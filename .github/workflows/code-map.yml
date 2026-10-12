@@ -1,0 +1,301 @@
+name: Code map
+
+# The merge gate: the code map, the intent manifest against it, and every
+# requirement row's evidence pin (specs/requirements/INTENT_PINS.tsv). It runs
+# on every pull request, with no path condition (owner, 2026-09-28): a change
+# to CONFORMANCE §8 alone can move a row's status and so its pin, and a
+# required check skipped by a path filter would read as passed. Its jobs have
+# no layer condition for the same reason.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "The commit this one's pins are compared with (pin evidence)"
+        type: string
+        default: origin/main
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request supersedes this run: it is cancelled
+# rather than finished for a result nobody reads. A run for anything else (a
+# push to main, a dispatch) is its own group and is never cancelled: each
+# merge commit is checked by its own result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The code map (make requirement-map): every source file hashed with BLAKE3;
+  # each shipped build's call graph from a rust-analyzer index of that build
+  # (Android: the real aarch64-linux-android target with the NDK Gradle pins;
+  # the storage node: Linux, which only this job builds), and the host test
+  # build. Every definition is reached, dead or indeterminate in each build,
+  # with a reason code; the map refuses an index whose analyzer log shows a
+  # failure or a line of no known kind, and definitions that do not add up.
+  # The page and its tables are kept as an artifact.
+  requirement-map:
+    name: Code map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The pins' tests read history: a commit's parent, and the first
+          # commit, which holds no pins.
+          fetch-depth: 0
+
+      - name: Free disk space
+        # Three indexes build their build scripts for three targets. The
+        # Android SDK stays: the NDK comes from it.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      /usr/local/.ghcup /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rust-analyzer
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: requirement-map
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Install the NDK version Gradle pins
+        # `yes` is ended by a broken pipe once sdkmanager has read enough;
+        # `|| :` covers yes alone, so sdkmanager's own status still decides.
+        run: |
+          NDK_VERSION="$(sed -n 's/.*ndkVersion = "\([^"]*\)".*/\1/p' dsm_client/android/app/build.gradle.kts | head -1)"
+          test -n "$NDK_VERSION"
+          (yes || :) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          test -d "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # The expensive half of this job (the fixture run, the three indexes and
+      # the mutation cases, about seventeen of its twenty minutes) reads code,
+      # configuration and this workflow: never a pin and never prose. The
+      # other half (the map's tables, its check, the intent manifest, every
+      # pin, the pins' own tests) runs on every commit. So the expensive half
+      # is kept under a key of everything it can read: every tracked file
+      # except `*.md` and specs/requirements/INTENT_PINS.tsv, and the runner
+      # image. The intent manifest stays in the key, because the mutation
+      # cases read the map its root questions shape. A commit that changes
+      # only pins or prose finds the indexes and fixture run of a commit whose
+      # every other byte is the same, verified there, and skips that half.
+      # Any other change misses and rebuilds it. The key matches exactly or
+      # not at all: there are no restore-keys, so a near match is a miss.
+      - name: The key of what the expensive half reads
+        id: key
+        run: |
+          inputs="$(git ls-tree -r HEAD | awk -F'\t' '$2 !~ /\.md$/ && $2 != "specs/requirements/INTENT_PINS.tsv"' | sha256sum | cut -d' ' -f1)"
+          echo "key=code-map-v1-${ImageOS}-${ImageVersion}-${inputs}" >> "$GITHUB_OUTPUT"
+
+      # Besides the indexes and the tables beside them, the map reads one
+      # thing from ./target: each build script's `output` (what it printed to
+      # cargo), which the indexes' cargo runs leave under target/debug/build
+      # and target/<triple>/debug/build. A shipped crate's build script that
+      # sets a cfg is refused from it, so it is kept with them.
+      - name: The indexes and fixture run of a commit with the same key
+        id: kept
+        uses: actions/cache/restore@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            target/requirement-map/android.scip
+            target/requirement-map/android.log
+            target/requirement-map/node.scip
+            target/requirement-map/node.log
+            target/requirement-map/tests.scip
+            target/requirement-map/tests.log
+            target/requirement-map/android-features.txt
+            target/requirement-map/android-features-indexed.txt
+            target/requirement-map/android-packages.txt
+            target/requirement-map/node-packages.txt
+            target/requirement-map/node-features.txt
+            target/requirement-map/node-features-indexed.txt
+            target/requirement-map/fixture
+            target/debug/build/*/output
+            target/*/debug/build/*/output
+
+      - name: The map reads its fixture as expected
+        # Dispatch through a type argument, a qualified path and a value, and
+        # a type only named: tools/requirement_map/fixture/expected.tsv.
+        id: fixture
+        if: steps.kept.outputs.cache-hit != 'true'
+        run: make requirement-map-fixture MAP=target/requirement-map
+
+      - name: Index
+        id: indexes
+        if: steps.kept.outputs.cache-hit != 'true'
+        run: make requirement-map-indexes MAP=target/requirement-map
+
+      - name: Map
+        # From the indexes, built above or kept; it refuses an index whose
+        # analyzer log shows a failure either way.
+        id: map
+        run: make requirement-map-tables MAP=target/requirement-map
+
+      - name: The map holds no contradiction and keeps its committed facts
+        # Contradictions in its own tables; sentinels, entry points and
+        # counts against ci/requirement_map.*.tsv. committed.tsv (kept below)
+        # is what this map reads, for a person to review and commit.
+        id: check
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-check MAP=target/requirement-map
+
+      - name: The intent manifest holds against the map
+        # specs/requirements/INTENT_MANIFEST.tsv: each row's outcome, and a
+        # failure for every gap a Met requirement has; both builds must be
+        # indexed. intent.tsv and unspecified.tsv are kept below.
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-intent MAP=target/requirement-map INTENT_BUILT=android,node
+
+      - name: The evidence pins refuse what they must
+        # ci/test_intent_pins.py: each pin state planted in copies of the
+        # fixture's manifest, requirements and pins; the repin and bootstrap
+        # rules; board evidence; test names over this map.
+        if: ${{ !cancelled() && steps.map.outcome == 'success' }}
+        run: make requirement-map-pin-tests MAP=target/requirement-map
+
+      - name: Every mutation case moves what it names and nothing else
+        # tools/requirement_map/fixture/mutations.toml: fixture changes, the
+        # app's declarations, a real-tree re-index, and faults planted in
+        # copies of the maps, each in a temporary copy. With the indexes kept,
+        # every input of every case is what it was where they passed.
+        id: mutations
+        if: ${{ !cancelled() && steps.map.outcome == 'success' && steps.kept.outputs.cache-hit != 'true' }}
+        run: make requirement-map-mutations MAP=target/requirement-map
+
+      - name: Keep the indexes and fixture run for a commit with the same key
+        # Only once this run built them and every step that verifies them
+        # passed: the fixture, the map, its check and every mutation case. The
+        # intent manifest and the pins need not hold: a commit re-pinning the
+        # rows this one left stale is exactly the one that reuses them.
+        if: >-
+          ${{ !cancelled() && steps.kept.outputs.cache-hit != 'true'
+              && steps.fixture.outcome == 'success' && steps.indexes.outcome == 'success'
+              && steps.map.outcome == 'success' && steps.check.outcome == 'success'
+              && steps.mutations.outcome == 'success' }}
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.key.outputs.key }}
+          path: |
+            target/requirement-map/android.scip
+            target/requirement-map/android.log
+            target/requirement-map/node.scip
+            target/requirement-map/node.log
+            target/requirement-map/tests.scip
+            target/requirement-map/tests.log
+            target/requirement-map/android-features.txt
+            target/requirement-map/android-features-indexed.txt
+            target/requirement-map/android-packages.txt
+            target/requirement-map/node-packages.txt
+            target/requirement-map/node-features.txt
+            target/requirement-map/node-features-indexed.txt
+            target/requirement-map/fixture
+            target/debug/build/*/output
+            target/*/debug/build/*/output
+
+      - name: Keep the map
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: code-map
+          path: |
+            target/requirement-map/code-map.html
+            target/requirement-map/files.tsv
+            target/requirement-map/defs.tsv
+            target/requirement-map/reach.tsv
+            target/requirement-map/edges.tsv
+            target/requirement-map/accounting.tsv
+            target/requirement-map/health.tsv
+            target/requirement-map/token-read.tsv
+            target/requirement-map/artifacts.tsv
+            target/requirement-map/committed.tsv
+            target/requirement-map/intent.tsv
+            target/requirement-map/unspecified.tsv
+            target/requirement-map/root-queries.tsv
+            target/requirement-map/pins.tsv
+            target/requirement-map/tree
+            target/requirement-map/sources.txt
+            target/requirement-map/inputs.txt
+            target/requirement-map/analyzer.txt
+            target/requirement-map/*.log
+
+  # The half of the gate that runs tests. A pin binds its row's code and its
+  # evidence tests' code, so the map job needs to run no test; what it cannot
+  # know is that a pin this change adds or alters stands on evidence that
+  # passed. This job runs, on this commit, the evidence of every requirement
+  # row whose pin is new, changed or missing against the base, and fails
+  # unless each test passed. Where no pins are committed yet, that is every
+  # row: its log is what the one-time bootstrap pins from.
+  pin-evidence:
+    name: Pin evidence
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: dsm_node_test
+        ports:
+          - 5432:5432
+        # Without a health check the job races the container's first accept().
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    # The storage node's store is Postgres, and the SDK suites run their nodes
+    # on it: every node-backed test needs this server.
+    env:
+      DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The base commit's pins are read from history.
+          fetch-depth: 0
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup \
+                      /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pin-evidence
+
+      - name: Install CI system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Every new, changed or missing pin's evidence passes on this commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || inputs.base || github.event.before }}
+        run: python3 ci/intent_pins.py evidence --base "$BASE" --out pin-evidence.log
+
+      - name: Keep the evidence log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pin-evidence-log
+          path: pin-evidence.log

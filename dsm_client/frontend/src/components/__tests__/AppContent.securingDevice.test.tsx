@@ -9,6 +9,7 @@ describe('AppContent securing device state', () => {
     render(
       <AppContent
         appState="securing_device"
+        skin="dgen"
         error={null}
         showIntro={false}
         introGifSrc="intro.gif"
@@ -22,9 +23,8 @@ describe('AppContent securing device state', () => {
         currentScreen="home"
         navigate={() => {}}
         handleGenerateGenesis={() => {}}
-        showLockPrompt={false}
-        dismissLockPrompt={() => {}}
-        unlockToWallet={() => {}}
+        cancelPhraseBackup={() => {}}
+        answerPhraseCheck={() => Promise.resolve()}
         menuItems={[]}
         currentMenuIndex={0}
         setCurrentMenuIndex={() => {}}

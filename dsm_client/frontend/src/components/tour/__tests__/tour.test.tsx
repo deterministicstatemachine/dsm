@@ -1,0 +1,343 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+import React from 'react';
+import fs from 'fs';
+import path from 'path';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+
+const mockNav = { currentScreen: 'home' as string };
+
+jest.mock('../../../services/dsmClient', () => ({
+  dsmClient: {
+    setPreference: jest.fn().mockResolvedValue(undefined),
+    getPreference: jest.fn().mockResolvedValue(null),
+  },
+}));
+jest.mock('../../../stores/walletStore', () => ({
+  walletStore: { refreshAll: jest.fn().mockResolvedValue(undefined) },
+}));
+jest.mock('../../../stores/contactsStore', () => ({
+  contactsStore: { refreshContacts: jest.fn().mockResolvedValue(undefined) },
+}));
+jest.mock('../practiceMode', () => ({
+  practiceMode: { enter: jest.fn(), leave: jest.fn() },
+}));
+jest.mock('../../../runtime/navigationStore', () => ({
+  navigationStore: {
+    navigate: jest.fn(),
+    getSnapshot: () => ({ currentScreen: mockNav.currentScreen }),
+  },
+  useNavigationStore: () => ({ currentScreen: mockNav.currentScreen }),
+}));
+
+import { dsmClient } from '../../../services/dsmClient';
+import { walletStore } from '../../../stores/walletStore';
+import { navigationStore } from '../../../runtime/navigationStore';
+import { practiceMode } from '../practiceMode';
+import { TOUR_STEPS } from '../tourSteps';
+import { TOUR_SEEN_PREF, hasSeenTour, tourStore } from '../tourStore';
+import TourOffer from '../TourOffer';
+import GuidedTour, { placeDialog } from '../GuidedTour';
+
+const client = dsmClient as unknown as { setPreference: jest.Mock; getPreference: jest.Mock };
+
+function resetTour(): void {
+  if (tourStore.getSnapshot().active) tourStore.end();
+  jest.clearAllMocks();
+  client.getPreference.mockResolvedValue(null);
+  client.setPreference.mockResolvedValue(undefined);
+  mockNav.currentScreen = 'home';
+}
+
+describe('tourStore', () => {
+  beforeEach(resetTour);
+
+  it('starting enters practice mode, reloads the stores and opens step one', () => {
+    tourStore.start();
+    expect(practiceMode.enter).toHaveBeenCalledTimes(1);
+    expect(walletStore.refreshAll).toHaveBeenCalled();
+    expect(tourStore.getSnapshot()).toEqual({ active: true, index: 0 });
+  });
+
+  it('starting twice does not enter practice mode twice', () => {
+    tourStore.start();
+    tourStore.start();
+    expect(practiceMode.enter).toHaveBeenCalledTimes(1);
+  });
+
+  it('next and back move one step and back stops at the first step', () => {
+    tourStore.start();
+    tourStore.back();
+    expect(tourStore.getSnapshot().index).toBe(0);
+    tourStore.next();
+    tourStore.next();
+    expect(tourStore.getSnapshot().index).toBe(2);
+    tourStore.back();
+    expect(tourStore.getSnapshot().index).toBe(1);
+  });
+
+  it('next on the last step ends the tour', () => {
+    tourStore.start();
+    for (let i = 0; i < TOUR_STEPS.length - 1; i += 1) tourStore.next();
+    expect(tourStore.getSnapshot().index).toBe(TOUR_STEPS.length - 1);
+    tourStore.next();
+    expect(tourStore.getSnapshot().active).toBe(false);
+    expect(practiceMode.leave).toHaveBeenCalledTimes(1);
+  });
+
+  it('ending leaves practice mode, returns home and remembers the tour was seen', () => {
+    tourStore.start();
+    tourStore.end();
+    expect(practiceMode.leave).toHaveBeenCalledTimes(1);
+    expect(navigationStore.navigate).toHaveBeenCalledWith('home');
+    expect(client.setPreference).toHaveBeenCalledWith(TOUR_SEEN_PREF, 'true');
+    expect(tourStore.getSnapshot()).toEqual({ active: false, index: 0 });
+  });
+
+  it('ending when not running does nothing', () => {
+    tourStore.end();
+    expect(practiceMode.leave).not.toHaveBeenCalled();
+    expect(client.setPreference).not.toHaveBeenCalled();
+  });
+});
+
+describe('hasSeenTour', () => {
+  beforeEach(resetTour);
+
+  it('is false until the preference says true', async () => {
+    client.getPreference.mockResolvedValueOnce(null);
+    await expect(hasSeenTour()).resolves.toBe(false);
+    client.getPreference.mockResolvedValueOnce('true');
+    await expect(hasSeenTour()).resolves.toBe(true);
+  });
+
+  it('never nags when the preference cannot be read', async () => {
+    client.getPreference.mockRejectedValueOnce(new Error('bridge down'));
+    await expect(hasSeenTour()).resolves.toBe(true);
+  });
+});
+
+describe('TourOffer', () => {
+  beforeEach(resetTour);
+
+  it('offers the tour on the home screen of a ready wallet that has not seen it', async () => {
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    expect(await screen.findByTestId('tour-offer')).toBeInTheDocument();
+  });
+
+  it('does not offer it once seen', async () => {
+    client.getPreference.mockResolvedValue('true');
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    await waitFor(() => expect(client.getPreference).toHaveBeenCalled());
+    expect(screen.queryByTestId('tour-offer')).toBeNull();
+  });
+
+  it.each([
+    ['a wallet that is not ready', { appState: 'needs_genesis', showIntro: false, screen: 'home' }],
+    ['the intro still showing', { appState: 'wallet_ready', showIntro: true, screen: 'home' }],
+    ['a screen other than home', { appState: 'wallet_ready', showIntro: false, screen: 'wallet' }],
+  ])('does not offer it with %s', async (_label, c) => {
+    mockNav.currentScreen = c.screen;
+    render(<TourOffer appState={c.appState as never} showIntro={c.showIntro} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('tour-offer')).toBeNull();
+    expect(client.getPreference).not.toHaveBeenCalled();
+  });
+
+  it('"Not now" retires the offer and remembers it', async () => {
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    fireEvent.click(await screen.findByText('Not now'));
+    expect(screen.queryByTestId('tour-offer')).toBeNull();
+    expect(client.setPreference).toHaveBeenCalledWith(TOUR_SEEN_PREF, 'true');
+    expect(practiceMode.enter).not.toHaveBeenCalled();
+  });
+
+  it('"Start tour" starts the tour and the offer never comes back in this session', async () => {
+    const { rerender } = render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    fireEvent.click(await screen.findByText('Start tour'));
+    expect(practiceMode.enter).toHaveBeenCalledTimes(1);
+    tourStore.end();
+    // The preference write may not have landed yet; the offer must stay retired regardless.
+    client.getPreference.mockResolvedValue(null);
+    rerender(<TourOffer appState="wallet_ready" showIntro={false} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('tour-offer')).toBeNull();
+  });
+});
+
+describe('the tour panels', () => {
+  beforeEach(resetTour);
+
+  // The guide's picture took the panel's left column; the words have it now.
+  it('carry words and no picture', async () => {
+    render(<TourOffer appState="wallet_ready" showIntro={false} />);
+    const offer = await screen.findByTestId('tour-offer');
+    expect(offer.querySelector('img')).toBeNull();
+    fireEvent.click(screen.getByText('Start tour'));
+
+    render(<GuidedTour appState="wallet_ready" />);
+    const dialog = await screen.findByRole('dialog', { name: TOUR_STEPS[0].title });
+    expect(dialog.querySelector('img')).toBeNull();
+  });
+});
+
+describe('the ring', () => {
+  const placed: HTMLElement[] = [];
+
+  function place(html: string, rect: { top: number; left: number; width: number; height: number }): void {
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    const el = holder.firstElementChild as HTMLElement;
+    el.getBoundingClientRect = () =>
+      ({ ...rect, right: rect.left + rect.width, bottom: rect.top + rect.height, x: rect.left, y: rect.top, toJSON: () => ({}) }) as DOMRect;
+    document.body.appendChild(el);
+    placed.push(el);
+  }
+
+  function goTo(id: string): void {
+    const index = TOUR_STEPS.findIndex((s) => s.id === id);
+    act(() => {
+      while (tourStore.getSnapshot().index < index) tourStore.next();
+    });
+  }
+
+  beforeEach(() => {
+    resetTour();
+    act(() => tourStore.start());
+  });
+  afterEach(() => {
+    placed.splice(0).forEach((el) => el.remove());
+    act(() => tourStore.end());
+  });
+
+  // A step whose element was not on screen kept the previous step's ring: the
+  // last step, opening home from Settings, showed the replay button's ring
+  // over the home screen's logo.
+  it("never leaves the previous step's ring on a step whose element is not on screen", async () => {
+    mockNav.currentScreen = 'settings';
+    place('<button data-tour="tutorial-button">Replay</button>', { top: 300, left: 40, width: 200, height: 40 });
+    goTo('replay');
+    render(<GuidedTour appState="wallet_ready" />);
+    await waitFor(() => expect(document.querySelector('.gt-ring')).toHaveStyle({ top: '294px' }));
+
+    mockNav.currentScreen = 'home';
+    goTo('done');
+    await waitFor(() => expect(document.querySelector('.gt-ring')).toBeNull());
+    expect(document.querySelector('.gt-shade--full')).not.toBeNull();
+  });
+
+  it('closes the tour on the WALLET brick', async () => {
+    mockNav.currentScreen = 'home';
+    place('<div class="dsm-menu-item" data-label="WALLET">WALLET</div>', { top: 296, left: 60, width: 270, height: 55 });
+    goTo('done');
+    render(<GuidedTour appState="wallet_ready" />);
+    await waitFor(() =>
+      expect(document.querySelector('.gt-ring')).toHaveStyle({ top: '290px', left: '54px', width: '282px', height: '67px' }),
+    );
+  });
+});
+
+describe('placeDialog', () => {
+  const screenBox = { top: 0, left: 0, width: 300, height: 400 };
+
+  it('puts the dialogue in the middle when there is nothing to point at', () => {
+    expect(placeDialog(null, screenBox)).toBe('middle');
+  });
+
+  it('puts the dialogue on the opposite half from the target', () => {
+    expect(placeDialog({ top: 20, left: 0, width: 50, height: 20 }, screenBox)).toBe('bottom');
+    expect(placeDialog({ top: 360, left: 0, width: 50, height: 20 }, screenBox)).toBe('top');
+  });
+});
+
+describe('tour anchors', () => {
+  // Every data-tour attribute a step points at must exist in the app, outside the tour itself,
+  // so removing one from a screen fails here instead of silently breaking the tour.
+  const src = path.resolve(__dirname, '../../..');
+  const tourDir = path.resolve(__dirname, '..');
+
+  function sourceFiles(dir: string): string[] {
+    return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        return entry.name === '__tests__' || full === tourDir ? [] : sourceFiles(full);
+      }
+      return /\.tsx?$/.test(entry.name) ? [full] : [];
+    });
+  }
+
+  const appSource = sourceFiles(src)
+    .map((file) => fs.readFileSync(file, 'utf8'))
+    .join('\n');
+
+  const anchors = Array.from(
+    new Set(
+      TOUR_STEPS.flatMap((step) => {
+        const found: string[] = [];
+        const text = JSON.stringify(step);
+        const re = /data-tour=\\"([a-z-]+)\\"/g;
+        let m: RegExpExecArray | null = re.exec(text);
+        while (m) {
+          found.push(m[1]);
+          m = re.exec(text);
+        }
+        return found;
+      }),
+    ),
+  );
+
+  it('the steps name exactly the tour anchors', () => {
+    expect(anchors.sort()).toEqual([
+      'add-token',
+      'contact-code',
+      'contact-list',
+      'contacts-tabs',
+      'create-token',
+      'faucet-claim',
+      'liquidity-close',
+      'liquidity-create',
+      'liquidity-vaults',
+      'recent-activity',
+      'swap-get',
+      'swap-pay',
+      'tokens-tabs',
+      'tutorial-button',
+    ]);
+  });
+
+  it.each(anchors)('data-tour="%s" exists in the app', (anchor) => {
+    expect(appSource).toContain(`data-tour="${anchor}"`);
+  });
+
+  // Every selector a step points at, waits for or backs out on names things
+  // the app renders: each attribute value, class and id in it is written in the
+  // app's screens or in the shell (public/index.html). A selector naming
+  // something no screen renders is a step that can never find its element.
+  const shell = fs.readFileSync(path.resolve(src, '../public/index.html'), 'utf8');
+  const rendered = `${appSource}\n${shell}`;
+  const selectors = TOUR_STEPS.flatMap((step) =>
+    [step.target, step.backOn, step.wait && 'selector' in step.wait ? step.wait.selector : undefined]
+      .filter((selector): selector is string => typeof selector === 'string')
+      .map((selector) => [step.id, selector] as const),
+  );
+  const written = (name: string): RegExp => new RegExp(`(?<![\\w-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`);
+
+  it.each(selectors)('step %s: %s names only what the app renders', (_id, selector) => {
+    const attributes = Array.from(selector.matchAll(/\[[a-z-]+\^?="([^"]+)"\]/g), (m) => m[1]);
+    const classes = Array.from(selector.matchAll(/\.([A-Za-z][\w-]*)/g), (m) => m[1]);
+    const ids = Array.from(selector.matchAll(/#([A-Za-z][\w-]*)/g), (m) => m[1]);
+    for (const value of attributes) expect(rendered).toContain(value);
+    for (const name of [...classes, ...ids]) expect(rendered).toMatch(written(name));
+  });
+
+  // Offline sending and Bitcoin stay out of the tour (owner, 2026-10-01).
+  it('no step teaches offline sending or Bitcoin', () => {
+    for (const step of TOUR_STEPS) {
+      expect(`${step.title} ${step.body}`).not.toMatch(/bluetooth|appliance|bitcoin|dbtc|offline (send|allocation|funding|mode)/i);
+      expect(JSON.stringify(step)).not.toMatch(/offline-funding|appliance-setup|Transaction mode/);
+    }
+  });
+});

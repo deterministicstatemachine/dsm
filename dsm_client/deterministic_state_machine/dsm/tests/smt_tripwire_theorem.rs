@@ -5,13 +5,13 @@
 //!
 //! - **Theorem 2 (Atomic Interlock Tripwire):** Any attempt to fork a bilateral
 //!   chain is detected deterministically — same parent cannot produce two valid
-//!   successors; divergent roots are caught by the witness verifier; and
+//!   successors; divergent roots are caught by the replace check; and
 //!   signature forgery is computationally infeasible.
 //!
 //! - **Theorem 1 (Modal Lock):** Relationship-scoped keys are deterministic and
 //!   independent across different bilateral pairs.
 //!
-//! - **Acceptance Predicates (§4.3):** SPHINCS+ signatures, SMT replace witnesses,
+//! - **Acceptance Predicates (§4.3):** SPHINCS+ signatures, the SMT replace over the one relationship path,
 //!   and device-tree inclusion proofs are verified end-to-end.
 //!
 //! - **Chain Integrity:** Successive tips are unique, deterministic, and
@@ -22,16 +22,21 @@
 use std::collections::HashSet;
 
 use dsm::common::device_tree::DeviceTree;
-use dsm::core::bilateral_transaction_manager::{compute_smt_key, compute_successor_tip};
+use dsm::bilateral::identity_binding::binding_digest;
+use dsm::bilateral::offline::{
+    decide_prepare, PeerCredentials, PinnedPeer, PrepareClaims, PrepareDecision,
+};
+use dsm::core::bilateral_transaction_manager::{
+    bilateral_sign_message, compute_smt_key, compute_successor_tip, BilateralPreCommitment,
+};
+use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::merkle::sparse_merkle_tree::ZERO_LEAF;
-use dsm::types::operations::{Operation, TransactionMode, VerificationType};
-use dsm::types::receipt_types::ParentConsumptionTracker;
+use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
-use dsm::verification::smt_replace_witness::{
-    hash_smt_leaf, hash_smt_node, verify_tripwire_smt_replace,
-};
+use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
+use dsm::merkle::sparse_merkle_tree::{hash_smt_leaf, hash_smt_node, DeviceSmtHashes};
 
 // ---------------------------------------------------------------------------
 // Test Harness
@@ -94,16 +99,16 @@ fn compute_initial_chain_tip(
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        terms_commitment: dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![0u8; 16],
+            mode: TransactionMode::Bilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
+        }
+        .commitment(),
         to_device_id: recipient.to_vec(),
-        amount: Balance::from_state(amount, [0u8; 32]),
-        token_id: b"ERA".to_vec(),
-        mode: TransactionMode::Bilateral,
-        nonce: vec![0u8; 16],
-        verification: VerificationType::Standard,
-        pre_commit: None,
-        recipient: recipient.to_vec(),
-        to: recipient.to_vec(),
-        message: String::new(),
+        amount: Balance::amount(amount),
         signature: vec![],
         authority_policy: None,
     };
@@ -111,13 +116,56 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     (op, bytes)
 }
 
-/// Encode a 1-step SMT replace witness (is_left flag + 32-byte sibling).
-fn encode_witness_1step(is_left: bool, sibling: &[u8; 32]) -> Vec<u8> {
-    let mut w = Vec::with_capacity(4 + 33);
-    w.extend_from_slice(&1u32.to_le_bytes()); // path length = 1
-    w.push(if is_left { 1 } else { 0 });
-    w.extend_from_slice(sibling);
-    w
+/// Full tree depth. The verifier requires exactly this many siblings: a
+/// shorter path would commit the leaf under a root of some other height.
+const SMT_DEPTH: usize = 256;
+
+/// Independent reimplementation of the verifier's bit convention.
+fn bit_msb_first(key: &[u8; 32], bit_index: usize) -> bool {
+    let byte = bit_index / 8;
+    let bit = 7 - (bit_index % 8);
+    ((key[byte] >> bit) & 1) == 1
+}
+
+/// The replace check every receipt verifier makes, through the one fold: the
+/// path authenticates `old` under `pre` and folds `new` to exactly `post`. A
+/// path of any other height is no path of this tree.
+fn replace_holds(
+    pre: &[u8; 32],
+    post: &[u8; 32],
+    old: &[u8; 32],
+    new: &[u8; 32],
+    key: &[u8; 32],
+    siblings: &[[u8; 32]],
+) -> bool {
+    let Ok(path) = <[[u8; 32]; 256]>::try_from(siblings) else {
+        return false;
+    };
+    let entry = FoldEntry {
+        key: *key,
+        pre: Some(*old),
+        post: Some(*new),
+        path: Box::new(path),
+    };
+    matches!(verify_batch::<DeviceSmtHashes>(pre, &[entry]), Ok(root) if root == *post)
+}
+
+/// Fold a leaf up to a root taking each direction from `key`, mirroring the verifier.
+fn fold_root_at_key(leaf: &[u8; 32], key: &[u8; 32], siblings: &[[u8; 32]]) -> [u8; 32] {
+    let mut acc = *leaf;
+    for (i, sib) in siblings.iter().enumerate() {
+        let bit_index = 255usize.saturating_sub(i);
+        acc = if bit_msb_first(key, bit_index) {
+            hash_smt_node(sib, &acc)
+        } else {
+            hash_smt_node(&acc, sib)
+        };
+    }
+    acc
+}
+
+fn uniform_siblings(v: [u8; 32]) -> Vec<[u8; 32]> {
+    vec![v; SMT_DEPTH]
 }
 
 // ===========================================================================
@@ -145,25 +193,69 @@ fn theorem2_two_successors_same_parent_rejected() {
     // Second (forked) transfer from SAME h_0: different amount.
     let entropy2 = [0xBBu8; 32];
     let receipt_digest2 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_RECEIPT, &[0x02; 32]);
-    let (_op2, op2_bytes) = make_transfer_op(&bob.device_id, 200);
+    let (op2, op2_bytes) = make_transfer_op(&bob.device_id, 200);
     let h_1_prime = compute_successor_tip(&h_0, &op2_bytes, &entropy2, &receipt_digest2);
 
     // Different operations from the same parent produce different successor tips.
     assert_ne!(h_1, h_1_prime, "forked tips must differ");
 
-    // ParentConsumptionTracker enforces single-use.
-    let mut tracker = ParentConsumptionTracker::new();
-    tracker
-        .try_consume(h_0, h_1)
-        .expect("first consumption must succeed");
-
-    // Attempting to consume h_0 again with a different child must fail (fork detected).
-    let err = tracker.try_consume(h_0, h_1_prime);
-    assert!(err.is_err(), "second consumption must be rejected (fork)");
-    let msg = format!("{}", err.unwrap_err());
+    // Production's receiver decides a proposal against the relationship tip it
+    // holds (Core's `decide_prepare`). Once the first child has committed it
+    // holds h_1, and the second child — which extends h_0 — is refused as a
+    // stale tip. While it holds h_0, the same proposal is considered: the
+    // refusal is the held tip's, not the proposal's.
+    let (kyber_pk, _kyber_sk) =
+        generate_kyber_keypair_from_entropy(&[0x5A; 32], "tripwire-theorem").unwrap();
+    let binding_sig = alice
+        .keypair
+        .sign(&binding_digest(
+            &alice.device_id,
+            &alice.genesis_hash,
+            &kyber_pk,
+        ))
+        .unwrap();
+    let commitment = BilateralPreCommitment::new(h_0, op2.clone()).bilateral_commitment_hash;
+    let signature = alice
+        .keypair
+        .sign(&bilateral_sign_message(&commitment))
+        .unwrap();
+    let pinned = PinnedPeer {
+        device_id: alice.device_id,
+        genesis: alice.genesis_hash,
+        signing_key: &alice.keypair.public_key,
+        kyber_public_key: &kyber_pk,
+    };
+    let claims = PrepareClaims {
+        addressed_to: &bob.device_id,
+        expected_tip: Some(h_0),
+        credentials: PeerCredentials {
+            signing_key: &alice.keypair.public_key,
+            kyber_public_key: &kyber_pk,
+            kyber_binding_sig: &binding_sig,
+        },
+        signature: &signature,
+    };
+    let decide = |held| {
+        decide_prepare(
+            commitment,
+            &op2,
+            claims,
+            &pinned,
+            &bob.device_id,
+            held,
+            None,
+        )
+        .expect("the proposal is authenticated")
+    };
+    let refused = decide(h_1);
     assert!(
-        msg.contains("Fork detected"),
-        "error must mention fork; got: {msg}"
+        matches!(refused, PrepareDecision::StaleTip { held, .. } if held == h_1),
+        "the second child of h_0 must be refused once h_1 is held; got {refused:?}"
+    );
+    let considered = decide(h_0);
+    assert!(
+        matches!(considered, PrepareDecision::Consider { .. }),
+        "the same proposal is considered while h_0 is held; got {considered:?}"
     );
 }
 
@@ -172,7 +264,7 @@ fn theorem2_divergent_roots_detected() {
     let alice = TestDevice::from_seed(10);
     let bob = TestDevice::from_seed(20);
 
-    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     // Parent tip and child tip.
     let parent_tip = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0x01; 32]);
@@ -182,36 +274,34 @@ fn theorem2_divergent_roots_detected() {
     let old_leaf = hash_smt_leaf(&parent_tip);
     let new_leaf = hash_smt_leaf(&child_tip);
 
-    // Build a 1-step witness: the leaf is the left child, sibling is a known value.
-    let sibling = [0x99u8; 32];
-    let witness_bytes = encode_witness_1step(true, &sibling);
+    // Full-depth path; roots folded with directions taken from the relationship key.
+    let sibs = uniform_siblings([0x99u8; 32]);
 
-    // Compute honest roots by replicating the witness logic.
-    let honest_parent_root = hash_smt_node(&old_leaf, &sibling);
-    let honest_child_root = hash_smt_node(&new_leaf, &sibling);
+    let honest_parent_root = fold_root_at_key(&old_leaf, &rel_key, &sibs);
+    let honest_child_root = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
     // Honest verification succeeds.
-    let result = verify_tripwire_smt_replace(
+    let result = replace_holds(
         &honest_parent_root,
         &honest_child_root,
         &parent_tip,
         &child_tip,
-        &witness_bytes,
-    )
-    .expect("must not error");
+        &rel_key,
+        &sibs,
+    );
     assert!(result, "honest verification must pass");
 
     // Fake root: tamper one byte.
     let mut fake_root = honest_child_root;
     fake_root[0] ^= 0xFF;
-    let result_fake = verify_tripwire_smt_replace(
+    let result_fake = replace_holds(
         &honest_parent_root,
         &fake_root,
         &parent_tip,
         &child_tip,
-        &witness_bytes,
-    )
-    .expect("must not error");
+        &rel_key,
+        &sibs,
+    );
     assert!(!result_fake, "tampered root must fail verification");
 }
 
@@ -293,32 +383,43 @@ fn theorem2_transitive_tripwire_web() {
 
     // Bob's SMT must commit to BOTH relationships.
     // Build a 2-level tree where ab is left, bc is right.
-    let _rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
-    let _rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
+    let rel_key_ab = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key_bc = compute_smt_key(&bob.device_id, &charlie.device_id);
     let leaf_ab = hash_smt_leaf(&h_1_ab);
     let leaf_bc = hash_smt_leaf(&h_1_bc);
-    let bob_root = hash_smt_node(&leaf_ab, &leaf_bc);
 
-    // Verify Alice<->Bob relationship under Bob's root (leaf_ab is left, sibling is leaf_bc).
-    let witness_ab = encode_witness_1step(true, &leaf_bc);
+    // Alice<->Bob under Bob's root: the path is scoped to k_AB.
+    let sibs_ab = uniform_siblings(leaf_bc);
     let old_leaf_ab = hash_smt_leaf(&h_0_ab);
-    let old_root = hash_smt_node(&old_leaf_ab, &leaf_bc);
+    let old_root = fold_root_at_key(&old_leaf_ab, &rel_key_ab, &sibs_ab);
+    let bob_root = fold_root_at_key(&leaf_ab, &rel_key_ab, &sibs_ab);
 
-    let ok_ab = verify_tripwire_smt_replace(&old_root, &bob_root, &h_0_ab, &h_1_ab, &witness_ab)
-        .expect("verify must not error");
+    let ok_ab = replace_holds(
+        &old_root,
+        &bob_root,
+        &h_0_ab,
+        &h_1_ab,
+        &rel_key_ab,
+        &sibs_ab,
+    );
     assert!(ok_ab, "Alice<->Bob proof must verify under Bob's root");
 
     // If Bob tries a different root for Charlie, it won't match.
     let mut fake_bob_root = bob_root;
     fake_bob_root[31] ^= 0x01;
 
-    let witness_bc = encode_witness_1step(false, &leaf_ab);
+    let sibs_bc = uniform_siblings(leaf_ab);
     let old_leaf_bc = hash_smt_leaf(&h_0_bc);
-    let old_root_bc = hash_smt_node(&leaf_ab, &old_leaf_bc);
+    let old_root_bc = fold_root_at_key(&old_leaf_bc, &rel_key_bc, &sibs_bc);
 
-    let ok_bc_fake =
-        verify_tripwire_smt_replace(&old_root_bc, &fake_bob_root, &h_0_bc, &h_1_bc, &witness_bc)
-            .expect("verify must not error");
+    let ok_bc_fake = replace_holds(
+        &old_root_bc,
+        &fake_bob_root,
+        &h_0_bc,
+        &h_1_bc,
+        &rel_key_bc,
+        &sibs_bc,
+    );
     assert!(
         !ok_bc_fake,
         "fake root must fail for Bob<->Charlie relationship"
@@ -405,48 +506,40 @@ fn predicate_1_sphincs_tampered_sig_rejects() {
 }
 
 #[test]
-fn predicate_2_parent_inclusion_via_witness() {
+fn predicate_2_parent_inclusion_via_the_path() {
     // Build a 1-step SMT: leaf at known key with value = parent_tip.
     let parent_tip = [0x11u8; 32];
-    let _rel_key = [0x22u8; 32];
+    let rel_key = [0x22u8; 32];
     let leaf = hash_smt_leaf(&parent_tip);
 
-    // Sibling is the empty (zero) position.
-    let sibling = ZERO_LEAF;
-    // Leaf is the left child.
-    let root = hash_smt_node(&leaf, &sibling);
+    // Siblings are the empty (zero) positions; the path is scoped to rel_key.
+    let sibs = uniform_siblings(ZERO_LEAF);
+    let root = fold_root_at_key(&leaf, &rel_key, &sibs);
 
-    // Build witness: is_left = true (leaf is left child), sibling = ZERO_LEAF.
-    let witness_bytes = encode_witness_1step(true, &sibling);
-
-    // Parse and recompute to verify inclusion.
-    let witness =
-        dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
-            .expect("parse");
-    let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(
-        recomputed, root,
-        "witness must recompute correct parent root"
+    let parent_tip2 = [0x12u8; 32];
+    let leaf2 = hash_smt_leaf(&parent_tip2);
+    let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
+    assert!(
+        replace_holds(&root, &root2, &parent_tip, &parent_tip2, &rel_key, &sibs),
+        "the path must authenticate the parent and fold the child at the relationship key"
     );
 }
 
 #[test]
-fn predicate_3_child_inclusion_via_witness() {
+fn predicate_3_child_inclusion_via_the_path() {
     let child_tip = [0x33u8; 32];
-    let _rel_key = [0x44u8; 32];
+    let rel_key = [0x44u8; 32];
     let leaf = hash_smt_leaf(&child_tip);
 
-    let sibling = [0xFFu8; 32];
-    let root = hash_smt_node(&sibling, &leaf); // leaf is right child
+    let sibs = uniform_siblings([0xFFu8; 32]);
+    let root = fold_root_at_key(&leaf, &rel_key, &sibs);
 
-    let witness_bytes = encode_witness_1step(false, &sibling);
-    let witness =
-        dsm::verification::smt_replace_witness::SmtReplaceWitness::from_bytes(&witness_bytes)
-            .expect("parse");
-    let recomputed = witness.recompute_root(&leaf);
-    assert_eq!(
-        recomputed, root,
-        "witness must recompute correct child root"
+    let child_tip2 = [0x34u8; 32];
+    let leaf2 = hash_smt_leaf(&child_tip2);
+    let root2 = fold_root_at_key(&leaf2, &rel_key, &sibs);
+    assert!(
+        replace_holds(&root, &root2, &child_tip, &child_tip2, &rel_key, &sibs),
+        "the path must fold the child to its root at the relationship key"
     );
 }
 
@@ -455,7 +548,7 @@ fn predicate_5_smt_replace_recomputation() {
     let alice = TestDevice::from_seed(70);
     let bob = TestDevice::from_seed(71);
 
-    let _rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
+    let rel_key = compute_smt_key(&alice.device_id, &bob.device_id);
 
     let h_n = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA0; 32]);
     let h_n1 = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, &[0xA1; 32]);
@@ -463,23 +556,19 @@ fn predicate_5_smt_replace_recomputation() {
     let old_leaf = hash_smt_leaf(&h_n);
     let new_leaf = hash_smt_leaf(&h_n1);
 
-    // 1-step tree: leaf is left, sibling is fixed.
-    let sibling = [0x77u8; 32];
-    let r_a = hash_smt_node(&old_leaf, &sibling);
-    let r_a_prime = hash_smt_node(&new_leaf, &sibling);
-
-    let witness_bytes = encode_witness_1step(true, &sibling);
+    // Full-depth tree scoped to the relationship key.
+    let sibs = uniform_siblings([0x77u8; 32]);
+    let r_a = fold_root_at_key(&old_leaf, &rel_key, &sibs);
+    let r_a_prime = fold_root_at_key(&new_leaf, &rel_key, &sibs);
 
     // Full verify cycle.
-    let ok = verify_tripwire_smt_replace(&r_a, &r_a_prime, &h_n, &h_n1, &witness_bytes)
-        .expect("must not error");
+    let ok = replace_holds(&r_a, &r_a_prime, &h_n, &h_n1, &rel_key, &sibs);
     assert!(ok, "honest SMT replace must verify");
 
     // Tamper r_a_prime.
     let mut bad_root = r_a_prime;
     bad_root[15] ^= 0x01;
-    let fail = verify_tripwire_smt_replace(&r_a, &bad_root, &h_n, &h_n1, &witness_bytes)
-        .expect("must not error");
+    let fail = replace_holds(&r_a, &bad_root, &h_n, &h_n1, &rel_key, &sibs);
     assert!(!fail, "tampered child root must fail");
 }
 
@@ -603,44 +692,6 @@ fn chain_first_transaction_from_zero() {
 // ===========================================================================
 
 #[test]
-fn parent_consumed_exactly_once() {
-    let mut tracker = ParentConsumptionTracker::new();
-
-    let parent = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_PARENT, &[0x01; 32]);
-    let child_a = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0A; 32]);
-    let child_b = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_CHILD, &[0x0B; 32]);
-
-    // Fresh parent: first consumption succeeds.
-    assert!(!tracker.is_consumed(&parent));
-    tracker
-        .try_consume(parent, child_a)
-        .expect("first consumption must succeed");
-    assert!(tracker.is_consumed(&parent));
-
-    // Replay (same child): must fail.
-    assert!(
-        tracker.try_consume(parent, child_a).is_err(),
-        "replay must be rejected"
-    );
-
-    // Fork (different child): must fail.
-    let fork_err = tracker.try_consume(parent, child_b);
-    assert!(fork_err.is_err(), "fork must be rejected");
-    let msg = format!("{}", fork_err.unwrap_err());
-    assert!(
-        msg.contains("Fork detected"),
-        "error must identify fork; got: {msg}"
-    );
-
-    // Recorded child is the first one.
-    assert_eq!(
-        tracker.get_child(&parent),
-        Some(&child_a),
-        "canonical child must be the first consumed"
-    );
-}
-
-#[test]
 fn balance_conservation_arithmetic() {
     let test_cases: &[(u64, u64)] = &[
         (1000, 250),
@@ -661,11 +712,11 @@ fn balance_conservation_arithmetic() {
         );
 
         // Verify via Balance type.
-        let sender_bal = Balance::from_state(sender_initial, [0u8; 32]);
+        let sender_bal = Balance::amount(sender_initial);
         assert_eq!(sender_bal.value(), sender_initial);
 
-        let remaining_bal = Balance::from_state(sender_remaining, [0u8; 32]);
-        let gained_bal = Balance::from_state(receiver_gained, [0u8; 32]);
+        let remaining_bal = Balance::amount(sender_remaining);
+        let gained_bal = Balance::amount(receiver_gained);
         assert_eq!(
             remaining_bal.value() + gained_bal.value(),
             sender_bal.value(),

@@ -23,7 +23,7 @@ if [ "${FORCE}" = false ] && [ -n "${SSH_KEY}" ]; then
     cd "${SCRIPT_DIR}"
     for IP in ${IPS}; do
         printf "  %s... " "${IP}"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes -i "${SSH_KEY}" "ubuntu@${IP}" \
+        ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes -i "${SSH_KEY}" "ubuntu@${IP}" \
             "cd /opt/dsm-storage && docker compose -f docker-compose.node.yml down 2>/dev/null" 2>/dev/null && echo "done" || echo "skipped"
     done
 fi

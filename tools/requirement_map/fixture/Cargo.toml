@@ -1,0 +1,6 @@
+# The requirement map's end-to-end fixture: a crate rust-analyzer indexes and
+# the map reads through its real loader and graph (make requirement-map-fixture).
+# Its own workspace: nothing here ships.
+[workspace]
+members = ["probe"]
+resolver = "2"

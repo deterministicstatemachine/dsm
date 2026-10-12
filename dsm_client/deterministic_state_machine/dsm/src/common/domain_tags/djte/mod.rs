@@ -4,19 +4,22 @@
 //!
 //! Domain tags under the DJTE.* namespace used by deterministic emissions logic.
 
-pub const TAG_DJTE_ACTIVE: &str = "DJTE.ACTIVE";
-pub const TAG_DJTE_DLV_TIP: &str = "DJTE.DLV.TIP";
-pub const TAG_DJTE_JAP: &str = "DJTE.JAP";
-pub const TAG_DJTE_POLICY: &str = "DJTE.POLICY";
-pub const TAG_DJTE_RCPT: &str = "DJTE.RCPT";
-pub const TAG_DJTE_RESEED: &str = "DJTE.RESEED";
-pub const TAG_DJTE_SEED: &str = "DJTE.SEED";
-pub const TAG_DJTE_SHARD: &str = "DJTE.SHARD";
-pub const TAG_DJTE_SHARDS_ROOT: &str = "DJTE.SHARDS.ROOT";
-pub const TAG_DJTE_SPENT: &str = "DJTE.SPENT";
+use crate::crypto::domain::TaggedHashDomain;
+
+pub const TAG_DJTE_ACTIVE: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.ACTIVE");
+pub const TAG_DJTE_DLV_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.DLV.TIP");
+pub const TAG_DJTE_JAP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.JAP");
+pub const TAG_DJTE_POLICY: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.POLICY");
+pub const TAG_DJTE_RCPT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.RCPT");
+pub const TAG_DJTE_RESEED: TaggedHashDomain<'static> = crate::tagged_domain!(b"DJTE.RESEED");
+pub const TAG_DJTE_SEED: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SEED");
+pub const TAG_DJTE_SHARD: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SHARD");
+pub const TAG_DJTE_SHARDS_ROOT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DJTE.SHARDS.ROOT");
+pub const TAG_DJTE_SPENT: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DJTE.SPENT");
 
 #[cfg(test)]
-pub(super) const TAGS: &[&str] = &[
+pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DJTE_ACTIVE,
     TAG_DJTE_DLV_TIP,
     TAG_DJTE_JAP,

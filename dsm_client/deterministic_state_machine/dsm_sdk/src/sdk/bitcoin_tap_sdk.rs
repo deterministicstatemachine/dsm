@@ -560,6 +560,46 @@ struct WithdrawalSelectorInput {
     eligible_advertisements: Vec<generated::DbtcVaultAdvertisementV1>,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// BITCOIN STUB — OWNER-AUTHORIZED (2026-09-24). NOT A STORAGE IMPLEMENTATION.
+//
+// The dBTC storage calls in this module used the path-keyed object store the
+// storage specification removed (put / get / delete / list by key prefix).
+// Bitcoin is out of scope this round and is not rewired (owner). So the SDK
+// builds, every production storage call in this module fails with
+// `bitcoin_storage_stub`, whose error names itself. Nothing here stores,
+// reads, lists or deletes anything. The two types below are the shapes the
+// removed store returned, kept only so this module compiles.
+//
+// Every stubbed site is marked `BITCOIN STUB`. Grep for it.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// BITCOIN STUB: one item of the removed store's prefix listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectListItemV1 {
+    pub key: String,
+    pub dlv_id_b32: String,
+    pub size_bytes: i64,
+}
+
+/// BITCOIN STUB: a page of the removed store's prefix listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObjectListResponseV1 {
+    pub items: Vec<ObjectListItemV1>,
+    pub next_cursor: Option<String>,
+}
+
+/// BITCOIN STUB: the error every production dBTC storage call returns.
+#[cfg(not(any(test, feature = "demos")))]
+fn bitcoin_storage_stub(operation: &str) -> DsmError {
+    DsmError::NotImplemented(format!(
+        "BITCOIN STUB (owner-authorized 2026-09-24): dBTC storage is not rewired onto the \
+         committed storage set; {operation} is unavailable"
+    ))
+}
+
+// ═══════════════════════════ END BITCOIN STUB ═══════════════════════════════
+
 // In-process mock storage backend.  Active under `#[cfg(test)]` for
 // crate-internal tests AND under `--features demos` so example
 // binaries (notably `cargo run --example sofi_demo`) can drive the
@@ -569,10 +609,31 @@ struct WithdrawalSelectorInput {
 #[cfg(any(test, feature = "demos"))]
 #[derive(Default)]
 struct DbtcStorageTestState {
-    list_results: std::collections::VecDeque<Result<generated::ObjectListResponseV1, String>>,
+    list_results: std::collections::VecDeque<Result<ObjectListResponseV1, String>>,
     put_failures: HashMap<String, String>,
     get_failures: HashMap<String, String>,
     object_store: HashMap<String, Vec<u8>>,
+    /// Every PUT and DELETE that reached the store, in order.
+    ///
+    /// `object_store` is last-write-wins: a PUT that landed and was then
+    /// corrected leaves no trace in it, so end state cannot distinguish
+    /// "never published the stale bytes" from "published them and fixed it".
+    /// A test that must prove what went over the wire reads this log.
+    op_log: Vec<(String, DbtcStorageOp)>,
+    /// Every key a GET asked for, in order — what a test reads to prove a
+    /// body was never fetched.
+    get_log: Vec<String>,
+    /// Fires once, just after a PUT on that key lands. The interleaving seam:
+    /// it lets a test perform the database write production would perform
+    /// concurrently, at an exact point inside a sweep, without threads.
+    put_hooks: HashMap<String, fn()>,
+}
+
+#[cfg(any(test, feature = "demos"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DbtcStorageOp {
+    Put([u8; 32]),
+    Delete,
 }
 
 #[cfg(any(test, feature = "demos"))]
@@ -847,17 +908,6 @@ impl BitcoinTapSdk {
         &self,
         vault_id: &str,
     ) -> Result<(), DsmError> {
-        // Integration tests set DSM_SDK_TEST_MODE=1 but compile the library
-        // without #[cfg(test)], so storage_put_bytes hits real storage nodes.
-        // Skip network publication in test mode — the vault is still persisted
-        // storage_nodely and the test can verify storage_node state.
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok_and(|v| v == "1") {
-            log::info!(
-                "[bitcoin_tap] Skipping mandatory vault publication in test mode for {vault_id}"
-            );
-            return Ok(());
-        }
-
         let device_id_bytes =
             crate::sdk::app_state::AppState::get_device_id().ok_or_else(|| {
                 DsmError::invalid_operation(
@@ -1310,7 +1360,6 @@ impl BitcoinTapSdk {
             DBTC_DECIMALS,
             TokenType::Wrapped,
             tap_identity,
-            0,
             Some(format!(
                 "dsm:policy:{}",
                 crate::util::text_id::encode_base32_crockford(
@@ -1465,6 +1514,8 @@ impl BitcoinTapSdk {
             Some(kem_public_key.to_vec()),
             kem_public_key,
             &reference_state.hash,
+            // No DLV-layer policy object here (not an AMM vault): nothing to derive.
+            None,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -1474,7 +1525,7 @@ impl BitcoinTapSdk {
 
         let (vault_id_bytes, _op) = self
             .dlv_manager
-            .finalize_vault(draft, &creator_signature, None, None)
+            .finalize_vault(draft, &creator_signature)
             .await?;
         let vault_id = crate::util::text_id::encode_base32_crockford(&vault_id_bytes);
 
@@ -1715,6 +1766,8 @@ impl BitcoinTapSdk {
             Some(kem_public_key.to_vec()),
             kem_public_key,
             &reference_state.hash,
+            // No DLV-layer policy object here (not an AMM vault): nothing to derive.
+            None,
         )?;
         let creator_signature = dsm::crypto::sphincs::sphincs_sign(
             creator_keypair.secret_key(),
@@ -1724,7 +1777,7 @@ impl BitcoinTapSdk {
 
         let (successor_vault_id_bytes, _op) = self
             .dlv_manager
-            .finalize_vault(draft, &creator_signature, None, None)
+            .finalize_vault(draft, &creator_signature)
             .await?;
         let successor_vault_id =
             crate::util::text_id::encode_base32_crockford(&successor_vault_id_bytes);
@@ -2444,7 +2497,7 @@ impl BitcoinTapSdk {
         format!("dbtc/manifold/{}/vault/", Self::dbtc_policy_commit_b32())
     }
 
-    fn vault_advertisement_key(vault_id: &str) -> String {
+    pub(crate) fn vault_advertisement_key(vault_id: &str) -> String {
         format!("{}{}", Self::vault_advertisement_prefix(), vault_id)
     }
 
@@ -2779,7 +2832,7 @@ impl BitcoinTapSdk {
     /// Deletes every vault advertisement and proto under the current AND any known
     /// stale manifold prefixes (from prior policy commits), then wipes local
     /// vault_store, vault_records, in_flight_withdrawals, in_flight_withdrawal_legs,
-    /// dBTC token_balances, and dlv_receipts.
+    /// dBTC token_balances.
     /// Also clears in-memory pending_ops.
     ///
     /// Use after policy commit migration or to reset dBTC state to zero.
@@ -2876,6 +2929,18 @@ impl BitcoinTapSdk {
         *state = DbtcStorageTestState::default();
     }
 
+    /// Every PUT and DELETE attempted against the object store, in order.
+    #[cfg(test)]
+    pub(crate) fn dbtc_storage_op_log() -> Vec<(String, DbtcStorageOp)> {
+        dbtc_storage_test_state().op_log.clone()
+    }
+
+    /// Run `hook` once, immediately after the next PUT on `key` lands.
+    #[cfg(test)]
+    pub(crate) fn set_dbtc_storage_put_hook(key: impl Into<String>, hook: fn()) {
+        dbtc_storage_test_state().put_hooks.insert(key.into(), hook);
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_dbtc_storage_object(key: impl Into<String>, payload: Vec<u8>) {
         dbtc_storage_test_state()
@@ -2885,25 +2950,11 @@ impl BitcoinTapSdk {
 
     #[cfg(test)]
     pub(crate) fn set_dbtc_storage_list_results(
-        results: impl IntoIterator<Item = Result<generated::ObjectListResponseV1, String>>,
+        results: impl IntoIterator<Item = Result<ObjectListResponseV1, String>>,
     ) {
         let mut state = dbtc_storage_test_state();
         state.list_results.clear();
         state.list_results.extend(results);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_dbtc_storage_put_failure(key: impl Into<String>, message: impl Into<String>) {
-        dbtc_storage_test_state()
-            .put_failures
-            .insert(key.into(), message.into());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_dbtc_storage_get_failure(key: impl Into<String>, message: impl Into<String>) {
-        dbtc_storage_test_state()
-            .get_failures
-            .insert(key.into(), message.into());
     }
 
     pub(crate) async fn storage_put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
@@ -2917,14 +2968,25 @@ impl BitcoinTapSdk {
                 ));
             }
             state.object_store.insert(key.to_string(), payload.to_vec());
+            let digest = *blake3::hash(payload).as_bytes();
+            state
+                .op_log
+                .push((key.to_string(), DbtcStorageOp::Put(digest)));
+            let hook = state.put_hooks.remove(key);
+            drop(state);
+            if let Some(hook) = hook {
+                hook();
+            }
             Ok(key.to_string())
         }
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            // Production fan-out + per-node auth lives in the neutral storage I/O module
-            // (shared with recovery and other subsystems).
-            crate::sdk::storage_io::put_bytes(key, payload).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!(
+                "put {key} ({} bytes)",
+                payload.len()
+            )))
         }
     }
 
@@ -2932,23 +2994,27 @@ impl BitcoinTapSdk {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
+            state.get_log.push(key.to_string());
             if let Some(message) = state.get_failures.remove(key) {
                 return Err(DsmError::storage(
                     format!("load {key}: {message}"),
                     None::<std::io::Error>,
                 ));
             }
-            state.object_store.get(key).cloned().ok_or_else(|| {
-                DsmError::storage(
-                    format!("load {key}: object not found"),
-                    None::<std::io::Error>,
-                )
-            })
+            if let Some(bytes) = state.object_store.get(key).cloned() {
+                return Ok(bytes);
+            }
+            drop(state);
+            Err(DsmError::storage(
+                format!("load {key}: object not found"),
+                None::<std::io::Error>,
+            ))
         }
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            crate::sdk::storage_io::get_bytes(key).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!("get {key}")))
         }
     }
 
@@ -2957,40 +3023,14 @@ impl BitcoinTapSdk {
         {
             let mut state = dbtc_storage_test_state();
             state.object_store.remove(key);
+            state.op_log.push((key.to_string(), DbtcStorageOp::Delete));
             Ok(())
         }
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            // Mirror storage_put_bytes: fan-out the DELETE to every
-            // node with each request authenticated by that node's own
-            // token.  Single-node delete would leave the object
-            // reachable from the other 5 replicas a trader might
-            // query.
-            let config = crate::sdk::storage_node_sdk::StorageNodeConfig::from_env_config()
-                .await
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("load storage node config: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let sdk = crate::sdk::storage_node_sdk::StorageNodeSDK::new(config.clone())
-                .await
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("construct storage node sdk: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let mut auths = std::collections::HashMap::new();
-            for url in &config.node_urls {
-                if let Some(auth) = crate::sdk::storage_io::resolve_storage_auth(url) {
-                    auths.insert(url.clone(), auth);
-                }
-            }
-            let sdk = sdk.with_per_node_auth(&auths);
-            sdk.delete_at_all_replicas(key).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!("delete {key}")))
         }
     }
 
@@ -2998,7 +3038,7 @@ impl BitcoinTapSdk {
         prefix: &str,
         cursor: Option<&str>,
         limit: u32,
-    ) -> Result<generated::ObjectListResponseV1, DsmError> {
+    ) -> Result<ObjectListResponseV1, DsmError> {
         #[cfg(any(test, feature = "demos"))]
         {
             let mut state = dbtc_storage_test_state();
@@ -3024,7 +3064,7 @@ impl BitcoinTapSdk {
                 .collect();
             let items = page_keys
                 .iter()
-                .map(|key| generated::ObjectListItemV1 {
+                .map(|key| ObjectListItemV1 {
                     key: key.clone(),
                     dlv_id_b32: String::new(),
                     size_bytes: state
@@ -3034,7 +3074,7 @@ impl BitcoinTapSdk {
                         .unwrap_or(0),
                 })
                 .collect();
-            Ok(generated::ObjectListResponseV1 {
+            Ok(ObjectListResponseV1 {
                 next_cursor: page_keys.last().cloned(),
                 items,
             })
@@ -3042,7 +3082,10 @@ impl BitcoinTapSdk {
 
         #[cfg(not(any(test, feature = "demos")))]
         {
-            crate::sdk::storage_io::list_objects(prefix, cursor, limit).await
+            // BITCOIN STUB — see the fence above.
+            Err(bitcoin_storage_stub(&format!(
+                "list objects under {prefix} from {cursor:?} (at most {limit})"
+            )))
         }
     }
 
@@ -3093,6 +3136,58 @@ impl BitcoinTapSdk {
             records_by_vault,
             records_by_parent,
             storage_node_vault_ids,
+        })
+    }
+
+    /// Re-read exactly the rows one vault's advertisement is built from.
+    ///
+    /// The sweep's opening vault-id list is a work list, not an authority: it
+    /// is taken once and then two network PUTs happen per vault. A record
+    /// written inside that window is invisible to a sweep-wide snapshot — an
+    /// exit moving to `awaiting_confirmation`, a fractional successor being
+    /// inserted — and republishing from the snapshot would put
+    /// `routeable=true` back over the busy advertisement the storage nodes
+    /// already hold, offering a vault whose UTXO is being swept as live
+    /// liquidity. Read the rows at the moment of publish instead.
+    fn load_storage_node_vault_routing_slice(
+        vault_id: &str,
+    ) -> Result<StorageNodeVaultRoutingInventory, DsmError> {
+        let records = crate::storage::client_db::list_vault_records_for_vault_or_parent(vault_id)
+            .map_err(|e| {
+            DsmError::storage(
+                format!("re-read vault records for {vault_id}: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        let mut records_by_vault: HashMap<
+            String,
+            Vec<crate::storage::client_db::PersistedVaultRecord>,
+        > = HashMap::new();
+        let mut records_by_parent: HashMap<
+            String,
+            Vec<crate::storage::client_db::PersistedVaultRecord>,
+        > = HashMap::new();
+        for record in records {
+            if record.vault_id.as_deref() == Some(vault_id) {
+                records_by_vault
+                    .entry(vault_id.to_string())
+                    .or_default()
+                    .push(record.clone());
+            }
+            if record.parent_vault_id.as_deref() == Some(vault_id) {
+                records_by_parent
+                    .entry(vault_id.to_string())
+                    .or_default()
+                    .push(record);
+            }
+        }
+        Ok(StorageNodeVaultRoutingInventory {
+            records_by_vault,
+            records_by_parent,
+            // A slice covers one vault; the id set is that vault alone. Only
+            // the sweep's work list and the planner read this field, and
+            // neither is built from a slice.
+            storage_node_vault_ids: std::iter::once(vault_id.to_string()).collect(),
         })
     }
 
@@ -3328,7 +3423,8 @@ impl BitcoinTapSdk {
             return Ok(());
         };
         // Guard: only the vault creator should publish advertisements.
-        // If this vault has no PersistedVaultRecord in the local inventory,
+        // If this vault has no PersistedVaultRecord in the rows re-read for
+        // this publish,
         // this device received the vault via bilateral transfer and cached
         // the proto locally for execution. The creator already published the
         // complete advertisement (htlc_address, redeem_params, deposit_nonce,
@@ -3382,19 +3478,37 @@ impl BitcoinTapSdk {
         &self,
         controller_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let inventory = Self::load_storage_node_vault_routing_inventory()?;
-        let mut vault_ids: Vec<String> = inventory.storage_node_vault_ids.iter().cloned().collect();
+        let mut vault_ids: Vec<String> =
+            crate::storage::client_db::list_all_vault_ids().map_err(|e| {
+                DsmError::storage(
+                    format!("list vault store for advertisement refresh: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
         vault_ids.sort();
+        vault_ids.dedup();
         log::info!(
             "[withdraw.plan] refreshing {} storage_node vault advertisements",
             vault_ids.len(),
         );
         let mut refreshed = 0u32;
         for vault_id in &vault_ids {
+            // The list above is the work list. Every row the advertisement is
+            // built from is re-read here, immediately before the publish.
+            let slice = match Self::load_storage_node_vault_routing_slice(vault_id) {
+                Ok(slice) => slice,
+                Err(e) => {
+                    log::warn!(
+                        "[withdraw.plan] failed to re-read rows for vault {}: {e}",
+                        &vault_id[..vault_id.len().min(12)],
+                    );
+                    continue;
+                }
+            };
             match Self::publish_storage_node_vault_advertisement_from_inventory(
                 vault_id,
                 controller_device_id,
-                &inventory,
+                &slice,
             )
             .await
             {
@@ -3421,7 +3535,7 @@ impl BitcoinTapSdk {
         vault_id: &str,
         controller_device_id: &[u8; 32],
     ) -> Result<(), DsmError> {
-        let inventory = Self::load_storage_node_vault_routing_inventory()?;
+        let inventory = Self::load_storage_node_vault_routing_slice(vault_id)?;
         Self::publish_storage_node_vault_advertisement_from_inventory(
             vault_id,
             controller_device_id,
@@ -4182,12 +4296,18 @@ impl BitcoinTapSdk {
         };
 
         // Fees come out of the delivered amount — they are not a shortfall.
-        // Shortfall only reflects genuinely unroutable liquidity.
-        let shortfall_sats = if candidate.total_gross_exit_sats >= requested_net_sats {
-            0
-        } else {
-            requested_net_sats.saturating_sub(candidate.total_gross_exit_sats)
-        };
+        // Shortfall is what the RECIPIENT does not get: the delivery this plan
+        // could not route, and nothing else.
+        //
+        // Both sides must therefore be net. Comparing the gross exit against the
+        // net request mixed the two and read as zero whenever the fee covered the
+        // gap: a 198_950 net request answered by sweeping a 200_000 vault routes
+        // 197_900 and burns 200_000 gross, which is "not short" by that measure
+        // while the recipient is 1_050 light. Candidates are already classified on
+        // exactly this quantity (`planned_net_sats` equal to, or below,
+        // `requested_net_sats`), so saturating_sub is zero for an exact plan by
+        // construction.
+        let shortfall_sats = requested_net_sats.saturating_sub(candidate.planned_net_sats);
         let mut plan_class = Self::classify_withdrawal_plan(&candidate.legs).to_string();
         let plan_id = Self::compute_withdrawal_plan_id(
             requested_net_sats,
@@ -4908,9 +5028,7 @@ mod tests {
     }
 
     fn init_withdrawal_test_db() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         BitcoinTapSdk::reset_dbtc_storage_test_state();
         crate::storage::client_db::init_database()
@@ -5335,6 +5453,107 @@ mod tests {
         assert!(successor_reason.contains("Successor vault still pending confirmation"));
     }
 
+    // Two vaults whose ids bracket the sweep: the sweep walks `list_all_vault_ids`
+    // in sorted order, so the lower id is published first and the higher id is
+    // still ahead of it. Recomputed rather than stored so the interleaving hook,
+    // which is a bare `fn()` and captures nothing, can name the same vault.
+    const SWEEP_LABEL_ONE: &str = "sweep-interleave-one";
+    const SWEEP_LABEL_TWO: &str = "sweep-interleave-two";
+
+    fn sweep_interleave_ids() -> (String, String) {
+        let mut ids = [
+            crate::util::text_id::encode_base32_crockford(&vid_from_label(SWEEP_LABEL_ONE)),
+            crate::util::text_id::encode_base32_crockford(&vid_from_label(SWEEP_LABEL_TWO)),
+        ];
+        ids.sort();
+        (ids[0].clone(), ids[1].clone())
+    }
+
+    /// The concurrent writer, fired from inside the sweep: an exit starts on the
+    /// not-yet-published vault, inserting the fractional successor row that makes
+    /// it busy. In production this is the withdrawal executor running while the
+    /// planner's refresh is mid-flight.
+    fn start_exit_on_the_trailing_vault() {
+        let (_, trailing) = sweep_interleave_ids();
+        let mut successor = persisted_deposit_record(
+            "btc_to_dbtc",
+            "BurnPending",
+            Some("successor-of-trailing"),
+            Some(&trailing),
+            true,
+        );
+        successor.vault_op_id = "successor-of-trailing".to_string();
+        crate::storage::client_db::upsert_vault_record(&successor)
+            .unwrap_or_else(|e| panic!("insert successor record failed: {e}"));
+    }
+
+    /// The advertisement sweep takes a vault-id work list once and then performs
+    /// two network PUTs per vault. A record written inside that window — here an
+    /// exit starting on a vault the sweep has not reached yet — must reach the
+    /// wire. Publishing the opening snapshot instead would put `routeable=true`
+    /// back over the busy advertisement the storage nodes already hold, offering
+    /// a vault whose UTXO is being swept as live liquidity to every other device.
+    ///
+    /// Asserted on the wire, not on end state: the object store is
+    /// last-write-wins, so this counts the PUTs on the advertisement key and
+    /// requires exactly one before reading its bytes.
+    #[tokio::test]
+    #[serial]
+    async fn a_record_written_during_the_sweep_is_not_published_away() {
+        init_withdrawal_test_db();
+        let (leading, trailing) = sweep_interleave_ids();
+
+        for label in [SWEEP_LABEL_ONE, SWEEP_LABEL_TWO] {
+            let vid = vid_from_label(label);
+            put_active_vault(vid, 400_000);
+            put_active_vault_record(vid, 400_000, "btc_to_dbtc");
+        }
+
+        // Fire once the leading vault's advertisement has landed: the sweep is
+        // now between the two vaults, exactly where a stale snapshot would have
+        // already decided what the trailing vault's advertisement says.
+        BitcoinTapSdk::set_dbtc_storage_put_hook(
+            BitcoinTapSdk::vault_advertisement_key(&leading),
+            start_exit_on_the_trailing_vault,
+        );
+
+        let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+        bridge
+            .refresh_storage_node_vault_advertisements(&[0x07; 32])
+            .await
+            .unwrap_or_else(|e| panic!("advertisement refresh failed: {e}"));
+
+        let trailing_ad_key = BitcoinTapSdk::vault_advertisement_key(&trailing);
+        let ad_puts = BitcoinTapSdk::dbtc_storage_op_log()
+            .into_iter()
+            .filter(|(key, op)| key == &trailing_ad_key && matches!(op, DbtcStorageOp::Put(_)))
+            .count();
+        assert_eq!(
+            ad_puts, 1,
+            "expected exactly one advertisement PUT for the trailing vault; \
+             more than one would mean the stored bytes are not the published bytes",
+        );
+
+        let published = BitcoinTapSdk::storage_get_bytes(&trailing_ad_key)
+            .await
+            .unwrap_or_else(|e| panic!("no advertisement published for trailing vault: {e}"));
+        let advertisement = generated::DbtcVaultAdvertisementV1::decode(published.as_slice())
+            .unwrap_or_else(|e| panic!("decode published advertisement: {e}"));
+
+        assert!(
+            !advertisement.routeable,
+            "the sweep published routeable=true for a vault whose exit had already \
+             started — the opening snapshot was treated as the authority",
+        );
+        assert!(
+            advertisement
+                .busy_reason
+                .contains("Successor vault still pending confirmation"),
+            "expected the fresh busy reason on the wire, got {:?}",
+            advertisement.busy_reason,
+        );
+    }
+
     // dBTC planner tests use BLAKE3-derived 32-byte ids via `vid_from_label`
     // so they round-trip through the strict `LimboVaultProto.id` schema.  The
     // wire-level vault_id (and assertions) are the Base32-Crockford encoding
@@ -5435,6 +5654,50 @@ mod tests {
         assert!(!plan.plan_id.is_empty());
         assert_eq!(plan.requested_net_sats, desired_net_sats);
         assert_eq!(plan.legs[0].vault_id, route_b32);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn plan_withdrawal_reports_what_the_recipient_is_short() {
+        init_withdrawal_test_db();
+
+        let bridge = BitcoinTapSdk::new(Arc::new(DLVManager::new()));
+        let full_fee = estimated_full_withdrawal_fee_sats();
+
+        // One vault, and a request slightly larger than it can deliver. The vault
+        // sweeps in full, so the fee is the only thing between the two figures:
+        // the gross exit clears the net request while the recipient still comes
+        // up short. That is the gap a gross-to-net comparison reported as zero.
+        let vault_sats = 200_000;
+        let vid = vid_from_label("vault-short");
+        put_active_vault(vid, vault_sats);
+        put_active_vault_record(vid, vault_sats, "btc_to_dbtc");
+
+        // The net request sits between what the sweep delivers (vault - fee) and
+        // what it burns (vault). No route lands on it exactly, and no partial one
+        // can either: a partial would have to leave a remainder under the floor.
+        let requested_net = vault_sats - full_fee / 2;
+        let plan = bridge
+            .plan_withdrawal(requested_net + full_fee, "tb1qshortfall", &[0x11; 32])
+            .await
+            .unwrap_or_else(|e| panic!("plan withdrawal failed: {e}"));
+
+        assert_eq!(plan.requested_net_sats, requested_net);
+        assert_eq!(plan.planned_net_sats, vault_sats - full_fee);
+        assert_eq!(plan.total_gross_exit_sats, vault_sats);
+        assert!(
+            plan.total_gross_exit_sats >= requested_net,
+            "the gross exit covers the net request — the old comparison stopped \
+             there and called it whole: gross {} vs requested net {}",
+            plan.total_gross_exit_sats,
+            requested_net
+        );
+        assert_eq!(
+            plan.shortfall_sats,
+            requested_net - plan.planned_net_sats,
+            "shortfall is the delivery this plan could not route"
+        );
+        assert!(plan.shortfall_sats > 0);
     }
 
     #[tokio::test]
@@ -5557,9 +5820,7 @@ mod tests {
 
     /// Set up identity + an existing dBTC LockedRecovery lock for the reconcile tests.
     fn dbtc_reconcile_test_identity() {
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_dbtc_reconcile_test"),
-        );
+        crate::economic_fixtures::use_test_storage_dir();
         crate::sdk::app_state::AppState::reset_memory_for_testing();
         crate::sdk::app_state::AppState::prime_memory_for_testing();
         crate::sdk::app_state::AppState::set_identity_info(
@@ -5567,8 +5828,9 @@ mod tests {
             vec![0x01; 32],
             vec![0x6E; 32],
             vec![0x02; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+        )
+        .expect("AppState identity");
+        crate::sdk::app_state::AppState::set_has_identity(true).expect("AppState identity");
         // dBTC starts LockedRecovery (as generic recovery-time locking would leave it).
         crate::storage::client_db::recovery::lock_restored_bearer_asset(DBTC_TOKEN_ID.as_bytes())
             .expect("lock dBTC");

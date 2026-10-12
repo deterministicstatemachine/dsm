@@ -66,11 +66,7 @@ fn decode_internal_envelope(result: AppResult, route: &str) -> Result<generated:
             .error_message
             .unwrap_or_else(|| format!("{route}: internal invoke failed")));
     }
-    let payload = result
-        .data
-        .strip_prefix(&[0x03])
-        .ok_or_else(|| format!("{route}: missing envelope v3 framing"))?;
-    dsm::envelope::from_canonical_bytes(payload)
+    super::response_helpers::decode_local_envelope(&result.data)
         .map_err(|e| format!("{route}: failed to decode envelope: {e}"))
 }
 
@@ -138,8 +134,6 @@ fn sync_dbtc_projection_from_state(
             available: spendable,
             locked: locked_sats,
             source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.hash[0] as u64,
-            updated_at: crate::util::deterministic_time::tick(),
         },
     )
     .map_err(|e| format!("{route}: failed to persist dBTC canonical projection row: {e}"))?;
@@ -248,7 +242,6 @@ struct WithdrawalLegParams<'a> {
 
 #[allow(clippy::too_many_arguments)]
 fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String> {
-    let now = crate::util::deterministic_time::tick();
     crate::storage::client_db::upsert_withdrawal_leg(
         &crate::storage::client_db::InFlightWithdrawalLeg {
             withdrawal_id: params.withdrawal_id.to_string(),
@@ -264,8 +257,6 @@ fn persist_withdrawal_leg(params: &WithdrawalLegParams<'_>) -> Result<(), String
             exit_vault_op_id: params.exit_vault_op_id.map(str::to_string),
             state: "broadcast".to_string(),
             proof_digest: None,
-            created_at: now,
-            updated_at: now,
         },
     )
     .map_err(|e| format!("withdrawal leg persistence failed: {e}"))
@@ -507,6 +498,50 @@ fn take_withdrawal_execution_test_result(
     Some(expectation.result)
 }
 
+/// The public-witness fence.
+///
+/// Tap creation is DISABLED. The shipped construction derives Bitcoin spend
+/// authority from public data — `manifold_seed = BLAKE3(TAG, policy_commit)`
+/// over a compile-time constant, combined with the `deposit_nonce` that is
+/// PUBLISHED in the vault advertisement — so anyone who can read an
+/// unauthenticated storage node can reconstruct the claim private key and
+/// sweep the tap. Reproduced end to end in
+/// `dsm_sdk/tests/dbtc_public_data_attack.rs`.
+///
+/// The exposure is independent of the accepting-layer mint refusal: BTC locks
+/// on-chain when the funding transaction is broadcast, and that refusal only
+/// blocks the dBTC credit. So every door refuses INDEPENDENTLY — a fence on
+/// one is not a fence on another.
+///
+/// THREE doors manufacture a publicly-derivable output, and all three refuse:
+///
+/// ```text
+/// bitcoin.deposit.initiate            open_tap() mints the tap
+/// bitcoin.deposit.fund_and_broadcast  puts BTC behind it
+/// bitcoin.fractional.exit             pour_partial() re-locks the remainder
+///                                     into a SUCCESSOR tap; its fresh
+///                                     deposit_nonce is OsRng but is then
+///                                     PUBLISHED in the advertisement (which
+///                                     rejects an empty one), so the successor
+///                                     claim key is public data again
+/// ```
+///
+/// Exit-direction routes stay OPEN so nothing is stranded: `bitcoin.full.sweep`
+/// (creates no successor), `bitcoin.sweep.recover`, `bitcoin.claim.auto` and
+/// `bitcoin.deposit.refund` all move value OUT of a vulnerable tap. Disposition
+/// of already-funded taps is an owner decision this fence does not make.
+///
+/// This lifts when sealed per-tap authority is bound behind an admitted dBTC
+/// in-flight consumption. There is deliberately no override, no environment
+/// escape and no migration path.
+const DBTC_PUBLIC_WITNESS_FENCE: &str =
+    "DBTC_PUBLIC_WITNESS_FENCED: new BTC->dBTC tap creation is disabled — the \
+     shipped tap derives its Bitcoin spend authority from public data (the \
+     builtin policy commit plus the advertised deposit nonce), so anyone who \
+     can read a storage-node advertisement can sweep the funds. This lifts \
+     when sealed per-tap authority is bound behind an admitted dBTC in-flight \
+     consumption.";
+
 impl AppRouterImpl {
     async fn prepare_deposit_completion_prep(
         &self,
@@ -544,7 +579,7 @@ impl AppRouterImpl {
             let dbtc_id = crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID;
             let current_dbtc = self
                 .wallet
-                .get_balance(Some(dbtc_id))
+                .get_balance(dbtc_id)
                 .map(|bal| bal.available())
                 .unwrap_or_else(|e| {
                     log::error!("[{route}] failed to read canonical dBTC balance: {e}");
@@ -620,7 +655,6 @@ impl AppRouterImpl {
         preimage.extend_from_slice(device_str.as_bytes());
         preimage.extend_from_slice(&amount_sats.to_le_bytes());
         preimage.extend_from_slice(dest.as_bytes());
-        preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
         let id_hash = dsm::crypto::blake3::domain_hash(
             dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
             &preimage,
@@ -730,7 +764,6 @@ impl AppRouterImpl {
             preimage.extend_from_slice(&self.device_id_bytes);
             preimage.extend_from_slice(&plan.requested_net_sats.to_le_bytes());
             preimage.extend_from_slice(req.destination_address.as_bytes());
-            preimage.extend_from_slice(&crate::util::deterministic_time::tick().to_le_bytes());
             let id_hash = dsm::crypto::blake3::domain_hash(
                 dsm::common::domain_tags::TAG_DSM_WITHDRAWAL,
                 &preimage,
@@ -955,6 +988,116 @@ impl AppRouterImpl {
                 })
                 .collect(),
         })
+    }
+
+    /// The legs that still say what they said when the policy check passed.
+    ///
+    /// ATOMIC STATE GUARD (legs). The withdrawal row is re-read before the burn
+    /// so a second poller pass cannot double-burn it. The legs were never given
+    /// the same treatment, and the work they drive is just as terminal: the
+    /// prune removes a vault's advertisement from every storage node, and the
+    /// republish puts a successor back on the wire as live liquidity. The rows
+    /// were read before the policy check, the burn, and the projection sync —
+    /// three awaits — and `upsert_withdrawal_leg` can rewrite them in that
+    /// window. A leg re-pointed there must not have its old source pruned, and
+    /// its old successor must not be advertised.
+    fn legs_still_authoritative(
+        log_prefix: &str,
+        withdrawal_id: &str,
+        validated: &[crate::storage::client_db::InFlightWithdrawalLeg],
+    ) -> Vec<crate::storage::client_db::InFlightWithdrawalLeg> {
+        let current = match crate::storage::client_db::list_withdrawal_legs(withdrawal_id) {
+            Ok(rows) => rows,
+            Err(e) => {
+                log::warn!(
+                    "[{}] ρ={} could not re-read legs before prune: {} — pruning nothing (race guard)",
+                    log_prefix,
+                    withdrawal_id,
+                    e
+                );
+                return Vec::new();
+            }
+        };
+        validated
+            .iter()
+            .filter(|leg| {
+                let Some(row) = current.iter().find(|row| row.leg_index == leg.leg_index) else {
+                    log::warn!(
+                        "[{}] ρ={} leg {} vanished after validation — skipping its prune (race guard)",
+                        log_prefix,
+                        withdrawal_id,
+                        leg.leg_index
+                    );
+                    return false;
+                };
+                if row.vault_id != leg.vault_id || row.successor_vault_id != leg.successor_vault_id
+                {
+                    log::warn!(
+                        "[{}] ρ={} leg {} was re-pointed after validation (source {} → {}, \
+                         successor {:?} → {:?}) — skipping its prune (race guard)",
+                        log_prefix,
+                        withdrawal_id,
+                        leg.leg_index,
+                        leg.vault_id,
+                        row.vault_id,
+                        leg.successor_vault_id,
+                        row.successor_vault_id
+                    );
+                    return false;
+                }
+                true
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Publish each settled leg's successor as routeable and prune its spent
+    /// source, for the legs the re-read still vouches for.
+    async fn prune_settled_withdrawal_legs(
+        bitcoin_tap: &Arc<crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk>,
+        controller_device_id: &[u8; 32],
+        log_prefix: &str,
+        withdrawal_id: &str,
+        validated_legs: &[crate::storage::client_db::InFlightWithdrawalLeg],
+    ) {
+        for leg in Self::legs_still_authoritative(log_prefix, withdrawal_id, validated_legs) {
+            if let Some(ref succ_vault_id) = leg.successor_vault_id {
+                if let Err(e) = bitcoin_tap
+                    .publish_vault_advertisement(succ_vault_id, controller_device_id)
+                    .await
+                {
+                    log::warn!(
+                        "[{}] successor ad re-publish for {} failed: {}",
+                        log_prefix,
+                        succ_vault_id,
+                        e
+                    );
+                } else {
+                    log::info!(
+                        "[{}] re-advertised successor vault {} as routeable",
+                        log_prefix,
+                        succ_vault_id
+                    );
+                }
+            }
+
+            // Prune spent source vault from storage nodes.
+            // Finalization is terminal — the UTXO is buried, no one
+            // needs the source advertisement anymore.
+            if let Err(e) =
+                crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
+                    &leg.vault_id,
+                )
+                .await
+            {
+                log::warn!(
+                    "[{}] vault prune failed for {}: {}",
+                    log_prefix,
+                    leg.vault_id,
+                    e
+                );
+            }
+        }
     }
 
     async fn resolve_pending_withdrawals_with_client(
@@ -1205,55 +1348,35 @@ impl AppRouterImpl {
                     wd.withdrawal_id
                 );
 
-                // Flip successor vault advertisements to green (routeable).
-                // After settlement, each leg's successor vault has confirmed burial
-                // and should be advertised as available liquidity.
-                for leg in &legs {
-                    if let Some(ref succ_vault_id) = leg.successor_vault_id {
-                        if let Err(e) = self
-                            .bitcoin_tap
-                            .publish_vault_advertisement(succ_vault_id, &self.device_id_bytes)
-                            .await
-                        {
-                            log::warn!(
-                                "[{}] successor ad re-publish for {} failed: {}",
-                                log_prefix,
-                                succ_vault_id,
-                                e
-                            );
-                        } else {
-                            log::info!(
-                                "[{}] re-advertised successor vault {} as routeable",
-                                log_prefix,
-                                succ_vault_id
-                            );
-                        }
-                    }
-
-                    // Prune spent source vault from storage nodes.
-                    // Finalization is terminal — the UTXO is buried, no one
-                    // needs the source advertisement anymore.
-                    if let Err(e) =
-                        crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::delete_vault_from_storage_nodes(
-                            &leg.vault_id,
-                        )
-                        .await
-                    {
-                        log::warn!(
-                            "[{}] vault prune failed for {}: {}",
-                            log_prefix,
-                            leg.vault_id,
-                            e
-                        );
-                    }
-                }
+                // Flip successor vault advertisements to green (routeable) and
+                // prune each spent source vault, for the legs that still hold.
+                Self::prune_settled_withdrawal_legs(
+                    &self.bitcoin_tap,
+                    &self.device_id_bytes,
+                    log_prefix,
+                    &wd.withdrawal_id,
+                    &legs,
+                )
+                .await;
 
                 summary.finalized += 1;
             } else {
                 // Not yet confirmed — increment poll counter and check for refund threshold.
-                let poll_count =
-                    crate::storage::client_db::increment_settlement_poll_count(&wd.withdrawal_id)
-                        .unwrap_or(0);
+                let poll_count = match crate::storage::client_db::increment_settlement_poll_count(
+                    &wd.withdrawal_id,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!(
+                            "[{}] failed to increment poll count for ρ={}: {}",
+                            log_prefix,
+                            wd.withdrawal_id,
+                            e
+                        );
+                        summary.pending += 1;
+                        continue;
+                    }
+                };
 
                 if poll_count > crate::sdk::bitcoin_tap_sdk::DBTC_MAX_SETTLEMENT_POLLS {
                     log::warn!(
@@ -1323,7 +1446,6 @@ impl AppRouterImpl {
                 };
 
                 let account_id = Self::bitcoin_account_id(&import_kind, &req.secret, req.network);
-                let now = crate::util::deterministic_time::tick();
                 let account = crate::storage::client_db::BitcoinAccountRecord {
                     account_id: account_id.clone(),
                     label: if req.label.trim().is_empty() {
@@ -1337,8 +1459,6 @@ impl AppRouterImpl {
                     first_address: Some(first_address.clone()),
                     active: true,
                     active_receive_index: start_index,
-                    created_at: now,
-                    updated_at: now,
                 };
 
                 if let Err(e) = crate::storage::client_db::upsert_bitcoin_account(&account) {
@@ -1438,7 +1558,6 @@ impl AppRouterImpl {
 
                 let account_id =
                     Self::bitcoin_account_id("mnemonic", &mnemonic_phrase, req.network);
-                let now = crate::util::deterministic_time::tick();
                 let account = crate::storage::client_db::BitcoinAccountRecord {
                     account_id: account_id.clone(),
                     label,
@@ -1448,8 +1567,6 @@ impl AppRouterImpl {
                     first_address: Some(first_address.clone()),
                     active: true,
                     active_receive_index: 0,
-                    created_at: now,
-                    updated_at: now,
                 };
 
                 if let Err(e) = crate::storage::client_db::upsert_bitcoin_account(&account) {
@@ -1620,6 +1737,11 @@ impl AppRouterImpl {
             }
 
             "bitcoin.deposit.initiate" => {
+                // FENCED — see DBTC_PUBLIC_WITNESS_FENCE. Refuse before the
+                // request is even decoded: nothing about the caller's input
+                // can make creating a public-witness tap safe.
+                return err(DBTC_PUBLIC_WITNESS_FENCE.to_string());
+                #[allow(unreachable_code)]
                 let pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
@@ -1834,14 +1956,13 @@ impl AppRouterImpl {
                                 }
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device",
+                                dsm::crypto::domain::TaggedHashDomain::from_static(
+                                    b"DSM/vault-device",
+                                ),
                                 req.vault_op_id.as_bytes(),
                             )
                             .as_bytes();
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-                                &device_id, &vault_id,
-                            );
-                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
                                 &device_id, &vault_id,
                             );
                             let unlock_applied_state = match self.core_sdk.execute_on_relationship(
@@ -1849,7 +1970,6 @@ impl AppRouterImpl {
                                 vault_id,
                                 signed_unlock_op,
                                 &[],
-                                Some(init_tip),
                             ) {
                                 Ok((s, _)) => s,
                                 Err(e) => {
@@ -1993,12 +2113,9 @@ impl AppRouterImpl {
                                 amount,
                                 tx_type: tx_type_str.to_string(),
                                 status: "completed".to_string(),
-                                chain_height: applied_state.hash[0] as u64,
-                                step_index: 0,
                                 commitment_hash: Some(prep.protocol_transition_commitment.to_vec()),
                                 proof_data: None,
                                 metadata,
-                                created_at: crate::util::deterministic_time::tick(),
                             };
                             if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
                                 log::warn!(
@@ -2517,6 +2634,16 @@ impl AppRouterImpl {
             }
 
             "bitcoin.fractional.exit" => {
+                // FENCED INDEPENDENTLY — a partial exit is also a MANUFACTURING
+                // door: pour_partial() pays the remainder into a successor
+                // P2WSH whose claim key derives from the same public chain. Use
+                // bitcoin.full.sweep, which exits without minting a successor.
+                return err(format!(
+                    "{DBTC_PUBLIC_WITNESS_FENCE} Partial exit is fenced because \
+                     it re-locks the remainder into a successor tap with the \
+                     same defect; use bitcoin.full.sweep to exit the vault."
+                ));
+                #[allow(unreachable_code)]
                 let pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,
                     Err(e) => return err(format!("decode ArgPack failed: {e}")),
@@ -2581,7 +2708,7 @@ impl AppRouterImpl {
                 // Read dBTC balance early — gate check runs after burn_amount is known.
                 let current_dbtc = self
                     .wallet
-                    .get_balance(Some(dbtc_id))
+                    .get_balance(dbtc_id)
                     .map(|b| b.available())
                     .unwrap_or(0);
 
@@ -2983,7 +3110,7 @@ impl AppRouterImpl {
                 // Gate 1: verify dBTC balance covers the vault amount
                 let current_dbtc = self
                     .wallet
-                    .get_balance(Some(dbtc_id))
+                    .get_balance(dbtc_id)
                     .map(|b| b.available())
                     .unwrap_or(0);
                 if let Err(message) =
@@ -3366,6 +3493,12 @@ impl AppRouterImpl {
 
             // -------- Universal: fund HTLC from user wallet + complete deposit --------
             "bitcoin.deposit.fund_and_broadcast" => {
+                // FENCED INDEPENDENTLY of deposit.initiate — a tap record that
+                // already exists (created before this fence, or restored from
+                // a backup) must still not be able to lock BTC behind a
+                // publicly-derivable key.
+                return err(DBTC_PUBLIC_WITNESS_FENCE.to_string());
+                #[allow(unreachable_code)]
                 let vault_op_id = match generated::ArgPack::decode(&*i.args) {
                     Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
                         match generated::DepositRefundRequest::decode(&*pack.body) {
@@ -3927,7 +4060,10 @@ impl AppRouterImpl {
                         ))
                     }
                 };
-                let base_height = status.block_height.unwrap_or(0);
+                let base_height = match status.block_height {
+                    Some(bh) => bh,
+                    None => return err("bitcoin.deposit.await_and_complete: tx is confirmed but has no block height".to_string()),
+                };
                 let extra = effective_min_conf.saturating_sub(1);
                 header_chain = match mempool.fetch_header_chain(base_height + 1, extra).await {
                     Ok(h) => h,
@@ -3999,18 +4135,17 @@ impl AppRouterImpl {
                                 Err(e) => return err(format!("await_and_complete: no state: {e}")),
                             };
                             let vault_id = *dsm::crypto::blake3::domain_hash(
-                                "DSM/vault-device",
+                                dsm::crypto::domain::TaggedHashDomain::from_static(
+                                    b"DSM/vault-device",
+                                ),
                                 vault_op_id.as_bytes(),
                             )
                             .as_bytes();
                             let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
                                 &device_id, &vault_id,
                             );
-                            let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &device_id, &vault_id,
-                            );
                             let unlock_applied_state = match self.core_sdk.execute_on_relationship(
-                                rel_key, vault_id, signed_unlock_op, &[], Some(init_tip),
+                                rel_key, vault_id, signed_unlock_op, &[],
                             ) {
                                 Ok((s, _)) => s,
                                 Err(e) => return err(format!("bitcoin.deposit.await_and_complete: failed to apply DLV unlock op: {e}")),
@@ -4166,14 +4301,11 @@ impl AppRouterImpl {
                                     amount,
                                     tx_type: tx_type_str.to_string(),
                                     status: "completed".to_string(),
-                                    chain_height: applied_state.hash[0] as u64,
-                                    step_index: 0,
                                     commitment_hash: Some(
                                         prep.protocol_transition_commitment.to_vec(),
                                     ),
                                     proof_data: None,
                                     metadata,
-                                    created_at: crate::util::deterministic_time::tick(),
                                 };
                                 if let Err(e) = crate::storage::client_db::store_transaction(&rec) {
                                     log::warn!(
@@ -4882,7 +5014,6 @@ pub(super) async fn try_claim_full_sweep_exit(
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
 
     use prost::Message;
     use serial_test::serial;
@@ -4893,38 +5024,19 @@ mod tests {
     use crate::init::SdkConfig;
     use crate::storage::client_db;
 
-    fn install_test_identity(device_id: Vec<u8>, genesis_hash: Vec<u8>, binding_key: Vec<u8>) {
-        crate::reset_sdk_context_for_testing();
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id,
-            public_key,
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        crate::sdk::app_state::AppState::set_has_identity(true);
+    /// A device created as wallet creation creates it, in a fresh database.
+    fn install_test_identity(seed: u8) {
+        crate::economic_fixtures::local_device(seed);
     }
 
     fn init_withdrawal_invoke_test_router(test_name: &str) -> AppRouterImpl {
+        crate::economic_fixtures::use_test_storage_dir();
         unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
             std::env::remove_var("DSM_ENV_CONFIG_PATH");
         }
         client_db::reset_database_for_tests();
-        let _ = crate::storage_utils::set_storage_base_dir(PathBuf::from(format!(
-            "./.dsm_testdata_{test_name}"
-        )));
-        install_test_identity(vec![0xA1; 32], vec![0xC1; 32], vec![0xD1; 32]);
+        crate::economic_fixtures::use_test_storage_dir();
+        install_test_identity(0xA1);
         client_db::init_database().expect("init db");
         set_withdrawal_bridge_sync_test_results(Vec::new());
         crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::reset_dbtc_storage_test_state();
@@ -4938,6 +5050,113 @@ mod tests {
         .expect("router init")
     }
 
+    fn withdrawal_leg(
+        withdrawal_id: &str,
+        leg_index: u32,
+        vault_id: &str,
+    ) -> client_db::InFlightWithdrawalLeg {
+        client_db::InFlightWithdrawalLeg {
+            withdrawal_id: withdrawal_id.to_string(),
+            leg_index,
+            vault_id: vault_id.to_string(),
+            leg_kind: "full".to_string(),
+            amount_sats: 100_000,
+            estimated_fee_sats: 0,
+            estimated_net_sats: 100_000,
+            sweep_txid: Some(format!("txid-{leg_index}")),
+            successor_vault_id: None,
+            successor_vault_op_id: None,
+            exit_vault_op_id: None,
+            state: "broadcast".to_string(),
+            proof_digest: None,
+        }
+    }
+
+    /// The prune is terminal: it removes a vault's advertisement from every
+    /// storage node. The leg rows keyed it were read before the policy check,
+    /// the burn and the projection sync — three awaits — while the withdrawal
+    /// row itself was re-read under an explicit race guard. A leg re-pointed
+    /// in that window must not take its old source's advertisement with it.
+    ///
+    /// Asserted on the wire: the object store cannot distinguish "never
+    /// deleted" from "deleted and republished", so this reads the ordered op
+    /// log the storage double keeps.
+    #[tokio::test]
+    #[serial]
+    async fn a_leg_repointed_after_validation_is_not_pruned() {
+        let router = init_withdrawal_invoke_test_router("leg_repointed");
+        let withdrawal_id = "rho-repointed";
+        let settled_vault = "VAULTSETTLED";
+        let stale_source = "VAULTSTALESOURCE";
+        let live_source = "VAULTLIVESOURCE";
+
+        client_db::create_withdrawal(client_db::CreateWithdrawalParams {
+            withdrawal_id,
+            device_id: "device-under-test",
+            amount_sats: 200_000,
+            dest_address: "tb1qdestination",
+            policy_commit: &[0x01; 32],
+            state: "committed",
+            burn_token_id: Some("dBTC"),
+            burn_amount_sats: 0,
+        })
+        .unwrap_or_else(|e| panic!("create withdrawal failed: {e}"));
+
+        for leg in [
+            withdrawal_leg(withdrawal_id, 0, settled_vault),
+            withdrawal_leg(withdrawal_id, 1, stale_source),
+        ] {
+            client_db::upsert_withdrawal_leg(&leg)
+                .unwrap_or_else(|e| panic!("seed leg failed: {e}"));
+        }
+
+        // What the finalization path validated, read exactly as it reads it.
+        let validated = client_db::list_withdrawal_legs(withdrawal_id)
+            .unwrap_or_else(|e| panic!("list legs failed: {e}"));
+        assert_eq!(validated.len(), 2, "expected two seeded legs");
+
+        // The window: leg 1 is re-pointed at a different source before the
+        // prune runs. Leg 0 is untouched and must still be pruned.
+        client_db::upsert_withdrawal_leg(&withdrawal_leg(withdrawal_id, 1, live_source))
+            .unwrap_or_else(|e| panic!("re-point leg failed: {e}"));
+
+        AppRouterImpl::prune_settled_withdrawal_legs(
+            &router.bitcoin_tap,
+            &[0x07; 32],
+            "test.prune",
+            withdrawal_id,
+            &validated,
+        )
+        .await;
+
+        let deleted: Vec<String> =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::dbtc_storage_op_log()
+                .into_iter()
+                .filter(|(_, op)| matches!(op, crate::sdk::bitcoin_tap_sdk::DbtcStorageOp::Delete))
+                .map(|(key, _)| key)
+                .collect();
+
+        let settled_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(settled_vault);
+        let stale_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(stale_source);
+        let live_ad =
+            crate::sdk::bitcoin_tap_sdk::BitcoinTapSdk::vault_advertisement_key(live_source);
+
+        assert!(
+            deleted.contains(&settled_ad),
+            "the untouched leg's source was never pruned; deletes were {deleted:?}",
+        );
+        assert!(
+            !deleted.contains(&stale_ad),
+            "the re-pointed leg pruned the advertisement of a vault it no longer names",
+        );
+        assert!(
+            !deleted.contains(&live_ad),
+            "the prune reached a vault the validated leg never named",
+        );
+    }
+
     fn pack_proto<T: Message>(message: &T) -> Vec<u8> {
         generated::ArgPack {
             codec: generated::Codec::Proto as i32,
@@ -4948,9 +5167,7 @@ mod tests {
     }
 
     fn decode_framed_envelope(bytes: &[u8], route: &str) -> generated::Envelope {
-        assert!(!bytes.is_empty(), "{route}: empty response bytes");
-        assert_eq!(bytes[0], 0x03, "{route}: expected FramedEnvelopeV3 prefix");
-        dsm::envelope::from_canonical_bytes(&bytes[1..])
+        crate::handlers::response_helpers::decode_local_envelope(bytes)
             .unwrap_or_else(|e| panic!("{route}: failed to decode envelope: {e}"))
     }
 
@@ -4961,6 +5178,7 @@ mod tests {
             processed: pulled,
             pushed: 0,
             errors: Vec::new(),
+            more_pending: Vec::new(),
         }
     }
 
@@ -5074,37 +5292,6 @@ mod tests {
         );
     }
 
-    /// Seed canonical dBTC projection for the test device ([0xA1; 32]).
-    fn seed_dbtc_balance(router: &AppRouterImpl, amount_sats: u64) {
-        let state = router
-            .core_sdk
-            .get_current_state()
-            .expect("load current state for dBTC projection seed");
-        let device_id = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
-        let state_hash = state
-            .hash()
-            .expect("hash current state for dBTC projection seed");
-        let balance_key = dsm::core::token::derive_canonical_balance_key(
-            crate::policy::builtins::DBTC_POLICY_COMMIT,
-            &state.device_info.public_key,
-            crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID,
-        );
-        client_db::upsert_balance_projection(&client_db::BalanceProjectionRecord {
-            balance_key,
-            device_id,
-            token_id: crate::sdk::bitcoin_tap_sdk::DBTC_TOKEN_ID.to_string(),
-            policy_commit: crate::util::text_id::encode_base32_crockford(
-                crate::policy::builtins::DBTC_POLICY_COMMIT,
-            ),
-            available: amount_sats,
-            locked: 0,
-            source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-            source_state_number: state.hash[0] as u64,
-            updated_at: crate::util::deterministic_time::tick(),
-        })
-        .expect("seed dBTC projection");
-    }
-
     #[test]
     #[serial]
     fn persist_committed_withdrawal_metadata_transitions_existing_row() {
@@ -5167,7 +5354,6 @@ mod tests {
         let source_amount = request_net_sats + full_fee;
         let vault_id = vid_from_label("000-vault-consumed");
 
-        seed_dbtc_balance(&router, request_net_sats * 3); // enough for multiple withdrawals
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5314,7 +5500,6 @@ mod tests {
         let source_amount = request_net_sats + full_fee;
         let vault_id = vid_from_label("vault-execute-success");
 
-        seed_dbtc_balance(&router, request_net_sats * 3);
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5411,7 +5596,7 @@ mod tests {
         assert_eq!(execute_resp.executed_legs[0].status, "broadcast");
         assert_eq!(execute_resp.executed_legs[0].sweep_txid, "txid-1");
 
-        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&router.device_id_bytes);
         let unresolved = crate::storage::client_db::list_unresolved_withdrawals(&device_id_b32)
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1, "expected one persisted withdrawal row");
@@ -5494,7 +5679,6 @@ mod tests {
         let source_amount = request_gross_sats + full_fee;
         let vault_id = vid_from_label("vault-policy");
 
-        seed_dbtc_balance(&router, request_gross_sats * 3);
         put_active_vault(vault_id, source_amount);
         put_active_vault_record(vault_id, source_amount);
 
@@ -5573,7 +5757,7 @@ mod tests {
         );
 
         // The persisted withdrawal row must carry the plan's policy_commit, not a hardcoded constant.
-        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&[0xA1; 32]);
+        let device_id_b32 = crate::util::text_id::encode_base32_crockford(&router.device_id_bytes);
         let unresolved = client_db::list_unresolved_withdrawals(&device_id_b32)
             .expect("list unresolved withdrawals");
         assert_eq!(unresolved.len(), 1);
@@ -5593,7 +5777,6 @@ mod tests {
         let actual_policy_commit = *crate::policy::builtins::DBTC_POLICY_COMMIT;
         let mismatched_policy_commit = [0xAB; 32];
 
-        seed_dbtc_balance(&router, amount_sats);
         let mismatch_vid = vid_from_label("vault-policy-mismatch");
         let mismatch_b32 = crate::util::text_id::encode_base32_crockford(&mismatch_vid);
         seed_vault_execution_advertisement(mismatch_vid, amount_sats, actual_policy_commit);

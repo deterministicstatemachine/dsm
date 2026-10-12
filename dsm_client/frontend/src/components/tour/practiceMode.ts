@@ -1,0 +1,335 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Practice mode for the guided tour.
+//
+// While the tour runs, the real screens stay on screen but the calls they make
+// for the things a beginner tries (balances, contacts, history, sending, the
+// faucet, adding a contact) are answered from a small in-memory practice
+// wallet. That is a convenience. What keeps the real wallet untouched is the
+// bridge: entering practice puts it in its sandbox (bridge/practiceGate.ts),
+// where only reads reach native code, whatever module makes the call. When the
+// tour ends, the real client and the bridge are put back exactly as they were.
+//
+// Every figure the practice wallet shows is Rust's. It asks `wallet.amount` to
+// parse what the user typed and to render each balance it keeps, as the real
+// wallet's figures are parsed and rendered, so practice ERA counts as ERA does.
+
+import { dsmClient } from '../../services/dsmClient';
+import { enterPracticeSandbox, leavePracticeSandbox } from '../../bridge/practiceGate';
+import { walletAmount } from '../../dsm/amount';
+import { encodeBase32Crockford } from '../../utils/textId';
+import { routerQueryBin } from '../../dsm/WebViewBridge';
+import { decodeFramedEnvelopeV3 } from '../../dsm/decoding';
+import type { AmountForms } from '../../dsm/amount';
+import type {
+  DomainContact,
+  DomainIdentity,
+  DomainTransaction,
+} from '../../domain/types';
+import type { TokenBalanceView } from '../../dsm/types';
+
+export type PracticeEvent = 'sent' | 'claimed' | 'contactAdded';
+
+// Practice ids use only Base32 Crockford characters, so any code that decodes
+// an id keeps working.
+const PAD = '0'.repeat(52);
+const practiceId = (stem: string): string => (stem + PAD).slice(0, 52);
+
+export const PRACTICE_CONTACT_ALIAS = 'alice';
+/** The practice contact's device id: what the send screen names a recipient by. */
+export const PRACTICE_CONTACT_DEVICE_ID = practiceId('PRACT1CEA11CE');
+/** The practice ERA the tour starts with, and what its faucet pays, as people count ERA. */
+export const PRACTICE_ERA_HELD = '1000';
+export const PRACTICE_FAUCET_AMOUNT = '100';
+
+type PracticeState = {
+  identity: DomainIdentity;
+  balances: TokenBalanceView[];
+  contacts: DomainContact[];
+  history: DomainTransaction[];
+  sequence: number;
+};
+
+function freshState(): PracticeState {
+  return {
+    identity: {
+      genesisHash: practiceId('PRACT1CEY0VGENES1S'),
+      deviceId: practiceId('PRACT1CEY0VDEV1CE'),
+    },
+    // The practice coin is counted in whole units. Practice ERA joins it once
+    // Rust has counted it (seedEra).
+    balances: [
+      { tokenId: 'PLAY', tokenName: 'Practice Coin', symbol: 'PLAY', decimals: 0, baseUnits: BigInt(50), displayAmount: '50', protocolDefined: false },
+    ],
+    contacts: [
+      {
+        alias: PRACTICE_CONTACT_ALIAS,
+        deviceId: PRACTICE_CONTACT_DEVICE_ID,
+        genesisHash: practiceId('PRACT1CEA11CEGENES1S'),
+        signingPublicKey: practiceId('PRACT1CEA11CEKEY'),
+        // Practice contacts are never paired over BLE.
+        pairing: 'idle',
+        genesisVerifiedOnline: true,
+        sendReady: true,
+        sendCheckState: 'ready',
+      },
+    ],
+    history: [],
+    sequence: 0,
+  };
+}
+
+/**
+ * Whether Rust lists ERA as a protocol-defined asset: its row in the router's
+ * `balance.list`, which lists ERA at any balance. The wallet never decides this
+ * from a ticker (TokenBalanceView.protocolDefined), and practice ERA does not
+ * either.
+ */
+async function eraIsProtocolDefined(): Promise<boolean> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('balance.list', new Uint8Array(0)));
+  if (env.payload.case !== 'balancesListResponse') {
+    throw new Error(`balance.list: the SDK answered ${String(env.payload.case)}, not balancesListResponse`);
+  }
+  const era = env.payload.value.balances.find((row) => row.tokenId === 'ERA');
+  if (!era) throw new Error('balance.list: Rust listed no ERA row');
+  return era.protocolDefined;
+}
+
+/**
+ * Practice ERA as Rust counts ERA: the tour's starting amount parsed at the
+ * decimals of ERA's committed policy, and the welcome payment that brought it.
+ */
+async function seedEra(state: PracticeState): Promise<void> {
+  const held = await walletAmount({ tokenId: 'ERA' }, { entered: PRACTICE_ERA_HELD });
+  const protocolDefined = await eraIsProtocolDefined();
+  state.balances.unshift({
+    holding: 'currency',
+    tokenId: 'ERA',
+    tokenName: 'ERA',
+    symbol: 'ERA',
+    decimals: held.decimals,
+    baseUnits: held.baseUnits,
+    displayAmount: held.displayAmount,
+    protocolDefined,
+  });
+  state.history.push({
+    txId: 'practice-welcome',
+    txHash: practiceId('PRACT1CEWE1C0ME'),
+    txType: 'online',
+    type: 'online',
+    amount: held.baseUnits,
+    displayAmount: held.displayAmount,
+    tokenId: 'ERA',
+    recipient: 'practice',
+    status: 'confirmed',
+    fromDeviceId: practiceId('PRACT1CESENDER'),
+    toDeviceId: practiceId('PRACT1CEY0VDEV1CE'),
+    memo: 'Practice tokens for the tour',
+    receiptVerified: false,
+  });
+}
+
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A practice debit: the balance left and the amount taken, or why it was refused. */
+type Debit = { balance: bigint; taken: AmountForms } | { refused: string };
+
+/**
+ * Takes `amount`, as the user typed it, from a practice holding. Rust parses it
+ * at the holding's decimals as a send parses it, and renders what is left; a
+ * refusal is Rust's, in its words.
+ */
+async function debit(state: PracticeState, tokenId: string, amount: string | number | bigint): Promise<Debit> {
+  const holding = state.balances.find((b) => b.tokenId === tokenId);
+  if (!holding) return { refused: `You hold no ${tokenId} in practice.` };
+  let taken: AmountForms;
+  try {
+    taken = await walletAmount({ decimals: holding.decimals }, { entered: String(amount) });
+  } catch (e) {
+    return { refused: e instanceof Error ? e.message : String(e) };
+  }
+  if (taken.baseUnits <= BigInt(0)) return { refused: 'Enter an amount above zero.' };
+  if (taken.baseUnits > holding.baseUnits) {
+    return { refused: `Not enough ${holding.symbol}: you have ${holding.displayAmount}.` };
+  }
+  const left = await walletAmount({ decimals: holding.decimals }, { baseUnits: holding.baseUnits - taken.baseUnits });
+  holding.baseUnits = left.baseUnits;
+  holding.displayAmount = left.displayAmount;
+  return { balance: holding.baseUnits, taken };
+}
+
+/** Adds `amount`, as people count the token, to a practice holding; Rust parses and renders it. */
+async function credit(state: PracticeState, tokenId: string, amount: string): Promise<AmountForms> {
+  const holding = state.balances.find((b) => b.tokenId === tokenId);
+  if (!holding) throw new Error(`You hold no ${tokenId} in practice.`);
+  const paid = await walletAmount({ decimals: holding.decimals }, { entered: amount });
+  const now = await walletAmount({ decimals: holding.decimals }, { baseUnits: holding.baseUnits + paid.baseUnits });
+  holding.baseUnits = now.baseUnits;
+  holding.displayAmount = now.displayAmount;
+  return paid;
+}
+
+function recordSend(state: PracticeState, to: string, tokenId: string, taken: AmountForms, memo: string | undefined, mode: 'online' | 'offline'): string {
+  state.sequence += 1;
+  const txId = `practice-${state.sequence}`;
+  const contact = state.contacts.find((c) => c.deviceId === to);
+  state.history = [
+    {
+      txId,
+      txHash: practiceId(`PRACT1CETX${state.sequence}`),
+      txType: mode === 'offline' ? 'bilateral_offline' : 'online',
+      type: mode,
+      amount: -taken.baseUnits,
+      // An outgoing amount, signed as Rust signs one: its rendered form after a minus.
+      displayAmount: `-${taken.displayAmount}`,
+      tokenId,
+      recipient: contact?.alias ?? to,
+      status: 'confirmed',
+      fromDeviceId: state.identity.deviceId,
+      toDeviceId: contact?.deviceId ?? practiceId('PRACT1CEPEER'),
+      memo,
+      receiptVerified: false,
+    },
+    ...state.history,
+  ];
+  return txId;
+}
+
+type AnyFn = (...args: never[]) => unknown;
+
+function simulations(state: PracticeState, emit: (event: PracticeEvent) => void): Record<string, AnyFn> {
+  // Practice ERA is counted by Rust the first time a call needs it, and every
+  // such call waits for that count; a refusal is the call's answer.
+  let seeded: Promise<void> | undefined;
+  const ready = (): Promise<void> => {
+    if (!seeded) seeded = seedEra(state);
+    return seeded;
+  };
+  // One change to the practice wallet at a time: a debit's check and the
+  // balance Rust renders after it belong together, so the next change waits.
+  let turn: Promise<unknown> = Promise.resolve();
+  const inTurn = <T>(change: () => Promise<T>): Promise<T> => {
+    const next = turn.then(change, change);
+    turn = next;
+    return next;
+  };
+  return {
+    getIdentity: async () => ({ ...state.identity }),
+    getAllBalances: async () => {
+      await ready();
+      return state.balances.map((b) => ({ ...b }));
+    },
+    getContacts: async () => ({ contacts: state.contacts.map((c) => ({ ...c })) }),
+    getWalletHistory: async () => {
+      await ready();
+      return { transactions: [...state.history] };
+    },
+    sendOnlineTransferSmart: async (recipientDeviceId: string, enteredAmount: string | number | bigint, memo?: string, tokenId?: string) => {
+      await pause(700);
+      // As Rust answers: a send that names no token is refused, never sent as ERA.
+      if (!tokenId) return { success: false, message: 'wallet.sendSmart: the request names no token' };
+      const token = tokenId;
+      await ready();
+      const result = await inTurn(() => debit(state, token, enteredAmount));
+      // The real call answers { success, message }: success is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { success: sent, message: result.refused };
+      recordSend(state, recipientDeviceId, token, result.taken, memo, 'online');
+      emit('sent');
+      return { success: true, newBalance: result.balance };
+    },
+    // Answers in the shape the real sendOfflineTransfer does (GenericTxResponse).
+    sendOfflineTransfer: async (params: { tokenId: string; to: string; amount: number | bigint | string; memo?: string }) => {
+      await pause(700);
+      if (!params.tokenId) return { accepted: false, result: 'wallet.sendOffline: the request names no token' };
+      const token = params.tokenId;
+      await ready();
+      const result = await inTurn(() => debit(state, token, params.amount));
+      // As the real call answers: accepted is whether the debit went through.
+      const sent = !('refused' in result);
+      if ('refused' in result) return { accepted: sent, result: result.refused };
+      recordSend(state, params.to, token, result.taken, params.memo, 'offline');
+      emit('sent');
+      return { accepted: true, result: 'Practice transfer complete' };
+    },
+    // Answers in the shape the real claimFaucet does; the faucet releases ERA,
+    // and its message shows ERA as Rust renders it.
+    claimFaucet: async () => {
+      await pause(600);
+      await ready();
+      const paid = await inTurn(() => credit(state, 'ERA', PRACTICE_FAUCET_AMOUNT));
+      emit('claimed');
+      return {
+        success: true,
+        tokensReceived: paid.baseUnits,
+        message: `Practice: claimed ${paid.displayAmount} ERA`,
+      };
+    },
+    // Answers in the shape the real addContact does (AddContactResult), for the
+    // card Rust read from the contact code the user entered.
+    addContact: async (input: { alias: string; deviceId: Uint8Array; genesisHash: Uint8Array; signingPublicKey: Uint8Array }) => {
+      await pause(400);
+      const contactId = encodeBase32Crockford(input.deviceId);
+      // As Rust names a contact added with no alias: by its device id's first eight characters.
+      const alias = input.alias.trim() || contactId.slice(0, 8);
+      state.contacts.push({
+        alias,
+        deviceId: contactId,
+        genesisHash: encodeBase32Crockford(input.genesisHash),
+        signingPublicKey: encodeBase32Crockford(input.signingPublicKey),
+        pairing: 'idle',
+        genesisVerifiedOnline: true,
+        sendReady: true,
+        sendCheckState: 'ready',
+      });
+      emit('contactAdded');
+      // Accepted when the practice wallet now holds the contact, as the real
+      // answer reports the contact stored.
+      const accepted = state.contacts.some((held) => held.deviceId === contactId);
+      return { accepted, contactId, alias };
+    },
+  };
+}
+
+class PracticeMode {
+  private state: PracticeState | null = null;
+  private originals = new Map<string, unknown>();
+  private listeners = new Set<(event: PracticeEvent) => void>();
+
+  get active(): boolean {
+    return this.state !== null;
+  }
+
+  enter(): void {
+    if (this.state) return;
+    const state = freshState();
+    this.state = state;
+    enterPracticeSandbox();
+    const client = dsmClient as unknown as Record<string, unknown>;
+    const answers = simulations(state, (event) => this.listeners.forEach((listener) => listener(event)));
+    for (const key of Object.keys(answers)) {
+      this.originals.set(key, client[key]);
+      client[key] = answers[key];
+    }
+  }
+
+  leave(): void {
+    if (!this.state) return;
+    const client = dsmClient as unknown as Record<string, unknown>;
+    this.originals.forEach((value, key) => {
+      client[key] = value;
+    });
+    this.originals.clear();
+    this.state = null;
+    leavePracticeSandbox();
+  }
+
+  onEvent(listener: (event: PracticeEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+}
+
+export const practiceMode = new PracticeMode();

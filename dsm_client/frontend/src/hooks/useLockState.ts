@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * useLockState — presentation-only lock/unlock intents via appRouter.
- * Native session drives lock state; this hook provides UI triggers only.
+ * useLockState — the lock intent via appRouter. Rust's session drives the lock
+ * state; opening it is the lock screen's, which sends what the user entered.
  */
 
 import { useEffect, useRef, useCallback } from 'react';
 import type { AppState } from '../types/app';
 import { LOCK_SETUP_COMPLETE_EVENT } from '../services/lock/lockService';
-import { lockSessionViaRouter, unlockSessionViaRouter } from '../dsm/WebViewBridge';
+import { lockSessionViaRouter } from '../dsm/WebViewBridge';
+import logger from '../utils/logger';
 
 interface Args {
   appState: AppState;
@@ -16,16 +17,12 @@ interface Args {
 export function useLockState({ appState }: Args) {
   const lock = useCallback(() => {
     if (appState !== 'wallet_ready') return;
-    void lockSessionViaRouter().catch(() => {});
+    lockSessionViaRouter().catch((e: unknown) => logger.warn('[useLockState] session.lock failed:', e));
   }, [appState]);
 
   // Always-current ref so event handlers fired asynchronously get the live callback.
   const lockRef = useRef(lock);
   lockRef.current = lock;
-
-  const unlock = useCallback(() => {
-    return unlockSessionViaRouter().catch(() => {});
-  }, []);
 
   // Lock immediately when a new lock is saved — fires after the LockSetupScreen
   // "done" animation finishes so the user lands on the lock screen and can verify
@@ -44,5 +41,5 @@ export function useLockState({ appState }: Args) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { lock, unlock };
+  return { lock };
 }

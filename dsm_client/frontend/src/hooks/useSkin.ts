@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: Apache-2.0
+// Reads the skin preferences once the bridge is up, and dresses the page for
+// the skin in use: `data-skin` and `data-scheme` on <html> select the Modern
+// skin's styles (styles/modern.css), which put the Game Boy device away and
+// let the app fill the screen. The choice is the app's, made before anything
+// else, so every screen from the first is in it.
+
+import { useEffect, useLayoutEffect, useRef } from 'react';
+import { loadSkinPreferences, readSkinHint } from '../runtime/skinPreferences';
+import { appRuntimeStore, type Scheme, type Skin } from '../runtime/appRuntimeStore';
+import type { AppState } from '../types/app';
+import type { NativeSessionLockStatus } from '../runtime/nativeSessionTypes';
+import { setSystemBars, type BarsLook } from '../dsm/WebViewBridge/systemBars';
+import logger from '../utils/logger';
+
+/**
+ * The skin the page is drawn in now. Modern in every phase once it is the
+ * choice, except a wallet locked with a button combo: the combo is entered on
+ * the Game Boy's buttons, so its lock screen shows the device.
+ */
+export function skinInUse(skin: Skin | null, appState: AppState, lockMethod: NativeSessionLockStatus['method']): Skin {
+  if (skin !== 'modern') return 'dgen';
+  if (appState === 'locked' && lockMethod === 'combo') return 'dgen';
+  return 'modern';
+}
+
+export function useSkin(
+  bridgeUp: boolean,
+  skin: Skin | null,
+  scheme: Scheme,
+  appState: AppState,
+  lockMethod: NativeSessionLockStatus['method'],
+  /** `agreeing` while the beta agreement covers the screen: a page kept between the bars, like Modern. */
+  agreement: 'agreeing' | 'agreed',
+): Skin {
+  // The first paint is in the look the page last drew; the preference, read
+  // below, is the authority.
+  useLayoutEffect(() => {
+    const hint = readSkinHint();
+    if (hint !== null && appRuntimeStore.getSnapshot().skin === null) appRuntimeStore.setSkin(hint);
+  }, []);
+
+  useEffect(() => {
+    if (!bridgeUp) return;
+    loadSkinPreferences().then(
+      () => undefined,
+      (e: unknown) => logger.warn('[skin] the preferences were not read:', e),
+    );
+  }, [bridgeUp]);
+
+  const inUse = skinInUse(skin, appState, lockMethod);
+  // The bars native set at start: dark, the page edge to edge around the device.
+  const bars = useRef<BarsLook>('device');
+
+  useEffect(() => {
+    const html = document.documentElement;
+    html.setAttribute('data-skin', inUse);
+    html.setAttribute('data-scheme', scheme);
+    // The phone's status and navigation bars follow: dark around the device,
+    // which runs under them; the Modern skin (and the black agreement page)
+    // kept between them, in its own colour. Asked only on a change.
+    const wanted: BarsLook = agreement === 'agreeing' ? 'dark' : inUse === 'modern' ? scheme : 'device';
+    if (wanted === bars.current) return;
+    bars.current = wanted;
+    setSystemBars(wanted).then(
+      () => undefined,
+      (e: unknown) => logger.warn('[skin] the system bars were not set:', e),
+    );
+  }, [inUse, scheme, agreement]);
+
+  return inUse;
+}

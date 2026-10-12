@@ -17,17 +17,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
 
-fn pb_send_status_from_router_status(
-    status: dsm::types::proto::RelationshipSendStatus,
-) -> pb::RelationshipSendStatus {
-    pb::RelationshipSendStatus {
-        send_ready: status.send_ready,
-        send_check_state: status.send_check_state,
-        send_block_reason: status.send_block_reason,
-        send_block_message: status.send_block_message,
-    }
-}
-
 /// Convert raw JNIEnv pointer to safe wrapper.
 /// Returns None on failure instead of aborting the process.
 #[inline]
@@ -553,7 +542,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processBleIde
                             let confirm_event = BleEvent {
                                 ev: Some(pb::ble_event::Ev::PairingConfirm(confirm)),
                             };
-                            match build_ble_event_envelope(confirm_event) {
+                            match local_pairing_frame(confirm_event) {
                                 Ok(confirm_bytes) => {
                                     log::info!(
                                         "processBleIdentityEnvelope: built BlePairingConfirm ({} bytes) for {}",
@@ -759,7 +748,26 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_finalizeScann
     )
 }
 
-/// Build a framed Envelope with BleEvent as the direct payload.
+/// A BLE pairing frame from this device to a peer: an addressed envelope
+/// under this device's id and genesis (see `bilateral_envelope::pairing_frame`).
+/// An error while this device has no identity.
+fn local_pairing_frame(ble_event: BleEvent) -> Result<Vec<u8>, String> {
+    let device_id: [u8; 32] = crate::sdk::app_state::AppState::get_device_id()
+        .and_then(|d| <[u8; 32]>::try_from(d.as_slice()).ok())
+        .ok_or("the local device id is not set")?;
+    let genesis_hash: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
+        .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
+        .ok_or("the local genesis is not set")?;
+    Ok(crate::bluetooth::bilateral_envelope::pairing_frame(
+        &device_id,
+        &genesis_hash,
+        ble_event,
+    ))
+}
+
+/// Build a framed Envelope with BleEvent as the direct payload, for the
+/// WebView (a local answer: no headers, no message id). Never a frame sent to
+/// a peer — those are `local_pairing_frame`.
 /// Uses the dedicated Payload::BleEvent field (proto schema v2.4+).
 pub(crate) fn build_ble_event_envelope(ble_event: BleEvent) -> Result<Vec<u8>, String> {
     let envelope =
@@ -858,12 +866,13 @@ fn process_deferred_identity(
         return;
     }
 
-    // 2. Register in-memory BLE address mapping (for routing), but do NOT persist
-    // ble_address to SQLite yet. The ble_address column is the sentinel that controls
-    // the pairing loop's exit condition — writing it before the scanner confirms
-    // receipt of our ACK breaks atomicity (advertiser exits loop, scanner never paired).
-    // Persistence happens in handle_pairing_confirm after the scanner's round-trip.
-    super::state::register_ble_address_mapping(&device_id, &sender_address);
+    // 2. Record where the contact's identity was seen this session, but do NOT
+    // persist ble_address to SQLite yet. The ble_address column is the sentinel that
+    // controls the pairing loop's exit condition — writing it before the scanner
+    // confirms receipt of our ACK breaks atomicity (advertiser exits loop, scanner
+    // never paired). Persistence happens in handle_pairing_confirm after the
+    // scanner's round-trip.
+    crate::bluetooth::peer_address::record_sighting(&device_id, &sender_address);
 
     // 3. Dispatch identity event to WebView via JNI callback (background thread)
     dispatch_identity_to_webview(&sender_address, &genesis_hash, &device_id);
@@ -894,7 +903,7 @@ fn process_deferred_identity(
             let ble_event = BleEvent {
                 ev: Some(pb::ble_event::Ev::PairingAccept(accept)),
             };
-            match build_ble_event_envelope(ble_event) {
+            match local_pairing_frame(ble_event) {
                 Ok(ack_bytes) => {
                     log::info!(
                         "process_deferred_identity: built ACK ({} bytes), delivering to Kotlin for {}",
@@ -1056,82 +1065,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_encodeIdentit
     )
 }
 
-/// Encode the local relationship send-status as a protobuf GATT characteristic value.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getRelationshipStatusCharValue(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    ble_address_jstr: jni::sys::jstring,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "getRelationshipStatusCharValue",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let address_jstring = unsafe { jstr_from(ble_address_jstr) };
-            let ble_address: String = match env.get_string(&address_jstring) {
-                Ok(s) => s.into(),
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: JNI address extraction failed: {e}"
-                    );
-                    return empty(&mut env);
-                }
-            };
-
-            let contact = match crate::storage::client_db::get_contact_by_ble_address(&ble_address)
-            {
-                Ok(Some(contact)) => contact,
-                Ok(None) => {
-                    log::warn!(
-                        "getRelationshipStatusCharValue: no contact mapped to BLE address {}",
-                        ble_address
-                    );
-                    return empty(&mut env);
-                }
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: failed to load contact for {}: {}",
-                        ble_address,
-                        e
-                    );
-                    return empty(&mut env);
-                }
-            };
-
-            if contact.device_id.len() != 32 {
-                log::error!(
-                    "getRelationshipStatusCharValue: contact device_id has invalid length {}",
-                    contact.device_id.len()
-                );
-                return empty(&mut env);
-            }
-
-            let send_status =
-                crate::handlers::relationship_status::derive_local_send_status_for_contact(
-                    &contact,
-                );
-            let char_value = pb::BleRelationshipStatusCharValue {
-                counterparty_device_id: contact.device_id.clone(),
-                send_status: Some(pb_send_status_from_router_status(send_status)),
-            };
-
-            let encoded = char_value.encode_to_vec();
-            match env.byte_array_from_slice(&encoded) {
-                Ok(arr) => arr.into_raw(),
-                Err(e) => {
-                    log::error!(
-                        "getRelationshipStatusCharValue: JNI byte_array_from_slice failed: {e}"
-                    );
-                    empty(&mut env)
-                }
-            }
-        }),
-    )
-}
-
 /// Process raw protobuf bytes read from the GATT identity characteristic.
 ///
 /// This is the canonical path for handling identity reads on the client (scanner) side.
@@ -1155,7 +1088,7 @@ fn observe_gatt_identity_inner(
     }
 
     log::info!(
-        "observeGattIdentityRead: addr={}, genesis={:02x}{:02x}..., device={:02x}{:02x}...",
+        "GATT identity read: addr={}, genesis={:02x}{:02x}..., device={:02x}{:02x}...",
         ble_address,
         char_value.genesis_hash[0],
         char_value.genesis_hash[1],
@@ -1166,7 +1099,7 @@ fn observe_gatt_identity_inner(
     match crate::storage::client_db::has_contact_for_device_id(&char_value.device_id) {
         Ok(true) => {
             log::info!(
-                "observeGattIdentityRead: contact EXISTS in SQLite for {:02x}{:02x}...",
+                "GATT identity read: contact EXISTS in SQLite for {:02x}{:02x}...",
                 char_value.device_id[0],
                 char_value.device_id[1]
             );
@@ -1189,7 +1122,7 @@ fn observe_gatt_identity_inner(
                 return Err("contact missing in SQLite".to_string());
             }
             log::info!(
-                "observeGattIdentityRead: contact appeared in SQLite during retry window for {:02x}{:02x}...",
+                "GATT identity read: contact appeared in SQLite during retry window for {:02x}{:02x}...",
                 char_value.device_id[0],
                 char_value.device_id[1]
             );
@@ -1224,7 +1157,7 @@ fn observe_gatt_identity_inner(
                         "([B)V",
                         &[JValue::Object(&jbytes.into())],
                     ) {
-                        log::warn!("observeGattIdentityRead: dispatchToWebView failed: {e}");
+                        log::warn!("GATT identity read: dispatchToWebView failed: {e}");
                     }
                 }
             }
@@ -1234,12 +1167,22 @@ fn observe_gatt_identity_inner(
     Ok((char_value.device_id, char_value.genesis_hash))
 }
 
+/// The identity a GATT client read from the peer at `ble_address`.
+///
+/// `expected_device_id` is the appliance a reach is connecting for (empty when
+/// the link is not a reach). A peer that is not the one expected is reported
+/// as not established and nothing about it is recorded: no contact address,
+/// no pairing session, no sighting. For the expected peer, or on a link that
+/// is not a reach, Rust decides by the contact's device id whether the link
+/// re-anchors a paired contact (no write-back) or starts pairing (the scanner
+/// writes its own identity back).
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattIdentityRead(
     env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
     ble_address_jstr: jni::sys::jstring,
     raw_proto_jbytes: jni::sys::jbyteArray,
+    expected_device_id_jbytes: jni::sys::jbyteArray,
 ) -> jni::sys::jbyteArray {
     crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
         "processGattIdentityRead",
@@ -1277,123 +1220,92 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                     );
                 }
             };
-
-            let (peer_device_id, peer_genesis_hash) =
-                match observe_gatt_identity_inner(&mut env, &ble_address, raw_proto.as_slice()) {
+            let expected: Vec<u8> =
+                match env.convert_byte_array(unsafe { jbytes_from(expected_device_id_jbytes) }) {
                     Ok(v) => v,
                     Err(e) => {
-                        log::error!("processGattIdentityRead: {e}");
-                        return emit_identity_read_result(&mut env, false, &[], &e);
+                        log::error!("processGattIdentityRead: expected device id unreadable: {e}");
+                        return emit_identity_read_result(
+                            &mut env,
+                            false,
+                            &[],
+                            "expected device id unreadable",
+                        );
                     }
                 };
 
-            let local_device_id = crate::sdk::app_state::AppState::get_device_id();
-            let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash();
-
-            let write_back = match (local_device_id, local_genesis) {
-                (Some(did), Some(genesis)) if did.len() == 32 && genesis.len() == 32 => {
-                    let local_obs = pb::BleIdentityObserved {
-                        address: ble_address.clone(),
-                        genesis_hash: genesis.to_vec(),
-                        device_id: did.to_vec(),
-                    };
-                    let ble_event = BleEvent {
-                        ev: Some(pb::ble_event::Ev::IdentityObserved(local_obs)),
-                    };
-                    match build_ble_event_envelope(ble_event) {
-                        Ok(bytes) => bytes,
-                        Err(e) => {
-                            log::warn!(
-                                "processGattIdentityRead: write-back envelope build failed: {e}"
-                            );
-                            Vec::new()
-                        }
-                    }
-                }
-                _ => {
-                    log::warn!(
-                        "processGattIdentityRead: local identity not available for write-back"
+            match crate::bluetooth::gatt_identity::identity_read_verdict(&raw_proto, &expected) {
+                Ok(crate::bluetooth::gatt_identity::IdentityReadVerdict::NotExpected) => {
+                    log::info!(
+                        "processGattIdentityRead: {ble_address} is not the appliance this reach is for"
                     );
-                    Vec::new()
+                    return emit_identity_read_result(
+                        &mut env,
+                        false,
+                        &[],
+                        "not the addressed appliance",
+                    );
                 }
-            };
-
-            emit_identity_read_result_with_identity(
-                &mut env,
-                true,
-                &write_back,
-                "",
-                &peer_device_id,
-                &peer_genesis_hash,
-            )
+                Ok(crate::bluetooth::gatt_identity::IdentityReadVerdict::Proceed { paired }) => {
+                    let (peer_device_id, peer_genesis_hash) = match observe_gatt_identity_inner(
+                        &mut env,
+                        &ble_address,
+                        raw_proto.as_slice(),
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log::error!("processGattIdentityRead: {e}");
+                            return emit_identity_read_result(&mut env, false, &[], &e);
+                        }
+                    };
+                    let write_back = if paired {
+                        Vec::new()
+                    } else {
+                        local_identity_write_back(&ble_address)
+                    };
+                    emit_identity_read_result_with_identity(
+                        &mut env,
+                        true,
+                        &write_back,
+                        "",
+                        &peer_device_id,
+                        &peer_genesis_hash,
+                    )
+                }
+                Err(e) => {
+                    log::error!("processGattIdentityRead: {e}");
+                    emit_identity_read_result(&mut env, false, &[], &e)
+                }
+            }
         }),
     )
 }
 
-/// Observe a paired peer's GATT identity without sending write-back pairing data.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_observeGattIdentityRead(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    ble_address_jstr: jni::sys::jstring,
-    raw_proto_jbytes: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "observeGattIdentityRead",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
+/// The scanner's own identity, written back to an advertiser it is pairing
+/// with. Empty when the local identity is not set.
+fn local_identity_write_back(ble_address: &str) -> Vec<u8> {
+    let local_device_id = crate::sdk::app_state::AppState::get_device_id();
+    let local_genesis = crate::sdk::app_state::AppState::get_genesis_hash();
+    match (local_device_id, local_genesis) {
+        (Some(did), Some(genesis)) if did.len() == 32 && genesis.len() == 32 => {
+            let local_obs = pb::BleIdentityObserved {
+                address: ble_address.to_string(),
+                genesis_hash: genesis.to_vec(),
+                device_id: did.to_vec(),
             };
-            let address_jstring = unsafe { jstr_from(ble_address_jstr) };
-
-            let ble_address: String = match env.get_string(&address_jstring) {
-                Ok(s) => s.into(),
-                Err(e) => {
-                    log::error!("observeGattIdentityRead: JNI address extraction failed: {e}");
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        "JNI address extraction failed",
-                    );
-                }
+            let ble_event = BleEvent {
+                ev: Some(pb::ble_event::Ev::IdentityObserved(local_obs)),
             };
-
-            let raw_proto: Vec<u8> = match env
-                .convert_byte_array(unsafe { jbytes_from(raw_proto_jbytes) })
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!("observeGattIdentityRead: JNI byte array extraction failed: {e}");
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        "JNI byte array extraction failed",
-                    );
-                }
-            };
-
-            let (peer_device_id, peer_genesis_hash) =
-                match observe_gatt_identity_inner(&mut env, &ble_address, raw_proto.as_slice()) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("observeGattIdentityRead: {e}");
-                        return emit_identity_read_result(&mut env, false, &[], &e);
-                    }
-                };
-
-            emit_identity_read_result_with_identity(
-                &mut env,
-                true,
-                &[],
-                "",
-                &peer_device_id,
-                &peer_genesis_hash,
-            )
-        }),
-    )
+            local_pairing_frame(ble_event).unwrap_or_else(|e| {
+                log::warn!("processGattIdentityRead: write-back envelope build failed: {e}");
+                Vec::new()
+            })
+        }
+        _ => {
+            log::warn!("processGattIdentityRead: local identity not available for write-back");
+            Vec::new()
+        }
+    }
 }
 
 /// Encode and return a BleGattIdentityReadResult as a JNI byte array.

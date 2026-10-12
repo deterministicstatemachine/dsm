@@ -10,20 +10,15 @@
 //!
 //! All ambiguous features fail-closed with `DsmError`.
 
-use blake3::{hash, Hasher};
-use dsm::crypto::blake3 as dsm_blake3;
+use blake3::Hasher;
 use parking_lot::Mutex;
 use prost::Message;
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 
-use dsm::core::identity::genesis::create_genesis_via_blind_mpc_with_contributors;
-use dsm::core::identity::genesis_session::generate_device_entropy;
 use dsm::core::state_machine::StateMachine;
 use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation as DsmOperation;
-use dsm::types::policy_types::PolicyFile;
 use dsm::types::state_types::{DeviceInfo, State};
 use dsm::types::token_types::TokenMetadata;
 
@@ -33,12 +28,6 @@ use crate::generated::TokenMetadataProto;
 use log;
 
 /* ------------------------------- Types ---------------------------------- */
-
-/// External token manager trait
-pub trait TokenManagerTrait: Send + Sync {
-    fn register_token(&self, token_id: &str) -> Result<(), DsmError>;
-    fn get_balance(&self, token_id: &str) -> Result<u64, DsmError>;
-}
 
 /// Operation types (binary-only; no JSON or clocks)
 #[derive(Debug, Clone)]
@@ -64,7 +53,6 @@ pub struct CoreSDK {
     state_machine: Mutex<StateMachine>,
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
-    audit_ctr: AtomicU64, // monotonic counter, not a clock
     /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
     /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
     /// its down-counter + fused-anchor lineage advance. Its `commit_0` is bootstrapped into the
@@ -72,6 +60,18 @@ pub struct CoreSDK {
     /// FINALIZE and advances the leaf in the same `DeviceState::advance`.
     anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
 }
+
+/// The pending economic admission each device's head carried when THIS PROCESS
+/// built its first `CoreSDK` for that device, as `(economic_position,
+/// operation_digest)`, or `None` if there was no head or nothing pending.
+/// Recorded once per device per process and never replaced. The SDK can be initialized more than once in a process (a bridge
+/// re-init, an Android activity recreated while the process lives); a router
+/// built then must not adopt an admission a live handler of this process
+/// created. Ownership ruled 2026-09-15: recovery owns only what predates
+/// process startup.
+static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<[u8; 32], Option<(u64, [u8; 32])>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /* ------------------------------- Helpers -------------------------------- */
 
@@ -87,70 +87,56 @@ fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
-fn device_key_material(di: &DeviceInfo) -> [u8; 32] {
-    // deterministic, no serialization dependency
-    blake3_cat(&[b"devkey", &di.device_id])
-}
-
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct TokenRegistryUpdateList {
     #[prost(message, repeated, tag = "1")]
     items: ::prost::alloc::vec::Vec<TokenMetadataProto>,
 }
 
-/// Deterministic, transport-agnostic encoding for DSM ops (no bincode, no JSON).
-fn encode_dsm_operation_det(op: &dsm::types::operations::Operation) -> Vec<u8> {
-    use dsm::types::operations::Operation as O;
-    match op {
-        O::Transfer {
-            token_id,
-            to_device_id,
-            amount,
-            ..
-        } => [
-            &b"dsm_op/transfer"[..],
-            token_id.as_slice(),
-            to_device_id.as_slice(),
-            &u64_le(amount.value()),
-        ]
-        .concat(),
-        O::Mint {
-            token_id, amount, ..
-        } => [
-            &b"dsm_op/mint"[..],
-            token_id.as_slice(),
-            &u64_le(amount.value()),
-        ]
-        .concat(),
-        O::Burn {
-            token_id, amount, ..
-        } => [
-            &b"dsm_op/burn"[..],
-            token_id.as_slice(),
-            &u64_le(amount.value()),
-        ]
-        .concat(),
-        O::Generic {
-            operation_type,
-            data,
-            message,
-            ..
-        } => [
-            &b"dsm_op/generic"[..],
-            operation_type.as_slice(),
-            message.as_bytes(),
-            data.as_slice(),
-        ]
-        .concat(),
-        other => {
-            // future-proof deterministic default path
-            let s = format!("{other:?}");
-            [&b"dsm_op/other"[..], s.as_bytes()].concat()
-        }
-    }
+/* ------------------------------- Impl ----------------------------------- */
+
+/// What a staged advance committed: the successor state, the advance outcome,
+/// and the artifacts written in the same transaction.
+pub(crate) struct StagedAdvance<A> {
+    pub(crate) state: State,
+    pub(crate) outcome: dsm::types::device_state::AdvanceOutcome,
+    pub(crate) artifacts: A,
 }
 
-/* ------------------------------- Impl ----------------------------------- */
+/// One economic admission riding one relationship advance — the SINGLE
+/// generalized producer seam every admitted operation (faucet claim, transfer
+/// debit, burn, create-token fee) goes through inside
+/// `execute_on_relationship_inner`. There is deliberately no second producer
+/// path.
+///
+/// The admitted predecessor this admission extends is DERIVED from
+/// `prepared` (`position - 1` at `pre_economic_root`; position 1 extends the
+/// canonical empty activation root) and is checked twice: under the
+/// state-machine lock before the prepare, and re-asserted CAS-style inside
+/// the commit transaction before local acceptance becomes durable.
+pub struct AdmissionPlan<'a> {
+    /// The Prepared admission (digest-only — acceptance coordinates are
+    /// built against the REAL prepared successor).
+    pub prepared: dsm::economic::admission::PendingEconomicAdmission,
+    pub storage_set_id: [u8; 32],
+    /// Build the acceptance coordinates + frozen artifacts from the exact
+    /// prepared outcome. Runs at the staged seam: after the pure prepare,
+    /// before anything durable.
+    #[allow(clippy::type_complexity)]
+    pub build: Box<
+        dyn FnOnce(
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<
+                (
+                    dsm::economic::admission::AcceptedAdmissionCoords,
+                    Vec<(String, Vec<u8>, &'static str)>,
+                ),
+                DsmError,
+            > + 'a,
+    >,
+    /// Receives the accepted (post-`Prepared`) admission on success.
+    pub accepted_out: &'a mut Option<dsm::economic::admission::PendingEconomicAdmission>,
+}
 
 impl CoreSDK {
     fn restore_latest_archived_state(
@@ -176,29 +162,468 @@ impl CoreSDK {
         Ok(())
     }
 
-    /// Phase 4.1 — fail-closed dual-write at the AdvanceOutcome chokepoint.
+    /// The fence-coupled faucet-claim advance, PREPARE-FIRST: attach the
+    /// `Prepared` admission (digest only — acceptance coordinates do not
+    /// exist yet), run the self-loop advance (whose accepting gate REQUIRES
+    /// that admission), hand the prepared successor's `C_dsm+` to `build` —
+    /// which constructs the witness, manifest, coordinates and frozen
+    /// artifacts against the REAL successor — and commit head + pending row +
+    /// frozen evidence in ONE transaction. This ordering is forced by the v2
+    /// operation identity: the witness names WHICH successor performed the
+    /// operation, so it cannot be built before the successor exists.
     ///
-    /// Writes one row to `bcr_chain_states` (authoritative per-advance
-    /// archive) and UPSERTs one row to `bcr_device_heads` (latest head cache)
-    /// in a single SQLite transaction. Both come from the same in-memory
-    /// `AdvanceOutcome` so there is no consistency window.
+    /// On any failure the pending attachment is rolled off the in-memory head
+    /// so the device is not left fenced by a claim that never happened.
+    /// Returns the accepted admission (post-`Prepared`, coordinates
+    /// installed) that is now riding the durable head.
+    /// The fence-coupled faucet-claim advance — now a THIN wrapper over the
+    /// generalized admission seam (self-loop relationship, single credit
+    /// delta). The bespoke body this replaced was the only other producer
+    /// path; deleting it is the point.
+    pub(crate) fn faucet_claim_advance(
+        &self,
+        operation: dsm::types::operations::Operation,
+        delta: &dsm::types::device_state::BalanceDelta,
+        prepared: dsm::economic::admission::PendingEconomicAdmission,
+        build: impl FnOnce(
+            &dsm::types::device_state::RelationshipChainState,
+        ) -> Result<
+            (
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<
+        (
+            dsm::types::device_state::AdvanceOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
+        self.admitted_advance(
+            operation,
+            std::slice::from_ref(delta),
+            prepared,
+            build,
+            storage_set_id,
+            in_tx_extra,
+        )
+    }
+
+    /// The generalized admission seam: a self-loop advance carrying a
+    /// pending admission, with whatever balance deltas the operation's
+    /// conservation rule takes — one credit for a faucet claim, one debit for
+    /// a burn, NONE for a SoFi fulfillment, which moves no online balance at
+    /// its transition (the claim it installs is conditional; the root a
+    /// resolution selects enters through `advance_resolved`, R13).
+    pub(crate) fn admitted_advance(
+        &self,
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        prepared: dsm::economic::admission::PendingEconomicAdmission,
+        build: impl FnOnce(
+            &dsm::types::device_state::RelationshipChainState,
+        ) -> Result<
+            (
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+        // Additional same-transaction writer (e.g. the token-registry row),
+        // composed AFTER the admission's pending row + artifact freeze.
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<
+        (
+            dsm::types::device_state::AdvanceOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
+        let dev_id = self.device_info.device_id;
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
+        let mut accepted_out = None;
+        let plan = AdmissionPlan {
+            prepared,
+            storage_set_id: *storage_set_id,
+            build: Box::new(move |o: &dsm::types::device_state::AdvanceOutcome| {
+                build(&o.new_chain_state)
+            }),
+            accepted_out: &mut accepted_out,
+        };
+        let (_state, outcome) = self.execute_on_relationship_inner(
+            rel_key,
+            dev_id,
+            operation,
+            deltas,
+            None,
+            None,
+            in_tx_extra,
+            None,
+            Some(plan),
+        )?;
+        let accepted = accepted_out.ok_or_else(|| {
+            DsmError::internal(
+                "admission advance committed without an accepted admission",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok((outcome, accepted))
+    }
+
+    /// Persist a pending-admission lifecycle transition (EvidencePublished /
+    /// Registered). Forward-only; the head's fence semantics are unchanged by
+    /// these states (all three fence), so only the durable row moves.
+    pub(crate) fn update_pending_admission_state(
+        &self,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::get_connection;
+        let devid = self.device_info.device_id;
+        let binding = get_connection().map_err(|e| {
+            DsmError::storage(format!("pending update: {e}"), None::<std::io::Error>)
+        })?;
+        let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let tx = conn.transaction().map_err(|e| {
+            DsmError::storage(format!("pending update tx: {e}"), None::<std::io::Error>)
+        })?;
+        crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+            &tx, &devid, pending,
+        )
+        .map_err(|e| DsmError::storage(format!("pending update: {e}"), None::<std::io::Error>))?;
+        tx.commit()
+            .map_err(|e| DsmError::storage(format!("pending commit: {e}"), None::<std::io::Error>))
+    }
+
+    /// The terminal admission transaction: admitted coordinate + leaf cache +
+    /// clear the pending row + persist the UNFENCED head — all or nothing, so
+    /// "admitted" and "no longer pending" cannot disagree.
     ///
-    /// Called BETWEEN `StateMachine::prepare_advance_relationship` and
-    /// `StateMachine::commit_advance`. If this returns `Err`, the caller
-    /// (`execute_on_relationship`) skips the commit step — the in-memory head
-    /// is unchanged and the operation is observable as never-happened. This
-    /// makes BCR persistence durable before the head is installed.
-    fn dual_write_advance_outcome(
+    /// For every admission but a resolved SoFi position, whose balances move
+    /// at resolution: see [`Self::admit_resolved_sofi_position`].
+    pub(crate) fn admit_economic_position(
+        &self,
+        admitted: dsm::economic::lineage::AdmittedEconomicPosition,
+        operation_digest: &[u8; 32],
+        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        storage_set_id: &[u8; 32],
+        post_admit_artifacts: &[(String, Vec<u8>, &'static str)],
+    ) -> Result<(), DsmError> {
+        let economic_root = match &admitted {
+            dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
+                economic_root, ..
+            } => *economic_root,
+            dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi { .. } => {
+                return Err(DsmError::invalid_operation(
+                    "admit: a resolved SoFi position moves the balances its resolution \
+                     selected, and is admitted with them",
+                ))
+            }
+            dsm::economic::lineage::AdmittedEconomicPosition::UnresolvedSofi { .. } => {
+                return Err(DsmError::invalid_operation(
+                    "admit: a conditional position that has selected no root is not terminal",
+                ))
+            }
+        };
+        self.admit(
+            &admitted,
+            economic_root,
+            operation_digest,
+            leaves,
+            storage_set_id,
+            post_admit_artifacts,
+            &[],
+            None,
+        )
+    }
+
+    /// The terminal admission of a SoFi position `advance_resolved` resolved:
+    /// the position is admitted at the root the resolution selected, the vault
+    /// heads it selected are recorded, and the unfenced head takes the trader
+    /// balances that root holds — all in the one admission transaction, so the
+    /// head and the admitted root cannot disagree about what this device holds.
+    pub(crate) fn admit_resolved_sofi_position(
+        &self,
+        advanced: &dsm::sofi::lineage::ResolvedAdvance,
+        fulfillment_id: [u8; 32],
+        operation_digest: &[u8; 32],
+        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        storage_set_id: &[u8; 32],
+        // The vault heads this position selected (spec §44.4), recorded in
+        // THIS transaction so a head and the position that chose it cannot
+        // disagree.
+        vault_heads: &[dsm::sofi::validation::VaultPostState],
+    ) -> Result<(), DsmError> {
+        let admitted = dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
+            economic_position: advanced.root.economic_position(),
+            selected_root: advanced.root.economic_root(),
+            fulfillment_id,
+            claim_ref: advanced.claim.claim_ref(),
+        };
+        self.admit(
+            &admitted,
+            advanced.root.economic_root(),
+            operation_digest,
+            leaves,
+            storage_set_id,
+            &[],
+            vault_heads,
+            Some(&advanced.balances),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        &self,
+        admitted: &dsm::economic::lineage::AdmittedEconomicPosition,
+        // The root the position holds, which the post-admit artifacts bind to.
+        economic_root: [u8; 32],
+        operation_digest: &[u8; 32],
+        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        storage_set_id: &[u8; 32],
+        post_admit_artifacts: &[(String, Vec<u8>, &'static str)],
+        vault_heads: &[dsm::sofi::validation::VaultPostState],
+        resolved: Option<&dsm::sofi::lineage::ResolvedBalances>,
+    ) -> Result<(), DsmError> {
+        use crate::storage::client_db::{get_connection, update_bcr_device_head_with_conn};
+        let economic_position = admitted.economic_position();
+        let devid = self.device_info.device_id;
+        let mut sm = self.state_machine.lock();
+        let head = sm
+            .device_head()
+            .cloned()
+            .ok_or_else(|| DsmError::storage("no head".to_string(), None::<std::io::Error>))?;
+        // COMPARE-AND-ADMIT, under the state-machine lock: the head must still
+        // carry exactly this admission. A stale admit writes nothing, so it can
+        // neither clear a newer pending admission nor regress the admitted
+        // coordinate.
+        match head.pending_economic_admission() {
+            Some(p)
+                if p.economic_position == economic_position
+                    && &p.operation_digest == operation_digest => {}
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "admit: the head no longer carries the admission at position \
+                     {economic_position} (it carries {}); refusing a stale admit",
+                    other.map_or_else(|| "none".to_string(), |p| p.economic_position.to_string())
+                )))
+            }
+        }
+        let unfenced = match resolved {
+            Some(balances) => head.with_resolved_position(balances)?,
+            None => head,
+        }
+        .with_pending_economic_admission(None);
+        {
+            let binding = get_connection()
+                .map_err(|e| DsmError::storage(format!("admit: {e}"), None::<std::io::Error>))?;
+            let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let tx = conn
+                .transaction()
+                .map_err(|e| DsmError::storage(format!("admit tx: {e}"), None::<std::io::Error>))?;
+            crate::storage::client_db::economic_lineage::record_admitted_with_conn(
+                &tx, admitted, leaves,
+            )
+            .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
+            for post in vault_heads {
+                crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
+                    .map_err(|e| {
+                        DsmError::storage(format!("admit vault head: {e}"), None::<std::io::Error>)
+                    })?;
+            }
+            crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
+                &tx, &devid,
+            )
+            .map_err(|e| DsmError::storage(format!("admit clear: {e}"), None::<std::io::Error>))?;
+            update_bcr_device_head_with_conn(&tx, &unfenced).map_err(|e| {
+                DsmError::storage(format!("admit head: {e}"), None::<std::io::Error>)
+            })?;
+            // A held sender-outbox row becomes deliverable in THIS transaction
+            // and no earlier: ECON_ADMITTED atomically releases the outbox.
+            crate::storage::client_db::sender_outbox::promote_held_outbox_rows_with_conn(&tx)
+                .map_err(|e| {
+                    DsmError::storage(format!("admit promote: {e}"), None::<std::io::Error>)
+                })?;
+            // Likewise the recipient's HELD B→A reply (carrying the release
+            // address): the sender may only ever finalize on a release whose
+            // admission is terminal, so the reply becomes deliverable
+            // atomically with ECON_ADMITTED.
+            crate::storage::client_db::recipient_receipt_fold::promote_held_replies_with_conn(&tx)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("admit promote replies: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            // Post-admission artifacts (the RELEASE object): frozen in THIS
+            // transaction and no earlier — the sweep may only ever publish a
+            // release whose admission is terminal.
+            for (key, payload, purpose) in post_admit_artifacts {
+                crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                    &tx,
+                    storage_set_id,
+                    key,
+                    payload,
+                    &economic_root,
+                    purpose,
+                )
+                .map_err(|e| {
+                    DsmError::storage(format!("admit freeze {key}: {e}"), None::<std::io::Error>)
+                })?;
+            }
+            tx.commit().map_err(|e| {
+                DsmError::storage(format!("admit commit: {e}"), None::<std::io::Error>)
+            })?;
+        }
+        // The head in memory is the head just made durable.
+        sm.set_device_head(unfenced);
+        Ok(())
+    }
+
+    /// The full seam: head + pending row + FROZEN EVIDENCE, one transaction.
+    ///
+    /// `artifacts` are `(object_key, exact payload bytes, purpose)` — every
+    /// canonical input recovery needs to reproduce the admission evidence
+    /// byte-identically. Freezing them here, in the same transaction as the
+    /// value-bearing acceptance, is the durability invariant: a crash leaves
+    /// either nothing, or a head + pending row + complete frozen evidence.
+    /// Recovery re-signs NOTHING and asks the user for nothing.
+    pub(crate) fn commit_advance_with_pending_admission_and_artifacts(
         outcome: &dsm::types::device_state::AdvanceOutcome,
         bump_capsule: bool,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+        artifacts: &[(String, Vec<u8>, &'static str)],
+        storage_set_id: &[u8; 32],
+        // Additional same-transaction writer (send prerequisites, token
+        // registry, ...) — chained AFTER the pending row + artifact freeze so
+        // callers COMPOSE with the admission commit rather than replace it.
+        also: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+    ) -> Result<(), DsmError> {
+        let devid = outcome.new_device_state.devid();
+        if !dsm::economic::admission::head_carries_admission(
+            outcome.new_device_state.pending_economic_admission(),
+            pending,
+        ) {
+            return Err(DsmError::invalid_operation(
+                "commit_advance_with_pending_admission: the head being committed does not carry \
+                 this admission — the durable head and the durable row would disagree about \
+                 whether the device is fenced",
+            ));
+        }
+        let pending = pending.clone();
+        let bound_root = outcome.new_device_state.root();
+        let set_id = *storage_set_id;
+        let artifacts: Vec<(String, Vec<u8>, &'static str)> = artifacts.to_vec();
+        Self::dual_write_advance_outcome_with_extra(
+            outcome,
+            bump_capsule,
+            Some(&move |tx: &rusqlite::Transaction<'_>,
+                        o: &dsm::types::device_state::AdvanceOutcome| {
+                // CAS re-assert of the admitted predecessor INSIDE the
+                // transaction that makes local acceptance durable: the
+                // pre-lock check can go stale only through this same
+                // serialized path, but the invariant is cheap to restate and
+                // a violated restatement is corruption, not a race.
+                let admitted =
+                    crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
+                        .map_err(|e| {
+                            DsmError::storage(
+                                format!("admission predecessor CAS: {e}"),
+                                None::<std::io::Error>,
+                            )
+                        })?;
+                let (expect_pos, expect_root) = match admitted {
+                    Some(a) => {
+                        // THE FENCE, on the commit that makes acceptance
+                        // durable. It decides more than the equality below:
+                        // for a resolved conditional predecessor it requires
+                        // this descendant to be built on the root the route
+                        // actually selected, and for an unresolved one it
+                        // refuses outright.
+                        dsm::sofi::lineage::descendant_fence(
+                            a.predecessor_claim(),
+                            &pending.pre_economic_root,
+                        )
+                        .map_err(|e| {
+                            DsmError::invalid_operation(format!("admission commit: {e}"))
+                        })?;
+                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                            rehydrate_from_admitted_store(a)
+                            .map_err(|e| {
+                                DsmError::invalid_operation(format!("admission commit: {e}"))
+                            })?;
+                        (v.economic_position() + 1, v.economic_root())
+                    }
+                    None => (1, dsm::economic::tree::empty_economic_root()),
+                };
+                if pending.economic_position != expect_pos
+                    || pending.pre_economic_root != expect_root
+                {
+                    return Err(DsmError::invalid_operation(
+                        "admission commit: the admitted predecessor changed under the \
+                         admission — refusing to make a stale acceptance durable",
+                    ));
+                }
+                crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+                    tx, &devid, &pending,
+                )
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("commit pending economic admission: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                for (key, payload, purpose) in &artifacts {
+                    crate::storage::client_db::frozen_publication_artifact::
+                        freeze_artifact_with_conn(tx, &set_id, key, payload, &bound_root, purpose)
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("freeze admission evidence {key}: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                }
+                if let Some(also) = also {
+                    also(tx, o)?;
+                }
+                Ok(())
+            }),
+        )
+    }
+
+    fn dual_write_advance_outcome_with_extra(
+        outcome: &dsm::types::device_state::AdvanceOutcome,
+        bump_capsule: bool,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
     ) -> Result<(), DsmError> {
         use crate::storage::client_db::{
             get_connection, store_bcr_chain_state_with_conn, update_bcr_device_head_with_conn,
         };
-        use crate::util::deterministic_time::tick;
-
         let devid = outcome.new_device_state.devid();
-        let now = tick();
 
         let binding = get_connection().map_err(|e| {
             DsmError::storage(
@@ -218,14 +643,15 @@ impl CoreSDK {
             )
         })?;
 
-        store_bcr_chain_state_with_conn(&tx, &devid, &outcome.new_chain_state, false, now)
-            .map_err(|e| {
+        store_bcr_chain_state_with_conn(&tx, &devid, &outcome.new_chain_state, false).map_err(
+            |e| {
                 DsmError::storage(
                     format!("dual-write: store_bcr_chain_state failed: {e}"),
                     None::<std::io::Error>,
                 )
-            })?;
-        update_bcr_device_head_with_conn(&tx, &outcome.new_device_state, now).map_err(|e| {
+            },
+        )?;
+        update_bcr_device_head_with_conn(&tx, &outcome.new_device_state).map_err(|e| {
             DsmError::storage(
                 format!("dual-write: update_bcr_device_head failed: {e}"),
                 None::<std::io::Error>,
@@ -246,6 +672,12 @@ impl CoreSDK {
                 },
             )?;
         }
+        // §16.6: caller-injected full-state-consumption work (nonce consumption +
+        // canonical apply record for the incoming-transfer apply). Same tx — an
+        // Err here rolls back the state persistence too.
+        if let Some(extra) = in_tx_extra {
+            extra(&tx, outcome)?;
+        }
         tx.commit().map_err(|e| {
             DsmError::storage(
                 format!("dual-write: commit failed: {e}"),
@@ -264,6 +696,16 @@ impl CoreSDK {
     /// (§2.2) and is also used as the legacy SMT-root anchor for the
     /// initial head so `verify_state` checks against the genesis hash work
     /// before any relationship advance has fired.
+    ///
+    /// `genesis` is set UNCONDITIONALLY, on both branches. It used to be written
+    /// only by the constructor in the `unwrap_or_else`, so a pre-existing head
+    /// kept whatever root it was built with — and that is the branch genesis
+    /// install always takes, because `StateMachine::set_state` materialises a
+    /// head (with a `[0u8; 32]` genesis) before this runs. The result was a
+    /// persisted head whose authority root was zeros while `AppState` held the
+    /// correct `v3.g`, and every reader of `genesis_digest()` compared against
+    /// zeros. Honouring the contract on both branches is the fix; nothing
+    /// downstream is taught to tolerate a zero root.
     fn write_genesis_device_head(&self, genesis_hash: [u8; 32]) -> Result<(), DsmError> {
         use crate::storage::client_db::update_bcr_device_head;
         let mut head = self.device_head().unwrap_or_else(|| {
@@ -271,9 +713,9 @@ impl CoreSDK {
                 genesis_hash,
                 self.device_info.device_id,
                 self.device_info.public_key.clone(),
-                1024,
             )
         });
+        head.set_genesis_digest(genesis_hash);
         if head.legacy_anchor().is_none() {
             head.bootstrap_legacy_root(genesis_hash);
         }
@@ -282,12 +724,14 @@ impl CoreSDK {
                 format!("genesis head-cache write failed: {e}"),
                 None::<std::io::Error>,
             )
-        })
-    }
-
-    /// Initialize CoreSDK with default device identity
-    pub fn new() -> Result<Self, DsmError> {
-        Self::new_with_device(DeviceInfo::from_hashed_label("default_device", vec![0; 32]))
+        })?;
+        // Install it IN MEMORY as well. `StateMachine::set_state` no longer
+        // manufactures a head (it does not know `G` and must not invent one), so
+        // this is now the only thing that gives the state machine a head at
+        // genesis — and callers read `device_head()` straight after install.
+        // Creating it here is the point: this function has the canonical root.
+        self.state_machine.lock().set_device_head(head);
+        Ok(())
     }
 
     /// Initialize CoreSDK with an explicit device identity (preferred for wallet/runtime use).
@@ -300,21 +744,67 @@ impl CoreSDK {
             "Initializing CoreSDK (strict/proto-only/clockless) for device {}",
             crate::util::text_id::encode_base32_crockford(&device_info.device_id)
         );
-        let policy_system = TokenPolicySystem::new()?;
-        // Preload standard token policies (ERA) synchronously
-        policy_system.preload_standard_policies_blocking()?;
+        // Policies are registered from their committed bytes as tokens are
+        // created and adopted (`register_policy_bytes`) and rehydrated from
+        // the durable store on a miss. ERA's is pre-rooted in Core and
+        // answered from its own bytes (SoFi Amendment S11).
+        let policy_system = TokenPolicySystem::new();
 
         let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
+        Self::record_process_startup_admission(&state_machine, &device_info.device_id);
 
         Ok(Self {
             state_machine,
             device_info,
             policy_system,
-            audit_ctr: AtomicU64::new(0),
             anchor_appliance: Mutex::new(None),
         })
+    }
+
+    /// Record, at the FIRST `CoreSDK` built for this device in this process, the
+    /// pending admission its restored head carries (`None` when there is no head
+    /// or nothing is pending). Never replaced: a later construction in the same
+    /// process (a bridge re-init, an activity recreated while the process lives)
+    /// records nothing, so no head created or loaded later in this process can
+    /// have its admission adopted.
+    fn record_process_startup_admission(state_machine: &Mutex<StateMachine>, device_id: &[u8; 32]) {
+        let coords = state_machine.lock().device_head().and_then(|h| {
+            h.pending_economic_admission()
+                .map(|p| (p.economic_position, p.operation_digest))
+        });
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(*device_id)
+            .or_insert(coords);
+    }
+
+    /// Whether `pending` is the admission this device's head already carried when
+    /// THIS PROCESS built its first `CoreSDK` for the device: an admission the
+    /// running process did not create.
+    pub(crate) fn admission_predates_startup(
+        &self,
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+    ) -> bool {
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&self.device_info.device_id)
+            .copied()
+            .flatten()
+            == Some((pending.economic_position, pending.operation_digest))
+    }
+
+    /// Forget every process-startup record. TEST ONLY: it models a process
+    /// restart for tests that build a fresh router over the same database.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn forget_process_startup_admissions_for_testing() {
+        PROCESS_STARTUP_ADMISSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {
@@ -325,8 +815,6 @@ impl CoreSDK {
     /// Uses `with_cleared_signature()` / `to_bytes()` for the canonical payload.
     /// Returns the operation with the signature field populated.
     ///
-    /// This differs from the legacy `sign_operation()` (async, returns raw bytes)
-    /// which uses `encode_dsm_operation_det()` and is only used for audit hashes.
     pub fn sign_operation_sphincs(
         &self,
         mut operation: DsmOperation,
@@ -346,6 +834,7 @@ impl CoreSDK {
         match &mut operation {
             DsmOperation::Transfer { signature, .. }
             | DsmOperation::CreateToken { signature, .. }
+            | DsmOperation::AdoptToken { signature, .. }
             | DsmOperation::Lock { signature, .. }
             | DsmOperation::Unlock { signature, .. }
             | DsmOperation::LockToken { signature, .. }
@@ -357,26 +846,22 @@ impl CoreSDK {
             | DsmOperation::DlvInvalidate { signature, .. } => {
                 *signature = sig;
             }
-            _ => {
-                log::warn!("[CoreSDK] sign_operation called on non-signable operation type");
+            // FAIL, never return unsigned. This arm used to `log::warn!` and hand back
+            // the operation with an empty signature and an `Ok`, so a caller that asked
+            // to sign a value-moving operation got a success it had no reason to doubt
+            // and an operation no verifier would accept. `DlvSettle` and `DlvOwnerApply`
+            // fell through here — both are `EgressAsset::Asset` — and the unsigned
+            // result was committed into the canonical root, where it cannot be
+            // retro-signed because the signature is inside `compute_chain_tip`.
+            other => {
+                return Err(DsmError::invalid_operation(format!(
+                    "sign_operation_sphincs: {} carries no signature field",
+                    other.get_operation_type()
+                )));
             }
         }
 
         Ok(operation)
-    }
-
-    /// Sign arbitrary bytes with the device's SPHINCS+ secret key.
-    /// Used for receipt counter-signatures where the payload is a 32-byte
-    /// commitment hash rather than a full `DsmOperation`.
-    pub fn sign_bytes_sphincs(&self, payload: &[u8]) -> Result<Vec<u8>, DsmError> {
-        let sk = crate::sdk::signing_authority::current_secret_key()?;
-
-        dsm::crypto::sphincs::sphincs_sign(&sk, payload).map_err(|e| {
-            DsmError::crypto(
-                format!("SPHINCS+ byte signing failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })
     }
 
     /// Current tip state (fail-closed if none).
@@ -384,13 +869,10 @@ impl CoreSDK {
     /// Returns a compatibility `State` view derived from the canonical
     /// `DeviceState`. Prefer `device_head()` for new code.
     pub fn get_current_state(&self) -> Result<State, DsmError> {
-        // Delegate to StateMachine::current_state so callers always see the
-        // single source of truth: an explicit `legacy_state` (set via
-        // `set_state` / `restore_state_snapshot`) wins over the projected
-        // DeviceState view. If no legacy_state is pinned, the StateMachine
-        // synthesizes a compat State from the DeviceState head's SMT root +
-        // balances. Pre-genesis paths return None which we surface as an
-        // explicit error.
+        // Delegate to StateMachine::current_state. The canonical DeviceState head
+        // is the single source of truth: the compat `State` is always synthesized
+        // from the head's SMT root + balances, with no override that could shadow
+        // it. Pre-genesis paths return None which we surface as an explicit error.
         let sm = self.state_machine.lock();
         sm.current_state()
             .ok_or_else(|| DsmError::state_machine("No current state available"))
@@ -400,117 +882,6 @@ impl CoreSDK {
     /// snapshot for this device.
     pub fn restore_latest_archived_state_for_device(&self) -> Result<(), DsmError> {
         Self::restore_latest_archived_state(&self.state_machine, &self.device_info.device_id)
-    }
-
-    /// Replace the in-memory canonical tip with a caller-supplied archived state snapshot.
-    /// Used by failed-online-send rollback after the bad archived successor has been removed.
-    pub fn restore_state_snapshot(&self, state: &State) -> Result<(), DsmError> {
-        if state.device_info.device_id != self.device_info.device_id {
-            return Err(DsmError::state_machine(
-                "restore_state_snapshot: device mismatch",
-            ));
-        }
-        self.state_machine.lock().set_state(state.clone());
-        Ok(())
-    }
-
-    /// Normalize stale balance key formats in the current state.
-    ///
-    /// Migrates:
-    ///  - `"{u128}|ERA"` → plain `"ERA"` (keep MAX if both exist)
-    ///  - `"{device_b32}.{token}"` dot-format entries are removed (pipe-format is authoritative)
-    pub fn migrate_token_balance_keys(&self) {
-        let mut sm = self.state_machine.lock();
-        let state = match sm.current_state() {
-            Some(s) => s,
-            None => return,
-        };
-
-        let mut updated = state;
-        let mut changed = false;
-
-        let canonical_era_key = dsm::core::token::derive_canonical_balance_key(
-            crate::policy::builtins::NATIVE_POLICY_COMMIT,
-            &updated.device_info.public_key,
-            "ERA",
-        );
-
-        // Collect keys to remove and entries to migrate
-        let mut keys_to_remove: Vec<String> = Vec::new();
-        let mut era_max: Option<dsm::types::token_types::Balance> = None;
-
-        for (key, balance) in &updated.token_balances {
-            if key == "ERA" {
-                keys_to_remove.push(key.clone());
-                era_max = Some(match era_max {
-                    Some(existing) if existing.value() >= balance.value() => existing,
-                    _ => balance.clone(),
-                });
-                continue;
-            }
-
-            // Detect pipe-format ERA keys like "{u128}|ERA"
-            if let Some((_, token_id)) = key.split_once('|') {
-                if token_id == "ERA" {
-                    if key != &canonical_era_key {
-                        keys_to_remove.push(key.clone());
-                    }
-                    era_max = Some(match era_max {
-                        Some(existing) if existing.value() >= balance.value() => existing,
-                        _ => balance.clone(),
-                    });
-                }
-            }
-            // Detect dot-format keys like "{device_b32}.{token}"
-            if key.contains('.') && !key.contains('|') {
-                keys_to_remove.push(key.clone());
-            }
-        }
-
-        // Apply removals
-        for key in &keys_to_remove {
-            updated.token_balances.remove(key);
-            changed = true;
-        }
-
-        // Merge migrated ERA balance into the canonical balance-key entry
-        if let Some(migrated) = era_max {
-            let existing = updated
-                .token_balances
-                .get(&canonical_era_key)
-                .map(|b| b.value())
-                .unwrap_or(0);
-            if migrated.value() > existing {
-                updated.token_balances.insert(canonical_era_key, migrated);
-                changed = true;
-            }
-        }
-
-        if changed {
-            if let Ok(h) = updated.compute_hash() {
-                updated.hash = h;
-            }
-            sm.set_state(updated);
-            log::info!("[CoreSDK] Migrated stale balance keys to canonical format");
-        }
-    }
-
-    /// Deterministic in-process genesis (for tests/bootstrap only)
-    pub fn initialize_with_genesis_state(&self) -> Result<(), DsmError> {
-        let initial_entropy = [0u8; 32];
-        let mut genesis_state = State::new_genesis(initial_entropy, self.device_info.clone());
-        // Precompute and embed the hash so tests and callers see a non-empty hash field
-        if let Ok(h) = genesis_state.compute_hash() {
-            genesis_state.hash = h;
-        }
-        let snapshot = {
-            let mut sm = self.state_machine.lock();
-            let snapshot = genesis_state.clone();
-            sm.set_state(genesis_state);
-            snapshot
-        };
-        self.write_genesis_device_head(snapshot.hash)?;
-        Ok(())
     }
 
     /// Deterministic transition (binary payloads only)
@@ -572,218 +943,161 @@ impl CoreSDK {
         // Route through relationship path with self-loop for generic ops
         let dev_id = self.get_current_state()?.device_info.device_id;
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let (state, _) =
-            self.execute_on_relationship(rel_key, dev_id, dsm_op, &[], Some(init_tip))?;
+        let (state, _) = self.execute_on_relationship(rel_key, dev_id, dsm_op, &[])?;
         Ok(state)
     }
 
-    /// Register a CPTA policy for a custom token with the underlying
-    /// `TokenPolicySystem`.  This is the authoritative step that makes the
-    /// policy visible to `PolicyEnforcer` and binds `policy_commit =
-    /// PolicyAnchor::from_policy(&policy_file)` for all subsequent balance
-    /// ops on `token_id`.
-    ///
-    /// Must run before any balance-changing op references `token_id`.
-    pub async fn register_token_policy(
-        &self,
-        token_id: &str,
-        policy_file: dsm::types::policy_types::PolicyFile,
-    ) -> Result<dsm::types::policy_types::PolicyAnchor, DsmError> {
-        self.policy_system
-            .register_token_policy(token_id, policy_file)
-            .await
+    /// Read access to the policy system, for tests that need to ask the
+    /// enforcer directly whether it can see a token's policy.
+    pub fn policy_system_ref(&self) -> &dsm::core::token::policy::TokenPolicySystem {
+        &self.policy_system
     }
 
-    /// Register policy bytes while preserving an externally-authoritative
-    /// policy anchor (for example, a storage-layer `DSM/policy` commitment).
-    pub async fn register_token_policy_with_anchor(
-        &self,
-        token_id: &str,
-        policy_file: dsm::types::policy_types::PolicyFile,
-        anchor: [u8; 32],
-    ) -> Result<(), DsmError> {
-        self.policy_system
-            .register_token_policy_with_anchor(
-                token_id,
-                policy_file,
-                dsm::types::policy_types::PolicyAnchor::from_bytes(anchor),
-            )
-            .await
+    /// Install the durable-storage resolver the policy enforcer consults when
+    /// its process-local index misses. See
+    /// `AppRouterImpl::install_policy_resolver` for why a miss must not be
+    /// read as absence.
+    pub fn set_policy_resolver(&self, resolver: dsm::core::token::policy::PolicyResolver) {
+        self.policy_system.set_policy_resolver(resolver);
     }
 
-    fn canonical_token_id_str(token_id: &[u8]) -> Option<&str> {
-        std::str::from_utf8(token_id)
-            .ok()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
+    /// Register the policy these exact `TokenPolicyV3` bytes are with the
+    /// enforcer, and answer its commitment: Core recomputes the commitment
+    /// from the bytes and derives the enforcer's view from what the blob
+    /// says. Must run before any balance-changing operation names the
+    /// commitment.
+    pub fn register_policy_bytes(&self, bytes: &[u8]) -> Result<[u8; 32], DsmError> {
+        self.policy_system.register_policy(bytes)
     }
 
+    /// What the supply cap is evaluated against: the amount the operation
+    /// names. The circulating supply is derived where the chain is reachable
+    /// (`enforce_policy_for_operation`), never here.
+    fn insert_supply_witness(context: &mut HashMap<String, Vec<u8>>, amount: u64) {
+        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        context.insert(
+            witness_keys::AMOUNT.to_string(),
+            amount.to_le_bytes().to_vec(),
+        );
+    }
+
+    /// What the enforcer evaluates for `operation`: the commitment of the
+    /// policy the operation names, the operation type, and what the supply
+    /// cap is evaluated against. `None` for an operation no token policy
+    /// gates. A token operation that names no commitment cannot be evaluated
+    /// against a committed policy and is refused (§9.1: every token
+    /// operation carries its `policy_commit`).
     fn build_token_policy_context(
         operation: &dsm::types::operations::Operation,
-        state_hash: [u8; 32],
-    ) -> Result<Option<(String, String, HashMap<String, Vec<u8>>)>, DsmError> {
+    ) -> Result<Option<([u8; 32], String, HashMap<String, Vec<u8>>)>, DsmError> {
         let mut context = HashMap::new();
-        context.insert(
-            "tick".to_string(),
-            dsm::utils::deterministic_time::tick_index()
-                .to_le_bytes()
-                .to_vec(),
-        );
-        context.insert("state_hash".to_string(), state_hash.to_vec());
-
         match operation {
-            DsmOperation::Transfer {
-                token_id,
-                amount,
-                recipient,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("recipient".to_string(), recipient.clone());
-                Ok(Some((
-                    token_id.to_string(),
-                    "transfer".to_string(),
-                    context,
-                )))
-            }
-            DsmOperation::Mint {
-                token_id,
-                amount,
-                authorized_by,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("authorized_by".to_string(), authorized_by.clone());
-                Ok(Some((token_id.to_string(), "mint".to_string(), context)))
+            DsmOperation::Transfer { policy_commit, .. } => {
+                Ok(Some((*policy_commit, "transfer".to_string(), context)))
             }
             DsmOperation::Burn {
-                token_id, amount, ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                Ok(Some((token_id.to_string(), "burn".to_string(), context)))
-            }
-            DsmOperation::Lock {
-                token_id,
                 amount,
-                purpose,
-                owner,
+                policy_commit,
                 ..
             } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                context.insert("owner".to_string(), owner.clone());
-                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
+                // Whether the holder may burn is the policy's burn flag,
+                // expressed as its operation restriction (SoFi §54).
+                Self::insert_supply_witness(&mut context, amount.value());
+                Ok(Some((*policy_commit, "burn".to_string(), context)))
             }
-            DsmOperation::Unlock {
-                token_id,
-                amount,
-                purpose,
-                owner,
+            // Creation is gated by the token's own policy: the supply cap and
+            // the operation restriction; who may create is the creator the
+            // policy names (SoFi Amendment S8), checked at the genesis release.
+            DsmOperation::CreateToken {
+                initial_supply,
+                policy_commit,
                 ..
             } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = amount.value();
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                context.insert("owner".to_string(), owner.clone());
-                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
+                Self::insert_supply_witness(&mut context, initial_supply.value());
+                Ok(Some((*policy_commit, "create_token".to_string(), context)))
             }
-            DsmOperation::LockToken {
-                token_id,
-                amount,
-                purpose,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = u64::try_from(*amount).map_err(|_| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: LockToken amount must be non-negative",
-                    )
-                })?;
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                Ok(Some((token_id.to_string(), "lock".to_string(), context)))
-            }
-            DsmOperation::UnlockToken {
-                token_id,
-                amount,
-                purpose,
-                ..
-            } => {
-                let token_id = Self::canonical_token_id_str(token_id).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: malformed or empty token_id",
-                    )
-                })?;
-                let amount_u64 = u64::try_from(*amount).map_err(|_| {
-                    DsmError::invalid_operation(
-                        "Policy enforcement rejected: UnlockToken amount must be non-negative",
-                    )
-                })?;
-                context.insert("amount_u64".to_string(), amount_u64.to_le_bytes().to_vec());
-                context.insert("amount".to_string(), amount_u64.to_string().into_bytes());
-                context.insert("purpose".to_string(), purpose.clone());
-                Ok(Some((token_id.to_string(), "unlock".to_string(), context)))
-            }
+            DsmOperation::Lock { .. }
+            | DsmOperation::Unlock { .. }
+            | DsmOperation::LockToken { .. }
+            | DsmOperation::UnlockToken { .. } => Err(DsmError::invalid_operation(
+                "Policy enforcement rejected: a lock operation names no policy commitment, so \
+                 no committed policy can be evaluated for it (§9.1)",
+            )),
             _ => Ok(None),
         }
     }
 
-    fn enforce_policy_for_operation(
+    /// Circulating supply of an asset, DERIVED from this device's canonical
+    /// chain history — never a cached counter, which a restored snapshot could
+    /// misreport. A token's whole supply is released at creation (SoFi §51),
+    /// so:
+    ///
+    ///   circulating = Σ CreateToken.initial_supply − Σ Burn
+    ///                 (for operations naming this policy_commit)
+    ///
+    /// Returns `None` when the history could not be read in full. That is not
+    /// the same as zero: a figure from partial history is a figure about
+    /// another chain.
+    ///
+    /// `None` propagates as an ABSENT witness, and the enforcer already fails
+    /// closed on an absent circulating supply rather than guessing.
+    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> Option<u64> {
+        use dsm::types::operations::Operation as O;
+        let device_id = self.device_info.device_id;
+        let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
+            log::warn!("[supply] chain history unreadable — refusing to derive a supply figure");
+            return None;
+        };
+        let mut circulating: u128 = 0;
+        for state in states {
+            match &state.operation {
+                O::CreateToken {
+                    initial_supply,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_add(initial_supply.value() as u128);
+                }
+                O::Burn {
+                    amount,
+                    policy_commit: pc,
+                    ..
+                } if pc == policy_commit => {
+                    circulating = circulating.saturating_sub(amount.value() as u128);
+                }
+                _ => {}
+            }
+        }
+        Some(u64::try_from(circulating).unwrap_or(u64::MAX))
+    }
+
+    /// Whether the policy committed at the commitment `operation` names
+    /// permits it. A creation's supply cap is evaluated against the
+    /// circulating supply derived HERE, where the chain is reachable, never
+    /// in the pure context builder.
+    pub(crate) fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
-        state_hash: [u8; 32],
     ) -> Result<(), DsmError> {
-        let Some((token_id, op_type, context)) =
-            Self::build_token_policy_context(operation, state_hash)?
+        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        let Some((policy_commit, op_type, mut context)) =
+            Self::build_token_policy_context(operation)?
         else {
             return Ok(());
         };
+        if context.contains_key(witness_keys::AMOUNT) {
+            // Absent, not zero, when the history is incomplete — the
+            // enforcer refuses a capped creation it cannot evaluate.
+            if let Some(circulating) = self.derive_circulating_supply(&policy_commit) {
+                context.insert(
+                    witness_keys::CIRCULATING.to_string(),
+                    circulating.to_le_bytes().to_vec(),
+                );
+            }
+        }
 
         let result = if tokio::runtime::Handle::try_current().is_ok() {
             let policy_system = self.policy_system.clone();
-            let token_id_for_thread = token_id.clone();
             let op_type_for_thread = op_type.clone();
             let context_for_thread = context.clone();
             let join_res = std::thread::spawn(move || {
@@ -798,11 +1112,7 @@ impl CoreSDK {
                     })?;
                 rt.block_on(async {
                     policy_system
-                        .enforce_policy(
-                            &token_id_for_thread,
-                            &op_type_for_thread,
-                            &context_for_thread,
-                        )
+                        .enforce_policy(&policy_commit, &op_type_for_thread, &context_for_thread)
                         .await
                 })
             })
@@ -830,14 +1140,14 @@ impl CoreSDK {
 
             rt.block_on(async {
                 self.policy_system
-                    .enforce_policy(&token_id, &op_type, &context)
+                    .enforce_policy(&policy_commit, &op_type, &context)
                     .await
             })?
         };
 
         if !result.allowed {
             return Err(DsmError::policy_violation(
-                token_id,
+                crate::util::text_id::encode_base32_crockford(&policy_commit),
                 result.reason,
                 None::<std::convert::Infallible>,
             ));
@@ -852,47 +1162,247 @@ impl CoreSDK {
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
     /// `State` will be removed once all downstream readers migrate to
     /// `DeviceState`.
-    /// Ordinary advance (no fused-anchor-state leaf). Thin wrapper over
-    /// [`Self::execute_on_relationship_with_anchor_leaf`] with `anchor_leaf = None`, so the many
-    /// non-bearer callers stay unchanged.
+    /// Ordinary advance (no fused-anchor-state leaf, no allocation draw).
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
-        self.execute_on_relationship_with_anchor_leaf(
+        self.execute_on_relationship_inner(
             rel_key,
             counterparty_devid,
             operation,
             deltas,
-            initial_chain_tip,
-            None, // anchor_leaf — ordinary online transition
-            None, // offline_spend — ordinary online transition, no allocation draw
+            None,
+            None,
+            None,
+            None,
+            None,
         )
     }
 
-    /// Advance the relationship, optionally committing an offline-bearer fused-anchor-state leaf
-    /// (`anchor_leaf`) ATOMICALLY with the relationship leaf. The bilateral confirm path passes the
-    /// same `anchor_leaf` its `simulate_advance_for_confirm` used, so the committed device root
-    /// matches the on-wire proofs (both-or-neither); ordinary advances pass `None`.
+    /// An offline bilateral step's advance. `before_commit` runs on the
+    /// prepared advance under the state-machine lock, before its transaction
+    /// opens (the receiver signs its receipt there, from the advance that
+    /// commits); `settle` writes the step's other effects (its relationship
+    /// tip, projection and history) inside the transaction that commits the
+    /// head, so the head and the relationship commit together or not at all.
     #[allow(clippy::too_many_arguments)]
-    pub fn execute_on_relationship_with_anchor_leaf(
+    pub fn execute_offline_step(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        before_commit: Option<
+            &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
+        >,
+        settle: &dyn Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+        ) -> Result<(), DsmError>,
+    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
+        self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            anchor_leaf,
+            offline_spend,
+            Some(settle),
+            before_commit,
+            None,
+        )
+        .map(|(_state, outcome)| outcome)
+    }
+
+    /// A staged advance with an economic admission riding the SAME advance
+    /// (see [`AdmissionPlan`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged_with_admission<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
+    ) -> Result<StagedAdvance<A>, DsmError> {
+        self.execute_on_relationship_staged_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            build_artifacts,
+            write_extra,
+            admission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_staged_inner<A>(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        build_artifacts: impl FnOnce(&dsm::types::device_state::AdvanceOutcome) -> Result<A, DsmError>,
+        write_extra: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
+    ) -> Result<StagedAdvance<A>, DsmError> {
+        // Artifacts are built once in `pre_write` (outside the transaction, so
+        // signing may read the DB) and shared with the in-tx writer through a
+        // cell. The in-tx closure NEVER rebuilds them — retries and the durable
+        // record must carry byte-identical bytes.
+        let built: std::cell::RefCell<Option<A>> = std::cell::RefCell::new(None);
+        let builder: std::cell::RefCell<Option<_>> = std::cell::RefCell::new(Some(build_artifacts));
+
+        let pre = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<(), DsmError> {
+            let f = builder.borrow_mut().take().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifact builder already consumed",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            *built.borrow_mut() = Some(f(outcome)?);
+            Ok(())
+        };
+
+        let write = |tx: &rusqlite::Transaction<'_>,
+                     outcome: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), DsmError> {
+            let guard = built.borrow();
+            let artifacts = guard.as_ref().ok_or_else(|| {
+                DsmError::internal(
+                    "staged advance: artifacts missing at write time",
+                    None::<std::convert::Infallible>,
+                )
+            })?;
+            write_extra(tx, outcome, artifacts)
+        };
+
+        let (state, outcome) = self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            None,
+            None,
+            Some(&write),
+            Some(&pre),
+            admission,
+        )?;
+
+        let artifacts = built.borrow_mut().take().ok_or_else(|| {
+            DsmError::internal(
+                "staged advance committed without artifacts",
+                None::<std::convert::Infallible>,
+            )
+        })?;
+        Ok(StagedAdvance {
+            state,
+            outcome,
+            artifacts,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_on_relationship_guarded(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+        admission: Option<AdmissionPlan<'_>>,
+    ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
+        self.execute_on_relationship_inner(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            None,
+            None,
+            in_tx_extra,
+            None,
+            admission,
+        )
+    }
+
+    /// Re-project every balance the just-committed `head` carries into
+    /// `balance_projections` — the rows `balance.list` renders from.
+    ///
+    /// The projection IS the head's cache (`client_db::tokens`), so it must be
+    /// brought level with the head at the commit chokepoint, not at the next
+    /// startup sweep. Operations that carry their debits inside the operation
+    /// rather than in a caller-supplied delta list are exactly why: a funded
+    /// vault creation once left the owner's wallet showing its pre-vault
+    /// balances on hardware (2026-09-13).
+    /// Best-effort by design: the head is already durable when this runs, so a
+    /// failure here is a stale cache the startup reconcile repairs, never a
+    /// lost transition.
+    fn reproject_committed_head(head: &dsm::types::device_state::DeviceState) {
+        match client_db::reconcile_projections_with_head(head) {
+            Ok((0, _)) => {}
+            Ok((rebuilt, checked)) => log::info!(
+                "[projection] {rebuilt}/{checked} balance row(s) re-projected from the committed head"
+            ),
+            Err(e) => log::warn!(
+                "[projection] re-projection from the committed head failed (cache stale until the startup sweep): {e}"
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_on_relationship_inner(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: dsm::types::operations::Operation,
+        deltas: &[dsm::types::device_state::BalanceDelta],
+        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
+        offline_spend: Option<dsm::types::device_state::OfflineSpend>,
+        in_tx_extra: Option<
+            &dyn Fn(
+                &rusqlite::Transaction<'_>,
+                &dsm::types::device_state::AdvanceOutcome,
+            ) -> Result<(), DsmError>,
+        >,
+        // §16.6 staged advance: runs AFTER the pure prepare and BEFORE the
+        // durable write opens its transaction. This is the only window in
+        // which a caller may do work that itself touches the database (e.g.
+        // per-step EK signing, which reads cert heads) — inside the write
+        // transaction the global connection mutex is held and re-entry
+        // deadlocks. An Err here aborts before anything is persisted.
+        pre_write: Option<
+            &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
+        >,
+        // The economic admission riding this advance, if the operation is an
+        // admitted economic write. See [`AdmissionPlan`].
+        admission: Option<AdmissionPlan<'_>>,
     ) -> Result<(State, dsm::types::device_state::AdvanceOutcome), DsmError> {
         // Phase 0 fail-closed recovery gate (spec condition R3): block
         // owner-initiated value egress while identity recovery is in progress.
         // `is_value_egress` is an exhaustive classifier (dsm core), so value
-        // ingress (Receive/Mint) and identity/recovery operations still advance,
+        // ingress (Receive) and identity/recovery operations still advance,
         // and any new Operation variant must be consciously classified. This is
         // the canonical state-advance chokepoint, so it covers bilateral
         // transfers, token ops, and DLV ops in one place.
@@ -932,11 +1442,82 @@ impl CoreSDK {
             }
         }
 
-        // Enforce token policy constraints on the operation that will advance
-        // state. This closes the previous gap where registration existed but
-        // execution path skipped policy checks.
-        let current_state_hash = sm.device_head().map(|ds| ds.root()).unwrap_or([0u8; 32]);
-        self.enforce_policy_for_operation(&operation, current_state_hash)?;
+        // Enforce the token's committed policy on the operation that will
+        // advance state, under the lock: registration alone gates nothing.
+        if sm.device_head().is_none() {
+            return Err(DsmError::state_machine(
+                "no device head to execute an operation on",
+            ));
+        }
+        self.enforce_policy_for_operation(&operation)?;
+        // ── Admission serialization, UNDER the state-machine lock ──────────
+        // A new admission atomically refuses an existing pending one and
+        // CAS-checks the admitted predecessor it extends. A route-level
+        // "resume first" cannot be the guard: two relationships can race
+        // before either takes this lock; THIS is the serialization boundary.
+        let admission = match admission {
+            Some(plan) => {
+                if sm
+                    .device_head()
+                    .and_then(|h| h.pending_economic_admission().cloned())
+                    .is_some()
+                {
+                    return Err(DsmError::invalid_operation(
+                        "advance: an economic admission is already pending — finish or resume \
+                         it before starting another; positions are write-once and never \
+                         overwritten",
+                    ));
+                }
+                let admitted = crate::storage::client_db::economic_lineage::get_admitted()
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("admission predecessor read: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                let (expected_position, expected_root) = match admitted {
+                    Some(a) => {
+                        // Same fence, on the advance that stages the plan.
+                        dsm::sofi::lineage::descendant_fence(
+                            a.predecessor_claim(),
+                            &plan.prepared.pre_economic_root,
+                        )
+                        .map_err(|e| DsmError::invalid_operation(format!("advance: {e}")))?;
+                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                            rehydrate_from_admitted_store(a)
+                            .map_err(|e| DsmError::invalid_operation(format!("advance: {e}")))?;
+                        (v.economic_position() + 1, v.economic_root())
+                    }
+                    None => (1, dsm::economic::tree::empty_economic_root()),
+                };
+                if plan.prepared.economic_position != expected_position
+                    || plan.prepared.pre_economic_root != expected_root
+                {
+                    return Err(DsmError::invalid_operation(format!(
+                        "advance: admission does not extend the admitted coordinate (expected \
+                         position {expected_position}) — rebuild from the current admitted \
+                         state rather than a stale snapshot",
+                    )));
+                }
+                Some(plan)
+            }
+            None => None,
+        };
+        if let Some(plan) = &admission {
+            sm.attach_pending_economic_admission(Some(plan.prepared.clone()));
+        }
+        // From here to commit, every error path must roll the attach off —
+        // one restore point via the closure below, not scattered clears.
+        // The admission, when there is one, travels with the storage set it
+        // was built for.
+        let admission_result = (|| -> Result<
+            (
+                dsm::types::device_state::AdvanceOutcome,
+                Option<(dsm::economic::admission::PendingEconomicAdmission, [u8; 32])>,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        > {
 
         // Phase 4.1 fail-closed pattern (§4.3 acceptance, §6.1 single-writer):
         //   1. PREPARE — derive the AdvanceOutcome (pure; no head mutation).
@@ -951,47 +1532,98 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            initial_chain_tip,
             anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
+        // The sender's signed A-side pair is deliberately NOT compared against
+        // this device's own lineage here — see the doc comment on
+        // `execute_on_relationship_guarded` for why such a comparison can never
+        // hold between two honest devices. The local advance is authoritative
+        // for the local lineage; A-side authority is enforced upstream in
+        // `apply_incoming_transfer_full_state`.
         // The accepted-state index is bumped ATOMICALLY inside this transaction
         // (spec §5.1) — a frontier-changing transition can never persist without
-        // the capsule being marked dirty.
-        Self::dual_write_advance_outcome(&outcome, frontier_changed)?;
+        // the capsule being marked dirty. `in_tx_extra` (nonce consumption +
+        // canonical apply record on the incoming-transfer path) runs in the SAME
+        // transaction (§16.6 full-state consumption).
+        // Staged artifact build (signing, envelope construction) — outside the
+        // write transaction, so DB reads here cannot deadlock. Failing now
+        // means nothing was persisted and nothing became deliverable.
+        if let Some(pre) = pre_write {
+            pre(&outcome)?;
+        }
+            match admission {
+                Some(plan) => {
+                    let (coords, artifacts) = (plan.build)(&outcome)?;
+                    let accepted = plan
+                        .prepared
+                        .into_locally_accepted(coords)
+                        .map_err(|e| DsmError::invalid_operation(e.to_string()))?;
+                    let outcome = outcome.with_pending_economic_admission(Some(accepted.clone()));
+                    *plan.accepted_out = Some(accepted.clone());
+                    Ok((outcome, Some((accepted, plan.storage_set_id)), artifacts))
+                }
+                None => Ok((outcome, None, Vec::new())),
+            }
+        })();
+        let (outcome, accepted, artifacts) = match admission_result {
+            Ok(v) => v,
+            Err(e) => {
+                // Restore the exact prior in-memory admission (None — the
+                // pre-attach check proved nothing was pending).
+                sm.attach_pending_economic_admission(None);
+                return Err(e);
+            }
+        };
+        let commit_result = match &accepted {
+            // The caller's in-tx writer (send prerequisites / token registry /
+            // canonical apply) COMPOSES with the admission commit via `also`.
+            Some((accepted, set_id)) => Self::commit_advance_with_pending_admission_and_artifacts(
+                &outcome,
+                frontier_changed,
+                accepted,
+                &artifacts,
+                set_id,
+                in_tx_extra,
+            ),
+            None => {
+                Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)
+            }
+        };
+        if let Err(e) = commit_result {
+            if accepted.is_some() {
+                sm.attach_pending_economic_admission(None);
+            }
+            return Err(e);
+        }
         sm.commit_advance(&outcome);
+        Self::reproject_committed_head(&outcome.new_device_state);
 
         // Build a compatibility State view from the outcome for callers that
         // still read State fields. This is a derived view, not the source of
         // truth — DeviceState IS the truth.
         let compat_state = {
             let cs = &outcome.new_chain_state;
-            let mut s = State::default();
-            s.hash = cs.compute_chain_tip();
-            s.prev_state_hash = cs.embedded_parent;
-            s.entropy = cs.entropy.clone();
-            s.operation = cs.operation.clone();
-            s.device_info = dsm::types::state_types::DeviceInfo::new(
-                outcome.new_device_state.devid(),
-                outcome.new_device_state.public_key().to_vec(),
-            );
+            let mut s = State {
+                hash: cs.compute_chain_tip(),
+                prev_state_hash: cs.embedded_parent,
+                entropy: cs.entropy.clone(),
+                operation: cs.operation.clone(),
+                device_info: dsm::types::state_types::DeviceInfo::new(
+                    outcome.new_device_state.devid(),
+                    outcome.new_device_state.public_key().to_vec(),
+                ),
+                ..State::default()
+            };
             // Sync balances from DeviceState → legacy HashMap<String, Balance>
-            // using the canonical `{prefix}|{token_id}` key format from
-            // derive_canonical_balance_key so balance.list can locate balances
-            // by their {token_id} suffix (e.g. "ERA", "dBTC").
+            // through the SAME shared helper the state machine's projection
+            // uses, so the two views cannot drift. An unnameable balance is
+            // omitted rather than surfaced under a `{prefix}|?` placeholder.
             let public_key = outcome.new_device_state.public_key();
             for (pc, val) in outcome.new_device_state.balances_snapshot() {
-                let token_id =
-                    dsm::core::token::builtin_token_id_for_policy_commit(pc).unwrap_or("");
-                let key = if token_id.is_empty() {
-                    let prefix = u128::from_le_bytes({
-                        let mut a = [0u8; 16];
-                        a.copy_from_slice(&pc[..16]);
-                        a
-                    });
-                    format!("{prefix}|?")
-                } else {
-                    dsm::core::token::derive_canonical_balance_key(pc, public_key, token_id)
+                let Some(key) = dsm::core::token::canonical_balance_key_for_commit(pc, public_key)
+                else {
+                    continue;
                 };
                 s.token_balances.insert(
                     key,
@@ -1002,6 +1634,38 @@ impl CoreSDK {
         };
 
         Ok((compat_state, outcome))
+    }
+
+    /// Establish the relationship with `counterparty_devid` on this device's
+    /// head: its leaf enters the tree at `h_0` (§26), a root advance that
+    /// moves no value, persisted before it is installed. Every step on the
+    /// relationship then extends a leaf the device committed. A relationship
+    /// already established stays as it is.
+    pub fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<(), DsmError> {
+        let mut sm = self.state_machine.lock();
+        let next = {
+            let head = sm.device_head().ok_or_else(|| {
+                DsmError::state_machine(
+                    "establish_relationship: DeviceState not initialized (genesis first)",
+                )
+            })?;
+            let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+                &head.devid(),
+                &counterparty_devid,
+            );
+            if head.chain_tip(&rel_key).is_some() {
+                return Ok(());
+            }
+            head.establish_relationship(counterparty_devid)?
+        };
+        crate::storage::client_db::update_bcr_device_head(&next).map_err(|e| {
+            DsmError::storage(
+                format!("establish_relationship: persist device head failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        sm.set_device_head(next);
+        Ok(())
     }
 
     /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation,
@@ -1033,6 +1697,7 @@ impl CoreSDK {
             },
         )?;
         sm.set_device_head(outcome.new_device_state.clone());
+        Self::reproject_committed_head(&outcome.new_device_state);
         Ok(outcome)
     }
 
@@ -1063,6 +1728,7 @@ impl CoreSDK {
             },
         )?;
         sm.set_device_head(outcome.new_device_state.clone());
+        Self::reproject_committed_head(&outcome.new_device_state);
         Ok(outcome)
     }
 
@@ -1083,6 +1749,28 @@ impl CoreSDK {
         }
     }
 
+    /// The offline allocation of `asset` under the bundle of the appliance
+    /// attached in this process, or `None` while none has been attached or
+    /// before genesis. The allocation leaf is keyed by the appliance's bundle,
+    /// which only the appliance states, so a device that has not attached one
+    /// cannot say what it holds offline: that is unknown, not zero.
+    pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
+        let bundle = self
+            .anchor_appliance
+            .lock()
+            .as_ref()
+            .map(|appliance| appliance.pin().bundle)?;
+        let sm = self.state_machine.lock();
+        let ds = sm.device_head()?;
+        let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
+            &ds.genesis_digest(),
+            &ds.devid(),
+            &bundle,
+            asset,
+        );
+        Some(ds.offline_allocation(&key))
+    }
+
     /// Get the canonical DeviceState head (§2.2 SMT root).
     pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
         self.state_machine.lock().device_head().cloned()
@@ -1094,7 +1782,7 @@ impl CoreSDK {
     /// Used by the BLE sender in `send_bilateral_confirm` to build the
     /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
     /// *before* the sender advances canonical state — the canonical commit
-    /// happens later in `mark_sender_committed_with_post_state_hash` via
+    /// happens later in `finalize_sender_step` via
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
     /// then commits. Identical inputs → identical outcome, so the simulated
     /// receipt is byte-exact with the eventual canonical advance.
@@ -1105,7 +1793,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        initial_chain_tip: Option<[u8; 32]>,
         anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
@@ -1115,7 +1802,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            initial_chain_tip,
             anchor_leaf,
             offline_spend,
         )
@@ -1136,201 +1822,22 @@ impl CoreSDK {
         self.state_machine.lock().device_head().map(|ds| ds.root())
     }
 
-    /// Commit a vault state leaf into the Per-Device SMT (SoFi spec
-    /// §4.1.2 / §8.4 step 2).
-    ///
-    /// Mirrors `execute_on_relationship`'s prepare/write/commit
-    /// pattern:
-    ///   1. PREPARE — clone the head, write the leaf, capture root +
-    ///      siblings (pure; no head mutation).
-    ///   2. WRITE   — persist the new head into `bcr_device_heads`.
-    ///      If this fails, the in-memory head is unchanged.
-    ///   3. COMMIT  — install the new head on the StateMachine.
-    ///
-    /// Returns `(new_root, siblings)` ready for the caller to embed in
-    /// a `VaultStateInclusionProofV1`.  The lock is held across all
-    /// three steps so the prepare/write/commit sequence is atomic
-    /// with respect to other writers.
-    pub fn install_vault_state_leaf(
-        &self,
-        vault_id: &[u8; 32],
-        sequence: u64,
-        reserves_digest: &[u8; 32],
-    ) -> Result<([u8; 32], Vec<[u8; 32]>), DsmError> {
-        use crate::storage::client_db::update_bcr_device_head;
-
-        let mut sm = self.state_machine.lock();
-        let outcome = sm.prepare_vault_state_leaf(vault_id, sequence, reserves_digest)?;
-        update_bcr_device_head(&outcome.new_device_state).map_err(|e| {
-            DsmError::storage(
-                format!("install_vault_state_leaf: device-head write failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        sm.commit_vault_state_leaf(&outcome);
-        Ok((outcome.new_root, outcome.siblings))
-    }
-
-    pub fn register_token_manager(
-        &self,
-        _manager: Box<dyn TokenManagerTrait>,
-    ) -> Result<(), DsmError> {
-        log::info!("Token manager registered");
-        Ok(())
-    }
-
-    // get_state_by_number(state_number: u64) deleted: per §4.3 there is no
-    // state_number, and the function compared the requested number against
-    // `state.hash[0] as u64` (a value in [0,255]) — a degenerate match that
-    // returned arbitrary archived states rather than the requested one. All
-    // 5 prior callers migrated to either a chain-state archive scan
-    // (resolve_policy_commit_strict, find_token_metadata_operation) or to
-    // local_genesis_hash() (token_mpc_sdk x3).
-
-    /// Deterministic signer (no clocks, no external randomness)
-    pub async fn sign_raw(&self, data: &[u8]) -> Result<Vec<u8>, DsmError> {
-        let dev_key = device_key_material(&self.device_info);
-        Ok(blake3_cat(&[dev_key.as_ref(), b"sig", data]).to_vec())
-    }
-
-    /// Hash state bytes
-    pub fn hash_state(&self, state_data: &[u8]) -> Result<Vec<u8>, DsmError> {
-        Ok(hash(state_data).as_bytes().to_vec())
-    }
-
     /* -------------------- Proto-only, non-removed paths ---------------- */
-
-    /// MPC genesis (blind MPC) — no wall-clock time.
-    ///
-    /// `before_install` runs once the genesis hash is known but BEFORE
-    /// any local installation steps fire. It is the integration point
-    /// for Phase B.6 (issue #277): the storage-node SDK publishes the
-    /// initial `DeviceTreeStateV1` to a quorum of storage nodes here.
-    /// If the publisher returns `Err`, the genesis aborts:
-    ///
-    /// * No state-machine state or BCR device-head row is written.
-    /// * No partial-genesis residue is left behind.
-    ///
-    /// Pass `|_| async { Ok(()) }` for the noop publisher (legacy
-    /// callers + offline test fixtures that don't talk to a storage
-    /// node cluster).
-    pub async fn create_genesis_with_passive_contributors<P, Fut>(
-        &self,
-        device_id: Vec<u8>,
-        mpc_participants: Vec<Vec<u8>>,
-        client_entropy: Option<Vec<u8>>,
-        before_install: P,
-    ) -> Result<GenesisInfo, DsmError>
-    where
-        P: FnOnce([u8; 32]) -> Fut + Send,
-        Fut: std::future::Future<Output = Result<(), DsmError>> + Send,
-    {
-        if device_id.is_empty() {
-            return Err(DsmError::invalid_operation("Device ID cannot be empty"));
-        }
-        if mpc_participants.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "At least one MPC participant required",
-            ));
-        }
-
-        // Prepare arguments for the MPC genesis core call
-        // device_id must be exactly 32 bytes
-        let device_id_arr: [u8; 32] = device_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| DsmError::invalid_operation("device_id must be 32 bytes"))?;
-
-        let mut storage_nodes = Vec::with_capacity(mpc_participants.len());
-        let mut contributor_entropies = Vec::with_capacity(mpc_participants.len());
-        for (index, participant) in mpc_participants.into_iter().enumerate() {
-            let contributor_entropy: [u8; 32] =
-                participant.as_slice().try_into().map_err(|_| {
-                    DsmError::invalid_operation("MPC participant entropy must be 32 bytes")
-                })?;
-            contributor_entropies.push(contributor_entropy);
-            storage_nodes.push(dsm::types::identifiers::NodeId::new(format!(
-                "storage-node-{}",
-                index
-            )));
-        }
-
-        let device_entropy = generate_device_entropy(&device_id_arr);
-
-        // Optional high-assurance / legacy profile: n-of-n commit-reveal multipart entropy
-        // (GenesisEntropyProfile::CommitRevealMpcV1). NO silicon binding and NO C-DBRW —
-        // the canonical wallet path is mnemonic-rooted Genesis v2 (`create_genesis_v2`).
-        let genesis_state = create_genesis_via_blind_mpc_with_contributors(
-            device_id_arr,
-            storage_nodes,
-            device_entropy,
-            contributor_entropies,
-            client_entropy,
-        )?;
-
-        // Run the pre-install hook with the freshly-computed genesis
-        // hash. Storage-node SDK uses this slot to publish the initial
-        // `DeviceTreeStateV1` to a quorum of storage nodes (Phase B.6
-        // issue #277); if quorum cannot be reached, the publisher
-        // returns Err and the genesis aborts with zero local residue.
-        if let Err(e) = before_install(genesis_state.hash).await {
-            log::warn!(
-                "Genesis aborting before local install: pre-install hook returned: {}",
-                e
-            );
-            return Err(e);
-        }
-
-        // From here on: COMMITTED. Install local state.
-        let public_key = genesis_state.signing_key.public_key.clone();
-        let smt_root = genesis_state.merkle_root.unwrap_or(genesis_state.hash);
-
-        log::info!(
-            "Genesis created (hash={})",
-            crate::util::text_id::encode_base32_crockford(&genesis_state.hash)
-        );
-
-        // Install the new genesis as current state and seed the canonical
-        // device head cache. There is no AdvanceOutcome at genesis, so the
-        // head cache write is the explicit one-shot equivalent — settlement
-        // and reader paths look up the device via `bcr_device_heads`.
-        let genesis_state_hash = {
-            let mut sm = self.state_machine.lock();
-            let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
-            s.hash = genesis_state.hash;
-            let snapshot = s.clone();
-            sm.set_state(s);
-            snapshot.hash
-        };
-        self.write_genesis_device_head(genesis_state_hash)?;
-
-        // Optional dev-only seeding (idempotent)
-        if let Err(e) = self.maybe_dev_seed_after_genesis().await {
-            log::warn!("Dev seeding skipped: {}", e);
-        }
-
-        Ok(GenesisInfo {
-            genesis_hash: genesis_state.hash.to_vec(),
-            device_id,
-            public_key,
-            smt_root: smt_root.to_vec(),
-        })
-    }
 
     /// Install an already-computed canonical Genesis v2 [`GenesisState`] as the device's current
     /// state and seed the device-head cache. The caller (the `wallet.createGenesisV2` route) must
     /// construct this `CoreSDK` with the v2 `DeviceInfo` (DevID + AK public key) so the installed
     /// state + device head carry the canonical identity. Returns the installed genesis hash `G`.
     ///
-    /// No MPC, no storage nodes, no silicon: the GenesisState came from
-    /// `create_genesis_v2_self_attested` over the unlocked wallet seed.
+    /// The GenesisState came from `create_genesis_v3_self_attested` over the
+    /// unlocked wallet seed.
     pub fn install_v2_genesis(
         &self,
         genesis_state: &dsm::core::identity::genesis::GenesisState,
     ) -> Result<[u8; 32], DsmError> {
         let genesis_state_hash = {
             let mut sm = self.state_machine.lock();
-            let mut s = State::new_genesis(genesis_state.initial_entropy, self.device_info.clone());
+            let mut s = State::new_genesis(genesis_state.genesis_nonce, self.device_info.clone());
             s.hash = genesis_state.hash;
             let snapshot = s.clone();
             sm.set_state(s);
@@ -1338,321 +1845,6 @@ impl CoreSDK {
         };
         self.write_genesis_device_head(genesis_state_hash)?;
         Ok(genesis_state.hash)
-    }
-
-    /// Dev-only seeding of ERA token for local testing, idempotent via flag file
-    async fn maybe_dev_seed_after_genesis(&self) -> Result<(), DsmError> {
-        // Gate via env var DSM_DEV_SEED=1
-        let enabled = std::env::var("DSM_DEV_SEED")
-            .ok()
-            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        if !enabled {
-            return Ok(());
-        }
-
-        // Determine flag path
-        let flag_path = std::env::var("DSM_DEV_SEED_DIR")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(".dsm_dev"));
-        let _ = std::fs::create_dir_all(&flag_path);
-        let flag_file = flag_path.join("seeded.flag");
-        if flag_file.exists() {
-            return Ok(());
-        }
-
-        // Construct a Mint operation for ERA
-        use dsm::types::operations::Operation as O;
-        use dsm::types::token_types::Balance as Bal;
-
-        // Ensure we have a current state
-        let _cur = self.get_current_state()?;
-
-        let mut amt = Bal::zero();
-        amt.update(1_000_000, true); // 1_000_000 units for local testing
-
-        let mint = O::Mint {
-            amount: amt,
-            token_id: b"ERA".to_vec(),
-            authorized_by: crate::util::text_id::encode_base32_crockford(
-                &self.device_info.device_id,
-            )
-            .into_bytes(),
-            proof_of_authorization: blake3_cat(&[b"dev-seed", &self.device_info.device_id])
-                .to_vec(),
-            message: "dev seed".to_string(),
-        };
-
-        // Execute mint via relationship path (self-loop for authority mint)
-        let dev_id = self.device_info.device_id;
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
-        let deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit: era_pc,
-            direction: dsm::types::device_state::BalanceDirection::Credit,
-            amount: 1_000_000,
-        }];
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let mut sm = self.state_machine.lock();
-        // Same fail-closed prepare → write → commit pattern as
-        // `execute_on_relationship`. The dev-seed mint participates in BCR
-        // archival so reader paths see the seeded balance.
-        let outcome = sm.prepare_advance_relationship(
-            rel_key,
-            dev_id,
-            mint,
-            &deltas,
-            Some(init_tip),
-            None, // anchor_leaf — dev-seed mint is an ordinary ingress transition
-            None, // offline_spend — online mint, no allocation draw
-        )?;
-        // Dev-seed Mint is ingress (no capsule bump needed): bump_capsule = false.
-        Self::dual_write_advance_outcome(&outcome, false)?;
-        sm.commit_advance(&outcome);
-        let new_hash = outcome.new_chain_state.compute_chain_tip();
-        log::info!("Dev seeding applied; new chain tip {:02x?}", &new_hash[..4]);
-
-        // Write flag to ensure idempotence
-        std::fs::write(flag_file, b"seeded=1").map_err(|e| {
-            DsmError::internal(
-                format!("Failed to write seed flag: {e}"),
-                None::<std::convert::Infallible>,
-            )
-        })?;
-
-        Ok(())
-    }
-
-    /// Strict range query; no time, fail-closed if history unsupported
-    pub async fn query_state_range(
-        &self,
-        genesis_hash: Vec<u8>,
-        from_position: u64,
-        to_position: u64,
-        _include_proofs: bool,
-    ) -> Result<StateQueryInfo, DsmError> {
-        if genesis_hash.is_empty() {
-            return Err(DsmError::invalid_operation("Empty genesis hash"));
-        }
-        if from_position > to_position {
-            return Err(DsmError::invalid_operation(
-                "Invalid range: from_position > to_position",
-            ));
-        }
-
-        if from_position != to_position {
-            return Err(DsmError::state_machine(
-                "Historical range not supported by StateMachine",
-            ));
-        }
-
-        let state = self.get_current_state()?;
-        let sbytes = state.to_bytes()?;
-        let current_state_hash = self.hash_state(&sbytes)?;
-        let entry = StateEntry {
-            position: to_position,
-            state_hash: current_state_hash.clone(),
-            prev_hash: Vec::new(),
-            operation_data: Vec::new(),
-            tick: 0, // clockless
-            smt_proof: blake3_cat(&[b"proof", &sbytes]).to_vec(),
-        };
-        let smt_root = blake3_cat(&[b"smt_root", &sbytes]).to_vec();
-
-        Ok(StateQueryInfo {
-            current_state_hash,
-            current_position: to_position,
-            state_entries: vec![entry],
-            smt_root,
-        })
-    }
-
-    /// Contact verification (deterministic challenge/anchor)
-    pub async fn verify_and_add_contact(
-        &self,
-        contact_genesis: Vec<u8>,
-        challenge: Vec<u8>,
-    ) -> Result<ContactInfo, DsmError> {
-        if contact_genesis.is_empty() {
-            return Err(DsmError::invalid_operation("Empty contact genesis"));
-        }
-        if !self.verify_genesis(&contact_genesis).await? {
-            return Err(DsmError::invalid_operation("Invalid genesis hash"));
-        }
-        let public_key = self.extract_public_key_from_genesis(&contact_genesis)?;
-
-        // canonical local id = H("did" || device_id)
-        let mut id_data = b"did".to_vec();
-        id_data.extend_from_slice(&self.device_info.device_id);
-        let local_id =
-            dsm_blake3::domain_hash(dsm::common::domain_tags::TAG_DSM_LOCAL_ID, &id_data)
-                .as_bytes()
-                .to_vec();
-
-        let bilateral_anchor =
-            blake3_cat(&[b"bilateral_anchor", &contact_genesis, &local_id]).to_vec();
-        let challenge_response =
-            blake3_cat(&[b"challenge_response", &challenge, &local_id]).to_vec();
-
-        Ok(ContactInfo {
-            genesis_hash: contact_genesis,
-            public_key,
-            chain_tip: vec![],
-            challenge_response,
-            bilateral_anchor,
-        })
-    }
-
-    /// Validate a token policy strictly; returns file when present
-    pub async fn validate_token_policy(
-        &self,
-        policy_id: &str,
-    ) -> Result<Option<PolicyFile>, DsmError> {
-        if policy_id.is_empty() {
-            return Err(DsmError::invalid_operation("Empty policy_id"));
-        }
-        if let Some(tp) = self.policy_system.get_token_policy(policy_id).await? {
-            // Deterministic local proof material if you need it:
-            let _proof = self.generate_policy_verification_proof(
-                hash(policy_id.as_bytes()).as_bytes(),
-                hash(&self.device_info.device_id).as_bytes(),
-            )?;
-            return Ok(Some(tp.file));
-        }
-        Ok(None)
-    }
-
-    /* ------------------------ Not provided here (strict) ------------------ */
-
-    pub async fn sync_with_network(&self) -> Result<SyncInfo, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Network sync not available in CoreSDK",
-        ))
-    }
-
-    pub async fn get_network_status(&self) -> Result<NetworkStatus, DsmError> {
-        Ok(NetworkStatus {
-            network_type: "offline".into(),
-            connected_peers: 0,
-            connection_status: "disconnected".into(),
-            is_syncing: false,
-            last_sync_time: 0, // clockless
-        })
-    }
-
-    pub async fn discover_storage_nodes(
-        &self,
-        _network_type: String,
-    ) -> Result<DiscoveryResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Discovery not available in CoreSDK",
-        ))
-    }
-
-    pub async fn list_contacts(&self) -> Result<Vec<ContactInfo>, DsmError> {
-        // Fetch real contacts from local database
-        let records = client_db::get_all_contacts().map_err(|e| {
-            DsmError::storage(
-                format!("Failed to load contacts: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let mut out = Vec::with_capacity(records.len());
-        for r in records {
-            if r.genesis_hash.len() != 32 {
-                continue;
-            }
-
-            out.push(ContactInfo {
-                genesis_hash: r.genesis_hash,
-                public_key: r.public_key,
-                chain_tip: r.current_chain_tip.unwrap_or_default(),
-                challenge_response: vec![], // Not stored in DB record
-                bilateral_anchor: vec![],   // Computed on-demand or during verify
-            });
-        }
-        Ok(out)
-    }
-
-    pub async fn get_token_balance(
-        &self,
-        _token_id: Vec<u8>,
-        _genesis_hash: Vec<u8>,
-    ) -> Result<TokenBalanceInfo, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Token balance query not available in CoreSDK",
-        ))
-    }
-
-    pub async fn get_app_state(&self, _key: String) -> Result<AppStateResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "App state get not available in CoreSDK",
-        ))
-    }
-    pub async fn set_app_state(
-        &self,
-        _key: String,
-        _value: String,
-    ) -> Result<AppStateResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "App state set not available in CoreSDK",
-        ))
-    }
-    pub async fn delete_app_state(&self, _key: String) -> Result<AppStateResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "App state delete not available in CoreSDK",
-        ))
-    }
-
-    pub async fn create_backup(&self) -> Result<BackupResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Backup creation not available in CoreSDK",
-        ))
-    }
-    pub async fn restore_from_backup(
-        &self,
-        _backup_phrase: String,
-    ) -> Result<BackupResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Backup restore not available in CoreSDK",
-        ))
-    }
-    pub async fn verify_backup(&self, _backup_phrase: String) -> Result<BackupResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Backup verify not available in CoreSDK",
-        ))
-    }
-
-    pub async fn get_setting(&self, _key: String) -> Result<SettingResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Settings get not available in CoreSDK",
-        ))
-    }
-    pub async fn set_setting(
-        &self,
-        _key: String,
-        _value: String,
-    ) -> Result<SettingResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Settings set not available in CoreSDK",
-        ))
-    }
-    pub async fn delete_setting(&self, _key: String) -> Result<SettingResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Settings delete not available in CoreSDK",
-        ))
-    }
-
-    pub async fn handle_bluetooth_operation(
-        &self,
-        _operation: String,
-    ) -> Result<BluetoothResult, DsmError> {
-        Err(DsmError::invalid_operation(
-            "Bluetooth operations are not available in CoreSDK",
-        ))
     }
 }
 
@@ -1810,43 +2002,15 @@ impl CoreSDK {
         if guard.is_none() {
             // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
             // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
-            // producer. The factory is called once and cached (stateful appliance).
-            let mut a: Box<dyn crate::anchor::AnchorAppliance + Send> =
+            // producer. The factory is called once and cached (stateful appliance). Construction only —
+            // the anchor-state-leaf reconcile is done PER stage call below (see the comment there), not
+            // once at birth: the chip can advance between attach and a later transfer.
+            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
                 match crate::bridge::anchor_appliance_factory() {
                     Some(factory) => factory()?,
                     None => hardware_appliance_or_fail(&seed, dev)?,
                 };
-            // Reconcile the DeviceState anchor-state leaf to the appliance's CURRENT active state
-            // (v2 leaf: B, frontier h_i, counter floor u_i), sourced from the chip's own
-            // status()/pin(). The CHIP is the source of truth for the counter, so this uses its
-            // live `anchor_counter` (u), NOT a hardcoded 0:
-            //   * fresh provisioned chip -> u == 0, the genesis leaf;
-            //   * process restart with k prior offline-bearer transfers (possibly with ONLINE
-            //     transfers in between — those advance the device SMT but never touch the chip
-            //     counter) -> u == k, so the leaf adopts the true post-k state;
-            //   * device-state/chip divergence -> the hardware wins.
-            // Writing the current active state is idempotent when the leaf already matches.
-            {
-                let s = a.status()?;
-                let pin = a.pin();
-                let value = anchor_state_leaf(&pin.bundle, &s.root, s.anchor_counter);
-                log::info!(
-                    "[offline-bearer] anchor-state leaf reconciled to chip state: u(anchor_counter)={} (online-transfer-safe; chip is source of truth)",
-                    s.anchor_counter
-                );
-                let key = anchor_state_leaf_key(&pin.bundle);
-                {
-                    let mut sm = self.state_machine.lock();
-                    let ds = sm.device_head().ok_or_else(|| {
-                        DsmError::state_machine(
-                            "offline-bearer: DeviceState not initialized (genesis first)",
-                        )
-                    })?;
-                    let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
-                    sm.set_device_head(bootstrapped);
-                }
-                *guard = Some(a);
-            }
+            *guard = Some(a);
         }
 
         let app = guard.as_mut().ok_or_else(|| {
@@ -1854,9 +2018,56 @@ impl CoreSDK {
         })?;
         let pin = app.pin();
 
+        // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
+        // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
+        // online recovery. This does NOT cancel or erase here — an orphaned/committed record is left for
+        // the dedicated `resolve_prepared_on_reattach` seam (a Committed release must be re-emitted,
+        // never erased, §26). Conservative `prepared_owned_by_session = true`: never auto-cancel in stage.
+        let action = crate::anchor::recovery_action(app.recover()?, true);
+        if action != crate::anchor::RecoveryAction::Ready {
+            return Err(DsmError::invalid_operation(format!(
+                "offline-bearer stage: appliance not Ready ({action:?}) — resolve/re-emit via recovery \
+                 before staging a new transfer (fail closed to online)"
+            )));
+        }
+
         // Active state: the frontier this transfer consumes + the current counter floor.
         let before = app.status()?;
         let appliance_prev_root = before.root;
+
+        // PER-CALL reconcile (the fix for receiver `PrevStateUncommitted`): keep the device-head
+        // anchor-state leaf byte-equal to the value the certificate will claim —
+        // `anchor_state_leaf(B, before.root, before.anchor_counter)` at `anchor_state_leaf_key(B)`.
+        // `before` is a LIVE chip status read that drives cert.prev_frontier/anchor_counter, so the
+        // leaf the sim's Π_i proves must be reconciled to the SAME live state. This previously ran only
+        // once at first attach (`if guard.is_none()`), so any chip move afterward that was not mirrored
+        // into a persisted device head — a committed-but-failed attempt (COMMIT burns the counter +
+        // FINALIZE advances the frontier), a reflash-birth, or an online-only advance that rebuilt the
+        // head — left the stored leaf stale, Π_i proved a stale value, and the receiver rejected.
+        // `with_anchor_state_leaf` touches only `anchor_state_leaf_key(B)`; balances / relationship tips
+        // / offline_allocations are untouched (allocation conservation is unaffected).
+        {
+            let value = anchor_state_leaf(&pin.bundle, &before.root, before.anchor_counter);
+            let key = anchor_state_leaf_key(&pin.bundle);
+            let mut sm = self.state_machine.lock();
+            let ds = sm.device_head().ok_or_else(|| {
+                DsmError::state_machine(
+                    "offline-bearer: DeviceState not initialized (genesis first)",
+                )
+            })?;
+            let stored = ds.extra_leaves_snapshot().get(&key).copied();
+            // No-op guard: an idempotent same-value write preserves the SMT root, but the explicit
+            // skip makes the determinism guarantee obvious and avoids a needless head replacement.
+            if stored != Some(value) {
+                log::info!(
+                    "[offline-bearer] anchor-state leaf reconciled to live chip: u(anchor_counter)={} (stored={}, chip is source of truth)",
+                    before.anchor_counter,
+                    stored.map(|v| crate::util::text_id::encode_base32_crockford(&v[..6])).unwrap_or_else(|| "absent".into()),
+                );
+                let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
+                sm.set_device_head(bootstrapped);
+            }
+        }
 
         // Stage Δ°: the digest excludes `next_root`, so D is computable first and the successor
         // frontier is derived, never invented.
@@ -2017,31 +2228,6 @@ impl CoreSDK {
 
 /* ------------------------------ Private helpers ------------------------- */
 
-/// The sender-side appliance when NO hardware factory is installed. Test builds get the in-process
-/// mock so the release-path unit tests keep exercising the v2 producer; real device builds FAIL
-/// CLOSED — offline-bearer strictly requires the physical chip ("offline = chips").
-#[cfg(test)]
-fn hardware_appliance_or_fail(
-    seed: &impl Fn(&str) -> [u8; 32],
-    dev: [u8; 32],
-) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
-    use crate::anchor::{BirthConfig, InProcessAnchorAppliance};
-    Ok(Box::new(InProcessAnchorAppliance::birth(&BirthConfig {
-        partition_trng: seed("DSM/anchor/partition-trng/v1"),
-        host_nonce: seed("DSM/anchor/host-nonce/v1"),
-        device_id: dev,
-        policy_hash: seed("DSM/anchor/policy-hash/v1"),
-        partition_device_id: seed("DSM/anchor/partition-device-id/v1"),
-        anchor_id: seed("DSM/anchor/anchor-id/v1"),
-        partition_key_seed: seed("DSM/anchor/partition-key-seed/v1"),
-        enrolled_counter: 1_000_000,
-        genesis_root: seed("DSM/anchor/genesis-root/v1"),
-        chip_birth_witness: seed("DSM/anchor/chip-birth-witness/v1"),
-        chip_seed: seed("DSM/anchor/chip-seed/v1"),
-        online_id_pk: Vec::new(),
-    })?))
-}
-
 /// User-facing error when an offline-bearer send finds no anchor appliance connected. It rides the
 /// `DsmError` up through the confirm-build failure into the `BilateralEventFailed` event's message,
 /// where the frontend maps it to a "connect your anchor device" toast (Stage 4 Slice 3 signal a).
@@ -2049,7 +2235,8 @@ fn hardware_appliance_or_fail(
 pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
     "offline-bearer requires the anchor appliance; connect the anchor device (Pico) and retry (fail closed)";
 
-#[cfg(not(test))]
+/// The sender-side appliance when no hardware factory is installed: none.
+/// Offline-bearer requires the physical anchor device ("offline = chips").
 fn hardware_appliance_or_fail(
     _seed: &impl Fn(&str) -> [u8; 32],
     _dev: [u8; 32],
@@ -2058,57 +2245,6 @@ fn hardware_appliance_or_fail(
 }
 
 impl CoreSDK {
-    fn validate_transfer_request(
-        &self,
-        token_id: &[u8],
-        recipient_genesis: &[u8],
-        amount: u64,
-        nonce: &[u8],
-        sender_signature: &[u8],
-    ) -> Result<(), DsmError> {
-        // Phase 0 fail-closed recovery gate (spec condition R3): no value egress
-        // while identity recovery is in progress — prevents the split-acceptance
-        // recovery double-spend window (spec vector V1).
-        if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
-            return Err(DsmError::invalid_operation(reason));
-        }
-        if token_id.is_empty() {
-            return Err(DsmError::invalid_operation("Empty token ID"));
-        }
-        if recipient_genesis.is_empty() {
-            return Err(DsmError::invalid_operation("Empty recipient genesis"));
-        }
-        if amount == 0 {
-            return Err(DsmError::invalid_operation("Zero amount transfer"));
-        }
-        if nonce.is_empty() {
-            return Err(DsmError::invalid_operation("Empty nonce"));
-        }
-        if sender_signature.is_empty() {
-            return Err(DsmError::invalid_operation("Empty sender signature"));
-        }
-        Ok(())
-    }
-
-    async fn verify_genesis(&self, genesis_hash: &[u8]) -> Result<bool, DsmError> {
-        Ok(!genesis_hash.is_empty())
-    }
-
-    fn extract_public_key_from_genesis(&self, genesis_hash: &[u8]) -> Result<Vec<u8>, DsmError> {
-        if genesis_hash.len() < 32 {
-            return Err(DsmError::invalid_operation("Invalid genesis hash length"));
-        }
-        Ok(genesis_hash[0..32].to_vec())
-    }
-
-    fn generate_policy_verification_proof(
-        &self,
-        policy_hash: &[u8],
-        creator_genesis: &[u8],
-    ) -> Result<Vec<u8>, DsmError> {
-        Ok(blake3_cat(&[b"policy_verification", policy_hash, creator_genesis]).to_vec())
-    }
-
     fn token_metadata_from_proto(proto: &TokenMetadataProto) -> TokenMetadata {
         TokenMetadata {
             token_id: proto.token_id.clone(),
@@ -2133,7 +2269,6 @@ impl CoreSDK {
                 }
                 arr
             },
-            creation_tick: proto.creation_index,
             metadata_uri: proto.metadata_uri.clone().filter(|s| !s.is_empty()),
             policy_anchor: proto.policy_anchor.clone().filter(|s| !s.is_empty()),
             fields: proto
@@ -2150,6 +2285,36 @@ impl CoreSDK {
         token_id: &str,
     ) -> Option<TokenMetadata> {
         match op {
+            // The canonical creation operation. Recognising it here is what
+            // lets a token be recovered from the chain alone after a restart.
+            dsm::types::operations::Operation::CreateToken {
+                token_id: op_token_id,
+                symbol,
+                name,
+                decimals,
+                policy_commit,
+                metadata_uri,
+                ..
+            } => {
+                let op_token_id_str = String::from_utf8(op_token_id.clone()).ok()?;
+                if op_token_id_str != token_id && symbol != token_id {
+                    return None;
+                }
+                let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
+                Some(TokenMetadata {
+                    token_id: op_token_id_str,
+                    name: name.clone(),
+                    symbol: symbol.clone(),
+                    description: None,
+                    icon_url: None,
+                    decimals: *decimals,
+                    token_type: dsm::types::token_types::TokenType::Created,
+                    owner_id: self.device_info.device_id,
+                    metadata_uri: metadata_uri.clone(),
+                    policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
+                    fields: std::collections::HashMap::new(),
+                })
+            }
             dsm::types::operations::Operation::Create { metadata, .. } => {
                 let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
                 let token_metadata = Self::token_metadata_from_proto(&proto);
@@ -2190,15 +2355,46 @@ impl CoreSDK {
         }
     }
 
-    pub(crate) fn resolve_policy_commit_strict(
-        &self,
-        token_id: &[u8],
-    ) -> Result<[u8; 32], DsmError> {
+    pub fn resolve_policy_commit_strict(&self, token_id: &[u8]) -> Result<[u8; 32], DsmError> {
         let token_id = std::str::from_utf8(token_id)
             .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
 
         if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
             return Ok(commit);
+        }
+
+        // The registry is authoritative for the persisted token IDENTITY
+        // mapping — ticker, token id, policy commitment, metadata — while
+        // canonical DeviceState stays authoritative for balances and
+        // transitions. Ask it before walking the archive.
+        //
+        // A device that ADOPTED a token by its CPTA anchor holds a registry
+        // row and the anchored policy bytes, and has no CreateToken of its own
+        // to find: adoption registers an identity, it is not a transition on
+        // this device's chain. So an archive-only lookup resolved on the
+        // CREATING device and could never resolve on the RECEIVING one, and
+        // every incoming transfer of an adopted token fail-closed with
+        // "Missing canonical policy anchor" after the sender had already
+        // debited.
+        //
+        // This is not trusting a mutable cache. `load_policy_verified`
+        // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
+        // that do not hash to the commitment they are stored under, so a row
+        // that does not carry the real policy cannot resolve through here.
+        let registry = |e: anyhow::Error| {
+            DsmError::storage(format!("token registry: {e}"), None::<std::io::Error>)
+        };
+        let by_id =
+            crate::storage::client_db::token_registry::get_token(token_id).map_err(registry)?;
+        let by_ticker = crate::storage::client_db::token_registry::get_token_by_ticker(token_id)
+            .map_err(registry)?;
+        for row in [by_id, by_ticker].into_iter().flatten() {
+            if crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
+                .map_err(registry)?
+                .is_some()
+            {
+                return Ok(row.policy_commit);
+            }
         }
 
         // Per §4.3 there is no `state_number`. Walk the per-relationship
@@ -2228,17 +2424,8 @@ impl CoreSDK {
         )))
     }
 
-    /// Proto-only signing for DSM ops (no bincode)
-    pub async fn sign_operation(
-        &self,
-        operation: &dsm::types::operations::Operation,
-    ) -> Result<Vec<u8>, DsmError> {
-        let op_bytes = encode_dsm_operation_det(operation);
-        self.sign_raw(&op_bytes).await
-    }
-
     pub async fn local_genesis_hash(&self) -> Result<Vec<u8>, DsmError> {
-        // Return the MPC-issued genesis hash from the genesis_records table.
+        // Return the genesis hash `G` from the genesis_records table.
         // This MUST match the genesis hash that contacts store during pairing,
         // otherwise b0x routing addresses will diverge between sender and receiver.
         match crate::storage::client_db::get_verified_genesis_record() {
@@ -2250,7 +2437,7 @@ impl CoreSDK {
                 )),
             },
             Ok(None) => Err(DsmError::internal(
-                "no genesis record found; MPC genesis has not been created yet",
+                "no genesis record found; genesis has not been created yet",
                 None::<std::convert::Infallible>,
             )),
             Err(e) => Err(DsmError::internal(
@@ -2258,12 +2445,6 @@ impl CoreSDK {
                 None::<std::convert::Infallible>,
             )),
         }
-    }
-
-    pub async fn local_chain_tip(&self) -> Result<Vec<u8>, DsmError> {
-        let state = self.get_current_state()?;
-        let state_bytes = state.to_bytes()?;
-        self.hash_state(&state_bytes)
     }
 
     fn sync_token_projection_best_effort(
@@ -2274,19 +2455,22 @@ impl CoreSDK {
         context: &str,
     ) {
         let token_id_str = String::from_utf8_lossy(token_id);
-        let canonical_token_id = if token_id_str.trim().is_empty() {
-            "ERA"
-        } else {
-            token_id_str.as_ref()
-        };
+        let canonical_token_id = token_id_str.trim();
+        if canonical_token_id.is_empty() {
+            log::error!(
+                "[{context}] CRITICAL: the operation names no token; no projection to sync"
+            );
+            return;
+        }
 
         let existing_locked = match client_db::get_locked_balance(local_b32, canonical_token_id) {
             Ok(value) => value,
             Err(error) => {
                 log::error!(
-                    "[{context}] CRITICAL: failed to read {canonical_token_id} locked balance: {error}"
+                    "[{context}] CRITICAL: failed to read {canonical_token_id} locked balance \
+                     ({error}); the projection is left for the repair sweep"
                 );
-                0
+                return;
             }
         };
 
@@ -2311,700 +2495,426 @@ impl CoreSDK {
                 "[{context}] CRITICAL: failed to sync {canonical_token_id} projection: {error}"
             );
         } else {
-            log::info!(
-                "[{context}] token projection synced: {canonical_token_id} state_number={}",
-                new_state.hash[0] as u64
-            );
+            log::info!("[{context}] token projection synced: {canonical_token_id}");
         }
     }
 
-    /// Apply a decoded Operation with replay protection and state machine integration.
-    /// This executes the operation through the state machine for validation and state transition,
-    /// then persists the results to the database with idempotency checks.
+    /// The ONE production canonical apply for an inbound online transfer —
+    /// STAGED (§16.6 defect zero, recipient side).
     ///
-    /// Returns the canonical [`AdvanceOutcome`] from the underlying
-    /// `execute_on_relationship` call so callers (notably the online-receiver
-    /// inbox drain in `storage_routes`) can build the stitched ReceiptCommit
-    /// (§4.2) directly from `smt_proofs` + `parent_r_a` + `child_r_a` — no
-    /// shadow SMT replace needed.
-    pub fn apply_operation_with_replay_protection(
+    /// ```text
+    /// lookup (Duplicate/Conflict return HERE, nothing built)
+    ///   → pin (signed parent == pinned counterparty head)
+    ///   → prepare (pure)
+    ///   → build_acceptance(&AdvanceOutcome, outcome.relationship_pair())   pre-write:
+    ///                                                                     DB reads + signing OK
+    ///   → ONE tx { state advance, nonce, CanonicalApplyRecord (with B pair),
+    ///              write_acceptance(tx, &outcome, &artifacts) }
+    /// ```
+    ///
+    /// The builder sees the EXACT outcome that commits, so what it signs (the
+    /// recipient's canonical pair) is the pair of the very advance that lands;
+    /// the writer runs inside the same transaction, so a failed apply leaves no
+    /// journal, no inert row and no re-sign question. `Duplicate` returns
+    /// before the builder is invoked; `Conflict` never builds.
+    ///
+    /// `sender_transition_entropy` is the receipt's canonical field 21: the one
+    /// value Core derived inside the sender's `advance` (Part VII step 3). It is
+    /// what `C_pre` is computed over here (§39.3), and it lets this side
+    /// recompute the sender's `child_tip` from `parent_tip`, the signed
+    /// operation and that value — a receipt whose child is not that successor
+    /// is refused before anything is built.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_incoming_transfer_staged<A>(
         &self,
         op: dsm::types::operations::Operation,
+        terms: &dsm::types::operations::TransferTerms,
         tx_id: &crate::types::identifiers::TransactionId,
-        _seq: u64,
         sender_device_id: &str,
-        sender_chain_tip: &str,
-    ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
-        // Fail-closed on obviously malformed inputs.
-        if sender_device_id.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "apply_operation_with_replay_protection: empty sender_device_id",
-            ));
-        }
-        if sender_chain_tip.is_empty() {
-            return Err(DsmError::invalid_operation(
-                "apply_operation_with_replay_protection: empty sender_chain_tip",
-            ));
-        }
-
-        // Execute via relationship-aware path. For incoming transfers (this is a
-        // recipient-side apply), the rel_key is k_{sender↔local_device}.
-        let local_device_id_bytes_pre = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-        let sender_id_bytes_pre =
-            crate::util::text_id::decode_base32_crockford(sender_device_id)
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-
-        let (rel_key, counterparty, deltas) = {
-            let mut local_arr = [0u8; 32];
-            if local_device_id_bytes_pre.len() == 32 {
-                local_arr.copy_from_slice(&local_device_id_bytes_pre);
-            }
-            let mut sender_arr = [0u8; 32];
-            if sender_id_bytes_pre.len() == 32 {
-                sender_arr.copy_from_slice(&sender_id_bytes_pre);
-            }
-            let rk =
-                dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
-            // For incoming transfers, we're the recipient → Credit
-            let d: Vec<dsm::types::device_state::BalanceDelta> = match &op {
-                dsm::types::operations::Operation::Transfer {
-                    token_id, amount, ..
-                } => {
-                    let pc = self.resolve_policy_commit_strict(token_id)?;
-                    vec![dsm::types::device_state::BalanceDelta {
-                        policy_commit: pc,
-                        direction: dsm::types::device_state::BalanceDirection::Credit,
-                        amount: amount.value(),
-                    }]
-                }
-                _ => vec![],
-            };
-            (rk, sender_arr, d)
+        canonical_operation_bytes: &[u8],
+        signed_parent_tip: [u8; 32],
+        signed_child_tip: [u8; 32],
+        sender_transition_entropy: [u8; 32],
+        build_acceptance: impl FnOnce(
+            &dsm::types::device_state::AdvanceOutcome,
+            ([u8; 32], [u8; 32]),
+        ) -> Result<A, DsmError>,
+        write_acceptance: impl Fn(
+            &rusqlite::Transaction<'_>,
+            &dsm::types::device_state::AdvanceOutcome,
+            &A,
+        ) -> Result<(), DsmError>,
+        admission: Option<AdmissionPlan<'_>>,
+    ) -> Result<crate::sdk::apply_outcome::ApplyOutcome, DsmError> {
+        use crate::sdk::apply_outcome::ApplyOutcome;
+        use crate::storage::client_db::{
+            self as cdb, CanonicalApplyInsertOutcome, CanonicalApplyLookup, CanonicalApplyRecord,
         };
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &{
-                let mut a = [0u8; 32];
-                if local_device_id_bytes_pre.len() == 32 {
-                    a.copy_from_slice(&local_device_id_bytes_pre);
-                }
-                a
-            },
-            &counterparty,
-        );
-        let (new_state, outcome) = self
-            .execute_on_relationship(rel_key, counterparty, op.clone(), &deltas, Some(init_tip))
-            .map_err(|e| {
-                DsmError::invalid_operation(format!(
-                    "apply_operation_with_replay_protection: state machine execution failed: {e}"
-                ))
-            })?;
 
-        // Then handle database persistence based on operation type
-        match op {
+        // ---- validate the request (fail closed) ----
+        let (amount_val, to_device_id, signed_policy_commit) = match &op {
             dsm::types::operations::Operation::Transfer {
-                nonce,
                 amount,
                 to_device_id,
-                token_id,
+                policy_commit,
                 ..
-            } => {
-                if nonce.is_empty() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: empty transfer nonce",
-                    ));
-                }
-                let amount_val = amount.value();
-                if amount_val == 0 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: zero transfer amount",
-                    ));
-                }
+            } => (amount.value(), to_device_id.clone(), *policy_commit),
+            _ => {
+                return Err(DsmError::invalid_operation(
+                    "apply_incoming_transfer_full_state: only Transfer operations are accepted",
+                ))
+            }
+        };
+        // The nonce and the token are read from terms that open the signed
+        // commitment, and from nothing else (pre-audit item 4).
+        terms.open(&op).map_err(|e| {
+            DsmError::invalid_operation(format!("apply_incoming_transfer_full_state: {e}"))
+        })?;
+        let nonce = terms.nonce.clone();
+        let token_id = terms.token_id.clone();
+        if nonce.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: empty transfer nonce",
+            ));
+        }
+        if amount_val == 0 {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: zero transfer amount",
+            ));
+        }
+        if canonical_operation_bytes.is_empty() {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: empty canonical operation bytes",
+            ));
+        }
+        let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
+            .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
+        if local_device_id_bytes.len() != 32 {
+            return Err(DsmError::state_machine(
+                "local device_id must be 32 bytes (AppState corrupt)",
+            ));
+        }
+        let local_for_check = <[u8; 32]>::try_from(local_device_id_bytes.as_slice())
+            .map_err(|e| DsmError::state_machine(format!("local device_id: {e}")))?;
+        if !addressed_to(&to_device_id, &local_for_check) {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: transfer not addressed to this device",
+            ));
+        }
+        let sender_id_bytes = crate::util::text_id::decode_base32_crockford(sender_device_id)
+            .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
+        if sender_id_bytes.len() != 32 {
+            return Err(DsmError::invalid_operation(
+                "apply_incoming_transfer_full_state: sender_device_id must decode to 32 bytes",
+            ));
+        }
+        let mut local_arr = [0u8; 32];
+        local_arr.copy_from_slice(&local_device_id_bytes);
+        let mut sender_arr = [0u8; 32];
+        sender_arr.copy_from_slice(&sender_id_bytes);
 
-                // Ensure the transfer is addressed to us (recipient-only apply).
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-                if to_device_id.as_slice() != local_device_id_bytes.as_slice() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: transfer not addressed to this device",
-                    ));
-                }
+        // ---- derive the PRE-EXECUTION request identity (no roots) ----
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&local_arr, &sender_arr);
+        // AUTHORITY SOURCING: the request pair comes from the SIGNED receipt's
+        // ASYMMETRIC canonical tips — the same formula-space as the DeviceState
+        // embedded relationship lineage this apply advances. The SYMMETRIC
+        // (`compute_successor_tip`) lineage is a projection/routing space and is
+        // NEVER derived or compared here (cross-space comparison was the
+        // AWYPCNK8 false-conflict bug). C_pre is bound to the signed parent
+        // and takes the sender's transition entropy — the one value of the
+        // transition (§39.3) — never the transfer nonce, which stays in the
+        // operation bytes where it is already hashed (§39.4).
+        let parent_tip = signed_parent_tip;
+        let child_tip = signed_child_tip;
+        let precommit_digest = dsm::core::bilateral_transaction_manager::compute_precommit(
+            &parent_tip,
+            canonical_operation_bytes,
+            &sender_transition_entropy,
+        );
+        let operation_digest = {
+            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
+                dsm::crypto::domain::TaggedHashDomain::from_static(
+                    b"DSM/canonical-apply-op-digest/v1",
+                ),
+            );
+            h.update(canonical_operation_bytes);
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&h.finalize().as_bytes()[..32]);
+            out
+        };
+        // The nonce is spent in this relationship only (security pre-audit item
+        // 5): another contact's transfer cannot spend it first.
+        let nonce_hash = cdb::relationship_nonce_hash(&rel_key, &nonce);
+        let canonical_apply_id = cdb::compute_canonical_apply_id(
+            &rel_key,
+            &parent_tip,
+            &child_tip,
+            &precommit_digest,
+            &operation_digest,
+            &sender_arr,
+            &local_arr,
+            &nonce_hash,
+        );
 
-                // Decode sender id to raw bytes for AF-2 table.
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
+        // ---- lookup BEFORE inspecting any mutable state or executing ----
+        match cdb::lookup_canonical_apply_status(
+            &canonical_apply_id,
+            &rel_key,
+            &parent_tip,
+            &nonce_hash,
+        )
+        .map_err(|e| {
+            DsmError::internal(
+                format!("canonical apply lookup failed: {e}"),
+                None::<std::convert::Infallible>,
+            )
+        })? {
+            CanonicalApplyLookup::Duplicate(record) => {
+                log::info!(
+                    "[apply_full_state] duplicate of already-applied op (tx={}); returning stored record, no re-execution",
+                    String::from_utf8_lossy(tx_id.as_bytes()),
+                );
+                return Ok(ApplyOutcome::AlreadyAppliedSameOperation { record: *record });
+            }
+            CanonicalApplyLookup::Conflict => {
+                return Ok(ApplyOutcome::Conflict {
+                    reason: "a different operation identity already consumed this (relationship, \
+                             parent) or nonce"
+                        .to_string(),
+                });
+            }
+            CanonicalApplyLookup::Fresh => {}
+        }
+
+        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            &local_arr,
+            &sender_arr,
+        );
+        // §16.6 A-side head pin (the space-correct successor check).
+        // The recipient cannot recompute the sender's child — chain tips are
+        // per-device values — but it CAN pin the sender's asymmetric head and
+        // require the signed parent to be exactly it. Before any transition has
+        // been applied the pin is the spec-canonical genesis seed, the single
+        // tip both sides derive identically. A stale, replayed, reordered, or
+        // forked sender lineage fails closed HERE, before execution.
+        let pinned_a_head = cdb::pinned_counterparty_a_head(&rel_key)
+            .map_err(|e| {
+                DsmError::internal(
+                    format!("A-side head pin failed: {e}"),
+                    None::<std::convert::Infallible>,
                 )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
+            })?
+            .unwrap_or(init_tip);
+        if parent_tip != pinned_a_head {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed parent ({}..) is not the pinned counterparty A-side head ({}..) — \
+                     stale, replayed, or forked sender lineage",
+                    crate::util::text_id::encode_base32_crockford(&parent_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&pinned_a_head[..4]),
+                ),
+            });
+        }
+        // §39.3: the signed child IS the v2 successor of the signed parent under
+        // the signed operation and the carried transition entropy. The sender's
+        // chain state hashes ITS counterparty devid (this device), the signed
+        // operation bytes (signature included — `op` is byte-identical to what
+        // the sender advanced, `decode_and_bind_signed` guarantees it) and the
+        // entropy Core derived for that step. A receipt whose child is anything
+        // else names a successor no honest advance produced.
+        let expected_child = successor_child_tip(
+            &rel_key,
+            &parent_tip,
+            &local_arr,
+            &op.to_bytes(),
+            &sender_transition_entropy,
+        );
+        if child_tip != expected_child {
+            return Ok(ApplyOutcome::Conflict {
+                reason: format!(
+                    "signed child ({}..) is not the successor of the signed parent under the \
+                     signed operation and the carried transition entropy ({}..)",
+                    crate::util::text_id::encode_base32_crockford(&child_tip[..4]),
+                    crate::util::text_id::encode_base32_crockford(&expected_child[..4]),
+                ),
+            });
+        }
 
-                // Replay check: refuse if nonce already spent.
-                let already_spent = client_db::is_nonce_spent(&nonce).map_err(|e| {
+        // ---- fresh: execute under the global lock with the single full-state tx ----
+        // The credit is in the token the SIGNED operation commits to — the same
+        // policy commitment Core's write set, provenance and conservation read —
+        // never a local resolution of its token id.
+        let deltas = vec![dsm::types::device_state::BalanceDelta {
+            policy_commit: signed_policy_commit,
+            direction: dsm::types::device_state::BalanceDirection::Credit,
+            amount: amount_val,
+        }];
+        let tx_id_str = String::from_utf8_lossy(tx_id.as_bytes()).into_owned();
+        // The record every in-tx write derives from — built ONCE from the
+        // outcome so the durable row and the returned value cannot drift.
+        let record_for = |outcome: &dsm::types::device_state::AdvanceOutcome| {
+            let (applied_parent_tip_b, applied_child_tip_b) = outcome.relationship_pair();
+            CanonicalApplyRecord {
+                relationship_key: rel_key,
+                parent_tip,
+                child_tip,
+                precommit_digest,
+                operation_digest,
+                sender_device: sender_arr,
+                recipient_device: local_arr,
+                nonce_hash,
+                applied_parent_root_b: outcome.parent_r_a,
+                applied_child_root_b: outcome.child_r_a,
+                applied_parent_tip_b,
+                applied_child_tip_b,
+            }
+        };
+        let build = |outcome: &dsm::types::device_state::AdvanceOutcome| -> Result<A, DsmError> {
+            build_acceptance(outcome, outcome.relationship_pair())
+        };
+        let in_tx_extra = {
+            let nonce = nonce.clone();
+            let tx_id_str = tx_id_str.clone();
+            move |tx: &rusqlite::Transaction<'_>,
+                  outcome: &dsm::types::device_state::AdvanceOutcome,
+                  artifacts: &A|
+                  -> Result<(), DsmError> {
+                // Nonce consumption INSIDE the full-state transaction.
+                let spent = cdb::is_nonce_spent_with_conn(tx, &rel_key, &nonce).map_err(|e| {
                     DsmError::internal(
-                        format!("nonce check failed: {e}"),
+                        format!("in-tx nonce check failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
                 })?;
-                if already_spent {
+                if spent {
                     return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: replay detected (nonce already spent)",
+                        "full-state apply race: nonce consumed concurrently (fail closed)",
                     ));
                 }
-
-                // We don't currently have an authoritative local chain tip for the bilateral inbox
-                // path in this function signature. Use the sender-provided chain tip *only* as
-                // input to the deterministic tip derivation in atomic_receive_transfer.
-                let sender_chain_tip_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_chain_tip,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_chain_tip not valid base32"))?;
-                if sender_chain_tip_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_chain_tip must decode to 32 bytes",
-                    ));
-                }
-
-                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
-                let local_b32 =
-                    crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
-                // Resolve policy_commit for hierarchical domain separation in chain tip.
-                let pc = self.resolve_policy_commit_strict(&token_id)?;
-                let tx_id_lossy = String::from_utf8_lossy(tx_id.as_bytes());
-                let _new_tip = client_db::atomic_receive_transfer(
-                    &local_b32,
+                cdb::mark_nonce_spent_with_conn(
+                    tx,
+                    &rel_key,
                     &nonce,
-                    &tx_id_lossy,
-                    &sender_id_bytes,
+                    &tx_id_str,
+                    &sender_arr,
                     amount_val,
-                    &sender_chain_tip_bytes,
-                    &pc,
                 )
                 .map_err(|e| {
                     DsmError::internal(
-                        format!("atomic receive failed: {e}"),
+                        format!("in-tx nonce consume failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
                 })?;
-
-                self.sync_token_projection_best_effort(
-                    &local_b32,
-                    &token_id,
-                    &new_state,
-                    "apply_operation",
-                );
-
-                log::info!(
-                    "[apply_operation] ✅ applied transfer tx={} token={} amount={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&token_id),
-                    amount_val,
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Receive {
-                nonce,
-                amount,
-                from_device_id,
-                token_id,
-                ..
-            } => {
-                if nonce.is_empty() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: empty receive nonce",
-                    ));
-                }
-                let amount_val = amount.value();
-                if amount_val == 0 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: zero receive amount",
-                    ));
-                }
-
-                // Ensure the receive is from the expected sender
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
-                let from_device_id_str = String::from_utf8_lossy(&from_device_id);
-                let from_device_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    &from_device_id_str,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("from_device_id not valid base32"))?;
-                if from_device_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: from_device_id must decode to 32 bytes",
-                    ));
-                }
-                if from_device_id_bytes.as_slice() != sender_id_bytes.as_slice() {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: receive from_device_id mismatch",
-                    ));
-                }
-
-                // Replay check: refuse if nonce already spent.
-                let already_spent = client_db::is_nonce_spent(&nonce).map_err(|e| {
+                // Canonical apply record with the AUTHORITATIVE applied B roots
+                // and B pair from the state mutation itself.
+                let record = record_for(outcome);
+                match cdb::insert_canonical_apply_identity_with_conn(tx, &record).map_err(|e| {
                     DsmError::internal(
-                        format!("nonce check failed: {e}"),
+                        format!("in-tx canonical apply insert failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
-                })?;
-                if already_spent {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: replay detected (nonce already spent)",
-                    ));
-                }
-
-                // Get local device info for balance update
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                let sender_chain_tip_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_chain_tip,
-                )
-                .ok_or_else(|| DsmError::invalid_operation("sender_chain_tip not valid base32"))?;
-                if sender_chain_tip_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_chain_tip must decode to 32 bytes",
-                    ));
-                }
-
-                // Apply atomically in SQLite: marks nonce spent and records receive metadata.
-                let local_b32 =
-                    crate::util::text_id::encode_base32_crockford(&local_device_id_bytes);
-                // Resolve policy_commit for hierarchical domain separation in chain tip.
-                let pc = self.resolve_policy_commit_strict(&token_id)?;
-                let tx_id_lossy = String::from_utf8_lossy(tx_id.as_bytes());
-                let _new_tip = client_db::atomic_receive_transfer(
-                    &local_b32,
-                    &nonce,
-                    &tx_id_lossy,
-                    &sender_id_bytes,
-                    amount_val,
-                    &sender_chain_tip_bytes,
-                    &pc,
-                )
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("atomic receive failed: {e}"),
-                        None::<std::convert::Infallible>,
-                    )
-                })?;
-
-                self.sync_token_projection_best_effort(
-                    &local_b32,
-                    &token_id,
-                    &new_state,
-                    "apply_operation",
-                );
-
-                log::info!(
-                    "[apply_operation] ✅ applied receive tx={} token={} amount={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&token_id),
-                    amount_val,
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Create { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied create operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::AddRelationship {
-                from_id: _,
-                to_id,
-                relationship_type,
-                metadata,
-                proof,
-                mode: _,
-                message,
-                ..
-            } => {
-                // Add the sender as a contact if they're adding a relationship with us
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                // Check if this relationship is addressed to us
-                if to_id.as_slice() == local_device_id_bytes.as_slice() {
-                    // Create or update contact record
-                    let sender_id_bytes =
-                        crate::util::text_id::decode_base32_crockford(sender_device_id)
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation("sender_device_id not valid base32")
-                            })?;
-                    if sender_id_bytes.len() != 32 {
+                })? {
+                    CanonicalApplyInsertOutcome::Inserted => {}
+                    CanonicalApplyInsertOutcome::DuplicateSameOperation(_)
+                    | CanonicalApplyInsertOutcome::Conflict => {
                         return Err(DsmError::invalid_operation(
-                            "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                        ));
+                            "full-state apply race: canonical apply identity inserted \
+                             concurrently (fail closed)",
+                        ))
                     }
-
-                    let contact = client_db::ContactRecord {
-                        contact_id: format!("contact_{}", sender_device_id),
-                        device_id: sender_id_bytes.clone(),
-                        alias: String::from_utf8_lossy(relationship_type.as_slice()).into_owned(),
-                        genesis_hash: if metadata.len() >= 32 {
-                            // Genesis hash embedded in first 32 bytes of metadata
-                            metadata[..32].to_vec()
-                        } else {
-                            // Derive deterministic genesis hash from sender device ID
-                            dsm_blake3::domain_hash(
-                                "DSM/genesis-counterparty",
-                                &[b"genesis/", sender_id_bytes.as_slice()].concat(),
-                            )
-                            .as_bytes()
-                            .to_vec()
-                        },
-                        public_key: if proof.len() >= 32 {
-                            // Public key embedded in first 32 bytes of proof
-                            proof[..32].to_vec()
-                        } else {
-                            vec![]
-                        },
-                        current_chain_tip: Some(
-                            crate::util::text_id::decode_base32_crockford(sender_chain_tip)
-                                .ok_or_else(|| {
-                                    DsmError::invalid_operation("sender_chain_tip not valid base32")
-                                })?,
-                        ),
-                        added_at: crate::util::deterministic_time::tick(),
-                        verified: true,
-                        verification_proof: Some(proof.clone()),
-                        metadata: {
-                            let mut meta = std::collections::HashMap::new();
-                            meta.insert("relationship_type".to_string(), relationship_type.clone());
-                            meta.insert("message".to_string(), message.as_bytes().to_vec());
-                            if !metadata.is_empty() {
-                                meta.insert("metadata".to_string(), metadata.clone());
-                            }
-                            meta
-                        },
-                        ble_address: None,
-                        status: "Active".to_string(),
-                        needs_online_reconcile: false,
-                        last_seen_online_counter: crate::util::deterministic_time::tick(),
-                        last_seen_ble_counter: 0,
-                        kyber_public_key: Vec::new(),
-                        previous_chain_tip: None,
-                    };
-
-                    client_db::store_contact(&contact).map_err(|e| {
-                        DsmError::internal(
-                            format!("failed to store contact: {e}"),
-                            None::<std::convert::Infallible>,
-                        )
-                    })?;
-
-                    log::info!(
-                        "[apply_operation] ✅ added relationship/contact tx={} type={} from={}",
-                        String::from_utf8_lossy(tx_id.as_bytes()),
-                        String::from_utf8_lossy(relationship_type.as_slice()),
-                        sender_device_id
-                    );
-                } else {
-                    log::info!(
-                        "[apply_operation] ℹ️  relationship not addressed to us tx={} from={}",
-                        String::from_utf8_lossy(tx_id.as_bytes()),
-                        sender_device_id
-                    );
                 }
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::CreateRelationship {
-                counterparty_id,
-                commitment,
-                proof,
-                mode: _,
-                message,
-                ..
-            } => {
-                // Similar to AddRelationship, create a contact record
-                let local_device_id_bytes = crate::sdk::app_state::AppState::get_device_id()
-                    .ok_or_else(|| DsmError::state_machine("missing local device_id (AppState)"))?;
-                if local_device_id_bytes.len() != 32 {
-                    return Err(DsmError::state_machine(
-                        "local device_id must be 32 bytes (AppState corrupt)",
-                    ));
-                }
-
-                let sender_id_bytes = crate::util::text_id::decode_base32_crockford(
-                    sender_device_id,
+                // The peer's canonical head: signed parent → signed child, CAS'd
+                // in THIS transaction. The pre-execution pin above read the same
+                // authority outside the tx; the CAS closes that window — a head
+                // that moved underneath is a retryable apply error, never a
+                // sticky conflict, and nothing here commits.
+                match cdb::cas_advance_counterparty_canonical_head_with_conn(
+                    tx,
+                    &rel_key,
+                    &sender_arr,
+                    &parent_tip,
+                    &child_tip,
+                    &canonical_apply_id,
+                    &init_tip,
                 )
-                .ok_or_else(|| DsmError::invalid_operation("sender_device_id not valid base32"))?;
-                if sender_id_bytes.len() != 32 {
-                    return Err(DsmError::invalid_operation(
-                        "apply_operation_with_replay_protection: sender_device_id must decode to 32 bytes",
-                    ));
-                }
-
-                let contact = client_db::ContactRecord {
-                    contact_id: format!("contact_{}", sender_device_id),
-                    device_id: sender_id_bytes.clone(),
-                    alias: String::from_utf8_lossy(&counterparty_id).into_owned(),
-                    genesis_hash: if commitment.len() >= 32 {
-                        // Genesis hash embedded in first 32 bytes of commitment
-                        commitment[..32].to_vec()
-                    } else {
-                        // Derive deterministic genesis hash from sender device ID
-                        dsm_blake3::domain_hash(
-                            "DSM/genesis-counterparty",
-                            &[b"genesis/", sender_id_bytes.as_slice()].concat(),
-                        )
-                        .as_bytes()
-                        .to_vec()
-                    },
-                    public_key: if proof.len() >= 32 {
-                        // Public key embedded in first 32 bytes of proof
-                        proof[..32].to_vec()
-                    } else {
-                        vec![]
-                    },
-                    current_chain_tip: Some(
-                        crate::util::text_id::decode_base32_crockford(sender_chain_tip)
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation("sender_chain_tip not valid base32")
-                            })?,
-                    ),
-                    added_at: crate::util::deterministic_time::tick(),
-                    verified: true,
-                    verification_proof: Some(proof.clone()),
-                    metadata: {
-                        let mut meta = std::collections::HashMap::new();
-                        meta.insert("counterparty_id".to_string(), counterparty_id.clone());
-                        meta.insert("message".to_string(), message.as_bytes().to_vec());
-                        if !commitment.is_empty() {
-                            meta.insert("commitment".to_string(), commitment.clone());
-                        }
-                        meta
-                    },
-                    ble_address: None,
-                    status: "Active".to_string(),
-                    needs_online_reconcile: false,
-                    last_seen_online_counter: crate::util::deterministic_time::tick(),
-                    last_seen_ble_counter: 0,
-                    kyber_public_key: Vec::new(),
-                    previous_chain_tip: None,
-                };
-
-                client_db::store_contact(&contact).map_err(|e| {
+                .map_err(|e| {
                     DsmError::internal(
-                        format!("failed to store contact: {e}"),
+                        format!("in-tx counterparty canonical head CAS failed: {e}"),
                         None::<std::convert::Infallible>,
                     )
-                })?;
+                })? {
+                    cdb::CasCanonicalHeadOutcome::Advanced
+                    | cdb::CasCanonicalHeadOutcome::GenesisInit
+                    | cdb::CasCanonicalHeadOutcome::AlreadyAtTarget => {}
+                    cdb::CasCanonicalHeadOutcome::Conflict { current } => {
+                        return Err(DsmError::internal(
+                            format!(
+                                "counterparty canonical head moved during apply (now {}..) — \
+                                 nothing committed; retry",
+                                current
+                                    .map(|c| crate::util::text_id::encode_base32_crockford(&c[..4]))
+                                    .unwrap_or_else(|| "none".to_string())
+                            ),
+                            None::<std::convert::Infallible>,
+                        ))
+                    }
+                }
+                // The recipient's acceptance artifacts (journal), same tx.
+                write_acceptance(tx, outcome, artifacts)
+            }
+        };
 
-                log::info!(
-                    "[apply_operation] ✅ created relationship/contact tx={} counterparty={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&counterparty_id),
-                    sender_device_id
+        let exec = self.execute_on_relationship_staged_with_admission(
+            rel_key,
+            sender_arr,
+            op,
+            &deltas,
+            build,
+            in_tx_extra,
+            admission,
+        );
+
+        match exec {
+            Ok(staged) => {
+                // Post-commit convergence (best-effort projection; NEVER invalidates
+                // the committed canonical transition).
+                let local_b32 = crate::util::text_id::encode_base32_crockford(&local_arr);
+                self.sync_token_projection_best_effort(
+                    &local_b32,
+                    &token_id,
+                    &staged.state,
+                    "apply_full_state",
                 );
-                Ok(outcome.clone())
+                let record = record_for(&staged.outcome);
+                log::info!(
+                    "[apply_full_state] ✅ applied transfer tx={} amount={} from={} (single full-state tx)",
+                    tx_id_str,
+                    amount_val,
+                    sender_device_id,
+                );
+                Ok(ApplyOutcome::Applied {
+                    record,
+                    advance: Box::new(staged.outcome),
+                })
             }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data: _,
-                message: _,
-                ..
-            } => {
-                // Generic operations are allowed but may not require specific database persistence
-                // The state machine validation already occurred above
-                log::info!(
-                    "[apply_operation] ✅ applied generic operation tx={} type={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    String::from_utf8_lossy(&operation_type),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            // For operations that don't require recipient-side database persistence,
-            // we still allow them through since state machine validation passed
-            dsm::types::operations::Operation::Mint { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied mint operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Burn { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied burn operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Lock { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied lock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Unlock { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::LockToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied lock_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::UnlockToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlock_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::CreateToken { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied create_token operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Update { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied update operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::RemoveRelationship { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied remove_relationship operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Recovery { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied recovery operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Delete { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied delete operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Link { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied link operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Unlink { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied unlink operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Invalidate { .. } => {
-                log::info!(
-                    "[apply_operation] ✅ applied invalidate operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Genesis => {
-                log::info!(
-                    "[apply_operation] ✅ applied genesis operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::Noop => {
-                log::info!(
-                    "[apply_operation] ✅ applied noop operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvCreate { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_create operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvUnlock { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_unlock operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvClaim { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_claim operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
-            }
-            dsm::types::operations::Operation::DlvInvalidate { .. } => {
-                log::info!(
-                    "[apply_operation] applied dlv_invalidate operation tx={} from={}",
-                    String::from_utf8_lossy(tx_id.as_bytes()),
-                    sender_device_id
-                );
-                Ok(outcome.clone())
+            Err(e) => {
+                // Losing racer / stale request classification. The DB is the
+                // authority: re-lookup the exact identity first.
+                match cdb::get_canonical_apply_identity_by_id(&canonical_apply_id) {
+                    Ok(Some(record)) => Ok(ApplyOutcome::AlreadyAppliedSameOperation { record }),
+                    _ => {
+                        let msg = e.to_string();
+                        if msg.contains("apply parent validation failed")
+                            || msg.contains("apply child validation failed")
+                            || msg.contains("full-state apply race")
+                        {
+                            Ok(ApplyOutcome::Conflict { reason: msg })
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
             }
         }
     }
@@ -3012,996 +2922,256 @@ impl CoreSDK {
 
 /* ---------------------------------- Tests ----------------------------------- */
 
+/// Whether a signed operation's `to_device_id` is this device. The one rule
+/// for "addressed here": the ingestion boundary and the canonical apply both
+/// call it.
+pub(crate) fn addressed_to(to_device_id: &[u8], this_device: &[u8; 32]) -> bool {
+    to_device_id == this_device.as_slice()
+}
+
+/// The child tip a receipt must sign for a step: the v2 successor of the
+/// signed parent under the signed operation (signature included) and the
+/// sender's transition entropy (§39.3). The ingestion boundary binds a
+/// receipt to its transfer with it; the canonical apply checks it again.
+pub(crate) fn successor_child_tip(
+    relationship_key: &[u8; 32],
+    parent_tip: &[u8; 32],
+    this_device: &[u8; 32],
+    signed_operation_bytes: &[u8],
+    transition_entropy: &[u8; 32],
+) -> [u8; 32] {
+    dsm::types::device_state::relationship_chain_tip_v2(
+        relationship_key,
+        parent_tip,
+        this_device,
+        signed_operation_bytes,
+        transition_entropy,
+        None,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsm::types::operations::Operation as DsmOperation;
+    use crate::economic_fixtures;
+    use crate::storage::client_db;
+    use crate::test_support::two_device::Pair;
     use serial_test::serial;
 
-    fn rt() -> tokio::runtime::Runtime {
-        match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt,
-            Err(e) => panic!("Failed to create runtime: {:?}", e),
+    fn count_for_relationship(table: &str, rel: &[u8; 32]) -> i64 {
+        let binding = client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE relationship_key = ?1"),
+            rusqlite::params![rel.as_slice()],
+            |r| r.get(0),
+        )
+        .expect("count")
+    }
+
+    /// Installing a wallet's genesis leaves a head whose authority root IS the
+    /// canonical G, in memory and as persisted, and a second `CoreSDK` for the
+    /// same device (what a router build makes) restores exactly that root.
+    #[test]
+    #[serial]
+    fn an_installed_genesis_head_carries_the_canonical_root_across_a_restore() {
+        let (identity, core) = economic_fixtures::local_device(0x61);
+        assert_eq!(
+            core.device_head().expect("head").genesis_digest(),
+            identity.genesis
+        );
+        let persisted = client_db::load_bcr_device_head(&identity.device_id)
+            .expect("reload")
+            .expect("a persisted head");
+        assert_eq!(persisted.genesis_digest(), identity.genesis);
+        let restored = economic_fixtures::core_sdk_for(&identity);
+        assert_eq!(
+            restored
+                .device_head()
+                .expect("restored head")
+                .genesis_digest(),
+            identity.genesis,
+            "a router build restores the canonical root, never a synthetic one"
+        );
+    }
+
+    /// A router is built only over a device head. A device whose database was
+    /// lost keeps its identity in `AppState` but has no head: the router
+    /// refuses rather than start on a head it made up.
+    #[test]
+    #[serial]
+    fn a_router_refuses_to_start_without_a_genesis_head() {
+        economic_fixtures::local_device(0x62);
+        client_db::reset_database_for_tests();
+        client_db::init_database().expect("init db");
+        let built = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "no-head".into(),
+            storage_endpoints: Vec::new(),
+            enable_offline: false,
+        });
+        match built {
+            Err(e) => assert!(e.to_string().contains("device head"), "{e}"),
+            Ok(_) => panic!("a router started with no genesis head"),
         }
     }
 
-    fn test_sdk() -> CoreSDK {
-        let dev = DeviceInfo::from_hashed_label("test_device", vec![1u8; 32]);
-        match CoreSDK::new_with_device(dev) {
-            Ok(sdk) => sdk,
-            Err(e) => panic!("Failed to init SDK: {:?}", e),
-        }
+    /// A restart restores the head the last advance committed: the faucet
+    /// admission's head, root for root, from the persisted row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_restart_restores_the_head_the_last_advance_committed() {
+        let d = crate::test_support::one_device::Device::funded(0x63).await;
+        let live = d.core().device_head().expect("head");
+        let cached = client_db::load_bcr_device_head(&d.identity.device_id)
+            .expect("reload")
+            .expect("a persisted head");
+        assert_eq!(
+            cached.root(),
+            live.root(),
+            "the cached head tracks the live one"
+        );
+        let restored = economic_fixtures::core_sdk_for(&d.identity);
+        let head = restored.device_head().expect("restored head");
+        assert_eq!(head.root(), live.root());
+        assert_eq!(
+            head.balance(&era_commit()),
+            economic_fixtures::whole_era(100)
+        );
     }
 
-    /// Stage 4 Slice 3 (signal a): the offline-bearer "no appliance" error must speak v2 — name the
-    /// anchor device the user connects — and never the deleted v1 "Path-B" concept. This message
-    /// rides into the failed-transfer event the frontend friendly-maps.
+    fn era_commit() -> [u8; 32] {
+        dsm::core::token::token_state_manager::era_policy_commit()
+    }
+
+    /// A transfer redelivered to a recipient that lost its record of having
+    /// consumed it applies ONCE: the halves are still on the members, the
+    /// recipient reads them again, and nothing re-executes — no second
+    /// credit, no second apply, journal or reply.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_redelivered_transfer_applies_once_and_is_never_rebuilt() {
+        let p = Pair::boot(100, 0).await;
+        let rel = p.a.rel_key_with(&p.b);
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 10);
+
+        p.b.enter();
+        let root_before = p.b.router().core_sdk.device_head().expect("head").root();
+        let journal_before = count_for_relationship("acceptance_fold_journal", &rel);
+        let replies_before = count_for_relationship("recipient_outbound_reply", &rel);
+        assert_eq!(count_for_relationship("canonical_apply_identity", &rel), 1);
+        // B's database loses its consume marks and read positions — a damaged
+        // or partly restored store that kept the apply.
+        {
+            let binding = client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute_batch("DELETE FROM b0x_consumed; DELETE FROM b0x_read_position;")
+                .expect("drop the consume marks");
+        }
+
+        let again = p.b.sync().await;
+        assert!(again.success, "{:?}", again.errors);
+        assert_eq!(p.b.era_balance(), 10, "no second credit");
+        p.b.enter();
+        assert_eq!(
+            p.b.router().core_sdk.device_head().expect("head").root(),
+            root_before,
+            "nothing re-executed"
+        );
+        assert_eq!(count_for_relationship("canonical_apply_identity", &rel), 1);
+        assert_eq!(
+            count_for_relationship("acceptance_fold_journal", &rel),
+            journal_before,
+            "no second journal"
+        );
+        assert_eq!(
+            count_for_relationship("recipient_outbound_reply", &rel),
+            replies_before,
+            "no second reply was built"
+        );
+    }
+
+    /// AWYPCNK8: the apply consults only the SIGNED canonical pair. The
+    /// symmetric projection (`contacts.chain_tip`) is a different formula
+    /// space. B's poll stages A's next transfer; B's projection of the
+    /// relationship then diverges from its canonical lineage — as the live
+    /// rig's did — and B's next sync still applies the staged pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_apply_consults_the_signed_pair_never_the_projection() {
+        use crate::handlers::recipient_dispatch::{
+            ingest_evidence_half, ingest_transfer_half, IngestOutcome, Ingested,
+        };
+        let p = Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        let finalized = p.a.sync().await;
+        assert!(finalized.success, "{:?}", finalized.errors);
+        let released = p.b.sync().await;
+        assert!(released.success, "{:?}", released.errors);
+
+        let sent = p.a.send(&p.b, 5).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
+        p.b.enter();
+        let staged = IngestOutcome {
+            ingested: Ingested::Staged,
+            unreadable_candidates: Vec::new(),
+            unbound: Vec::new(),
+        };
+        assert_eq!(
+            ingest_transfer_half(
+                &one.transfer_bytes,
+                &one.header_sender,
+                &one.route,
+                &one.message_id
+            )
+            .expect("ingest the transfer"),
+            staged
+        );
+        assert_eq!(
+            ingest_evidence_half(
+                &one.evidence_bytes,
+                &one.evidence_route,
+                &one.evidence_message_id
+            )
+            .expect("ingest the evidence"),
+            staged
+        );
+
+        {
+            let binding = client_db::get_connection().expect("conn");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = conn
+                .execute(
+                    "UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?2",
+                    rusqlite::params![p.b.genesis.as_slice(), p.a.device_id.as_slice()],
+                )
+                .expect("diverge the projection");
+            assert_eq!(changed, 1, "B holds A as a contact");
+        }
+
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(
+            p.b.era_balance(),
+            15,
+            "a valid signed pair applies whatever the projection holds"
+        );
+    }
+
+    /// The offline-bearer "no appliance" error names the anchor device the user
+    /// connects, and never the deleted v1 "Path-B" concept.
     #[test]
     fn offline_bearer_no_appliance_message_is_v2_worded() {
-        assert!(
-            OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("anchor device"),
-            "the send-failure message must tell the user to connect the anchor device"
-        );
-        assert!(
-            !OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("Path-B"),
-            "the message must not reference the deleted v1 Path-B concept"
-        );
-    }
-
-    /// Stage 4 Slice 3 (signal c): the read-only `anchor.status` accessor attaches the appliance
-    /// and reports a connected snapshot (identity + counters) WITHOUT mutating the device head —
-    /// the data source behind the diagnostics panel. Contrast `stage_offline_bearer_transition`,
-    /// which reconciles the anchor-state leaf.
-    #[test]
-    #[serial]
-    fn anchor_status_reports_connected_snapshot_without_mutation() {
-        let sdk = test_sdk();
-        let had_head_before = sdk.state_machine.lock().device_head().is_some();
-
-        let snap = sdk.anchor_appliance_status();
-        assert!(
-            snap.connected,
-            "the in-process mock appliance must report connected"
-        );
-        assert_eq!(
-            snap.enrolled_counter, 1_000_000,
-            "enrolled counter comes from the appliance pin"
-        );
-        assert_ne!(
-            snap.anchor_id, [0u8; 32],
-            "a connected anchor exposes a non-zero identity"
-        );
-        assert!(
-            !snap.pk_chip.is_empty(),
-            "a connected anchor exposes the resident chip pubkey"
-        );
-        assert!(
-            snap.status.contains("connected"),
-            "the human-readable status names the connected state"
-        );
-
-        let had_head_after = sdk.state_machine.lock().device_head().is_some();
-        assert_eq!(
-            had_head_before, had_head_after,
-            "anchor.status is read-only and must not create or mutate the device head"
-        );
-    }
-
-    /// v2 producer phases: STAGE determines the transition + successor leaf with NO appliance
-    /// mutation; RELEASE (PREPARE→COMMIT→EMIT→FINALIZE) is born with the caller-supplied real
-    /// device roots in its signed transcript and the Π proofs attached — and the frontier lineage
-    /// advances exactly once per release.
-    #[test]
-    #[serial]
-    fn stage_then_release_binds_roots_challenge_and_advances_lineage() {
-        use prost::Message as _;
-        let sdk = test_sdk();
-        {
-            let ds = dsm::types::device_state::DeviceState::new(
-                [9u8; 32],
-                sdk.device_info.device_id,
-                vec![0u8; 64],
-                256,
-            );
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-
-        // ---- Transfer 1 ----
-        let r_r_1 = [0x55u8; 32];
-        let staged1 = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xAB],
-                r_r_1,
-            )
-            .expect("stage 1");
-        assert_eq!(staged1.transition.anchor_counter, 0);
-        assert_eq!(staged1.transition.next_anchor_counter, 1);
-        assert_eq!(staged1.transition.prev_root, staged1.appliance_prev_root);
-        assert_eq!(staged1.transition.next_root, staged1.appliance_next_root);
-        // Staging mutated nothing: staging again yields the identical transition.
-        let staged1b = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xAB],
-                r_r_1,
-            )
-            .expect("re-stage");
-        assert_eq!(staged1b.appliance_prev_root, staged1.appliance_prev_root);
-        assert_eq!(staged1b.appliance_next_root, staged1.appliance_next_root);
-
-        let r_i = [0x51u8; 32];
-        let r_next = [0x52u8; 32];
-        let art1 = sdk
-            .release_offline_bearer(&staged1, r_r_1, r_i, r_next, vec![0xAA; 40], vec![0xCC; 40])
-            .expect("release 1");
-        let rel = anchor_core::proto::pb::OfflineRelease::decode(&art1.offline_release[..])
-            .expect("decode")
-            .to_release()
-            .expect("to_release");
-        assert_eq!(
-            rel.cert.receiver_challenge, r_r_1,
-            "r_R must bind into the cert"
-        );
-        assert_eq!(
-            rel.cert.sender_device_root_before, r_i,
-            "the REAL pre-advance device root is in the signed transcript (no placeholder)"
-        );
-        assert_eq!(
-            rel.cert.sender_device_root_after, r_next,
-            "the REAL post-advance device root is in the signed transcript (no re-stamp)"
-        );
-        assert_eq!(rel.transition.recipient_device_id, recipient);
-        assert_eq!(rel.cert.anchor_counter, 0);
-        assert_eq!(rel.cert.next_anchor_counter, 1);
-        assert_eq!(
-            rel.anchor_smt_proof_before,
-            vec![0xAA; 40],
-            "Pi_i attached to the package"
-        );
-        assert_eq!(
-            rel.anchor_smt_proof_after,
-            vec![0xCC; 40],
-            "Pi_i+1 attached to the package"
-        );
-
-        // ---- Transfer 2: frontier lineage advances (prev == prior next), counter + leaf advance ----
-        let r_r_2 = [0x66u8; 32];
-        let staged2 = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xCD],
-                r_r_2,
-            )
-            .expect("stage 2");
-        assert_eq!(
-            staged2.appliance_prev_root, art1.appliance_next_root,
-            "frontier lineage must advance (transfer 2 consumes transfer 1's successor)"
-        );
-        assert_ne!(
-            staged2.anchor_leaf.new_value, staged1.anchor_leaf.new_value,
-            "the successor anchor-state leaf advances each transfer"
-        );
-        assert_eq!(staged2.pin.bundle, staged1.pin.bundle);
-        let art2 = sdk
-            .release_offline_bearer(
-                &staged2,
-                r_r_2,
-                r_next,
-                [0x53u8; 32],
-                Vec::new(),
-                Vec::new(),
-            )
-            .expect("release 2");
-        let rel2 = anchor_core::proto::pb::OfflineRelease::decode(&art2.offline_release[..])
-            .unwrap()
-            .to_release()
-            .unwrap();
-        assert_eq!(rel2.cert.anchor_counter, 1, "counter advanced to u_i=1");
-        assert_eq!(rel2.cert.receiver_challenge, r_r_2);
-    }
-
-    /// Exactly-once release: re-releasing the SAME staged transition is rejected (its `prev_root`
-    /// was consumed — the appliance frontier moved), cancel after a committed release is a safe
-    /// no-op, and the next stage starts from the advanced coordinate.
-    #[test]
-    #[serial]
-    fn release_is_exactly_once_and_cancel_after_is_noop() {
-        use dsm::types::device_state::DeviceState;
-
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-        let r_r = [0x55u8; 32];
-
-        let staged = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xAB],
-                r_r,
-            )
-            .expect("stage");
-        sdk.release_offline_bearer(&staged, r_r, [0x51u8; 32], [0x52u8; 32], vec![], vec![])
-            .expect("release once");
-
-        // A SECOND release from the SAME staged transition must be rejected — its prev_root was
-        // consumed; the counter cannot move twice for one staged transfer.
-        assert!(
-            sdk.release_offline_bearer(&staged, r_r, [0x51u8; 32], [0x52u8; 32], vec![], vec![])
-                .is_err(),
-            "double-release from the same staged transition is rejected (exactly once)"
-        );
-
-        // Cleanup after a committed release is a no-op: it never re-moves the counter.
-        sdk.cancel_offline_bearer_release()
-            .expect("cancel after release is a safe no-op");
-
-        // The next stage starts from the advanced coordinate u_i+1 / the advanced frontier.
-        let staged2 = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xCD],
-                [0x66u8; 32],
-            )
-            .expect("stage 2");
-        assert_eq!(
-            staged2.transition.anchor_counter, 1,
-            "the next transfer starts from the advanced coordinate u_i+1"
-        );
-        assert_eq!(staged2.appliance_prev_root, staged.appliance_next_root);
-    }
-
-    /// §26 host recovery seam. At a re-attach the host cancels ONLY an orphaned uncommitted
-    /// `Prepared` (no owning session) and moves no counter doing so; a `Prepared` an in-flight
-    /// session still owns is left untouched. `recover()` observes; the host decides.
-    #[test]
-    #[serial]
-    fn reattach_cancels_orphaned_prepared_not_owned_and_moves_no_counter() {
-        use crate::anchor::RecoveryAction;
-        use dsm::types::device_state::DeviceState;
-
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-        let r_r = [0x55u8; 32];
-
-        // No appliance attached yet -> nothing prepared -> Ready.
-        assert_eq!(
-            sdk.resolve_prepared_on_reattach(false).expect("reattach"),
-            RecoveryAction::Ready
-        );
-
-        // Stage, then drive the appliance to PREPARED directly (a crash between PREPARE and COMMIT
-        // — the window `release_offline_bearer` normally closes atomically).
-        let staged = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xAB],
-                r_r,
-            )
-            .expect("stage");
-        {
-            let mut guard = sdk.anchor_appliance.lock();
-            let app = guard.as_mut().expect("appliance attached by stage");
-            app.prepare(
-                &staged.transition.as_transition(),
-                &r_r,
-                &[0x51u8; 32],
-                &[0x52u8; 32],
-            )
-            .expect("prepare");
-        }
-
-        // An in-flight session OWNS this prepared record -> the host must NOT cancel it.
-        assert_eq!(
-            sdk.resolve_prepared_on_reattach(true).expect("owned"),
-            RecoveryAction::LeavePreparedForOwner
-        );
-
-        // Orphaned (the owning session was lost on restart) -> cancel it back to Ready.
-        assert_eq!(
-            sdk.resolve_prepared_on_reattach(false).expect("orphan"),
-            RecoveryAction::CancelOrphanedPrepared
-        );
-
-        // The appliance is Ready again and NO counter moved: a fresh stage still starts at u_i=0,
-        // so a lost/abandoned prepare does not strand future sends (and burned no counter).
-        let staged2 = sdk
-            .stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                [3u8; 32],
-                0,
-                vec![0xCD],
-                [0x66u8; 32],
-            )
-            .expect("stage after cancel");
-        assert_eq!(
-            staged2.transition.anchor_counter, 0,
-            "cancel moved no counter — u_i unchanged, future sends not stranded"
-        );
-    }
-
-    /// End-to-end producer → receiver-predicate → adopt → replay-reject over TWO real bearer
-    /// transfers, v2 shape. The SENDER stages, commits the staged successor leaf into a REAL
-    /// per-device SMT advance (real roots + real Π inclusion proofs), then releases with those
-    /// roots; the RECEIVER runs the full v2 predicate (`accept_offline_release`: σ^chip + σ^host
-    /// verified against the pin, Π verified against the device roots, frontier pin) with NO
-    /// counter read on the path. Proves: (a) a real release is accepted, (b) the receiver adopts
-    /// the successor frontier, (c) replaying transfer 1 after adoption is rejected, (d) transfer 2
-    /// chains from the adopted frontier, (e) cert roots that differ from the verified device roots
-    /// are rejected.
-    #[test]
-    #[serial]
-    fn producer_release_accepts_adopts_and_rejects_replay_end_to_end() {
-        use crate::bluetooth::anchor_accept::{accept_offline_release, OfflineRecover, PinnedAnchor};
-        use dsm::core::bilateral_transaction_manager::{
-            compute_smt_key, initial_chain_tip_from_device_ids,
-        };
-        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
-
-        let sdk = test_sdk();
-        {
-            let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-            sdk.state_machine.lock().set_device_head(ds);
-        }
-        let recipient = [4u8; 32];
-        let policy_hash = [3u8; 32];
-
-        let pin_from = |p: &crate::anchor::AnchorPin| PinnedAnchor {
-            bundle: p.bundle,
-            anchor_id: p.anchor_id,
-            enrolled_counter: p.enrolled_counter,
-            partition_pk: p.partition_pk.clone(),
-            pk_chip: p.pk_chip.clone(),
-            uncompromised: true,
-        };
-
-        // One real bearer transfer from `head`: stage, advance the REAL per-device SMT with the
-        // staged successor leaf (producing real roots + Π), then release with those roots.
-        let drive = |head: &DeviceState, cp_tag: u8, r_r: [u8; 32]| {
-            let staged = sdk
-                .stage_offline_bearer_transition(
-                    [1u8; 32],
-                    recipient,
-                    [2u8; 32],
-                    [9u8; 32],
-                    policy_hash,
-                    0,
-                    vec![0xAB],
-                    r_r,
-                )
-                .expect("stage");
-            let cp = {
-                let mut c = [0u8; 32];
-                c[0] = cp_tag;
-                c
-            };
-            let rk = compute_smt_key(&head.devid(), &cp);
-            let init = initial_chain_tip_from_device_ids(&head.devid(), &cp);
-            let out = head
-                .advance(
-                    rk,
-                    cp,
-                    DsmOperation::Noop,
-                    vec![cp_tag; 32],
-                    None,
-                    &[],
-                    Some(init),
-                    Some(AnchorLeafUpdate {
-                        key: staged.anchor_leaf.key,
-                        new_value: staged.anchor_leaf.new_value,
-                    }),
-                    None,
-                )
-                .expect("bearer advance");
-            let proofs = out
-                .anchor_proofs
-                .clone()
-                .expect("bearer advance emits anchor proofs");
-            let art = sdk
-                .release_offline_bearer(
-                    &staged,
-                    r_r,
-                    out.smt_proofs.pre_root,
-                    out.child_r_a,
-                    proofs.parent,
-                    proofs.child,
-                )
-                .expect("release");
-            (art, out)
-        };
-
-        // Transfer 1 runs from the head the stage-time reconcile bootstrapped (it writes the
-        // current anchor-state leaf into the device head on first attach).
-        let (art1, out1) = {
-            // Prime the bootstrap: stage once so the reconciled head exists, then drive from it.
-            sdk.stage_offline_bearer_transition(
-                [1u8; 32],
-                recipient,
-                [2u8; 32],
-                [9u8; 32],
-                policy_hash,
-                0,
-                vec![0xAB],
-                [0x55u8; 32],
-            )
-            .expect("prime bootstrap");
-            let head = sdk
-                .state_machine
-                .lock()
-                .device_head()
-                .expect("bootstrapped head")
-                .clone();
-            drive(&head, 0xC0, [0x55u8; 32])
-        };
-        let pin1 = pin_from(&art1.pin);
-        let before1 = out1.smt_proofs.pre_root;
-        let after1 = out1.child_r_a;
-
-        // (a) The receiver accepts the real release: three signatures + Π against the REAL device
-        // roots + frontier pin (genesis: accepted_frontier=None adopts prev_root TOFU).
-        let adopted = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            None,
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        )
-        .expect("transfer 1 must be accepted by the v2 predicate");
-        assert_eq!(adopted.next_root, art1.appliance_next_root);
-        assert_eq!(adopted.next_anchor_counter, 1);
-
-        // (a') Pinning the frontier explicitly also accepts.
-        accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        )
-        .expect("accept with the pinned frontier");
-
-        // (e) Cert roots that are NOT the verified device roots are rejected (parallel-tree cert).
-        let wrong = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&art1.appliance_prev_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &[0xEEu8; 32],
-            &after1,
-        );
-        assert!(
-            matches!(wrong, Err(OfflineRecover::Predicate(_))),
-            "cert/device root mismatch must be rejected, got {wrong:?}"
-        );
-
-        // (c) Replay: presenting transfer 1 again AFTER the receiver adopted `next_root` is
-        // rejected — the consumed frontier is no longer the accepted one.
-        let replay = accept_offline_release(
-            &art1.offline_release,
-            Some(&pin1),
-            Some(&adopted.next_root),
-            &recipient,
-            &[0x55u8; 32],
-            &policy_hash,
-            &before1,
-            &after1,
-        );
-        assert!(
-            matches!(replay, Err(OfflineRecover::Predicate(_))),
-            "replay of the consumed frontier must be rejected, got {replay:?}"
-        );
-
-        // (d) Transfer 2 chains from the adopted frontier.
-        let (art2, out2) = drive(&out1.new_device_state, 0xC1, [0x66u8; 32]);
-        assert_eq!(
-            art2.appliance_prev_root, art1.appliance_next_root,
-            "transfer 2 must consume transfer 1's successor frontier"
-        );
-        let pin2 = pin_from(&art2.pin);
-        accept_offline_release(
-            &art2.offline_release,
-            Some(&pin2),
-            Some(&adopted.next_root),
-            &recipient,
-            &[0x66u8; 32],
-            &policy_hash,
-            &out2.smt_proofs.pre_root,
-            &out2.child_r_a,
-        )
-        .expect("transfer 2 must be accepted from the adopted frontier");
-    }
-
-    /// SAFETY RAIL for the sender-release thread (both-or-neither): the SIMULATED post-root the
-    /// sender puts on the confirm proofs MUST equal the CANONICAL committed post-root — so long as
-    /// BOTH advances carry the same `anchor_leaf`. If either side omits it, the roots diverge (the
-    /// sender's own §4.3 history would go Invalid). Both paths route through the deterministic
-    /// `StateMachine::prepare_advance_relationship`, which already takes `anchor_leaf`, so this is
-    /// provable before the higher commit layers are threaded.
-    #[test]
-    #[serial]
-    fn sim_post_root_equals_canonical_committed_post_root_with_anchor_leaf() {
-        use dsm::core::bilateral_transaction_manager::{
-            anchor_state_leaf_key, compute_smt_key, initial_chain_tip_from_device_ids,
-        };
-        use dsm::types::device_state::{AnchorLeafUpdate, DeviceState};
-
-        let sdk = test_sdk();
-        let ds = DeviceState::new([9u8; 32], sdk.device_info.device_id, vec![0u8; 64], 256);
-        sdk.state_machine.lock().set_device_head(ds);
-
-        let cp = [0x33u8; 32];
-        let rel_key = compute_smt_key(&sdk.device_info.device_id, &cp);
-        let init = initial_chain_tip_from_device_ids(&sdk.device_info.device_id, &cp);
-        let op = DsmOperation::Noop;
-        let deltas: &[dsm::types::device_state::BalanceDelta] = &[];
-        let b = [0xB7u8; 32];
-        let leaf = AnchorLeafUpdate {
-            key: anchor_state_leaf_key(&b),
-            new_value: anchor_core::root_advance::anchor_state_leaf(&b, &[0xA1u8; 32], 1),
-        };
-
-        // `simulate_advance_for_confirm` is PURE (no head mutation), so we can call it twice.
-        let sim_with = sdk
-            .simulate_advance_for_confirm(
-                rel_key,
-                cp,
-                op.clone(),
-                deltas,
-                Some(init),
-                Some(leaf.clone()),
-                None,
-            )
-            .expect("sim with anchor_leaf")
-            .child_r_a;
-        let sim_without = sdk
-            .simulate_advance_for_confirm(rel_key, cp, op.clone(), deltas, Some(init), None, None)
-            .expect("sim without anchor_leaf")
-            .child_r_a;
-
-        // The hazard is real: the anchor_leaf changes the device root. Omitting it on EITHER side
-        // (sim carried it, a commit that dropped it) diverges -> §4.3 Invalid.
-        assert_ne!(
-            sim_with, sim_without,
-            "anchor_leaf must change the committed device root"
-        );
-
-        // Canonical commit WITH the same anchor_leaf, via the deterministic prepare + install.
-        let committed_root = {
-            let mut sm = sdk.state_machine.lock();
-            let outcome = sm
-                .prepare_advance_relationship(
-                    rel_key,
-                    cp,
-                    op.clone(),
-                    deltas,
-                    Some(init),
-                    Some(leaf.clone()),
-                    None,
-                )
-                .expect("canonical prepare with anchor_leaf");
-            sm.commit_advance(&outcome);
-            outcome.new_device_state.root()
-        };
-
-        // Both-or-neither: sim post-root == canonical committed post-root when both carry the leaf.
-        assert_eq!(
-            sim_with, committed_root,
-            "simulated post-root must equal the canonical committed post-root for the same anchor_leaf"
-        );
-    }
-
-    #[test]
-    fn sign_operation_matches_raw_signature_preimage_hash() {
-        let sdk = test_sdk();
-        let op = DsmOperation::Generic {
-            operation_type: b"op_type".to_vec(),
-            data: vec![0xAA, 0xBB, 0xCC],
-            message: "hello".to_string(),
-            signature: vec![],
-        };
-
-        let r = rt();
-        // Sign via public API
-        let sig = match r.block_on(sdk.sign_operation(&op)) {
-            Ok(sig) => sig,
-            Err(e) => panic!("Failed to sign op: {:?}", e),
-        };
-
-        // Recreate the signing preimage (private helper) and sign_raw on the same bytes
-        let op_bytes = encode_dsm_operation_det(&op);
-        let expected = match r.block_on(sdk.sign_raw(&op_bytes)) {
-            Ok(sig) => sig,
-            Err(e) => panic!("Failed to sign raw preimage: {:?}", e),
-        };
-
-        // Signatures must match exactly and be the deterministic BLAKE3 hash output length.
-        assert_eq!(
-            sig, expected,
-            "sign_operation must equal sign_raw over preimage"
-        );
-        assert_eq!(sig.len(), 32, "signature length must be BLAKE3 output");
-
-        // Hash of the operation bytes is stable across invocations (tracks the hash deterministically).
-        let h1 = blake3::hash(&op_bytes);
-        let h2 = blake3::hash(&encode_dsm_operation_det(&op));
-        assert_eq!(
-            h1.as_bytes(),
-            h2.as_bytes(),
-            "operation hash must be stable/symmetric"
-        );
-    }
-
-    #[test]
-    fn sign_operation_is_deterministic_across_calls() {
-        let sdk = test_sdk();
-        let op = DsmOperation::Generic {
-            operation_type: b"deterministic".to_vec(),
-            data: vec![1, 2, 3, 4],
-            message: "m".to_string(),
-            signature: vec![],
-        };
-
-        let r = rt();
-        let sig1 = match r.block_on(sdk.sign_operation(&op)) {
-            Ok(sig) => sig,
-            Err(e) => panic!("Failed to get sig1: {:?}", e),
-        };
-        let sig2 = match r.block_on(sdk.sign_operation(&op)) {
-            Ok(sig) => sig,
-            Err(e) => panic!("Failed to get sig2: {:?}", e),
-        };
-        assert_eq!(
-            sig1, sig2,
-            "signing must be deterministic for identical input"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn execute_operation_archives_and_restores_latest_state() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_core_sdk_archive_state_test"),
-        );
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let device_id = vec![0x43; 32];
-        let genesis_hash = vec![0x53; 32];
-        let binding_key = vec![0x63; 32];
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
-        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
-        sdk.initialize_with_genesis_state()
-            .expect("initialize genesis state");
-        let current = sdk
-            .get_current_state()
-            .expect("current state after genesis");
-        assert_eq!(current.device_info.public_key, device.public_key);
-
-        let op = sdk
-            .sign_operation_sphincs(DsmOperation::Generic {
-                operation_type: b"archive.test".to_vec(),
-                data: vec![0xAB, 0xCD],
-                message: "persist state".to_string(),
-                signature: vec![],
-            })
-            .expect("sign operation");
-        let signature = op.get_signature().expect("signature present");
-        let payload = op.with_cleared_signature().to_bytes();
-        assert!(
-            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
-                .expect("direct signature verify"),
-            "canonical CoreSDK test signature must self-verify"
-        );
-
-        // Route through relationship path with self-loop for generic ops
-        let dev_id = device.device_id;
-        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
-        let init_tip = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id, &dev_id,
-        );
-        let (executed, outcome) = sdk
-            .execute_on_relationship(rel_key, dev_id, op, &[], Some(init_tip))
-            .expect("execute operation");
-        assert_ne!(executed.hash, [0u8; 32], "state hash should be non-zero");
-
-        let rel_archived =
-            crate::storage::client_db::get_bcr_chain_states(&device.device_id, false)
-                .expect("load archived chain states");
-        assert!(
-            rel_archived
-                .iter()
-                .any(|state| state.compute_chain_tip()
-                    == outcome.new_chain_state.compute_chain_tip()),
-            "execute_on_relationship must archive the per-advance chain state"
-        );
-        let cached_head = crate::storage::client_db::load_bcr_device_head(&device.device_id)
-            .expect("load cached device head")
-            .expect("cached device head present");
-        assert_eq!(
-            cached_head.root(),
-            outcome.new_device_state.root(),
-            "head cache must track latest DeviceState root"
-        );
-        assert_eq!(
-            cached_head.chain_tip(&rel_key),
-            Some(outcome.new_chain_state.compute_chain_tip()),
-            "head cache must carry latest relationship tip"
-        );
-
-        let restored = CoreSDK::new_with_device(device).expect("restore sdk from archive");
-        let restored_head = restored.device_head().expect("restored device head");
-        assert_eq!(
-            restored_head.root(),
-            outcome.new_device_state.root(),
-            "CoreSDK startup must restore the latest cached DeviceState root"
-        );
-        assert_eq!(
-            restored_head.chain_tip(&rel_key),
-            Some(outcome.new_chain_state.compute_chain_tip()),
-            "restored device head must carry the latest relationship tip"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn restore_state_snapshot_rewinds_in_memory_tip() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
-        let _ = crate::storage_utils::set_storage_base_dir(
-            std::env::temp_dir().join("dsm_core_sdk_rollback_state_test"),
-        );
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-
-        crate::sdk::app_state::AppState::reset_memory_for_testing();
-        crate::sdk::app_state::AppState::prime_memory_for_testing();
-        crate::sdk::signing_authority::clear_binding_key_for_testing();
-        let device_id = vec![0x47; 32];
-        let genesis_hash = vec![0x57; 32];
-        let binding_key = vec![0x67; 32];
-        let (public_key, _secret_key) =
-            crate::sdk::signing_authority::derive_signing_keys_for_testing(
-                &device_id,
-                &genesis_hash,
-                &binding_key,
-            )
-            .expect("derive canonical signing keypair");
-        crate::sdk::signing_authority::set_binding_key_for_testing(binding_key);
-        crate::sdk::app_state::AppState::set_identity_info(
-            device_id.clone(),
-            public_key.clone(),
-            genesis_hash,
-            vec![0u8; 32],
-        );
-        let device = DeviceInfo::new(device_id.try_into().expect("device id"), public_key.clone());
-        let sdk = CoreSDK::new_with_device(device.clone()).expect("init sdk");
-        sdk.initialize_with_genesis_state()
-            .expect("initialize genesis state");
-        let current = sdk
-            .get_current_state()
-            .expect("current state after genesis");
-        assert_eq!(current.device_info.public_key, device.public_key);
-        let prior = sdk.get_current_state().expect("prior state");
-
-        let op = sdk
-            .sign_operation_sphincs(DsmOperation::Generic {
-                operation_type: b"rollback.test".to_vec(),
-                data: vec![0x01],
-                message: "advance".to_string(),
-                signature: vec![],
-            })
-            .expect("sign operation");
-        let signature = op.get_signature().expect("signature present");
-        let payload = op.with_cleared_signature().to_bytes();
-        assert!(
-            dsm::crypto::sphincs::sphincs_verify(&device.public_key, &payload, &signature)
-                .expect("direct signature verify"),
-            "canonical CoreSDK test signature must self-verify"
-        );
-        let dev_id2 = device.device_id;
-        let rel_key2 =
-            dsm::core::bilateral_transaction_manager::compute_smt_key(&dev_id2, &dev_id2);
-        let init_tip2 = dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-            &dev_id2, &dev_id2,
-        );
-        let (advanced, _) = sdk
-            .execute_on_relationship(rel_key2, dev_id2, op, &[], Some(init_tip2))
-            .expect("execute operation");
-        assert_ne!(advanced.hash, prior.hash, "state must advance");
-
-        sdk.restore_state_snapshot(&prior)
-            .expect("restore prior snapshot");
-        let current = sdk.get_current_state().expect("current state");
-        assert_eq!(current.hash[0] as u64, prior.hash[0] as u64);
-        assert_eq!(current.hash, prior.hash);
+        assert!(OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("anchor device"));
+        assert!(!OFFLINE_BEARER_NO_APPLIANCE_MSG.contains("Path-B"));
     }
 }
 
 /* ---------------------------- Result Structures ------------------------- */
-
-#[derive(Debug, Clone)]
-pub struct GenesisInfo {
-    pub genesis_hash: Vec<u8>,
-    pub device_id: Vec<u8>,
-    pub public_key: Vec<u8>,
-    pub smt_root: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TransferResult {
-    pub tx_id: Vec<u8>,
-    pub new_chain_tip: u64,
-    pub new_state_hash: Vec<u8>,
-    pub smt_proof: Vec<u8>,
-    pub bilateral_signature: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StateQueryInfo {
-    pub current_state_hash: Vec<u8>,
-    pub current_position: u64,
-    pub state_entries: Vec<StateEntry>,
-    pub smt_root: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StateEntry {
-    pub position: u64,
-    pub state_hash: Vec<u8>,
-    pub prev_hash: Vec<u8>,
-    pub operation_data: Vec<u8>,
-    /// Clockless build: set to 0
-    pub tick: u64,
-    pub smt_proof: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ContactInfo {
-    pub genesis_hash: Vec<u8>,
-    pub public_key: Vec<u8>,
-    pub chain_tip: Vec<u8>, // Changed from u64 to Vec<u8> (hash)
-    pub challenge_response: Vec<u8>,
-    pub bilateral_anchor: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TokenPolicyInfo {
-    pub policy_hash: Vec<u8>,
-    pub is_valid: bool,
-    pub verification_proof: Vec<u8>,
-    pub total_supply: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct SyncInfo {
-    pub sync_needed: bool,
-    pub missing_states: Vec<StateEntry>,
-    pub updated_peers: Vec<Vec<u8>>,
-    pub new_smt_root: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NetworkStatus {
-    pub network_type: String,
-    pub connected_peers: u32,
-    pub connection_status: String,
-    pub is_syncing: bool,
-    /// Clockless build: 0
-    pub last_sync_time: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DiscoveryResult {
-    pub total_discovered: u32,
-    pub network_type: String,
-    pub node_addresses: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TokenBalanceInfo {
-    pub balance: u64,
-    pub token_id: Vec<u8>,
-    pub last_updated: u64,
-    pub history: Vec<BalanceEntry>,
-    pub genesis_hash: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BalanceEntry {
-    pub position: u64,
-    pub balance: u64,
-    /// Clockless: 0 unless caller provides
-    pub tick: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct AppStateResult {
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BackupResult {
-    pub backup_phrase: Option<String>,
-    pub is_valid: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SettingResult {
-    pub value: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BluetoothResult {
-    pub enabled: bool,
-    pub available: bool,
-}

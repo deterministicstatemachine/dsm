@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useSyncExternalStore } from 'react';
-import type { AppState, ScreenType } from '../types/app';
+import { SCREEN_TYPES, type AppState, type ScreenType } from '../types/app';
 import logger from '../utils/logger';
+import { appRuntimeStore } from './appRuntimeStore';
 
 type NavigationSnapshot = {
   currentScreen: ScreenType;
@@ -12,35 +13,35 @@ type NavigationSnapshot = {
 
 type MenuIndexUpdate = number | ((prev: number) => number);
 
-// Allowlist of valid navigation targets.  Every entry MUST also be
-// routed by `AppScreenRouter.tsx` and present in the `ScreenType`
-// union in `types/app.ts`.  Adding a screen anywhere else without
-// updating this set causes silent navigation drops (the `navigate`
-// early-returns when `to` is not in the set).
-const VALID_NAV_TARGETS = new Set<ScreenType>([
-  'home',
-  'wallet',
-  'transactions',
-  'contacts',
-  'accounts',
-  'storage',
-  'settings',
-  'tokens',
-  'qr',
-  'mycontact',
-  'dev_dlv',
-  'dev_policy',
-  'dev_sofi_launch',
+// The valid navigation targets: exactly the app's screens (`SCREEN_TYPES`,
+// from which `ScreenType` is derived). `navigate` refuses anything else — a
+// string from an untyped caller — and there is no second list to fall behind.
+const VALID_NAV_TARGETS = new Set<ScreenType>(SCREEN_TYPES);
+
+/**
+ * The screens Simple mode puts away, in the Modern skin: trading (SoFi), the
+ * Bitcoin bridge, storage nodes and the developer tools. Tokens, the faucet,
+ * contacts and apps stay. While Simple mode is on nothing reaches them: no
+ * menu offers them, and a call that names one, a deep link's included, is
+ * refused here. The DGen Game Boy always reaches everything.
+ */
+export const SIMPLE_MODE_EXCLUDED = new Set<ScreenType>([
   'sofi',
-  'liquidity',
-  'mail',
-  'lock_setup',
-  'recovery',
-  'nfc_recovery',
-  'recovery_pipeline',
   'vault',
-  'bluetooth',
+  'storage',
+  'dev_policy',
 ]);
+
+/** Whether Simple mode is in force: the Modern skin, with Simple mode on. */
+export function simpleModeOn(): boolean {
+  const runtime = appRuntimeStore.getSnapshot();
+  return runtime.skin === 'modern' && runtime.simpleMode === 'on';
+}
+
+/** Whether the look in use lets navigation reach `to`. */
+export function reachable(to: ScreenType): boolean {
+  return !simpleModeOn() || !SIMPLE_MODE_EXCLUDED.has(to);
+}
 
 class NavigationStore {
   private snapshot: NavigationSnapshot = {
@@ -64,6 +65,10 @@ class NavigationStore {
 
   navigate = (to: ScreenType): void => {
     if (!VALID_NAV_TARGETS.has(to)) return;
+    if (!reachable(to)) {
+      logger.info(`[nav] ${to} is put away in Simple mode`);
+      return;
+    }
     if (this.snapshot.currentScreen === to) return;
     this.snapshot = {
       currentScreen: to,
@@ -75,6 +80,7 @@ class NavigationStore {
 
   setCurrentScreen = (to: ScreenType): void => {
     if (!VALID_NAV_TARGETS.has(to)) return;
+    if (!reachable(to)) return;
     if (this.snapshot.currentScreen === to) return;
     this.snapshot = {
       ...this.snapshot,

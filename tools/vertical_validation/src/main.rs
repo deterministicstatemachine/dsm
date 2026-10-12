@@ -33,10 +33,10 @@
 mod adversarial_bilateral;
 mod benchmark;
 mod bilateral_throughput;
-mod compat_shim;
 mod crypto_kat;
 mod implementation_traces;
 mod lean_checker;
+mod live_device;
 mod local_nodes;
 mod proof_runner;
 mod property_tests;
@@ -180,19 +180,19 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Commands::PropertyTests { iterations, seed } => {
-            run_property_tests(iterations, seed);
+            run_property_tests(iterations, seed)?;
         }
 
         Commands::ImplementationTraces => {
-            run_implementation_traces();
+            run_implementation_traces()?;
         }
 
         Commands::Adversarial => {
-            run_adversarial();
+            run_adversarial()?;
         }
 
         Commands::CryptoKat => {
-            run_crypto_kat();
+            run_crypto_kat()?;
         }
 
         Commands::BilateralThroughput { iterations } => {
@@ -221,6 +221,26 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Turn an aggregate verdict into a process exit status.
+///
+/// A gate that PRINTS "FAILED" and then exits 0 is not a gate. CI reads the
+/// process status, not the report text, so a suite that summarises its own
+/// failures and returns `Ok` is indistinguishable from a green one to the only
+/// consumer that matters.
+///
+/// Enforcement runs AFTER the report is printed, so the failing spec, property
+/// or trace — and the invariant it violated — stay visible in the log.
+fn enforce(gate: &str, total: usize, failing: &[String]) -> anyhow::Result<()> {
+    if failing.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{gate}: {} of {total} FAILED — {}",
+        failing.len(),
+        failing.join(", ")
+    )
 }
 
 /// Collect TLAPS proof results (progress on stderr, no report printed).
@@ -341,6 +361,21 @@ async fn run_tla_check(
     };
 
     print!("{}", report.render_ascii());
+
+    // A violated invariant, a falsification config that failed to falsify, or
+    // a literal, direct or linked Rust trace that fails to replay must redden
+    // CI. `run_all` has already NORMALISED every TLC verdict, including
+    // inverting the expected-to-fail configs; each spec report's `passed`
+    // combines that verdict with its replays and linked traces, and is the
+    // same answer the printed OVERALL VERDICT gives.
+    let failing: Vec<String> = report
+        .tla_results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| r.label.clone())
+        .collect();
+    enforce("TLA+ model checking", report.tla_results.len(), &failing)?;
+
     Ok(results)
 }
 
@@ -368,8 +403,15 @@ async fn run_benchmark(
 }
 
 /// Run property tests standalone.
-fn run_property_tests(iterations: u64, seed: u64) {
+fn run_property_tests(iterations: u64, seed: u64) -> anyhow::Result<()> {
     let results = property_tests::collect_property_test_results(seed, iterations);
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| r.property_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -381,11 +423,19 @@ fn run_property_tests(iterations: u64, seed: u64) {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Real-code bridge properties", total, &failing)
 }
 
 /// Run deterministic implementation traces standalone.
-fn run_implementation_traces() {
+fn run_implementation_traces() -> anyhow::Result<()> {
     let results = implementation_traces::collect_implementation_trace_results();
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| r.trace_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -397,11 +447,19 @@ fn run_implementation_traces() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Implementation traces", total, &failing)
 }
 
 /// Run adversarial tests standalone.
-fn run_adversarial() {
+fn run_adversarial() -> anyhow::Result<()> {
     let results = adversarial_bilateral::collect_adversarial_results();
+    let total = results.attacks.len();
+    let failing: Vec<String> = results
+        .attacks
+        .iter()
+        .filter(|a| !a.passed)
+        .map(|a| a.attack_name.clone())
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -413,11 +471,19 @@ fn run_adversarial() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Adversarial attacks", total, &failing)
 }
 
 /// Run crypto KAT tests standalone.
-fn run_crypto_kat() {
+fn run_crypto_kat() -> anyhow::Result<()> {
     let results = crypto_kat::collect_crypto_kat_results();
+    let total = results.results.len();
+    let failing: Vec<String> = results
+        .results
+        .iter()
+        .filter(|r| !r.passed)
+        .map(|r| format!("{}/{}", r.primitive, r.test_name))
+        .collect();
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
         tla_results: Vec::new(),
@@ -429,6 +495,7 @@ fn run_crypto_kat() {
         bilateral_throughput_results: None,
     };
     print!("{}", report.render_ascii());
+    enforce("Crypto KATs", total, &failing)
 }
 
 /// Run bilateral throughput benchmark standalone.

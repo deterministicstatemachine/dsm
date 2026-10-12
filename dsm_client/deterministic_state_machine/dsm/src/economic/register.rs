@@ -1,0 +1,804 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! The economic root register — where a trader publishes one root per position,
+//! and what that publication does and does not establish.
+//!
+//! ## Registered is not validated
+//!
+//! Writing a claim into a write-once cell establishes exactly one thing:
+//! **non-equivocation**. This identity named one root at this position and can
+//! never name a second. It says nothing about whether that root resulted from a
+//! valid transition — a malicious trader registers an arbitrary root perfectly
+//! consistently, and the register accepts it.
+//!
+//! `accepted_root != valid_root`. This module produces
+//! [`RegisteredEconomicRoot`] and nothing else; [`super::lineage`] owns the
+//! validated side, and the two cannot be interconverted.
+//!
+//! ## Nodes stay dumb
+//!
+//! A member checks nothing (Part II §9, §12): it keeps every value it is
+//! given at `K_root(q)`, in arrival order, and decides nothing. The writer
+//! and Core compute the cell's route from `s(q)` over the committed set
+//! ([`RootCell`]); the writer writes along it leader first, and Core
+//! evaluates the route chains from the raw reads (`route_chain`, storage
+//! spec §9). No P0–P6, no transition validation, no economics, and no
+//! attribution: a claim carries its own authority, the claimant's signature
+//! over its exact bytes, and a claim in a victim's name that the victim never
+//! signed is not an object naming the victim's cell — it counts as nothing
+//! there, however early it arrived.
+//!
+//! ## The network scope is what stops register substitution
+//!
+//! Genesis v3 commits `network_id` as field 2 of `GenesisParamsV3`, inside the
+//! CCB that `G` commits — so an authenticated genesis already carries a
+//! committed network scope, recoverable by recomputation rather than by
+//! lookup. Requiring the trader's committed `network_id` to equal the
+//! vault's is what stops a trader minting a genesis under some other network
+//! whose profile names a different register, then presenting roots from that
+//! register as though they were from this one.
+//!
+//! The network→root-set mapping is **immutable for the lifetime of that root
+//! sequence**. Replacing the fleet requires an explicit handover or a new
+//! network identity, never a config edit — a mapping that could be edited
+//! would let the same position resolve to two different registers.
+
+use crate::ccb::{storage_set_id, CcbError, StorageSetMembers};
+use crate::common::domain_tags::{
+    TAG_DSM_ECONOMIC_POSITION_SEED, TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY,
+};
+use crate::crypto::blake3::dsm_domain_hasher;
+use crate::economic::claim_envelope::RegisteredEconomicClaim;
+use crate::route_chain::{
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
+    CompletionProof, Missing, ProofRefusal, RoutedCell,
+};
+
+/// `K_root = H_dom(DSM/trader-economic-root-register-key/v1,
+/// G ‖ DevID ‖ u64_be(economic_position))`.
+///
+/// Identity-scopes the cell and nothing more. The key is **derivable by
+/// anyone** who knows `(G, DevID, position)` — all public — so it confers no
+/// exclusivity on its own. Exclusivity comes from recognition: only a claim
+/// the trader signed is an object naming the cell.
+pub fn economic_root_register_key(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    economic_position: u64,
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(&economic_position.to_be_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// An object naming `K_root`: a registered economic claim — a trader's
+/// signed root claim, or a conditional SoFi claim — whose own coordinates
+/// derive `k_root`. Anything else at the cell counts as nothing.
+pub fn root_claim_naming(bytes: &[u8], k_root: &[u8; 32]) -> Option<RegisteredEconomicClaim> {
+    let claim = crate::economic::claim_envelope::decode_registered_economic_claim(bytes).ok()?;
+    let (genesis, device_id) = claim.trader();
+    (economic_root_register_key(&genesis, &device_id, claim.economic_position()) == *k_root)
+        .then_some(claim)
+}
+
+/// The namespace of economic root cells at a member: the key domain's own
+/// bytes.
+pub fn economic_root_namespace() -> &'static [u8] {
+    TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY.source_bytes()
+}
+
+/// `K_root(q)` of a trader as Core derives it: the key, and the route seeded
+/// by `s(q)` over the register's committed set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootCell {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    cell: RoutedCell,
+}
+
+impl RootCell {
+    /// `parent_root` is the root the verifier validated at `q - 1` (the
+    /// activation root before the first position). `members` must
+    /// re-derive `committed_set_id`, the register's pinned set id.
+    pub fn new(
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        economic_position: u64,
+        parent_root: &[u8; 32],
+        members: &StorageSetMembers,
+        committed_set_id: &[u8; 32],
+    ) -> Result<Self, CellError> {
+        let cell = RoutedCell::new(
+            economic_root_namespace(),
+            economic_root_register_key(genesis, device_id, economic_position),
+            &position_seed(genesis, device_id, economic_position, parent_root),
+            members,
+            committed_set_id,
+        )?;
+        Ok(Self {
+            genesis: *genesis,
+            device_id: *device_id,
+            economic_position,
+            cell,
+        })
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    pub fn routed(&self) -> &RoutedCell {
+        &self.cell
+    }
+}
+
+/// The route-chain reading of a root cell over claims naming its key
+/// ([`root_claim_naming`]). What holds the cell is the claim; its id is the
+/// entry digest of the exact bytes it arrived in.
+pub fn read_root_cell(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+) -> Result<CellReading<RegisteredEconomicClaim>, Missing> {
+    evaluate(&cell.cell, evidence, claim_at(cell))
+}
+
+/// The recognizer of a root cell: claims naming its key.
+///
+/// A single-root claim is identified by the entry digest of its exact bytes,
+/// which its writer retains and replays. A conditional claim is identified by
+/// the entry digest of its derived body, `C_q`: the trader's signature makes
+/// it an occupant (SoFi Amendment S20), but `C_q` is what every reader
+/// recomputes from `(P, F)` and compares, and a verifier cannot reproduce the
+/// signed bytes.
+fn claim_at(cell: &RootCell) -> impl Fn(&[u8]) -> Option<([u8; 32], RegisteredEconomicClaim)> + '_ {
+    move |bytes| {
+        root_claim_naming(bytes, cell.cell.key()).map(|claim| {
+            let id = match &claim {
+                RegisteredEconomicClaim::SingleRoot(_) => crate::storage_cell::entry_digest(bytes),
+                RegisteredEconomicClaim::ConditionalSofi(c) => {
+                    crate::storage_cell::entry_digest(&c.encode())
+                }
+            };
+            (id, claim)
+        })
+    }
+}
+
+/// The completion proof of the claim final at a root cell (storage spec
+/// §9), with the claim; `None` while no chain of the claim holding the cell
+/// has three links.
+pub fn root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+) -> Result<Option<(RegisteredEconomicClaim, CompletionProof)>, Missing> {
+    completion_proof(&cell.cell, evidence, claim_at(cell))
+}
+
+/// Check a kept completion proof of a root cell against the reads in
+/// `evidence`: the claim it proves final.
+pub fn check_root_completion(
+    cell: &RootCell,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<RegisteredEconomicClaim, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, claim_at(cell))
+}
+
+/// `s(q)` — the seed of a trader's position cells (Part II §7.2), consumed
+/// by the leader shuffle for `K_ful(q)` and `K_root(q)`. `parent_root` is the
+/// validated economic root at `q - 1`, or the genesis root for the first
+/// position; a verifier passes the root it validated itself.
+pub fn position_seed(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    economic_position: u64,
+    parent_root: &[u8; 32],
+) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_ECONOMIC_POSITION_SEED);
+    h.update(genesis);
+    h.update(device_id);
+    h.update(&economic_position.to_be_bytes());
+    h.update(parent_root);
+    *h.finalize().as_bytes()
+}
+
+/// The member that leads a position's cells: `FisherYates(s(q), S)[0]` over
+/// the committed set's member ids (Part II §7). The writer and Core compute
+/// it; a storage node never does.
+pub fn position_leader(
+    seed: &[u8; 32],
+    members: &StorageSetMembers,
+) -> Result<Vec<u8>, crate::sofi::fisher_yates::FisherYatesError> {
+    let ids: Vec<Vec<u8>> = members
+        .entries()
+        .iter()
+        .map(|e| e.member_id().to_vec())
+        .collect();
+    crate::sofi::fisher_yates::first_member(seed, &ids)
+}
+
+/// The register a network's economic roots live in.
+///
+/// Resolved from the network identity, never supplied by a claimant. A claim
+/// names the set it was written to inside its **signed** body, and a verifier
+/// checks that name against this resolution — so a claim cannot be lifted from
+/// one network's register into another's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootRegisterProfile {
+    pub members: Vec<Vec<u8>>,
+    /// The PINNED set id this network's root register lives under.
+    ///
+    /// This is the authority commitment, and it is why the field exists. With
+    /// membership alone, the answer to "who chose the incarnation values the
+    /// set id was derived from?" is "the resolved catalog candidate" — the
+    /// catalog would be constrained to the right member ids and otherwise
+    /// believed. Pinning the digest makes the catalog's job resolution and
+    /// nothing else: it may say WHERE a member is reached and WHICH
+    /// incarnation it claims, and this value decides whether that is the
+    /// register this network actually commits to.
+    ///
+    /// Derived once, from the incarnations the real provisioned members
+    /// minted. It is not derivable from anything in this source tree, which
+    /// is the point.
+    pub storage_set_id: [u8; 32],
+}
+
+impl RootRegisterProfile {
+    /// Check a CANDIDATE set against this network's pinned commitment.
+    ///
+    /// Two conjuncts, in this order, and neither is sufficient alone:
+    ///
+    /// 1. the candidate's member ids are exactly this network's members —
+    ///    a cheap, legible refusal that names what was wrong;
+    /// 2. the id RE-DERIVED from the candidate's `(member_id,
+    ///    register_incarnation_id)` pairs equals `storage_set_id`.
+    ///
+    /// Clause 2 is the one that makes the catalog non-authoritative. A member
+    /// that rebuilt its register still has the right id, so clause 1 passes;
+    /// its incarnation changed, so the re-derived digest does not match and
+    /// the set is refused. That is the substitution this exists to stop, and
+    /// it is refused rather than silently resolved to a different register.
+    ///
+    /// Endpoints are transport metadata and are not inputs to either clause.
+    pub fn verify_candidate(
+        &self,
+        candidate: &StorageSetMembers,
+    ) -> Result<(), RegisterResolutionError> {
+        let mut want: Vec<&[u8]> = self.members.iter().map(|m| m.as_slice()).collect();
+        want.sort_unstable();
+        let got: Vec<&[u8]> = candidate.entries().iter().map(|e| e.member_id()).collect();
+        if got != want {
+            return Err(RegisterResolutionError::MembershipNotCanonical {
+                expected: self.members.clone(),
+                got: got.iter().map(|m| m.to_vec()).collect(),
+            });
+        }
+        let derived =
+            storage_set_id(candidate).map_err(RegisterResolutionError::ProfileNotDerivable)?;
+        if derived != self.storage_set_id {
+            return Err(RegisterResolutionError::SetIdIsNotThePinnedOne {
+                pinned: self.storage_set_id,
+                derived,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Why a register could not be resolved. Every variant is **fail-closed**:
+/// there is no default register and no fallback set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterResolutionError {
+    /// No profile is defined for this network. Not an error to paper over
+    /// with a default — a default register is a register an attacker can
+    /// steer traffic into.
+    UnknownNetwork { network_id: Vec<u8> },
+    /// A resolver offered a candidate set whose membership is not this
+    /// network's. The catalog resolves a set; it never chooses one.
+    MembershipNotCanonical {
+        expected: Vec<Vec<u8>>,
+        got: Vec<Vec<u8>>,
+    },
+    /// The candidate has this network's members, but the id re-derived from
+    /// its `(member, incarnation)` pairs is not the pinned one — the members
+    /// are right and at least one is not serving the register this network
+    /// committed to. A rebuilt or restored member lands here.
+    SetIdIsNotThePinnedOne { pinned: [u8; 32], derived: [u8; 32] },
+    /// The trader's committed network is not the one being settled against.
+    NetworkMismatch { claimed: Vec<u8>, expected: Vec<u8> },
+    /// The profile resolved, but its set id could not be re-derived from the
+    /// members — a corrupt profile, not a recoverable condition.
+    ProfileNotDerivable(CcbError),
+}
+
+impl core::fmt::Display for RegisterResolutionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::UnknownNetwork { network_id } => write!(
+                f,
+                "no root-register profile for network {:?} — fail closed; a default register \
+                 is one an attacker can steer traffic into",
+                String::from_utf8_lossy(network_id)
+            ),
+            Self::MembershipNotCanonical { expected, got } => write!(
+                f,
+                "resolved root-register membership {:?} is not this network's canonical \
+                 membership {:?} — the catalog resolves a set, it never chooses one",
+                got.iter()
+                    .map(|m| String::from_utf8_lossy(m))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|m| String::from_utf8_lossy(m))
+                    .collect::<Vec<_>>()
+            ),
+            // The digests are carried on the variant rather than rendered
+            // here: this crate has no Base32-Crockford encoder (it lives in
+            // the SDK), and the repository forbids hex.
+            Self::SetIdIsNotThePinnedOne { .. } => write!(
+                f,
+                "the resolved register set has this network's members but does not derive the \
+                 pinned set id — a member is not serving the register history this network \
+                 committed to"
+            ),
+            Self::NetworkMismatch { claimed, expected } => write!(
+                f,
+                "trader genesis commits network {:?} but this is network {:?} — a genesis \
+                 minted under another network resolves a different register",
+                String::from_utf8_lossy(claimed),
+                String::from_utf8_lossy(expected)
+            ),
+            Self::ProfileNotDerivable(e) => {
+                write!(f, "root-register profile is not derivable: {e}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegisterResolutionError {}
+
+/// The beta fleet's PINNED authority set: each member and the register
+/// incarnation it is serving.
+///
+/// This is the network's root-register commitment, expressed as the pairs
+/// rather than as an opaque digest so it can be audited by reading it — the
+/// set id is derived from exactly these bytes, and `verify_candidate` refuses
+/// anything that does not re-derive to it.
+///
+/// The incarnations are NOT chosen here. Each is the value that member's own
+/// database minted on first boot, read from its startup log; nothing in this
+/// source tree can derive them, which is what makes the pin meaningful. A
+/// member that loses and rebuilds its register mints a different one, stops
+/// re-deriving this id, and is refused rather than silently substituted.
+///
+/// An all-zero incarnation is the value a node has before it has established
+/// one, and `StorageSetMembers::new` refuses it — so an UNPROVISIONED network
+/// fails closed here by construction rather than by anyone remembering to
+/// check.
+///
+/// Reprovisioned 2026-09-27 (UTC): the five-member GCP set (us-central1) was
+/// rebuilt on the storage node at main f779cb872, whose schema (version 2)
+/// migrates nothing, so every member's database was recreated empty and each
+/// minted a NEW incarnation on first boot; these are the values each logged at
+/// that boot, and the set id they derive is the one every member logged. Their
+/// Base32-Crockford renderings are pinned in
+/// `beta_root_register_pins_render_to_the_logged_values`. Nothing from the
+/// 2026-09-12 provisioning carries over — its incarnations and its set id are
+/// retired, and a claim made under them cannot validate here.
+const BETA_ROOT_REGISTER_MEMBERS: [PinnedMember; 5] = [
+    (
+        b"dsm-node-1",
+        [
+            0x59, 0x9B, 0xF2, 0x69, 0xF2, 0x17, 0x83, 0x0C, 0xC9, 0x1D, 0x29, 0xD8, 0xE4, 0x2F,
+            0x9D, 0x05, 0xE8, 0x59, 0x63, 0x6A, 0x95, 0x80, 0x89, 0x62, 0xFA, 0xD9, 0x8A, 0xD7,
+            0x5C, 0xA3, 0x6F, 0xA7,
+        ],
+    ),
+    (
+        b"dsm-node-2",
+        [
+            0xBF, 0xB0, 0x69, 0x98, 0xAC, 0x6A, 0x33, 0xF2, 0x02, 0x04, 0xB7, 0xF6, 0x4B, 0x53,
+            0x22, 0xC0, 0x37, 0x30, 0x0A, 0xA1, 0x26, 0x9C, 0xCF, 0x82, 0x16, 0x00, 0x3F, 0x84,
+            0xED, 0x99, 0xF3, 0x04,
+        ],
+    ),
+    (
+        b"dsm-node-3",
+        [
+            0x12, 0xA4, 0x88, 0x7C, 0x97, 0xA1, 0xFD, 0x13, 0xB4, 0xB0, 0x29, 0x44, 0xE5, 0x47,
+            0x36, 0xD6, 0x75, 0xC8, 0x26, 0x7D, 0x70, 0x09, 0x8D, 0x2E, 0x7E, 0xAA, 0x1D, 0x90,
+            0x9F, 0xC9, 0x5E, 0xB9,
+        ],
+    ),
+    (
+        b"dsm-node-4",
+        [
+            0xCA, 0x4B, 0xB8, 0xF0, 0x1E, 0xF9, 0x02, 0x36, 0xA8, 0x9E, 0xEA, 0x4E, 0x2F, 0xA9,
+            0x3D, 0x6A, 0x8C, 0x97, 0xF5, 0xE4, 0x9A, 0xD9, 0x01, 0x2A, 0x30, 0x42, 0x5A, 0xA4,
+            0x5B, 0x5E, 0x10, 0x01,
+        ],
+    ),
+    (
+        b"dsm-node-5",
+        [
+            0x29, 0xB6, 0xB2, 0xEB, 0xC2, 0x82, 0x2F, 0x3D, 0xCA, 0xBB, 0x7C, 0xE5, 0x7E, 0xA6,
+            0xA0, 0x84, 0x65, 0x53, 0x6D, 0xD7, 0x0C, 0xF6, 0x97, 0x21, 0x10, 0xE8, 0x8E, 0x2D,
+            0xA2, 0x04, 0x1E, 0x39,
+        ],
+    ),
+];
+
+/// The network the beta fleet serves. Matches the client database's
+/// `network_id` default. The real mainnet gets its OWN id (and with it its
+/// own native ERA reserve, `era_reserve_id(network_id)`) as a new profile at
+/// launch — nothing claimed under this network can validate there.
+/// The network the beta root register is pinned for. One name for the
+/// network, so callers resolve the profile they were built for instead of
+/// each spelling the id themselves.
+pub const BETA_NETWORK_ID: &[u8] = b"dsm-testnet";
+
+/// One pinned entry: a member id and the register incarnation it serves.
+pub type PinnedMember = (&'static [u8], [u8; 32]);
+
+/// A network's PINNED root-register members, for callers that must construct
+/// or display the committed set — a catalog being provisioned, a fixture that
+/// has to resolve to the real register, an operator tool.
+///
+/// Public because it is a commitment, not a secret: it says which members and
+/// which register histories this network trusts, and anyone verifying a claim
+/// against this network needs to be able to check that.
+pub fn pinned_root_register_members(
+    network_id: &[u8],
+) -> Result<&'static [PinnedMember], RegisterResolutionError> {
+    if network_id != BETA_NETWORK_ID {
+        return Err(RegisterResolutionError::UnknownNetwork {
+            network_id: network_id.to_vec(),
+        });
+    }
+    Ok(&BETA_ROOT_REGISTER_MEMBERS)
+}
+
+/// Resolve the register for a network. Unknown network ⇒ fail closed.
+pub fn resolve_root_register_profile(
+    network_id: &[u8],
+) -> Result<RootRegisterProfile, RegisterResolutionError> {
+    if network_id != BETA_NETWORK_ID {
+        return Err(RegisterResolutionError::UnknownNetwork {
+            network_id: network_id.to_vec(),
+        });
+    }
+    // The pinned pairs are the ONE source: both the member list and the set id
+    // come from them, so the two cannot drift apart.
+    let pinned = StorageSetMembers::new(&BETA_ROOT_REGISTER_MEMBERS)
+        .map_err(RegisterResolutionError::ProfileNotDerivable)?;
+    let storage_set_id =
+        storage_set_id(&pinned).map_err(RegisterResolutionError::ProfileNotDerivable)?;
+    let members: Vec<Vec<u8>> = pinned
+        .entries()
+        .iter()
+        .map(|e| e.member_id().to_vec())
+        .collect();
+    Ok(RootRegisterProfile {
+        members,
+        storage_set_id,
+    })
+}
+
+/// Resolve the register for a trader, requiring their committed network to be
+/// the one being settled against.
+///
+/// `trader_network_id` must come from the `GenesisParamsV3` behind the
+/// **authenticated** `G` — recovered by recomputation, not accepted from a
+/// claimant.
+pub fn resolve_for_trader(
+    trader_network_id: &[u8],
+    settling_network_id: &[u8],
+) -> Result<RootRegisterProfile, RegisterResolutionError> {
+    if trader_network_id != settling_network_id {
+        return Err(RegisterResolutionError::NetworkMismatch {
+            claimed: trader_network_id.to_vec(),
+            expected: settling_network_id.to_vec(),
+        });
+    }
+    resolve_root_register_profile(settling_network_id)
+}
+
+/// What a register member observed at one position.
+///
+/// Holding one of these means a quorum accepted these exact bytes. It means
+/// **nothing** about whether `post_economic_root` is the result of a valid
+/// transition — see [`super::lineage`], and note there is deliberately no
+/// conversion from this type into a validated one.
+/// **Fields are private, and there is ONE constructor.** Public fields made
+/// this type assemblable from arbitrary bytes: anything could name a position
+/// and a root and hand the result to `advance_validated`, which is the whole
+/// door the claim union was introduced to shut. The union refuses to flatten
+/// a conditional claim into a root — and that is worth nothing if a caller can
+/// simply build the flattened struct itself.
+///
+/// So the only way to one of these is
+/// [`Self::from_verified_single_root`]: a claim whose envelope decoded
+/// canonically, whose signature verified under its own committed key, and
+/// which is a `SingleRoot` claim rather than a conditional one. Every field
+/// below is then a projection of that claim, not a caller's assertion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredEconomicRoot {
+    trader_genesis: [u8; 32],
+    trader_devid: [u8; 32],
+    economic_position: u64,
+    post_economic_root: [u8; 32],
+    admission_manifest_addr: [u8; 32],
+    storage_set_id: [u8; 32],
+    /// `ClaimRef`: the digest of the exact envelope the claim arrived in.
+    claim_ref: [u8; 32],
+}
+
+impl RegisteredEconomicRoot {
+    /// THE constructor: project a verified single-root claim.
+    ///
+    /// It takes the claim rather than the fields precisely so there is nothing
+    /// for a caller to choose. A conditional claim cannot reach here — it has
+    /// no `VerifiedEconomicRootClaim` to offer, because
+    /// `RegisteredEconomicClaim::single_root` refuses it.
+    pub fn from_verified_single_root(
+        claim: &crate::economic::claim_envelope::VerifiedEconomicRootClaim,
+    ) -> Self {
+        let body = claim.body();
+        Self {
+            trader_genesis: body.trader_genesis,
+            trader_devid: body.trader_devid,
+            economic_position: body.economic_position,
+            post_economic_root: body.post_economic_root,
+            admission_manifest_addr: body.admission_manifest_addr,
+            storage_set_id: body.root_register_storage_set_id,
+            claim_ref: crate::sofi::derive::claim_ref(claim.envelope_bytes()),
+        }
+    }
+
+    /// The digest of the exact claim envelope this root was registered in.
+    pub fn claim_ref(&self) -> [u8; 32] {
+        self.claim_ref
+    }
+
+    pub fn trader_genesis(&self) -> [u8; 32] {
+        self.trader_genesis
+    }
+
+    pub fn trader_devid(&self) -> [u8; 32] {
+        self.trader_devid
+    }
+
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    pub fn post_economic_root(&self) -> [u8; 32] {
+        self.post_economic_root
+    }
+
+    pub fn admission_manifest_addr(&self) -> [u8; 32] {
+        self.admission_manifest_addr
+    }
+
+    pub fn storage_set_id(&self) -> [u8; 32] {
+        self.storage_set_id
+    }
+
+    /// The cell these bytes occupy.
+    pub fn register_key(&self) -> [u8; 32] {
+        economic_root_register_key(
+            &self.trader_genesis,
+            &self.trader_devid,
+            self.economic_position,
+        )
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
+mod registered_root_construction_tests {
+    use super::*;
+    use crate::economic::claim::EconomicRootClaimBody;
+    use crate::economic::claim_envelope::device_fixture::{device, signed_by, signed_conditional};
+    use crate::economic::claim_envelope::{decode_registered_economic_claim, sign_economic_root_claim};
+    use crate::route_chain::fixtures::{committed_set, committed_set_id, Cell};
+    use crate::route_chain::{ChainState, ROUTE_LEN};
+    use crate::sofi::wire::SofiResolutionClaim;
+
+    fn conditional(device_id: [u8; 32], position: u64) -> SofiResolutionClaim {
+        SofiResolutionClaim {
+            genesis: [0x11; 32],
+            device_id,
+            position,
+            fulfillment_id: [0xF1; 32],
+            realize_root: [0xA1; 32],
+            void_root: [0xB1; 32],
+        }
+    }
+
+    fn root_cell(device_id: &[u8; 32], position: u64) -> RootCell {
+        RootCell::new(
+            &[0x11; 32],
+            device_id,
+            position,
+            &[0x5E; 32],
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .expect("the committed set")
+    }
+
+    /// THE ONLY WAY TO A REGISTERED ROOT IS A VERIFIED CLAIM.
+    ///
+    /// With public fields, the claim union's refusal to flatten a conditional
+    /// claim into a root bought nothing: a caller could read `realize_root`
+    /// off a `C_q` and assemble the struct by hand, then hand it to
+    /// `advance_validated`. The type now has one constructor and it takes the
+    /// verified claim, so there is no field for a caller to choose.
+    #[test]
+    fn a_registered_root_is_a_projection_of_a_verified_claim() {
+        let d = device([0xA7; 32]).unwrap();
+        let body = EconomicRootClaimBody::new(
+            [0x11; 32],
+            d.devid,
+            9,
+            [0xC0; 32],
+            [0xD0; 32],
+            [0x77; 32],
+            crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            &d.pk,
+            d.att_a,
+        )
+        .unwrap();
+        let envelope = sign_economic_root_claim(&body, &d.sk).unwrap();
+        let verified = decode_registered_economic_claim(&envelope)
+            .unwrap()
+            .single_root()
+            .unwrap()
+            .clone();
+
+        let registered = RegisteredEconomicRoot::from_verified_single_root(&verified);
+        // Every field is the claim's, not an argument.
+        assert_eq!(registered.trader_genesis(), [0x11; 32]);
+        assert_eq!(registered.trader_devid(), d.devid);
+        assert_eq!(registered.economic_position(), 9);
+        assert_eq!(registered.post_economic_root(), [0xC0; 32]);
+        assert_eq!(registered.admission_manifest_addr(), [0xD0; 32]);
+        assert_eq!(registered.storage_set_id(), [0x77; 32]);
+        assert_eq!(
+            registered.register_key(),
+            economic_root_register_key(&[0x11; 32], &d.devid, 9)
+        );
+    }
+
+    /// A CONDITIONAL CLAIM CANNOT REACH THE CONSTRUCTOR AT ALL.
+    ///
+    /// Not because a check rejects it — because it has no
+    /// `VerifiedEconomicRootClaim` to offer. The refusal is in the type, which
+    /// is what makes it impossible to forget.
+    #[test]
+    fn a_conditional_claim_has_nothing_to_construct_from() {
+        let d = device([0xA7; 32]).unwrap();
+        let decoded = decode_registered_economic_claim(
+            &signed_conditional(conditional(d.devid, 9), &d).unwrap(),
+        )
+        .unwrap();
+        // The only path to the constructor's argument refuses, and there is no
+        // second path: `RegisteredEconomicRoot` has no public fields and no
+        // other constructor.
+        assert!(decoded.single_root().is_err());
+    }
+
+    /// A root cell names what holds it, and the read carries the exact bytes
+    /// that hold it: this key's claim, not the claim the leader took first,
+    /// which names the next position's key. A conditional claim is named by
+    /// its derived body, which every reader recomputes from `(P, F)`; the
+    /// signed bytes are what the cell holds.
+    #[test]
+    fn a_held_root_cell_carries_the_exact_bytes_that_hold_it() {
+        let d = device([0xA7; 32]).unwrap();
+        let claim = conditional(d.devid, 9);
+        let bytes = signed_conditional(claim, &d).unwrap();
+        let cell = root_cell(&d.devid, 9);
+        let elsewhere = signed_conditional(conditional(d.devid, 10), &d).unwrap();
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&elsewhere, ROUTE_LEN - 1, &[]);
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(CellReading::Held {
+            id, value, state, ..
+        }) = read_root_cell(&cell, &seats.evidence())
+        else {
+            panic!("the claim holds the cell")
+        };
+        assert_eq!(
+            (id, value, state),
+            (
+                crate::storage_cell::entry_digest(&claim.encode()),
+                bytes,
+                ChainState::Final
+            )
+        );
+    }
+
+    /// DSM Amendment A10: a claim in the trader's name that the trader's
+    /// device did not sign counts for nothing at the trader's cell, however
+    /// early it arrived. A squatter's `C_q`, and a squatter's single-root
+    /// claim, written first at every seat, leave the cell to the trader's
+    /// own claim.
+    #[test]
+    fn a_squatters_claim_written_first_does_not_hold_the_cell() {
+        let trader = device([0xA7; 32]).unwrap();
+        let squatter = device([0x5A; 32]).unwrap();
+        let cell = root_cell(&trader.devid, 9);
+        let squat_conditional =
+            signed_by(conditional(trader.devid, 9), &squatter, trader.att_a).unwrap();
+        let squat_root = sign_economic_root_claim(
+            &EconomicRootClaimBody::new(
+                [0x11; 32],
+                trader.devid,
+                9,
+                [0xE0; 32],
+                [0xD0; 32],
+                [0x77; 32],
+                crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+                &squatter.pk,
+                squatter.att_a,
+            )
+            .unwrap(),
+            &squatter.sk,
+        )
+        .unwrap();
+        let ours = signed_conditional(conditional(trader.devid, 9), &trader).unwrap();
+
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&squat_conditional, ROUTE_LEN - 1, &[]);
+        seats.write(&squat_root, ROUTE_LEN - 1, &[]);
+        seats.write(&conditional(trader.devid, 9).encode(), ROUTE_LEN - 1, &[]);
+        // Nothing the squatter wrote holds the cell.
+        assert_eq!(
+            read_root_cell(&cell, &seats.evidence()),
+            Ok(CellReading::Open)
+        );
+
+        seats.write(&ours, ROUTE_LEN - 1, &[]);
+        let Ok(CellReading::Held { value, state, .. }) = read_root_cell(&cell, &seats.evidence())
+        else {
+            panic!("the trader's own claim holds the cell")
+        };
+        assert_eq!((value, state), (ours, ChainState::Final));
+    }
+
+    /// A claim final at its root cell has a completion proof built from the
+    /// reads, and the proof checks against them; a claim held at the leader
+    /// alone has none.
+    #[test]
+    fn a_final_root_claim_has_a_completion_proof_that_checks() {
+        let d = device([0xA7; 32]).unwrap();
+        let bytes = signed_conditional(conditional(d.devid, 9), &d).unwrap();
+        let cell = root_cell(&d.devid, 9);
+        let mut held = Cell::at(cell.routed());
+        held.write(&bytes, 0, &[]);
+        assert_eq!(root_completion(&cell, &held.evidence()), Ok(None));
+        let mut seats = Cell::at(cell.routed());
+        seats.write(&bytes, ROUTE_LEN - 1, &[]);
+        let Ok(Some((proven, proof))) = root_completion(&cell, &seats.evidence()) else {
+            panic!("a final claim has a completion proof")
+        };
+        assert_eq!(proven, decode_registered_economic_claim(&bytes).unwrap());
+        assert_eq!(
+            check_root_completion(&cell, &seats.evidence(), &proof),
+            Ok(proven)
+        );
+    }
+}

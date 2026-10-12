@@ -9,7 +9,112 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-_No changes yet on `main` past `v0.1.0-beta.3`._
+### Breaking — requires a device state wipe
+
+- **Vault rehydration fails closed on funded heads that predate the vault-state leaf.**
+  `advance` began deriving a vault-state leaf on every funding and settlement in
+  `607ec24f` (2026-08-19), but reserve mutations had existed since `05c16b99`
+  (2026-07-31). A head funded in that window holds reserve legs with **no**
+  vault-state leaf. Rehydration now checks the vault record against that leaf,
+  so such a vault is refused everywhere it is read: omitted from the vault list,
+  not quotable, and **not closable** — reserves encumbered in that window are
+  unreachable on that device.
+
+  The persistence codec does not catch this. `DEVICE_STATE_VERSION` was last
+  raised in `80c9f3f6` (2026-08-12), before the leaf derivation landed, so an
+  affected head still decodes cleanly and reaches rehydration looking valid.
+
+  **There is no migration, deliberately.** The missing leaf is never
+  synthesized: writing a commitment the device did not make is exactly the class
+  of fabricated state this line of work exists to remove, and a migration would
+  create compatibility logic for a state shape we do not want to preserve. Beta
+  runs on `dsm-testnet` and carries no production user state, so the remedy is a
+  state wipe — reinstall or clear application data, then re-fund. Today's funded
+  create cannot produce such a head, so only a device still carrying state from
+  that window is affected.
+
+  This option disappears once production persistence matters; at that point the
+  same boundary would need a real migration or an explicit terminal state.
+
+- **Every DLV's creator signature now covers its DLV-policy digest — pre-existing
+  vault signatures stop verifying.** `LimboVault::parameters_hash`, the preimage
+  the creator signs at birth, now folds the vault's `policy_digest` (presence-
+  tagged). `LimboVault::verify` recomputes that preimage from the vault's fields,
+  so a vault created before this change carries a signature over a preimage that
+  no longer matches and is refused as unverifiable — everywhere it is read.
+
+  **No migration, no re-signing, deliberately.** Those signatures were made over
+  a different statement. Re-signing, synthesising, or translating them would
+  preserve exactly the historical accommodation this line of work exists to
+  remove. Beta runs on `dsm-testnet` with no production user state, so the
+  remedy is the same wipe as above.
+
+  Alongside it, `DlvSpecV1.policy_digest` changes meaning and contract for AMM
+  DLVs: it is the AMM DLV-policy digest - a derived view of the release and fee
+  policy the creator-signed vault state already commits - not a CPTA/token
+  anchor. AMM `dlv.create` now derives it (leave the field empty) and refuses
+  any other supplied value; the LiquidityScreen's "policy anchor" paste box is
+  gone. Non-AMM DLVs have no `ReleasePolicy`/`FeePolicy` object to derive from,
+  so their supplied 32-byte digest remains caller-supplied but creator-signed.
+  That non-AMM semantic gap is follow-up debt, not solved in this release.
+
+### Security
+
+- **The owner's settlement fold proves the trade from the state it owns.**
+  `dlv.reconcile` used to copy `input_amount`/`output_amount` out of the
+  trader's receipt into the signed `DlvOwnerApplyV2` and fold them; the receipt
+  witnesses what the trader committed, not what the owner's reserves pay, and
+  nothing on the owner's side re-ran the curve. Now, in the core
+  `ApplySettlement` arm of `advance` (the security boundary, sufficient by
+  itself), the owner re-derives the transition from its own commitment: the
+  vault-state leaf at `parent_sequence` must commit exactly the pair, fee and
+  reserves being consumed; the signed `parent_binding` must be the commitment of
+  a parent `VaultStateV2` whose vault, generation, reserves, pair, fee and owner
+  equal those leaves; the input reserve is the leaf of the asset the trader
+  paid (by asset identity, never by pair order); and the ONE canonical
+  `constant_product_output` over those reserves must equal the proposed output
+  exactly. Any other fold is refused by name and moves nothing.
+  `VaultReserveMutation::ApplySettlement` gains `parent_state` (the parent
+  `CCB(V_n)` bytes, bound by the signed `parent_binding`). `dlv.reconcile`
+  mirrors the same check BEFORE signing, sourcing pair, fee, reserves and the
+  binding from the verified composition rather than the SQLite record, so the
+  owner never signs settlement arithmetic it has not checked. Every owner-apply
+  fixture that folded an off-curve literal is re-rooted to the curve. No
+  persisted format changes; no wipe: the vault-state leaf this relies on has
+  been required since the rehydration gate.
+
+- **Client database schema 12 → 13: the AMM vault record gains a reserve-proof
+  locator, and beta does not migrate.** `amm_vault_records` now carries
+  `economic_proof_addr` and `economic_proof_position` — the content address of
+  the `EconomicProofArtifactV1` the admitted create publishes for the vault's
+  reserve leaves, and the economic position whose registered root that proof
+  names. `CREATE TABLE IF NOT EXISTS` does not add columns to an existing file,
+  so an older database is structurally invalid and `enforce_schema_version`
+  refuses it by design: wipe the app database and re-provision from the wallet
+  seed. Beta runs on `dsm-testnet` with no production user state.
+
+  The routing advertisement carries the same pair, which is what lets a trader
+  find the proof at all. Both are LOCATORS on an unsigned object: a reader
+  resolves the position's root from the owner's own write-once register cell
+  and recomputes every inclusion path against it, so a wrong address or
+  position can only make a lookup fail, never make one succeed against a root
+  the owner did not register.
+
+### Changed
+
+- **The 0x0026 reserve-consumption evidence bundle names the generic proof
+  artifact instead of carrying its own leaves.**
+  `ReserveConsumptionEvidenceV1` dropped `reserve_a_state`,
+  `reserve_a_siblings`, `reserve_b_state` and `reserve_b_siblings` (fields 3–6,
+  now reserved) in favour of `economic_proof_addr`. The verifier fetches that
+  artifact, re-hashes it to the named address, verifies it against the owner,
+  economic position and validated root the verifier itself derived, and then
+  selects exactly the two reserve leaves for this vault at this generation.
+
+  Carrying the leaves in the bundle was a second representation of what the
+  artifact already proves, and two representations of one fact can disagree.
+  No migration is needed and no state is affected: nothing had ever produced
+  one of these bundles, so none exist.
 
 ---
 

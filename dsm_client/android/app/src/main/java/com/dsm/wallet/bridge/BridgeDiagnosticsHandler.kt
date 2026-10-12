@@ -53,23 +53,15 @@ internal object BridgeDiagnosticsHandler {
     }
 
     fun getArchitectureInfo(escapeForString: (String) -> String): ByteArray {
-        return try {
-            val compat = com.dsm.wallet.diagnostics.ArchitectureChecker.checkCompatibility()
-            buildArchitectureInfoProto(
-                compat.status.name,
-                escapeForString(compat.deviceArch),
-                escapeForString(compat.supportedAbis.joinToString(", ")),
-                escapeForString(compat.message),
-                escapeForString(compat.recommendation)
-            )
-        } catch (_: Exception) {
-            buildArchitectureInfoProto(
-                "UNKNOWN",
-                "unavailable",
-                "",
-                "Architecture check error",
-                ""
-            )
-        }
+        // A check that fails answers as the bridge's error (the RPC wrapper
+        // reports the exception); nothing is answered in its place.
+        val compat = com.dsm.wallet.diagnostics.ArchitectureChecker.checkCompatibility()
+        return buildArchitectureInfoProto(
+            compat.status.name,
+            escapeForString(compat.deviceArch),
+            escapeForString(compat.supportedAbis.joinToString(", ")),
+            escapeForString(compat.message),
+            escapeForString(compat.recommendation)
+        )
     }
 }

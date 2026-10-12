@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { AppState, ScreenType } from '../types/app';
+import { appVersion } from '../appVersion';
 
 type HomeStatusArgs = {
   appState: AppState;
@@ -11,12 +12,12 @@ type HomeStatusArgs = {
 export function buildHomeMenuItems(appState: AppState, currentScreen: ScreenType): string[] {
   switch (appState) {
     case 'needs_genesis':
-      return ['INITIALIZE', 'ADDITIONAL DEVICE', 'DEVICE RECOVERY'];
+      return ['INITIALIZE', 'DEVICE RECOVERY'];
     case 'error':
       return ['RETRY CONNECTION', 'VIEW ERROR LOG'];
     case 'wallet_ready':
       if (currentScreen !== 'home') return ['BACK TO HOME'];
-      return ['WALLET', 'TOKENS', 'SOFI', 'CONTACTS', 'STORAGE', 'SETTINGS'];
+      return ['WALLET', 'TOKENS', 'TRADE', 'APPS', 'CONTACTS', 'STORAGE', 'SETTINGS'];
     default:
       return [];
   }
@@ -30,7 +31,15 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: STANDBY',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
+      ];
+    case 'publication_pending':
+      return [
+        'GENESIS: COMMITTED',
+        'NETWORK: PUBLISHING',
+        'DEVICE: VERIFIED',
+        `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
+        `VERSION: ${appVersion()}`,
       ];
     case 'wallet_ready':
       return [
@@ -38,7 +47,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: CONNECTED',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     case 'error':
       return [
@@ -46,7 +55,7 @@ export function buildHomeStatusLines({ appState, soundEnabled, error }: HomeStat
         'NETWORK: DISCONNECTED',
         'DEVICE: VERIFIED',
         `SOUND: ${soundEnabled ? 'ON' : 'OFF'}`,
-        'VERSION: 1.0.0',
+        `VERSION: ${appVersion()}`,
       ];
     default:
       return [];

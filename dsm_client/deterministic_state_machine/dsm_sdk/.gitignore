@@ -15,7 +15,13 @@ Java class files
 
 Generated files
 
-bin/
+# ANCHORED. This file is an Android .gitignore living in a Rust crate, and a
+# bare `bin/` matches Rust's `src/bin/` too — which silently untracked
+# `src/bin/dlv_binding_probe.rs`, a source file the live rig gate depends on.
+# `git status` showed a clean tree, so nothing surfaced it. Anchor to the
+# crate root, where the Android build output these patterns were written for
+# actually lives.
+/bin/
 gen/
 out/
 

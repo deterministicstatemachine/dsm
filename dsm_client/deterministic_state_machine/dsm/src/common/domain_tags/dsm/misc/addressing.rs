@@ -2,9 +2,12 @@
 
 //! DSM namespace tags: addressing and routing
 
-pub const TAG_DSM_ADDR_D: &str = "DSM/addr-D";
-pub const TAG_DSM_ADDR_G: &str = "DSM/addr-G";
-pub const TAG_DSM_ADDR_T: &str = "DSM/addr-T";
-pub const TAG_DSM_CONTACT_ADD: &str = "DSM/contact/add";
-pub const TAG_DSM_CONTACT_ADD_NUL: &str = "DSM/contact/add\0";
-pub const TAG_DSM_COUNTERPARTY_ID: &str = "DSM/counterparty-id";
+use crate::crypto::domain::TaggedHashDomain;
+
+pub const TAG_DSM_ADDR_D: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/addr-D");
+pub const TAG_DSM_ADDR_G: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/addr-G");
+pub const TAG_DSM_ADDR_T: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/addr-T");
+pub const TAG_DSM_CONTACT_ADD: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/contact/add");
+pub const TAG_DSM_COUNTERPARTY_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/counterparty-id");

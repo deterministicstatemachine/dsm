@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { processEnvelopeV3Bin } from '../WebViewBridge';
-import { BridgeRpcRequest, BridgeRpcResponse, EnvelopeOp, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
+import { routerQueryBin } from '../WebViewBridge';
+import { BridgeRpcRequest, BridgeRpcResponse, IngressRequest, IngressResponse } from '../../proto/dsm_app_pb';
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  const br = new BridgeRpcResponse({ result: { case: 'success', value: { data } } });
+  const br = new BridgeRpcResponse({ result: { case: 'success', value: { data: new Uint8Array(data) } } });
   return br.toBinary();
 }
 
-describe.skip('WebViewBridge framing invariants', () => {
+describe('WebViewBridge framing invariants', () => {
   beforeEach(() => {
     (global as any).window = (global as any).window ?? {};
   });
 
-  test('processEnvelopeV3Bin uses nativeBoundaryIngress with an envelope op', async () => {
+  test('a router query goes to nativeBoundaryIngress as a routerQuery op', async () => {
     const seen: { method?: string; payload?: Uint8Array } = {};
     const response = new IngressResponse({
       result: { case: 'okBytes', value: new Uint8Array([1, 2, 3]) },
     }).toBinary();
 
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = BridgeRpcRequest.fromBinary(reqBytes);
         seen.method = req.method;
         seen.payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
@@ -28,22 +28,26 @@ describe.skip('WebViewBridge framing invariants', () => {
       },
     };
 
-    const envelope = new Uint8Array([9, 9, 9, 9]);
-    await processEnvelopeV3Bin(envelope);
+    const params = new Uint8Array([9, 9, 9, 9]);
+    await expect(routerQueryBin('balance.list', params)).resolves.toEqual(new Uint8Array([1, 2, 3]));
 
     expect(seen.method).toBe('nativeBoundaryIngress');
     const ingressRequest = IngressRequest.fromBinary(seen.payload ?? new Uint8Array(0));
-    expect(ingressRequest.operation.case).toBe('envelope');
-    expect((ingressRequest.operation.value as EnvelopeOp).envelopeBytes).toEqual(envelope);
+    expect(ingressRequest.operation.case).toBe('routerQuery');
+    expect(ingressRequest.operation.case === 'routerQuery' && ingressRequest.operation.value.method).toBe('balance.list');
+    expect(ingressRequest.operation.case === 'routerQuery' && ingressRequest.operation.value.args).toEqual(params);
   });
 
-  test('normalizeToBytes rejects non-Uint8Array / non-number[] payloads', async () => {
+  // The guard is on the bridge's own `ingress` wrapper's answer: index.html
+  // answers bytes or throws, and anything else is refused here.
+  test('a native answer that is not bytes is refused', async () => {
     (global as any).window.DsmBridge = {
-      __callBin: async () => ({ nope: true } as any),
+      sendMessageBin: async () => new Uint8Array(0),
+      ingress: async () => ({ nope: true } as any),
     };
 
-    await expect(processEnvelopeV3Bin(new Uint8Array([1]))).rejects.toThrow(
-      /normalizeToBytes: expected Uint8Array or number\[]/,
+    await expect(routerQueryBin('balance.list')).rejects.toThrow(
+      /expected Uint8Array response from native boundary/,
     );
   });
 });

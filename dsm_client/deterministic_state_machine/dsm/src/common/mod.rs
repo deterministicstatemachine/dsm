@@ -12,7 +12,6 @@
 /// Centralized canonical encoding for cryptographic commitments
 pub mod canonical_encoding;
 /// Deterministic ID generation (no UUID, no wall-clock)
-pub mod deterministic_id;
 /// Additional-device admission (§16.3 — existing device admits a new device into the tree)
 pub mod device_admission;
 pub mod device_tree;

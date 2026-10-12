@@ -2,34 +2,109 @@
 
 //! DSM namespace tags: misc
 
+// TAGS below is consumed only by the cfg(test) `all_tags()` collector, so
+// both it and this import are test-only in a non-test build.
+#[cfg(test)]
+use crate::crypto::domain::TaggedHashDomain;
+
 mod addressing;
+mod connect;
+mod economic;
+mod escrow;
 mod protocol;
+mod shared_lineage;
+mod sofi;
 mod testing;
 mod token_ops;
+mod wallet;
 
 pub use addressing::*;
+pub use connect::*;
+pub use economic::*;
+pub use escrow::*;
 pub use protocol::*;
+pub use shared_lineage::*;
+pub use sofi::*;
 pub use testing::*;
 pub use token_ops::*;
+pub use wallet::*;
+
+/// The SoFi v8 tags, collected separately so the flat `TAGS` list below stays
+/// untouched by the v8 allocation.
+#[cfg(test)]
+pub(super) fn sofi_tags() -> &'static [TaggedHashDomain<'static>] {
+    sofi::SOFI_TAGS
+}
+
+/// The escrow-vault tags (SoFi Amendment S21), collected the same way.
+#[cfg(test)]
+pub(super) fn escrow_tags() -> &'static [TaggedHashDomain<'static>] {
+    escrow::ESCROW_TAGS
+}
+
+/// The shared-lineage tags (SoFi Amendment S23), collected the same way.
+#[cfg(test)]
+pub(super) fn shared_lineage_tags() -> &'static [TaggedHashDomain<'static>] {
+    shared_lineage::SHARED_LINEAGE_TAGS
+}
 
 #[cfg(test)]
-pub(super) const TAGS: &[&str] = &[
+#[cfg(test)]
+pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ADDR_D,
     TAG_DSM_ADDR_G,
     TAG_DSM_ADDR_T,
-    TAG_DSM_ANCHOR_TICK,
-    TAG_DSM_BALANCE_ANCHOR,
     TAG_DSM_BTC_DEPOSIT_ID,
     TAG_DSM_BTC_KEY_ENC,
-    TAG_DSM_CANONICAL_BALANCE,
     TAG_DSM_CANONICAL_LP,
+    TAG_DSM_CONNECT_ACCEPT,
+    TAG_DSM_CONNECT_OFFER,
+    TAG_DSM_CONNECT_OFFER_DIGEST,
+    TAG_DSM_CONNECT_REQUEST,
+    TAG_DSM_CONNECT_RESPONSE,
+    TAG_DSM_CONNECT_SESSION,
     TAG_DSM_CONTACT_ADD,
-    TAG_DSM_CONTACT_ADD_NUL,
     TAG_DSM_COUNTERPARTY_ID,
     TAG_DSM_DETERMINISTIC_ID,
     TAG_DSM_DETERMINISTIC_TIME,
     TAG_DSM_DEV_ENT_V2,
     TAG_DSM_DJTE_SHARD_MERKLE,
+    TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+    TAG_DSM_ECONOMIC_BALANCE_KEY,
+    TAG_DSM_ECONOMIC_CONSUMED_SOURCE_KEY,
+    TAG_DSM_ECONOMIC_TOKEN_CREATION_KEY,
+    TAG_DSM_ECONOMIC_LEAF_STATE,
+    TAG_DSM_ECONOMIC_DSM_SUBSTRATE_OBJ,
+    TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+    TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+    TAG_DSM_EK_CERT_STEP,
+    TAG_DSM_PEER_TRANSFER_ACCEPTANCE,
+    TAG_DSM_RECIPIENT_ECONOMIC_RELEASE,
+    TAG_DSM_RECIPIENT_ECONOMIC_RELEASE_SIGN,
+    TAG_DSM_ECONOMIC_SUBSTRATE_SIGN,
+    TAG_DSM_ECONOMIC_ROOT_CLAIM_ENVELOPE,
+    TAG_DSM_ECONOMIC_ROOT_CLAIM_SIGN,
+    TAG_DSM_ECONOMIC_SMT_LEAF,
+    TAG_DSM_ECONOMIC_SMT_NODE,
+    TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+    TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM,
+    TAG_DSM_ECONOMIC_OPERATION_ID_DSM,
+    TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE,
+    TAG_DSM_ECON_SOURCE_GENESIS_RELEASE,
+    TAG_DSM_DLV_RESERVE_CONSUMPTION_EVIDENCE,
+    TAG_DSM_DLV_SETTLEMENT_PAYMENT_EVIDENCE,
+    TAG_DSM_ECONOMIC_PROOF_ARTIFACT,
+    TAG_DSM_NATIVE_RESERVE_ID,
+    TAG_DSM_NATIVE_RESERVE_STATE,
+    TAG_DSM_NATIVE_RESERVE_CELL,
+    TAG_DSM_NATIVE_RESERVE_SEED,
+    TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN,
+    TAG_DSM_NATIVE_RESERVE_RELEASE,
+    TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT,
+    TAG_DSM_TRADER_ECONOMIC_ROOT_REGISTER_KEY,
+    TAG_DSM_ECONOMIC_POSITION_SEED,
+    TAG_DSM_DLV_CLOSE_COMMIT,
+    TAG_DSM_DLV_CLOSE_X,
     TAG_DSM_EXTERNAL_EVIDENCE,
     TAG_DSM_EXTERNAL_SOURCE_ID,
     TAG_DSM_FAUCET_CLAIM,
@@ -41,16 +116,68 @@ pub(super) const TAGS: &[&str] = &[
     TAG_DSM_PROTOCOL_TRANSITION,
     TAG_DSM_RECEIPT,
     TAG_DSM_RECEIPT_BIND_SESSION,
+    TAG_DSM_RECEIPT_B_CANONICAL,
+    TAG_DSM_RECEIPT_EVIDENCE_A,
+    TAG_DSM_RECEIPT_EVIDENCE_B,
+    TAG_DSM_RECEIPT_EMAIL,
+    TAG_DSM_RELATIONSHIP_FINALIZED,
+    TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
+    TAG_DSM_EXT_COMMIT,
     TAG_DSM_SILICON_FP_V4,
     TAG_DSM_SMT_PROOF,
     TAG_DSM_SPARSE_IDX,
     TAG_DSM_STATE_ENTROPY,
-    TAG_DSM_SYSTEM_OWNER,
-    TAG_DSM_TOKEN_FACTORY,
+    TAG_DSM_ANCHOR_PRESENTATION_V1,
+    TAG_DSM_STORAGE_SET,
+    TAG_DSM_VAULT_STATE,
+    TAG_DSM_DEVTREE_DELEGATION,
+    TAG_DSM_DEVTREE_DELEGATION_GENESIS_SENTINEL_V1,
+    TAG_DSM_DEVTREE_DELEGATION_SIGN,
+    TAG_DSM_DEVTREE_TRANSITION,
+    TAG_DSM_DEVTREE_TRANSITION_GENESIS_SENTINEL_V1,
+    TAG_DSM_DEVTREE_TRANSITION_SIGN,
+    TAG_DSM_STORAGE_OBJECT,
+    TAG_DSM_STORAGE_CELL_ENTRY_V1,
+    TAG_DSM_STORAGE_CELL_RUN_INIT_V1,
+    TAG_DSM_STORAGE_CELL_RUN_V1,
+    TAG_DSM_STORAGE_CELL_LEAF_KEY_V1,
+    TAG_DSM_STORAGE_CELL_LEAF_V1,
+    TAG_DSM_STORAGE_BYTECOMMIT_V1,
+    TAG_DSM_STORAGE_ROUTE_COMPLETION_V1,
+    TAG_DSM_STORAGE_ROUTE_VALUE_V1,
+    TAG_DSM_MARKET_POLICY_OBJECT,
+    TAG_DSM_RELEASE_POLICY_OBJECT,
+    TAG_DSM_FEE_POLICY_OBJECT,
+    TAG_DSM_BINDING_KEYSET,
+    TAG_DSM_VAULT_STATE_ANCHOR_V2,
+    TAG_DSM_VAULT_STATE_ANCHOR_V3,
+    TAG_DSM_VAULT_STATE_PARENT_GENESIS_V2,
     TAG_DSM_TOKEN_ID,
     TAG_DSM_TOKEN_METADATA,
-    TAG_DSM_TOKEN_MPC_PARTICIPANT,
     TAG_DSM_TOKEN_OP,
     TAG_DSM_TRANSITION,
     TAG_DSM_WAL_KEY_CTX,
+    // Test, benchmark and trace fixtures (misc/testing.rs). That module is
+    // NOT cfg(test)-gated, so these compile into production builds and share
+    // the one domain namespace: a fixture colliding with a protocol tag would
+    // be a real defect, and until now no test could see one.
+    TAG_DSM_BENCH,
+    TAG_DSM_TAG,
+    TAG_DSM_TAG1,
+    TAG_DSM_TAG2,
+    TAG_DSM_TAG_A,
+    TAG_DSM_TAG_B,
+    TAG_DSM_TEST,
+    TAG_DSM_TEST_CHILD,
+    TAG_DSM_TEST_COMMIT,
+    TAG_DSM_TEST_CSPRNG_NEXT,
+    TAG_DSM_TEST_CSPRNG_SEED,
+    TAG_DSM_TEST_DEVICE,
+    TAG_DSM_TEST_ENTITY_ID,
+    TAG_DSM_TEST_ENTROPY,
+    TAG_DSM_TEST_NEXT_TIP,
+    TAG_DSM_TEST_PARENT,
+    TAG_DSM_TEST_TIP,
+    TAG_DSM_TRACE_DEVICE,
+    TAG_DSM_TRACE_GENESIS,
 ];

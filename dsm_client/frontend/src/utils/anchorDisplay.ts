@@ -44,12 +44,6 @@ function toBase32Crockford(bytes: Uint8Array): string {
   return output;
 }
 
-function groupBlocks(s: string, n = 8): string {
-  const parts: string[] = [];
-  for (let i = 0; i < s.length; i += n) parts.push(s.slice(i, i + n));
-  return parts.join(' ');
-}
-
 function fnv1a32(data: Uint8Array): number {
   let hash = 0x811c9dc5;
   for (let i = 0; i < data.length; i++) {
@@ -83,14 +77,6 @@ export function shortId(bytes: Uint8Array, bodyLen = 10): string {
   const body = b32.slice(0, bodyLen);
   const sum = uiChecksum2(bytes);
   return `${body}-${sum}`;
-}
-
-/**
- * Pretty-print an internal anchor (bytes) for debugging.
- * STRICT: DO NOT use for user identity. Use aliases only.
- */
-export function prettyAnchor(bytes: Uint8Array): string {
-  return groupBlocks(toBase32Crockford(bytes), 8);
 }
 
 

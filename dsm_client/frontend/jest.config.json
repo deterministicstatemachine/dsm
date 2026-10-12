@@ -34,6 +34,7 @@
   ],
   "coverageDirectory": "coverage",
   "coverageReporters": ["text-summary", "lcov", "html"],
+  "setupFiles": ["<rootDir>/scripts/jestAppVersion.js"],
   "setupFilesAfterEnv": ["<rootDir>/src/setupTests.ts"],
   "moduleNameMapper": {
     "^@/services/DsmClient$": "<rootDir>/src/dsm/index.ts",

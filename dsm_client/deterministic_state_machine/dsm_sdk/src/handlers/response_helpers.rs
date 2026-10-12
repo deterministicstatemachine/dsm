@@ -7,63 +7,74 @@ use dsm::types::proto as generated;
 use prost::Message;
 
 use crate::bridge::AppResult;
-use crate::sdk::app_state::AppState;
 
-/// Wrap raw bytes into an ArgPack and return as AppResult success.
-pub(crate) fn pack_bytes_ok(body: Vec<u8>, schema_hash: generated::Hash32) -> AppResult {
+/// Wrap raw bytes into an ArgPack and return as AppResult success. The body
+/// is raw bytes with no schema to name, so the pack names none.
+pub(crate) fn pack_bytes_ok(body: Vec<u8>) -> AppResult {
     let arg = generated::ArgPack {
-        schema_hash: Some(schema_hash),
+        schema_hash: None,
         codec: generated::Codec::Proto as i32,
         body,
     };
-    let mut buf = Vec::with_capacity(arg.encoded_len());
-    arg.encode(&mut buf).unwrap_or(());
     AppResult {
         success: true,
-        data: buf,
+        data: arg.encode_to_vec(),
         error_message: None,
     }
 }
 
-fn bytes32_or_zero(value: Option<Vec<u8>>) -> Vec<u8> {
-    value
-        .filter(|bytes| bytes.len() == 32)
-        .unwrap_or_else(|| vec![0u8; 32])
-}
-
-fn app_state_bytes32_or_zero(load: fn() -> Option<Vec<u8>>) -> Vec<u8> {
-    if crate::storage_utils::get_storage_base_dir().is_none() {
-        return vec![0u8; 32];
+/// Decode a local answer this device built for itself — `[0x03]` framing, an
+/// Envelope v3 in canonical bytes, with no sender headers and no message id
+/// (see [`frame_local_envelope`]). A wire envelope from another party is not a
+/// local answer; decode that with `dsm::envelope::from_canonical_bytes`.
+pub(crate) fn decode_local_envelope(framed: &[u8]) -> Result<generated::Envelope, String> {
+    let body = framed
+        .strip_prefix(&[0x03])
+        .ok_or_else(|| "a local answer is framed 0x03".to_string())?;
+    let envelope = generated::Envelope::decode(body)
+        .map_err(|e| format!("local answer does not decode: {e}"))?;
+    if envelope.encode_to_vec() != body {
+        return Err("local answer is not in canonical encoding".to_string());
     }
-    bytes32_or_zero(load())
-}
-
-fn response_headers() -> generated::Headers {
-    generated::Headers {
-        device_id: app_state_bytes32_or_zero(AppState::get_device_id),
-        chain_tip: vec![0u8; 32],
-        genesis_hash: app_state_bytes32_or_zero(AppState::get_genesis_hash),
-        seq: 0,
+    if envelope.version != 3 {
+        return Err(format!(
+            "local answer is Envelope v{}, not v3",
+            envelope.version
+        ));
     }
+    if envelope.headers.is_some() || !envelope.message_id.is_empty() {
+        return Err("a local answer carries no sender headers and no message id".to_string());
+    }
+    Ok(envelope)
 }
 
 /// Build a strict Envelope v3 response.
-/// Returns FramedEnvelopeV3: [0x03] || Envelope(version=3, headers=..., payload=...)
+/// Returns FramedEnvelopeV3: [0x03] || Envelope(version=3, payload=...).
+///
+/// A response to the local app is not a protocol message: it has no sender
+/// chain position and no message identity, so it carries no headers and no
+/// message id.
 pub(crate) fn pack_envelope_ok(payload: generated::envelope::Payload) -> AppResult {
+    AppResult {
+        success: true,
+        data: frame_local_envelope(payload),
+        error_message: None,
+    }
+}
+
+/// `[0x03][Envelope v3]` carrying `payload` for this device's own frontend:
+/// a local answer, so no sender headers and no message id.
+pub(crate) fn frame_local_envelope(payload: generated::envelope::Payload) -> Vec<u8> {
     let envelope = generated::Envelope {
         version: 3,
-        headers: Some(response_headers()),
-        message_id: vec![0u8; 16],
+        headers: None,
+        message_id: Vec::new(),
         payload: Some(payload),
     };
     let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
     buf.push(0x03); // Framing byte for Envelope v3
-    envelope.encode(&mut buf).unwrap_or(());
-    AppResult {
-        success: true,
-        data: buf,
-        error_message: None,
-    }
+    buf.extend_from_slice(&envelope.encode_to_vec());
+    buf
 }
 
 /// Convenience: return an error AppResult with message.
@@ -82,13 +93,9 @@ mod tests {
     use super::*;
     use prost::Message;
 
-    fn zero_hash32() -> generated::Hash32 {
-        generated::Hash32 { v: vec![0u8; 32] }
-    }
-
     #[test]
     fn pack_bytes_ok_success_flag() {
-        let result = pack_bytes_ok(vec![1, 2, 3], zero_hash32());
+        let result = pack_bytes_ok(vec![1, 2, 3]);
         assert!(result.success);
         assert!(result.error_message.is_none());
         assert!(!result.data.is_empty());
@@ -97,18 +104,17 @@ mod tests {
     #[test]
     fn pack_bytes_ok_roundtrip_argpack() {
         let body = vec![0xAA, 0xBB, 0xCC];
-        let hash = zero_hash32();
-        let result = pack_bytes_ok(body.clone(), hash);
+        let result = pack_bytes_ok(body.clone());
 
         let decoded = generated::ArgPack::decode(&*result.data).unwrap();
         assert_eq!(decoded.body, body);
         assert_eq!(decoded.codec, generated::Codec::Proto as i32);
-        assert!(decoded.schema_hash.is_some());
+        assert!(decoded.schema_hash.is_none(), "raw bytes name no schema");
     }
 
     #[test]
     fn pack_bytes_ok_empty_body() {
-        let result = pack_bytes_ok(vec![], zero_hash32());
+        let result = pack_bytes_ok(vec![]);
         assert!(result.success);
         let decoded = generated::ArgPack::decode(&*result.data).unwrap();
         assert!(decoded.body.is_empty());
@@ -133,10 +139,16 @@ mod tests {
             value: None,
         });
         let result = pack_envelope_ok(payload);
-        let envelope = dsm::envelope::from_canonical_bytes(&result.data[1..]).unwrap();
+        let envelope = decode_local_envelope(&result.data).expect("a local answer");
         assert_eq!(envelope.version, 3);
-        assert_eq!(envelope.message_id, vec![0u8; 16]);
-        assert!(envelope.headers.is_some());
+        assert!(
+            envelope.message_id.is_empty(),
+            "a local response has no message id"
+        );
+        assert!(
+            envelope.headers.is_none(),
+            "a local response has no sender headers"
+        );
         assert!(envelope.payload.is_some());
     }
 

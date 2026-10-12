@@ -22,14 +22,25 @@ CORE_DIR="dsm_client/deterministic_state_machine/dsm/src"
 red()  { printf "\033[31m%s\033[0m\n" "$*"; }
 green(){ printf "\033[32m%s\033[0m\n" "$*"; }
 
+# rg exits 0 on a match, 1 on none, and 2 on an error such as a path that is
+# not there. Only 1 passes: a rule pinned to a file that no longer exists is a
+# failed scan, not a clean one.
 fail_if_found() {
   local desc="$1"; shift
   local cmd=("rg" "-n" "$@")
-  if "${cmd[@]}" > /dev/null; then
-    red "[CI-SCAN] FAIL: ${desc}"
-    "${cmd[@]}" || true
-    exit 1
-  fi
+  local status=0
+  "${cmd[@]}" > /dev/null || status=$?
+  case "$status" in
+    0)
+      red "[CI-SCAN] FAIL: ${desc}"
+      "${cmd[@]}" || true
+      exit 1 ;;
+    1) ;;
+    *)
+      red "[CI-SCAN] ERROR: ${desc}: rg exited $status (a scanned path is missing?)"
+      "${cmd[@]}" || true
+      exit 1 ;;
+  esac
 }
 
 # Common ripgrep excludes
@@ -105,7 +116,7 @@ fail_if_found "Forbidden version=2 markers" "${EXCLUDES[@]}" -e '\bversion\s*=\s
 #     legacy type names
 #   - accept_v2 / accept_legacy / legacy_envelope          → semantic flags
 # Anchored on `envelope` keyword for the numeric inequality so that
-# non-envelope schema bumps (soft_vault, recovery capsule) don't trigger.
+# non-envelope schema bumps (the recovery capsule) don't trigger.
 fail_if_found "envelope-version lenient acceptance (seam a)" "${EXCLUDES[@]}" \
   -e '\bEnvelopeV[12]\b|\benvelope\b.*\bversion\s*[<≤]\s*3\b|\baccept_v2\b|\baccept_legacy\b|\blegacy_envelope\b' \
   "${SCAN_ROOTS[@]}"
@@ -137,7 +148,7 @@ fail_if_found "serde_json reaches into Core/SDK protocol path (seam b)" \
 # or vault-specific execution material. The file currently has zero vault
 # imports; this scan freezes that property.
 fail_if_found "transfer_hooks must stay token-only — no vault/anchor imports (seam c)" \
-  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_routes::|dlv_sdk::|dsm::dlv::' \
+  -e '(crate::|dsm::|super::)?vault::|::vault\b|LimboVault|LimboVaultProto|DlvManager|AnchorEnforcement|VaultStateAnchor|dlv_sdk::|dsm::dlv::' \
   dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/transfer_hooks.rs
 
 # 3) Ban clocks/time APIs (protocol layer only)
@@ -246,5 +257,79 @@ done
 # NOTE: This repo currently uses `prost::Message` in several core modules for
 # deterministic encoding/canonicalization and internal migrations.
 # We rely on CI gates and code review to keep protobuf usage disciplined.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STATIC ARCHITECTURAL RULES — migrated from dsm_sdk/tests/dlv_regression_guards.rs
+#
+# These are the rules from that suite that are GENUINELY STATIC: they say
+# "this code shape must not exist", which no behavioural test can express — a
+# test can only prove the code that DOES exist behaves correctly, never that a
+# forbidden construct is absent.
+#
+# Everything else in that suite asserted `src.contains(...)` about behaviour,
+# and has been replaced by tests that execute the real routes. Those greps were
+# the reason a value path rejected by the conservation chokepoint stayed green
+# for months: they matched the text of code that never ran.
+#
+# Labelled static so nobody mistakes them for coverage.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SDK_SRC="dsm_client/deterministic_state_machine/dsm_sdk/src"
+CORE_SRC="dsm_client/deterministic_state_machine/dsm/src"
+FE_SRC="dsm_client/frontend"
+
+# Protocol state is canonical state, never a preferences blob. A handler that
+# mirrored vault or token state into app-state prefs would create a second copy
+# that drifts from the chain.
+fail_if_found "static: token/dlv/sofi state written to app-state prefs" \
+  -e 'app_state_set\(&format!\("dsm\.(token|dlv|sofi)\.' \
+  "$SDK_SRC/handlers/"
+
+# A policy commit is derived from the canonical policy, never lifted out of a
+# display metadata cache. The cache is populated FROM the commit; reversing that
+# lets a stale or attacker-supplied cache entry decide asset identity.
+fail_if_found "static: policy_commit derived from a metadata cache" \
+  -e 'policy_commit = metadata\.policy_anchor' \
+  -e 'from_policy_anchor\(&metadata\.policy_anchor' \
+  "$SDK_SRC/"
+
+# Business logic stays in Rust: a frontend that can hash can derive identity,
+# and then two implementations decide what an asset is.
+if [ -f "$FE_SRC/package.json" ]; then
+  fail_if_found "static: frontend carries a hashing library" \
+    -e '@noble/hashes|blake3' \
+    "$FE_SRC/package.json"
+fi
+
+# Deleted paths stay deleted. Each of these was removed because it was wrong,
+# not because it was unused, so a reintroduction is a regression rather than a
+# style question.
+fail_if_found "static: the token-policy placeholder hash was reintroduced" \
+  -e 'domain_hash_bytes\("DSM/token-policy' \
+  "$CORE_SRC/core/token/token_state_manager.rs"
+
+fail_if_found "static: DlvCreateV3 was reintroduced" \
+  -e 'DlvCreateV3' \
+  "$CORE_SRC/" "$SDK_SRC/" proto/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ECONOMIC FABRICATION — deleted helpers stay deleted (2026-09-02 remediation).
+#
+# Each of these could install a positive balance, a reserve, an admission or a
+# policy anchor into canonical device state with no protocol origin — no
+# faucet admission, no authorized issuance, no admitted transfer, no funded
+# creation. Debits are deliberately unfenced in core, so a fabricated balance
+# does not sit below the acceptance boundary: it CROSSES it the moment it is
+# spent, and every test that held one was green against a state the product
+# can never reach. The legitimate test-support origins are `economic_fixtures`
+# (faucet, issuance, transfer, through the real routes) and, at the core
+# layer, `DeviceState::admitted_faucet_claim` / `admitted_mint` /
+# `admitted_funded_create` — the same accepting path production takes.
+# ─────────────────────────────────────────────────────────────────────────────
+FABRICATION_BAN_PATTERN='\bwith_balance_for_testing\b|\binstall_balance_for_testing\b|\bseed_in_memory_balance\b|\bforce_set_balance(_for_self)?\b|\bseed_token_balance_for_self\b|\bunadmitted_(owner|device)_holding\b|\bpair_commits\b|\bfunded_vault_with_surplus\b|\bfund_unadmitted\b|\bseed_era_projection\b|\bseed_dbtc_balance\b'
+fail_if_found "static: an economic-fabrication helper was reintroduced — fund through economic_fixtures or the core admitted_* origins" \
+  -e "$FABRICATION_BAN_PATTERN" \
+  "$CORE_SRC/" "$SDK_SRC/" dsm_client/deterministic_state_machine/dsm_sdk/tests/
 
 green "[CI-SCAN] PASS: No violations detected"

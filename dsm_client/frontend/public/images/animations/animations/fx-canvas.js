@@ -5,9 +5,25 @@
    bottom, pixels always integer-scaled.
    Attributes: anim, seq (bump to replay), fps, muted ("1"/"0").
    window.StateBoyFX = { play(name), list(), mute(bool) }.
-   window.STATEBOY_MUTED === true silences all SFX. */
+   window.STATEBOY_MUTED === true silences all SFX.
+   fit="fill" stretches to the host width (fractional scale, snapped to whole
+   device pixels when that still covers the host) instead of integer CSS scale.
+   The element dispatches "fx-end" once the last frame of a scene is drawn.
+   Dialog text is drawn with a built-in 5x7 pixel font, so no web font is
+   needed. sci-guy.png is loaded from the directory this script came from
+   (override with window.STATEBOY_FX_BASE). */
 (function () {
   if (customElements.get('fx-canvas')) return;
+
+  // Directory of this script: sprites live next to it, wherever it is served from.
+  const FX_BASE = (function () {
+    try {
+      if (window.STATEBOY_FX_BASE) return String(window.STATEBOY_FX_BASE);
+      const cs = document.currentScript;
+      if (cs && cs.src) return cs.src.replace(/[^/]*$/, '');
+    } catch (e) {}
+    return '';
+  })();
 
   // 3x5 pixel font for digits & symbols
   const TINY = {
@@ -25,6 +41,77 @@
     '+': ['000', '010', '111', '010', '000'],
     '?': ['111', '001', '010', '000', '010'],
     '!': ['010', '010', '010', '000', '010']
+  };
+
+  // 5x7 pixel font for dialog text (uppercase, digits, punctuation): 8px advance.
+  const PIX = {
+    'A': ['.###.', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+    'B': ['####.', '#...#', '#...#', '####.', '#...#', '#...#', '####.'],
+    'C': ['.####', '#....', '#....', '#....', '#....', '#....', '.####'],
+    'D': ['####.', '#...#', '#...#', '#...#', '#...#', '#...#', '####.'],
+    'E': ['#####', '#....', '#....', '####.', '#....', '#....', '#####'],
+    'F': ['#####', '#....', '#....', '####.', '#....', '#....', '#....'],
+    'G': ['.####', '#....', '#....', '#.###', '#...#', '#...#', '.####'],
+    'H': ['#...#', '#...#', '#...#', '#####', '#...#', '#...#', '#...#'],
+    'I': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '#####'],
+    'J': ['..###', '...#.', '...#.', '...#.', '...#.', '#..#.', '.##..'],
+    'K': ['#...#', '#..#.', '#.#..', '##...', '#.#..', '#..#.', '#...#'],
+    'L': ['#....', '#....', '#....', '#....', '#....', '#....', '#####'],
+    'M': ['#...#', '##.##', '#.#.#', '#.#.#', '#...#', '#...#', '#...#'],
+    'N': ['#...#', '##..#', '#.#.#', '#..##', '#...#', '#...#', '#...#'],
+    'O': ['.###.', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+    'P': ['####.', '#...#', '#...#', '####.', '#....', '#....', '#....'],
+    'Q': ['.###.', '#...#', '#...#', '#...#', '#.#.#', '#..#.', '.##.#'],
+    'R': ['####.', '#...#', '#...#', '####.', '#.#..', '#..#.', '#...#'],
+    'S': ['.####', '#....', '#....', '.###.', '....#', '....#', '####.'],
+    'T': ['#####', '..#..', '..#..', '..#..', '..#..', '..#..', '..#..'],
+    'U': ['#...#', '#...#', '#...#', '#...#', '#...#', '#...#', '.###.'],
+    'V': ['#...#', '#...#', '#...#', '#...#', '.#.#.', '.#.#.', '..#..'],
+    'W': ['#...#', '#...#', '#...#', '#.#.#', '#.#.#', '##.##', '#...#'],
+    'X': ['#...#', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '#...#'],
+    'Y': ['#...#', '#...#', '.#.#.', '..#..', '..#..', '..#..', '..#..'],
+    'Z': ['#####', '....#', '...#.', '..#..', '.#...', '#....', '#####'],
+    '0': ['.###.', '#...#', '#..##', '#.#.#', '##..#', '#...#', '.###.'],
+    '1': ['..#..', '.##..', '..#..', '..#..', '..#..', '..#..', '.###.'],
+    '2': ['.###.', '#...#', '....#', '...#.', '..#..', '.#...', '#####'],
+    '3': ['#####', '...#.', '..#..', '...#.', '....#', '#...#', '.###.'],
+    '4': ['...#.', '..##.', '.#.#.', '#..#.', '#####', '...#.', '...#.'],
+    '5': ['#####', '#....', '####.', '....#', '....#', '#...#', '.###.'],
+    '6': ['..##.', '.#...', '#....', '####.', '#...#', '#...#', '.###.'],
+    '7': ['#####', '....#', '...#.', '..#..', '.#...', '.#...', '.#...'],
+    '8': ['.###.', '#...#', '#...#', '.###.', '#...#', '#...#', '.###.'],
+    '9': ['.###.', '#...#', '#...#', '.####', '....#', '...#.', '.##..'],
+    '!': ['..#..', '..#..', '..#..', '..#..', '..#..', '.....', '..#..'],
+    '?': ['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'],
+    '.': ['.....', '.....', '.....', '.....', '.....', '.##..', '.##..'],
+    ',': ['.....', '.....', '.....', '.....', '.##..', '..#..', '.#...'],
+    ':': ['.....', '.##..', '.##..', '.....', '.##..', '.##..', '.....'],
+    ';': ['.....', '.##..', '.##..', '.....', '.##..', '..#..', '.#...'],
+    '+': ['.....', '..#..', '..#..', '#####', '..#..', '..#..', '.....'],
+    '-': ['.....', '.....', '.....', '#####', '.....', '.....', '.....'],
+    '=': ['.....', '.....', '#####', '.....', '#####', '.....', '.....'],
+    '/': ['....#', '...#.', '...#.', '..#..', '.#...', '.#...', '#....'],
+    '\\': ['#....', '.#...', '.#...', '..#..', '...#.', '...#.', '....#'],
+    "'": ['..#..', '..#..', '.#...', '.....', '.....', '.....', '.....'],
+    '"': ['.#.#.', '.#.#.', '.....', '.....', '.....', '.....', '.....'],
+    '(': ['...#.', '..#..', '.#...', '.#...', '.#...', '..#..', '...#.'],
+    ')': ['.#...', '..#..', '...#.', '...#.', '...#.', '..#..', '.#...'],
+    '[': ['.###.', '.#...', '.#...', '.#...', '.#...', '.#...', '.###.'],
+    ']': ['.###.', '...#.', '...#.', '...#.', '...#.', '...#.', '.###.'],
+    '<': ['...#.', '..#..', '.#...', '#....', '.#...', '..#..', '...#.'],
+    '>': ['.#...', '..#..', '...#.', '....#', '...#.', '..#..', '.#...'],
+    '*': ['.....', '#.#.#', '.###.', '#####', '.###.', '#.#.#', '.....'],
+    '#': ['.#.#.', '.#.#.', '#####', '.#.#.', '#####', '.#.#.', '.#.#.'],
+    '%': ['##..#', '##..#', '...#.', '..#..', '.#...', '#..##', '#..##'],
+    '&': ['.##..', '#..#.', '#..#.', '.##..', '#.#.#', '#..#.', '.##.#'],
+    '_': ['.....', '.....', '.....', '.....', '.....', '.....', '#####'],
+    '·': ['.....', '.....', '.....', '..#..', '.....', '.....', '.....'],
+    '✓': ['.....', '....#', '....#', '...#.', '#..#.', '.##..', '.#...'],
+    '×': ['.....', '#...#', '.#.#.', '..#..', '.#.#.', '#...#', '.....'],
+    '→': ['.....', '..#..', '...#.', '#####', '...#.', '..#..', '.....'],
+    '←': ['.....', '..#..', '.#...', '#####', '.#...', '..#..', '.....'],
+    '…': ['.....', '.....', '.....', '.....', '.....', '.....', '#.#.#'],
+    '₿': ['..#..', '####.', '#..##', '####.', '#..##', '####.', '..#..']
   };
 
   const SPR = {
@@ -145,7 +232,7 @@
   };
 
   class FxCanvas extends HTMLElement {
-    static get observedAttributes() { return ['anim', 'seq', 'fps', 'muted']; }
+    static get observedAttributes() { return ['anim', 'seq', 'fps', 'muted', 'fit']; }
 
     connectedCallback() {
       if (!this._cv) {
@@ -225,11 +312,24 @@
               if (px[p * 4 + 3] >= 128 && lab[p] !== main.id) px[p * 4 + 3] = 0;
             }
             const mnX = main.mnX, mxX = main.mxX, mnY = main.mnY, mxY = main.mxY;
-            octx.putImageData(d, 0, 0);
-            if (mxX > mnX && mxY > mnY) this._sciImg = { cv: oc, x: mnX, y: mnY, w: mxX - mnX + 1, h: mxY - mnY + 1 };
+            // The art is drawn in the four DMG greens. Index each opaque pixel
+            // to a palette slot by its luminance (lightest = 0, darkest = 3),
+            // so the mascot is painted in whatever palette the screen wears.
+            if (mxX > mnX && mxY > mnY) {
+              const w = mxX - mnX + 1, h = mxY - mnY + 1;
+              const idx = new Uint8Array(w * h);
+              for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+                const i = ((yy + mnY) * Wd + (xx + mnX)) * 4;
+                if (px[i + 3] < 128) { idx[yy * w + xx] = 255; continue; }
+                const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+                idx[yy * w + xx] = lum > 140 ? 0 : lum > 70 ? 1 : lum > 36 ? 2 : 3;
+              }
+              this._sciMap = { w, h, idx };
+              this._sciImg = null;
+            }
           } catch (e) {}
         };
-        im.src = 'sci-guy.png';
+        im.src = FX_BASE + 'sci-guy.png';
       }
       window.StateBoyFX = {
         play: (n, o) => { if (o && o.amount != null) this.setAttribute('amount', String(o.amount)); this.play(n); },
@@ -237,7 +337,25 @@
         mute: (v) => { this._muteOverride = !!v; }
       };
       this.readPalette();
-      const start = () => { if (this._connected) this.play(this.getAttribute('anim') || 'intro'); };
+      // The app applies a color theme by writing CSS variables onto <html>;
+      // follow every such change so a scene already on screen (the intro
+      // before the saved theme lands, a popup while SELECT is pressed)
+      // repaints in the new palette.
+      if (!this._themeMo) {
+        try {
+          this._themeMo = new MutationObserver(() => {
+            this.readPalette();
+            if (this._cur && this._cv && this._connected) {
+              this._lastF = -1;
+              if (!this._raf) this._raf = requestAnimationFrame(this._step);
+            }
+          });
+          this._themeMo.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'data-theme'] });
+        } catch (e) {}
+      }
+      // An `anim` attribute set while the fonts were loading has already
+      // started a scene; do not restart it behind the user's back.
+      const start = () => { if (this._connected && !this._cur) this.play(this.getAttribute('anim') || 'intro'); };
       try {
         if (document.fonts && document.fonts.load) {
           Promise.race([document.fonts.load('8px "Press Start 2P"'), new Promise(r => setTimeout(r, 1500))]).then(start, start);
@@ -248,13 +366,24 @@
     disconnectedCallback() {
       this._connected = false;
       if (this._ro) { try { this._ro.disconnect(); } catch (e) {} }
+      if (this._themeMo) { try { this._themeMo.disconnect(); } catch (e) {} this._themeMo = null; }
       if (this._raf) { cancelAnimationFrame(this._raf); this._raf = null; }
     }
 
     fitScale() {
       if (!this._cv) return;
       const w = this.clientWidth || 320;
-      const s = Math.max(1, Math.floor(w / 160));
+      let s;
+      if (this.getAttribute('fit') === 'fill') {
+        // Stretch to the host. Prefer a whole number of device pixels per
+        // logical pixel (even pixels) when that still covers ~94% of the
+        // width; the host's background hides the sliver either side.
+        const dpr = window.devicePixelRatio || 1;
+        const kDev = Math.floor(w * dpr / 160);
+        s = (kDev >= 1 && kDev * 160 / dpr >= w * 0.94) ? kDev / dpr : w / 160;
+      } else {
+        s = Math.max(1, Math.floor(w / 160));
+      }
       const hostH = Math.max(this.clientHeight || 0, this.parentElement ? (this.parentElement.clientHeight || 0) : 0);
       let H = 144;
       // Only grow when the host is explicitly taller than the classic canvas
@@ -270,6 +399,7 @@
       if (!this._connected || oldV === newV) return;
       if (name === 'anim' && newV) this.play(newV);
       else if (name === 'seq') this.play(this.getAttribute('anim') || this._cur || 'intro');
+      else if (name === 'fit') this.fitScale();
     }
 
     isMuted() {
@@ -281,6 +411,36 @@
       return Math.max(4, Math.min(20, v || 10));
     }
 
+    // The mascot painted in the palette in force; repainted only when it changes.
+    sciImgFor(pal) {
+      const m = this._sciMap;
+      if (!m) return null;
+      const key = pal.join('|');
+      if (this._sciImg && this._sciImg.key === key) return this._sciImg;
+      const oc = document.createElement('canvas');
+      oc.width = m.w; oc.height = m.h;
+      const octx = oc.getContext('2d');
+      const probe = octx; // normalises any CSS colour to #rrggbb through fillStyle
+      const rgb = pal.map((c) => {
+        probe.fillStyle = '#000'; probe.fillStyle = c;
+        const v = String(probe.fillStyle);
+        if (v[0] === '#' && v.length === 7) return [parseInt(v.slice(1, 3), 16), parseInt(v.slice(3, 5), 16), parseInt(v.slice(5, 7), 16)];
+        const mm = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(v);
+        return mm ? [Number(mm[1]), Number(mm[2]), Number(mm[3])] : [0, 0, 0];
+      });
+      const d = octx.createImageData(m.w, m.h);
+      const px = d.data;
+      for (let p = 0; p < m.w * m.h; p++) {
+        const k = m.idx[p];
+        if (k === 255) continue;
+        const c = rgb[k];
+        px[p * 4] = c[0]; px[p * 4 + 1] = c[1]; px[p * 4 + 2] = c[2]; px[p * 4 + 3] = 255;
+      }
+      octx.putImageData(d, 0, 0);
+      this._sciImg = { key, cv: oc, x: 0, y: 0, w: m.w, h: m.h };
+      return this._sciImg;
+    }
+
     readPalette() {
       try {
         const cs = getComputedStyle(this);
@@ -289,6 +449,7 @@
       } catch (e) {
         this.pal = ['#9bbc0f', '#8bac0f', '#306230', '#0f380f'];
       }
+      if (this._cv) this._cv.style.background = this.pal[0];
     }
 
     // ---------- audio ----------
@@ -406,9 +567,24 @@
           }
         },
         text(s, x, y, i, center) {
-          ctx.font = '8px "Press Start 2P"'; ctx.textBaseline = 'top';
-          ctx.fillStyle = C(i == null ? 3 : i);
-          ctx.fillText(s, center ? Math.round(x - s.length * 4) : x, y);
+          // Built-in 5x7 pixel font on an 8px advance (same metrics the old
+          // web-font path assumed), so captions stay crisp at any scale.
+          const str = String(s == null ? '' : s).toUpperCase();
+          const col = i == null ? 3 : i;
+          let cx = center ? Math.round(x - str.length * 4) : Math.round(x);
+          const yy = Math.round(y);
+          for (const ch of str) {
+            const g = PIX[ch];
+            if (g) {
+              for (let r = 0; r < 7; r++) {
+                const row = g[r];
+                for (let c = 0; c < 5; c++) if (row.charCodeAt(c) === 35) S.px(cx + c, yy + r, 1, 1, col);
+              }
+            } else if (ch !== ' ') {
+              S.px(cx, yy + 6, 5, 1, col);
+            }
+            cx += 8;
+          }
         },
         tiny(s, x, y, i, sc) {
           sc = sc || 1;
@@ -713,7 +889,7 @@
         let yo = 0;
         if (pose === 'walk0') yo = -1;
         if (pose === 'cheer' && f % 4 < 2) yo = -2;
-        const IM = this._sciImg;
+        const IM = this.sciImgFor(this.pal || ['#9bbc0f', '#8bac0f', '#306230', '#0f380f']);
         if (IM) {
           const dh = 71, dw = Math.round(IM.w * dh / IM.h);
           S.drawImg(IM, cx - (dw >> 1), fy - dh + yo, dw, dh, true);
@@ -884,8 +1060,10 @@
               }
             }
           }
-          let l2 = ok ? (AMT ? '+' + AMT : 'BALANCE UPDATED') : (AMT ? AMT + ' DENIED' : 'PRESS B: RETRY');
-          if (l2.length > 17) l2 = AMT;
+          // The caller may sign the amount ("-12.5 ERA" for a send); unsigned means incoming.
+          const signed = /^[+\-]/.test(AMT) ? AMT : '+' + AMT;
+          let l2 = ok ? (AMT ? signed : 'BALANCE UPDATED') : (AMT ? AMT.replace(/^[+\-]/, '') + ' DENIED' : 'PRESS B: RETRY');
+          if (l2.length > 17) l2 = (ok ? signed : AMT).slice(0, 17);
           S.textBox(ok ? 'TX CONFIRMED' : 'TX FAILED', l2, f, 33);
         }
       });
@@ -1313,9 +1491,11 @@
     play(name) {
       const anims = this.ANIMS();
       if (!anims[name]) return;
+      this.readPalette();
       this._cur = name;
       this._t0 = performance.now();
       this._lastF = -1;
+      this._ended = false;
       if (!this._raf) this._raf = requestAnimationFrame(this._step);
     }
 
@@ -1338,6 +1518,10 @@
         ctx.translate(0, S.dy);
         try { a.draw(S, df); } catch (e) {}
         ctx.restore();
+        if (df >= last && !this._ended) {
+          this._ended = true;
+          try { this.dispatchEvent(new CustomEvent('fx-end', { detail: { name: this._cur, frames: a.frames } })); } catch (e) {}
+        }
       }
       if (f < last || a.holdBlink) this._raf = requestAnimationFrame(this._step);
     };

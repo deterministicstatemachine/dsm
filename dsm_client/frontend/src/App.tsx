@@ -7,7 +7,10 @@ import AppContent from './components/AppContent';
 import { UXProvider } from './contexts/UXContext';
 import GlobalToast from './components/GlobalToast';
 import BilateralTransferDialog from './components/BilateralTransferDialog';
-import { BleProvider } from './contexts/BleContext';
+import GuidedTour from './components/tour/GuidedTour';
+import TourOffer from './components/tour/TourOffer';
+import LockPromptModal from './components/lock/LockPromptModal';
+import { useTourStore } from './components/tour/tourStore';
 import ScreenContainer from './components/ScreenContainer';
 import { useLockState } from './hooks/useLockState';
 import { getLockPrefs } from './services/lock/lockService';
@@ -19,7 +22,6 @@ import { useThemeAssets } from './hooks/useThemeAssets';
 import { useInputIntents } from './inputs/useInputIntents';
 import { StateBoyInputProvider } from './inputs/providers/StateBoyInputProvider';
 import type { AndroidBridgeV3 } from './dsm/bridgeTypes';
-import { installPendingBilateralSync } from './services/pendingBilateralSync';
 import logger from './utils/logger';
 import { appRuntimeStore, useAppRuntimeStore } from './runtime/appRuntimeStore';
 import { navigationStore, useNavigationStore } from './runtime/navigationStore';
@@ -28,16 +30,24 @@ import { useBottomNav } from './hooks/useBottomNav';
 import { WalletProvider } from './contexts/WalletContext';
 import { ContactsProvider } from './contexts/ContactsContext';
 import { BridgeProvider } from './bridge/BridgeProvider';
+import { FxLayer, FxProvider } from './components/fx/FxProvider';
 import { useNativeSessionBridge } from './hooks/useNativeSessionBridge';
+import './styles/screen.css';
+import './styles/modern.css';
+import './styles/modernKit.css';
+import { useSkin } from './hooks/useSkin';
+import LookPicker from './components/LookPicker';
+import BetaAgreement from './components/BetaAgreement';
 
 export default function App() {
   const runtime = useAppRuntimeStore();
   const navigation = useNavigationStore();
+  const tour = useTourStore();
   const lockPromptCheckedRef = useRef(false);
   const [_themeIndex, setThemeIndex] = useState(0);
 
   const themes = useMemo(() => getAvailableThemes(), []);
-  const { handleGenerateGenesis } = useGenesisFlow({
+  const { handleGenerateGenesis, cancelPhraseBackup, answerPhraseCheck } = useGenesisFlow({
     appState: runtime.appState,
     setAppState: appRuntimeStore.setAppState,
     setError: appRuntimeStore.setError,
@@ -54,13 +64,31 @@ export default function App() {
     setThemeIndex,
   });
 
-  useEffect(() => {
-    if (runtime.appState !== 'wallet_ready') return;
-    const uninstall = installPendingBilateralSync();
-    return () => uninstall();
-  }, [runtime.appState]);
+  // A phone that has not chosen how its wallet looks is asked first, before
+  // the intro or anything else: the picker's box over the app, which is drawn
+  // in the look the picker is showing until OK keeps one.
+  // Before even that, the beta agreement: the first screen a phone shows until
+  // its user has accepted the current one.
+  const agreeing = runtime.skinRead === 'read' && runtime.agreement !== 'accepted' ? 'agreeing' : 'agreed';
+  const choosing = agreeing === 'agreed' && runtime.skinRead === 'read' && runtime.skin === null ? 'choose' : 'chosen';
+  const preview = choosing === 'choose' ? runtime.lookPreview : null;
 
-  const showIntro = useIntroGate(runtime.appState);
+  // Which skin the page is drawn in: the owner's choice, made before anything
+  // else, in every phase (a combo-locked wallet's lock screen shows the device).
+  const skin = useSkin(
+    session.received,
+    preview !== null ? preview.skin : runtime.skin,
+    preview !== null ? preview.scheme : runtime.scheme,
+    runtime.appState,
+    session.lock_status.method,
+    agreeing,
+  );
+
+  // The Game Boy's intro cutscene waits for its A button: it plays only once
+  // DGen is the choice (the Modern skin has neither).
+  const introGate = useIntroGate();
+  const showIntro = introGate.showIntro && agreeing === 'agreed' && runtime.skin === 'dgen' && skin === 'dgen';
+  const dismissIntro = introGate.dismissIntro;
   const {
     chameleonSrc,
     setChameleonSrc,
@@ -70,7 +98,7 @@ export default function App() {
     dsmLogoSrc,
   } = useThemeAssets(runtime.theme);
 
-  const { unlock } = useLockState({ appState: runtime.appState });
+  useLockState({ appState: runtime.appState });
   useBottomNav({ currentScreen: navigation.currentScreen, navigate: navigationStore.navigate });
 
   useEffect(() => navigationStore.installGlobalNavigate(), []);
@@ -107,7 +135,7 @@ export default function App() {
     }
   }, [navigation.currentScreen, runtime.appState]);
 
-  const intents = useInputIntents({
+  const menuIntents = useInputIntents({
     appState: runtime.appState,
     menuItems,
     currentMenuIndex: navigation.currentMenuIndex,
@@ -123,6 +151,9 @@ export default function App() {
     setSoundEnabled: appRuntimeStore.setSoundEnabled,
   });
 
+  // While the intro is on the screen, A (select) moves past it.
+  const intents = showIntro ? { ...menuIntents, select: dismissIntro } : menuIntents;
+
   useLayoutEffect(() => {
     const screenHost = document.querySelector('.stateboy-screen-host');
     if (screenHost) screenHost.scrollTop = 0;
@@ -132,13 +163,14 @@ export default function App() {
     <UXProvider defaultHideComplexity={true}>
       <WalletProvider>
         <ContactsProvider>
-          <BleProvider>
             <BridgeProvider bridge={(globalThis as any)?.window?.DsmBridge as AndroidBridgeV3 | undefined}>
               <ErrorBoundary>
                 <StateBoyInputProvider intents={intents}>
+                  <FxProvider appState={runtime.appState} soundEnabled={runtime.soundEnabled}>
                   <ScreenContainer theme={runtime.theme}>
                     <AppContent
                       appState={runtime.appState}
+                      skin={skin}
                       error={runtime.error}
                       showIntro={showIntro}
                       introGifSrc={introGifSrc}
@@ -152,21 +184,39 @@ export default function App() {
                       currentScreen={navigation.currentScreen}
                       navigate={navigationStore.navigate}
                       handleGenerateGenesis={handleGenerateGenesis}
-                      showLockPrompt={runtime.showLockPrompt}
-                      dismissLockPrompt={() => appRuntimeStore.setShowLockPrompt(false)}
-                      unlockToWallet={() => { void unlock(); }}
+                      cancelPhraseBackup={cancelPhraseBackup}
+                      answerPhraseCheck={answerPhraseCheck}
                       menuItems={menuItems}
                       currentMenuIndex={navigation.currentMenuIndex}
                       setCurrentMenuIndex={(next) => navigationStore.setCurrentMenuIndex(next)}
                     />
+                    {agreeing === 'agreeing' ? <BetaAgreement /> : null}
+                    {choosing === 'choose' ? <LookPicker /> : null}
                     <GlobalToast />
                     <DiagnosticsOverlay />
-                    <BilateralTransferDialog />
+                    <BilateralTransferDialog walletReady={runtime.appState === 'wallet_ready' && !showIntro} />
+                    <FxLayer />
+                    {/* The tour walks the Game Boy's menus and buttons: it runs in
+                        DGen, and is offered once DGen is the owner's choice. */}
+                    {skin === 'dgen' ? <GuidedTour appState={runtime.appState} /> : null}
+                    {runtime.skin === 'dgen' ? <TourOffer appState={runtime.appState} showIntro={showIntro} /> : null}
                   </ScreenContainer>
+                  {/* The passcode prompt is its own layer, not part of the home
+                      screen's content: it portals over the whole display, the
+                      screen and its nav bar. The tour portals above the shell,
+                      so it stays on top; while a tour runs the prompt waits,
+                      rather than covering what the tour points at, and comes
+                      back when the tour ends at home. */}
+                  {runtime.showLockPrompt && !showIntro && !tour.active && runtime.appState === 'wallet_ready' && navigation.currentScreen === 'home' ? (
+                    <LockPromptModal
+                      onNavigate={navigationStore.navigate}
+                      onDismiss={() => appRuntimeStore.setShowLockPrompt(false)}
+                    />
+                  ) : null}
+                  </FxProvider>
                 </StateBoyInputProvider>
               </ErrorBoundary>
             </BridgeProvider>
-          </BleProvider>
         </ContactsProvider>
       </WalletProvider>
     </UXProvider>

@@ -34,14 +34,22 @@ export function useNativeSessionBridge({ themes, setThemeIndex }: Args): NativeS
     // architecture where the frontend state machine drove the securing screen,
     // and Rust's session.phase only transitioned to wallet_ready/error at the
     // end of genesis. The legitimate exits from securing_device are:
-    //   securing_device → wallet_ready  (genesis succeeded, identity installed)
+    //   securing_device → publication_pending (genesis committed locally; the
+    //                                          identity is not published yet)
+    //   securing_device → wallet_ready  (genesis succeeded, identity published)
     //   securing_device → error         (fatal error during genesis)
     //   securing_device → locked        (lock engaged mid-flow, extremely rare)
     // Any transient `needs_genesis` (or `runtime_loading`/`loading`) reported
     // during the finalize race window is swallowed so the INITIALIZE screen
     // never flashes between the progress bar and the home screen.
+    //
+    // `backup_phrase` is held the same way: the session reports `needs_genesis`
+    // the whole time the user is writing the recovery phrase down, because no
+    // wallet exists until the phrase is checked. Its exits are the user's own
+    // (cancel → needs_genesis) or genesis's (securing_device, wallet_ready,
+    // error).
     if (
-      currentAppState === 'securing_device' &&
+      (currentAppState === 'securing_device' || currentAppState === 'backup_phrase') &&
       (nextAppState === 'needs_genesis' ||
         nextAppState === 'runtime_loading' ||
         nextAppState === 'loading')

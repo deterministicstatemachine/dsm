@@ -1,11 +1,35 @@
+# The two root-context builds (ci/docker/StorageNode.Dockerfile and
+# dsm_storage_node/Dockerfile.cloud) need only tracked sources: every member
+# manifest, scripts/real_code_guard*, its baseline and proto/. Everything
+# below is local build output, a developer's checkout state, or a secret.
 **/target/
 **/build/
 **/.gradle/
+**/.gradle_isolated/
+**/.cxx/
 **/node_modules/
 .git/
 .agents/
-dsm_client/android/.cxx/
+.claude/
+.codex/
+.vscode/
+.idea/
 dsm_client/android/app/build/
+dsm_client/android/app/src/main/assets/
 dsm_client/frontend/dist/
 dsm_client/frontend/build/
 dsm_client/deterministic_state_machine/target/
+**/jniLibs/
+**/*.so
+**/*.apk
+**/*.aab
+dsm_storage_node/deploy/nodes/
+dsm_storage_node/deploy/*.tar
+dsm_storage_node/dev-pki/
+dsm_storage_node/logs/
+**/data-dev-node*/
+**/pgdata-dev*/
+**/dsm_core_db/
+/dist/
+.tlacache/
+tla/states/

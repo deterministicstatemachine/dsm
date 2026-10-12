@@ -10,7 +10,13 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+include!("../../scripts/real_code_guard_build.rs");
+
 fn main() {
+    if let Err(refusal) = real_code_guard() {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
     println!("cargo:rerun-if-changed=veneer/dsm_sg_veneer.S");
     println!("cargo:rerun-if-changed=veneer/dsm_ns_payload.S");
     println!("cargo:rerun-if-changed=veneer/dsm_sg_abi.h");

@@ -13,7 +13,6 @@ use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// AEAD nonce size for XChaCha20-Poly1305 (24 bytes).
 const NONCE_LEN: usize = 24;
@@ -28,17 +27,22 @@ fn derive_enc_key(binding_key: &[u8]) -> [u8; 32] {
         .as_bytes()
 }
 
-/// Encrypt `plaintext` with XChaCha20-Poly1305 using a BLAKE3-derived deterministic nonce.
+/// Encrypt `plaintext` with XChaCha20-Poly1305 under a synthetic nonce.
 /// Returns `[24-byte nonce][ciphertext + tag]`.
+///
+/// The nonce is `BLAKE3("DSM/btc-nonce" || enc_key || len(account_id) ||
+/// account_id || plaintext)[0..24]`: keyed by the encryption key and bound to
+/// the plaintext, so two different secrets never share a nonce under one key,
+/// and re-encrypting the same secret for the same account yields the same blob.
 fn encrypt_secret(enc_key: &[u8; 32], account_id: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = XChaCha20Poly1305::new_from_slice(enc_key)
         .map_err(|e| anyhow::anyhow!("XChaCha20 key init: {e}"))?;
 
-    // Deterministic nonce: BLAKE3("DSM/btc-nonce\0" || account_id || tick)[0..24]
-    // Using tick ensures a new nonce on each re-encryption (e.g., migration).
     let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_BTC_NONCE);
+    h.update(enc_key);
+    h.update(&(account_id.len() as u64).to_le_bytes());
     h.update(account_id.as_bytes());
-    h.update(&tick().to_le_bytes());
+    h.update(plaintext);
     let hash = h.finalize();
     let mut nonce_bytes = [0u8; NONCE_LEN];
     nonce_bytes.copy_from_slice(&hash.as_bytes()[..NONCE_LEN]);
@@ -92,8 +96,6 @@ pub struct BitcoinAccountRecord {
     pub first_address: Option<String>,
     pub active: bool,
     pub active_receive_index: u32,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 pub fn upsert_bitcoin_account(rec: &BitcoinAccountRecord) -> Result<()> {
@@ -102,17 +104,25 @@ pub fn upsert_bitcoin_account(rec: &BitcoinAccountRecord) -> Result<()> {
         log::warn!("DB lock poisoned in upsert_bitcoin_account, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
 
     // Encrypt secret_material before writing to SQLite.
     let key = get_enc_key()?;
     let stored_material = encrypt_secret(&key, &rec.account_id, &rec.secret_material)?;
 
+    // An update keeps the row (and so its place in insertion order).
     conn.execute(
-        "INSERT OR REPLACE INTO bitcoin_accounts(
+        "INSERT INTO bitcoin_accounts(
             account_id, label, import_kind, secret_material, network, first_address,
-            active, active_receive_index, created_at, updated_at
-        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            active, active_receive_index
+        ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
+        ON CONFLICT(account_id) DO UPDATE SET
+            label = excluded.label,
+            import_kind = excluded.import_kind,
+            secret_material = excluded.secret_material,
+            network = excluded.network,
+            first_address = excluded.first_address,
+            active = excluded.active,
+            active_receive_index = excluded.active_receive_index",
         params![
             rec.account_id,
             rec.label,
@@ -122,8 +132,6 @@ pub fn upsert_bitcoin_account(rec: &BitcoinAccountRecord) -> Result<()> {
             rec.first_address,
             if rec.active { 1i32 } else { 0i32 },
             rec.active_receive_index as i64,
-            rec.created_at as i64,
-            now as i64,
         ],
     )?;
     Ok(())
@@ -136,7 +144,7 @@ pub fn list_bitcoin_accounts() -> Result<Vec<BitcoinAccountRecord>> {
         poisoned.into_inner()
     });
     let mut stmt =
-        conn.prepare("SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index, created_at, updated_at FROM bitcoin_accounts ORDER BY created_at ASC")?;
+        conn.prepare("SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index FROM bitcoin_accounts ORDER BY rowid ASC")?;
     let iter = stmt.query_map([], read_bitcoin_account_row)?;
     let mut out = Vec::new();
     for r in iter {
@@ -155,7 +163,7 @@ pub fn get_bitcoin_account(account_id: &str) -> Result<Option<BitcoinAccountReco
     });
     let row = conn
         .query_row(
-            "SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index, created_at, updated_at FROM bitcoin_accounts WHERE account_id = ?1",
+            "SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index FROM bitcoin_accounts WHERE account_id = ?1",
             params![account_id],
             read_bitcoin_account_row,
         )
@@ -191,7 +199,7 @@ pub fn get_active_bitcoin_account() -> Result<Option<BitcoinAccountRecord>> {
     });
     let row = conn
         .query_row(
-            "SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index, created_at, updated_at FROM bitcoin_accounts WHERE active = 1 LIMIT 1",
+            "SELECT account_id, label, import_kind, secret_material, network, first_address, active, active_receive_index FROM bitcoin_accounts WHERE active = 1 LIMIT 1",
             [],
             read_bitcoin_account_row,
         )
@@ -254,8 +262,6 @@ fn read_bitcoin_account_row(row: &Row) -> rusqlite::Result<BitcoinAccountRecord>
         first_address: row.get(5)?,
         active: row.get::<_, i32>(6)? != 0,
         active_receive_index: row.get::<_, i64>(7)? as u32,
-        created_at: row.get::<_, i64>(8)? as u64,
-        updated_at: row.get::<_, i64>(9)? as u64,
     })
 }
 
@@ -321,6 +327,25 @@ mod tests {
         assert!(decrypt_secret(&key_b, &encrypted).is_err());
     }
 
+    /// The nonce is keyed and bound to the plaintext: different secrets under
+    /// one key and account never share a nonce, a different key gives a
+    /// different nonce, and the same secret re-encrypts to the same blob.
+    #[test]
+    fn synthetic_nonce_never_repeats_across_distinct_secrets() {
+        let key = derive_enc_key(b"nonce-binding-key");
+        let a = encrypt_secret(&key, "acct-n", b"secret-one").expect("encrypt a");
+        let b = encrypt_secret(&key, "acct-n", b"secret-two").expect("encrypt b");
+        assert_ne!(a[..NONCE_LEN], b[..NONCE_LEN]);
+
+        let other_key = derive_enc_key(b"other-binding-key");
+        let c = encrypt_secret(&other_key, "acct-n", b"secret-one").expect("encrypt c");
+        assert_ne!(a[..NONCE_LEN], c[..NONCE_LEN]);
+
+        let again = encrypt_secret(&key, "acct-n", b"secret-one").expect("encrypt again");
+        assert_eq!(a, again);
+        assert_eq!(decrypt_secret(&key, &b).expect("decrypt b"), b"secret-two");
+    }
+
     #[test]
     fn bitcoin_account_record_default_fields() {
         let rec = BitcoinAccountRecord {
@@ -332,8 +357,6 @@ mod tests {
             first_address: Some("tb1q...".to_string()),
             active: true,
             active_receive_index: 0,
-            created_at: 100,
-            updated_at: 200,
         };
         assert!(rec.active);
         assert_eq!(rec.network, 0);

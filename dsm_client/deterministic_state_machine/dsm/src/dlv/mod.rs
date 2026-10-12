@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! Tier 2 Foundation DLV primitives — pure-crypto helpers that the
-//! `dsm_sdk` and storage layers compose into the off-device SoFi
-//! flow.  This module deliberately holds no proto / I/O / runtime
-//! state; each submodule is a self-contained crypto primitive.
+//! Pure-crypto vault primitives that outlive the old market: the deployed
+//! beta storage profile, the one route arithmetic, and the owner-signed
+//! baseline over the canonical state identity. No proto, I/O or runtime
+//! state lives here.
 
-pub mod controller_rotation;
-pub mod vault_pending_pointer;
-pub mod vault_smt_leaf;
-pub mod vault_state_anchor;
+pub mod route_commit;
+// vault_state_anchor (V1) and vault_state_anchor_v2 are DELETED by the
+// state-identity cut. Their names and domains are burned, never reused; the
+// only anchor form is V3 below, whose sole content is c_n.
+pub mod vault_state_anchor_v3; // Def 6.4a — owner baseline over c_n; the only anchor form after the cut

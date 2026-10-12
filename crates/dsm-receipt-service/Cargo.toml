@@ -1,0 +1,18 @@
+[package]
+name = "dsm-receipt-service"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "The DSM receipt service (DSM Amendment A17): emails a plain receipt that a wallet's device signed. Outside the DSM protocol; it decides nothing."
+
+[dependencies]
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+prost = "0.14"
+axum = "0.8"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }

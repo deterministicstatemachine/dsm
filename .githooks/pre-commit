@@ -77,6 +77,13 @@ info "Checking canonical bilateral gates..."
 bash ci/canonical_bilateral_gates.sh
 pass "Canonical bilateral gates"
 
+# ---------------------------------------------------------------------------
+# 7. Real-code guard: no placeholders, fabricated results or boolean literals
+# ---------------------------------------------------------------------------
+info "Checking the real-code guard..."
+python3 scripts/real_code_guard.py || fail "real-code guard refused the tree (see above)"
+pass "Real-code guard"
+
 echo ""
 echo -e "${GREEN}All pre-commit checks passed.${NC}"
 echo ""

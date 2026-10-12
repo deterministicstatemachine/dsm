@@ -3,16 +3,24 @@
 #
 # Modes:
 #   --local   (default)  Generate localhost config + adb reverse ports (dev nodes)
+#   --gcp-beta          Push the LIVE 5-node GCP beta fleet config (us-central1) + CA
 #   --aws               Push pre-built AWS config + self-signed CA cert (production nodes)
-#   --gcp               Push pre-built GCP config + self-signed CA cert (production nodes)
-#   --alibaba           Push pre-built Alibaba config + self-signed CA cert (production nodes)
+#   --gcp               REFUSED: the 6-node 3-region fleet is dead (see below)
+#
+# The Alibaba fleet and its CA were DELETED on 2026-09-12 — the config, the
+# scripts/ca.crt it used, and this script's --alibaba mode all went in one cut.
 #
 # Usage:
 #   ./push_env_override.sh             # local dev nodes (default)
 #   ./push_env_override.sh --local     # same as above, explicit
+#   ./push_env_override.sh --gcp-beta  # LIVE 5-node GCP beta fleet (us-central1)
 #   ./push_env_override.sh --aws       # AWS storage nodes
-#   ./push_env_override.sh --gcp       # GCP storage nodes
-#   ./push_env_override.sh --alibaba   # Alibaba Cloud storage nodes (3 nodes, us-west-1)
+#
+# WHY --gcp IS REFUSED: dsm_env_config.gcp.toml describes the 6-node,
+# 3-region fleet from 2026-03-31. Those hosts are gone. It was never updated
+# when the beta fleet moved to 5 nodes in us-central1, so --gcp would push a
+# config naming dead endpoints AND the wrong member ids, deriving a storage set
+# id no node belongs to. The live fleet is --gcp-beta.
 
 set -e
 
@@ -25,16 +33,21 @@ PORTS=(8080 8081 8082 8083 8084)
 MODE="local"
 for arg in "$@"; do
   case "$arg" in
-    --aws)     MODE="aws" ;;
-    --gcp)     MODE="gcp" ;;
-    --alibaba) MODE="alibaba" ;;
-    --local)   MODE="local" ;;
+    --aws)      MODE="aws" ;;
+    --gcp-beta) MODE="gcp-beta" ;;
+    --local)    MODE="local" ;;
+    --gcp)
+      echo "REFUSED: --gcp names the RETIRED 6-node, 3-region fleet (2026-03-31)." >&2
+      echo "Those hosts are dead and its member ids derive a storage set no node belongs to." >&2
+      echo "The live beta fleet is 5 nodes in us-central1: use --gcp-beta." >&2
+      exit 1
+      ;;
     --help|-h)
-      echo "Usage: $0 [--local|--aws|--gcp|--alibaba]"
-      echo "  --local    (default) Local dev nodes via adb reverse"
-      echo "  --aws      AWS storage nodes (6 nodes, 3 regions)"
-      echo "  --gcp      GCP storage nodes (6 nodes, 3 regions)"
-      echo "  --alibaba  Alibaba Cloud storage nodes (3 nodes, us-west-1)"
+      echo "Usage: $0 [--local|--gcp-beta|--aws]"
+      echo "  --local     (default) Local dev nodes via adb reverse"
+      echo "  --gcp-beta  LIVE GCP beta fleet (5 nodes, us-central1, q=3)"
+      echo "  --aws       AWS storage nodes (6 nodes, 3 regions)"
+      echo "  --gcp       REFUSED — dead 6-node fleet; use --gcp-beta"
       exit 0
       ;;
     *) echo "Unknown argument: $arg"; exit 1 ;;
@@ -45,19 +58,19 @@ echo "Mode: $MODE"
 
 # --- Remote config paths ---
 AWS_CONFIG="$REPO_ROOT/scripts/dsm_env_config.aws.toml"
-GCP_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp.toml"
-ALIBABA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.alibaba.toml"
+GCP_BETA_CONFIG="$REPO_ROOT/scripts/dsm_env_config.gcp_beta.toml"
+# ONE CA path, no fallback. The old second candidate (scripts/ca.crt) was the
+# Alibaba CA — same subject CN=DSM-Storage-CA, different key — so the fallback
+# could silently push a CA that verifies nothing and turn a fleet move into an
+# unexplained TLS outage. It is deleted; the deployment's CA is the only source.
 CA_CERT="$REPO_ROOT/dsm_storage_node/deploy/nodes/ca/ca.crt"
-CA_CERT_SCRIPTS="$REPO_ROOT/scripts/ca.crt"
 
 # Resolve REMOTE_CONFIG and CA cert based on mode
 REMOTE_CONFIG=""
 if [[ "$MODE" == "aws" ]]; then
   REMOTE_CONFIG="$AWS_CONFIG"
-elif [[ "$MODE" == "gcp" ]]; then
-  REMOTE_CONFIG="$GCP_CONFIG"
-elif [[ "$MODE" == "alibaba" ]]; then
-  REMOTE_CONFIG="$ALIBABA_CONFIG"
+elif [[ "$MODE" == "gcp-beta" ]]; then
+  REMOTE_CONFIG="$GCP_BETA_CONFIG"
 fi
 
 if [[ -n "$REMOTE_CONFIG" ]]; then
@@ -66,15 +79,11 @@ if [[ -n "$REMOTE_CONFIG" ]]; then
     echo "Run the deployment first (deploy/provision_${MODE}.sh)"
     exit 1
   fi
-  # Try deploy/nodes CA first, fall back to scripts/ca.crt
   if [[ ! -f "$CA_CERT" ]]; then
-    if [[ -f "$CA_CERT_SCRIPTS" ]]; then
-      CA_CERT="$CA_CERT_SCRIPTS"
-    else
-      echo "CA cert not found at $CA_CERT or $CA_CERT_SCRIPTS"
-      echo "Run deploy/generate_node_configs.sh first to generate TLS certs"
-      exit 1
-    fi
+    echo "CA cert not found at $CA_CERT" >&2
+    echo "That is the deployment's CA and the only one this script will push." >&2
+    echo "Restore it from the deployment before pushing to devices." >&2
+    exit 1
   fi
 fi
 
@@ -82,9 +91,6 @@ fi
 make_env_toml() {
   local host="$1"
   cat <<EOF
-protocol = "http"
-lan_ip = "$host"
-ports = [${PORTS[1]}, ${PORTS[2]}, ${PORTS[3]}, ${PORTS[4]}, ${PORTS[5]}]
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1
@@ -113,46 +119,50 @@ EOF
 }
 
 # --- Gather devices ---
-serials=( $(adb devices | awk '/\tdevice$/{print $1}') )
-if [[ ${#serials[@]} -eq 0 ]]; then
+# Address devices by transport id, not serial: wireless (mDNS) serials contain
+# spaces ("adb-XXXX-yyyy (2)._adb-tls-connect._tcp"), which word-splitting
+# truncates into a serial `adb -s` cannot resolve. Transport ids are plain
+# integers and unambiguous.
+transports=( $(adb devices -l | awk '/ device /{for(i=1;i<=NF;i++) if($i ~ /^transport_id:/){sub("transport_id:","",$i); print $i}}') )
+if [[ ${#transports[@]} -eq 0 ]]; then
   echo "No connected adb devices in device state."
   adb devices -l
   exit 2
 fi
 
-echo "Detected devices: $serials"
+echo "Detected device transports: $transports"
 
-for d in $serials; do
-  echo "=== Processing $d ==="
+for d in $transports; do
+  echo "=== Processing transport $d ==="
 
   # Ensure app-private files dir exists
-  adb -s "$d" shell run-as "$APP_PKG" mkdir -p files || true
+  adb -t "$d" shell run-as "$APP_PKG" mkdir -p files || true
 
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
-    # --- Remote mode (AWS / GCP / Alibaba) ---
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp-beta" ]]; then
+    # --- Remote mode (AWS / GCP beta) ---
     # MUST write the DEVELOPER OVERRIDE file, not files/dsm_env_config.toml: MainActivity
     # unconditionally re-materializes the bundled asset over files/dsm_env_config.toml on every
     # launch (FileOutputStream ... false), so a push there is clobbered. The override
     # (dsm_env_config.override.toml) is checked first and wins.
     echo "Pushing $MODE storage node config to $d (developer override)..."
-    adb -s "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
+    adb -t "$d" push "$REMOTE_CONFIG" /data/local/tmp/dsm_env_config.override.toml
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.override.toml files/dsm_env_config.override.toml
 
     echo "Pushing CA cert to $d..."
-    adb -s "$d" push "$CA_CERT" /data/local/tmp/ca.crt
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
+    adb -t "$d" push "$CA_CERT" /data/local/tmp/ca.crt
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/ca.crt files/ca.crt
 
     # Remove any stale adb reverse ports (not needed for remote)
     for p in $PORTS 18443; do
-      adb -s "$d" reverse --remove tcp:$p 2>/dev/null || true
+      adb -t "$d" reverse --remove tcp:$p 2>/dev/null || true
     done
 
     echo "Config: $MODE storage nodes (HTTPS + custom CA, via override file)"
-    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
+    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.override.toml files/ca.crt
 
   else
     # --- Local mode ---
-    is_emulator=$(adb -s "$d" shell getprop ro.kernel.qemu | tr -d '\r' | tr -d '\n')
+    is_emulator=$(adb -t "$d" shell getprop ro.kernel.qemu | tr -d '\r' | tr -d '\n')
     if [[ "$is_emulator" == "1" ]]; then
       host="10.0.2.2"
       echo "Device $d identified as emulator (ro.kernel.qemu=1). Using host=$host"
@@ -160,7 +170,7 @@ for d in $serials; do
       host="127.0.0.1"
       echo "Device $d identified as physical. Using host=$host and setting reverse ports"
       for p in $PORTS 18443; do
-        adb -s "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
+        adb -t "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
       done
     fi
 
@@ -171,31 +181,31 @@ for d in $serials; do
     make_env_toml "$host" > "$tmpfile"
     echo "Generated local dev config:"; head -10 "$tmpfile"
 
-    adb -s "$d" push "$tmpfile" /data/local/tmp/dsm_env_config.toml
-    adb -s "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
-    adb -s "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml
+    adb -t "$d" push "$tmpfile" /data/local/tmp/dsm_env_config.toml
+    adb -t "$d" shell run-as "$APP_PKG" cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
+    adb -t "$d" shell run-as "$APP_PKG" ls -l files/dsm_env_config.toml
     rm -f "$tmpfile"
 
     echo "Config: 5 local dev nodes (HTTP via adb reverse)"
   fi
 
   # Uninstall/install APK if not present
-  pm_out=$(adb -s "$d" shell pm list packages | grep -c "$APP_PKG" || true)
+  pm_out=$(adb -t "$d" shell pm list packages | grep -c "$APP_PKG" || true)
   if [[ "$pm_out" == "0" ]]; then
     echo "App not installed on $d; installing APK..."
-    adb -s "$d" install -r "$APK_PATH" || echo "Install failed; continuing"
+    adb -t "$d" install -r "$APK_PATH" || echo "Install failed; continuing"
   fi
 
   echo "Restarting app on $d..."
-  adb -s "$d" shell am force-stop "$APP_PKG" || true
-  adb -s "$d" shell am start -n "$APP_PKG"/.ui.MainActivity || echo "Failed to start on $d"
+  adb -t "$d" shell am force-stop "$APP_PKG" || true
+  adb -t "$d" shell am start -n "$APP_PKG"/.ui.MainActivity || echo "Failed to start on $d"
 
   echo "Verifying startup logs for $d..."
   sleep 2
-  if [[ "$MODE" == "aws" || "$MODE" == "gcp" || "$MODE" == "alibaba" ]]; then
-    adb -s "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
+  if [[ "$MODE" == "aws" || "$MODE" == "gcp-beta" ]]; then
+    adb -t "$d" logcat -d | grep -iE "(storage node|ca cert|6 storage|appState changed to: wallet_ready)" | tail -15 || true
   else
-    adb -s "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
+    adb -t "$d" logcat -d | grep -E "(Using 5 storage nodes|appState changed to: wallet_ready|Genesis.*published)" | tail -15 || true
   fi
   echo "=== Done $d ==="
   echo

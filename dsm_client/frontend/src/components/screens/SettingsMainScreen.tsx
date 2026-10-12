@@ -1,77 +1,65 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 // src/components/screens/SettingsMainScreen.tsx
+// Settings on the StateBoy frame: the version (and its 7-tap developer
+// unlock), the tour, the wallet lock, the ring backup as Rust reports it, and
+// the developer options once unlocked.
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
-import { exportStateBackupFile, importStateBackupFile } from '../../services/settings/backupService';
 import {
   getNfcBackupStatus,
   setAutoWriteEnabled,
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
-import './SettingsScreen.css';
+import { tourStore } from '../tour/tourStore';
+import { chooseSkin, setReceiptsEmail } from '../../runtime/skinPreferences';
+import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
+import { useAppRuntimeStore } from '../../runtime/appRuntimeStore';
+import { versionLabel } from '../../appVersion';
+import { Notice, ScreenFrame } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
 
-type PrefValue = string | null;
-
-interface NfcReadResult {
-  ringId?: string;
-}
-
-interface ExtendedDsmClient {
-  getPreference(key: string): Promise<PrefValue>;
-  setPreference(key: string, value: string): Promise<void>;
-  nfcReadRingId?: () => Promise<NfcReadResult | null>;
-  nfcRegisterRingId?: (id: string) => Promise<boolean>;
-  claimFaucet?: (tokenId?: string) => Promise<{ success: boolean; message?: string }>;
-  exportStateBackup?: () => Promise<Uint8Array | ArrayBuffer | Blob | string>;
-  importStateBackup?: (backup: Uint8Array) => Promise<{ success: boolean; message?: string }>;
-}
-
-const client = dsmClient as unknown as ExtendedDsmClient;
+const client = dsmClient;
 const DEV_MODE_PREF_KEY = 'dev_mode';
 const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 let cachedDevMode: boolean | null = null;
-const emptyNfcStatus: NfcBackupStatus = {
-  enabled: false,
-  configured: false,
-  pendingCapsule: false,
-  capsuleCount: 0,
-  lastCapsuleIndex: 0,
-  autoWriteEnabled: false,
-};
+
+/** The backup status as Rust reported it, the failure of asking, or not asked yet. */
+type NfcStatusRead = { status: NfcBackupStatus } | { error: string } | undefined;
 
 interface SettingsMainScreenProps {
   onNavigate?: (screen: string) => void;
 }
 
 const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) => {
+  const runtime = useAppRuntimeStore();
   const [devMode, setDevMode] = useState<boolean>(() => cachedDevMode ?? false);
   const [devModeResolved, setDevModeResolved] = useState<boolean>(() => cachedDevMode !== null);
   const [tapCount, setTapCount] = useState<number>(0);
   const devModeUnlockingRef = useRef(false);
-  // ringId is stored in native prefs via setPreference; no React state needed.
   const [status, setStatus] = useState<string>('');
-  const [backupStatus, setBackupStatus] = useState<string>('');
-  const [backupProcessing, setBackupProcessing] = useState<boolean>(false);
 
   // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
-  const [nfcStatus, setNfcStatus] = useState<NfcBackupStatus>(emptyNfcStatus);
-
-
+  // A status that could not be read is shown as that failure; it used to be
+  // shown as "NOT SET", the status of a device with no backup at all.
+  const [nfcRead, setNfcRead] = useState<NfcStatusRead>(undefined);
 
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
       try {
-        setNfcStatus(await getNfcBackupStatus());
-      } catch {
-        /* tolerate — tables may not exist yet */
+        const status = await getNfcBackupStatus();
+        if (!cancelled) setNfcRead({ status });
+      } catch (e) {
+        if (!cancelled) setNfcRead({ error: e instanceof Error ? e.message : String(e) });
       }
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  const nfcUi = getNfcBackupUiModel(nfcStatus);
+  const nfcStatus = nfcRead && 'status' in nfcRead ? nfcRead.status : null;
+  const nfcUi = nfcStatus ? getNfcBackupUiModel(nfcStatus) : null;
 
   // Initial preferences load (deterministic, event-driven only)
   useEffect(() => {
@@ -84,8 +72,9 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         if (!cancelled) {
           setDevMode(unlocked);
         }
-      } catch {
-        // Remain silent in UI; settings screen tolerates missing prefs
+      } catch (e) {
+        // Not unlocked until the preference says so; the failure is logged, not hidden.
+        console.warn('[Settings] the developer-mode preference was not read:', e);
       } finally {
         if (!cancelled) {
           setDevModeResolved(true);
@@ -127,397 +116,201 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     });
   }, [devMode, devModeResolved, enableDevMode]);
 
-  const _onSetupRing = useCallback(async () => {
-    try {
-      const nfc = client.nfcReadRingId ? await client.nfcReadRingId() : null;
-      let id: string | undefined = nfc?.ringId;
-
-      if (!id) {
-        const entered =
-          typeof window !== 'undefined'
-            ? window.prompt('Scan/enter Ring ID (read-only, provided by NFC):')
-            : null;
-        if (!entered || !entered.trim()) return;
-        id = entered.trim();
-      }
-
-      const registered = client.nfcRegisterRingId
-        ? await client.nfcRegisterRingId(id)
-        : false;
-
-      if (!registered) {
-        await client.setPreference('nfc_ring_id', id);
-      }
-
-      setStatus('Ring registered successfully');
-    } catch {
-      setStatus('Failed to register ring');
-    }
-  }, []);
-
-  const onExportBackup = useCallback(async () => {
-    if (backupProcessing) return;
-    setBackupProcessing(true);
-    setBackupStatus('Exporting state...');
-    try {
-      const out = await exportStateBackupFile(client);
-      if (out.blob && out.filename) {
-        const url = URL.createObjectURL(out.blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = out.filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }
-      setBackupStatus(out.message || (out.ok ? 'Backup exported successfully' : 'Backup export failed'));
-    } catch (err) {
-      setBackupStatus(
-        `Export failed: ${err instanceof Error ? err.message : 'unknown'}`
-      );
-    } finally {
-      setBackupProcessing(false);
-    }
-  }, [backupProcessing]);
-
-  const onImportBackup = useCallback(async () => {
-    if (backupProcessing) return;
-
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.bin,application/octet-stream';
-
-    input.onchange = async e => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
-
-      setBackupProcessing(true);
-      setBackupStatus('Importing state...');
-
-      try {
-        const result = await importStateBackupFile(client, file);
-        setBackupStatus(result.message);
-      } catch (err) {
-        setBackupStatus(
-          `Import failed: ${err instanceof Error ? err.message : 'unknown'}`
-        );
-      } finally {
-        setBackupProcessing(false);
-      }
-    };
-
-    input.click();
-  }, [backupProcessing]);
-
   const openDiagnosticsWorkspace = useCallback(() => {
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
     setStatus('Diagnostics workspace opened');
   }, []);
 
-  return (
-    <main className="settings-shell settings-shell--main" role="main" aria-labelledby="settings-title">
-      <div id="settings-title" className="settings-shell__title">
-        SETTINGS
-      </div>
+  const onToggleAutoWrite = useCallback((next: boolean) => {
+    if (!nfcStatus || nfcStatus.autoWriteEnabled === next) return;
+    void setAutoWriteEnabled(next).then(() =>
+      setNfcRead({ status: { ...nfcStatus, autoWriteEnabled: next } }),
+    );
+  }, [nfcStatus]);
 
+  return (
+    <ScreenFrame
+      title="Settings"
+      className="settings-screen"
+      banner={status ? (
+        <Notice banner kind="success" onClose={() => setStatus('')}>{status}</Notice>
+      ) : null}
+    >
       {/* Version row with 7-tap unlock (deterministic counter, no timers) */}
       <button
         type="button"
-        className="settings-shell__button settings-shell__button--stack"
+        className="sb-card"
         onClick={onVersionTap}
         aria-describedby={!devMode ? 'dev-hint' : undefined}
-        style={{
-          marginBottom: '12px',
-          textAlign: 'left',
-        }}
       >
-        <div
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '4px',
-          }}
-        >
-          VERSION
+        <div className="sb-kv">
+          <span className="sb-kv__k">Version</span>
+          <span className="sb-kv__v">{versionLabel()}</span>
         </div>
-        <div style={{ fontSize: '9px' }}>1.0.0</div>
         {!devMode && devModeResolved && (
-          <div
-            id="dev-hint"
-            style={{
-              fontSize: '8px',
-              opacity: 0.7,
-              marginTop: '6px',
-            }}
-          >
+          <div id="dev-hint" className="sb-hint sb-hint--tight">
             TAP 7X FOR DEV OPTIONS ({tapCount}/7)
           </div>
         )}
       </button>
 
-      {/* Backup & Restore Section */}
-      <section
-        aria-labelledby="backup-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="backup-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          BACKUP & RESTORE
-        </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          EXPORT YOUR STATE OR RESTORE FROM BACKUP
-        </div>
-
-        <div
-          className="settings-shell__button-row"
-          style={{
-            marginBottom: '8px',
-          }}
-        >
+      {/* The wallet's look: this Game Boy (DGen), or the Modern wallet. In the
+          Modern skin these settings open inside it, and its own Settings
+          changes the look. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="look-section-title">
+          <div id="look-section-title" className="sb-card__title">Wallet style</div>
+          <p className="sb-hint">Modern is a full-screen wallet with every DSM feature, light or dark, and a Simple mode. Switch back here from its Settings.</p>
           <button
-            className="settings-shell__button"
-            onClick={onExportBackup}
-            disabled={backupProcessing}
-            style={{
-              flex: '1 1 140px',
-              fontSize: '9px',
-              opacity: backupProcessing ? 0.5 : 1,
-              cursor: backupProcessing ? 'not-allowed' : 'pointer',
+            type="button"
+            className="sb-btn sb-btn--block"
+            onClick={() => {
+              chooseSkin('modern').then(
+                () => undefined,
+                (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+              );
             }}
           >
-            {backupProcessing ? 'EXPORTING...' : 'EXPORT BACKUP'}
+            Switch to Modern
           </button>
+        </section>
+      ) : null}
 
+      {/* Your contact card and email receipts (DSM Amendment A17). The Modern
+          skin has its own pages for both. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="card-section-title">
+          <div id="card-section-title" className="sb-card__title">Contact card and receipts</div>
+          <p className="sb-hint">Your name, email and phone ride on your contact code.</p>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('mycontact')}>
+            Edit my contact card
+          </button>
+          <p className="sb-hint" style={{ marginTop: 10 }}>{RECEIPT_CONSENT.lead} {RECEIPT_CONSENT.given}</p>
+          <ul className="sb-hint">
+            {RECEIPT_CONSENT.items.map((item) => <li key={item}>{item}</li>)}
+          </ul>
+          <p className="sb-hint">{RECEIPT_CONSENT.after}</p>
+          <p className="sb-hint">Email receipts: {runtime.receiptsEmail === 'on' ? 'on' : 'off'}</p>
           <button
-            className="settings-shell__button"
-            onClick={onImportBackup}
-            disabled={backupProcessing}
-            style={{
-              flex: '1 1 140px',
-              fontSize: '9px',
-              opacity: backupProcessing ? 0.5 : 1,
-              cursor: backupProcessing ? 'not-allowed' : 'pointer',
+            type="button"
+            className={`sb-btn sb-btn--block${runtime.receiptsEmail === 'on' ? '' : ' sb-btn--primary'}`}
+            onClick={() => {
+              setReceiptsEmail(runtime.receiptsEmail === 'on' ? 'off' : 'on').then(
+                () => undefined,
+                (e: unknown) => setStatus(e instanceof Error ? e.message : String(e)),
+              );
             }}
           >
-            {backupProcessing ? 'IMPORTING...' : 'IMPORT BACKUP'}
+            {runtime.receiptsEmail === 'on' ? 'Turn receipts off' : 'I agree, turn receipts on'}
           </button>
-        </div>
-        {backupStatus && (
-          <div className="settings-shell__status">
-            {backupStatus}
-          </div>
-        )}
-      </section>
+        </section>
+      ) : null}
 
-
-
+      {/* The guided tour walks the Game Boy's buttons: DGen only. */}
+      {runtime.skin === 'dgen' ? (
+        <section className="sb-card" aria-labelledby="tour-section-title">
+          <div id="tour-section-title" className="sb-card__title">Guided tour</div>
+          <button
+            type="button"
+            className="sb-btn sb-btn--block"
+            data-tour="tutorial-button"
+            onClick={() => tourStore.start()}
+          >
+            Replay tutorial
+          </button>
+        </section>
+      ) : null}
 
       {/* Security / Wallet Lock */}
-      <section
-        aria-labelledby="security-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="security-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '8px',
-            color: 'var(--text-dark)',
-            letterSpacing: '1px',
-          }}
-        >
-          SECURITY
+      <section className="sb-card" aria-labelledby="security-section-title">
+        <div id="security-section-title" className="sb-card__title">
+          <span>Security</span>
+          <InfoTip title="Wallet lock">
+            <p>A lock asks for a PIN or a sequence of the shell&apos;s buttons before the wallet opens.</p>
+            <p>It locks on leaving the app if you choose so. After three wrong tries only the wallet&apos;s recovery phrase opens it, and neither a wait nor a restart gives a try back.</p>
+          </InfoTip>
         </div>
-        <div
-          style={{
-            fontSize: '8px',
-            color: 'var(--text-dark)',
-            marginBottom: '12px',
-            lineHeight: '1.4',
-            opacity: 0.8,
-          }}
-        >
-          PROTECT YOUR WALLET WITH A PIN, BUTTON COMBO, OR BIOMETRIC LOCK.
-        </div>
+        <p className="sb-hint">Protect your wallet with a PIN or a button combo.</p>
         <button
-          className="settings-shell__button"
+          type="button"
+          className="sb-btn sb-btn--primary sb-btn--block"
           onClick={() => onNavigate?.('lock_setup')}
-          style={{ fontSize: '9px', width: '100%' }}
         >
-          CONFIGURE WALLET LOCK
+          Configure wallet lock
         </button>
       </section>
 
       {/* NFC Ring Backup — compact card, full management on dedicated screen */}
-      <section
-        aria-labelledby="nfc-section-title"
-        className="settings-shell__panel"
-      >
-        <div
-          id="nfc-section-title"
-          style={{
-            fontSize: '10px',
-            fontWeight: 'bold',
-            marginBottom: '6px',
-            letterSpacing: '1px',
-          }}
-        >
-          NFC RING BACKUP
+      <section className="sb-card sb-card--dark" aria-labelledby="nfc-section-title">
+        <div id="nfc-section-title" className="sb-card__title">NFC ring backup</div>
+        <div className="sb-hero__value" style={{ fontSize: 14, marginTop: 0 }}>
+          {nfcRead === undefined ? '…' : nfcUi ? nfcUi.backupLabel : 'NOT READ'}
+          {nfcUi && nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
         </div>
-        <div style={{ marginBottom: 8 }}>
-          <div
-            style={{
-              fontSize: '9px',
-              fontWeight: 'bold',
-              color: 'var(--text-dark)',
-              marginBottom: 4,
-            }}
-          >
-            {nfcUi.backupLabel}
-            {nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
+        <div className="sb-hint sb-hint--tight" style={{ marginBottom: 8 }}>
+          {nfcRead === undefined
+            ? 'Reading the backup status…'
+            : nfcUi
+              ? nfcUi.compactSummary
+              : `Status not read: ${(nfcRead as { error: string }).error}`}
+        </div>
+        <div style={{ display: 'grid', gap: 8 }}>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('nfc_recovery')}>
+            Manage backup
+          </button>
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('recovery')}>
+            Inspect or recover
+          </button>
+        </div>
+        {nfcStatus && nfcStatus.enabled && nfcStatus.configured && (
+          <div className="sb-kv" style={{ marginTop: 8, alignItems: 'center' }}>
+            <span className="sb-kv__k">Auto-backup to ring</span>
+            <div className="sb-seg" role="group" aria-label="Auto-backup to ring">
+              <button
+                type="button"
+                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? ' active' : ''}`}
+                aria-pressed={nfcStatus.autoWriteEnabled}
+                onClick={() => onToggleAutoWrite(true)}
+              >
+                On
+              </button>
+              <button
+                type="button"
+                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? '' : ' active'}`}
+                aria-pressed={!nfcStatus.autoWriteEnabled}
+                onClick={() => onToggleAutoWrite(false)}
+              >
+                Off
+              </button>
+            </div>
           </div>
-          <div
-            style={{
-              fontSize: '8px',
-              color: 'var(--text-dark)',
-              lineHeight: '1.4',
-              opacity: 0.82,
-            }}
-          >
-            {nfcUi.compactSummary}
-          </div>
-        </div>
-        <div className="settings-shell__button-row">
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('nfc_recovery')}
-            style={{ fontSize: '9px' }}
-          >
-            MANAGE BACKUP
-          </button>
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('recovery')}
-            style={{ fontSize: '9px' }}
-          >
-            INSPECT OR RECOVER
-          </button>
-          <button
-            className="settings-shell__button"
-            onClick={() => onNavigate?.('additional_device')}
-            style={{ fontSize: '9px' }}
-          >
-            ADD / APPROVE DEVICE
-          </button>
-        </div>
-        {nfcStatus.enabled && nfcStatus.configured && (
-          <button
-            className="settings-shell__button"
-            onClick={() => {
-              const next = !nfcStatus.autoWriteEnabled;
-              void setAutoWriteEnabled(next).then(() =>
-                setNfcStatus((prev) => ({ ...prev, autoWriteEnabled: next })),
-              );
-            }}
-            style={{ fontSize: '9px', width: '100%', marginTop: 6 }}
-          >
-            AUTO-BACKUP TO RING: {nfcStatus.autoWriteEnabled ? 'ON' : 'OFF'}
-          </button>
         )}
       </section>
 
       {/* Developer Options (only when unlocked) */}
       {devMode && (
-        <section
-          aria-labelledby="dev-section-title"
-          className="settings-shell__panel"
-        >
-          <div
-            style={{
-              fontSize: '10px',
-              fontWeight: 'bold',
-              marginBottom: '8px',
-              color: 'var(--text-dark)',
-              letterSpacing: '1px',
-            }}
-          >
-            DEVELOPER OPTIONS
-          </div>
-          <div
-            style={{
-              display: 'grid',
-              gap: '8px',
-            }}
-          >
+        <section className="sb-card" aria-labelledby="dev-section-title">
+          <div id="dev-section-title" className="sb-card__title">Developer options</div>
+          <div style={{ display: 'grid', gap: 8 }}>
             <button
               type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_dlv')}
-            >
-              DLV TOOLS
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
+              className="sb-btn sb-btn--block"
               onClick={() => onNavigate?.('dev_policy')}
             >
-              POLICY TOOLS
+              Policy tools
             </button>
-
             <button
               type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
-              onClick={() => onNavigate?.('dev_sofi_launch')}
-            >
-              SOFI LAUNCH
-            </button>
-
-            <button
-              type="button"
-              className="settings-shell__button"
-              style={{ fontSize: '9px' }}
+              className="sb-btn sb-btn--block"
               onClick={openDiagnosticsWorkspace}
             >
-              REPORT ISSUE / FEEDBACK
+              Report issue / feedback
             </button>
-
           </div>
         </section>
       )}
-
-      {status && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="settings-shell__status settings-shell__status--flush"
-        >
-          {status.toUpperCase()}
-        </div>
-      )}
-    </main>
+    </ScreenFrame>
   );
 };
 

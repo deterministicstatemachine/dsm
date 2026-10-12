@@ -1,0 +1,11 @@
+$ cargo test --locked --release -p dsm_sdk --lib -- --exact --nocapture --test-threads=1 handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end
+    Blocking waiting for file lock on build directory
+warning: dsm@0.1.0-beta.3: Prost compilation succeeded
+warning: dsm_sdk@0.1.0-beta.3: dsm@0.1.0: Using vendored protoc
+warning: dsm_sdk@0.1.0-beta.3: dsm@0.1.0: Using vendored protoc include
+warning: dsm_sdk@0.1.0-beta.3: Sanitized generated proto file to avoid clippy ICE
+    Finished `release` profile [optimized] target(s) in 5.15s
+     Running unittests src/lib.rs (target/release/deps/dsm_sdk-d5cfe22b5eeb2106)
+
+running 1 test
+test handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end ... 

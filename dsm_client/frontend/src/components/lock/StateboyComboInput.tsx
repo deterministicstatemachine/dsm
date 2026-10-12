@@ -7,7 +7,7 @@
  *      shell button is tapped (detail: 'up'|'down'|'left'|'right'|'a'|'b'|'start'|'select')
  *   2. Keyboard fallback for dev/desktop: Arrow keys, Z=A, X=B, Enter=START, Shift=SELECT
  *
- * Security: dots show count only (● / ○) — no indication of which buttons pressed.
+ * Security: dots show count only — no indication of which buttons pressed.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -93,25 +93,25 @@ export default function StateboyComboInput({ onComplete, label }: Props) {
   }, [press, backspace]);
 
   return (
-    <div className="combo-input">
-      {label && <div className="combo-label">{label}</div>}
+    <div className="sb-combo">
+      {label && <div className="sb-combo__label">{label}</div>}
 
       {/* Count-only dots — no button labels for security */}
-      <div className="combo-dots" aria-label={`${count} of ${COMBO_LENGTH} buttons pressed`}>
+      <div className="sb-combo__dots" aria-label={`${count} of ${COMBO_LENGTH} buttons pressed`}>
         {Array.from({ length: COMBO_LENGTH }).map((_, i) => (
-          <span key={i} className={`combo-dot${i < count ? ' combo-dot--filled' : ''}`}>
+          <span key={i} className={`sb-combo__dot${i < count ? ' is-filled' : ''}`}>
             {i < count ? '●' : '○'}
           </span>
         ))}
       </div>
 
-      <div className="combo-hint">
+      <div className="sb-combo__hint">
         {count === 0 && 'PRESS CONTROLLER BUTTONS'}
         {count > 0 && count < COMBO_LENGTH && `${COMBO_LENGTH - count} MORE`}
       </div>
 
       {count > 0 && (
-        <button className="combo-back-btn" onClick={backspace} aria-label="Undo last button">⌫</button>
+        <button type="button" className="sb-btn sb-btn--small" onClick={backspace} aria-label="Undo last button">⌫</button>
       )}
     </div>
   );

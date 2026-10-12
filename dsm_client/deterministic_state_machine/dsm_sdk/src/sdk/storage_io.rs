@@ -1,283 +1,312 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Neutral storage object I/O over the DSM storage-node fleet.
+//! Immutable objects and indexes over a committed storage set (storage spec
+//! §5, §7), and the storage facts Core derives from them.
 //!
-//! DSM storage nodes are independent endpoints (no server-side replication for the
-//! production deployment) and each maintains its own per-device auth table, rejecting
-//! tokens issued by a different node with HTTP 401. So a write must fan out to EVERY
-//! configured node, each request authenticated with that node's OWN token resolved from
-//! the local DB. This module is the single home for that fan-out + per-node-auth +
-//! lazy auth back-fill logic.
-//!
-//! It was lifted out of `bitcoin_tap_sdk` so non-dBTC subsystems (recovery-authority
-//! anchors, recovery evidence) can post/fetch objects without coupling to the dBTC SDK
-//! or duplicating the auth handling. `bitcoin_tap_sdk::storage_*` now delegate their
-//! production paths here while keeping their own in-memory test/demos store.
-//!
-//! Storage is availability-only: callers verify everything client-side. These helpers
-//! return raw bytes; authentication of the CONTENT (signatures, genesis/device-tree
-//! proofs) is the caller's responsibility.
+//! Every function takes the set the caller resolved from committed state,
+//! never "the configured nodes". Writes go to every member; what a member
+//! answered is never counted toward anything here. Reads return what the
+//! members hold, and Core decides what it establishes: `Stored(o)` from
+//! three members returning the exact bytes (§5 rule 6), an index's candidate
+//! order from every member's appends (§7). Raced cells are written and read
+//! along their routes (`sdk::route_seats`).
 
-use crate::sdk::storage_node_sdk::{
-    build_ca_aware_client, StorageAuthContext, StorageNodeConfig, StorageNodeSDK,
-};
+use dsm::crypto::domain::TaggedHashDomain;
+use dsm::sofi::storage::{Discovered, IndexCandidates, Resolved, StoredFact};
 use dsm::types::error::DsmError;
-use dsm::types::proto as generated;
 
-/// Resolve device auth credentials for a storage node write.
-///
-/// Looks up device_id + genesis from AppState, then fetches the per-node auth token
-/// from SQLite. Returns `None` (with a log) if credentials are unavailable — callers
-/// still attempt the request unauthenticated so regtest/dev flows work.
-pub(crate) fn resolve_storage_auth(node_url: &str) -> Option<StorageAuthContext> {
-    let device_id = crate::sdk::app_state::AppState::get_device_id()?;
-    let genesis = crate::sdk::app_state::AppState::get_genesis_hash()?;
-    let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-    let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis);
-    let token =
-        match crate::storage::client_db::get_auth_token(node_url, &device_id_b32, &genesis_b32) {
-            Ok(Some(t)) => t,
-            Ok(None) => {
-                log::debug!(
-                    "[storage_auth] no auth token for node={} device={} (device not registered?)",
-                    &node_url[..node_url.len().min(40)],
-                    &device_id_b32[..device_id_b32.len().min(12)]
-                );
-                return None;
-            }
-            Err(e) => {
-                log::warn!("[storage_auth] auth token lookup failed: {e}");
-                return None;
-            }
-        };
-    Some(StorageAuthContext {
-        device_id_b32,
-        token_b32: token,
-    })
-}
+use crate::sdk::storage_node_sdk::SetClient;
+use crate::sdk::storage_set::StorageSet;
 
-/// Fan-out PUT to every configured storage node, each authenticated with its OWN
-/// per-node token. Lazily back-fills missing auth tokens via a registration pass
-/// (idempotent) so every node knows this device. Returns the object address.
-pub(crate) async fn put_bytes(key: &str, payload: &[u8]) -> Result<String, DsmError> {
-    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
-        DsmError::storage(
-            format!("load storage node config: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let sdk = StorageNodeSDK::new(config.clone()).await.map_err(|e| {
-        DsmError::storage(
-            format!("construct storage node sdk: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    // Resolve auth for each configured node so the per-client auth is the right token
-    // for that specific endpoint.
-    let mut auths = std::collections::HashMap::new();
-    for url in &config.node_urls {
-        if let Some(auth) = resolve_storage_auth(url) {
-            auths.insert(url.clone(), auth);
-        }
-    }
-    // Lazy back-fill: if any configured node has no token in the local DB, run a
-    // registration pass so every node knows this device. Idempotent — re-registering a
-    // known (device, node) pair returns the existing token.
-    if auths.len() < config.node_urls.len() {
-        let missing = config.node_urls.len() - auths.len();
-        log::info!(
-            "storage_io::put_bytes: {missing}/{} nodes lack a local auth token — running register_device_for_auth to back-fill",
-            config.node_urls.len()
-        );
-        let device_id = crate::sdk::app_state::AppState::get_device_id().unwrap_or_default();
-        let public_key = crate::sdk::app_state::AppState::get_public_key().unwrap_or_default();
-        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-        if !device_id.is_empty() && !public_key.is_empty() && !genesis_hash.is_empty() {
-            let device_id_b32 = crate::util::text_id::encode_base32_crockford(&device_id);
-            let public_key_b32 = crate::util::text_id::encode_base32_crockford(&public_key);
-            let genesis_hash_b32 = crate::util::text_id::encode_base32_crockford(&genesis_hash);
-            if let Err(e) = sdk
-                .register_device_for_auth(&device_id_b32, &public_key_b32, &genesis_hash_b32)
-                .await
-            {
-                log::warn!(
-                    "storage_io::put_bytes: back-fill register_device_for_auth failed: {e} \
-                     (continuing — some nodes may still PUT-401)"
-                );
-            }
-            // Re-read the local DB to pick up the freshly-stored tokens.
-            auths.clear();
-            for url in &config.node_urls {
-                if let Some(auth) = resolve_storage_auth(url) {
-                    auths.insert(url.clone(), auth);
-                }
-            }
-            log::info!(
-                "storage_io::put_bytes: post-back-fill auths populated for {}/{} nodes",
-                auths.len(),
-                config.node_urls.len()
-            );
-        } else {
-            log::warn!(
-                "storage_io::put_bytes: skipping back-fill — AppState identity not loaded \
-                 (device_id_empty={} pk_empty={} genesis_empty={})",
-                device_id.is_empty(),
-                public_key.is_empty(),
-                genesis_hash.is_empty()
-            );
-        }
-    }
-    let sdk = sdk.with_per_node_auth(&auths);
-    sdk.put_to_all_replicas(key, payload, None).await
-}
-
-/// Fetch an object's bytes by key, with failover across the configured nodes.
-pub(crate) async fn get_bytes(key: &str) -> Result<Vec<u8>, DsmError> {
-    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
-        DsmError::storage(
-            format!("load storage node config: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let sdk = StorageNodeSDK::new(config).await.map_err(|e| {
-        DsmError::storage(
-            format!("construct storage node sdk: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    sdk.get(key).await
-}
-
-/// List posted objects under `prefix` (paginated).
-pub(crate) async fn list_objects(
-    prefix: &str,
-    cursor: Option<&str>,
-    limit: u32,
-) -> Result<generated::ObjectListResponseV1, DsmError> {
-    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
-        DsmError::storage(
-            format!("load storage node config: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let sdk = StorageNodeSDK::new(config).await.map_err(|e| {
-        DsmError::storage(
-            format!("construct storage node sdk: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let response = sdk.list_objects(prefix, cursor, limit).await?;
-    Ok(generated::ObjectListResponseV1 {
-        items: response
-            .items
-            .into_iter()
-            .map(|item| generated::ObjectListItemV1 {
-                key: item.key,
-                dlv_id_b32: item.dlv_id_b32,
-                size_bytes: item.size_bytes,
-            })
-            .collect(),
-        next_cursor: response.next_cursor,
-    })
-}
-
-/// Outcome of a fan-out PUT to a custom (non-object-store) endpoint path across
-/// every configured node. DSM storage nodes are independent mirrors, so a write
-/// must reach each one; `conflict` counts HTTP 409 (single-assignment rejection)
-/// separately from `failed` (network / other non-2xx) so the caller can tell
-/// "a different value is already bound" apart from "the node was unreachable".
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct PathPutFanout {
-    pub ok: usize,
-    pub conflict: usize,
-    pub failed: usize,
-    pub total: usize,
-}
-
-/// PUT `payload` to `{node}/{path}` on every configured node (no per-node auth —
-/// these endpoints are public/rate-limited, like the device-tree root). `path`
-/// is the endpoint path WITHOUT a leading slash, e.g.
-/// `api/v2/recovery/authority-anchor/{genesis_b32}`.
-pub(crate) async fn put_to_all_nodes_path(
-    path: &str,
+/// Put an immutable object at every member of `set` (§5). Returns its
+/// address and how many members took it; whether it is `Stored` is read back
+/// ([`read_stored_bytes`]), never inferred from this count.
+pub(crate) async fn put_immutable(
+    set: &StorageSet,
+    namespace: TaggedHashDomain<'_>,
     payload: &[u8],
-) -> Result<PathPutFanout, DsmError> {
-    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
-        DsmError::storage(
-            format!("load storage node config: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let client = build_ca_aware_client();
-    let path = path.trim_start_matches('/');
-    let mut r = PathPutFanout::default();
-    for node_url in &config.node_urls {
-        let trimmed = node_url.trim_end_matches('/');
-        if trimmed.is_empty() {
-            continue;
-        }
-        r.total += 1;
-        let url = format!("{trimmed}/{path}");
-        match client
-            .put(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(payload.to_vec())
-            .send()
-            .await
-        {
-            Ok(resp) => {
-                let status = resp.status();
-                if status.is_success() {
-                    r.ok += 1;
-                } else if status == reqwest::StatusCode::CONFLICT {
-                    r.conflict += 1;
-                    log::warn!("put_to_all_nodes_path: {trimmed} returned 409 Conflict for {path}");
-                } else {
-                    r.failed += 1;
-                    log::warn!(
-                        "put_to_all_nodes_path: {trimmed} returned HTTP {} for {path}",
-                        status.as_u16()
-                    );
-                }
-            }
-            Err(e) => {
-                r.failed += 1;
-                log::warn!("put_to_all_nodes_path: network error against {trimmed}: {e}");
-            }
-        }
-    }
-    Ok(r)
+) -> Result<([u8; 32], u32), DsmError> {
+    let took = SetClient::new(set)?.put_immutable(namespace, payload).await;
+    Ok((
+        dsm::storage_object::immutable_addr(namespace, payload),
+        took,
+    ))
 }
 
-/// GET `{node}/{path}` from the configured nodes, returning the first 2xx body
-/// (failover). `path` is the endpoint path WITHOUT a leading slash.
-pub(crate) async fn get_from_any_node_path(path: &str) -> Result<Vec<u8>, DsmError> {
-    let config = StorageNodeConfig::from_env_config().await.map_err(|e| {
-        DsmError::storage(
-            format!("load storage node config: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let client = build_ca_aware_client();
-    let path = path.trim_start_matches('/');
-    let mut last_err = String::from("no nodes configured");
-    for node_url in &config.node_urls {
-        let trimmed = node_url.trim_end_matches('/');
-        if trimmed.is_empty() {
-            continue;
-        }
-        let url = format!("{trimmed}/{path}");
-        match client.get(&url).send().await {
-            Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                Ok(b) => return Ok(b.to_vec()),
-                Err(e) => last_err = format!("read body from {trimmed}: {e}"),
-            },
-            Ok(resp) => last_err = format!("{trimmed} returned HTTP {}", resp.status().as_u16()),
-            Err(e) => last_err = format!("network error against {trimmed}: {e}"),
+/// The bytes of the object whose identity is `inner` under `namespace`, from
+/// the first member whose bytes re-hash to its address. A member can fail to
+/// serve an object, never substitute one. `None` when no member holds it.
+pub(crate) async fn fetch_immutable(
+    set: &StorageSet,
+    namespace: TaggedHashDomain<'_>,
+    inner: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
+    // An object is its bytes: once a member served bytes that re-hash to the
+    // address, they are kept and never fetched again.
+    if let Some(kept) = crate::sdk::final_reads::object(&addr) {
+        return Ok(Some(kept));
+    }
+    let fetched = SetClient::new(set)?.fetch_verified(&addr).await;
+    if let Some(bytes) = &fetched {
+        crate::sdk::final_reads::keep_object(namespace, &addr, bytes);
+    }
+    Ok(fetched)
+}
+
+/// `Stored(o)` for the object whose identity is `inner` under `namespace`
+/// (§5 rule 6), derived by Core from every member's raw answer.
+pub async fn read_stored_object(
+    set: &StorageSet,
+    namespace: TaggedHashDomain<'_>,
+    inner: &[u8; 32],
+) -> Result<StoredFact, DsmError> {
+    let addr = dsm::storage_object::immutable_addr_from_inner(namespace, inner);
+    let reads = SetClient::new(set)?.get_immutable(&addr).await;
+    Ok(dsm::sofi::storage::stored(&addr, &reads))
+}
+
+/// The exact bytes at `addr` once `Stored` holds for them, `None` otherwise.
+/// For a caller that holds the address rather than the identity (a vault
+/// state commits its policies by address). Always read from the members: a
+/// publisher reads its object back with it.
+pub(crate) async fn read_stored_bytes(
+    set: &StorageSet,
+    addr: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    let reads = SetClient::new(set)?.get_immutable(addr).await;
+    Ok(match dsm::sofi::storage::stored(addr, &reads) {
+        StoredFact::Stored(bytes) => Some(bytes),
+        StoredFact::Unavailable => None,
+    })
+}
+
+/// [`read_stored_bytes`] for a reader: the bytes at `addr` once this process
+/// read them `Stored`, which never changes what they are (§5: an address is
+/// its bytes, and there is no overwrite path), and read from the members
+/// otherwise. Bytes not `Stored` are not kept, and are read again when asked
+/// for. A publisher reading its own object back does not use this.
+pub(crate) async fn read_stored_bytes_kept(
+    set: &StorageSet,
+    addr: &[u8; 32],
+) -> Result<Option<Vec<u8>>, DsmError> {
+    if let Some(kept) = crate::sdk::final_reads::stored_object(addr) {
+        return Ok(Some(kept));
+    }
+    let read = read_stored_bytes(set, addr).await?;
+    if let Some(bytes) = &read {
+        crate::sdk::final_reads::keep_stored_object(addr, bytes);
+    }
+    Ok(read)
+}
+
+/// Candidates whose bytes are asked for at once.
+const CANDIDATE_READS_AT_ONCE: usize = 8;
+
+/// Append `addr` under `locator` at every member of `set` (§7). Returns how
+/// many members took it.
+pub async fn append_to_index(
+    set: &StorageSet,
+    namespace: &[u8],
+    locator: &[u8; 32],
+    addr: &[u8; 32],
+) -> Result<u32, DsmError> {
+    Ok(SetClient::new(set)?
+        .append_index(namespace, locator, addr)
+        .await)
+}
+
+/// The candidates under `locator`: every member's appends in append order,
+/// members in set order, merged by Core; `Unavailable` when no member
+/// answered. Reading stops at `budget` addresses per member, and Core's scan
+/// applies the budget again over the merged order.
+pub async fn read_index_candidates(
+    set: &StorageSet,
+    namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+) -> Result<IndexCandidates, DsmError> {
+    let reads = SetClient::new(set)?
+        .read_index(namespace, locator, budget)
+        .await;
+    Ok(dsm::sofi::storage::merge_index_reads(&reads))
+}
+
+/// The `Stored` bytes of at most `budget + 1` candidates, in candidate order:
+/// the budget bounds the work a flood of appends can cost.
+async fn stored_candidates(
+    set: &StorageSet,
+    candidates: &[[u8; 32]],
+    budget: usize,
+) -> Result<Vec<Option<Vec<u8>>>, DsmError> {
+    let client = &SetClient::new(set)?;
+    let asked = &candidates[..candidates.len().min(budget + 1)];
+    let mut fetched = Vec::with_capacity(asked.len());
+    // Each candidate is its own object: a few are asked for at once, and
+    // their answers are taken in candidate order.
+    for some in asked.chunks(CANDIDATE_READS_AT_ONCE) {
+        let reads =
+            futures::future::join_all(some.iter().map(|addr| client.get_immutable(addr))).await;
+        for (addr, reads) in some.iter().zip(reads) {
+            fetched.push(match dsm::sofi::storage::stored(addr, &reads) {
+                StoredFact::Stored(bytes) => Some(bytes),
+                StoredFact::Unavailable => None,
+            });
         }
     }
-    Err(DsmError::storage(
-        format!("get_from_any_node_path({path}) failed on all nodes: {last_err}"),
-        None::<std::io::Error>,
+    Ok(fetched)
+}
+
+/// The one object under `locator` whose bytes are `Stored` and whose
+/// identity, recomputed by Core from the bytes with `recognize`, is
+/// `locator`. Every other candidate is nothing; a scan that would examine
+/// more than `budget` candidates is `Unavailable`, never `Invalid`.
+pub async fn resolve_locator<T>(
+    set: &StorageSet,
+    index_namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+    recognize: impl Fn(&[u8]) -> Option<([u8; 32], T)>,
+) -> Result<Resolved<T>, DsmError> {
+    let candidates = match read_index_candidates(set, index_namespace, locator, budget).await? {
+        IndexCandidates::Unavailable => return Ok(Resolved::Unavailable),
+        IndexCandidates::Candidates(c) => c,
+    };
+    let fetched = stored_candidates(set, &candidates, budget).await?;
+    Ok(dsm::sofi::storage::keep_verifying(
+        locator, &fetched, budget, recognize,
     ))
+}
+
+/// Every candidate under `locator` whose `Stored` bytes recognize to
+/// `locator`, in append order, and whether that is all of them. It
+/// establishes what is published under the locator and decides nothing about
+/// which applies.
+pub async fn resolve_locator_all<T>(
+    set: &StorageSet,
+    index_namespace: &[u8],
+    locator: &[u8; 32],
+    budget: usize,
+    recognize: impl Fn(&[u8]) -> Option<([u8; 32], T)>,
+) -> Result<Discovered<T>, DsmError> {
+    let candidates = match read_index_candidates(set, index_namespace, locator, budget).await? {
+        IndexCandidates::Unavailable => return Ok(Discovered::Partial(Vec::new())),
+        IndexCandidates::Candidates(c) => c,
+    };
+    let fetched = stored_candidates(set, &candidates, budget).await?;
+    Ok(dsm::sofi::storage::keep_all_verifying(
+        locator, &fetched, budget, recognize,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::economic_fixtures::NETWORK;
+    use crate::sdk::storage_set::canonical_set;
+    use crate::test_support::one_device::Fleet;
+
+    const NAMESPACE: TaggedHashDomain<'static> =
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST;
+
+    /// How many times the members were asked for the object at `addr`
+    /// since they last forgot.
+    fn asked_for(fleet: &Fleet, addr: &[u8; 32]) -> usize {
+        let read = format!(
+            "GET /api/v2/immutable/{}",
+            crate::util::text_id::encode_base32_crockford(addr)
+        );
+        fleet
+            .nodes()
+            .nodes
+            .iter()
+            .map(|node| node.requests().iter().filter(|r| **r == read).count())
+            .sum()
+    }
+
+    fn forget_requests(fleet: &Fleet) {
+        for node in &fleet.nodes().nodes {
+            node.forget_requests();
+        }
+    }
+
+    /// An object a reader read `Stored` is its bytes for good: asked for
+    /// again it asks no member, and answers the same bytes. Bytes that are
+    /// not `Stored` are not kept, and a publisher's read-back always asks
+    /// the members.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn an_object_read_stored_is_not_read_again_by_a_reader() {
+        let fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let payload = b"an object a reader reads twice".to_vec();
+        let (addr, took) = put_immutable(&set, NAMESPACE, &payload)
+            .await
+            .expect("the put");
+        assert!(took >= 3, "the members took the object");
+
+        let absent = dsm::storage_object::immutable_addr(NAMESPACE, b"never put");
+        for _ in 0..2 {
+            assert_eq!(
+                read_stored_bytes_kept(&set, &absent).await.expect("read"),
+                None
+            );
+        }
+
+        forget_requests(&fleet);
+        let first = read_stored_bytes_kept(&set, &addr).await.expect("read");
+        assert_eq!(first, Some(payload.clone()));
+        assert!(
+            asked_for(&fleet, &addr) >= 3,
+            "the first read asks the members"
+        );
+
+        forget_requests(&fleet);
+        let again = read_stored_bytes_kept(&set, &addr).await.expect("read");
+        assert_eq!(again, first, "the same bytes");
+        assert_eq!(asked_for(&fleet, &addr), 0, "a kept object asks no member");
+
+        let read_back = read_stored_bytes(&set, &addr).await.expect("read");
+        assert_eq!(read_back, first);
+        assert!(
+            asked_for(&fleet, &addr) >= 3,
+            "a publisher's read-back asks the members"
+        );
+    }
+
+    /// A locator's candidates are fetched a few at once and kept in the
+    /// order they were appended: twenty objects under one locator, more than
+    /// are asked for at once, come back in append order, every one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn candidates_fetched_at_once_keep_their_append_order() {
+        let _fleet = Fleet::start();
+        crate::sdk::final_reads::forget_everything();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        let index = b"DSM/test/candidate-order";
+        let locator = [0x4C; 32];
+        let mut appended = Vec::new();
+        for n in 0..20u8 {
+            let payload = vec![n; 1 + usize::from(n)];
+            let (addr, ..) = put_immutable(&set, NAMESPACE, &payload)
+                .await
+                .expect("the put");
+            append_to_index(&set, index, &locator, &addr)
+                .await
+                .expect("the append");
+            appended.push(payload);
+        }
+        let found = resolve_locator_all(&set, index, &locator, 64, |bytes| {
+            Some((locator, bytes.to_vec()))
+        })
+        .await
+        .expect("the scan");
+        match found {
+            Discovered::Complete(objects) => assert_eq!(objects, appended),
+            Discovered::Partial(objects) => {
+                panic!("every candidate is Stored, yet the scan is partial: {objects:?}")
+            }
+        }
+    }
 }

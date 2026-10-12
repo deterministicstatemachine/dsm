@@ -4,52 +4,70 @@
 import * as pb from '../proto/dsm_app_pb';
 import {
   getContactsStrictBridge,
-  normalizeToBytes,
   routerInvokeBin,
+  routerQueryBin,
   requestBlePermissions as bridgeRequestBlePermissions,
 } from './WebViewBridge';
-import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ChainTipDTO } from './types';
+import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
+import type { ContactPairing, PersonProfile } from '../domain/types';
 
-function mapContactToDTO(c: any): BilateralRelationshipDTO {
-  // ═══════════════════════════════════════════════════════════════════════
-  // INVARIANT: Proto data uses camelCase field names from @bufbuild/protobuf.
-  // DO NOT add snake_case fallbacks (e.g. c.device_id ?? c.deviceId).
-  // If you see snake_case data, the bridge is returning raw objects — fix
-  // the bridge, not the mapper. ESLint enforces this via no-restricted-syntax.
-  // ═══════════════════════════════════════════════════════════════════════
-  const deviceId = c.deviceId instanceof Uint8Array ? c.deviceId : new Uint8Array();
-  const alias = c.alias || '';
-  const verifyCounter = typeof c.verifyCounter === 'bigint' ? c.verifyCounter : BigInt(c.verifyCounter || 0);
-  const signingPublicKey = c.signingPublicKey instanceof Uint8Array ? c.signingPublicKey : new Uint8Array();
+const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
+  [pb.ContactPairingPhase.PAIRED]: 'paired',
+  [pb.ContactPairingPhase.IDLE]: 'idle',
+  [pb.ContactPairingPhase.SEARCHING]: 'searching',
+  [pb.ContactPairingPhase.CONNECTED]: 'connected',
+  [pb.ContactPairingPhase.RETRYING]: 'retrying',
+};
 
-  const genesisHash = (c.genesisHash instanceof Uint8Array)
-      ? c.genesisHash
-      : (c.genesisHash?.v instanceof Uint8Array ? c.genesisHash.v : undefined);
-
-  const tipHash = c.chainTip?.v instanceof Uint8Array ? c.chainTip.v : undefined;
-
-  let tip: ChainTipDTO | undefined = undefined;
-  if (tipHash) {
-      tip = { tipHash };
+/** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
+function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
+  const genesisHash = c.genesisHash?.v;
+  const chainTip = c.chainTip?.v;
+  if (c.deviceId.length !== 32) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${c.deviceId.length}-byte device id`);
   }
-
-  const bleAddr = c.bleAddress || '';
-
+  if (!genesisHash || genesisHash.length !== 32) {
+    throw new Error('STRICT: contacts.list answered a contact without its 32-byte genesis');
+  }
+  if (c.signingPublicKey.length !== 64) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${c.signingPublicKey.length}-byte signing key`);
+  }
+  if (!c.alias) {
+    throw new Error('STRICT: contacts.list answered a contact without its alias');
+  }
+  if (chainTip !== undefined && chainTip.length !== 32) {
+    throw new Error(`STRICT: contacts.list answered a contact with a ${chainTip.length}-byte tip`);
+  }
+  const pairing = PAIRING[c.pairing];
+  if (!pairing) {
+    throw new Error(`STRICT: contacts.list answered a contact in a pairing phase the wire does not name (${c.pairing})`);
+  }
   return {
-    deviceId,
-    publicKey: signingPublicKey,
-    alias,
+    deviceId: c.deviceId,
+    publicKey: c.signingPublicKey,
+    alias: c.alias,
     genesisHash,
-    lastSeenTick: verifyCounter,
-    chainTip: tip,
-    bleAddress: typeof bleAddr === 'string' && bleAddr.length > 0 ? bleAddr : undefined,
-    genesisVerifiedOnline: c.genesisVerifiedOnline === true,
-    addedCounter: typeof c.addedCounter === 'bigint' ? c.addedCounter : BigInt(c.addedCounter || 0),
-    sendStatus: c.sendStatus ?? undefined,
+    chainTip,
+    // The wire's empty string is "no address".
+    bleAddress: c.bleAddress || undefined,
+    pairing,
+    genesisVerifiedOnline: c.genesisVerifiedOnline,
+    sendStatus: c.sendStatus,
+    profile: c.profile ? profileOf(c.profile) : undefined,
   };
 }
 
+/** A person's details as the wire carries them. */
+export function profileOf(p: pb.ContactProfileV1): PersonProfile {
+  return { name: p.displayName, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey };
+}
+
+function profileToWire(p: PersonProfile): pb.ContactProfileV1 {
+  return new pb.ContactProfileV1({ displayName: p.name, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey });
+}
+
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { decodeBase32Crockford, encodeBase32Crockford } from '../utils/textId';
 
 export async function getContacts(): Promise<ContactsList> {
   try {
@@ -87,58 +105,73 @@ export async function getContacts(): Promise<ContactsList> {
   }
 }
 
+/** Rust's refusal, worded as Rust worded it. */
+function refusal(route: string, e: pb.Error): Error {
+  return new Error(e.message || `${route} failed with code ${e.code}`);
+}
+
+/** This device's contact code: the text its QR encodes, as Rust renders it. */
+export async function getContactCode(): Promise<string> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('identity.contact_code'));
+  if (env.payload.case === 'error') throw refusal('identity.contact_code', env.payload.value);
+  if (env.payload.case !== 'appStateResponse' || env.payload.value.key !== 'contact_code' || !env.payload.value.value) {
+    throw new Error(`STRICT: identity.contact_code answered ${env.payload.case} without the code`);
+  }
+  return env.payload.value.value;
+}
+
+/**
+ * The card a scanned or pasted contact code carries. Rust reads the code and
+ * refuses one that is not whole or names another network than this device's.
+ */
+export async function readContactCode(text: string): Promise<ContactCard> {
+  const scanned = new pb.QrScanResultPayload({ textUtf8: text });
+  const pack = new pb.ArgPack({ codec: pb.Codec.PROTO, body: scanned.toBinary() as any });
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('contacts.readContactCode', pack.toBinary()));
+  if (env.payload.case === 'error') throw refusal('contacts.readContactCode', env.payload.value);
+  if (env.payload.case !== 'contactQrResponse') {
+    throw new Error(`STRICT: contacts.readContactCode answered ${env.payload.case}`);
+  }
+  const card = env.payload.value;
+  if (card.deviceId.length !== 32 || card.genesisHash.length !== 32 || card.signingPublicKey.length !== 64 || !card.network) {
+    throw new Error('STRICT: contacts.readContactCode answered a card without its identity');
+  }
+  return {
+    deviceId: card.deviceId,
+    genesisHash: card.genesisHash,
+    signingPublicKey: card.signingPublicKey,
+    network: card.network,
+    preferredAlias: card.preferredAlias || undefined,
+    email: card.email || undefined,
+    phone: card.phone || undefined,
+  };
+}
+
+/**
+ * Adds the contact a card names. Rust resolves the device's directory entry on
+ * the pinned set first and answers the contact it added, or its refusal.
+ */
 export async function addContact(args: AddContactArgs): Promise<AddContactResult> {
-  if (!args.alias) {
-    throw new Error('alias required');
-  }
-  const deviceId = normalizeToBytes(args.deviceId);
-  const genesisHash = normalizeToBytes(args.genesisHash);
-  const signingPublicKey = normalizeToBytes(args.signingPublicKey);
-  
-  if (genesisHash.length !== 32) {
-    throw new Error('genesisHash must be 32 bytes');
-  }
-  if (signingPublicKey.length !== 64) {
-    throw new Error('signingPublicKey must be 64 bytes');
-  }
   try {
     const req = new pb.ContactManualAddRequest({
       alias: args.alias,
-      deviceId: deviceId as any,
-      genesisHash: genesisHash as any,
-      signingPublicKey: signingPublicKey as any,
+      deviceId: args.deviceId as any,
+      genesisHash: args.genesisHash as any,
+      signingPublicKey: args.signingPublicKey as any,
+      profile: args.profile ? profileToWire(args.profile) : undefined,
     });
-
     const argPack = new pb.ArgPack({
-      schemaHash: { v: new Uint8Array(32) },
       codec: pb.Codec.PROTO,
       body: new Uint8Array(req.toBinary()) as any,
     });
-
-    const responseBytes = await routerInvokeBin(
-      'contacts.addManual',
-      argPack.toBinary()
-    );
-
-    // Canonical Envelope v3 decode
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      const errMsg = env.payload.value.message || `Error code ${env.payload.value.code}`;
-      throw new Error(`addContact failed: ${errMsg}`);
-    }
+    const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.addManual', argPack.toBinary()));
+    if (env.payload.case === 'error') throw refusal('contacts.addManual', env.payload.value);
     if (env.payload.case !== 'contactAddResponse') {
-      throw new Error(`Expected contactAddResponse, got ${env.payload.case}`);
+      throw new Error(`STRICT: contacts.addManual answered ${env.payload.case}`);
     }
-    const resp = env.payload.value;
-    const success = !!resp.alias; // Check if we got back an alias
-    
-    return {
-      accepted: success,
-      contactId: undefined, // Could map resp.deviceId to B32 if utility available
-      error: success ? undefined : 'Empty response or failure'
-    };
+    const added = env.payload.value;
+    return { accepted: true, contactId: encodeBase32Crockford(added.deviceId), alias: added.alias };
   } catch (e) {
-    console.error('[addContact] Bridge call failed:', e);
     return {
       accepted: false,
       error: e instanceof Error ? e.message : String(e),
@@ -148,4 +181,44 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
 
 export async function requestBlePermissions(): Promise<void> {
     return bridgeRequestBlePermissions();
+}
+
+/** An invoke's argument: an ArgPack of codec PROTO around `body`. */
+function protoArg(body: Uint8Array): Uint8Array {
+  return new pb.ArgPack({ codec: pb.Codec.PROTO, body: new Uint8Array(body) }).toBinary();
+}
+
+/** Replaces the details the wallet holds for a contact (DSM Amendment A17). */
+export async function setContactProfile(deviceIdB32: string, profile: PersonProfile): Promise<PersonProfile> {
+  const req = new pb.ContactSetProfileRequest({
+    deviceId: new Uint8Array(decodeBase32Crockford(deviceIdB32)),
+    profile: profileToWire(profile),
+  });
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.setProfile', protoArg(req.toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.setProfile', env.payload.value);
+  if (env.payload.case !== 'contactAddResponse' || !env.payload.value.profile) {
+    throw new Error(`STRICT: contacts.setProfile answered ${env.payload.case} without the details`);
+  }
+  return profileOf(env.payload.value.profile);
+}
+
+/** The owner's own card: what the contact code shares. `null` until one is made. */
+export async function getOwnProfile(): Promise<PersonProfile | null> {
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('contacts.ownProfile'));
+  if (env.payload.case === 'error') throw refusal('contacts.ownProfile', env.payload.value);
+  if (env.payload.case === 'contactProfile') return profileOf(env.payload.value);
+  if (env.payload.case === 'appStateResponse' && env.payload.value.key === 'own_profile' && env.payload.value.value === undefined) {
+    return null;
+  }
+  throw new Error(`STRICT: contacts.ownProfile answered ${env.payload.case}`);
+}
+
+/** Replaces the owner's own card; answers it as Rust stored it. */
+export async function setOwnProfile(profile: PersonProfile): Promise<PersonProfile> {
+  const env = decodeFramedEnvelopeV3(await routerInvokeBin('contacts.setOwnProfile', protoArg(profileToWire(profile).toBinary())));
+  if (env.payload.case === 'error') throw refusal('contacts.setOwnProfile', env.payload.value);
+  if (env.payload.case !== 'contactProfile') {
+    throw new Error(`STRICT: contacts.setOwnProfile answered ${env.payload.case}`);
+  }
+  return profileOf(env.payload.value);
 }

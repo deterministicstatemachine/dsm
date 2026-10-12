@@ -55,3 +55,20 @@ updates:
     labels:
       - "ci"
       - "dependencies"
+    ignore:
+      # dtolnay/rust-toolchain's tag IS the Rust version, and every `uses:` pin
+      # of it is a MIRROR of rust-toolchain.toml — the sole normative
+      # declaration. ci/check_toolchain_consistency.sh exists to prove the two
+      # equal, and runs in `make lint` and ci/production_safety_checks.sh.
+      #
+      # So a Dependabot bump of this action can never merge: it moves the
+      # mirrors and cannot move the normative file, and the consistency gate
+      # fails by design. PR #782 (1.98.0 -> 1.120.0) is the demonstration —
+      # Rust, Coverage, Embedded and Storage Node all red, on a change that
+      # touched no code.
+      #
+      # Moving the toolchain is a deliberate, coordinated edit: rust-toolchain.toml
+      # first, then every mirror in ci.yml and release.yml, in one change, with
+      # the consistency gate green. Dependabot cannot author that, so it should
+      # not keep proposing half of it.
+      - dependency-name: "dtolnay/rust-toolchain"

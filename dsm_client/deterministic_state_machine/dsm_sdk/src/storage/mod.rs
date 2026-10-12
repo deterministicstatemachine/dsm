@@ -9,26 +9,15 @@
 // • Cryptographic verification of all stored data
 // • Hash chain and SMT proof integration
 // • No in-memory alternate paths per DSM protocol compliance
-// • Bilateral storage interface for offline capability
 // pub mod bcr_storage — deleted alongside core::security (heuristic detection
 // layer removed). The bcr_states SQLite table and its codec in client_db::bcr
 // stay as a durable state archive.
-pub mod bilateral;
 pub mod client_db;
 pub mod codecs;
-pub mod policy_fs;
-pub mod soft_vault;
 
 // Re-export key types and functions for easy access
 pub use client_db::{
     init_database, store_genesis_record_with_verification, get_verified_genesis_record,
-    initialize_wallet_from_verified_genesis, verify_wallet_against_stored_genesis, store_contact,
-    get_all_contacts, store_transaction, get_transaction_history, get_wallet_state, GenesisRecord,
-    VerificationResult, WalletState, ContactRecord, TransactionRecord,
-};
-
-// Re-export bilateral storage interface
-pub use bilateral::{
-    BilateralStorageInterface, BilateralStorageSDK, BilateralStorageConfig, BilateralStorageStats,
-    BilateralKey,
+    store_contact, get_all_contacts, store_transaction, get_transaction_history, GenesisRecord,
+    ContactRecord, TransactionRecord,
 };

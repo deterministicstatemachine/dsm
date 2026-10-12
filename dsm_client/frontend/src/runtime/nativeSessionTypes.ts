@@ -4,14 +4,26 @@ import type { AppState } from '../types/app';
 
 export type NativeSessionIdentityStatus = 'runtime_not_ready' | 'missing' | 'ready';
 export type NativeSessionEnvConfigStatus = 'loading' | 'ready' | 'error';
-export type NativeSessionPhase = Exclude<AppState, 'loading'>;
-export type NativeSessionLockMethod = 'none' | 'pin' | 'combo' | 'biometric';
+// `backup_phrase` is the frontend's own: the recovery phrase is on the screen
+// before any wallet exists, so the native session never reports it.
+export type NativeSessionPhase = Exclude<AppState, 'loading' | 'backup_phrase'>;
+export type NativeSessionLockMethod = 'none' | 'pin' | 'combo';
+
+/** The tries Rust's app lock reports (sdk::app_lock). */
+export type NativeSessionLockTries = {
+  /** Wrong PINs or patterns left before only the recovery phrase opens it. */
+  misses_left: number;
+  /** Only the recovery phrase opens it: the tries are used up, or nothing is enrolled. */
+  phrase_required: boolean;
+};
 
 export type NativeSessionLockStatus = {
   enabled: boolean;
   locked: boolean;
   method: NativeSessionLockMethod;
   lock_on_pause: boolean;
+  /** Null until Rust has reported them. */
+  tries: NativeSessionLockTries | null;
 };
 
 export type NativeSessionBleHardwareStatus = {
@@ -44,6 +56,9 @@ export type NativeSessionSnapshot = {
   wallet_refresh_hint: number;
 };
 
+/** A snapshot as Rust sends it; the store adds that one has arrived. */
+export type NativeSessionReport = Omit<NativeSessionSnapshot, 'received'>;
+
 export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
   received: false,
   phase: 'runtime_loading',
@@ -54,6 +69,7 @@ export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
     locked: false,
     method: 'none',
     lock_on_pause: true,
+    tries: null,
   },
   hardware_status: {
     app_foreground: true,
@@ -72,17 +88,3 @@ export const DEFAULT_NATIVE_SESSION: NativeSessionSnapshot = {
   fatal_error: null,
   wallet_refresh_hint: 0,
 };
-
-export function isNativeSessionSnapshot(value: unknown): value is NativeSessionSnapshot {
-  if (!value || typeof value !== 'object') {
-    return false;
-  }
-  const snapshot = value as Partial<NativeSessionSnapshot>;
-  return (
-    typeof snapshot.phase === 'string' &&
-    typeof snapshot.identity_status === 'string' &&
-    typeof snapshot.env_config_status === 'string' &&
-    typeof snapshot.lock_status === 'object' &&
-    typeof snapshot.hardware_status === 'object'
-  );
-}

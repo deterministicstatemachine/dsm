@@ -47,10 +47,8 @@ mod tests {
         }
 
         /// Non-malleability: corrupting the signature randomizer `R` (first n
-        /// bytes) makes verify fail.  SPHINCS+ WOTS+ chains tolerate many
-        /// single-byte flips inside the authentication path, but the leading
-        /// randomizer `R` feeds into the message hash that determines all FORS
-        /// indices — corrupting it is always fatal.
+        /// bytes) makes verify fail: `R` feeds the message hash that selects
+        /// every FORS index and the signing leaf.
         #[test]
         fn pbt_sphincs_signature_tamper(
             msg in proptest::collection::vec(any::<u8>(), 1..=256),
@@ -124,8 +122,12 @@ mod tests {
             let kp = generate_keypair(v).expect("keygen");
             let tag_a = format!("DSM/pbt/{suffix_a}");
             let tag_b = format!("DSM/pbt/{suffix_b}");
-            let digest_a = domain_hash(&tag_a, &msg);
-            let digest_b = domain_hash(&tag_b, &msg);
+            let da = crate::crypto::domain::TaggedHashDomain::try_new(tag_a.as_bytes())
+                .expect("generated tag has no NUL");
+            let db = crate::crypto::domain::TaggedHashDomain::try_new(tag_b.as_bytes())
+                .expect("generated tag has no NUL");
+            let digest_a = domain_hash(da, &msg);
+            let digest_b = domain_hash(db, &msg);
 
             let sig = sign(v, &kp.secret_key, digest_a.as_bytes()).expect("sign");
             let valid = verify(v, &kp.public_key, digest_b.as_bytes(), &sig).expect("verify");

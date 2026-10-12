@@ -3,7 +3,7 @@
 //! Additional-device admission (§16.3) — the authorization that lets an already-trusted device
 //! admit a NEW device into an existing genesis Device Tree.
 //!
-//! Doctrine (three separate device events): the root device *creates* genesis (MPC — untouched);
+//! Doctrine (three separate device events): the root device *creates* genesis;
 //! an already-authorized device *admits* another device (this module); recovery authority
 //! *replaces* a lost device after tombstone (the recovery module).
 //!

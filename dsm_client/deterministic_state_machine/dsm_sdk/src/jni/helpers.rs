@@ -2,45 +2,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! JNI helpers (prost-only transport; NO JSON/base64/hex)
 
-#![allow(dead_code)]
 #![allow(clippy::needless_pass_by_value)]
 
 use crate::generated as pb;
 
 use prost::Message;
 
-fn strict_headers() -> pb::Headers {
-    pb::Headers {
-        device_id: vec![0u8; 32],
-        chain_tip: vec![0u8; 32],
-        genesis_hash: vec![0u8; 32],
-        seq: 0,
-    }
-}
-
-fn strict_message_id(payload: &pb::envelope::Payload) -> Vec<u8> {
-    let seed = pb::Envelope {
-        version: 3,
-        headers: Some(strict_headers()),
-        message_id: vec![0u8; 16],
-        payload: Some(payload.clone()),
-    }
-    .encode_to_vec();
-    dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_JNI_ENVELOPE_MESSAGE_ID_V1,
-        &seed,
-    )[..16]
-        .to_vec()
-}
-
+/// Wrap `payload` for this device's own app: a local answer, with no sender
+/// headers and no message id.
 pub fn encode_payload_transport(payload: pb::envelope::Payload) -> pb::Envelope {
-    let message_id = strict_message_id(&payload);
-    pb::Envelope {
-        version: 3,
-        headers: Some(strict_headers()),
-        message_id,
-        payload: Some(payload),
-    }
+    crate::envelope::local_answer(payload)
 }
 
 /// Encode a deterministic transport-level error as an Envelope v3.
@@ -69,37 +40,6 @@ pub fn encode_universal_ok() -> pb::Envelope {
     }))
 }
 
-#[cfg(target_os = "android")]
-#[derive(Debug, Clone)]
-pub struct JniResult<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub error: Option<String>,
-    /// Deterministic tick (no wall clock)
-    pub tick: u64,
-}
-
-#[cfg(target_os = "android")]
-impl<T> JniResult<T> {
-    pub fn success(data: T) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            error: None,
-            tick: crate::util::deterministic_time::tick(),
-        }
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            data: None,
-            error: Some(message.into()),
-            tick: crate::util::deterministic_time::tick(),
-        }
-    }
-}
-
 /// Minimal JNI error taxonomy for upstream mapping (no std/time/alloc bloat)
 #[derive(Debug, Clone, Copy)]
 pub enum JniErrorCode {
@@ -126,17 +66,18 @@ mod tests {
     fn encode_error_transport_round_trip() {
         let env = encode_error_transport(JniErrorCode::ProcessingFailed as u32, "unit test failed");
         assert_eq!(env.version, 3);
+        assert!(
+            env.headers.is_none() && env.message_id.is_empty(),
+            "a local answer"
+        );
         match env.payload {
             Some(pb::envelope::Payload::Error(e)) => {
                 assert_eq!(e.code, JniErrorCode::ProcessingFailed as u32);
                 assert_eq!(e.message, "unit test failed");
-                // debug_b32 should be present and decode to some bytes
-                assert!(e.debug_b32.is_some());
-                let dbg = e.debug_b32.unwrap();
-                let decoded = match base32::decode(base32::Alphabet::Crockford, &dbg) {
-                    Ok(d) => d,
-                    Err(e) => panic!("debug_b32 should decode: {:?}", e),
-                };
+                // debug_b32 is present and decodes to some bytes
+                assert!(!e.debug_b32.is_empty());
+                let decoded = base32::decode(base32::Alphabet::Crockford, &e.debug_b32)
+                    .expect("debug_b32 decodes");
                 assert!(decoded.len() > 0);
             }
             other => panic!("Unexpected payload: {:?}", other),
@@ -234,71 +175,6 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isBleAddressPaired
                     JNI_FALSE
                 }
             }
-        }),
-    )
-}
-
-/// JNI external: Resolve persisted contact identity for a BLE address.
-/// Returns 64 bytes ordered as [device_id(32)][genesis_hash(32)], or empty if unknown.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_resolvePeerIdentityForBleAddressBin(
-    mut env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-    address_jstring: jni::sys::jstring,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "resolvePeerIdentityForBleAddressBin",
-        std::panic::AssertUnwindSafe(|| {
-            use jni::objects::JString;
-
-            let address_obj = unsafe { JString::from_raw(address_jstring) };
-            let address: String = match env.get_string(&address_obj) {
-                Ok(js) => js.into(),
-                Err(e) => {
-                    log::warn!(
-                        "[JNI] resolvePeerIdentityForBleAddressBin: failed to convert address: {}",
-                        e
-                    );
-                    return env
-                        .byte_array_from_slice(&[])
-                        .map(|a| a.into_raw())
-                        .unwrap_or(std::ptr::null_mut());
-                }
-            };
-
-            let Some(contact) = crate::storage::client_db::get_contact_by_ble_address(&address)
-                .ok()
-                .flatten()
-            else {
-                return env
-                    .byte_array_from_slice(&[])
-                    .map(|a| a.into_raw())
-                    .unwrap_or(std::ptr::null_mut());
-            };
-
-            if contact.device_id.len() != 32 || contact.genesis_hash.len() != 32 {
-                log::warn!(
-                    "[JNI] resolvePeerIdentityForBleAddressBin: invalid contact identity lengths device_id={} genesis_hash={}",
-                    contact.device_id.len(),
-                    contact.genesis_hash.len()
-                );
-                return env
-                    .byte_array_from_slice(&[])
-                    .map(|a| a.into_raw())
-                    .unwrap_or(std::ptr::null_mut());
-            }
-
-            let mut device_id = [0u8; 32];
-            device_id.copy_from_slice(&contact.device_id);
-            crate::jni::state::register_ble_address_mapping(&device_id, &address);
-
-            let mut out = Vec::with_capacity(64);
-            out.extend_from_slice(&contact.device_id);
-            out.extend_from_slice(&contact.genesis_hash);
-            env.byte_array_from_slice(&out)
-                .map(|a| a.into_raw())
-                .unwrap_or(std::ptr::null_mut())
         }),
     )
 }
@@ -629,62 +505,4 @@ pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_notifyBleIdentityO
             }
         }),
     );
-}
-
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_hasUnpairedContacts(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "hasUnpairedContacts",
-        std::panic::AssertUnwindSafe(|| {
-            use jni::sys::{JNI_FALSE, JNI_TRUE};
-
-            let has_unpaired = crate::storage::client_db::has_unpaired_contacts();
-
-            if has_unpaired {
-                log::debug!(
-                    "[JNI] hasUnpairedContacts: true - persistent scanning should be active"
-                );
-                JNI_TRUE
-            } else {
-                log::debug!("[JNI] hasUnpairedContacts: false - can stop persistent scanning");
-                JNI_FALSE
-            }
-        }),
-    )
-}
-
-/// Start the pairing loop for all unpaired contacts.
-/// Spawns on the tokio runtime (fire-and-forget). The loop runs until all contacts are
-/// paired or stopPairingAll() is called.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_startPairingAll(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    log::info!("[JNI] startPairingAll invoked");
-    let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-    if orchestrator.is_loop_running() {
-        log::info!("[JNI] startPairingAll: loop already running, ignoring");
-        return;
-    }
-    crate::runtime::get_runtime().spawn(async move {
-        orchestrator.start_pairing_all_unpaired().await;
-    });
-}
-
-/// Stop the pairing loop. Safe to call even if no loop is running.
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_stopPairingAll(
-    _env: jni::JNIEnv,
-    _class: jni::objects::JClass,
-) {
-    log::info!("[JNI] stopPairingAll invoked");
-    let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-    orchestrator.stop_pairing_loop();
 }

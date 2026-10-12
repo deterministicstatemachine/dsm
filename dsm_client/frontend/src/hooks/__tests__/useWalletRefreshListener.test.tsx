@@ -101,48 +101,62 @@ describe('useWalletRefreshListener', () => {
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 
-  it('priority source bypasses cooldown', async () => {
+  // The old "cooldown" counted dropped events, not frames: after a reload the
+  // next 119 events from a low-priority source were discarded. Every event is
+  // followed by a reload that started after it, whatever its source.
+  it('an event after a completed refresh runs another: nothing is dropped', async () => {
     const refresh = jest.fn().mockResolvedValue(undefined);
     render(<Harness refresh={refresh} />);
 
-    // First refresh
-    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'ble' }); });
-    await act(async () => { flushRaf(); });
-    expect(refresh).toHaveBeenCalledTimes(1);
-
-    // Non-priority during cooldown — should be skipped
-    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'ble.envelope' }); });
-    await act(async () => { flushRaf(); });
-    // Still 1 because cooldown blocks it (the scheduled RAF returns early)
-
-    // Priority source — should bypass cooldown
-    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'wallet.send' }); });
-    await act(async () => { flushRaf(); });
-    expect(refresh).toHaveBeenCalledTimes(2);
+    for (const source of ['inbox.sync', 'storage.sync', 'sofi']) {
+      act(() => { mockedBridgeEvents.emit('wallet.refresh', { source }); });
+      await act(async () => { flushRaf(); });
+    }
+    expect(refresh).toHaveBeenCalledTimes(3);
   });
 
-  it('queues another frame when refresh is still running', async () => {
+  it('events during a running refresh owe exactly one more after it', async () => {
     let resolveRefresh!: () => void;
     const refresh = jest.fn().mockReturnValue(new Promise<void>(r => { resolveRefresh = r; }));
     render(<Harness refresh={refresh} />);
 
-    // Start first refresh
     act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'a' }); });
     await act(async () => { flushRaf(); });
     expect(refresh).toHaveBeenCalledTimes(1);
 
-    // Emit while running — should queue
-    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'wallet.send' }); });
+    // Three events while the first refresh is still running.
+    act(() => {
+      mockedBridgeEvents.emit('wallet.refresh', { source: 'b' });
+      mockedBridgeEvents.emit('wallet.refresh', { source: 'c' });
+      mockedBridgeEvents.emit('wallet.refresh', { source: 'd' });
+    });
     await act(async () => { flushRaf(); });
-    // refresh is still running, so this RAF re-scheduled
     expect(refresh).toHaveBeenCalledTimes(1);
 
-    // Complete the first refresh
+    refresh.mockResolvedValue(undefined);
     await act(async () => { resolveRefresh(); });
-
-    // Now flush the re-scheduled RAF
     await act(async () => { flushRaf(); });
     expect(refresh).toHaveBeenCalledTimes(2);
+
+    // Nothing further is owed.
+    await act(async () => { flushRaf(); });
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('an owed refresh is not run after unmount', async () => {
+    let resolveRefresh!: () => void;
+    const refresh = jest.fn().mockReturnValue(new Promise<void>(r => { resolveRefresh = r; }));
+    const { unmount } = render(<Harness refresh={refresh} />);
+
+    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'a' }); });
+    await act(async () => { flushRaf(); });
+    act(() => { mockedBridgeEvents.emit('wallet.refresh', { source: 'b' }); });
+    await act(async () => { flushRaf(); });
+    unmount();
+
+    await act(async () => { resolveRefresh(); });
+    await act(async () => { flushRaf(); });
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it('handles refresh errors without crashing', async () => {

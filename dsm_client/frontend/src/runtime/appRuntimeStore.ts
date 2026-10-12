@@ -6,6 +6,20 @@ import type { AppState } from '../types/app';
 
 type StateUpdate<T> = T | ((prev: T) => T);
 
+/**
+ * How the wallet looks: the Game Boy device (`dgen`) or the Modern wallet
+ * (`modern`). `null` until the wallet has read the choice, and while a new
+ * wallet has not made one.
+ */
+export type Skin = 'modern' | 'dgen';
+/** The Modern skin's colours. */
+export type Scheme = 'light' | 'dark';
+/** A switch the user sets: Simple mode, the offline appliance in it, email receipts. */
+export type Switch = 'on' | 'off';
+
+/** A look as the first-run picker shows it behind its box, before OK keeps it. */
+export type Look = { skin: Skin; scheme: Scheme; simpleMode: Switch };
+
 type AppRuntimeSnapshot = {
   appState: AppState;
   error: string | null;
@@ -13,6 +27,18 @@ type AppRuntimeSnapshot = {
   showLockPrompt: boolean;
   soundEnabled: boolean;
   theme: ThemeName;
+  skin: Skin | null;
+  /** Whether the skin preferences were read for this identity: until then `skin` says nothing. */
+  skinRead: 'read' | 'unread';
+  scheme: Scheme;
+  /** Simple mode, in the Modern skin only: trading, storage and the Bitcoin bridge put away. */
+  simpleMode: Switch;
+  simpleOffline: Switch;
+  receiptsEmail: Switch;
+  /** The look the picker is previewing; `null` when no picker is open. */
+  lookPreview: Look | null;
+  /** Whether this phone's user accepted the current beta agreement (read with the skin preferences). */
+  agreement: 'accepted' | 'not_accepted';
 };
 
 class AppRuntimeStore {
@@ -23,6 +49,14 @@ class AppRuntimeStore {
     showLockPrompt: false,
     soundEnabled: true,
     theme: 'stateboy',
+    skin: null,
+    skinRead: 'unread',
+    scheme: 'light',
+    simpleMode: 'off',
+    simpleOffline: 'off',
+    receiptsEmail: 'off',
+    lookPreview: null,
+    agreement: 'not_accepted',
   };
 
   private listeners = new Set<() => void>();
@@ -74,6 +108,38 @@ class AppRuntimeStore {
     });
   };
 
+  setSkin = (skin: Skin | null): void => {
+    this.setState({ skin });
+  };
+
+  setSkinRead = (skinRead: 'read' | 'unread'): void => {
+    this.setState({ skinRead });
+  };
+
+  setScheme = (scheme: Scheme): void => {
+    this.setState({ scheme });
+  };
+
+  setSimpleMode = (simpleMode: Switch): void => {
+    this.setState({ simpleMode });
+  };
+
+  setLookPreview = (lookPreview: Look | null): void => {
+    this.setState({ lookPreview });
+  };
+
+  setAgreement = (agreement: 'accepted' | 'not_accepted'): void => {
+    this.setState({ agreement });
+  };
+
+  setSimpleOffline = (simpleOffline: Switch): void => {
+    this.setState({ simpleOffline });
+  };
+
+  setReceiptsEmail = (receiptsEmail: Switch): void => {
+    this.setState({ receiptsEmail });
+  };
+
   private setState(patch: Partial<AppRuntimeSnapshot>): void {
     this.snapshot = {
       ...this.snapshot,
@@ -88,6 +154,15 @@ class AppRuntimeStore {
 }
 
 export const appRuntimeStore = new AppRuntimeStore();
+
+/**
+ * The look on the screen: the one the first-run picker is showing while it is
+ * open, else the owner's choice. What a part of the page draws follows this,
+ * not only the choice, so a preview is drawn as the look it previews.
+ */
+export function skinShown(snapshot: AppRuntimeSnapshot): Skin | null {
+  return snapshot.skin === null && snapshot.lookPreview !== null ? snapshot.lookPreview.skin : snapshot.skin;
+}
 
 export function useAppRuntimeStore(): AppRuntimeSnapshot {
   return useSyncExternalStore(

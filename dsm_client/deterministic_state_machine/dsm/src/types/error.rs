@@ -432,8 +432,6 @@ pub enum DsmError {
     Genesis(String),
     /// Device hierarchy (Device Tree) operation failure.
     DeviceHierarchy(String),
-    /// Forward commitment validation or processing failure.
-    ForwardCommitment(String),
     /// Bilateral relationship management error.
     Relationship(String),
     /// External commitment (cross-chain or DLV) error.
@@ -577,10 +575,6 @@ pub enum DsmError {
     Crypto(CryptoError),
     /// OS-level system error (file permissions, resource limits).
     SystemError(String),
-    /// Token minting is not allowed on this network configuration.
-    MintNotAllowed,
-    /// Token burning is not allowed on this network configuration.
-    BurnNotAllowed,
     /// The faucet has been administratively disabled.
     FaucetDisabled,
     /// The faucet is not available on this network (e.g., mainnet).
@@ -767,15 +761,13 @@ impl DsmError {
         }
     }
 
-    // ...existing code...
+    /// Creates a new invalid-parameter error
     ///
     /// # Arguments
     /// * `message` - Description of the invalid parameter
     pub fn invalid_parameter(message: impl Into<String>) -> Self {
         DsmError::InvalidParameter(message.into())
     }
-
-    // ...existing code...
 
     /// Creates a new verification error
     ///
@@ -839,14 +831,6 @@ impl DsmError {
     /// * `message` - Description of the device hierarchy error
     pub fn device_hierarchy(message: impl Into<String>) -> Self {
         DsmError::DeviceHierarchy(message.into())
-    }
-
-    /// Creates a new forward commitment error
-    ///
-    /// # Arguments
-    /// * `message` - Description of the forward commitment error
-    pub fn forward_commitment(message: impl Into<String>) -> Self {
-        DsmError::ForwardCommitment(message.into())
     }
 
     /// Creates a new relationship error
@@ -1426,7 +1410,6 @@ impl Display for DsmError {
             DsmError::PreCommitment(msg) => write!(f, "Pre-commitment error: {msg}"),
             DsmError::Genesis(msg) => write!(f, "Genesis error: {msg}"),
             DsmError::DeviceHierarchy(msg) => write!(f, "Device hierarchy error: {msg}"),
-            DsmError::ForwardCommitment(msg) => write!(f, "Forward commitment error: {msg}"),
             DsmError::Relationship(msg) => write!(f, "Relationship error: {msg}"),
             DsmError::ExternalCommitment(msg) => write!(f, "External commitment error: {msg}"),
             DsmError::Identity(msg) => write!(f, "Identity error: {msg}"),
@@ -1553,8 +1536,6 @@ impl Display for DsmError {
                 Ok(())
             }
             DsmError::SystemError(msg) => write!(f, "System error: {msg}"),
-            DsmError::MintNotAllowed => write!(f, "Minting not allowed on this network"),
-            DsmError::BurnNotAllowed => write!(f, "Burning not allowed on this network"),
             DsmError::FaucetDisabled => write!(f, "Faucet is currently disabled"),
             DsmError::FaucetNotAvailable => write!(f, "Faucet is not available on this network"),
             DsmError::ClockDrift {
@@ -1710,7 +1691,6 @@ impl Error for DsmError {
             DsmError::PreCommitment(_) => None,
             DsmError::Genesis(_) => None,
             DsmError::DeviceHierarchy(_) => None,
-            DsmError::ForwardCommitment(_) => None,
             DsmError::Relationship(_) => None,
             DsmError::ExternalCommitment(_) => None,
             DsmError::Identity(_) => None,
@@ -1759,8 +1739,6 @@ impl Error for DsmError {
             DsmError::AlreadyExists(_) => None,
             DsmError::InvalidState(_) => None,
             DsmError::SystemError(_) => None,
-            DsmError::MintNotAllowed => None,
-            DsmError::BurnNotAllowed => None,
             DsmError::FaucetDisabled => None,
             DsmError::FaucetNotAvailable => None,
             DsmError::ClockDrift { .. } => None,
@@ -2196,14 +2174,6 @@ mod tests {
         assert_eq!(
             format!("{}", DsmError::InvalidIndex),
             "Invalid or out-of-bounds index"
-        );
-        assert_eq!(
-            format!("{}", DsmError::MintNotAllowed),
-            "Minting not allowed on this network"
-        );
-        assert_eq!(
-            format!("{}", DsmError::BurnNotAllowed),
-            "Burning not allowed on this network"
         );
         assert_eq!(
             format!("{}", DsmError::FaucetDisabled),

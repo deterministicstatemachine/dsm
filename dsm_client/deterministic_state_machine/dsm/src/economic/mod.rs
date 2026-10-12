@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! `R_econ` — the online economic root.
+//!
+//! ## What problem this exists to solve
+//!
+//! A legitimate Genesis-v3 identity is not evidence about value. An attacker
+//! holding one signs an arbitrary economic root, and a write-once register
+//! accepts it: the register proves **non-equivocation**, that this identity
+//! named one root at this position and never a second one. It does not and
+//! cannot prove that the root is the result of a valid transition.
+//! `accepted_root != valid_root`. Everything here exists to make the second
+//! statement independently checkable by a party who trusts neither the trader
+//! nor any storage node.
+//!
+//! ```text
+//! authenticated pre-state + verifiable valid transition
+//!         -> authenticated post-state + receipt inclusion
+//!         -> authentic successor edge
+//! ```
+//!
+//! ## Scope: online only
+//!
+//! ```text
+//! R_econ = SMT {
+//!     balance(policy_commit)
+//!     consumed_source(source_id)
+//!     relationship(vault_id)
+//!     vault_creation(vault_id)
+//! }
+//! ```
+//!
+//! There is deliberately **no offline-allocation leaf**. The device-bound
+//! offline allocation is a separate accounting regime that evolves entirely
+//! outside this tree; only its boundaries touch `R_econ`, and they touch it
+//! through the ordinary `balance` and `consumed_source` leaves.
+//!
+//! ## What is here and what is not
+//!
+//! This module currently provides the primitives: the tree, the key
+//! derivations, the leaf encodings, a single leaf mutation, the sequential
+//! verifier that turns a mutation list into a post-root, and the exhaustive
+//! classifier that says which operations owe a write set at all.
+//!
+//! Credit provenance is a separate and **conjunctive** obligation: a closed
+//! write set proves *what changed*, never *why a credit may appear*, and a
+//! verifier that checked only the mutations would accept a trader crediting
+//! itself from nothing. The `CreditSource` algebra (a peer's validated debit
+//! `0x0025`, a native-reserve release `0x005D`, a genesis release `0x005F`)
+//! lives in [`provenance`]. Nothing is minted after genesis (SoFi §48): a
+//! token's supply is released at creation or from its reserve.
+
+pub mod admission;
+pub mod authority_evidence;
+pub mod claim;
+pub mod claim_envelope;
+pub mod classifier;
+pub mod credit;
+pub mod decode;
+pub mod issuance;
+pub mod keys;
+pub mod lineage;
+pub mod mutation;
+pub mod native_reserve;
+pub mod peer_acceptance;
+pub mod peer_lineage;
+pub mod provenance;
+pub mod register;
+pub mod release;
+pub mod state;
+pub mod successor_evidence;
+pub mod token_policy;
+pub mod tree;
+pub mod witness;
+pub mod write_set;
+
+pub use claim::{
+    verify_manifest_provenance_index, AdmissionSubstrate, EconomicAdmissionManifest,
+    EconomicRootClaimBody,
+};
+pub use decode::{
+    decode_credit_source, decode_leaf_mutation, decode_leaf_state, decode_transition_witness,
+};
+pub use credit::{CreditSource, CreditSourceGenesisRelease, CreditSourceValidatedPeerDebit};
+pub use classifier::{
+    check_tripwire, classify, EconomicEffect, EconomicTripwire, ObservedEconomicChange,
+};
+pub use keys::{balance_key, consumed_source_key};
+pub use mutation::EconomicLeafMutation;
+pub use state::{EconomicBalanceState, EconomicConsumedSourceState, EconomicLeafState};
+pub use tree::{empty_economic_root, EconomicSmt, ECONOMIC_SMT_HEIGHT};
+pub use witness::{
+    verify_mutation_sequence, EconomicMutationSequence, EconomicTransitionWitness,
+    EconomicWitnessError,
+};

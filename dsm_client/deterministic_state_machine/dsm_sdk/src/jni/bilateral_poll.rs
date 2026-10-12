@@ -2,8 +2,6 @@
 //! Bilateral initialization poller with adaptive backoff and telemetry.
 //! Gated behind android+bluetooth. Extracted from unified_protobuf_bridge for testability.
 
-#![allow(dead_code)]
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // (No direct runtime usage here; caller supplies async init via closure)

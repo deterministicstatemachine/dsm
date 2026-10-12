@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Atomic bilateral chain tip synchronization and stale-gate clearing.
+//! Atomic bilateral chain tip synchronization.
 //!
 //! Non-negotiable invariant: for every successful tip mutation, persisted
 //! `chain_tip == local_bilateral_chain_tip`, both written in the same
@@ -7,20 +7,11 @@
 //! follow-up writes to "finish" a repair.
 
 use anyhow::Result;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 
 use super::{get_connection, ObservedRemoteTipRecord, ObservedRemoteTipSource};
 
 // ── Types ─────────────────────────────────────────────────────────────────
-
-/// Identity of an observed pending online gate. Used for exact-match delete
-/// to prevent TOCTOU races where a BLE cleanup could delete a newer gate.
-#[derive(Debug, Clone)]
-pub struct ObservedPendingGate {
-    pub counterparty_device_id: [u8; 32],
-    pub parent_tip: [u8; 32],
-    pub next_tip: [u8; 32],
-}
 
 /// Request to advance or repair bilateral chain tips atomically.
 #[derive(Debug, Clone)]
@@ -28,45 +19,23 @@ pub struct TipSyncRequest {
     pub counterparty_device_id: [u8; 32],
     pub expected_parent_tip: [u8; 32],
     pub target_tip: [u8; 32],
-    /// If supplied, the helper validates this exact gate exists before clearing.
-    pub observed_gate: Option<ObservedPendingGate>,
-    /// If true, clear the exact observed gate on success outcomes only.
-    pub clear_gate_on_success: bool,
 }
 
 /// Outcome of an atomic tip sync operation.
 #[derive(Debug, Clone)]
 pub enum TipSyncOutcome {
     /// Canonical was at expected_parent; both tips advanced to target in one tx.
-    Advanced {
-        new_tip: [u8; 32],
-        gate_cleared: bool,
-    },
+    Advanced { new_tip: [u8; 32] },
     /// Canonical was already at target, local was stale — repaired in same tx.
-    RepairedAtTarget { tip: [u8; 32], gate_cleared: bool },
+    RepairedAtTarget { tip: [u8; 32] },
     /// Both tips already equal target. No mutation needed.
-    AlreadyAtTarget { tip: [u8; 32], gate_cleared: bool },
+    AlreadyAtTarget { tip: [u8; 32] },
     /// Canonical is not at expected_parent (still behind or at a different value).
     ParentMismatch { current_tip: [u8; 32] },
     /// Canonical already moved, but not to the requested target.
     CanonicalMovedToDifferentTip { current_tip: [u8; 32] },
-    /// Supplied observed gate does not match persisted gate.
-    GateMismatch,
     /// Persisted state is malformed or helper detected impossible state.
     InvariantViolation { message: String },
-}
-
-/// Outcome of atomically recording a new pending online gate.
-#[derive(Debug, Clone)]
-pub enum RecordPendingGateOutcome {
-    /// New gate inserted.
-    Recorded,
-    /// Identical gate already exists (idempotent).
-    AlreadyExistsSameGate,
-    /// A different gate for this counterparty already exists.
-    ConflictingGateExists,
-    /// chain_tip != expected_parent — cannot create gate.
-    ParentMismatch { current_tip: [u8; 32] },
 }
 
 // ── Atomic tip sync ───────────────────────────────────────────────────────
@@ -78,6 +47,34 @@ pub enum RecordPendingGateOutcome {
 ///
 /// No caller outside this function may write to bilateral tip columns.
 pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyncOutcome> {
+    sync_projection_with_optional_acceptance(request, None)
+}
+
+/// §16.6: synchronize the `contacts.chain_tip` PROJECTION and insert the
+/// immutable `accepted_transition` marker in ONE client-db transaction.
+///
+/// The name is deliberate — this is PROJECTION synchronization, not a second
+/// canonical state transition. The canonical relationship tip already committed
+/// inside the full-state apply transaction; parent/child here come from the
+/// durable `CanonicalApplyRecord`, never derived from the projection. This
+/// function must NOT create BCR state, recompute a successor, touch balances,
+/// or mutate the authenticated `DeviceState`. Semantics:
+///   projection == record.parent → update to record.child → insert/check marker
+///   projection == record.child  → already synchronized  → insert/check marker (idempotent)
+///   projection == third value   → fail closed (no writes) → reconciliation
+/// The marker insert runs in the SAME transaction on both committing cases; an
+/// existing DIFFERENT marker for the consumed parent aborts the whole tx.
+pub fn sync_tip_projection_and_record_acceptance_atomic(
+    request: &TipSyncRequest,
+    marker: &super::recipient_receipt_fold::AcceptedTransition,
+) -> Result<TipSyncOutcome> {
+    sync_projection_with_optional_acceptance(request, Some(marker))
+}
+
+fn sync_projection_with_optional_acceptance(
+    request: &TipSyncRequest,
+    acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,
+) -> Result<TipSyncOutcome> {
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
@@ -85,11 +82,36 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
     });
 
     let tx = conn.transaction()?;
+    let outcome = sync_tip_projections_in_tx(&tx, request, acceptance)?;
+    match outcome {
+        TipSyncOutcome::Advanced { .. }
+        | TipSyncOutcome::RepairedAtTarget { .. }
+        | TipSyncOutcome::AlreadyAtTarget { .. } => {
+            tx.commit()?;
+        }
+        _ => {
+            // Non-committing outcome — nothing may persist (marker included).
+            tx.rollback().ok();
+        }
+    }
+    Ok(outcome)
+}
 
+/// The single transactional impl — ONE copy of the CAS logic; both public APIs
+/// delegate here (no cloned CAS to drift). PROJECTION-ONLY: touches
+/// `contacts.chain_tip` / `local_bilateral_chain_tip` / the pending gate /
+/// the acceptance marker — never BCR state, balances, or `DeviceState`.
+/// Performs NO commit/rollback; the wrapper commits only the committing
+/// outcomes (`Advanced` / `RepairedAtTarget` / `AlreadyAtTarget`).
+pub(crate) fn sync_tip_projections_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    request: &TipSyncRequest,
+    acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,
+) -> Result<TipSyncOutcome> {
     // Step 1: Load current bilateral row
     let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
-        Vec<u8>,
-        Vec<u8>,
+        Option<Vec<u8>>,
+        Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
     ) = {
@@ -99,8 +121,8 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         )?;
         match stmt.query_row(params![&request.counterparty_device_id[..]], |row| {
             Ok((
-                row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default(),
-                row.get::<_, Option<Vec<u8>>>(1)?.unwrap_or_default(),
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
             ))
@@ -115,27 +137,25 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         }
     };
 
-    let chain_tip_arr: [u8; 32] = match chain_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if chain_tip.is_empty() || chain_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!("chain_tip is {} bytes, expected 32", chain_tip.len()),
-            });
-        }
+    // Every contact starts at its relationship's h_0: a missing tip, or one
+    // that is not 32 bytes, is a corrupt row.
+    let tip_of = |column: &str, tip: Option<Vec<u8>>| -> Result<[u8; 32], TipSyncOutcome> {
+        let tip = tip.ok_or_else(|| TipSyncOutcome::InvariantViolation {
+            message: format!("{column} is missing"),
+        })?;
+        tip.as_slice()
+            .try_into()
+            .map_err(|_| TipSyncOutcome::InvariantViolation {
+                message: format!("{column} is {} bytes, expected 32", tip.len()),
+            })
     };
-
-    let local_tip_arr: [u8; 32] = match local_tip.as_slice().try_into() {
-        Ok(a) => a,
-        Err(_) if local_tip.is_empty() || local_tip == vec![0u8; 32] => [0u8; 32],
-        Err(_) => {
-            return Ok(TipSyncOutcome::InvariantViolation {
-                message: format!(
-                    "local_bilateral_chain_tip is {} bytes, expected 32",
-                    local_tip.len()
-                ),
-            });
-        }
+    let chain_tip_arr = match tip_of("chain_tip", chain_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
+    };
+    let local_tip_arr = match tip_of("local_bilateral_chain_tip", local_tip) {
+        Ok(tip) => tip,
+        Err(violation) => return Ok(violation),
     };
 
     let observed_remote_tip_record = match observed_remote_tip {
@@ -144,7 +164,6 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
             arr.copy_from_slice(&tip);
             Some(ObservedRemoteTipRecord {
                 tip: arr,
-                updated_at: 0,
                 source: ObservedRemoteTipSource::from_db(observed_remote_tip_source),
             })
         }
@@ -159,43 +178,6 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         None => None,
     };
 
-    // Step 2: Validate observed gate if supplied
-    let gate_matched = if let Some(ref observed) = request.observed_gate {
-        let persisted: Option<(Vec<u8>, Vec<u8>)> = tx
-            .prepare(
-                "SELECT parent_tip, next_tip FROM pending_online_outbox WHERE counterparty_device_id = ?1",
-            )?
-            .query_row(params![&observed.counterparty_device_id[..]], |row| {
-                Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                ))
-            })
-            .optional()?;
-
-        match persisted {
-            Some((p_parent, p_next)) => {
-                if p_parent.as_slice() == &observed.parent_tip[..]
-                    && p_next.as_slice() == &observed.next_tip[..]
-                {
-                    true // exact match
-                } else {
-                    // Gate exists but different values — mismatch
-                    tx.rollback().ok();
-                    return Ok(TipSyncOutcome::GateMismatch);
-                }
-            }
-            None => {
-                // No gate persisted — can't match, but this is not an error
-                // if clear_gate_on_success is false. If it is true, we simply
-                // won't clear anything (gate already gone).
-                false
-            }
-        }
-    } else {
-        false
-    };
-
     // Step 3: Branch on canonical/local state
     let target = &request.target_tip;
     let parent = &request.expected_parent_tip;
@@ -206,32 +188,12 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         // Case A: canonical already at target
         if local_tip_arr == *target {
             // Both already aligned — no mutation needed
-            if request.clear_gate_on_success || request.observed_gate.is_some() {
-                tx.execute(
-                    "UPDATE contacts
-                        SET needs_online_reconcile = 0
-                      WHERE device_id = ?1",
-                    params![&request.counterparty_device_id[..]],
-                )?;
-            }
-            let gc = if request.clear_gate_on_success && gate_matched {
-                clear_gate_in_tx(
-                    &tx,
-                    &request.counterparty_device_id,
-                    request.observed_gate.as_ref(),
-                )?
-            } else {
-                false
-            };
             clear_observed_remote_tip_in_tx(
-                &tx,
+                tx,
                 &request.counterparty_device_id,
                 clear_observed_tip_on_success,
             )?;
-            TipSyncOutcome::AlreadyAtTarget {
-                tip: *target,
-                gate_cleared: gc,
-            }
+            TipSyncOutcome::AlreadyAtTarget { tip: *target }
         } else {
             // Canonical at target but local is stale — repair local
             tx.execute(
@@ -241,66 +203,40 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
                   WHERE device_id = ?2",
                 params![&target[..], &request.counterparty_device_id[..]],
             )?;
-            let gc = if request.clear_gate_on_success && gate_matched {
-                clear_gate_in_tx(
-                    &tx,
-                    &request.counterparty_device_id,
-                    request.observed_gate.as_ref(),
-                )?
-            } else {
-                false
-            };
             clear_observed_remote_tip_in_tx(
-                &tx,
+                tx,
                 &request.counterparty_device_id,
                 clear_observed_tip_on_success,
             )?;
-            TipSyncOutcome::RepairedAtTarget {
-                tip: *target,
-                gate_cleared: gc,
-            }
+            TipSyncOutcome::RepairedAtTarget { tip: *target }
         }
-    } else if chain_tip_arr == *parent || (chain_tip_arr == [0u8; 32] && *parent == [0u8; 32]) {
+    } else if chain_tip_arr == *parent {
         // Case B: canonical at expected parent — advance both atomically
-        let tick_val = crate::util::deterministic_time::tick() as i64;
         tx.execute(
             "UPDATE contacts SET \
                 previous_chain_tip = chain_tip, \
                 chain_tip = ?1, \
                 local_bilateral_chain_tip = ?1, \
-                needs_online_reconcile = 0, \
-                last_seen_online_counter = ?2 \
-             WHERE device_id = ?3",
-            params![&target[..], tick_val, &request.counterparty_device_id[..]],
+                chain_tip_commitment = NULL, \
+                needs_online_reconcile = 0 \
+             WHERE device_id = ?2",
+            params![&target[..], &request.counterparty_device_id[..]],
         )?;
-        let gc = if request.clear_gate_on_success && gate_matched {
-            clear_gate_in_tx(
-                &tx,
-                &request.counterparty_device_id,
-                request.observed_gate.as_ref(),
-            )?
-        } else {
-            false
-        };
         clear_observed_remote_tip_in_tx(
-            &tx,
+            tx,
             &request.counterparty_device_id,
             clear_observed_tip_on_success,
         )?;
-        TipSyncOutcome::Advanced {
-            new_tip: *target,
-            gate_cleared: gc,
-        }
+        TipSyncOutcome::Advanced { new_tip: *target }
     } else {
-        // Case C: canonical is somewhere else
-        // Distinguish ParentMismatch from CanonicalMovedToDifferentTip
+        // Case C: canonical is somewhere else — fail closed, no writes
+        // (wrapper rolls back). Distinguish ParentMismatch from
+        // CanonicalMovedToDifferentTip.
         if chain_tip_arr != [0u8; 32] && chain_tip_arr != *parent {
-            tx.rollback().ok();
             return Ok(TipSyncOutcome::CanonicalMovedToDifferentTip {
                 current_tip: chain_tip_arr,
             });
         }
-        tx.rollback().ok();
         return Ok(TipSyncOutcome::ParentMismatch {
             current_tip: chain_tip_arr,
         });
@@ -328,102 +264,19 @@ pub fn sync_bilateral_tips_atomically(request: &TipSyncRequest) -> Result<TipSyn
         }
     }
 
-    tx.commit()?;
+    // §16.6 acceptance marker: SAME transaction, committing cases only (all
+    // non-committing outcomes returned early above). Idempotent for an
+    // identical existing marker; a DIFFERENT existing marker for this consumed
+    // parent errors — the wrapper then rolls the whole tx back (fail closed,
+    // the projection sync does not persist either).
+    if let Some(marker) = acceptance {
+        super::recipient_receipt_fold::record_accepted_transition_in_tx(tx, marker)?;
+    }
+
     Ok(outcome)
 }
 
-/// Atomically record a new pending online gate. One SQLite write transaction.
-/// Only inserts if chain_tip == expected_parent and no conflicting gate exists.
-pub fn record_pending_online_transition_atomically(
-    counterparty_device_id: &[u8; 32],
-    expected_parent_tip: &[u8; 32],
-    next_tip: &[u8; 32],
-    message_id: &str,
-    payload: &[u8],
-) -> Result<RecordPendingGateOutcome> {
-    let binding = get_connection()?;
-    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
-        log::warn!("DB lock poisoned, recovering");
-        poisoned.into_inner()
-    });
-
-    let tx = conn.transaction()?;
-
-    // Step 1: Read current chain_tip
-    let chain_tip: Vec<u8> = tx
-        .prepare("SELECT chain_tip FROM contacts WHERE device_id = ?1")?
-        .query_row(params![&counterparty_device_id[..]], |row| {
-            Ok(row.get::<_, Option<Vec<u8>>>(0)?.unwrap_or_default())
-        })
-        .unwrap_or_default();
-
-    let chain_tip_arr: [u8; 32] = chain_tip.as_slice().try_into().unwrap_or([0u8; 32]);
-
-    if chain_tip_arr != *expected_parent_tip {
-        tx.rollback().ok();
-        return Ok(RecordPendingGateOutcome::ParentMismatch {
-            current_tip: chain_tip_arr,
-        });
-    }
-
-    // Step 2: Check existing gate
-    let existing: Option<(Vec<u8>, Vec<u8>)> = tx
-        .prepare("SELECT parent_tip, next_tip FROM pending_online_outbox WHERE counterparty_device_id = ?1")?
-        .query_row(params![&counterparty_device_id[..]], |row| {
-            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
-        .optional()?;
-
-    match existing {
-        Some((p, n))
-            if p.as_slice() == &expected_parent_tip[..] && n.as_slice() == &next_tip[..] =>
-        {
-            tx.rollback().ok();
-            return Ok(RecordPendingGateOutcome::AlreadyExistsSameGate);
-        }
-        Some(_) => {
-            tx.rollback().ok();
-            return Ok(RecordPendingGateOutcome::ConflictingGateExists);
-        }
-        None => {}
-    }
-
-    // Step 3: Insert new gate
-    let tick_val = crate::util::deterministic_time::tick() as i64;
-    tx.execute(
-        "INSERT INTO pending_online_outbox (counterparty_device_id, message_id, parent_tip, next_tip, payload, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            &counterparty_device_id[..],
-            message_id,
-            &expected_parent_tip[..],
-            &next_tip[..],
-            payload,
-            tick_val,
-        ],
-    )?;
-
-    tx.commit()?;
-    Ok(RecordPendingGateOutcome::Recorded)
-}
-
 // ── Internal helpers ──────────────────────────────────────────────────────
-
-/// Delete the exact observed gate inside an existing transaction.
-fn clear_gate_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    counterparty_device_id: &[u8; 32],
-    observed: Option<&ObservedPendingGate>,
-) -> Result<bool> {
-    let Some(gate) = observed else {
-        return Ok(false);
-    };
-    let rows = tx.execute(
-        "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1 AND parent_tip = ?2 AND next_tip = ?3",
-        params![&counterparty_device_id[..], &gate.parent_tip[..], &gate.next_tip[..]],
-    )?;
-    Ok(rows > 0)
-}
 
 fn should_clear_observed_tip_after_success(
     observed: Option<&ObservedRemoteTipRecord>,
@@ -448,7 +301,6 @@ fn clear_observed_remote_tip_in_tx(
     tx.execute(
         "UPDATE contacts
             SET observed_remote_chain_tip = NULL,
-                observed_remote_tip_updated_at = NULL,
                 observed_remote_tip_source = NULL
           WHERE device_id = ?1",
         params![&counterparty_device_id[..]],

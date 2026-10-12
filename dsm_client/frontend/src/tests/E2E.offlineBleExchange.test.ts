@@ -52,7 +52,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
     initializeEventBridge();
   });
 
-  test('offline send then receive BilateralPrepareResponse triggers wallet refresh', async () => {
+  test('offline send: a BLE prepare response announces no wallet change; the completed transfer does', async () => {
     // Mock bridge methods
     (global as any).window = (global as any).window || {};
     const ALICE_DEVICE_ID = new Uint8Array(32).fill(1);
@@ -69,47 +69,13 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
       sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
-        const data = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
-        if (method === 'nativeBoundaryIngress') {
-          const ingress = pb.IngressRequest.fromBinary(data);
-          if (ingress.operation.case === 'routerQuery' && ingress.operation.value.method === 'contacts.list') {
-            const contactsListResponse = new pb.ContactsListResponse({
-              contacts: [
-                {
-                  alias: 'Bob',
-                  deviceId: BOB_DEVICE_ID,
-                  genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
-                  chainTip: new pb.Hash32({ v: BOB_TIP } as any),
-                  bleAddress: 'AA:BB:CC:DD:EE:FF',
-                },
-              ],
-            } as any);
-            // Return Envelope-wrapped response with framing byte and router prefix
-            const env = new pb.Envelope({
-              version: 3,
-              payload: { case: 'contactsListResponse', value: contactsListResponse },
-            } as any);
-            return wrapIngressOk(frameEnvelope(env));
-          }
-          return wrapIngressOk(new Uint8Array(0));
-        }
-        throw new Error(`unhandled sendMessageBin: ${reqBytes.length} bytes`);
-      },
-      __callBin: async (reqBytes: Uint8Array) => {
-        const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
-        const method = req.method || '';
         const payload = req.payload?.case === 'bytes' ? req.payload.value.data : new Uint8Array(0);
         if (method === 'getTransportHeadersV3Bin') {
           const headersBytes = new pb.Headers({
             deviceId: ALICE_DEVICE_ID,
             genesisHash: ALICE_GENESIS as any,
-            chainTip: new Uint8Array(32),
-            seq: 1n as any,
           }).toBinary();
           return wrapSuccessEnvelope(headersBytes);
-        }
-        if (method === 'getSigningPublicKeyBin') {
-          return wrapSuccessEnvelope(new Uint8Array(64).fill(0x5a));
         }
         if (method === 'nativeBoundaryIngress') {
           const ingress = pb.IngressRequest.fromBinary(payload);
@@ -124,6 +90,7 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
                     genesisHash: new pb.Hash32({ v: BOB_GENESIS } as any),
                     chainTip: new pb.Hash32({ v: BOB_TIP } as any),
                     bleAddress: 'AA:BB:CC:DD:EE:FF',
+                    pairing: pb.ContactPairingPhase.PAIRED,
                   },
                 ],
               } as any);
@@ -145,13 +112,14 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
           if (ingress.operation.case === 'routerInvoke') {
             const ingressMethod = ingress.operation.value.method;
             if (ingressMethod === 'wallet.sendOffline') {
-              const resp = new pb.BilateralPrepareResponse({
-                commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
-                localSignature: new Uint8Array(64),
+              const resp = new pb.BilateralTransferResponse({
+                success: true,
+                transactionHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
+                message: 'prepare sent over BLE',
               });
               const env = new pb.Envelope({
                 version: 3,
-                payload: { case: 'bilateralPrepareResponse', value: resp },
+                payload: { case: 'bilateralTransferResponse', value: resp },
               } as any);
               return wrapIngressOk(frameEnvelope(env));
             }
@@ -160,39 +128,14 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
         }
         if (method === 'nativeHostRequest') {
           const hostRequest = pb.NativeHostRequest.fromBinary(payload);
-          if (hostRequest.kind === pb.NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS) {
-            const resp = new pb.BilateralPrepareResponse({
-              commitmentHash: new pb.Hash32({ v: new Uint8Array(32) } as any),
-              localSignature: new Uint8Array(64),
-            });
-            const env = new pb.Envelope({
-              version: 3,
-              payload: { case: 'bilateralPrepareResponse', value: resp },
-            } as any);
-            return wrapSuccessEnvelope(
-              new pb.NativeHostResponse({
-              result: {
-                case: 'okBytes',
-                value: new pb.BleTransportSendChunksResult({
-                    responseEnvelope: frameEnvelope(env),
-                  }).toBinary(),
-                },
-              }).toBinary(),
-            );
-          }
           throw new Error(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
         }
-        throw new Error(`unhandled __callBin method: ${method} (payloadLen=${payload.length})`);
+        throw new Error(`unhandled bridge method: ${method} (payloadLen=${payload.length})`);
       },
-      // Some call sites read base32 Crockford strings from these getters.
-      getDeviceIdBin: () => base32CrockfordEncode(ALICE_DEVICE_ID),
-      getGenesisHashBin: () => base32CrockfordEncode(ALICE_GENESIS),
-      getTransportHeadersV3Bin: () =>
-        new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any, chainTip: new Uint8Array(32) }).toBinary(),
     };
 
     // Start offline send
-    const offlineSendPromise = offlineSend({ to: base32CrockfordEncode(recipient), amount: '1', tokenId: 'ERA', bleAddress: 'AA:BB:CC:DD:EE:FF' });
+    const offlineSendPromise = offlineSend({ to: base32CrockfordEncode(recipient), amount: '1', tokenId: 'ERA' });
 
     // Emit TRANSFER_COMPLETE event to resolve offlineSend
     await new Promise((r) => setTimeout(r, 0));
@@ -214,20 +157,27 @@ describe('E2E: Offline BLE exchange -> wallet refresh', () => {
 
     // Craft BilateralPrepareResponse envelope arriving over BLE
     const resp = new pb.BilateralPrepareResponse({ commitmentHash: zeroHash32(), localSignature: new Uint8Array(64) });
-    const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any, chainTip: new Uint8Array(32) }), payload: { case: 'bilateralPrepareResponse', value: resp } });
+    const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: ALICE_DEVICE_ID, genesisHash: ALICE_GENESIS as any,}), payload: { case: 'bilateralPrepareResponse', value: resp } });
     const rawBytes = env.toBinary();
     const bytes = new Uint8Array(1 + rawBytes.length);
     bytes[0] = 0x03;
     bytes.set(rawBytes, 1);
 
-    // Emit through the real DOM ingress path that EventBridge listens to.
+    // Emit through the real DOM ingress path that EventBridge listens to. A
+    // prepare response is not a wallet change and announces none; this used
+    // to emit a `wallet.refresh` claiming a completed transfer on one prepare
+    // response in eight.
     window.dispatchEvent(new CustomEvent('dsm-event-bin', {
       detail: { topic: 'ble.envelope.bin', payload: bytes },
     }));
+    expect(handler).not.toHaveBeenCalled();
 
-    expect(handler).toHaveBeenCalled();
-    const calledWith = handler.mock.calls.find((c: any) => c && c[0] && typeof c[0].source === 'string' && c[0].source.indexOf('bilateral') >= 0);
-    expect(Boolean(calledWith)).toBe(true);
+    // The completed transfer is Rust's to announce, and that is the refresh.
+    window.dispatchEvent(new CustomEvent('dsm-event-bin', {
+      detail: { topic: 'bilateral.event', payload: new Uint8Array(completeNote.toBinary()) },
+    }));
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toEqual(expect.objectContaining({ source: 'bilateral.transfer_complete' }));
     unsubscribe();
   });
 });

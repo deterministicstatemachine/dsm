@@ -5,7 +5,6 @@ use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BalanceProjectionRecord {
@@ -16,8 +15,6 @@ pub struct BalanceProjectionRecord {
     pub available: u64,
     pub locked: u64,
     pub source_state_hash: String,
-    pub source_state_number: u64,
-    pub updated_at: u64,
 }
 
 fn validate_projection_identity(
@@ -59,7 +56,7 @@ pub(crate) fn upsert_balance_projection_with_conn(
     let existing = conn
         .query_row(
             "SELECT balance_key, device_id, token_id, policy_commit,
-                    available, locked, source_state_hash, source_state_number, updated_at
+                    available, locked, source_state_hash
              FROM balance_projections
              WHERE device_id = ?1 AND token_id = ?2",
             params![record.device_id, record.token_id],
@@ -72,8 +69,6 @@ pub(crate) fn upsert_balance_projection_with_conn(
                     available: row.get::<_, i64>(4)? as u64,
                     locked: row.get::<_, i64>(5)? as u64,
                     source_state_hash: row.get(6)?,
-                    source_state_number: row.get::<_, i64>(7)? as u64,
-                    updated_at: row.get::<_, i64>(8)? as u64,
                 })
             },
         )
@@ -86,14 +81,12 @@ pub(crate) fn upsert_balance_projection_with_conn(
     conn.execute(
         "INSERT INTO balance_projections (
             balance_key, device_id, token_id, policy_commit,
-            available, locked, source_state_hash, source_state_number, updated_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            available, locked, source_state_hash
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(balance_key) DO UPDATE SET
             available = excluded.available,
             locked = excluded.locked,
-            source_state_hash = excluded.source_state_hash,
-            source_state_number = excluded.source_state_number,
-            updated_at = excluded.updated_at",
+            source_state_hash = excluded.source_state_hash",
         params![
             record.balance_key,
             record.device_id,
@@ -102,8 +95,6 @@ pub(crate) fn upsert_balance_projection_with_conn(
             record.available as i64,
             record.locked as i64,
             record.source_state_hash,
-            record.source_state_number as i64,
-            record.updated_at as i64,
         ],
     )?;
     Ok(())
@@ -137,8 +128,6 @@ pub fn build_balance_projection_from_state(
         available: spendable,
         locked,
         source_state_hash: crate::util::text_id::encode_base32_crockford(&state_hash),
-        source_state_number: state.hash[0] as u64,
-        updated_at: tick(),
     })
 }
 
@@ -151,10 +140,10 @@ pub fn build_balance_projection_from_state(
 /// caller passes `head.balance(policy_commit) + amount` so the UI shows the
 /// fresh credit immediately.
 ///
-/// `source_state_hash` is the device head root `r_A` (§2.2). The legacy
-/// `source_state_number` field is set to `0` — there are no counters in
-/// canonical state per §4.3, and freshness comparisons fall back to
-/// `updated_at` (deterministic tick) for ordering.
+/// `source_state_hash` is the device head root `r_A` (§2.2) — provenance, not a
+/// freshness key. It is not comparable to `State::hash()`, and §4.3 leaves no
+/// counter to compare, so nothing downstream may gate on it: the projection IS
+/// the head's cache, so a reader that has one has the canonical value.
 pub fn build_balance_projection_from_device_head(
     device_id: &str,
     token_id: &str,
@@ -176,8 +165,6 @@ pub fn build_balance_projection_from_device_head(
         available: spendable,
         locked,
         source_state_hash: crate::util::text_id::encode_base32_crockford(&head_root),
-        source_state_number: 0,
-        updated_at: tick(),
     })
 }
 
@@ -189,7 +176,7 @@ pub fn get_balance_projection(
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let result = conn.query_row(
         "SELECT balance_key, device_id, token_id, policy_commit,
-                available, locked, source_state_hash, source_state_number, updated_at
+                available, locked, source_state_hash
          FROM balance_projections
          WHERE device_id = ?1 AND token_id = ?2",
         params![device_id, token_id],
@@ -202,8 +189,6 @@ pub fn get_balance_projection(
                 available: row.get::<_, i64>(4)? as u64,
                 locked: row.get::<_, i64>(5)? as u64,
                 source_state_hash: row.get(6)?,
-                source_state_number: row.get::<_, i64>(7)? as u64,
-                updated_at: row.get::<_, i64>(8)? as u64,
             })
         },
     );
@@ -232,8 +217,6 @@ pub fn get_validated_balance_projection(
                     available: record.available,
                     locked: record.locked,
                     source_state_hash: record.source_state_hash.clone(),
-                    source_state_number: record.source_state_number,
-                    updated_at: record.updated_at,
                 },
             )?;
             Ok(Some(record))
@@ -247,7 +230,7 @@ pub fn list_balance_projections(device_id: &str) -> Result<Vec<BalanceProjection
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     let mut stmt = conn.prepare(
         "SELECT balance_key, device_id, token_id, policy_commit,
-                available, locked, source_state_hash, source_state_number, updated_at
+                available, locked, source_state_hash
          FROM balance_projections
          WHERE device_id = ?1",
     )?;
@@ -261,12 +244,9 @@ pub fn list_balance_projections(device_id: &str) -> Result<Vec<BalanceProjection
                 available: row.get::<_, i64>(4)? as u64,
                 locked: row.get::<_, i64>(5)? as u64,
                 source_state_hash: row.get(6)?,
-                source_state_number: row.get::<_, i64>(7)? as u64,
-                updated_at: row.get::<_, i64>(8)? as u64,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
 
@@ -280,16 +260,6 @@ pub fn get_locked_balance(device_id: &str, token_id: &str) -> Result<u64> {
     }
 
     Ok(0)
-}
-
-pub fn delete_balance_projection(device_id: &str, token_id: &str) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    conn.execute(
-        "DELETE FROM balance_projections WHERE device_id = ?1 AND token_id = ?2",
-        params![device_id, token_id],
-    )?;
-    Ok(())
 }
 
 pub fn sync_token_projection_from_state(
@@ -314,9 +284,7 @@ mod tests {
     #[test]
     #[serial]
     fn balance_projection_round_trips_latest_freshness() {
-        unsafe {
-            std::env::set_var("DSM_SDK_TEST_MODE", "1");
-        }
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
 
@@ -334,8 +302,6 @@ mod tests {
             available: 5,
             locked: 1,
             source_state_hash: "state-1".to_string(),
-            source_state_number: 7,
-            updated_at: 11,
         };
         upsert_balance_projection(&first).expect("insert projection");
 
@@ -343,8 +309,6 @@ mod tests {
             available: 9,
             locked: 2,
             source_state_hash: "state-2".to_string(),
-            source_state_number: 8,
-            updated_at: 12,
             ..first.clone()
         };
         upsert_balance_projection(&second).expect("update projection");
@@ -353,6 +317,45 @@ mod tests {
             .expect("load projection")
             .expect("projection exists");
         assert_eq!(stored, second);
+    }
+
+    /// A row SQLite holds but Rust cannot decode fails the list. A list with
+    /// a row left out is not a list of this device's balances; `balance.list`
+    /// and the token cache would take it for one.
+    #[test]
+    #[serial]
+    fn a_projection_row_that_does_not_decode_fails_the_list() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        let good = BalanceProjectionRecord {
+            balance_key: "k|TKN".to_string(),
+            device_id: "device-b".to_string(),
+            token_id: "TKN".to_string(),
+            policy_commit: "policy-b".to_string(),
+            available: 5,
+            locked: 0,
+            source_state_hash: "state-1".to_string(),
+        };
+        upsert_balance_projection(&good).expect("insert projection");
+        assert_eq!(list_balance_projections("device-b").expect("list").len(), 1);
+
+        {
+            let binding = crate::storage::client_db::get_connection().expect("connection");
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            let changed = conn
+                .execute(
+                    "UPDATE balance_projections SET available = 'not a number' WHERE device_id = ?1",
+                    params!["device-b"],
+                )
+                .expect("corrupt the row");
+            assert_eq!(changed, 1);
+        }
+        assert!(
+            list_balance_projections("device-b").is_err(),
+            "a row that does not decode is an error, never left out"
+        );
     }
 
     #[test]
@@ -365,16 +368,12 @@ mod tests {
             available: 5,
             locked: 0,
             source_state_hash: "state-1".to_string(),
-            source_state_number: 7,
-            updated_at: 11,
         };
         let err = validate_projection_identity(
             &first,
             &BalanceProjectionRecord {
                 policy_commit: "policy-b".to_string(),
                 source_state_hash: "state-2".to_string(),
-                source_state_number: 8,
-                updated_at: 12,
                 ..first.clone()
             },
         )

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { navigationStore } from '../navigationStore';
-import type { ScreenType } from '../../types/app';
+import { SCREEN_TYPES, type ScreenType } from '../../types/app';
 
 // Reset navigation state to 'home' between tests by walking back
 // through history.  navigationStore is a module-level singleton so
@@ -18,37 +18,11 @@ describe('navigationStore VALID_NAV_TARGETS coverage', () => {
   beforeEach(() => resetToHome());
   afterAll(() => resetToHome());
 
-  // Every screen routed by AppScreenRouter that the user can reach
-  // from a button/menu MUST be navigable.  Adding a screen anywhere
-  // (ScreenType, AppScreenRouter, SettingsMainScreen) without also
-  // adding it to VALID_NAV_TARGETS in navigationStore.ts causes a
-  // silent navigation drop — the user clicks and nothing happens.
-  //
-  // This list is the source of truth; bump it when you add a new
-  // navigable screen.
-  const navigableScreens: ScreenType[] = [
-    'wallet',
-    'transactions',
-    'contacts',
-    'accounts',
-    'storage',
-    'settings',
-    'tokens',
-    'qr',
-    'mycontact',
-    'dev_dlv',
-    'dev_policy',
-    'dev_sofi_launch',
-    'sofi',
-    'liquidity',
-    'mail',
-    'lock_setup',
-    'recovery',
-    'nfc_recovery',
-    'recovery_pipeline',
-    'vault',
-    'bluetooth',
-  ];
+  // Every screen the app has is navigable: the targets navigation accepts
+  // and the screens `ScreenType` names come from the one list, so this walks
+  // all of them. (A hand-kept copy here once omitted 'sofi' exactly as the
+  // store's own allowlist did, and the TRADE brick went dead with both green.)
+  const navigableScreens: ScreenType[] = SCREEN_TYPES.filter((s) => s !== 'home');
 
   it.each(navigableScreens)(
     'navigate(%s) advances currentScreen (not silently dropped by allowlist)',
@@ -57,4 +31,19 @@ describe('navigationStore VALID_NAV_TARGETS coverage', () => {
       expect(navigationStore.getSnapshot().currentScreen).toBe(target);
     },
   );
+});
+
+describe('the home screen\'s TRADE brick', () => {
+  beforeEach(() => resetToHome());
+  afterAll(() => resetToHome());
+
+  it('opens the SoFi screen', () => {
+    navigationStore.navigate('sofi');
+    expect(navigationStore.getSnapshot().currentScreen).toBe('sofi');
+  });
+
+  it('refuses a target that is not a screen', () => {
+    navigationStore.navigate('not-a-screen' as ScreenType);
+    expect(navigationStore.getSnapshot().currentScreen).toBe('home');
+  });
 });

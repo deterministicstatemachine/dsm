@@ -27,8 +27,10 @@ The guarded kernel (paper Appendix A/B) is machine checked as:
 - `lean4/DSMGuardedTripwire.lean`: the universal theorems
   (`realized_unique_at_key`, `guarded_tripwire_at_key`/`_exists`,
   `hardened_single_consumption`, `no_resource_local_cycle`, and companions).
-  The uniqueness/tripwire core depends on NO axioms; only the paper's labeled
-  cryptographic Assumptions appear as axioms, and only where the paper uses them.
+  The module depends on NO axioms beyond Lean's core logic
+  (specs/requirements/LEAN_AXIOM_LEDGER.tsv). Paper Assumption 3 is proved for
+  the model's encoding (`canonical_encode_injective`); Assumption 1 enters only
+  as an explicit collision disjunct (`candidate_digest_binds_or_collides`).
 - `lean4/DSMOfflineAnchorOrigin.lean`: the offline-anchor special case of the
   kernel (v2 "Software Authority, Hardware Identity"). One correct enrolled
   appliance emits at most one committed package per SMT anchor origin
@@ -106,3 +108,113 @@ invariants, verifies that relationship scoping plus the bilateral
 single-receiver topology make same-parent multi-receiver forks unconstructible
 in online DSM, and demonstrates by deliberate falsification that guard-family
 well formedness and that structure are load bearing."
+
+## The economic verification substrate (amendment 2c-C2)
+
+A later milestone adds coverage for the **economic** tree and register, which is
+a third structure — neither the relationship SMT nor the device SMT.
+
+```text
+lean4/DSMEconomicSmtSeparation.lean   the ALGEBRAIC obligations:
+                                      tagged-encoding injectivity in
+                                      (tag, message), per-key byte-layer input
+                                      injectivity, pairwise domain
+                                      non-aliasing, ABSENT_LEAF separation,
+                                      map/tree/root non-interference, and
+                                      quorum intersection over qualifying
+                                      quorums
+
+tla/DSM_EconRegisterObservation.tla   the CONCURRENT half: write-once cells,
+                                      two-axis attribution, non-atomic read
+                                      rounds, register rebuild, and the
+                                      four-valued observation
+```
+
+Neither restates the other, and the split is deliberate: `2q > n` is a universal
+statement over all `n` that TLC cannot express, while "a cell observed Claimed
+is never later observed empty across every interleaving" is a statement about
+rounds that Lean is the wrong tool for.
+
+**Boundary, stated as plainly as the ones above.** Formal coverage establishes
+the stated properties of the normative economic-SMT and economic-register
+**models**. It does **not** constitute a machine-checked refinement proof that
+the shipping Rust implements those models. Implementation correspondence is
+supported separately by conformance vectors, source-level invariants, tests, and
+deliberate falsification controls.
+
+**And the Lean module is not "axiom-free" without qualification.** The quorum
+results are. The hash and non-aliasing results rest on a symbolic abstraction
+declared in that module's header, with the adequacy bridge resting on a *local*
+collision hypothesis and — for the zero-sentinel obligation only — a *local*
+preimage hypothesis. Neither is a global claim about BLAKE3: a universal
+"distinct preimages give distinct 256-bit outputs" is false by pigeonhole, and
+"no populated economic preimage produces the all-zero digest" is not implied by
+preimage resistance.
+
+## SoFi v8 settlement (plan revision 10.3)
+
+```text
+lean4/DSMSofiSuccessorCells.lean   the ALGEBRA of the storage layer and the walk
+lean4/DSMSofiAtomicity.lean        identities, hash order, validation, realization,
+                                   the resolution ladder, the fence
+
+tla/DSM_SofiSuccessorCells.tla     the MEMBERS under interleaving and faults
+tla/DSM_SofiFulfillment.tla        the OPERATION under rivals, completers, late
+                                   evidence and parent canonicality settling
+```
+
+The TLC half is bounded: one parent with two attempts at the members, and two
+parents, two traders and one descendant position for the operation. Both models
+are finite, so "a registered F resolves" is checked as quiescence ⇒ resolved over
+every reachable state rather than as a temporal property. The quorum algebra is
+not restated in TLA+; the member-level behaviour is not restated in the operation
+model.
+
+**Boundary.** These are properties of the models of plan revision 10.3. The v8
+Rust is not written yet (Phase E), so no correspondence to shipping code is
+claimed; Phase E owes conformance vectors and mutation-tested gates against
+these invariants.
+
+
+## A step's receipt proves its whole write set
+
+```text
+lean4/DSMStepTransition.lean       the FOLD: a write set folded against one
+                                   pre-root yields the tree after the writes
+                                   (fold_sound), refuses no honest set
+                                   (fold_complete), and carries only the tree's
+                                   own paths (fold_canonical); with the
+                                   consistency checks deleted it stays sound but
+                                   not canonical (lax_fold_sound,
+                                   lax_fold_is_not_canonical)
+
+tla/DSM_ReceiptWriteSet.tla        the VERIFIER against an unconstrained author:
+                                   every accepted receipt proves the three
+                                   leaves a bearer spend writes, value leaves
+                                   the allocation only as receivers credit it,
+                                   the counter moves with every step, and no
+                                   honest spend is refused
+
+tla/DSM_OfflineAnchorSingleAppliance.tla
+                                   the ORDER: no counter step is committed for
+                                   a step whose receipt does not hold
+```
+
+The split is the one the code has. The pre-root check (`verify_batch`) is what
+makes the post-root right; the sibling-consistency checks are what make the
+proof canonical — the Lean anti-vacuity witness is a write set with a sibling
+the fold never uses, accepted without the checks and refused with them. The
+falsifications are the two verifiers the code replaced: one that checks the
+relationship leaf alone (`AllocationConserved` fails) and one that accepts one
+relationship path and nothing else (`HonestSpendAcceptable` fails: the honest
+bearer spend cannot be proven), and the order that released before proving the
+receipt (`NoCommitWithoutDeliverableConfirm` fails).
+
+**Boundary.** The Lean module rests on the symbolic digest abstraction declared
+in its header (equal roots have equal children); breaking it for the real tree
+means supplying a BLAKE3 collision between two leaf or node preimages. The TLC
+models are bounded (two peers, an allocation of three, three steps; three
+contents over an enrolled counter of three). Correspondence to the Rust is
+supported by the tests and mutation controls recorded in
+`specs/requirements/VERIFICATION_MATRIX.md`, not by a machine-checked
+refinement.

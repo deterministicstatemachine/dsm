@@ -16,6 +16,9 @@ import * as pb from '../proto/dsm_app_pb';
 import * as dsm from '../dsm/index';
 import { emit, initializeEventBridge } from '../dsm/EventBridge';
 import { encodeBase32Crockford } from '../utils/textId';
+
+/** The contact the sends name: Bob, by his device id. */
+const BOB_DEVICE_ID = encodeBase32Crockford(new Uint8Array(32).fill(0xb0));
 import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 
 // ─────────────────────────── Constants ───────────────────────────
@@ -23,7 +26,6 @@ import { decodeFramedEnvelopeV3 } from '../dsm/decoding';
 const DEVICE_A = new Uint8Array(32).fill(0xAA); // sender
 const DEVICE_B = new Uint8Array(32).fill(0xBB); // recipient
 const GENESIS_A = new Uint8Array(32).fill(0x11);
-const CHAIN_TIP_A = new Uint8Array(32).fill(0xCC); // non-zero required for online
 const SIGNING_KEY = new Uint8Array(64).fill(0x5A); // 64-byte SPHINCS+ SPX256s
 const COMMITMENT_HASH = new Uint8Array(32).fill(0xDD);
 const COUNTERPARTY_TIP = new Uint8Array(32).fill(0xFF);
@@ -99,6 +101,7 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
     genesisHash: new pb.Hash32({ v: COUNTERPARTY_GENESIS }),
     chainTip: new pb.Hash32({ v: COUNTERPARTY_TIP }),
     bleAddress: bleAddress || 'AA:BB:CC:DD:EE:FF',
+    pairing: pb.ContactPairingPhase.PAIRED,
   } as any);
   const resp = new pb.ContactsListResponse({ contacts: [contact] });
   const env = new pb.Envelope({
@@ -109,15 +112,16 @@ function makeContactsFramedEnvelope(bleAddress?: string): Uint8Array {
   return frameEnvelope(env);
 }
 
-/** Build a BilateralPrepareResponse inside a framed Envelope. */
-function makeBilateralPrepareResponseEnvelope(commitHash: Uint8Array): Uint8Array {
-  const resp = new pb.BilateralPrepareResponse({
-    commitmentHash: new pb.Hash32({ v: commitHash } as any),
-    localSignature: new Uint8Array(64),
+/** The SDK's answer to wallet.sendOffline: the prepare went out under this commitment. */
+function makeOfflineSendAnswerEnvelope(commitHash: Uint8Array): Uint8Array {
+  const resp = new pb.BilateralTransferResponse({
+    success: true,
+    transactionHash: new pb.Hash32({ v: commitHash } as any),
+    message: 'prepare sent over BLE',
   } as any);
   const env = new pb.Envelope({
     version: 3,
-    payload: { case: 'bilateralPrepareResponse', value: resp },
+    payload: { case: 'bilateralTransferResponse', value: resp },
   } as any);
   return frameEnvelope(env);
 }
@@ -135,7 +139,6 @@ function makeOnlineResponseEnvelope(success: boolean, message: string, newBalanc
     version: 3,
     headers: new pb.Headers({
       deviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
       genesisHash: GENESIS_A as any,
     } as any),
     payload: { case: 'onlineTransferResponse', value: resp },
@@ -143,12 +146,10 @@ function makeOnlineResponseEnvelope(success: boolean, message: string, newBalanc
   return frameEnvelope(env); // 0x03-framed, matching routerInvokeBin output
 }
 
-function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Uint8Array; chainTip: Uint8Array; seq: bigint }>): pb.Headers {
+function makeHeaders(overrides?: Partial<{ deviceId: Uint8Array; genesisHash: Uint8Array }>): pb.Headers {
   return new pb.Headers({
     deviceId: overrides?.deviceId || DEVICE_A,
     genesisHash: (overrides?.genesisHash || GENESIS_A) as any,
-    chainTip: (overrides?.chainTip || CHAIN_TIP_A) as any,
-    seq: (overrides?.seq ?? 1n) as any,
   } as any);
 }
 
@@ -168,11 +169,8 @@ function installBridge(opts?: { contactBleAddress?: string }) {
 
   g.window.DsmBridge = {
     __binary: true,
-    getDeviceIdBin: () => encodeBase32Crockford(DEVICE_A),
-    getGenesisHashBin: () => encodeBase32Crockford(GENESIS_A),
-    hasIdentityDirect: () => true,
 
-    __callBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
+    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       capturedMethods.push(method);
 
@@ -182,16 +180,8 @@ function installBridge(opts?: { contactBleAddress?: string }) {
         return wrapSuccess(headers.toBinary());
       }
 
-      if (method === 'getSigningPublicKeyBin') {
-        return wrapSuccess(SIGNING_KEY);
-      }
-
       if (method === 'getPreference' || method === 'setPreference') {
         return wrapSuccess(new Uint8Array(0));
-      }
-
-      if (method === 'resolveBleAddressForDeviceId') {
-        return wrapSuccess(new TextEncoder().encode('AA:BB:CC:DD:EE:FF'));
       }
 
       if (method === 'nativeBoundaryIngress') {
@@ -229,7 +219,7 @@ function installBridge(opts?: { contactBleAddress?: string }) {
             if (bilateralResponseOverride) {
               return wrapIngressOk(bilateralResponseOverride());
             }
-            return wrapIngressOk(makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH));
+            return wrapIngressOk(makeOfflineSendAnswerEnvelope(COMMITMENT_HASH));
           }
           return wrapIngressOk(new Uint8Array(0));
         }
@@ -238,30 +228,10 @@ function installBridge(opts?: { contactBleAddress?: string }) {
 
       if (method === 'nativeHostRequest') {
         const hostRequest = pb.NativeHostRequest.fromBinary(payload);
-        if (hostRequest.kind === pb.NativeHostRequestKind.PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS) {
-          const responseEnvelope = bilateralResponseOverride
-            ? bilateralResponseOverride()
-            : makeBilateralPrepareResponseEnvelope(COMMITMENT_HASH);
-          return wrapSuccess(
-            new pb.NativeHostResponse({
-              result: {
-                case: 'okBytes',
-                value: new pb.BleTransportSendChunksResult({
-                  responseEnvelope,
-                }).toBinary(),
-              },
-            }).toBinary(),
-          );
-        }
         return wrapError(`unhandled nativeHostRequest kind: ${hostRequest.kind}`);
       }
 
       return wrapError(`unhandled method: ${method}`);
-    },
-
-    sendMessageBin: async (reqBytes: Uint8Array): Promise<Uint8Array> => {
-      // MessagePort path — delegates to __callBin for simplicity in tests
-      return g.window.DsmBridge.__callBin(reqBytes);
     },
   };
 
@@ -288,38 +258,29 @@ beforeEach(() => {
   headersOverride = null;
   testIndex++;
   initializeEventBridge();
-  // Clear headers cache so each test gets fresh headers from bridge
-  (global as any).__dsmLastGoodHeaders = { deviceId: undefined, genesisHash: undefined, chainTip: undefined };
 });
 
 // ─────────────────────────────────────────────────────────────────
 // 1. Online Transfer — Full Cycle
 // ─────────────────────────────────────────────────────────────────
 
-describe('Online Transfer — Full Cycle', () => {
+describe('Online Transfer — Full Cycle (wallet.sendSmart, the path the send screen takes)', () => {
   beforeEach(() => installBridge());
 
-  test('happy path: accepted=true with txHash', async () => {
+  test('happy path: success=true', async () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'transfer ok', 500n);
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(1000 + testIndex), // unique amount to avoid dedup
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(true);
+    // A unique amount per test avoids dedup.
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(1000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(true);
   });
 
-  test('failure response returns accepted=false when inner OnlineTransferResponse.success=false', async () => {
+  test('failure response returns success=false when inner OnlineTransferResponse.success=false', async () => {
     onlineTransferOverride = () => makeOnlineResponseEnvelope(false, 'insufficient funds', 0n);
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(2000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(res.result).toContain('insufficient funds');
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(2000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(res.message).toContain('insufficient funds');
   });
 
   test('error envelope: bridge returns error payload', async () => {
@@ -334,13 +295,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(3000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/internal error|DSM error/);
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(3000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toMatch(/internal error|DSM error/);
   });
 
   test('unexpected payload case → error', async () => {
@@ -355,14 +312,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(4000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    // sendOnlineTransfer now expects onlineTransferResponse, not universalRx
-    expect(String(res.result)).toMatch(/Expected onlineTransferResponse|unexpected/i);
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(4000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toMatch(/Expected onlineTransferResponse|unexpected/i);
   });
 
   test('OnlineTransferResponse with success=false carries message', async () => {
@@ -379,75 +331,9 @@ describe('Online Transfer — Full Cycle', () => {
       } as any));
     };
 
-    const res = await dsm.sendOnlineTransfer({
-      to: encodeBase32Crockford(DEVICE_B),
-      amount: BigInt(5000 + testIndex),
-      tokenId: 'ERA',
-    });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toContain('quota exceeded');
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────
-// 2. Online Transfer — Input Validation
-// ─────────────────────────────────────────────────────────────────
-
-describe('Online Transfer — Input Validation', () => {
-  beforeEach(() => installBridge());
-
-  test('invalid device ID length (16 bytes) → error', async () => {
-    const shortId = new Uint8Array(16).fill(0x22);
-    const res = await dsm.sendOnlineTransfer({ to: shortId as unknown as string, amount: BigInt(6000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/32 bytes/);
-  });
-
-  test('string device ID (base32) is accepted', async () => {
-    const b32 = encodeBase32Crockford(DEVICE_B);
-    onlineTransferOverride = () => makeOnlineResponseEnvelope(true, 'ok', 100n);
-
-    const res = await dsm.sendOnlineTransfer({ to: b32, amount: BigInt(7000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(true);
-  });
-
-  test('zero chain_tip no longer blocks online transfer (SDK-owned state)', async () => {
-    // chain_tip is no longer supplied by the frontend; the SDK derives it from SQLite.
-    // Keep this regression test to ensure an all-zero transport header tip does not break send.
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'getTransportHeadersV3Bin') {
-        const headers = makeHeaders({ chainTip: new Uint8Array(32) /* all zeros */ });
-        return wrapSuccess(headers.toBinary());
-      }
-      return origCallBin(reqBytes);
-    };
-
-    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(8000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(true);
-  });
-
-  test('missing from_device_id (bridge returns short headers) → error', async () => {
-    // Override getTransportHeadersV3Bin to return empty device_id
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method } = decodeBridgeReq(reqBytes);
-      if (method === 'getTransportHeadersV3Bin') {
-        const headers = new pb.Headers({
-          deviceId: new Uint8Array(0) as any,
-          genesisHash: GENESIS_A as any,
-          chainTip: CHAIN_TIP_A as any,
-          seq: 1n as any,
-        } as any);
-        return wrapSuccess(headers.toBinary());
-      }
-      return origCallBin(reqBytes);
-    };
-
-    const res = await dsm.sendOnlineTransfer({ to: encodeBase32Crockford(DEVICE_B), amount: BigInt(9000 + testIndex), tokenId: 'ERA' });
-    expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/device.id|32 bytes|bridge headers|identity not ready/i);
+    const res = await dsm.sendOnlineTransferSmart(BOB_DEVICE_ID, BigInt(5000 + testIndex), undefined, 'ERA');
+    expect(res.success).toBe(false);
+    expect(String(res.message)).toContain('quota exceeded');
   });
 });
 
@@ -456,90 +342,8 @@ describe('Online Transfer — Input Validation', () => {
 // ─────────────────────────────────────────────────────────────────
 
 describe('Online Transfer — Proto Fidelity', () => {
-  test('OnlineTransferRequest field roundtrip preserves all fields', () => {
-    const req = new pb.OnlineTransferRequest({
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 42n as any,
-      memo: 'test memo',
-      nonce: new Uint8Array(0),
-      signature: new Uint8Array(0),
-      fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 7n as any,
-    } as any);
-
-    const bytes = req.toBinary();
-    const decoded = pb.OnlineTransferRequest.fromBinary(bytes);
-
-    expect(decoded.tokenId).toBe('ERA');
-    expect(decoded.toDeviceId).toEqual(DEVICE_B);
-    expect(decoded.toDeviceId).toHaveLength(32);
-    expect(decoded.amount).toBe(42n);
-    expect(decoded.memo).toBe('test memo');
-    expect(decoded.fromDeviceId).toEqual(DEVICE_A);
-    expect(decoded.fromDeviceId).toHaveLength(32);
-    expect(decoded.chainTip).toEqual(CHAIN_TIP_A);
-    expect(decoded.chainTip).toHaveLength(32);
-    expect(decoded.seq).toBe(7n);
-  });
-
-  test('Envelope v3 wraps UniversalTx → UniversalOp → Invoke(wallet.send) → ArgPack', () => {
-    const req = new pb.OnlineTransferRequest({
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 10n as any,
-      fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 1n as any,
-    } as any);
-
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
-    });
-    const invoke = new pb.Invoke({ method: 'wallet.send', args: argPack });
-    const opId = new pb.Hash32({ v: new Uint8Array(32).fill(0x77) } as any);
-    const uop = new pb.UniversalOp({
-      opId,
-      actor: DEVICE_A as any,
-      genesisHash: GENESIS_A as any,
-      kind: { case: 'invoke', value: invoke } as any,
-    });
-    const tx = new pb.UniversalTx({ ops: [uop], atomic: true });
-
-    const env = new pb.Envelope({
-      version: 3,
-      headers: makeHeaders(),
-      messageId: new Uint8Array(16) as any,
-      payload: { case: 'universalTx', value: tx },
-    } as any);
-
-    // Roundtrip
-    const envBytes = env.toBinary();
-    const decoded = pb.Envelope.fromBinary(envBytes);
-
-    expect(decoded.version).toBe(3);
-    expect(decoded.payload.case).toBe('universalTx');
-    const decodedTx = decoded.payload.value as pb.UniversalTx;
-    expect(decodedTx.ops).toHaveLength(1);
-    expect(decodedTx.atomic).toBe(true);
-
-    const decodedOp = decodedTx.ops[0];
-    expect(decodedOp.actor).toEqual(DEVICE_A);
-    expect(decodedOp.kind.case).toBe('invoke');
-    const decodedInvoke = decodedOp.kind.value as pb.Invoke;
-    expect(decodedInvoke.method).toBe('wallet.send');
-
-    const decodedArgPack = decodedInvoke.args!;
-    const innerReq = pb.OnlineTransferRequest.fromBinary(decodedArgPack.body);
-    expect(innerReq.tokenId).toBe('ERA');
-    expect(innerReq.toDeviceId).toEqual(DEVICE_B);
-    expect(innerReq.amount).toBe(10n);
-  });
-
   test('headers carry correct identity (deviceId, genesisHash, chainTip, seq)', () => {
-    const headers = makeHeaders({ seq: 42n });
+    const headers = makeHeaders();
     const env = new pb.Envelope({
       version: 3,
       headers,
@@ -549,8 +353,6 @@ describe('Online Transfer — Proto Fidelity', () => {
     const decoded = pb.Envelope.fromBinary(env.toBinary());
     expect(decoded.headers?.deviceId).toEqual(DEVICE_A);
     expect(decoded.headers?.genesisHash).toEqual(GENESIS_A);
-    expect(decoded.headers?.chainTip).toEqual(CHAIN_TIP_A);
-    expect(decoded.headers?.seq).toBe(42n);
   });
 });
 
@@ -566,7 +368,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(10000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     // Let offlineSend register event listeners (async bridge calls)
@@ -585,23 +386,22 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(res.accepted).toBe(true);
   });
 
-  test('CRITICAL: BilateralPrepareRequest fields sent to bridge are correct', async () => {
-    // Verifies the TS-side fields in the BilateralPrepareRequest that offlineSend
-    // constructs and sends via routerInvokeBin('wallet.sendOffline', ArgPack).
-    // The Rust layer adds senderSigningPublicKey/senderDeviceId/senderGenesisHash
-    // before BLE transmission — those are NOT set by the TS side.
-    let capturedPrepReq: pb.BilateralPrepareRequest | null = null;
+  test('CRITICAL: the offline send request carries what the user asked for', async () => {
+    // offlineSend sends the user's intent via routerInvokeBin('wallet.sendOffline',
+    // ArgPack): the counterparty, token, amount and memo. Rust resolves where the
+    // counterparty's appliance is and authors the prepare it sends over BLE.
+    let capturedPrepReq: pb.OfflineTransferRequest | null = null;
 
-    // Intercept nativeBoundaryIngress to capture the ArgPack → BilateralPrepareRequest
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
+    // Intercept nativeBoundaryIngress to capture the ArgPack → OfflineTransferRequest
+    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
       const { method, payload } = decodeBridgeReq(reqBytes);
       if (method === 'nativeBoundaryIngress') {
         const ingress = decodeIngressReq(payload);
         if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
           try {
             const argPack = pb.ArgPack.fromBinary(ingress.args);
-            capturedPrepReq = pb.BilateralPrepareRequest.fromBinary(argPack.body);
+            capturedPrepReq = pb.OfflineTransferRequest.fromBinary(argPack.body);
           } catch {
             // fall through
           }
@@ -614,7 +414,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(11000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -627,13 +426,12 @@ describe('Offline Transfer — Full Cycle', () => {
     const res = await promise;
     expect(res.accepted).toBe(true);
 
-    // Verify the BilateralPrepareRequest that TS sends to the Rust layer
+    // Verify the OfflineTransferRequest that TS sends to the Rust layer
     expect(capturedPrepReq).not.toBeNull();
     expect(capturedPrepReq!.counterpartyDeviceId).toHaveLength(32);
     expect(capturedPrepReq!.counterpartyDeviceId[0]).toBe(0xBB); // matches DEVICE_B
-    expect(capturedPrepReq!.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
-    expect(capturedPrepReq!.validityIterations).toBe(100n);
-    expect(capturedPrepReq!.transferAmountDisplay).toBe(String(11000 + testIndex));
+    expect(capturedPrepReq!.tokenId).toBe('ERA');
+    expect(capturedPrepReq!.amount).toBe(String(11000 + testIndex));
   });
 
   test('BILATERAL_EVENT_REJECTED event → accepted=false', async () => {
@@ -641,7 +439,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(12000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -668,8 +465,11 @@ describe('Offline Transfer — Full Cycle', () => {
         commitmentHash: COMMITMENT_HASH,
         senderId: DEVICE_A,
         recipientId: DEVICE_B,
-        status: pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED,
-        metadata: { direction: 'outgoing', amount: '7' },
+        phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED,
+        direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+        amount: BigInt(700),
+        displayAmount: '7.00',
+        tokenId: 'ERA',
       } as any),
     ];
 
@@ -677,7 +477,6 @@ describe('Offline Transfer — Full Cycle', () => {
       to: DEVICE_B,
       amount: BigInt(13000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     await new Promise(r => setTimeout(r, 100));
@@ -695,44 +494,24 @@ describe('Offline Transfer — Full Cycle', () => {
     expect(String(res.result)).toMatch(/failed/i);
   });
 
-  test('missing BLE address with no resolution → error', async () => {
-    // Override bridge: when wallet.sendOffline is called with an empty bleAddress,
-    // the Rust layer rejects with a bilateralPrepareReject error.
-    const origCallBin = (global as any).window.DsmBridge.__callBin;
-    (global as any).window.DsmBridge.__callBin = async (reqBytes: Uint8Array) => {
-      const { method, payload } = decodeBridgeReq(reqBytes);
-      if (method === 'nativeBoundaryIngress') {
-        const ingress = decodeIngressReq(payload);
-        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
-          // Check if bleAddress is empty in the request
-          try {
-            const argPack = pb.ArgPack.fromBinary(ingress.args);
-            const prep = pb.BilateralPrepareRequest.fromBinary(argPack.body);
-            if (!prep.bleAddress) {
-              const reject = new pb.BilateralPrepareReject({ reason: 'bleAddress unavailable' } as any);
-              const env = new pb.Envelope({
-                version: 3,
-                payload: { case: 'bilateralPrepareReject', value: reject },
-              } as any);
-              return wrapIngressOk(frameEnvelope(env));
-            }
-          } catch {
-            // ignore, let original handler run
-          }
-        }
-      }
-      return origCallBin(reqBytes);
-    };
+  // Where the counterparty's appliance is over BLE is Rust's to know. An appliance it
+  // has not met is its refusal, shown in its words; the frontend neither
+  // resolves an address nor refuses first.
+  test('a send to an appliance Rust has not met over BLE is Rust\'s refusal, in its words', async () => {
+    const refusal = 'wallet.sendOffline: no BLE address is known for the counterparty: the appliances have not met over BLE';
+    bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
+      version: 3,
+      payload: { case: 'error', value: new pb.Error({ code: 1, message: refusal }) },
+    } as any));
 
     const res = await dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(14000 + testIndex),
       tokenId: 'ERA',
-      // no bleAddress provided
-    } as any);
+    });
 
     expect(res.accepted).toBe(false);
-    expect(String(res.result)).toMatch(/ble|unavailable|rejected/i);
+    expect(res.result).toBe(`offlineSend: ${refusal}`);
   }, 15000);
 });
 
@@ -745,10 +524,8 @@ describe('Offline Transfer — Proto Constraints', () => {
     const prepReq = new pb.BilateralPrepareRequest({
       counterpartyDeviceId: DEVICE_B as any,
       operationData: new Uint8Array(100) as any,
-      validityIterations: 100n as any,
       expectedGenesisHash: new pb.Hash32({ v: COUNTERPARTY_GENESIS } as any),
       expectedCounterpartyStateHash: new pb.Hash32({ v: COUNTERPARTY_TIP } as any),
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
       senderSigningPublicKey: SIGNING_KEY as any,
       senderDeviceId: DEVICE_A as any,
       senderGenesisHash: new pb.Hash32({ v: GENESIS_A } as any),
@@ -768,35 +545,12 @@ describe('Offline Transfer — Proto Constraints', () => {
     expect(decoded.expectedGenesisHash?.v).toHaveLength(32);
     expect(decoded.expectedCounterpartyStateHash?.v).toHaveLength(32);
     expect(decoded.senderGenesisHash?.v).toHaveLength(32);
-    // BLE address
-    expect(decoded.bleAddress).toBe('AA:BB:CC:DD:EE:FF');
-  });
-
-  test('canonical encoding is deterministic (same input = same bytes)', () => {
-    const params = {
-      tokenId: 'ERA',
-      toDeviceId: DEVICE_B as any,
-      amount: 42n as any,
-      memo: 'test',
-      fromDeviceId: DEVICE_A as any,
-      chainTip: CHAIN_TIP_A as any,
-      seq: 1n as any,
-    };
-
-    const req1 = new pb.OnlineTransferRequest(params as any);
-    const req2 = new pb.OnlineTransferRequest(params as any);
-    const bytes1 = req1.toBinary();
-    const bytes2 = req2.toBinary();
-
-    expect(bytes1).toEqual(bytes2);
-    expect(bytes1.length).toBeGreaterThan(0);
   });
 
   test('BilateralPrepareResponse roundtrip preserves commitment_hash', () => {
     const resp = new pb.BilateralPrepareResponse({
       commitmentHash: new pb.Hash32({ v: COMMITMENT_HASH } as any),
       localSignature: new Uint8Array(64).fill(0xEE),
-      expiresIterations: 100n as any,
       counterpartyStateHash: new pb.Hash32({ v: new Uint8Array(32).fill(0x11) } as any),
       localStateHash: new pb.Hash32({ v: new Uint8Array(32).fill(0x22) } as any),
       responderSigningPublicKey: new Uint8Array(64).fill(0x33) as any,
@@ -819,29 +573,95 @@ describe('Offline Transfer — Proto Constraints', () => {
 describe('Offline Transfer — Timeout & Event Matching', () => {
   beforeEach(() => installBridge());
 
-  test('status polling resolves as success when session absent from pending list', async () => {
-    // With no events, the status poller eventually queries the backend.
-    // Default mock returns empty pending list → session absent → assumed committed.
+  test('a session absent from the pending list is not a completed transfer; its committed phase is', async () => {
+    // With no events, the status poller queries the backend. The default mock
+    // lists nothing: the step's absence says nothing about how it ended.
+    let settled = false;
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(15000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
+    void promise.then(() => { settled = true; });
 
-    // Allow bridge calls and first poll interval to fire
+    // Allow bridge calls and the first poll to fire against the empty list.
     await new Promise(r => setTimeout(r, 4000));
+    expect(settled).toBe(false);
+
+    // The backend now lists the step as committed; the next poll reads it.
+    bilateralPendingListOverride = () => [
+      new pb.OfflineBilateralTransaction({
+        id: encodeBase32Crockford(COMMITMENT_HASH),
+        commitmentHash: COMMITMENT_HASH,
+        senderId: DEVICE_A,
+        recipientId: DEVICE_B,
+        phase: pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED,
+        direction: pb.OfflineBilateralDirection.OFFLINE_DIRECTION_OUTGOING,
+        // The typed ERA as Rust lists the step: in base units at ERA's two decimals.
+        amount: BigInt(15000 + testIndex) * 100n,
+        displayAmount: `${15000 + testIndex}.00`,
+        tokenId: 'ERA',
+      } as any),
+    ];
 
     const res = await promise;
     expect(res.accepted).toBe(true);
-  }, 10000);
+  }, 15000);
+
+  test('when the screen stops waiting, the step is reported open, not failed', async () => {
+    jest.useFakeTimers();
+    try {
+      const promise = dsm.offlineSend({
+        to: DEVICE_B,
+        amount: BigInt(18000 + testIndex),
+        tokenId: 'ERA',
+      } as any);
+      // The pending list never names the step as ended, past every poll.
+      await jest.advanceTimersByTimeAsync(1_500 + 3_000 * 41);
+      const res = await promise;
+      expect(res.accepted).toBe(false);
+      expect(res.open).toBe(true);
+      expect(String(res.result)).toMatch(/still open/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a send that names no token reaches Rust naming none, and Rust refuses it', async () => {
+    let captured: pb.OfflineTransferRequest | null = null;
+    bilateralResponseOverride = () => frameEnvelope(new pb.Envelope({
+      version: 3,
+      payload: { case: 'error', value: new pb.Error({ code: 1, message: 'wallet.sendOffline: the request names no token' }) },
+    } as any));
+    const origCallBin = (global as any).window.DsmBridge.sendMessageBin;
+    (global as any).window.DsmBridge.sendMessageBin = async (reqBytes: Uint8Array) => {
+      const { method, payload } = decodeBridgeReq(reqBytes);
+      if (method === 'nativeBoundaryIngress') {
+        const ingress = decodeIngressReq(payload);
+        if (ingress.operationCase === 'routerInvoke' && ingress.method === 'wallet.sendOffline') {
+          captured = pb.OfflineTransferRequest.fromBinary(pb.ArgPack.fromBinary(ingress.args).body);
+        }
+      }
+      return origCallBin(reqBytes);
+    };
+
+    const res = await dsm.offlineSend({
+      to: DEVICE_B,
+      amount: BigInt(19000 + testIndex),
+      tokenId: '',
+    } as any);
+
+    expect(captured).not.toBeNull();
+    expect(captured!.tokenId).toBe('');
+    expect(res.accepted).toBe(false);
+    expect(String(res.result)).toContain('names no token');
+  });
 
   test('event with wrong commitment hash does NOT resolve; correct hash does', async () => {
     const promise = dsm.offlineSend({
       to: DEVICE_B,
       amount: BigInt(16000 + testIndex),
       tokenId: 'ERA',
-      bleAddress: 'AA:BB:CC:DD:EE:FF',
     } as any);
 
     // Let async bridge calls complete
@@ -928,13 +748,10 @@ describe('Bridge Protocol Fidelity', () => {
     expect(() => decodeFramedEnvelopeV3(raw)).toThrow(/invalid framing byte 0x08/);
   });
 
-  test('OfflineBilateralTransaction status enum values match proto spec', () => {
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_STATUS_UNSPECIFIED).toBe(0);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_PENDING).toBe(1);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_IN_PROGRESS).toBe(2);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_CONFIRMED).toBe(3);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_FAILED).toBe(4);
-    expect(pb.OfflineBilateralTransactionStatus.OFFLINE_TX_REJECTED).toBe(5);
+  test('OfflineBilateralPhase numbers the terminal phases the send poller reads as the proto does', () => {
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_REJECTED).toBe(5);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_COMMITTED).toBe(7);
+    expect(pb.OfflineBilateralPhase.OFFLINE_PHASE_FAILED).toBe(8);
   });
 
   test('BilateralEventType enum values exist for all completion states', () => {

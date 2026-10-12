@@ -36,7 +36,7 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     // Fake bytes-only DsmBridge response for bilateral.accept
     const resp = new pb.BilateralAcceptResponse({ accepted: true, message: 'ok' } as any);
     const pack = new pb.ResultPack({ schemaHash: new pb.Hash32({ v: new Uint8Array(32) }), codec: pb.Codec.PROTO, body: resp.toBinary() as any });
-    const op = new pb.OpResult({ opId: new pb.Hash32({ v: new Uint8Array(32) }), accepted: true, postStateHash: new pb.Hash32({ v: new Uint8Array(32) }), result: pack } as any);
+    const op = new pb.OpResult({ opId: new pb.Hash32({ v: new Uint8Array(32) }), accepted: true, result: pack } as any);
     const rx = new pb.UniversalRx({ results: [op] });
     const env = new pb.Envelope({ version: 3, headers: new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) } as any), payload: { case: 'universalRx', value: rx } } as any);
     // Helper: wrap raw Envelope bytes with 0x03 framing prefix
@@ -48,11 +48,16 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     };
 
     (window as any).DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         const method = req.method || '';
         if (method === 'acceptBilateralByCommitment') {
-          return (global as any).createDsmBridgeSuccessResponse(frame(env.toBinary()));
+          // The SDK answers an accept with the accept envelope it sends the proposer.
+          const accept = new pb.Envelope({
+            version: 3,
+            payload: { case: 'bilateralPrepareResponse', value: new pb.BilateralPrepareResponse({}) },
+          } as any);
+          return (global as any).createDsmBridgeSuccessResponse(frame(accept.toBinary()));
         }
         if (method === 'nativeBoundaryIngress') {
           const ingressRequest = pb.IngressRequest.fromBinary(
@@ -78,10 +83,8 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
           const headers = new pb.Headers({ deviceId: new Uint8Array(32).fill(1), genesisHash: new Uint8Array(32).fill(1) as any, chainTip: new Uint8Array(32), seq: 1n as any } as any);
           return (global as any).createDsmBridgeSuccessResponse(frame(headers.toBinary()));
         }
-        throw new Error(`unhandled __callBin method:${method}`);
+        throw new Error(`unhandled bridge method:${method}`);
       },
-      getDeviceIdBin: () => new Uint8Array(32).fill(1),
-      getGenesisHashBin: () => new Uint8Array(32).fill(1),
     };
 
     // Call accept — RAF mock fires synchronously so all 4 staggered
@@ -93,9 +96,12 @@ describe('E2E bilateral accept: BLE accept flow triggers refresh and toast', () 
     off();
 
     // schedulePostAcceptRefreshes emits wallet.refresh at frame intervals [1, 30, 60, 120].
-    // With sync RAF all 4 fire. Verify at least one arrived.
-    expect(refreshEvents.length).toBeGreaterThanOrEqual(1);
-    // Each event should carry the bilateral source tag
-    expect(refreshEvents[0]).toEqual(expect.objectContaining({ source: 'bilateral.transfer_complete' }));
+    // With sync RAF all 4 fire.
+    expect(refreshEvents.length).toBe(4);
+    // Each names itself as the accept's follow-up re-read: a completed
+    // transfer is Rust's to announce, and these used to claim to be one.
+    for (const event of refreshEvents) {
+      expect(event).toEqual(expect.objectContaining({ source: 'bilateral.accept_followup' }));
+    }
   });
 });

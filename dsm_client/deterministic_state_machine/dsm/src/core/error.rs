@@ -108,9 +108,6 @@ pub enum DsmCoreError {
     /// Device hierarchy errors
     DeviceHierarchy(String),
 
-    /// Forward commitment errors
-    ForwardCommitment(String),
-
     /// Relationship errors
     Relationship(String),
 
@@ -689,7 +686,6 @@ mod tests {
             DsmCoreError::PreCommitment("x".into()),
             DsmCoreError::Genesis("x".into()),
             DsmCoreError::DeviceHierarchy("x".into()),
-            DsmCoreError::ForwardCommitment("x".into()),
             DsmCoreError::Relationship("x".into()),
             DsmCoreError::ExternalCommitment("x".into()),
             DsmCoreError::Identity("x".into()),
@@ -835,7 +831,6 @@ mod tests {
             DsmCoreError::PreCommitment("".into()),
             DsmCoreError::Genesis("".into()),
             DsmCoreError::DeviceHierarchy("".into()),
-            DsmCoreError::ForwardCommitment("".into()),
             DsmCoreError::Relationship("".into()),
             DsmCoreError::ExternalCommitment("".into()),
             DsmCoreError::Identity("".into()),

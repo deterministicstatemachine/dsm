@@ -3,11 +3,9 @@
 import {
   createGenesisViaRouter,
   rejectBilateralByCommitmentBridge,
-  setBleIdentityForAdvertising,
 } from "../WebViewBridge";
 import {
   BilateralPayload,
-  BleIdentityPayload,
   BridgeRpcRequest,
   BridgeRpcResponse,
   Envelope,
@@ -17,14 +15,14 @@ import {
 } from "../../proto/dsm_app_pb";
 
 function wrapSuccessEnvelope(data: Uint8Array): Uint8Array {
-  const br = new BridgeRpcResponse({ result: { case: "success", value: { data } } });
+  const br = new BridgeRpcResponse({ result: { case: "success", value: { data: new Uint8Array(data) } } });
   return br.toBinary();
 }
 
 function setupBridge(onRequest: (req: BridgeRpcRequest) => void): void {
   (global as any).window = (global as any).window ?? {};
   (global as any).window.DsmBridge = {
-    __callBin: async (reqBytes: Uint8Array) => {
+    sendMessageBin: async (reqBytes: Uint8Array) => {
       const req = BridgeRpcRequest.fromBinary(reqBytes);
       onRequest(req);
       return wrapSuccessEnvelope(new Uint8Array([1]));
@@ -46,16 +44,15 @@ describe("protobuf-only bridge payloads", () => {
         value: new GenesisCreated({
           deviceId,
           genesisHash: new Hash32({ v: genesisHash }),
-          deviceEntropy: new Uint8Array(32).fill(0x33), // v2: carries the PUBLIC genesis_nonce
+          genesisNonce: new Uint8Array(32).fill(0x33),
           networkId: "testnet",
-          locale: "en-US",
         }),
       },
     });
     const framedGenesisEnvelope = new Uint8Array([0x03, ...genesisEnvelope.toBinary()]);
     (global as any).window = (global as any).window ?? {};
     (global as any).window.DsmBridge = {
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const req = BridgeRpcRequest.fromBinary(reqBytes);
         seenRequests.push(req);
         if (req.method === "createGenesisV2") {
@@ -65,37 +62,18 @@ describe("protobuf-only bridge payloads", () => {
       },
     };
 
-    await createGenesisViaRouter(mnemonic, "en-US", "testnet");
+    await createGenesisViaRouter(mnemonic);
 
     expect(seenRequests).toHaveLength(1);
     expect(seenRequests[0].method).toBe("createGenesisV2");
-    expect(seenRequests[0].payload.case).toBe("bytes");
-    const decoded = WalletCreateGenesisV2Request.fromBinary(seenRequests[0].payload.value.data);
+    const payload = seenRequests[0].payload;
+    expect(payload.case).toBe("bytes");
+    if (payload.case !== "bytes") throw new Error("expected a bytes payload");
+    const decoded = WalletCreateGenesisV2Request.fromBinary(payload.value.data);
     expect(decoded.mnemonic).toBe(mnemonic);
-    expect(decoded.locale).toBe("en-US");
-    expect(decoded.networkId).toBe("testnet");
+    // The network is the SDK's to choose; the request names none.
+    expect(WalletCreateGenesisV2Request.fields.findJsonName("networkId")).toBeUndefined();
     // No silicon / no random entropy: the mnemonic is the sole genesis root.
-  });
-
-  test("setBleIdentityForAdvertising sends BleIdentityPayload", async () => {
-    let seenMethod = "";
-    let seenPayload: Uint8Array | undefined;
-
-    setupBridge((req) => {
-      seenMethod = req.method;
-      seenPayload = req.payload.case === "bytes" ? req.payload.value.data : new Uint8Array(0);
-    });
-
-    const genesis = new Uint8Array(32).fill(0xaa);
-    const deviceId = new Uint8Array(32).fill(0xbb);
-    await setBleIdentityForAdvertising(genesis, deviceId);
-
-    expect(seenMethod).toBe("setBleIdentityForAdvertising");
-    expect(seenPayload).toBeInstanceOf(Uint8Array);
-
-    const decoded = BleIdentityPayload.fromBinary(seenPayload as Uint8Array);
-    expect(decoded.genesisHash).toEqual(genesis);
-    expect(decoded.deviceId).toEqual(deviceId);
   });
 
   test("rejectBilateralByCommitmentBridge sends BilateralPayload", async () => {

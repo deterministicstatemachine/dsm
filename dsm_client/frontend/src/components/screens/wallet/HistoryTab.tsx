@@ -6,10 +6,9 @@ import type { DomainTransaction } from '../../../domain/types';
 
 type Props = {
   transactions: DomainTransaction[];
-  aliasLookup: Map<string, string>;
 };
 
-function HistoryTabInner({ transactions, aliasLookup }: Props): JSX.Element {
+function HistoryTabInner({ transactions }: Props): React.JSX.Element {
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
 
   const handleToggleTx = useCallback((txId: string) => {
@@ -18,20 +17,17 @@ function HistoryTabInner({ transactions, aliasLookup }: Props): JSX.Element {
 
   return (
     <div className="history-tab">
-      <h3>Transaction History</h3>
+      <h3 className="sb-section-title">Transaction History</h3>
       {transactions.length === 0 ? (
-        <div className="empty-state"><p>No transactions</p></div>
+        <div className="sb-empty">No transactions yet.</div>
       ) : (
         <div className="transaction-items">
-          {transactions.map((tx, idx) => (
+          {transactions.map((tx) => (
             <TransactionItem
-              key={(tx.txId?.length ?? 0) > 0 ? tx.txId! : `tx:idx:${idx}`}
+              key={tx.txId}
               tx={tx}
-              idx={idx}
               expandedTxId={expandedTxId}
               onToggle={handleToggleTx}
-              aliasLookup={aliasLookup}
-              showRecoveredBadge
             />
           ))}
         </div>

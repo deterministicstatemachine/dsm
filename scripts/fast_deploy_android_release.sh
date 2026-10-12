@@ -3,7 +3,9 @@ set -euo pipefail
 
 # Fast deploy for DSM Android app — RELEASE (signed) variant.
 # Same as fast_deploy_android.sh but builds assembleRelease.
-# Prompts for the keystore path, key alias, and signing passwords when running interactively.
+# One prompt: the keystore password, checked against the keystore before Gradle
+# runs. The keystore defaults to $HOME/dsm-release.p12, the key to dsm-release
+# (or the keystore's only private key), the key password to the keystore password.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ANDROID_DIR="$ROOT_DIR/dsm_client/android"
@@ -14,6 +16,7 @@ BUILD_ONLY=0
 SKIP_UNINSTALL=1
 START_APP=1
 LOCAL_DEV=0
+NEW_KEYSTORE=0
 
 usage() {
   cat <<'USAGE'
@@ -23,48 +26,89 @@ Options:
   --no-build         Skip gradle build step (assumes APK exists)
   --build-only       Build the signed release APK, then exit without adb install
   --uninstall        Uninstall app before install (clears data)
+  --new-keystore     Make a new signing keystore first (the old one is kept as <path>.<time>.bak)
   --no-start         Don't launch MainActivity
   --local            Local dev mode: push localhost env config override + adb reverse ports
 
 Environment:
   DSM_KEYSTORE_PASSWORD   Optional; if unset, the script prompts on an interactive TTY.
-  DSM_KEYSTORE_PATH       Optional keystore path override; if unset, the script prompts and defaults to $HOME/dsm-release.p12.
-  DSM_KEY_ALIAS           Optional key alias override; if unset, the script prompts and defaults to dsm-release.
+  DSM_KEYSTORE_PATH       Optional; defaults to $HOME/dsm-release.p12.
+  DSM_KEY_ALIAS           Optional; defaults to dsm-release, or the keystore's only private key.
   DSM_KEY_PASSWORD        Optional key-entry password override; defaults to the keystore password.
-  SERIALS="id1 id2"       Space-separated adb device serials. If not set, auto-detect.
+  SERIALS="id1 id2"       Space-separated adb device serials. If not set, every device in
+                          'device' state is used, addressed by its adb transport id.
 USAGE
 }
 
-prompt_keystore_path() {
-  if [[ -n "${DSM_KEYSTORE_PATH:-}" ]]; then
-    return 0
+resolve_keystore_path() {
+  export DSM_KEYSTORE_PATH="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.p12}"
+  if [[ $NEW_KEYSTORE -eq 1 ]]; then
+    create_keystore
+  elif [[ ! -f "$DSM_KEYSTORE_PATH" ]]; then
+    echo "[fast_deploy_release] ERROR: keystore not found at $DSM_KEYSTORE_PATH (set DSM_KEYSTORE_PATH, or pass --new-keystore)." >&2
+    exit 1
   fi
-
-  local default_path="$HOME/dsm-release.p12"
-
-  if [[ ! -t 0 ]]; then
-    export DSM_KEYSTORE_PATH="$default_path"
-    return 0
-  fi
-
-  read -r -p "DSM Android keystore path [$default_path]: " DSM_KEYSTORE_PATH
-  DSM_KEYSTORE_PATH="${DSM_KEYSTORE_PATH:-$default_path}"
-  export DSM_KEYSTORE_PATH
 }
 
-prompt_key_alias() {
-  if [[ -n "${DSM_KEY_ALIAS:-}" ]]; then
-    return 0
-  fi
+# Java's PKCS12 keystores take only ASCII passwords. keytool's own prompt
+# decodes the terminal by its locale, so a character such as € or § can
+# arrive there as '?' and be accepted; the same password read here reaches
+# keytool and Gradle intact, and the keystore refuses it.
+non_ascii() {
+  LC_ALL=C grep -q '[^ -~]' <<<"$1"
+}
 
+# A keystore made here takes its password through the channel every later
+# use reads it from: this prompt, then an environment variable to keytool
+# and Gradle.
+create_keystore() {
   if [[ ! -t 0 ]]; then
-    export DSM_KEY_ALIAS="dsm-release"
-    return 0
+    echo "[fast_deploy_release] ERROR: --new-keystore needs a terminal for the password." >&2
+    exit 1
   fi
-
-  read -r -p "DSM key alias [dsm-release]: " DSM_KEY_ALIAS
-  DSM_KEY_ALIAS="${DSM_KEY_ALIAS:-dsm-release}"
-  export DSM_KEY_ALIAS
+  if ! command -v keytool >/dev/null 2>&1; then
+    echo "[fast_deploy_release] ERROR: --new-keystore needs keytool (a JDK) on PATH." >&2
+    exit 1
+  fi
+  local again
+  while true; do
+    IFS= read -r -s -p "New keystore password (ASCII; symbols such as !@#\$%^&* are fine): " DSM_KEYSTORE_PASSWORD
+    echo
+    if [[ -z "$DSM_KEYSTORE_PASSWORD" ]]; then
+      echo "[fast_deploy_release] Empty. Again." >&2
+      continue
+    fi
+    if non_ascii "$DSM_KEYSTORE_PASSWORD"; then
+      echo "[fast_deploy_release] That password has a non-ASCII character (such as € § • £ é); Java keystores refuse those. Again." >&2
+      continue
+    fi
+    IFS= read -r -s -p "The same password again: " again
+    echo
+    if [[ "$DSM_KEYSTORE_PASSWORD" == "$again" ]]; then
+      break
+    fi
+    echo "[fast_deploy_release] The two did not match. Again." >&2
+  done
+  export DSM_KEYSTORE_PASSWORD
+  local kept=""
+  if [[ -f "$DSM_KEYSTORE_PATH" ]]; then
+    kept="$DSM_KEYSTORE_PATH.$(date +%Y%m%d-%H%M%S).bak"
+    mv "$DSM_KEYSTORE_PATH" "$kept"
+  fi
+  if ! keytool -genkeypair -keystore "$DSM_KEYSTORE_PATH" -storetype PKCS12 \
+      -alias "${DSM_KEY_ALIAS:-dsm-release}" -keyalg RSA -keysize 4096 -validity 10000 \
+      -dname "CN=DSM Release" -storepass:env DSM_KEYSTORE_PASSWORD; then
+    rm -f "$DSM_KEYSTORE_PATH"
+    if [[ -n "$kept" ]]; then
+      mv "$kept" "$DSM_KEYSTORE_PATH"
+    fi
+    echo "[fast_deploy_release] ERROR: keytool could not make the keystore; nothing changed." >&2
+    exit 1
+  fi
+  if [[ -n "$kept" ]]; then
+    echo "[fast_deploy_release] Kept the old keystore as $kept"
+  fi
+  echo "[fast_deploy_release] Made a new keystore at $DSM_KEYSTORE_PATH"
 }
 
 prompt_keystore_password() {
@@ -78,38 +122,45 @@ prompt_keystore_password() {
     exit 1
   fi
 
-  local keystore_path="${DSM_KEYSTORE_PATH:-$HOME/dsm-release.p12}"
-  local key_alias="${DSM_KEY_ALIAS:-dsm-release}"
-
-  if [[ ! -f "$keystore_path" ]]; then
-    echo "[fast_deploy_release] ERROR: keystore not found at $keystore_path" >&2
-    exit 1
-  fi
-
-  read -r -s -p "DSM keystore password for $key_alias ($keystore_path): " DSM_KEYSTORE_PASSWORD
+  # IFS= keeps a leading or trailing space: read would strip it, and keytool would not.
+  IFS= read -r -s -p "Keystore password ($DSM_KEYSTORE_PATH): " DSM_KEYSTORE_PASSWORD
   echo
-  if [[ -z "$DSM_KEYSTORE_PASSWORD" ]]; then
-    echo "[fast_deploy_release] ERROR: empty keystore password." >&2
-    exit 1
-  fi
   export DSM_KEYSTORE_PASSWORD
 }
 
-prompt_key_password() {
-  if [[ -n "${DSM_KEY_PASSWORD:-}" ]]; then
+# The password opens the keystore and the key Gradle signs with is in it.
+# Checked here, so a wrong password costs a prompt rather than a Gradle run.
+check_keystore() {
+  if ! command -v keytool >/dev/null 2>&1; then
+    echo "[fast_deploy_release] keytool not on PATH; Gradle will check the password." >&2
+    export DSM_KEY_ALIAS="${DSM_KEY_ALIAS:-dsm-release}"
     return 0
   fi
-
-  if [[ ! -t 0 ]]; then
-    return 0
+  local listing
+  if ! listing="$(keytool -list -keystore "$DSM_KEYSTORE_PATH" -storepass:env DSM_KEYSTORE_PASSWORD 2>&1)"; then
+    echo "[fast_deploy_release] $DSM_KEYSTORE_PATH refused that password." >&2
+    if non_ascii "$DSM_KEYSTORE_PASSWORD"; then
+      echo "[fast_deploy_release] It has a non-ASCII character (such as € § • £ é). Java keystores take ASCII only, and" >&2
+      echo "[fast_deploy_release] keytool's own prompt may have stored each such character as '?'. Rerun with --new-keystore" >&2
+      echo "[fast_deploy_release] and an ASCII password (symbols such as !@#\$%^&* are fine)." >&2
+      exit 1
+    fi
+    return 1
   fi
-
-  read -r -s -p "DSM key password for $DSM_KEY_ALIAS (press Enter to reuse keystore password): " DSM_KEY_PASSWORD
-  echo
-  if [[ -z "$DSM_KEY_PASSWORD" ]]; then
-    DSM_KEY_PASSWORD="$DSM_KEYSTORE_PASSWORD"
+  local keys wanted
+  keys="$(awk -F', ' '/PrivateKeyEntry/{print $1}' <<<"$listing")"
+  wanted="${DSM_KEY_ALIAS:-dsm-release}"
+  if grep -qxF "$wanted" <<<"$keys"; then
+    export DSM_KEY_ALIAS="$wanted"
+  elif [[ -z "${DSM_KEY_ALIAS:-}" && "$(grep -c . <<<"$keys")" -eq 1 ]]; then
+    export DSM_KEY_ALIAS="$keys"
+  else
+    echo "[fast_deploy_release] ERROR: no key named '$wanted' in $DSM_KEYSTORE_PATH. Its keys:" >&2
+    sed 's/^/  /' <<<"$keys" >&2
+    echo "[fast_deploy_release] Set DSM_KEY_ALIAS to one of them." >&2
+    exit 1
   fi
-  export DSM_KEY_PASSWORD
+  echo "[fast_deploy_release] Keystore opened; signing with key '$DSM_KEY_ALIAS'."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -117,6 +168,7 @@ while [[ $# -gt 0 ]]; do
     --no-build) SKIP_BUILD=1; shift ;;
     --build-only) BUILD_ONLY=1; shift ;;
     --uninstall) SKIP_UNINSTALL=0; shift ;;
+    --new-keystore) NEW_KEYSTORE=1; shift ;;
     --no-start) START_APP=0; shift ;;
     --local) LOCAL_DEV=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -125,10 +177,18 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
-  prompt_keystore_path
-  prompt_key_alias
-  prompt_keystore_password
-  prompt_key_password
+  resolve_keystore_path
+  for attempt in 1 2 3; do
+    prompt_keystore_password
+    if check_keystore; then
+      break
+    fi
+    if [[ ! -t 0 || $attempt -eq 3 ]]; then
+      exit 1
+    fi
+    unset DSM_KEYSTORE_PASSWORD
+  done
+  export DSM_KEY_PASSWORD="${DSM_KEY_PASSWORD:-$DSM_KEYSTORE_PASSWORD}"
   echo "[fast_deploy_release] Gradle assembleRelease (incremental)…"
   (cd "$ANDROID_DIR" && ./gradlew --stop && ./gradlew :app:assembleRelease --no-daemon --console=plain)
 fi
@@ -143,11 +203,25 @@ if [[ $BUILD_ONLY -eq 1 ]]; then
   exit 0
 fi
 
+# The Android SDK's adb, ahead of any other on PATH: two adb versions share one
+# server port and reset each other's connections.
+SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
+if [[ -x "$SDK_DIR/platform-tools/adb" ]]; then
+  export PATH="$SDK_DIR/platform-tools:$PATH"
+fi
+
+# Each device is an adb selector, "-s SERIAL" or "-t TRANSPORT_ID". A device
+# found by itself is addressed by its transport id: a wireless-debugging serial
+# can hold a space ("adb-XXXX (2)._adb-tls-connect._tcp").
+DEVICES=()
 if [[ -n "${SERIALS:-}" ]]; then
-  # shellcheck disable=SC2206
-  DEVICES=($SERIALS)
+  for s in $SERIALS; do
+    DEVICES+=("-s $s")
+  done
 else
-  mapfile -t DEVICES < <(adb devices | awk '/\tdevice$/{print $1}')
+  while read -r t; do
+    DEVICES+=("-t $t")
+  done < <(adb devices -l | grep -E '[[:space:]]device[[:space:]]' | grep -oE 'transport_id:[0-9]+' | cut -d: -f2)
 fi
 
 if [[ ${#DEVICES[@]} -eq 0 ]]; then
@@ -173,32 +247,36 @@ if [[ $LOCAL_DEV -eq 1 ]]; then
     echo ""
   fi
 else
-  echo "[fast_deploy_release] GCP mode: using bundled dsm_env_config.toml (6 GCP nodes)"
+  echo "[fast_deploy_release] GCP mode: using bundled dsm_env_config.toml (the beta fleet: 5 GCP nodes)"
 fi
 
+FAILED=()
 for d in "${DEVICES[@]}"; do
-  echo "=== $d ==="
+  read -r -a sel <<<"$d"
+  label="$(adb "${sel[@]}" shell getprop ro.serialno 2>/dev/null | tr -d '\r\n' || true)"
+  echo "=== ${label:-$d} ($d) ==="
   if [[ $SKIP_UNINSTALL -eq 0 ]]; then
-    adb -s "$d" uninstall com.dsm.wallet || true
+    adb "${sel[@]}" uninstall com.dsm.wallet || true
   fi
 
-  adb -s "$d" install -r "$APK"
+  if ! adb "${sel[@]}" install -r "$APK"; then
+    echo "[fast_deploy_release] Install FAILED on ${label:-$d}" >&2
+    FAILED+=("${label:-$d}")
+    continue
+  fi
 
   if [[ $LOCAL_DEV -eq 1 ]]; then
-    is_emu=$(adb -s "$d" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r\n')
+    is_emu=$(adb "${sel[@]}" shell getprop ro.kernel.qemu 2>/dev/null | tr -d '\r\n')
     if [[ "$is_emu" == "1" ]]; then
       ENV_HOST="10.0.2.2"
     else
       ENV_HOST="127.0.0.1"
     fi
     for p in 8080 8081 8082 8083 8084 18443; do
-      adb -s "$d" reverse tcp:$p tcp:$p || echo "reverse failed for $d:$p"
+      adb "${sel[@]}" reverse tcp:$p tcp:$p || echo "reverse failed for ${label:-$d}:$p"
     done
     ENV_TOML=$(mktemp /tmp/dsm_env_XXXXXX)
     cat >"$ENV_TOML" <<EOF
-protocol = "http"
-lan_ip = "$ENV_HOST"
-ports = [8080, 8081, 8082, 8083, 8084]
 allow_localhost = true
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1
@@ -224,23 +302,27 @@ endpoint = "http://$ENV_HOST:8083"
 name = "storage-node-5"
 endpoint = "http://$ENV_HOST:8084"
 EOF
-    adb -s "$d" push "$ENV_TOML" /data/local/tmp/dsm_env_config.toml
-    adb -s "$d" shell run-as com.dsm.wallet mkdir -p files 2>/dev/null || true
-    adb -s "$d" shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
+    adb "${sel[@]}" push "$ENV_TOML" /data/local/tmp/dsm_env_config.toml
+    adb "${sel[@]}" shell run-as com.dsm.wallet mkdir -p files 2>/dev/null || true
+    adb "${sel[@]}" shell run-as com.dsm.wallet cp /data/local/tmp/dsm_env_config.toml files/dsm_env_config.toml
     rm -f "$ENV_TOML"
-    echo "[fast_deploy_release] Env config pushed to $d (host=$ENV_HOST)"
+    echo "[fast_deploy_release] Env config pushed to ${label:-$d} (host=$ENV_HOST)"
   else
     # GCP mode: remove any stale local override so the app uses the bundled GCP config.
-    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
-    adb -s "$d" shell run-as com.dsm.wallet rm -f files/dsm_env_config.local.toml 2>/dev/null || true
-    echo "[fast_deploy_release] Cleared stale overrides on $d (app will use bundled GCP config)"
+    adb "${sel[@]}" shell run-as com.dsm.wallet rm -f files/dsm_env_config.override.toml 2>/dev/null || true
+    adb "${sel[@]}" shell run-as com.dsm.wallet rm -f files/dsm_env_config.local.toml 2>/dev/null || true
+    echo "[fast_deploy_release] Cleared stale overrides on ${label:-$d} (app will use bundled GCP config)"
   fi
 
   if [[ $START_APP -eq 1 ]]; then
-    adb -s "$d" shell am force-stop com.dsm.wallet 2>/dev/null || true
-    adb -s "$d" shell am start -n com.dsm.wallet/.ui.MainActivity || echo "Failed to start on $d"
+    adb "${sel[@]}" shell am force-stop com.dsm.wallet 2>/dev/null || true
+    adb "${sel[@]}" shell am start -n com.dsm.wallet/.ui.MainActivity || echo "Failed to start on ${label:-$d}"
   fi
 
 done
 
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+  echo "[fast_deploy_release] Install failed on: ${FAILED[*]}" >&2
+  exit 1
+fi
 echo "[fast_deploy_release] Done."

@@ -2,7 +2,7 @@ variable "gcp_project" { type = string }
 
 variable "machine_type" {
   type    = string
-  default = "e2-small"
+  default = "e2-medium"
 }
 
 variable "disk_size_gb" {

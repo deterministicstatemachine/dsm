@@ -1,86 +1,168 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  mapBalanceList,
-  mapIdentity,
+  mapContactList,
   mapTransactions,
-  normalizeBleAddress,
-  toBigint,
 } from '../mappers';
+import { TokenMove, TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
+import { toBase32Crockford } from '../../dsm/decoding';
 
 describe('domain mappers', () => {
-  describe('toBigint', () => {
-    it('passes through bigint', () => {
-      expect(toBigint(7n)).toBe(7n);
+  describe('mapContactList', () => {
+    const contact = (bleAddress?: string) => ({
+      alias: 'peer',
+      deviceId: new Uint8Array(32).fill(1),
+      genesisHash: new Uint8Array(32).fill(2),
+      publicKey: new Uint8Array(64).fill(3),
+      genesisVerifiedOnline: true,
+      bleAddress,
+      pairing: bleAddress ? 'paired' as const : 'idle' as const,
     });
 
-    it('truncates numbers', () => {
-      expect(toBigint(3.9)).toBe(3n);
-    });
-
-    it('parses decimal strings', () => {
-      expect(toBigint('  42  ')).toBe(42n);
-    });
-
-    it('returns 0n for empty or invalid', () => {
-      expect(toBigint('')).toBe(0n);
-      expect(toBigint(undefined)).toBe(0n);
-    });
-  });
-
-  describe('normalizeBleAddress', () => {
-    it('uppercases colon-separated MAC', () => {
-      expect(normalizeBleAddress('aa:bb:cc:dd:ee:ff')).toBe('AA:BB:CC:DD:EE:FF');
-    });
-
-    it('formats 12 hex chars without colons', () => {
-      expect(normalizeBleAddress('aabbccddeeff')).toBe('AA:BB:CC:DD:EE:FF');
-    });
-
-    it('returns undefined for invalid input', () => {
-      expect(normalizeBleAddress('')).toBeUndefined();
-      expect(normalizeBleAddress('not-mac')).toBeUndefined();
-      expect(normalizeBleAddress(undefined)).toBeUndefined();
-    });
-  });
-
-  describe('mapIdentity', () => {
-    it('maps camelCase protobuf fields', () => {
-      const id = {
-        genesisHash: new Uint8Array(32).fill(1),
-        deviceId: new Uint8Array(32).fill(2),
-      };
-      const out = mapIdentity(id);
-      expect(out).not.toBeNull();
-      expect(out!.genesisHash.length).toBeGreaterThan(0);
-      expect(out!.deviceId.length).toBeGreaterThan(0);
-    });
-
-    it('returns null when required fields missing', () => {
-      expect(mapIdentity({ genesisHash: '', deviceId: '' })).toBeNull();
-    });
-  });
-
-  describe('mapBalanceList', () => {
-    it('rewrites spaced tokenId to ERA', () => {
-      const out = mapBalanceList([
-        { tokenId: 'bad id', symbol: 'X', balance: 1n, decimals: 0, tokenName: 'T' },
-      ]);
-      expect(out[0].tokenId).toBe('ERA');
+    // The address is Rust's: the contact carries it as Rust holds it, and none
+    // where Rust holds none. The mapper used to reformat it, drop one that was
+    // not MAC-shaped, and fill a missing one from addresses resolved this session.
+    it('carries the BLE address Rust holds, as it holds it, and none where it holds none', () => {
+      expect(mapContactList([contact('aa:bb:cc:dd:ee:ff')])[0].bleAddress).toBe('aa:bb:cc:dd:ee:ff');
+      expect(mapContactList([contact(undefined)])[0].bleAddress).toBeUndefined();
     });
   });
 
   describe('mapTransactions', () => {
-    it('maps numeric txType to domain string', () => {
-      const out = mapTransactions([
+    const b = (fill: number) => new Uint8Array(32).fill(fill);
+    const row = (overrides: Partial<TransactionInfo> = {}) =>
+      new TransactionInfo({
+        id: 'tx_ROW',
+        fromDeviceId: b(0x11),
+        toDeviceId: b(0x22),
+        tokenId: 'ERA',
+        amount: 500n,
+        txHash: b(0x33),
+        amountSigned: -500n,
+        txType: TransactionType.TX_TYPE_ONLINE,
+        status: 'confirmed',
+        recipient: 'alice',
+        memo: 'lunch',
+        receiptVerified: false,
+        displayAmount: '-5.00',
+        ...overrides,
+      });
+
+    it('carries every field exactly as Rust reported it', () => {
+      expect(mapTransactions([row()])).toEqual([
         {
-          txType: 4,
-          txId: 'id',
-          toDeviceId: new Uint8Array(32),
-          amount: 100n,
+          txId: 'tx_ROW',
+          txHash: toBase32Crockford(b(0x33)),
+          txType: 'online',
+          type: 'online',
+          amount: -500n,
+          displayAmount: '-5.00',
+          tokenId: 'ERA',
+          recipient: 'alice',
+          status: 'confirmed',
+          fromDeviceId: toBase32Crockford(b(0x11)),
+          toDeviceId: toBase32Crockford(b(0x22)),
+          memo: 'lunch',
+          stitchedReceipt: undefined,
+          receiptVerified: false,
         },
       ]);
-      expect(out[0].txType).toBe('online');
-      expect(out[0].type).toBe('online');
+    });
+
+    it('names the transport of a transfer and none for a dBTC row', () => {
+      const [offline, mint] = mapTransactions([
+        row({ txType: TransactionType.TX_TYPE_BILATERAL_OFFLINE }),
+        row({ txType: TransactionType.TX_TYPE_DBTC_MINT }),
+      ]);
+      expect(offline.txType).toBe('bilateral_offline');
+      expect(offline.type).toBe('offline');
+      expect(mint.txType).toBe('dbtc_mint');
+      expect(mint.type).toBeUndefined();
+    });
+
+    it('refuses a type the wire does not name, never guessing one', () => {
+      expect(() => mapTransactions([row({ txType: TransactionType.TX_TYPE_UNSPECIFIED })])).toThrow(
+        /tx_ROW has type 0/,
+      );
+      expect(() => mapTransactions([row({ txType: 3 as TransactionType })])).toThrow(/tx_ROW has type 3/);
+    });
+
+    // A faucet claim's source is the ERA reserve: Rust names no sender device,
+    // labels the source, and a faucet row that names a sender is corrupt.
+    it('maps a faucet claim with no sender device and no transport', () => {
+      const [claim] = mapTransactions([
+        row({
+          txType: TransactionType.TX_TYPE_FAUCET,
+          fromDeviceId: new Uint8Array(0),
+          recipient: 'ERA reserve (faucet)',
+          amountSigned: 10000n,
+          displayAmount: '100.00',
+        }),
+      ]);
+      expect(claim.txType).toBe('faucet');
+      expect(claim.type).toBeUndefined();
+      expect(claim.fromDeviceId).toBeUndefined();
+      expect(claim.recipient).toBe('ERA reserve (faucet)');
+      expect(claim.amount).toBe(10000n);
+    });
+
+    it('refuses a faucet claim that names a sender device', () => {
+      expect(() => mapTransactions([row({ txType: TransactionType.TX_TYPE_FAUCET })])).toThrow(
+        /faucet claim tx_ROW names a sender device/,
+      );
+    });
+
+    // A token or SoFi event names every token it moved, with Rust's signed
+    // display form for each; it has no single token or amount of its own.
+    it('maps a SoFi trade with every token it moved', () => {
+      const [trade] = mapTransactions([
+        row({
+          txType: TransactionType.TX_TYPE_SOFI_TRADE,
+          tokenId: '',
+          amount: 0n,
+          amountSigned: 0n,
+          displayAmount: '',
+          recipient: 'VAULTID',
+          moves: [
+            new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -1000n, displayAmount: '-10.00' }),
+            new TokenMove({ policyCommit: b(0x42), tokenId: 'TKN', amountSigned: 90n, displayAmount: '90' }),
+          ],
+        }),
+      ]);
+      expect(trade.txType).toBe('sofi_trade');
+      expect(trade.recipient).toBe('VAULTID');
+      expect(trade.moves).toEqual([
+        { policyCommit: toBase32Crockford(b(0x41)), tokenId: 'ERA', amount: -1000n, displayAmount: '-10.00' },
+        { policyCommit: toBase32Crockford(b(0x42)), tokenId: 'TKN', amount: 90n, displayAmount: '90' },
+      ]);
+    });
+
+    it('maps a setup, which moves no token', () => {
+      const [setup] = mapTransactions([
+        row({ txType: TransactionType.TX_TYPE_SOFI_SETUP, tokenId: '', displayAmount: '', moves: [] }),
+      ]);
+      expect(setup.txType).toBe('sofi_setup');
+      expect(setup.moves).toEqual([]);
+    });
+
+    it('refuses an event movement Rust did not render', () => {
+      expect(() =>
+        mapTransactions([
+          row({
+            txType: TransactionType.TX_TYPE_VAULT_CREATE,
+            moves: [new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -100n, displayAmount: '' })],
+          }),
+        ]),
+      ).toThrow(/carries no moved amount/);
+    });
+
+    it('refuses a row missing a field Rust always writes', () => {
+      expect(() => mapTransactions([row({ status: '' })])).toThrow(/carries no status/);
+      expect(() => mapTransactions([row({ tokenId: '' })])).toThrow(/carries no token id/);
+      expect(() => mapTransactions([row({ recipient: '' })])).toThrow(/carries no counterparty label/);
+      expect(() => mapTransactions([row({ displayAmount: '' })])).toThrow(/carries no display amount/);
+      expect(() => mapTransactions([row({ fromDeviceId: new Uint8Array(0) })])).toThrow(
+        /sender device id that is not 32 bytes/,
+      );
     });
   });
 });

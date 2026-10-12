@@ -1,0 +1,10 @@
+$ cargo test --locked --release -p dsm --lib -- --exact --nocapture --test-threads=1 route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in
+warning: dsm@0.1.0-beta.3: Prost compilation succeeded
+    Finished `release` profile [optimized] target(s) in 0.44s
+     Running unittests src/lib.rs (target/release/deps/dsm-21e99b2d3e0a1bc3)
+
+running 1 test
+test route_chain::tests::an_unread_leader_is_missing_and_no_other_seat_stands_in ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1355 filtered out; finished in 0.00s
+

@@ -16,6 +16,7 @@ interface Props {
 }
 
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'];
+const MAX_DIGITS = 8;
 
 export default function PinInput({ onComplete, label }: Props) {
   const [digits, setDigits] = useState('');
@@ -32,38 +33,32 @@ export default function PinInput({ onComplete, label }: Props) {
       }
       return;
     }
-    if (digits.length < 8) {
+    if (digits.length < MAX_DIGITS) {
       setDigits((prev) => prev + k);
     }
   };
 
-  const dots = Array.from({ length: 8 }).map((_, i) =>
-    i < digits.length ? '●' : '○'
-  );
+  const hint = digits.length === 0
+    ? 'ENTER PIN — PRESS ✓ TO CONFIRM'
+    : digits.length < 4
+      ? 'MIN 4 DIGITS — PRESS ✓ TO CONFIRM'
+      : 'PRESS ✓ TO CONFIRM';
 
   return (
-    <div className="pin-input">
-      {label && <div className="pin-label">{label}</div>}
-      <div className="pin-dots" aria-label={`${digits.length} digits entered`}>
-        {dots.map((d, i) => (
-          <span key={i} className="pin-dot">{d}</span>
+    <div className="sb-keypad">
+      {label && <div className="sb-keypad__label">{label}</div>}
+      <div className="sb-keypad__dots" aria-label={`${digits.length} digits entered`}>
+        {Array.from({ length: MAX_DIGITS }).map((_, i) => (
+          <span key={i} className={`sb-keypad__dot${i < digits.length ? ' is-filled' : ''}`} />
         ))}
       </div>
-      {digits.length < 4 && digits.length > 0 && (
-        <div className="pin-hint">MIN 4 DIGITS — PRESS ✓ TO CONFIRM</div>
-      )}
-      {digits.length === 0 && (
-        <div className="pin-hint">ENTER PIN — PRESS ✓ TO CONFIRM</div>
-      )}
-      {digits.length >= 4 && (
-        <div className="pin-hint pin-hint--ready">PRESS ✓ TO CONFIRM</div>
-      )}
-      <div className="pin-grid" role="group" aria-label="PIN keypad">
+      <div className={`sb-keypad__hint${digits.length >= 4 ? ' is-ready' : ''}`}>{hint}</div>
+      <div className="sb-keypad__grid" role="group" aria-label="PIN keypad">
         {KEYS.map((k) => (
           <button
             key={k}
             type="button"
-            className={`pin-key${k === '#' ? ' pin-key--confirm' : ''}${k === '*' ? ' pin-key--back' : ''}`}
+            className={`sb-keypad__key${k === '#' ? ' sb-keypad__key--confirm' : ''}${k === '*' ? ' sb-keypad__key--back' : ''}`}
             onClick={() => handleKey(k)}
             aria-label={k === '*' ? 'backspace' : k === '#' ? 'confirm' : k}
           >

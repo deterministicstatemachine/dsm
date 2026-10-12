@@ -25,54 +25,6 @@ pub mod pb {
     pub use self::dsm::*;
 }
 
-/* ---------------------- Normative v3 authoring helpers --------------------- */
-
-/// Deterministic domain-separated hash: H(tag \0 || bytes).
-///
-/// Delegates to `dsm::crypto::blake3::domain_hash_bytes` which automatically
-/// appends the NUL terminator. Strips any trailing `\0` from `tag` first to
-/// prevent double-NUL when callers embed the terminator in the literal.
-pub fn domain_hash_bytes(tag: &str, body: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes(tag.trim_end_matches('\0'), body)
-}
-
-/// Author a ContactAddV3 request for a new peer.
-///
-/// This is signature-free authoring; device-side authenticity is provided
-/// by signing the `ContactAddV3` deterministic bytes with SPHINCS+ in the
-/// envelope layer.
-pub fn author_contact_add(
-    author_id: &[u8; 32],
-    device_id: &[u8; 32],
-    counterparty_tip: &[u8; 32],
-) -> pb::ContactAddV3 {
-    pb::ContactAddV3 {
-        author_device_id: author_id.to_vec(),
-        contact_device_id: device_id.to_vec(),
-        contact_chain_tip: counterparty_tip.to_vec(),
-        // Root of author's contact stream (optional)
-        parent_digest: Vec::new(),
-    }
-}
-
-/// Author a ContactAcceptV3 response following a received add request.
-///
-/// Computes add_digest = H("DSM/contact/add" \0 || ProtoDet(ContactAddV3)).
-pub fn author_contact_accept(
-    accepter_id: &[u8; 32],
-    add_req: &pb::ContactAddV3,
-    local_tip: &[u8; 32],
-) -> pb::ContactAcceptV3 {
-    let add_bytes = add_req.encode_to_vec();
-    let add_digest = domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_CONTACT_ADD, &add_bytes);
-
-    pb::ContactAcceptV3 {
-        accepter_device_id: accepter_id.to_vec(),
-        add_digest: add_digest.to_vec(),
-        local_chain_tip: local_tip.to_vec(),
-    }
-}
-
 /* ---------------------------- Hash/Int wrappers ---------------------------- */
 
 impl From<[u8; 32]> for pb::Hash32 {
@@ -184,7 +136,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::InvalidKeyLength
         | DsmError::InvalidCiphertext
         | DsmError::HashChain(_)
-        | DsmError::ForwardCommitment(_)
         | DsmError::Genesis(_)
         | DsmError::DeviceHierarchy(_)
         | DsmError::ExternalCommitment(_)
@@ -213,8 +164,6 @@ fn map_error_code(error: &DsmError) -> ErrorCode {
         | DsmError::Configuration { .. }
         | DsmError::TimeError(_)
         | DsmError::SystemError(_)
-        | DsmError::MintNotAllowed
-        | DsmError::BurnNotAllowed
         | DsmError::FaucetDisabled
         | DsmError::FaucetNotAvailable
         | DsmError::InboxTokenInvalid(_)
@@ -383,70 +332,6 @@ impl From<pb::Error> for TransportError {
             recoverable: e.is_recoverable,
             context: e.context,
         }
-    }
-}
-
-// state_to_wire(&State) → pb::StateWire deleted: zero Rust callers.
-// The pb::StateWire proto type is still generated and consumed by the
-// frontend JS, but the Rust-side conversion was dead — the function had
-// `state_number: 0` hardcoded after §4.3, and the only legitimate use of
-// the wire format is from the JS layer building it directly from received
-// bytes.
-
-/// Minimal canonical verb for Operation variants (no serde; stable strings).
-/// Used by `make_state_transition_proto` below.
-fn canonical_operation_name(op: &Operation) -> String {
-    use Operation::*;
-    match op {
-        Create { .. } => "CREATE",
-        Transfer { .. } => "TRANSFER",
-        AddRelationship { .. } => "ADD_REL",
-        // …extend with all variants, keep ALLCAPS ASCII and stable.
-        _ => "CUSTOM",
-    }
-    .to_string()
-}
-
-/* -------------------------- Transitions / Results ------------------------- */
-
-/// Build a `StateTransitionProto` deterministically from a domain transition.
-/// Make sure the `balance_delta` list is sorted by token_id.
-#[allow(clippy::too_many_arguments)]
-pub fn make_state_transition_proto(
-    actor_id: &[u8],
-    counterparty_id: &[u8],
-    bilateral_chain_id: &str,
-    prev_hash: [u8; 32],
-    new_hash: [u8; 32],
-    state_number: u64,
-    operation: &Operation,
-    balance_delta: &[(String, i128)],
-    tx_dir: &str, // e.g. "send" | "recv" (stable ASCII)
-    signature: &[u8],
-) -> pb::StateTransitionProto {
-    let mut deltas = balance_delta.to_vec();
-    deltas.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let balance_delta = deltas
-        .into_iter()
-        .map(|(token_id, d)| pb::BalanceDeltaEntry {
-            token_id,
-            delta: Some(pb::S128 {
-                le: d.to_le_bytes().to_vec(),
-            }),
-        })
-        .collect();
-
-    pb::StateTransitionProto {
-        device_id: actor_id.to_vec(),
-        counterparty_id: counterparty_id.to_vec(),
-        bilateral_chain_id: bilateral_chain_id.to_string(),
-        prev_state_hash: prev_hash.to_vec(),
-        new_state_hash: new_hash.to_vec(),
-        state_number,
-        operation: canonical_operation_name(operation),
-        balance_delta,
-        signature: signature.to_vec(),
-        transaction_direction: tx_dir.to_string(),
     }
 }
 
@@ -820,5 +705,64 @@ mod bilateral_wire_tests {
         };
         assert_eq!(inner.session_id, vec![0x22u8; 16]);
         assert_eq!(inner.final_state_hash, vec![0xABu8; 32]);
+    }
+}
+
+#[cfg(test)]
+mod domain_hash_agreement {
+    //! INVERTED from a characterization of the core/SDK delimiter disagreement.
+    //!
+    //! These tests used to assert that the two layers hashed DIFFERENT bytes for
+    //! the same declared domain, because `dsm_sdk::wire::domain_hash_bytes`
+    //! trimmed a trailing NUL before delegating and core did not. The shim is
+    //! deleted and the one NUL-bearing registered tag was renamed, so the
+    //! property flips to agreement — which was always the goal state.
+    //!
+    //! Kept rather than deleted so the regression is named: if a second
+    //! normalizing helper appears, these fail.
+
+    use dsm::common::domain_tags::{TAG_DSM_CONTACT_ADD, TAG_DSM_DLV_OPEN};
+    use dsm::crypto::blake3::domain_hash_bytes;
+    use dsm::crypto::domain::TaggedHashDomain;
+
+    const BODY: &[u8] = b"characterization body";
+
+    /// The tag that used to diverge. There is now ONE implementation, so the
+    /// question "which layer computed this" no longer has an answer.
+    #[test]
+    fn the_formerly_divergent_tag_has_a_single_encoding() {
+        let via_helper = domain_hash_bytes(TAG_DSM_DLV_OPEN, BODY);
+
+        // The tag IS a TaggedHashDomain now — there is no &str to re-validate,
+        // which is itself the end state this test was written to anticipate.
+        let mut canonical = dsm::crypto::blake3::tagged_hasher(TAG_DSM_DLV_OPEN);
+        canonical.update(BODY);
+
+        assert_eq!(
+            via_helper,
+            *canonical.finalize().as_bytes(),
+            "the legacy helper and the canonical encoder disagree for \
+             TAG_DSM_DLV_OPEN"
+        );
+    }
+
+    /// Neither tag may be spelled with a delimiter any more — the type refuses
+    /// to represent one, which is what removed the divergence at its source.
+    #[test]
+    fn neither_tag_can_be_spelled_with_its_own_delimiter() {
+        for tag in [TAG_DSM_CONTACT_ADD, TAG_DSM_DLV_OPEN] {
+            let spelled = String::from_utf8_lossy(tag.source_bytes()).into_owned();
+            assert!(
+                TaggedHashDomain::try_new(spelled.as_bytes()).is_ok(),
+                "{spelled:?} must be representable"
+            );
+
+            let with_nul = format!("{spelled}\0");
+            assert!(
+                TaggedHashDomain::try_new(with_nul.as_bytes()).is_err(),
+                "{spelled:?} plus a hand-written NUL must be unrepresentable, not \
+                 silently trimmed back onto {tag:?}'s domain"
+            );
+        }
     }
 }

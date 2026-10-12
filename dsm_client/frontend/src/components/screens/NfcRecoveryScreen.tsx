@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+// NFC ring backup on the StateBoy frame: the backup status as Rust reports
+// it, first-time setup, arming a capsule, and writing it to the ring.
 
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import * as EventBridge from '../../dsm/EventBridge';
@@ -14,31 +16,28 @@ import {
   type NfcBackupStatus,
 } from '../../services/recovery/nfcRecoveryService';
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
-import './NfcRecoveryScreen.css';
+import { Notice, ScreenFrame, middleTruncate } from '../common/ScreenFrame';
+import { InfoTip } from '../common/InfoTip';
+import { copyText } from '../../utils/anchorDisplay';
 
 type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh' | 'writing';
+
+/** The backup status as Rust reported it, the failure of asking, or not asked yet. */
+type StatusRead = { status: NfcBackupStatus } | { error: string } | undefined;
 
 interface NfcRecoveryScreenProps {
   onNavigate?: (screen: string) => void;
 }
 
-function shortenValue(value: string, size = 20): string {
-  if (!value) return '--';
-  if (value === 'UNKNOWN') return value;
-  return value.length > size ? `${value.slice(0, size)}...` : value;
+function formatError(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return String(error);
 }
 
-const emptyStatus: NfcBackupStatus = {
-  enabled: false,
-  configured: false,
-  pendingCapsule: false,
-  capsuleCount: 0,
-  lastCapsuleIndex: 0,
-  autoWriteEnabled: false,
-};
-
 const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => {
-  const [status, setStatus] = useState<NfcBackupStatus>(emptyStatus);
+  // No status is shown until Rust has answered: a struct of defaults reads as
+  // "not set", the status of a device with no backup at all.
+  const [read, setRead] = useState<StatusRead>(undefined);
   const [preview, setPreview] = useState<CapsulePreview>(null);
   const [setupMode, setSetupMode] = useState<SetupMode>('idle');
   const [generatedMnemonic, setGeneratedMnemonic] = useState('');
@@ -47,10 +46,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
   const [statusMsg, setStatusMsg] = useState('');
   const mountedRef = useRef(true);
 
-  const formatError = useCallback((error: unknown): string => {
-    if (error instanceof Error && error.message) return error.message;
-    return String(error);
-  }, []);
+  const status = read && 'status' in read ? read.status : null;
 
   const refresh = useCallback(async () => {
     try {
@@ -59,13 +55,13 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
         getCapsulePreview(),
       ]);
       if (!mountedRef.current) return;
-      setStatus(nextStatus);
+      setRead({ status: nextStatus });
       setPreview(nextPreview);
     } catch (error: unknown) {
       if (!mountedRef.current) return;
-      setStatusMsg(`Recovery backup status failed: ${formatError(error)}`);
+      setRead({ error: formatError(error) });
     }
-  }, [formatError]);
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -135,11 +131,11 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
         setBusy(false);
       }
     },
-    [formatError, refresh],
+    [refresh],
   );
 
   const onToggleBackup = useCallback(async () => {
-    if (busy) return;
+    if (busy || !status) return;
 
     if (status.enabled) {
       setBusy(true);
@@ -158,7 +154,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
 
     setSetupMode(status.configured ? 'enable' : 'choose');
     setStatusMsg('');
-  }, [busy, formatError, refresh, status.configured, status.enabled]);
+  }, [busy, refresh, status]);
 
   const onGenerateMnemonic = useCallback(async () => {
     if (busy) return;
@@ -172,10 +168,10 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
     } finally {
       setBusy(false);
     }
-  }, [busy, formatError]);
+  }, [busy]);
 
   const onWriteNow = useCallback(async () => {
-    if (busy) return;
+    if (busy || !status) return;
     if (!status.enabled) {
       setStatusMsg('Enable NFC backup first.');
       return;
@@ -203,250 +199,211 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
     } finally {
       setBusy(false);
     }
-  }, [busy, formatError, refresh, status.enabled, status.pendingCapsule]);
+  }, [busy, refresh, status]);
 
-  const latestCapsuleLabel = status.capsuleCount > 0
+  const nfcUi = status ? getNfcBackupUiModel(status) : null;
+  const latestCapsuleLabel = status && status.capsuleCount > 0
     ? `#${status.lastCapsuleIndex}`
     : '--';
-  const nfcUi = getNfcBackupUiModel(status);
-  const writeButtonLabel = !status.enabled
-    ? 'WRITE LATEST CAPSULE'
+  const writeButtonLabel = !status || !status.enabled
+    ? 'Write latest capsule'
     : status.pendingCapsule
-      ? 'WRITE TO RING'
-      : 'REBUILD & WRITE';
+      ? 'Write to ring'
+      : 'Rebuild & write';
 
   return (
-    <div className="nfc-shell" role="main">
-      <div className="nfc-header">
-        <h2>NFC RING BACKUP</h2>
-      </div>
-
-      <div className="nfc-stage">
-        {/* Status dashboard card */}
-        <div className="nfc-card">
-          <div className="nfc-stat-grid">
-            <div className="nfc-stat-cell">
-              <div className="nfc-stat-val-sm">
-                {nfcUi.backupLabel}
-              </div>
-              <div className="nfc-stat-label">Backup</div>
+    <ScreenFrame
+      title="NFC Ring Backup"
+      onBack={() => onNavigate?.('settings')}
+      className="nfc-recovery-screen"
+      info={(
+        <InfoTip title="How it works">
+          <p>1. Enter or confirm your recovery mnemonic. 2. Arm a capsule. 3. Press write and hold the ring to the phone. A vibration means the write committed.</p>
+          <p>After a successful write the ring keeps that capsule; this phone re-arms only after the next accepted state change or a manual rebuild.</p>
+          <p>Rebuilding arms a fresh capsule in Rust. It does not write to the ring until you press the write action.</p>
+        </InfoTip>
+      )}
+      banner={statusMsg ? (
+        <Notice banner onClose={() => setStatusMsg('')}>{statusMsg}</Notice>
+      ) : null}
+    >
+      {/* Status dashboard: as Rust reported it, or why it could not */}
+      {read === undefined ? (
+        <div className="sb-empty">Reading the backup status{'…'}</div>
+      ) : 'error' in read ? (
+        <>
+          <Notice kind="error">Status not read: {read.error}</Notice>
+          <div className="sb-actions">
+            <button type="button" className="sb-btn sb-btn--primary" onClick={() => { setRead(undefined); void refresh(); }}>
+              Try Again
+            </button>
+          </div>
+        </>
+      ) : nfcUi && (
+        <section className="sb-card sb-card--dark" aria-label="Backup status">
+          <div className="sb-stats sb-stats--4">
+            <div className="sb-stats__cell">
+              <div className="sb-stats__val sb-stats__val--sm">{nfcUi.backupLabel}</div>
+              <div className="sb-stats__label">Backup</div>
             </div>
-            <div className="nfc-stat-cell">
-              <div className="nfc-stat-val-sm">{nfcUi.writeStateLabel}</div>
-              <div className="nfc-stat-label">Write State</div>
+            <div className="sb-stats__cell">
+              <div className="sb-stats__val sb-stats__val--sm">{nfcUi.writeStateLabel}</div>
+              <div className="sb-stats__label">Write</div>
             </div>
-            <div className="nfc-stat-cell">
-              <div className="nfc-stat-val">{latestCapsuleLabel}</div>
-              <div className="nfc-stat-label">Latest Capsule</div>
+            <div className="sb-stats__cell">
+              <div className="sb-stats__val">{latestCapsuleLabel}</div>
+              <div className="sb-stats__label">Capsule</div>
             </div>
-            <div className="nfc-stat-cell">
-              <div className="nfc-stat-val-sm">{nfcUi.nextActionLabel}</div>
-              <div className="nfc-stat-label">Next Step</div>
+            <div className="sb-stats__cell">
+              <div className="sb-stats__val sb-stats__val--sm">{nfcUi.nextActionLabel}</div>
+              <div className="sb-stats__label">Next</div>
             </div>
           </div>
+          <p className="sb-hint sb-hint--tight" style={{ marginTop: 8 }}>{nfcUi.detailSummary}</p>
+        </section>
+      )}
 
-          <div className="nfc-note">
-            {nfcUi.detailSummary}
+      {/* First-time setup: choose flow */}
+      {setupMode === 'choose' && (
+        <section className="sb-card">
+          <div className="sb-card__title">First-time setup</div>
+          <div style={{ display: 'grid', gap: 8 }}>
+            <button type="button" className="sb-btn sb-btn--primary sb-btn--block" onClick={onGenerateMnemonic} disabled={busy}>
+              Generate new mnemonic
+            </button>
+            <button type="button" className="sb-btn sb-btn--block" onClick={() => setSetupMode('enable')}>
+              Enter existing mnemonic
+            </button>
+            <button type="button" className="sb-btn sb-btn--ghost sb-btn--block sb-btn--small" onClick={() => setSetupMode('idle')}>
+              Cancel
+            </button>
           </div>
+        </section>
+      )}
+
+      {/* Generated mnemonic display */}
+      {setupMode === 'generate' && generatedMnemonic && (
+        <section className="sb-card sb-card--dark">
+          <div className="sb-card__title">Write these words down</div>
+          <p className="sb-hint">They are required to rebuild or recover. Nothing else can.</p>
+          <div className="sb-field">
+            <textarea
+              className="sb-input sb-input--mono"
+              aria-label="Generated mnemonic"
+              value={generatedMnemonic}
+              readOnly
+              rows={4}
+            />
+          </div>
+          <div className="sb-actions" style={{ margin: 0 }}>
+            <button
+              type="button"
+              className="sb-btn"
+              onClick={() => { void copyText(generatedMnemonic).then((ok) => setStatusMsg(ok ? 'Copied to clipboard.' : 'Could not copy. Write the words down.')); }}
+            >
+              Copy
+            </button>
+            <button
+              type="button"
+              className="sb-btn sb-btn--primary"
+              onClick={() => void submitMnemonic('enable', generatedMnemonic)}
+              disabled={busy}
+            >
+              {busy ? 'Arming…' : 'I saved it: arm backup'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Mnemonic input (enable or refresh) */}
+      {(setupMode === 'enable' || setupMode === 'refresh') && (
+        <section className="sb-card">
+          <div className="sb-card__title">
+            {setupMode === 'refresh' ? 'Rebuild the latest capsule' : 'Enter your mnemonic'}
+          </div>
+          <div className="sb-field">
+            <label htmlFor="nfc-mnemonic">Recovery mnemonic</label>
+            <textarea
+              id="nfc-mnemonic"
+              className="sb-input sb-input--mono"
+              value={mnemonicInput}
+              onChange={(e) => setMnemonicInput(e.target.value)}
+              placeholder="word1 word2 word3 ..."
+              rows={4}
+              spellCheck={false}
+            />
+          </div>
+          <div className="sb-actions" style={{ margin: 0 }}>
+            <button type="button" className="sb-btn" onClick={() => { setSetupMode('idle'); setMnemonicInput(''); }} disabled={busy}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="sb-btn sb-btn--primary"
+              onClick={() => void submitMnemonic(setupMode === 'refresh' ? 'refresh' : 'enable', mnemonicInput)}
+              disabled={busy || mnemonicInput.trim().split(/\s+/).length < 12}
+            >
+              {busy ? 'Working…' : setupMode === 'refresh' ? 'Rebuild capsule' : 'Enable backup'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Writing mode — "ready to write" prompt */}
+      {setupMode === 'writing' && (
+        <section className="sb-card sb-card--dark sb-card--hero" aria-live="polite">
+          <div className="sb-hero__label">Ready to write</div>
+          <div className="sb-hero__value" style={{ fontSize: 14 }}>Hold the ring to the back of the phone</div>
+          <div className="sb-hero__sub">A vibration means the write committed. Do not move the ring until then.</div>
+          <div className="sb-actions" style={{ marginBottom: 0 }}>
+            <button type="button" className="sb-btn sb-btn--block" onClick={() => { setSetupMode('idle'); setStatusMsg('Write cancelled.'); }}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Main actions — only when idle and the status is known */}
+      {setupMode === 'idle' && status && (
+        <div className="sb-actions">
+          <button type="button" className={`sb-btn${status.enabled ? '' : ' sb-btn--primary'}`} onClick={onToggleBackup} disabled={busy}>
+            {busy ? '…' : status.enabled ? 'Disable backup' : status.configured ? 'Re-enable' : 'Set up'}
+          </button>
+          {status.enabled && (
+            <button type="button" className="sb-btn sb-btn--primary" onClick={onWriteNow} disabled={busy}>
+              {writeButtonLabel}
+            </button>
+          )}
         </div>
+      )}
 
-        {/* First-time setup: choose flow */}
-        {setupMode === 'choose' && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">FIRST-TIME SETUP</span>
-            </div>
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={onGenerateMnemonic} disabled={busy}>
-                GENERATE NEW MNEMONIC
-              </button>
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={() => setSetupMode('enable')}
-              >
-                ENTER EXISTING MNEMONIC
-              </button>
-            </div>
+      {/* Local capsule snapshot — only when idle */}
+      {setupMode === 'idle' && preview && (
+        <section className="sb-card">
+          <div className="sb-card__title">Local capsule snapshot</div>
+          <div className="sb-kv">
+            <span className="sb-kv__k">Capsule</span>
+            <span className="sb-kv__v">#{preview.capsuleIndex}</span>
           </div>
-        )}
+          <div className="sb-kv">
+            <span className="sb-kv__k">Peers</span>
+            <span className="sb-kv__v">{preview.counterpartyCount}</span>
+          </div>
+          <div className="sb-kv">
+            <span className="sb-kv__k">SMT root</span>
+            <span className="sb-kv__v sb-kv__v--mono">{middleTruncate(preview.smtRoot || 'UNKNOWN', 10, 8)}</span>
+          </div>
+        </section>
+      )}
 
-        {/* Generated mnemonic display */}
-        {setupMode === 'generate' && generatedMnemonic && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">
-                WRITE THESE WORDS DOWN — REQUIRED TO REBUILD OR RECOVER
-              </span>
-            </div>
-            <div style={{ padding: '0 10px 8px' }}>
-              <textarea
-                className="nfc-input"
-                value={generatedMnemonic}
-                readOnly
-                rows={4}
-                style={{ marginTop: 8 }}
-              />
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={() => { void navigator.clipboard.writeText(generatedMnemonic); setStatusMsg('Copied to clipboard.'); }}
-              >
-                COPY TO CLIPBOARD
-              </button>
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={() => void submitMnemonic('enable', generatedMnemonic)}
-                disabled={busy}
-              >
-                {busy ? 'ARMING...' : 'I SAVED IT — ARM BACKUP'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Mnemonic input (enable or refresh) */}
-        {(setupMode === 'enable' || setupMode === 'refresh') && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">
-                {setupMode === 'refresh' ? 'REBUILD THE LATEST CAPSULE' : 'ENTER YOUR MNEMONIC'}
-              </span>
-            </div>
-            <div style={{ padding: '0 10px 8px' }}>
-              <textarea
-                className="nfc-input"
-                value={mnemonicInput}
-                onChange={(e) => setMnemonicInput(e.target.value)}
-                placeholder="word1 word2 word3 ..."
-                rows={4}
-                style={{ marginTop: 8 }}
-              />
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={() => void submitMnemonic(setupMode === 'refresh' ? 'refresh' : 'enable', mnemonicInput)}
-                disabled={busy || mnemonicInput.trim().split(/\s+/).length < 12}
-              >
-                {busy ? 'WORKING...' : setupMode === 'refresh' ? 'REBUILD CAPSULE' : 'ENABLE BACKUP'}
-              </button>
-            </div>
-            <div className="nfc-note">
-              Rebuilding arms a fresh capsule in Rust. It does not write to the ring until you press
-              the write action.
-            </div>
-          </div>
-        )}
-
-        {/* Writing mode — "ready to write" prompt */}
-        {setupMode === 'writing' && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label" style={{ fontSize: '12px' }}>
-                READY TO WRITE
-              </span>
-            </div>
-            <div className="nfc-note" style={{ fontSize: '11px', fontWeight: 700, textAlign: 'center', padding: '16px 10px' }}>
-              HOLD THE RING TO THE BACK OF THE PHONE.
-              <br />
-              <br />
-              A VIBRATION MEANS THE WRITE COMMITTED.
-              <br />
-              DO NOT MOVE THE RING UNTIL THEN.
-            </div>
-            <div className="nfc-actions">
-              <button
-                className="nfc-btn"
-                onClick={() => { setSetupMode('idle'); setStatusMsg('Write cancelled.'); }}
-              >
-                CANCEL
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Main action buttons card — only when idle */}
-        {setupMode === 'idle' && (
-          <div className="nfc-card">
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={onToggleBackup} disabled={busy}>
-                {busy ? '...' : status.enabled ? 'DISABLE BACKUP' : status.configured ? 'RE-ENABLE' : 'SET UP'}
-              </button>
-            </div>
-            {status.enabled && (
-              <div className="nfc-actions">
-                <button
-                  className="nfc-btn"
-                  onClick={onWriteNow}
-                  disabled={busy || !status.enabled}
-                >
-                  {writeButtonLabel}
-                </button>
-              </div>
-            )}
-            <div className="nfc-actions">
-              <button className="nfc-btn" onClick={() => onNavigate?.('recovery')}>
-                INSPECT OR RECOVER RING
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Local capsule snapshot — only when idle */}
-        {setupMode === 'idle' && preview && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">LOCAL CAPSULE SNAPSHOT</span>
-            </div>
-            <div className="nfc-stat-grid">
-              <div className="nfc-stat-cell">
-                <div className="nfc-stat-val">#{preview.capsuleIndex}</div>
-                <div className="nfc-stat-label">Capsule</div>
-              </div>
-              <div className="nfc-stat-cell">
-                <div className="nfc-stat-val">{preview.counterpartyCount}</div>
-                <div className="nfc-stat-label">Peers</div>
-              </div>
-            </div>
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">SMT Root</span>
-              <span className="nfc-info-val" style={{ fontFamily: 'monospace', fontSize: 11 }}>
-                {shortenValue(preview.smtRoot || 'UNKNOWN')}
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* How-it-works card — only when idle */}
-        {setupMode === 'idle' && (
-          <div className="nfc-card">
-            <div className="nfc-info-row">
-              <span className="nfc-info-label">HOW IT WORKS</span>
-            </div>
-            <div className="nfc-note">
-              1. Enter or confirm your recovery mnemonic. 2. Arm a capsule. 3. Press write and hold
-              the ring to the phone. A vibration means the write committed. After a successful write,
-              the ring keeps that capsule; this phone re-arms only after the next accepted state
-              change or a manual rebuild.
-            </div>
-          </div>
-        )}
-
-        {/* Status message */}
-        {statusMsg && (
-          <div className="nfc-card">
-            <div className="nfc-note nfc-note--strong">
-              {statusMsg}
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+      {setupMode === 'idle' && (
+        <div className="sb-actions">
+          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('recovery')}>
+            Inspect or recover a ring
+          </button>
+        </div>
+      )}
+    </ScreenFrame>
   );
 };
 

@@ -1,0 +1,399 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+//! Durable token registry and anchored policy store.
+//!
+//! Before this existed, a created token lived only in `RwLock<HashMap>`s: the
+//! metadata cache in `TokenSDK` and the policy map in `TokenPolicySystem`.
+//! Both are dropped on process exit, so after a restart the token's policy was
+//! gone, `resolve_policy_commit_strict` failed, the wallet showed the balance
+//! as `"?"`, and `dlv.create` — which resolves the pair's policy commit and
+//! fails closed — could not build a vault for it. A token that cannot survive
+//! a restart is not a token.
+//!
+//! Two tables with deliberately separate lifetimes:
+//!
+//! * `token_policies` — anchored policy bytes, keyed by their own content hash
+//!   (`BLAKE3(TAG_DSM_POLICY, policy_bytes)`). A policy can exist without a
+//!   token; the developer paste-raw-bytes path publishes one on its own. The
+//!   table is self-verifying: a row whose bytes do not hash to its key is
+//!   detectable with no external authority, which is what
+//!   [`load_policy_verified`] enforces on every read.
+//! * `token_registry` — tokens created on this device.
+//!
+//! **There is intentionally no circulating-supply column.** Circulating supply
+//! is derived from the canonical chain, never cached: a mutable counter would
+//! be a second authority, and a restored snapshot could disagree with the
+//! canonical history — enforcing a supply cap against the wrong number.
+
+use anyhow::{anyhow, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+
+use super::get_connection;
+
+/// A token as recorded at creation time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenRegistryRow {
+    pub token_id: String,
+    pub policy_commit: [u8; 32],
+    pub ticker: String,
+    pub alias: String,
+    pub decimals: u32,
+    /// The whole supply the policy fixes at creation (SoFi §51).
+    pub genesis_supply: u128,
+    /// The device the policy names as the token's creator (SoFi Amendment S8).
+    pub creator_device_id: [u8; 32],
+}
+
+/// A column that must hold exactly `N` bytes, or the row is refused.
+fn fixed<const N: usize>(r: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<[u8; N]> {
+    let bytes: Vec<u8> = r.get(index)?;
+    let len = bytes.len();
+    <[u8; N]>::try_from(bytes).map_err(|_| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::other(format!(
+                "token_registry column {index} holds {len} bytes, not {N}"
+            ))),
+        )
+    })
+}
+
+fn row_to_registry(r: &rusqlite::Row<'_>) -> rusqlite::Result<TokenRegistryRow> {
+    let decimals: i64 = r.get(4)?;
+    Ok(TokenRegistryRow {
+        token_id: r.get(0)?,
+        policy_commit: fixed::<32>(r, 1)?,
+        ticker: r.get(2)?,
+        alias: r.get(3)?,
+        decimals: u32::try_from(decimals).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Integer,
+                Box::new(e),
+            )
+        })?,
+        genesis_supply: u128::from_be_bytes(fixed::<16>(r, 5)?),
+        creator_device_id: fixed::<32>(r, 6)?,
+    })
+}
+
+const SELECT_COLS: &str =
+    "token_id, policy_commit, ticker, alias, decimals, genesis_supply, creator_device_id";
+
+// ── policies ────────────────────────────────────────────────────────────────
+
+/// Store anchored policy bytes under their content hash.
+///
+/// Takes the commit explicitly rather than recomputing it so the caller's
+/// derivation is the one recorded; [`load_policy_verified`] re-checks it on
+/// read, so a mismatch cannot go unnoticed.
+pub fn upsert_policy_with_conn(
+    conn: &Connection,
+    policy_commit: &[u8; 32],
+    policy_bytes: &[u8],
+) -> Result<()> {
+    require_policy_hashes_to(policy_commit, policy_bytes)?;
+    conn.execute(
+        "INSERT INTO token_policies(policy_commit, policy_bytes)
+         VALUES (?1, ?2)
+         ON CONFLICT(policy_commit) DO NOTHING",
+        params![policy_commit.as_slice(), policy_bytes],
+    )?;
+    Ok(())
+}
+
+pub fn upsert_policy(policy_commit: &[u8; 32], policy_bytes: &[u8]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    upsert_policy_with_conn(&conn, policy_commit, policy_bytes)
+}
+
+/// Policy bytes are the policy their commit names only if they hash to it.
+fn require_policy_hashes_to(policy_commit: &[u8; 32], policy_bytes: &[u8]) -> Result<()> {
+    let derived = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::common::domain_tags::TAG_DSM_POLICY,
+        policy_bytes,
+    );
+    if derived != *policy_commit {
+        return Err(anyhow!(
+            "policy bytes do not hash to the commit they are stored under"
+        ));
+    }
+    Ok(())
+}
+
+/// Load the policy stored under `policy_commit`, or `None` when none is.
+/// Stored bytes that do not hash to their commit are a corrupt table and an
+/// error — the anchor is the definition of the policy.
+pub fn load_policy_verified(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let bytes: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT policy_bytes FROM token_policies WHERE policy_commit = ?1",
+            params![policy_commit.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    require_policy_hashes_to(policy_commit, &bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Every stored policy, verified; a corrupt row is an error. Used to
+/// rehydrate the in-memory policy system at startup.
+pub fn all_policies() -> Result<Vec<([u8; 32], Vec<u8>)>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare("SELECT policy_commit, policy_bytes FROM token_policies")?;
+    let rows = stmt.query_map([], |r| {
+        let c: Vec<u8> = r.get(0)?;
+        let b: Vec<u8> = r.get(1)?;
+        Ok((c, b))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (c, b) = row?;
+        let commit: [u8; 32] = c
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow!("a stored policy commit is {} bytes, expected 32", c.len()))?;
+        require_policy_hashes_to(&commit, &b)?;
+        out.push((commit, b));
+    }
+    Ok(out)
+}
+
+// ── registry ────────────────────────────────────────────────────────────────
+
+/// Record a created token.
+///
+/// `PRIMARY KEY(token_id)` plus `UNIQUE(policy_commit)` and `UNIQUE(ticker)`
+/// mean a duplicate creation fails here. When this runs inside the creating
+/// advance's transaction, that failure rolls the whole advance back — which is
+/// what makes creation exactly-once against both the database and canonical
+/// state, rather than merely idempotent-looking.
+pub fn insert_token_with_conn(conn: &Connection, row: &TokenRegistryRow) -> Result<()> {
+    conn.execute(
+        "INSERT INTO token_registry(
+             token_id, policy_commit, ticker, alias, decimals, genesis_supply,
+             creator_device_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            row.token_id,
+            row.policy_commit.as_slice(),
+            row.ticker,
+            row.alias,
+            row.decimals as i64,
+            row.genesis_supply.to_be_bytes().to_vec(),
+            row.creator_device_id.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn insert_token(row: &TokenRegistryRow) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    insert_token_with_conn(&conn, row)
+}
+
+/// Drop a token's identity row and its anchored policy.
+///
+/// The CALLER is responsible for refusing when the token is still held —
+/// canonical state, not this table, knows the balance. This only removes the
+/// naming, which is exactly what makes a superseded ticker adoptable again.
+/// The policy is content-addressed, so it can always be re-fetched.
+pub fn delete_token(token_id: &str) -> Result<Option<TokenRegistryRow>> {
+    let Some(row) = get_token(token_id)? else {
+        return Ok(None);
+    };
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    conn.execute(
+        "DELETE FROM token_registry WHERE token_id = ?1",
+        params![row.token_id],
+    )?;
+    conn.execute(
+        "DELETE FROM token_policies WHERE policy_commit = ?1",
+        params![row.policy_commit.as_slice()],
+    )?;
+    Ok(Some(row))
+}
+
+pub fn get_token(token_id: &str) -> Result<Option<TokenRegistryRow>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            &format!("SELECT {SELECT_COLS} FROM token_registry WHERE token_id = ?1"),
+            params![token_id],
+            row_to_registry,
+        )
+        .optional()?)
+}
+
+/// Reverse lookup used by the balance projection: a 32-byte `policy_commit` is
+/// the canonical key for a balance, but the wallet needs the ticker to display
+/// it.
+pub fn get_token_by_policy_commit(policy_commit: &[u8; 32]) -> Result<Option<TokenRegistryRow>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            &format!("SELECT {SELECT_COLS} FROM token_registry WHERE policy_commit = ?1"),
+            params![policy_commit.as_slice()],
+            row_to_registry,
+        )
+        .optional()?)
+}
+
+pub fn get_token_by_ticker(ticker: &str) -> Result<Option<TokenRegistryRow>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    Ok(conn
+        .query_row(
+            &format!("SELECT {SELECT_COLS} FROM token_registry WHERE ticker = ?1"),
+            params![ticker],
+            row_to_registry,
+        )
+        .optional()?)
+}
+
+pub fn all_tokens() -> Result<Vec<TokenRegistryRow>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM token_registry ORDER BY rowid"
+    ))?;
+    let rows = stmt.query_map([], row_to_registry)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::client_db::reset_database_for_tests;
+
+    fn policy_bytes(tag: u8) -> Vec<u8> {
+        vec![tag; 48]
+    }
+
+    fn commit_of(bytes: &[u8]) -> [u8; 32] {
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, bytes)
+    }
+
+    fn row(tag: u8, ticker: &str) -> TokenRegistryRow {
+        let bytes = policy_bytes(tag);
+        TokenRegistryRow {
+            token_id: format!("TOKEN{tag}"),
+            policy_commit: commit_of(&bytes),
+            ticker: ticker.to_string(),
+            alias: "Test Token".into(),
+            decimals: 8,
+            genesis_supply: 1_000_000,
+            creator_device_id: [0xAA; 32],
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn policy_round_trips_and_survives_reopen() {
+        reset_database_for_tests();
+        let bytes = policy_bytes(0x11);
+        let commit = commit_of(&bytes);
+        upsert_policy(&commit, &bytes).unwrap();
+
+        assert_eq!(load_policy_verified(&commit).unwrap(), Some(bytes.clone()));
+        // Rehydration source must see it too.
+        let all = all_policies().unwrap();
+        assert!(all.iter().any(|(c, b)| *c == commit && *b == bytes));
+    }
+
+    /// The table is self-verifying: bytes that no longer hash to their key are
+    /// not that policy, and reading them is an error, never an absent policy.
+    #[test]
+    #[serial_test::serial]
+    fn tampered_policy_bytes_are_an_error() {
+        reset_database_for_tests();
+        let bytes = policy_bytes(0x22);
+        let commit = commit_of(&bytes);
+        upsert_policy(&commit, &bytes).unwrap();
+
+        // Corrupt the stored bytes behind the commit's back.
+        {
+            let binding = get_connection().unwrap();
+            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+            conn.execute(
+                "UPDATE token_policies SET policy_bytes = ?1 WHERE policy_commit = ?2",
+                params![vec![0xFFu8; 48], commit.as_slice()],
+            )
+            .unwrap();
+        }
+
+        assert!(
+            load_policy_verified(&commit).is_err(),
+            "bytes that do not hash to the commit are not that policy"
+        );
+        assert!(
+            all_policies().is_err(),
+            "rehydration must not resurrect a corrupt policy"
+        );
+        assert!(
+            upsert_policy(&commit, &[0xEEu8; 48]).is_err(),
+            "bytes that do not hash to the commit are refused on the way in"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn token_round_trips_by_id_commit_and_ticker() {
+        reset_database_for_tests();
+        let r = row(0x33, "AAA");
+        insert_token(&r).unwrap();
+
+        assert_eq!(get_token(&r.token_id).unwrap().as_ref(), Some(&r));
+        assert_eq!(
+            get_token_by_policy_commit(&r.policy_commit)
+                .unwrap()
+                .as_ref(),
+            Some(&r)
+        );
+        assert_eq!(get_token_by_ticker("AAA").unwrap().as_ref(), Some(&r));
+        assert_eq!(all_tokens().unwrap().len(), 1);
+    }
+
+    /// Duplicate identity must fail at the database, so that when the insert
+    /// runs inside the creating advance the whole advance rolls back.
+    #[test]
+    #[serial_test::serial]
+    fn duplicate_token_id_commit_or_ticker_is_rejected() {
+        reset_database_for_tests();
+        let first = row(0x44, "BBB");
+        insert_token(&first).unwrap();
+
+        assert!(insert_token(&first).is_err(), "same token_id");
+
+        let same_commit = TokenRegistryRow {
+            token_id: "OTHER".into(),
+            ticker: "CCC".into(),
+            ..first.clone()
+        };
+        assert!(insert_token(&same_commit).is_err(), "same policy_commit");
+
+        let same_ticker = TokenRegistryRow {
+            token_id: "OTHER2".into(),
+            policy_commit: commit_of(&policy_bytes(0x55)),
+            ..first.clone()
+        };
+        assert!(insert_token(&same_ticker).is_err(), "same ticker");
+    }
+}

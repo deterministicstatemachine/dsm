@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * to the Rust `system.createGenesisV2` handler. Rust derives `wallet_seed`, caches it in the
  * unlocked session, runs `create_genesis_v2`, installs the state, persists the public GenesisV2
  * record, and initializes the SDK context. There is NO C-DBRW, NO AntiCloneGate/silicon
- * enrollment, NO storage-node MPC, NO random genesis entropy, and NO persisted s0/Smaster.
+ * enrollment, NO random genesis entropy, and NO persisted s0/Smaster.
  * Anti-clone (offline bearer only) is the Boot Fenced Fused Anchor, never this path.
  *
  * Cold start ([bootstrapFromPrefs]) re-primes the persisted identity via `restore_identity_context`;
@@ -55,11 +55,7 @@ internal object BridgeIdentityHandler {
         } else {
             envelopeBytes
         }
-        return try {
-            Unified.isErrorEnvelope(rawEnvelope)
-        } catch (_: Throwable) {
-            0
-        }
+        return Unified.isErrorEnvelope(rawEnvelope)
     }
 
     /** Dispatch a router query through the native ingress boundary, returning the raw ok-bytes. */
@@ -172,18 +168,11 @@ internal object BridgeIdentityHandler {
         keyGenesisHash: String,
         keyGenesisEnvelope: String,
         mnemonic: String,
-        locale: String,
-        networkId: String,
     ): ByteArray {
-        if (mnemonic.trim().isEmpty()) {
-            Log.e(logTag, "createGenesisV2: mnemonic is required")
-            return ByteArray(0)
-        }
+        require(mnemonic.isNotBlank()) { "createGenesisV2: mnemonic is required" }
         return try {
             val req = WalletCreateGenesisV2Request.newBuilder()
                 .setMnemonic(mnemonic)
-                .setLocale(locale)
-                .setNetworkId(networkId)
                 .build()
             val arg = ArgPack.newBuilder()
                 .setCodec(Codec.CODEC_PROTO)
@@ -207,6 +196,10 @@ internal object BridgeIdentityHandler {
             // The Rust route already initialized the SDK context (wallet unlocked this session).
             sdkContextInitialized.set(true)
             Log.i(logTag, "createGenesisV2: identity persisted + SDK context initialized")
+            // The appliance has an identity now; advertising follows it.
+            com.dsm.wallet.ui.MainActivity.getActiveInstance()?.let { act ->
+                act.runOnUiThread { act.startBleForIdentity() }
+            }
             envelopeBytes
         } catch (t: Throwable) {
             Log.e(logTag, "createGenesisV2 failed", t)
@@ -218,10 +211,7 @@ internal object BridgeIdentityHandler {
                 keyGenesisEnvelope = keyGenesisEnvelope,
                 logTag = logTag,
             )
-            if (t is DsmNativeException) {
-                throw t
-            }
-            ByteArray(0)
+            throw t
         }
     }
 

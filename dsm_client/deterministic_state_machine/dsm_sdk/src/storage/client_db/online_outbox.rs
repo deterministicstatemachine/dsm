@@ -2,11 +2,10 @@
 //! Persisted sender-side online transition gating.
 
 use anyhow::{anyhow, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use super::types::PendingOnlineOutboxRecord;
-use crate::util::deterministic_time::tick;
 
 pub fn store_pending_online_outbox(
     counterparty_device_id: &[u8],
@@ -61,15 +60,9 @@ pub fn store_pending_online_outbox(
 
     conn.execute(
         "INSERT INTO pending_online_outbox (
-            counterparty_device_id, message_id, parent_tip, next_tip, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            counterparty_device_id,
-            message_id,
-            parent_tip,
-            next_tip,
-            tick() as i64,
-        ],
+            counterparty_device_id, message_id, parent_tip, next_tip
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![counterparty_device_id, message_id, parent_tip, next_tip,],
     )?;
 
     Ok(())
@@ -111,6 +104,53 @@ pub fn record_pending_online_transition(
     });
 
     let tx = conn.transaction()?;
+    record_pending_online_transition_with_conn(
+        &tx,
+        counterparty_device_id,
+        message_id,
+        parent_tip,
+        next_tip,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Same gate write, INSIDE a caller-owned transaction.
+///
+/// §16.6 defect zero: the gate must be committed together with the canonical
+/// advance, the proposal, the pending EK head, and the outbox row — one
+/// transaction, before anything is deliverable. This variant therefore takes
+/// `&Connection` (a `&Transaction` derefs to one) and never calls
+/// `get_connection()`: the advance already holds the single global connection
+/// mutex, so opening another here would deadlock.
+///
+/// Validation and semantics are identical to the self-opening wrapper above;
+/// only the transaction ownership differs.
+pub fn record_pending_online_transition_with_conn(
+    tx: &Connection,
+    counterparty_device_id: &[u8],
+    message_id: &str,
+    parent_tip: &[u8],
+    next_tip: &[u8],
+) -> Result<()> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid counterparty_device_id length"));
+    }
+    if parent_tip.len() != 32 {
+        return Err(anyhow!("Invalid parent_tip length"));
+    }
+    if next_tip.len() != 32 {
+        return Err(anyhow!("Invalid next_tip length"));
+    }
+    if message_id.trim().is_empty() {
+        return Err(anyhow!("message_id cannot be empty"));
+    }
+    if parent_tip == next_tip {
+        return Err(anyhow!(
+            "Pending online transition requires next_tip different from parent_tip"
+        ));
+    }
+
     let existing_gate: Option<(String, Vec<u8>, Vec<u8>)> = tx
         .query_row(
             "SELECT message_id, parent_tip, next_tip
@@ -151,7 +191,8 @@ pub fn record_pending_online_transition(
         }
     };
 
-    let stored_parent = current_chain_tip.unwrap_or_else(|| vec![0u8; 32]);
+    let stored_parent: Vec<u8> =
+        current_chain_tip.ok_or_else(|| anyhow!("the contact has no finalized chain tip"))?;
     if stored_parent.len() != 32 {
         return Err(anyhow!(
             "Stored finalized chain tip has invalid length {}",
@@ -193,19 +234,12 @@ pub fn record_pending_online_transition(
     if existing_gate.is_none() {
         tx.execute(
             "INSERT INTO pending_online_outbox (
-                counterparty_device_id, message_id, parent_tip, next_tip, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                counterparty_device_id,
-                message_id,
-                parent_tip,
-                next_tip,
-                tick() as i64,
-            ],
+                counterparty_device_id, message_id, parent_tip, next_tip
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![counterparty_device_id, message_id, parent_tip, next_tip,],
         )?;
     }
 
-    tx.commit()?;
     Ok(())
 }
 
@@ -223,7 +257,7 @@ pub fn get_pending_online_outbox(
     });
 
     let row = conn.query_row(
-        "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+        "SELECT counterparty_device_id, message_id, parent_tip, next_tip
            FROM pending_online_outbox
           WHERE counterparty_device_id = ?1",
         params![counterparty_device_id],
@@ -233,7 +267,6 @@ pub fn get_pending_online_outbox(
                 message_id: row.get(1)?,
                 parent_tip: row.get(2)?,
                 next_tip: row.get(3)?,
-                created_at: row.get::<_, i64>(4)? as u64,
             })
         },
     );
@@ -254,7 +287,7 @@ pub fn get_all_pending_online_outbox() -> Result<Vec<PendingOnlineOutboxRecord>>
     });
 
     let mut stmt = conn.prepare(
-        "SELECT counterparty_device_id, message_id, parent_tip, next_tip, created_at
+        "SELECT counterparty_device_id, message_id, parent_tip, next_tip
            FROM pending_online_outbox",
     )?;
 
@@ -264,7 +297,6 @@ pub fn get_all_pending_online_outbox() -> Result<Vec<PendingOnlineOutboxRecord>>
             message_id: row.get(1)?,
             parent_tip: row.get(2)?,
             next_tip: row.get(3)?,
-            created_at: row.get::<_, i64>(4)? as u64,
         })
     })?;
 
@@ -300,6 +332,159 @@ pub fn clear_pending_online_outbox(counterparty_device_id: &[u8]) -> Result<()> 
 /// concurrent online send.
 ///
 /// Returns `Ok(true)` if the exact row was deleted, `Ok(false)` if no match.
+/// Exact-match gate delete INSIDE a caller-owned transaction (§16.6 defect 1).
+pub fn clear_pending_online_outbox_if_matches_with_conn(
+    conn: &Connection,
+    counterparty_device_id: &[u8],
+    expected_parent_tip: &[u8],
+    expected_next_tip: &[u8],
+) -> Result<bool> {
+    if counterparty_device_id.len() != 32
+        || expected_parent_tip.len() != 32
+        || expected_next_tip.len() != 32
+    {
+        return Err(anyhow!("Invalid identifier length for gate clear"));
+    }
+    let rows = conn.execute(
+        "DELETE FROM pending_online_outbox WHERE counterparty_device_id = ?1 AND parent_tip = ?2 AND next_tip = ?3",
+        params![counterparty_device_id, expected_parent_tip, expected_next_tip],
+    )?;
+    Ok(rows > 0)
+}
+
+/// The §5.4 stale-gate decision. Total, so a caller cannot drop the answer.
+///
+/// This exists because the previous shape returned `Result<bool>` and the BLE
+/// handler consumed it with `if let Err(..)`. `Ok(false)` — "the row you read is
+/// no longer the row in the table" — read as success, and the handler went on to
+/// clear the in-memory modal lock and admit the offline transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StaleGateOutcome {
+    /// No gate row for this counterparty. Nothing blocks the offline transfer.
+    NoGate,
+    /// The gate was stale and its exact row was deleted. The in-memory lock may
+    /// be cleared.
+    Cleared,
+    /// A prior online transfer on the relationship is genuinely unresolved
+    /// (an unsettled or checkpoint-pending outbox row exists behind the gate).
+    StillPending,
+    /// The row changed between the read and the delete inside the transaction.
+    /// Unreachable while the read and the delete share one transaction, which is
+    /// the point — it is kept, and refuses, so that a future refactor which
+    /// splits them fails closed instead of silently admitting.
+    Raced,
+}
+
+impl StaleGateOutcome {
+    /// Whether the offline transfer may proceed. Only a gate that is absent or
+    /// provably cleared admits; every ambiguous answer refuses.
+    pub fn admits_offline(&self) -> bool {
+        matches!(self, StaleGateOutcome::NoGate | StaleGateOutcome::Cleared)
+    }
+}
+
+/// Read the gate, decide whether it is stale, and delete it — atomically.
+///
+/// The read, the staleness decision and the exact-match delete all run inside
+/// ONE transaction on ONE connection, so a concurrent online send cannot settle
+/// the old gate and arm a new one between them.
+///
+/// STALENESS UNDER THE FINALITY BARRIER. A gate is `StillPending` while ANY
+/// `sender_outbox` row for the relationship is unsettled or awaiting its
+/// finality checkpoint (`pending_submit`, `submitting`, `submitted`,
+/// `submission_uncertain`, `finalization_checkpoint_pending`): the send behind
+/// it has not yet been made final for the peer, and only the post-quorum
+/// checkpoint sweep may release it. The former "chain tip moved off the gate's
+/// parent ⇒ stale" rule is gone: after local finalization the projection tip
+/// sits at the gate's target by construction, so that rule called every
+/// legitimately-armed gate stale. A gate with NO such outbox row is an orphan
+/// (its send has already been released or never existed) and is deleted.
+///
+/// Tips are parsed strictly: a stored row whose `parent_tip` or `next_tip` is
+/// not exactly 32 bytes is an error, not a zero-filled default.
+pub fn clear_stale_pending_online_gate(counterparty_device_id: &[u8]) -> Result<StaleGateOutcome> {
+    if counterparty_device_id.len() != 32 {
+        return Err(anyhow!("Invalid counterparty_device_id length"));
+    }
+
+    let binding = get_connection()?;
+    let mut conn = binding.lock().unwrap_or_else(|poisoned| {
+        log::warn!("DB lock poisoned, recovering");
+        poisoned.into_inner()
+    });
+    let tx = conn.transaction()?;
+
+    let pending: Option<PendingOnlineOutboxRecord> = tx
+        .query_row(
+            "SELECT counterparty_device_id, message_id, parent_tip, next_tip
+               FROM pending_online_outbox
+              WHERE counterparty_device_id = ?1",
+            params![counterparty_device_id],
+            |row| {
+                Ok(PendingOnlineOutboxRecord {
+                    counterparty_device_id: row.get(0)?,
+                    message_id: row.get(1)?,
+                    parent_tip: row.get(2)?,
+                    next_tip: row.get(3)?,
+                })
+            },
+        )
+        .optional()?;
+
+    let Some(pending) = pending else {
+        return Ok(StaleGateOutcome::NoGate);
+    };
+
+    // Strict, like the HTTP sibling in handlers/bilateral_routes.rs.
+    let gate_parent: [u8; 32] = pending
+        .parent_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("persisted online gate has a malformed parent_tip"))?;
+    let gate_next: [u8; 32] = pending
+        .next_tip
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("persisted online gate has a malformed next_tip"))?;
+
+    // The send behind THIS gate: the outbox row frozen with the gate's own
+    // projection identity (one send in flight per relationship — the gate
+    // guarantees it — so this is "any unsettled row for the relationship").
+    let unsettled: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sender_outbox
+          WHERE projection_parent = ?1 AND projection_target = ?2
+            AND status IN (?3, ?4, ?5, ?6, ?7)",
+        params![
+            gate_parent.as_slice(),
+            gate_next.as_slice(),
+            super::sender_outbox::OUTBOX_PENDING_SUBMIT,
+            super::sender_outbox::OUTBOX_SUBMITTING,
+            super::sender_outbox::OUTBOX_SUBMITTED,
+            super::sender_outbox::OUTBOX_SUBMISSION_UNCERTAIN,
+            super::sender_outbox::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+        ],
+        |row| row.get(0),
+    )?;
+    if unsettled > 0 {
+        return Ok(StaleGateOutcome::StillPending);
+    }
+
+    let deleted = clear_pending_online_outbox_if_matches_with_conn(
+        &tx,
+        counterparty_device_id,
+        &gate_parent,
+        &gate_next,
+    )?;
+    if !deleted {
+        // Cannot happen inside this transaction — we read the row here. Refuse
+        // rather than assume; see StaleGateOutcome::Raced.
+        return Ok(StaleGateOutcome::Raced);
+    }
+
+    tx.commit()?;
+    Ok(StaleGateOutcome::Cleared)
+}
+
 pub fn clear_pending_online_outbox_if_matches(
     counterparty_device_id: &[u8],
     expected_parent_tip: &[u8],
@@ -420,7 +605,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }

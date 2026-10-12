@@ -5,7 +5,6 @@
 //! Shared helpers for JNI entry points: protobuf request/response
 //! marshalling and error-to-`OpResult` conversion.
 
-use crate::generated as pb;
 use jni::objects::{JByteArray, JString};
 use jni::JNIEnv;
 use prost::Message;
@@ -73,22 +72,6 @@ where
         Err(panic) => {
             log::error!("{}: panic captured: {}", name, panic_message(&panic));
             default
-        }
-    }
-}
-
-/// Wrap a closure that returns `jni::sys::jlong` with panic::catch_unwind.
-/// On panic, returns 0.
-#[inline]
-pub fn jni_catch_unwind_jlong<F>(name: &str, f: F) -> jni::sys::jlong
-where
-    F: FnOnce() -> jni::sys::jlong + std::panic::UnwindSafe,
-{
-    match std::panic::catch_unwind(f) {
-        Ok(result) => result,
-        Err(panic) => {
-            log::error!("{}: panic captured: {}", name, panic_message(&panic));
-            0
         }
     }
 }
@@ -180,48 +163,4 @@ pub fn error_byte_array<'a>(env: &'a JNIEnv<'a>, code: u32, msg: &str) -> JByteA
             empty_byte_array_or_empty(env)
         }
     }
-}
-
-#[inline]
-pub fn error_transport_bytes(code: u32, msg: &str) -> Vec<u8> {
-    let env_pb = crate::jni::helpers::encode_error_transport(code, msg);
-    let mut out = Vec::new();
-    if let Err(e) = env_pb.encode(&mut out) {
-        log::error!("failed to encode error envelope: {}", e);
-        Vec::new()
-    } else {
-        out
-    }
-}
-
-#[inline]
-pub fn ensure_bootstrap() {
-    // This function is intentionally side-effect free: it does NOT bootstrap.
-    // Platform layers (Android/Kotlin) may choose to bootstrap from prefs before
-    // calling JNI exports, but the Rust SDK itself stays deterministic and inert here.
-    if !crate::is_sdk_context_initialized() {
-        log::info!("ensure_bootstrap: SDK context not initialized (bootstrap is platform-managed)");
-    }
-    // Genesis v2 has no persisted device secret to re-check here: SDK readiness is structural
-    // (context initialized + identity present). Operations that need the wallet seed (signing,
-    // EK/coins, at-rest decryption) re-derive it from the unlocked wallet and fail closed
-    // individually when the wallet is locked.
-}
-
-pub fn fetch_transport_headers_bytes() -> Result<Vec<u8>, String> {
-    crate::get_transport_headers_v3_bytes().map_err(|e| format!("headers fetch failed: {e}"))
-}
-
-pub fn build_transport_headers_pack() -> Result<Vec<u8>, String> {
-    let body = fetch_transport_headers_bytes()
-        .map_err(|e| format!("fetch_transport_headers_bytes failed: {}", e))?;
-    let pack = pb::ResultPack {
-        schema_hash: Some(pb::Hash32 { v: vec![0u8; 32] }),
-        codec: pb::Codec::Proto as i32,
-        body,
-    };
-    let mut out = Vec::new();
-    pack.encode(&mut out)
-        .map_err(|e| format!("ResultPack encode failed: {}", e))?;
-    Ok(out)
 }

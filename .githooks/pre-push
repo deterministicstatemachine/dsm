@@ -32,13 +32,17 @@ fi
 pass "make lint"
 
 # ---------------------------------------------------------------------------
-# 2. Tests
+# 2. Production safety checks
+#
+# The board (every test, --release, serial) runs in CI on the pushed commit;
+# it takes longer than a push hook can. What runs here is the set of gates
+# that read the tree: the same ones CI runs before the board.
 # ---------------------------------------------------------------------------
-info "Running test suite..."
-if ! cargo test --locked --workspace --features local-dev 2>&1; then
-  fail "cargo test failed — fix failing tests before pushing"
+info "Running production safety checks..."
+if ! bash ci/production_safety_checks.sh 2>&1; then
+  fail "production safety checks failed — fix them before pushing"
 fi
-pass "cargo test"
+pass "production safety checks"
 
 # ---------------------------------------------------------------------------
 # 3. Codegen enforcement

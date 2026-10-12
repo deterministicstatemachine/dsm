@@ -2,54 +2,38 @@
 
 //! # B0x SDK — Unilateral Envelope Transport
 //!
-//! Deterministic, protobuf-only client for the b0x spool protocol.
-//! Handles device registration (including 409 Already Registered recovery),
-//! Envelope v3 submission, retrieval, and acknowledgement against the
-//! storage-node `/api/v2/b0x/*` endpoints.
+//! Deterministic, protobuf-only client for the b0x spool: Envelope v3
+//! submission to, and retrieval from, the storage-node `/api/v2/b0x/*`
+//! endpoints. A node's spool is append-only and checks no writer or reader
+//! (DSM Amendment A3): there is no registration, token or acknowledgement,
+//! and what this device consumed is its own state (`client_db::b0x_consumed`).
 //!
-//! Authorization uses `DSM <device_id>:<token>` headers with Base32
-//! Crockford device identifiers. No wall clocks, no JSON, no hex in
-//! protocol logic.
+//! Every payload is sealed end to end (DSM Amendment A7): a node holds an
+//! outer envelope carrying only the message id and a `SealedEnvelopeV1` — an
+//! ML-KEM encapsulation to the recipient's Kyber key and the inner envelope
+//! sealed under its shared secret (`dsm::crypto::spool_seal`). A message is
+//! sealed once and its bytes are kept by message id (`client_db::b0x_sealed`),
+//! so every member and every retry gets the same bytes. No wall clocks, no
+//! JSON, no hex in protocol logic.
 
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 
 use crate::sdk::core_sdk::CoreSDK;
-use crate::util::{deterministic_time as dt, text_id};
+use crate::util::text_id;
 // blake3 usage: all calls go through dsm::crypto::blake3::dsm_domain_hasher() for domain separation
 
-use log::{info, warn, debug};
+use log::{info, warn};
 use prost::Message;
-use rand::rngs::OsRng;
 use reqwest;
 use std::collections::HashMap;
 use std::sync::Arc;
-use dsm::utils::time::Duration;
-use std::sync::atomic::{AtomicU64, Ordering};
-
-// ...existing code...
-
-fn looks_like_dotted_decimal_bytes(s: &str) -> bool {
-    // Very small heuristic: 32 dot-separated u8-ish segments.
-    // This is only for diagnostics; do NOT make protocol decisions based on this.
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 32 {
-        return false;
-    }
-    parts.iter().all(|p| p.parse::<u8>().is_ok())
-}
 
 fn base32_decodes_to_32_bytes(s: &str) -> bool {
     match crate::util::text_id::decode_base32_crockford(s) {
         Some(b) => b.len() == 32,
         None => false,
     }
-}
-
-fn is_canonical_auth_device_id(device_id_b32: &str) -> bool {
-    // Protocol invariant: Authorization device_id must be base32 decoding to exactly 32 bytes.
-    // Reject dotted-decimal ("N.N.N..." 32 segments) and anything malformed.
-    base32_decodes_to_32_bytes(device_id_b32) && !looks_like_dotted_decimal_bytes(device_id_b32)
 }
 
 /// Validate the canonical rotated b0x routing key.
@@ -88,32 +72,163 @@ fn decode_base32_32(label: &str, value: &str) -> Result<[u8; 32], DsmError> {
     Ok(out)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AckStatusSummary {
-    Acked,
-    NotAcked,
-    Unavailable,
+fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
+    DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
 }
 
-fn summarize_ack_status(
-    acked_count: usize,
-    quorum: usize,
-    seen_unacked: bool,
-    saw_authoritative_status: bool,
-) -> AckStatusSummary {
-    if acked_count >= quorum {
-        return AckStatusSummary::Acked;
+fn message_id_bytes(
+    message_id_b32: &str,
+) -> Result<[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN], DsmError> {
+    text_id::decode_base32_crockford(message_id_b32)
+        .and_then(|raw| <[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN]>::try_from(raw).ok())
+        .ok_or_else(|| {
+            DsmError::invalid_parameter(format!(
+                "spool message id {message_id_b32} is not base32 of {} bytes",
+                dsm::crypto::spool_seal::MESSAGE_ID_LEN
+            ))
+        })
+}
+
+/// The recipient's Kyber key, as its contact holds it: the key its verified
+/// directory entry carries (`sdk::device_directory`), signed by its AK.
+fn recipient_kyber_key(recipient_device: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+    let contact = crate::storage::client_db::get_contact_by_device_id(recipient_device)
+        .map_err(|e| storage_err("recipient contact", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation("the recipient is not a contact: nothing to seal for")
+        })?;
+    if contact.kyber_public_key.len() != dsm::crypto::kyber::public_key_bytes() {
+        return Err(DsmError::invalid_operation(
+            "the recipient's Kyber key is not in hand yet: its directory entry has not been \
+             read into the contact",
+        ));
     }
-    if seen_unacked {
-        return AckStatusSummary::NotAcked;
+    Ok(contact.kyber_public_key)
+}
+
+/// Seal `inner` — the exact bytes of an inner envelope — for
+/// `recipient_device` under `message_id_b32` (DSM Amendment A7), and keep the
+/// sealed bytes: an outer Envelope v3 carrying only the message id and a
+/// `SealedEnvelopeV1` — a fresh ML-KEM encapsulation to the recipient's Kyber
+/// key and the inner bytes sealed under its shared secret. A message id is
+/// sealed once: a later call returns the bytes kept by the first
+/// (`client_db::b0x_sealed`).
+pub(crate) fn seal_for(
+    recipient_device: &[u8; 32],
+    message_id_b32: &str,
+    inner: &[u8],
+) -> Result<Vec<u8>, DsmError> {
+    if let Some(kept) = crate::storage::client_db::b0x_sealed::get_sealed(message_id_b32)
+        .map_err(|e| storage_err("sealed spool bytes", e))?
+    {
+        return Ok(kept);
     }
-    if acked_count > 0 {
-        return AckStatusSummary::Unavailable;
+    let message_id = message_id_bytes(message_id_b32)?;
+    let (shared_secret, kem_ciphertext) =
+        dsm::crypto::kyber::kyber_encapsulate(&recipient_kyber_key(recipient_device)?)?;
+    let ciphertext = dsm::crypto::spool_seal::seal(&shared_secret, &message_id, inner)
+        .map_err(|e| DsmError::crypto(format!("spool seal: {e}"), None::<std::io::Error>))?;
+    let outer = dsm::types::proto::Envelope {
+        version: 3,
+        headers: None,
+        message_id: message_id.to_vec(),
+        payload: Some(dsm::types::proto::envelope::Payload::Sealed(
+            dsm::types::proto::SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            },
+        )),
+    };
+    let bytes = outer.encode_to_vec();
+    crate::storage::client_db::b0x_sealed::put_sealed(message_id_b32, &bytes)
+        .map_err(|e| storage_err("keep sealed spool bytes", e))?;
+    Ok(bytes)
+}
+
+/// The sealed bytes kept for `message_id_b32` when its envelope was frozen
+/// ([`seal_for`]).
+pub(crate) fn kept_seal(message_id_b32: &str) -> Result<Vec<u8>, DsmError> {
+    crate::storage::client_db::b0x_sealed::get_sealed(message_id_b32)
+        .map_err(|e| storage_err("sealed spool bytes", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "spool message {message_id_b32} was frozen without its seal"
+            ))
+        })
+}
+
+/// This device's Kyber secret, re-derived from `Smaster` (KS1 `ml_kem_seed`, keyed by Smaster) —
+/// the key pair whose public half its directory entry publishes
+/// (`kyber_identity::local_kyber_public_key`). Never kept.
+pub(crate) fn local_kyber_secret() -> Result<Vec<u8>, DsmError> {
+    let smaster = crate::init::current_smaster()?;
+    let (.., secret) = dsm::crypto::kyber::generate_kyber_identity_keypair(&smaster)?;
+    Ok(secret)
+}
+
+/// Open a spooled envelope (DSM Amendment A7): the inner envelope its seal
+/// carries, once this device's Kyber secret decapsulates the encapsulation and
+/// the seal opens under the outer message id. The inner envelope carries the
+/// same message id; anything else did not come sealed for this device.
+/// Every error here is about the envelope, never about this device: what
+/// does not open with the device's Kyber secret (`kyber_secret`, from
+/// [`local_kyber_secret`]) never will.
+pub(crate) fn open_sealed(
+    kyber_secret: &[u8],
+    env: &dsm::types::proto::Envelope,
+) -> Result<dsm::types::proto::Envelope, DsmError> {
+    let Some(dsm::types::proto::envelope::Payload::Sealed(sealed)) = &env.payload else {
+        return Err(DsmError::invalid_operation("the envelope is not sealed"));
+    };
+    let message_id =
+        <[u8; dsm::crypto::spool_seal::MESSAGE_ID_LEN]>::try_from(env.message_id.as_slice())
+            .map_err(|_| {
+                DsmError::invalid_operation("the sealed envelope's message id is malformed")
+            })?;
+    let shared_secret =
+        dsm::crypto::kyber::kyber_decapsulate(kyber_secret, &sealed.kem_ciphertext)?;
+    let inner_bytes =
+        dsm::crypto::spool_seal::open(&shared_secret, &message_id, &sealed.ciphertext)
+            .map_err(|e| DsmError::invalid_operation(format!("spool seal: {e}")))?;
+    let inner = dsm::envelope::from_canonical_bytes(&inner_bytes)
+        .map_err(|e| DsmError::invalid_operation(format!("sealed inner envelope: {e}")))?;
+    if inner.message_id != env.message_id {
+        return Err(DsmError::invalid_operation(
+            "the sealed inner envelope carries another message id",
+        ));
     }
-    if saw_authoritative_status {
-        return AckStatusSummary::NotAcked;
+    Ok(inner)
+}
+
+/// Why a member did not take a submit.
+#[derive(Debug)]
+enum Refused {
+    /// It refused for good: a retry would be refused the same way.
+    Final(DsmError),
+    /// It did not answer, or answered with a status a retry may clear.
+    Retryable(String),
+}
+
+impl Refused {
+    /// The error a submit to `endpoint` that made `attempts` attempts ends
+    /// with.
+    fn into_error(self, endpoint: &str, attempts: u32) -> DsmError {
+        match self {
+            Refused::Final(e) => e,
+            Refused::Retryable(why) => DsmError::network(
+                format!("submit via {endpoint} failed after {attempts} attempts: {why}"),
+                None::<std::io::Error>,
+            ),
+        }
     }
-    AckStatusSummary::Unavailable
+}
+
+/// Which submits to one member a delivery's ask makes.
+enum Attempts {
+    /// The first.
+    First,
+    /// The retries after a first that failed retryably, with why it failed.
+    Retries(String),
 }
 
 /// Retry configuration for b0x operations
@@ -136,31 +251,156 @@ impl Default for B0xRetryConfig {
     }
 }
 
+/// What `deliver_frozen_logical_send` delivered — every id that reached quorum.
+/// Returned only on complete success; there is no partial variant on purpose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenSendDelivery {
+    /// The transfer envelope's deterministic submission id (== node message id).
+    pub transfer_id: String,
+    /// Every frozen outbound artifact's submission id, in delivery order.
+    pub artifact_ids: Vec<String>,
+}
+
+/// What one spool read covered (storage spec §8 item 2; owner ruling
+/// 2026-09-25). A delivery lands on exactly `quorum_k` of the set's members
+/// ([`B0xSDK::delivery_quorum`]), so a read that reached at least
+/// `members - quorum_k + 1` of them met every delivered message at least once:
+/// `Complete`. Fewer is `Partial`: what was read is real, and a message held
+/// only by members that did not answer is still there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpoolCoverage {
+    Complete,
+    Partial { responded: usize, needed: usize },
+}
+
+impl SpoolCoverage {
+    /// The coverage of a read `responded` members answered, of `members`,
+    /// when every delivery lands on `quorum_k` of them.
+    pub fn of(responded: usize, members: usize, quorum_k: usize) -> Self {
+        let needed = members.saturating_sub(quorum_k) + 1;
+        if responded >= needed {
+            Self::Complete
+        } else {
+            Self::Partial { responded, needed }
+        }
+    }
+}
+
+/// One spool read: what it found, how many members answered, and what that
+/// covers.
+#[derive(Debug)]
+pub struct RetrievalOutcome {
+    pub entries: Vec<B0xEntry>,
+    pub responded: usize,
+    pub members: usize,
+    pub coverage: SpoolCoverage,
+    /// The copies that opened for this device and are none of the payloads a
+    /// device spools (a transfer, its evidence, a countersign, a finality
+    /// certificate, a cert resync), by `envelope_merge_key`. They never will
+    /// be; the consumer may pass them over.
+    pub unknown: Vec<String>,
+    /// Whether some member's read stopped at its page cap rather than at the
+    /// end of its spool: there is more on this route than this read reached.
+    pub more: bool,
+}
+
+/// Where a read of one member's spool starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadFrom {
+    /// The read position, below which everything is consumed. A read from it
+    /// leaves no cursor: a preview reads here and moves nothing a sync reads.
+    Position,
+    /// Where `storage.sync`'s previous read of this member stopped at its page
+    /// cap, or the read position when it did not. The read leaves its own
+    /// cursor for the next (pre-audit item 11).
+    Resume,
+}
+
+/// How fetching one member's pages ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PagesEnded {
+    /// The member's spool ended (or a page named no position a spool can hold).
+    End,
+    /// The page cap was reached with the spool going on.
+    PageCap,
+    /// The member did not answer, or answered with what is not a page.
+    Failed,
+}
+
+/// One member's pages, fetched before any is read.
+struct MemberPages {
+    pages: Vec<dsm::types::proto::SequencedBatchEnvelope>,
+    ended: PagesEnded,
+}
+
+/// Where one member's read stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadStop {
+    /// At the end of the member's spool: nothing more there.
+    End,
+    /// At the page cap: the spool goes on past where this read stopped.
+    PageCap,
+}
+
+/// What kind of request a polled entry carries. Nothing about its content is
+/// read here: a transfer's terms are read from its signed operation, after the
+/// ingestion boundary has verified it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum B0xEntryKind {
+    /// An online transfer request.
+    Transfer,
+    /// A request whose body is not what its invoke method names, and why.
+    /// Listed as unverified; nothing is taken from it.
+    Unrecognized { reason: String },
+}
+
+/// One polled request, as the spool showed it. Transport data only: the id the
+/// spool holds it by, the address it was read at, the device its header names
+/// (a hint for which stored key to try), and the request bytes.
 #[derive(Debug, Clone)]
 pub struct B0xEntry {
+    /// The message id the spool holds this copy by (Base32).
     pub transaction_id: String,
+    /// The inbox address this copy was read at.
     pub inbox_key: String,
-    // Textual fields are base32-encoded (Crockford: 0-9,A-H,J-K,M-N,P-T,V-Z with substitutions)
+    /// The device the envelope header names (Base32). Unsigned: the ingestion
+    /// boundary only uses it to choose which stored key to verify against.
     pub sender_device_id: String,
-    pub sender_genesis_hash: String,
-    pub sender_chain_tip: String,
-    /// Next chain tip (base32) anchoring this online transition.
-    /// If unknown at decode time, fall back to sender_chain_tip.
-    pub next_chain_tip: String,
-    pub recipient_device_id: String,
-    pub transaction: Operation,
-    pub signature: Vec<u8>,
-    /// Sender's SPHINCS+ public key (optional, embedded in envelope evidence)
-    pub sender_signing_public_key: Vec<u8>,
-    pub tick: u64,
-    pub ttl_seconds: u64,
-    // Envelope v3 signing context (AF-2 remediation)
-    pub seq: u64,
-    /// Canonical ReceiptCommit bytes (§4.2) — SMT proofs for this transition.
-    pub receipt_commit: Vec<u8>,
-    /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
-    /// Receiver uses these directly for SPHINCS+ verification and tip computation.
-    pub canonical_operation_bytes: Vec<u8>,
+    pub kind: B0xEntryKind,
+    /// A transfer's `OnlineTransferRequest` bytes, exactly as decoded — the
+    /// boundary verifies SIG A over the canonical operation inside them. Empty
+    /// for a message.
+    pub transfer_wire_bytes: Vec<u8>,
+    /// This copy's `envelope_merge_key`: its message id and content digest.
+    /// A copy passed over is recorded under it, never under the id alone.
+    pub copy_key: String,
+}
+
+/// One A-side evidence artifact, with the message id the spool holds it by —
+/// the id its consumed marker is written with — and its `envelope_merge_key`,
+/// the key it is passed over by.
+#[derive(Debug, Clone)]
+pub struct EvidenceArtifact {
+    pub message_id: String,
+    pub copy_key: String,
+    pub evidence: dsm::types::proto::ReceiptEvidenceA,
+}
+
+/// The product of pure envelope construction: the exact canonical wire bytes
+/// plus the identity they were built under. Carries no network capability.
+/// The storage node's per-envelope admission cap
+/// (`dsm_storage_node/src/api/transport/b0x.rs`). Duplicated deliberately: the
+/// client must not silently track a change to the node's limit, and building an
+/// artifact that exceeds it produces a 413 that no retry can ever clear.
+pub(crate) const MAX_B0X_ENVELOPE_BYTES: usize = 128 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct BuiltEnvelope {
+    /// EXACT bytes. The durable outbox freezes these; a retry replays them
+    /// verbatim rather than re-running construction.
+    pub bytes: Vec<u8>,
+    pub message_id_b32: String,
+    pub to_device_id_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -171,17 +411,6 @@ pub struct B0xSubmissionParams {
     pub transaction: Operation,
     pub signature: Vec<u8>,
     pub sender_genesis_hash: String, // base32 of 32-byte genesis
-    pub sender_chain_tip: String,    // base32 of 32-byte tip
-    /// Sender's SPHINCS+ public key (optional, embedded for verification hints)
-    pub sender_signing_public_key: Vec<u8>,
-    /// TTL is ignored in the clockless protocol; keep for wire compatibility, always 0.
-    pub ttl_seconds: u64,
-    /// Sequence number for canonical signing (AF-2 remediation)
-    pub seq: u64,
-    /// Next chain tip bytes (32) anchoring this online transition (optional).
-    pub next_chain_tip: Option<Vec<u8>>,
-    /// Canonical ReceiptCommit bytes (§4.2) — SMT proofs for this transition.
-    pub receipt_commit: Vec<u8>,
     /// Tip-scoped b0x routing address (§16.4).
     /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
@@ -189,234 +418,21 @@ pub struct B0xSubmissionParams {
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
-}
-
-impl B0xSubmissionParams {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-
-        // recipient_device_id
-        let r_dev = self.recipient_device_id.as_bytes();
-        bytes.extend_from_slice(&(r_dev.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(r_dev);
-
-        // recipient_genesis_hash
-        let r_gen = self.recipient_genesis_hash.as_bytes();
-        bytes.extend_from_slice(&(r_gen.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(r_gen);
-
-        // transaction
-        let tx_bytes = crate::storage::client_db::serialize_operation(&self.transaction);
-        bytes.extend_from_slice(&(tx_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&tx_bytes);
-
-        // signature
-        bytes.extend_from_slice(&(self.signature.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.signature);
-
-        // sender_signing_public_key (optional)
-        bytes.extend_from_slice(&(self.sender_signing_public_key.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.sender_signing_public_key);
-
-        // sender_genesis_hash
-        let s_gen = self.sender_genesis_hash.as_bytes();
-        bytes.extend_from_slice(&(s_gen.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(s_gen);
-
-        // sender_chain_tip
-        let s_tip = self.sender_chain_tip.as_bytes();
-        bytes.extend_from_slice(&(s_tip.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(s_tip);
-
-        // ttl_seconds
-        bytes.extend_from_slice(&self.ttl_seconds.to_le_bytes());
-
-        // seq (AF-2 canonical signing)
-        bytes.extend_from_slice(&self.seq.to_le_bytes());
-
-        // next_chain_tip (optional; length-prefixed)
-        if let Some(ref next_tip) = self.next_chain_tip {
-            bytes.extend_from_slice(&(next_tip.len() as u32).to_le_bytes());
-            bytes.extend_from_slice(next_tip);
-        } else {
-            bytes.extend_from_slice(&0u32.to_le_bytes());
-        }
-
-        // receipt_commit (§4.2 ReceiptCommit canonical protobuf) — length-prefixed
-        bytes.extend_from_slice(&(self.receipt_commit.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&self.receipt_commit);
-
-        // routing_address (§16.4 tip-scoped b0x address) — length-prefixed
-        let addr_bytes = self.routing_address.as_bytes();
-        bytes.extend_from_slice(&(addr_bytes.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(addr_bytes);
-
-        bytes
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
-        let mut cursor = 0;
-
-        let read_string = |cursor: &mut usize| -> Result<String, DsmError> {
-            if *cursor + 4 > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let len = u32::from_le_bytes(
-                bytes[*cursor..*cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            *cursor += 4;
-            if *cursor + len > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let s = String::from_utf8(bytes[*cursor..*cursor + len].to_vec()).map_err(|e| {
-                DsmError::internal(format!("utf8 error: {}", e), None::<std::io::Error>)
-            })?;
-            *cursor += len;
-            Ok(s)
-        };
-
-        let read_bytes = |cursor: &mut usize| -> Result<Vec<u8>, DsmError> {
-            if *cursor + 4 > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let len = u32::from_le_bytes(
-                bytes[*cursor..*cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            *cursor += 4;
-            if *cursor + len > bytes.len() {
-                return Err(DsmError::internal(
-                    "buffer underflow",
-                    None::<std::io::Error>,
-                ));
-            }
-            let v = bytes[*cursor..*cursor + len].to_vec();
-            *cursor += len;
-            Ok(v)
-        };
-
-        let recipient_device_id = read_string(&mut cursor)?;
-        let recipient_genesis_hash = read_string(&mut cursor)?;
-
-        let tx_bytes = read_bytes(&mut cursor)?;
-        let transaction =
-            crate::storage::client_db::deserialize_operation(&tx_bytes).map_err(|e| {
-                DsmError::internal(
-                    format!("deserialize op failed: {}", e),
-                    None::<std::io::Error>,
-                )
-            })?;
-
-        let signature = read_bytes(&mut cursor)?;
-
-        let sender_signing_public_key = read_bytes(&mut cursor)?;
-        let sender_genesis_hash = read_string(&mut cursor)?;
-        let sender_chain_tip = read_string(&mut cursor)?;
-
-        if cursor + 8 > bytes.len() {
-            return Err(DsmError::internal(
-                "buffer underflow",
-                None::<std::io::Error>,
-            ));
-        }
-        let ttl_seconds = u64::from_le_bytes(
-            bytes[cursor..cursor + 8]
-                .try_into()
-                .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-        );
-        cursor += 8;
-
-        if cursor + 8 > bytes.len() {
-            return Err(DsmError::internal(
-                "buffer underflow",
-                None::<std::io::Error>,
-            ));
-        }
-        let seq = u64::from_le_bytes(
-            bytes[cursor..cursor + 8]
-                .try_into()
-                .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-        );
-
-        cursor += 8;
-
-        let next_chain_tip = if cursor + 4 <= bytes.len() {
-            let len = u32::from_le_bytes(
-                bytes[cursor..cursor + 4]
-                    .try_into()
-                    .map_err(|_| DsmError::internal("buffer underflow", None::<std::io::Error>))?,
-            ) as usize;
-            cursor += 4;
-            if len > 0 {
-                if cursor + len > bytes.len() {
-                    return Err(DsmError::internal(
-                        "buffer underflow",
-                        None::<std::io::Error>,
-                    ));
-                }
-                let v = bytes[cursor..cursor + len].to_vec();
-                cursor += len;
-                Some(v)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // receipt_commit (§4.2)
-        let receipt_commit = read_bytes(&mut cursor)?;
-
-        // routing_address (§16.4) — mandatory
-        let routing_address = read_string(&mut cursor)?;
-        if routing_address.is_empty() {
-            return Err(DsmError::internal(
-                "routing_address cannot be empty",
-                None::<std::io::Error>,
-            ));
-        }
-
-        Ok(Self {
-            recipient_device_id,
-            recipient_genesis_hash,
-            transaction,
-            signature,
-            sender_signing_public_key,
-            sender_genesis_hash,
-            sender_chain_tip,
-            ttl_seconds,
-            seq,
-            next_chain_tip,
-            receipt_commit,
-            routing_address,
-            canonical_operation_bytes: Vec::new(),
-        })
-    }
-}
-
-fn anchor_tick_from_tip(tip: &[u8]) -> u64 {
-    if tip.len() != 32 {
-        return 0;
-    }
-    let mut hasher =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ANCHOR_TICK);
-    hasher.update(tip);
-    let h = hasher.finalize();
-    let mut out = [0u8; 8];
-    out.copy_from_slice(&h.as_bytes()[..8]);
-    u64::from_le_bytes(out)
+    /// §16.6 defect zero: the DETERMINISTIC submission id, derived from the
+    /// receipt commitment (`sender_outbox::derive_submission_id`), so it is
+    /// known BEFORE the send is committed locally and is identical on every
+    /// retry. Storage nodes enforce `UNIQUE(message_id)` with
+    /// `ON CONFLICT DO NOTHING`, so a resend collapses onto the same spool row
+    /// instead of spawning duplicates.
+    pub submission_id: String,
+    /// Sender economic locators (3.5b): OUTPUTS of the sender's built
+    /// admission — the admitted position and THE debit mutation index of the
+    /// exact write set. Untrusted locators on the wire, never authority.
+    pub sender_economic_position: u64,
+    pub sender_debit_mutation_index: u32,
+    /// The canonical bytes of the terms `transaction` commits to. They ride
+    /// inside the sealed request and nowhere public (pre-audit item 4).
+    pub transfer_terms: Vec<u8>,
 }
 
 pub struct B0xSDK {
@@ -424,78 +440,268 @@ pub struct B0xSDK {
     pub(crate) device_id: String,
     core_sdk: Arc<CoreSDK>,
     pub(crate) storage_node_endpoints: Vec<String>,
-    http_client: reqwest::Client,
-    pub(crate) request_timeout: Duration,
-    pub(crate) max_retries: usize,
-    pub(crate) retry_delay: Duration,
+    /// One client per endpoint, each bound to the member the canonical set
+    /// names there: it accepts only that member's certificate.
+    member_clients: HashMap<String, reqwest::Client>,
     circuit_breaker: CircuitBreaker,
     salt_genesis: [u8; 32],
     salt_device: [u8; 32],
-    /// Per-endpoint tokens (tokens are node-specific). Persisted in client_db as well.
-    tokens_by_endpoint: tokio::sync::RwLock<HashMap<String, String>>, // (endpoint|genesis|device) -> token
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
+    /// ADR 0003 B-side countersign deltas decoded during the most recent
+    /// retrieve. Buffered rather than returned so the retrieve signature (5 call
+    /// sites) stays stable; drained by the sender-finalization path via
+    /// [`Self::take_countersign_deltas`].
+    pending_countersign_deltas: Vec<CountersignDelta>,
+    /// Finality certificates (`relationship.finalized.v1`) decoded by the most
+    /// recent retrieve, drained by `take_relationship_finalized`.
+    pending_relationship_finalized: Vec<RelationshipFinalizedMessage>,
+    /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
+    /// drained by [`Self::take_evidence_artifacts`].
+    pending_evidence_artifacts: Vec<EvidenceArtifact>,
+    /// Cert-resync control messages decoded on retrieve: (method, framed body).
+    pending_cert_resync: Vec<(String, Vec<u8>)>,
 }
 
-static MSG_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+/// Explicit invoke method that marks an ADR 0003 A-side evidence artifact. The
+/// evidence half is structurally distinct from both forward transfers and
+/// replies — discriminated by this exact string, NEVER trial-decoded. The producer (`build_evidence_envelope`) and this
+/// consumer key off this one constant so they cannot drift apart.
+pub(crate) const RECEIPT_EVIDENCE_A_METHOD: &str = "receipt.evidence.a";
 
-/// A persisted token can only be trusted if it was stored for the *same* canonical
-/// device_id string that we will place into `Authorization: DSM <device_id>:<token>`.
-///
-/// If we see any evidence that the current `AppState` contains a non-canonical dotted-decimal
-/// textual id ("N.N.N..."), we must *not* adopt cached tokens, because they will
-/// guarantee 401 loops on v2 retrieve/ack.
-fn app_state_device_id_is_canonical_base32() -> bool {
-    match crate::sdk::app_state::AppState::get_device_id() {
-        Some(b) if b.len() == 32 => {
-            let b32 = crate::util::text_id::encode_base32_crockford(&b);
-            base32_decodes_to_32_bytes(&b32)
-        }
-        _ => false,
-    }
+/// Explicit invoke method that marks an ADR 0003 B-side countersign DELTA — the
+/// return leg. Same discipline: discriminated by this string alone, never
+/// trial-decoded, one constant shared by producer and consumer.
+pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
+
+/// Explicit invoke method of a `RelationshipFinalizedV1` finality certificate
+/// (finality barrier). Same discipline: discriminated by this string alone.
+pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
+
+/// One finality certificate as it came off the wire: the node message id it
+/// is ACKed under and the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipFinalizedMessage {
+    pub message_id: String,
+    pub body: Vec<u8>,
 }
 
+/// One B-side countersign delta as it came off the wire, kept whole so the
+/// sender can retain the exact envelope it finalized on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountersignDelta {
+    /// Node message id (Base32 Crockford) — the deterministic reply id.
+    pub message_id: String,
+    /// The whole envelope, re-encoded; what the sender persists as its
+    /// `countersign_b` artifact once the delta verifies.
+    pub envelope_bytes: Vec<u8>,
+    /// `ArgPack.body`: the `ReceiptCountersignB` wire bytes, unvalidated.
+    pub body: Vec<u8>,
+}
+
+/// Members whose last request failed. A failed member stays failed until a
+/// request to it succeeds; callers ask healthy members first and failed ones
+/// last, so a failed member is still reachable. No clock decides recovery.
 #[derive(Clone)]
 struct CircuitBreaker {
-    failed_nodes: Arc<tokio::sync::RwLock<HashMap<String, u64>>>, // ticks
-    failure_threshold: Duration,
+    failed_nodes: Arc<tokio::sync::RwLock<std::collections::HashSet<String>>>,
 }
 
 impl CircuitBreaker {
     fn new() -> Self {
         Self {
-            failed_nodes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            // Clockless: ticks-only threshold. The numeric magnitude is policy (not wall-clock).
-            failure_threshold: Duration::from_ticks(300),
+            failed_nodes: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         }
     }
     async fn is_node_healthy(&self, endpoint: &str) -> bool {
-        let failed = self.failed_nodes.read().await;
-        if let Some(&t) = failed.get(endpoint) {
-            let now = dt::peek() as i64;
-            // Healthy again once the failure threshold window has elapsed.
-            // NOTE: previous logic was inverted and would keep nodes unhealthy forever.
-            (now - t as i64) as u64 >= self.failure_threshold.as_secs()
-        } else {
-            true
-        }
+        !self.failed_nodes.read().await.contains(endpoint)
     }
     async fn mark_node_failed(&self, endpoint: &str) {
-        self.failed_nodes
-            .write()
-            .await
-            .insert(endpoint.to_string(), dt::peek());
+        self.failed_nodes.write().await.insert(endpoint.to_string());
         warn!("CircuitBreaker: marked failed {}", endpoint);
     }
     async fn mark_node_healthy(&self, endpoint: &str) {
-        if self.failed_nodes.write().await.remove(endpoint).is_some() {
+        if self.failed_nodes.write().await.remove(endpoint) {
             info!("CircuitBreaker: {} back to healthy", endpoint);
         }
     }
 }
 
+/// Spool message id for an acceptance reply: 16 opaque bytes derived from the
+/// transition's own commitment (never wall-clock), stable across reposts so
+/// the recipient's replay check recognizes a redelivery (impact-table row
+/// B5).
+pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) -> Vec<u8> {
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-reply-message-id"));
+    h.update(commitment);
+    h.update(sender_projection_tip);
+    h.finalize().as_bytes()[..16].to_vec()
+}
+
+/// Cross-endpoint merge key for a polled envelope: `(message_id, CONTENT digest)`,
+/// deliberately NOT `message_id` alone.
+///
+/// Identical replicas of one message still collapse to a single entry, so the
+/// honest case is unchanged. Two copies that DISAGREE under one message id are
+/// both surfaced, and the consumer decides which (if either) verifies.
+///
+/// Keying on `message_id` alone made the merge first-responder-wins: whichever
+/// endpoint answered first durably shadowed every other copy of that message.
+/// These ids are DETERMINISTIC (see [`reply_message_id`]), so the shadowing
+/// repeated identically on every poll — a single replica serving a tampered copy
+/// could suppress the honest copies indefinitely, and no amount of retrying
+/// would ever surface a good one. Recovering from a bad acceptance artifact is
+/// meaningless if a correct replacement can never be seen.
+pub(crate) fn envelope_merge_key(env: &dsm::types::proto::Envelope) -> String {
+    let mut h =
+        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-envelope-content"));
+    h.update(&env.encode_to_vec());
+    format!(
+        "{}:{}",
+        text_id::encode_base32_crockford(&env.message_id),
+        text_id::encode_base32_crockford(&h.finalize().as_bytes()[..8]),
+    )
+}
+
+/// Transport-local spool id for a cert-resync message, from method + route + a
+/// digest of the body. IMPACT-TABLE ROW B6, same defect and same extraction
+/// reason as [`reply_message_id`].
+pub(crate) fn certresync_message_id(method: &str, recipient_tip: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/b0x-certresync-message-id"
+    ));
+    h.update(method.as_bytes());
+    h.update(recipient_tip);
+    h.update(body);
+    h.finalize().as_bytes()[..16].to_vec()
+}
+
+/// Where `storage.sync` last read each member's spool at each address to its
+/// end, in this process: `(address, endpoint)` to the position after the last
+/// entry seen. A wait on that spool ([`wait_on_member`]) wakes for what lands
+/// from there. Kept in memory only: a process that has not yet read a spool
+/// to its end waits from its read position, and its first sync records the
+/// end.
+static SPOOL_ENDS: once_cell::sync::Lazy<std::sync::Mutex<HashMap<(String, String), u64>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// The spool ends. A writer that panicked left at worst one stale end, and a
+/// stale end only wakes a wait early.
+fn spool_ends() -> std::sync::MutexGuard<'static, HashMap<(String, String), u64>> {
+    match SPOOL_ENDS.lock() {
+        Ok(ends) => ends,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn record_spool_end(address: &str, endpoint: &str, end: u64) {
+    spool_ends().insert((address.to_string(), endpoint.to_string()), end);
+}
+
+/// Where a sync last read the spool at `address` on `endpoint` to its end,
+/// in this process.
+pub(crate) fn spool_end(address: &str, endpoint: &str) -> Option<u64> {
+    spool_ends()
+        .get(&(address.to_string(), endpoint.to_string()))
+        .copied()
+}
+
+/// How long a member holds a wait before answering that nothing landed: the
+/// deployed node's bound (`dsm_storage_node::api::transport::b0x::MAX_WAIT`).
+pub(crate) const MEMBER_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// How much longer than the member's bound a wait request may take: the
+/// round trip, and a member slow to answer at the end of its bound. A member
+/// that has not answered by then did not answer.
+const WAIT_TRANSPORT_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a member answered a wait on this device's spools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WaitAnswer {
+    /// These spools hold an entry at or after their mark.
+    Ready(Vec<String>),
+    /// Nothing landed while the member held the wait (`204`).
+    Quiet,
+    /// The member does not hold waits: a node that does not serve them yet
+    /// (`404`), or one holding as many as it can (`503`).
+    NotHeld(reqwest::StatusCode),
+}
+
+/// Hold a wait on `marks` (spool address, position) at the member at
+/// `endpoint` until it answers (storage spec §8, long-poll): at once when an
+/// entry is past its mark, when one lands, or `204` after its bound. Reads
+/// nothing and moves nothing: what landed is read by the next sync.
+pub(crate) async fn wait_on_member(
+    client: &reqwest::Client,
+    endpoint: &str,
+    marks: &[(String, u64)],
+) -> Result<WaitAnswer, DsmError> {
+    let request = dsm::types::proto::B0xWaitRequest {
+        marks: marks
+            .iter()
+            .map(|(address, from_seq)| dsm::types::proto::B0xWaitMark {
+                address: address.clone(),
+                from_seq: *from_seq,
+            })
+            .collect(),
+    };
+    let url = format!("{}/api/v2/b0x/wait", endpoint.trim_end_matches('/'));
+    let resp = client
+        .post(&url)
+        .header("Content-Type", "application/protobuf")
+        .header("Accept", "application/protobuf")
+        .timeout(MEMBER_WAIT_BOUND + WAIT_TRANSPORT_SLACK)
+        .body(request.encode_to_vec())
+        .send()
+        .await
+        .map_err(|e| {
+            DsmError::network(
+                format!("b0x wait at {endpoint}: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(WaitAnswer::Quiet);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+    {
+        return Ok(WaitAnswer::NotHeld(status));
+    }
+    if status != reqwest::StatusCode::OK {
+        return Err(DsmError::network(
+            format!("b0x wait at {endpoint} answered HTTP {status}"),
+            None::<std::io::Error>,
+        ));
+    }
+    let bytes = resp.bytes().await.map_err(|e| {
+        DsmError::network(
+            format!("b0x wait answer from {endpoint}: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    let answer = dsm::types::proto::B0xWaitResponse::decode(bytes.as_ref()).map_err(|e| {
+        DsmError::network(
+            format!("b0x wait answer from {endpoint} does not decode: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    if answer.ready.is_empty() {
+        return Err(DsmError::network(
+            format!("b0x wait at {endpoint} answered 200 naming no spool"),
+            None::<std::io::Error>,
+        ));
+    }
+    Ok(WaitAnswer::Ready(answer.ready))
+}
+
 impl B0xSDK {
-    fn hash_b0x_component(domain_tag: &str, input: &[u8]) -> [u8; 32] {
+    fn hash_b0x_component(
+        domain_tag: dsm::crypto::domain::TaggedHashDomain<'_>,
+        input: &[u8],
+    ) -> [u8; 32] {
         let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(domain_tag);
         hasher.update(input);
         *hasher.finalize().as_bytes()
@@ -513,8 +719,11 @@ impl B0xSDK {
         // secret). genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
         // gives per-device, domain-separated salts. (A future §16.4 hardening can fold the secret
         // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
-        let tag_str = std::str::from_utf8(domain_tag).unwrap_or("DSM/b0x-salt");
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag_str);
+        // Runtime domain: validated at construction, falling back to a fixed
+        // static domain rather than silently normalizing a malformed one.
+        let tag = dsm::crypto::domain::TaggedHashDomain::try_new(domain_tag)
+            .unwrap_or(dsm::tagged_domain!(b"DSM/b0x-salt"));
+        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag);
         // Augment with public genesis material for domain separation when storage is available.
         if crate::storage_utils::get_storage_base_dir().is_some() {
             if let Some(genesis) = crate::sdk::app_state::AppState::get_genesis_hash() {
@@ -525,12 +734,20 @@ impl B0xSDK {
         *hasher.finalize().as_bytes()
     }
 
-    /// Compose the current auth binding components: (genesis_b32, device_id, cache_key)
-    async fn auth_binding_key(&self, endpoint: &str) -> Result<(String, String, String), DsmError> {
-        let genesis_bytes = self.core_sdk.local_genesis_hash().await?;
-        let genesis_b32 = crate::util::text_id::encode_base32_crockford(&genesis_bytes);
-        let cache_key = format!("{}|{}|{}", endpoint, genesis_b32, self.device_id);
-        Ok((genesis_b32, self.device_id.clone(), cache_key))
+    /// The delivery quorum this SDK fans out to.
+    pub fn delivery_quorum(&self) -> usize {
+        self.quorum_k
+    }
+
+    /// The client for the member at `endpoint`, which accepts only that
+    /// member's certificate.
+    fn client_for(&self, endpoint: &str) -> Result<&reqwest::Client, DsmError> {
+        self.member_clients.get(endpoint).ok_or_else(|| {
+            DsmError::network(
+                format!("{endpoint} is not a member endpoint of this inbox"),
+                None::<std::io::Error>,
+            )
+        })
     }
 
     pub fn new(
@@ -556,36 +773,74 @@ impl B0xSDK {
                 None::<std::io::Error>,
             ));
         }
-        if !is_canonical_auth_device_id(&device_id_b32) {
+        if !base32_decodes_to_32_bytes(&device_id_b32) {
             return Err(DsmError::internal(
-                "B0xSDK::new: device_id is not canonical base32(32) for Authorization",
+                "B0xSDK::new: device_id is not canonical base32(32)",
                 None::<std::io::Error>,
             ));
         }
 
-        // Clockless: do not set wall-clock request timeouts here.
-        // Cancellation/limits are owned by the caller task lifetime.
-        let http_client = crate::sdk::storage_node_sdk::build_ca_aware_client();
+        // Each endpoint is a member of the canonical set, reached with a
+        // client that accepts only that member's certificate. An endpoint the
+        // set does not name has no member to verify, and is refused.
+        let canonical =
+            crate::sdk::storage_set::canonical_set(dsm::economic::register::BETA_NETWORK_ID)?;
+        let mut member_clients = HashMap::with_capacity(storage_endpoints.len());
+        for endpoint in &storage_endpoints {
+            let member = canonical
+                .members()
+                .iter()
+                .find(|m| m.endpoint.trim_end_matches('/') == endpoint.trim_end_matches('/'))
+                .ok_or_else(|| {
+                    DsmError::network(
+                        format!(
+                            "B0xSDK::new: {endpoint} is not an endpoint of the canonical \
+                             storage set"
+                        ),
+                        None::<std::io::Error>,
+                    )
+                })?;
+            member_clients.insert(
+                endpoint.clone(),
+                crate::sdk::storage_node_sdk::member_client(&member.member_id, endpoint)?,
+            );
+        }
+
+        // The delivery fan-out stops at K acknowledging members. K is the
+        // register quorum of the network this device is built for — resolved
+        // from the pinned profile, never a literal beside it. A literal `3`
+        // used to live here; it agreed with the 5/3 pin by coincidence and
+        // silently diverged from the 3/2 one (#867). No profile, no fan-out:
+        // a device that cannot resolve its register has nothing to deliver to.
+        let quorum_k = crate::storage::client_db::publication::quorum_for(
+            dsm::economic::register::resolve_root_register_profile(
+                dsm::economic::register::BETA_NETWORK_ID,
+            )
+            .map_err(|e| {
+                DsmError::internal(
+                    format!("B0xSDK::new: root register profile unresolved: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
+            .members
+            .len(),
+        ) as usize;
 
         let sdk = Self {
             device_id: device_id_b32,
             core_sdk,
             storage_node_endpoints: storage_endpoints,
-            http_client,
-            // Clockless: deterministic tick budget marker only; not used to enforce wall-clock.
-            request_timeout: Duration::from_ticks(0),
-            max_retries: 3,
-            // Clockless: do not sleep between retries. Keep as metadata only.
-            retry_delay: Duration::from_ticks(0),
+            member_clients,
             circuit_breaker: CircuitBreaker::new(),
             salt_genesis: Self::derive_salt(b"DSM/b0x-salt-G", &decoded),
             salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
-            tokens_by_endpoint: tokio::sync::RwLock::new(HashMap::new()), // (endpoint|genesis|device) -> token
-            quorum_k: 3,
+            quorum_k,
+            pending_countersign_deltas: Vec::new(),
+            pending_relationship_finalized: Vec::new(),
+            pending_evidence_artifacts: Vec::new(),
+            pending_cert_resync: Vec::new(),
         };
 
-        // Token loading is now lazy - happens on first use via ensure_token()
-        // This avoids blocking in the constructor and works in both sync and async contexts
         Ok(sdk)
     }
 
@@ -608,9 +863,9 @@ impl B0xSDK {
                 "genesis/device/tip must be 32 bytes",
             ));
         }
-        let h_g = Self::hash_b0x_component("DSM/b0x-G", genesis);
-        let h_d = Self::hash_b0x_component("DSM/b0x-D", device);
-        let h_t = Self::hash_b0x_component("DSM/b0x-T", tip);
+        let h_g = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), genesis);
+        let h_d = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), device);
+        let h_t = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
@@ -764,452 +1019,683 @@ impl B0xSDK {
     // Device registration / token management
     // ------------------------------------------------------------------------
 
-    /// Attempt to load persisted tokens into memory map for all configured endpoints.
-    async fn hydrate_tokens_from_disk(&self) {
-        let mut map = self.tokens_by_endpoint.write().await;
+    // ------------------------------------------------------------------------
+    // §16.6 reply window (Envelope v3 over HTTP)
+    // ------------------------------------------------------------------------
 
-        // Root-cause guard: if the local identity binding has changed (device_id/genesis),
-        // purge persisted tokens so we never attempt to use stale tokens that will 401.
-        // This is intentionally best-effort; failure here should not prevent startup.
-        let genesis_b32 = match self.core_sdk.local_genesis_hash().await {
-            Ok(gen_bytes) => crate::util::text_id::encode_base32_crockford(&gen_bytes),
-            Err(e) => {
-                warn!("🔐 hydrate_tokens_from_disk: unable to load genesis hash: {e}");
-                return;
-            }
+    /// Decode a §16.6 acceptance artifact from a spooled envelope, or `None` if
+    /// this envelope is not one.
+    ///
+    /// Discrimination is on the EXPLICIT invoke method name, so a forward
+    /// transfer can never be mistaken for a reply (and vice versa) — the "no
+    /// trial-decode" rule holds even though both ride UniversalTx.
+    ///
+    /// Returns the raw `ArgPack.body`; nothing here is validated or trusted.
+    /// The strict wire codec and the overlay onto the sender's OWN retained
+    /// A-side bytes happen in the finalization path.
+    pub(crate) fn decode_countersign_b(env: &dsm::types::proto::Envelope) -> Option<Vec<u8>> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
         };
-        if let Err(e) = crate::storage::client_db::ensure_auth_tokens_bound_to_identity(
-            self.device_id.trim(),
-            genesis_b32.trim(),
-        ) {
-            warn!("🔐 ensure_auth_tokens_bound_to_identity failed: {e}");
-        }
-
-        // If the running build is somehow feeding a dotted-decimal device id into the
-        // auth layer, adopting any persisted tokens will *only* create an infinite 401 loop.
-        // In that case, force a clean re-registration instead.
-        if !app_state_device_id_is_canonical_base32() {
-            warn!(
-                "🔐 Refusing to hydrate persisted auth tokens: AppState device_id is not canonical base32(32). Will re-register instead."
-            );
-            map.clear();
-            return;
-        }
-
-        for ep in &self.storage_node_endpoints {
-            let cache_key = format!("{}|{}|{}", ep, genesis_b32, self.device_id);
-
-            if let Ok(Some(tok)) =
-                crate::storage::client_db::get_auth_token(ep, &self.device_id, &genesis_b32)
-            {
-                map.insert(cache_key.clone(), tok);
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RECEIPT_COUNTERSIGN_B_METHOD {
                 continue;
             }
+            let Some(args) = &invoke.args else { continue };
+            return Some(args.body.clone());
         }
+        None
     }
 
-    pub async fn purge_persisted_token_for_endpoint(&self, endpoint: &str) {
-        if let Ok((genesis_b32, device_id_b32, cache_key)) = self.auth_binding_key(endpoint).await {
-            // Drop in-memory token
-            self.tokens_by_endpoint.write().await.remove(&cache_key);
-            // Drop persisted token for this (endpoint, device_id, genesis)
-            let _ = crate::storage::client_db::delete_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-            );
+    /// Decode an ADR 0003 A-side evidence half from a spooled envelope,
+    /// discriminated on the EXPLICIT invoke method — never trial-decoded.
+    ///
+    /// Returning the artifact does NOT mean it is trustworthy: nothing here is
+    /// verified. `full_receipt_bytes` are unauthenticated wire data until the
+    /// ingestion boundary verifies the receipt's signature chain, which is why
+    /// this is a pure decoder with no side effects.
+    pub(crate) fn decode_receipt_evidence_a(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<dsm::types::proto::ReceiptEvidenceA> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RECEIPT_EVIDENCE_A_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            match dsm::types::proto::ReceiptEvidenceA::decode(&*args.body) {
+                Ok(a) => return Some(a),
+                Err(e) => warn!("receipt evidence: artifact decode failed: {e}"),
+            }
         }
+        None
     }
 
-    /// Ensure a token exists for the specific endpoint. Attempts persisted load, then single-endpoint register.
-    pub async fn ensure_token_for_endpoint(&self, endpoint: &str) -> Result<String, DsmError> {
-        // If device_id is non-canonical, nothing we do with tokens can succeed.
-        if !is_canonical_auth_device_id(self.device_id.trim()) {
-            return Err(DsmError::unauthorized(
-                "ensure_token: device_id is not canonical base32(32) for Authorization",
+    /// Drain the ADR 0003 evidence halves decoded by the most recent retrieve.
+    ///
+    /// Draining rather than cloning mirrors [`Self::take_countersign_deltas`]; the
+    /// durable idempotency lives downstream: staging keys a receipt by its
+    /// commitment, so every copy of one receipt is one staged object.
+    pub fn take_evidence_artifacts(&mut self) -> Vec<EvidenceArtifact> {
+        std::mem::take(&mut self.pending_evidence_artifacts)
+    }
+
+    /// Drain the B-side countersign deltas decoded by the most recent retrieve.
+    /// Draining (rather than cloning) keeps a re-poll from re-finalizing the
+    /// same reply within one process lifetime; durable idempotency is enforced
+    /// downstream by the proposal's terminal status.
+    pub fn take_countersign_deltas(&mut self) -> Vec<CountersignDelta> {
+        std::mem::take(&mut self.pending_countersign_deltas)
+    }
+
+    /// Decode a finality certificate from a spooled envelope, discriminated on
+    /// the EXPLICIT invoke method — never trial-decoded. Returns the raw body;
+    /// the strict wire codec and the signature check happen in the recipient's
+    /// certificate handler.
+    pub(crate) fn decode_relationship_finalized(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<Vec<u8>> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != RELATIONSHIP_FINALIZED_METHOD {
+                continue;
+            }
+            let Some(args) = &invoke.args else { continue };
+            return Some(args.body.clone());
+        }
+        None
+    }
+
+    /// Drain the finality certificates decoded by the most recent retrieve.
+    /// Durable idempotency lives in the journal's `peer_finalized` flag.
+    pub fn take_relationship_finalized(&mut self) -> Vec<RelationshipFinalizedMessage> {
+        std::mem::take(&mut self.pending_relationship_finalized)
+    }
+
+    /// Build the `relationship.finalized.v1` envelope for an already-signed
+    /// `RelationshipFinalizedV1` (finality barrier). PURE: every input is a
+    /// parameter, so the bytes are byte-identical on rebuild — though the
+    /// sender never rebuilds; it freezes THESE bytes at finalize and the sweep
+    /// replays them. `message_id` = the artifact submission id (16 bytes
+    /// derived from the certificate digest); `op_id` = the digest itself.
+    /// Refuses at construction if over the node cap.
+    pub(crate) fn build_relationship_finalized_envelope(
+        local_device_id: &[u8; 32],
+        local_genesis: &[u8; 32],
+        certificate_wire: &[u8],
+        certificate_digest: &[u8; 32],
+        message_id_b32: &str,
+    ) -> Result<BuiltEnvelope, DsmError> {
+        use prost::Message as _;
+        let local_device_bytes = local_device_id.to_vec();
+        let msg_id_bytes = crate::util::text_id::decode_base32_crockford(message_id_b32)
+            .filter(|m| m.len() == 16)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "build_relationship_finalized_envelope: message id must be base32(16)",
+                )
+            })?;
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: RELATIONSHIP_FINALIZED_METHOD.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: certificate_wire.to_vec(),
+            }),
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: certificate_digest.to_vec(),
+            }),
+            actor: local_device_bytes.clone(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis.to_vec(),
+            }),
+            message_id: msg_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("finality certificate envelope encode failed: {e}"),
                 None::<std::io::Error>,
+            )
+        })?;
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_relationship_finalized_envelope: encoded envelope is {} bytes, at or over \
+                 the node's {MAX_B0X_ENVELOPE_BYTES}-byte cap",
+                buf.len()
+            )));
+        }
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32: message_id_b32.to_string(),
+            to_device_id_bytes: Vec::new(),
+        })
+    }
+
+    /// Decode a cert-resync control message (method + framed body) from a spooled
+    /// envelope, discriminated on the EXPLICIT invoke method — never trial-decoded.
+    fn decode_cert_resync_message(env: &dsm::types::proto::Envelope) -> Option<(String, Vec<u8>)> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
+                || invoke.method == crate::storage::client_db::CERT_RESYNC_ACK_METHOD
+            {
+                if let Some(args) = &invoke.args {
+                    return Some((invoke.method.clone(), args.body.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Drain cert-resync control messages decoded by the most recent retrieve.
+    pub fn take_cert_resync_messages(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.pending_cert_resync)
+    }
+
+    /// Deliver the recipient's countersigned acceptance receipt BACK to the
+    /// original sender, so the sender can finalize on cryptographic proof rather
+    /// than on storage-node message deletion (which is best-effort GC only).
+    ///
+    /// ADDRESSING IS THE WHOLE GAME HERE. The reply must land on the address the
+    /// SENDER polls, which it derives from ITS genesis, ITS device id, and the
+    /// SYMMETRIC projection tip of the relationship. By the time the fold
+    /// completes, the recipient's own projection has already advanced to the
+    /// target, so `sender_projection_tip` MUST be the parent captured at PREPARE —
+    /// never a local `contacts.chain_tip` read. Addressing from the advanced tip
+    /// would spool the reply where nobody listens, reproducing the stranded-message
+    /// failure this window exists to eliminate.
+    ///
+    /// Delivery is at-least-once and the payload is byte-identical on every
+    /// attempt (the receipt is signed once, at prepare, and only replayed), so a
+    /// duplicate is harmless: the sender's finalization is idempotent.
+    /// Build the ADR 0003 return-leg envelope: the B-side countersign DELTA
+    /// derived from the recipient's stored full countersigned receipt. PURE —
+    /// no I/O, no ambient state; every input is a parameter, so two calls with
+    /// the same inputs are byte-identical (the deterministic reply id relies on
+    /// that: the node keeps the first body per message id).
+    ///
+    /// The delta carries the four B-side fields, two references (the
+    /// commitment the sender looks its proposal up by, and the digest of the
+    /// exact A-side bytes B countersigned) and the recipient's canonical pair
+    /// `b_pair` for the applied step — read from the DURABLE journal/reply row
+    /// by the caller, never from current state, because it is the pair `sig_b`
+    /// was computed over. Nothing A-side rides back; the sender overlays this
+    /// onto the receipt it authored and froze. Refuses at construction if the
+    /// encoded envelope would not fit under the node cap — the same guard
+    /// `build_evidence_envelope` applies.
+    pub(crate) fn build_countersign_reply_envelope(
+        &self,
+        local_genesis: &[u8; 32],
+        sender_projection_tip: &[u8; 32],
+        expected_commitment: &[u8; 32],
+        full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
+        release_bytes: &[u8],
+    ) -> Result<BuiltEnvelope, DsmError> {
+        use prost::Message as _;
+
+        let local_device_bytes =
+            crate::util::text_id::decode_base32_crockford(self.device_id.trim())
+                .filter(|b| b.len() == 32)
+                .ok_or_else(|| {
+                    DsmError::invalid_parameter(
+                        "build_countersign_reply_envelope: local device_id not base32(32)",
+                    )
+                })?;
+
+        // The stored bytes must be the receipt this reply is for.
+        let full = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            full_countersigned_receipt_bytes,
+        )
+        .map_err(|e| {
+            DsmError::invalid_parameter(format!(
+                "build_countersign_reply_envelope: stored receipt does not decode: {e}"
+            ))
+        })?;
+        let commitment = full.compute_commitment()?;
+        if &commitment != expected_commitment {
+            return Err(DsmError::invalid_parameter(
+                "build_countersign_reply_envelope: stored receipt commitment != reply commitment",
             ));
         }
-        let (genesis_b32, device_id_b32, cache_key) = self.auth_binding_key(endpoint).await?;
-
-        if let Some(tok) = self
-            .tokens_by_endpoint
-            .read()
-            .await
-            .get(&cache_key)
-            .cloned()
-        {
-            return Ok(tok);
-        }
-        // Try persisted
-        if let Ok(Some(tok)) =
-            crate::storage::client_db::get_auth_token(endpoint, &device_id_b32, &genesis_b32)
-        {
-            // IMPORTANT: do not immediately trust persisted tokens if they are actively failing.
-            // We'll use it once; if it yields 401, the caller must purge + re-register.
-            self.tokens_by_endpoint
-                .write()
-                .await
-                .insert(cache_key.clone(), tok.clone());
-            return Ok(tok);
-        }
-        // If there is a token persisted for this endpoint/device but under a different genesis, hard-fail with a deterministic error.
-        if let Ok(Some(other_gen)) = crate::storage::client_db::get_mismatched_genesis(
-            endpoint,
-            &device_id_b32,
-            &genesis_b32,
-        ) {
-            let msg = format!(
-                "GENESIS_INBOX_MISMATCH: stored token bound to genesis {} differs from local {}",
-                other_gen, genesis_b32
-            );
-            return Err(DsmError::InboxTokenInvalid(msg));
-        }
-        // Register on this endpoint
-        let tok = self.register_device_on(endpoint).await?;
-        self.tokens_by_endpoint
-            .write()
-            .await
-            .insert(cache_key, tok.clone());
-        // Persist under (endpoint, device_id, genesis)
-        let _ = crate::storage::client_db::store_auth_token(
-            endpoint,
-            &device_id_b32,
-            &genesis_b32,
-            &tok,
+        let (a_side, b) = full.split_countersign_b().map_err(|e| {
+            DsmError::invalid_parameter(format!("build_countersign_reply_envelope: {e}"))
+        })?;
+        // The exact A bytes B countersigned == what the sender froze at send.
+        let a_bytes = a_side.to_full_protobuf()?;
+        let digest_a = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &a_bytes,
         );
-        Ok(tok)
+
+        let body = dsm::types::proto::ReceiptCountersignB {
+            commitment: commitment.to_vec(),
+            receipt_evidence_digest_a: digest_a.to_vec(),
+            sig_b: b.sig_b,
+            ek_cert_b: b.ek_cert_b,
+            ek_pk_b: b.ek_pk_b,
+            kyber_ct_b: b.kyber_ct_b,
+            b_parent_tip: b_pair.0.to_vec(),
+            b_child_tip: b_pair.1.to_vec(),
+            // 3.5b PR4: the post-admission RELEASE's content address — the
+            // sender fetches the exact bytes re-hash-verified and finalizes
+            // only on them. The reply is only deliverable once ECON_ADMITTED
+            // promoted it, so a delta without a release is not an acceptance
+            // the sender may act on.
+            recipient_economic_release_addr: if release_bytes.is_empty() {
+                Vec::new()
+            } else {
+                dsm::economic::release::recipient_economic_release_addr(release_bytes).to_vec()
+            },
+        }
+        .encode_to_vec();
+        // Content address of the delta itself, role-separated (op_id, as the
+        // A-side builder does).
+        let digest_b = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::CountersignB,
+            &body,
+        );
+
+        // Transport-local id: 16 opaque bytes derived from the transition's own
+        // commitment (never wall-clock). Stable across reposts, so a redelivery
+        // collapses onto the same spool row instead of piling up duplicates.
+        let message_id_bytes = reply_message_id(&commitment, sender_projection_tip);
+        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
+
+        // CARRIER CHOICE (deliberate): storage nodes validate transport envelopes
+        // against a COMPILED-IN allowlist of payload tags, so the delta rides
+        // inside UniversalTx (an allowlisted tag) as an explicit
+        // `receipt.countersign.b` invoke. Discrimination is by that method name
+        // — structural, never a trial-decode.
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: RECEIPT_COUNTERSIGN_B_METHOD.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body,
+            }),
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: digest_b.to_vec(),
+            }),
+            actor: local_device_bytes.clone(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis.to_vec(),
+                // The tip this artifact is ADDRESSED to (the sender's projection
+                // parent), so the receiving side can correlate the route it polled.
+            }),
+            message_id: message_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("reply envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_countersign_reply_envelope: encoded envelope is {} bytes, at or over the \
+                 node's {MAX_B0X_ENVELOPE_BYTES}-byte envelope cap; it could never be \
+                 delivered — the B-side delta must carry exactly two SPHINCS+-sized objects",
+                buf.len()
+            )));
+        }
+        info!(
+            "build_countersign_reply_envelope: {} bytes ({}% of cap) msg={}..",
+            buf.len(),
+            100 * buf.len() / MAX_B0X_ENVELOPE_BYTES,
+            &message_id_b32[..8.min(message_id_b32.len())],
+        );
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes: Vec::new(),
+        })
     }
 
-    /// Register device; on 409, transparently request a token re-issue.
-    pub async fn register_device(&self) -> Result<(), DsmError> {
-        info!("🔐 Register device flow start");
+    /// The local genesis, from AppState when populated, otherwise from the
+    /// durable genesis record. Errors rather than encoding an empty genesis —
+    /// an envelope built without one would differ byte-for-byte from a later
+    /// rebuild under the SAME deterministic message id.
+    async fn resolve_local_genesis(&self) -> Result<[u8; 32], DsmError> {
+        let from_state =
+            crate::sdk::app_state::AppState::get_genesis_hash().filter(|g| g.len() == 32);
+        let bytes = match from_state {
+            Some(g) => g,
+            None => self.core_sdk.local_genesis_hash().await?,
+        };
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| DsmError::state("local genesis hash unavailable or not 32 bytes"))
+    }
 
-        let device_id_b32 = self.device_id.clone();
-        let device_identity = self.core_sdk.get_device_identity();
+    /// ADR 0003 return leg: deliver the B-side countersign delta for
+    /// `full_countersigned_receipt_bytes` to the sender's b0x route.
+    ///
+    /// The recipient keeps the whole countersigned receipt locally; ONLY the
+    /// delta goes on the wire (`build_countersign_reply_envelope`). Delivery
+    /// success is the SAME quorum rule as frozen sends (`delivered >= K`): a
+    /// lost delta strands both sides — the sender's gate and, under the
+    /// finality barrier, the recipient's own next origination — so one replica
+    /// taking it is not delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_acceptance_reply(
+        &mut self,
+        sender_genesis: &[u8; 32],
+        sender_device_id: &[u8; 32],
+        sender_projection_tip: &[u8; 32],
+        commitment: &[u8; 32],
+        full_countersigned_receipt_bytes: &[u8],
+        b_pair: ([u8; 32], [u8; 32]),
+        release_bytes: &[u8],
+    ) -> Result<String, DsmError> {
+        let routing_key =
+            Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
+        let local_genesis = self.resolve_local_genesis().await?;
+        let built = self.build_countersign_reply_envelope(
+            &local_genesis,
+            sender_projection_tip,
+            commitment,
+            full_countersigned_receipt_bytes,
+            b_pair,
+            release_bytes,
+        )?;
+        self.post_reply_envelope(&routing_key, sender_device_id, &built)
+            .await
+    }
 
-        if device_identity.public_key.is_empty() {
-            return Err(DsmError::internal(
+    /// Seal an already-built reply envelope for `recipient_device` and deliver
+    /// it; success is `quorum_k` members answering 204.
+    async fn post_reply_envelope(
+        &mut self,
+        routing_key: &str,
+        recipient_device: &[u8; 32],
+        built: &BuiltEnvelope,
+    ) -> Result<String, DsmError> {
+        let sealed = seal_for(recipient_device, &built.message_id_b32, &built.bytes)?;
+        self.deliver(
+            routing_key,
+            &built.message_id_b32,
+            &sealed,
+            &B0xRetryConfig::default(),
+        )
+        .await
+        .map_err(|e| {
+            DsmError::network(format!("§16.6 reply delivery: {e}"), None::<std::io::Error>)
+        })?;
+        Ok(built.message_id_b32.clone())
+    }
+
+    /// Deliver sealed spool bytes under `routing_key` until `quorum_k`
+    /// members answered 204. The first `quorum_k` members are asked at once —
+    /// those the circuit breaker holds healthy first — and each member that
+    /// fails is replaced by the next at once, so a delivery takes one round
+    /// of answers instead of one round per member, and lands on exactly
+    /// `quorum_k` members, never the whole fleet (#867). The bar is the
+    /// register quorum whatever the breaker holds: a member it marked failed
+    /// is still asked once the others are used up.
+    async fn deliver(
+        &self,
+        routing_key: &str,
+        message_id_b32: &str,
+        sealed: &[u8],
+        retry_config: &B0xRetryConfig,
+    ) -> Result<(), DsmError> {
+        let quorum = self.quorum_k;
+        let total = self.storage_node_endpoints.len();
+        if total < quorum {
+            return Err(DsmError::network(
                 format!(
-                    "Invalid public key length (must be non-empty): {}",
-                    device_identity.public_key.len()
+                    "delivery needs {quorum} members and the fleet names {total}; \
+                     msg_id={message_id_b32}"
                 ),
                 None::<std::io::Error>,
             ));
         }
-
-        let genesis_hash = self.core_sdk.local_genesis_hash().await?;
-        if genesis_hash.len() != 32 {
-            return Err(DsmError::internal(
-                format!("Invalid genesis hash len: {}", genesis_hash.len()),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let genesis_b32 = text_id::encode_base32_crockford(&genesis_hash);
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: text_id::decode_base32_crockford(&device_id_b32).unwrap_or_default(),
-            pubkey: device_identity.public_key.clone(),
-            genesis_hash: genesis_hash.clone(),
-        };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("RegisterDeviceRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        // Hydrate any persisted tokens into memory map first
-        self.hydrate_tokens_from_disk().await;
-
-        let mut last_err: Option<DsmError> = None;
-
+        let mut healthy = Vec::with_capacity(total);
+        let mut marked_failed = Vec::new();
         for endpoint in &self.storage_node_endpoints {
-            // Primary: /device/register
-            let url_register = format!("{}/api/v2/device/register", endpoint);
-
-            match self
-                .http_client
-                .post(&url_register)
-                .header("Content-Type", "application/protobuf")
-                .body(body.clone())
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    let bytes = resp.bytes().await.map_err(|e| {
-                        DsmError::internal(
-                            format!("RegisterDeviceResponse read failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                        .map_err(|e| {
-                            DsmError::internal(
-                                format!("RegisterDeviceResponse decode failed: {e}"),
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                    // store in per-endpoint map; token is bytes on wire, encode to Base32
-                    let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-                    let cache_key = format!("{}|{}|{}", endpoint, genesis_b32, device_id_b32);
-                    self.tokens_by_endpoint
-                        .write()
+            if self.circuit_breaker.is_node_healthy(endpoint).await {
+                healthy.push(endpoint.clone());
+            } else {
+                marked_failed.push(endpoint.clone());
+            }
+        }
+        let this = self;
+        let ask = |endpoint: String, attempts: Attempts| async move {
+            let answer = match &attempts {
+                Attempts::First => {
+                    this.submit_once(&endpoint, sealed, routing_key, message_id_b32)
                         .await
-                        .insert(cache_key, token_b32.clone());
-                    if let Err(e) = crate::storage::client_db::store_auth_token(
-                        endpoint,
-                        &device_id_b32,
-                        &genesis_b32,
-                        &token_b32,
-                    ) {
-                        warn!("Persist token failed: {e}");
-                    }
-                    info!("✅ Registered at {}", endpoint);
-                    return Ok(());
                 }
-                Ok(resp) if resp.status() == reqwest::StatusCode::CONFLICT => {
-                    // Device already registered, ask server to issue/return the existing token.
-                    let url_token = format!("{}/api/v2/device/token", endpoint);
-                    match self
-                        .http_client
-                        .post(&url_token)
-                        .header("Content-Type", "application/protobuf")
-                        .body(body.clone())
-                        .send()
-                        .await
-                    {
-                        Ok(resp2) if resp2.status().is_success() => {
-                            let bytes = resp2.bytes().await.map_err(|e| {
-                                DsmError::internal(
-                                    format!("Token response read failed: {e}"),
-                                    None::<std::io::Error>,
-                                )
-                            })?;
-                            let parsed =
-                                dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                                    .map_err(|e| {
-                                    DsmError::internal(
-                                        format!("Token response decode failed: {e}"),
-                                        None::<std::io::Error>,
-                                    )
-                                })?;
-                            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-                            let cache_key =
-                                format!("{}|{}|{}", endpoint, genesis_b32, device_id_b32);
-                            self.tokens_by_endpoint
-                                .write()
-                                .await
-                                .insert(cache_key, token_b32.clone());
-                            if let Err(e) = crate::storage::client_db::store_auth_token(
-                                endpoint,
-                                &device_id_b32,
-                                &genesis_b32,
-                                &token_b32,
-                            ) {
-                                warn!("Persist token failed: {e}");
-                            }
-                            info!("🔑 Token re-issued at {}", endpoint);
-                            return Ok(());
-                        }
-                        Ok(resp2) => {
-                            let status = resp2.status();
-                            let body_txt = resp2.text().await.unwrap_or_default();
-                            warn!(
-                                "Token re-issue failed at {}: status={} body={}",
-                                endpoint, status, body_txt
-                            );
-                            last_err = Some(DsmError::internal(
-                                format!(
-                                    "Registration failed: 409 and token re-issue failed (status={} body={})",
-                                    status, body_txt
-                                ),
-                                None::<std::io::Error>,
-                            ));
-                        }
-                        Err(e) => {
-                            warn!("Token re-issue transport failed at {}: {}", endpoint, e);
-                            last_err = Some(DsmError::internal(
-                                format!(
-                                    "Registration failed: 409 and token re-issue transport failed: {}",
-                                    e
-                                ),
-                                None::<std::io::Error>,
-                            ));
-                        }
+                Attempts::Retries(first) => this
+                    .submit_retries(
+                        &endpoint,
+                        sealed,
+                        routing_key,
+                        message_id_b32,
+                        retry_config,
+                        first.clone(),
+                    )
+                    .await
+                    .map_err(Refused::Final),
+            };
+            (endpoint, attempts, answer)
+        };
+        let mut waiting = healthy.into_iter().chain(marked_failed);
+        let mut answers = futures::stream::FuturesUnordered::new();
+        for endpoint in waiting.by_ref().take(quorum) {
+            answers.push(ask(endpoint, Attempts::First));
+        }
+        let mut delivered = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        while let Some((endpoint, attempts, answer)) = futures::StreamExt::next(&mut answers).await
+        {
+            // A member that failed its first submit is replaced by the next
+            // at once, while its own retries back off: the delivery waits for
+            // whichever answers first, never for a member's backoff.
+            let answer = match (answer, attempts) {
+                (Err(Refused::Retryable(why)), Attempts::First) if retry_config.max_retries > 0 => {
+                    if let Some(next) = waiting.next() {
+                        answers.push(ask(next, Attempts::First));
                     }
+                    answers.push(ask(endpoint, Attempts::Retries(why)));
+                    continue;
                 }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let body_txt = resp.text().await.unwrap_or_default();
-                    last_err = Some(DsmError::internal(
-                        format!("Registration failed {}: {}", status, body_txt),
-                        None::<std::io::Error>,
-                    ));
+                (Err(refused), Attempts::First) => {
+                    if let Some(next) = waiting.next() {
+                        answers.push(ask(next, Attempts::First));
+                    }
+                    Err(refused.into_error(&endpoint, 1))
+                }
+                // Its replacement was asked at its first failure.
+                (Err(refused), Attempts::Retries(..)) => {
+                    Err(refused.into_error(&endpoint, retry_config.max_retries + 1))
+                }
+                (Ok(()), ..) => Ok(()),
+            };
+            match answer {
+                Ok(()) => {
+                    delivered += 1;
+                    if delivered >= quorum {
+                        info!(
+                            "✅ delivered {}.. to {}/{} (K={}) route={}..",
+                            &message_id_b32[..8.min(message_id_b32.len())],
+                            delivered,
+                            total,
+                            quorum,
+                            &routing_key[..8.min(routing_key.len())]
+                        );
+                        return Ok(());
+                    }
                 }
                 Err(e) => {
-                    last_err = Some(DsmError::internal(
-                        format!("HTTP error: {e}"),
-                        None::<std::io::Error>,
-                    ));
+                    errors.push(format!("{endpoint}: {e}"));
                 }
             }
         }
-
-        Err(last_err.unwrap_or_else(|| {
-            DsmError::internal("No storage endpoints available", None::<std::io::Error>)
-        }))
+        Err(DsmError::network(
+            format!(
+                "delivery below quorum: {delivered}/{total} (K={quorum}); msg_id={message_id_b32}; \
+                 errors={errors:?}"
+            ),
+            None::<std::io::Error>,
+        ))
     }
 
-    /// Register on a specific endpoint; returns token string.
-    async fn register_device_on(&self, endpoint: &str) -> Result<String, DsmError> {
-        let device_id_b32 = self.device_id.clone();
-        let device_identity = self.core_sdk.get_device_identity();
-        let genesis_hash = self.core_sdk.local_genesis_hash().await?;
-        let genesis_b32 = text_id::encode_base32_crockford(&genesis_hash);
-        let device_id_raw = text_id::decode_base32_crockford(&device_id_b32).unwrap_or_default();
+    /// Submit a cert-resync control message (an explicit `invoke.method` with the
+    /// framed body in `ArgPack.body`) addressed to the recipient's b0x route. Rides
+    /// the SAME allowlisted UniversalTx tag as everything else — no new payload tag,
+    /// no fleet redeploy. Mirrors `submit_acceptance_reply`'s carrier choice.
+    ///
+    /// NOTE ON PAIDK: the deployed fleet does not currently enforce the PaidK gate
+    /// on submit; the structural exemption (a recovery message must never depend on
+    /// the spend authority it restores) is tracked as node-side follow-up.
+    pub async fn submit_cert_resync_message(
+        &mut self,
+        method: &str,
+        body: Vec<u8>,
+        recipient_genesis: &[u8; 32],
+        recipient_device: &[u8; 32],
+        recipient_tip: &[u8; 32],
+    ) -> Result<String, DsmError> {
+        use prost::Message as _;
+        let routing_key =
+            Self::compute_b0x_address(recipient_genesis, recipient_device, recipient_tip)?;
 
-        info!(
-            "register_device_on {}: device_id_raw.len={} pubkey.len={} genesis_hash.len={}",
-            endpoint,
-            device_id_raw.len(),
-            device_identity.public_key.len(),
-            genesis_hash.len(),
-        );
+        // Deterministic transport id from method + route + a digest of the body.
+        let message_id_bytes = certresync_message_id(method, recipient_tip, &body);
+        let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
-        let req = dsm::types::proto::RegisterDeviceRequest {
-            device_id: device_id_raw,
-            pubkey: device_identity.public_key.clone(),
-            genesis_hash: genesis_hash.clone(),
+        let local_device_bytes =
+            crate::util::text_id::decode_base32_crockford(self.device_id.trim())
+                .filter(|b| b.len() == 32)
+                .ok_or_else(|| {
+                    DsmError::invalid_parameter(
+                        "submit_cert_resync: local device_id not base32(32)",
+                    )
+                })?;
+        let local_genesis = self.resolve_local_genesis().await?.to_vec();
+
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: method.to_string(),
+            args: Some(dsm::types::proto::ArgPack {
+                schema_hash: None,
+                codec: 0,
+                body,
+            }),
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
         };
-        let mut body = Vec::with_capacity(req.encoded_len());
-        req.encode(&mut body).map_err(|e| {
+        let op = dsm::types::proto::UniversalOp {
+            op_id: Some(dsm::types::proto::Hash32 {
+                v: message_id_bytes.clone(),
+            }),
+            actor: local_device_bytes.clone(),
+            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: local_device_bytes,
+                genesis_hash: local_genesis,
+            }),
+            message_id: message_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![op],
+                    atomic: false,
+                },
+            )),
+        };
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).map_err(|e| {
             DsmError::internal(
-                format!("RegisterDeviceRequest encode failed: {e}"),
+                format!("cert-resync envelope encode failed: {e}"),
                 None::<std::io::Error>,
             )
         })?;
-
-        let url_register = format!("{}/api/v2/device/register", endpoint);
-        let resp_ok = match self
-            .http_client
-            .post(&url_register)
-            .header("Content-Type", "application/protobuf")
-            .body(body.clone())
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = format!("register_device_on {} HTTP send failed: {e}", endpoint);
-                warn!("{}", msg);
-                return Err(DsmError::internal(msg, None::<std::io::Error>));
-            }
-        };
-
-        let status = resp_ok.status();
-        info!("register_device_on {}: HTTP status={}", endpoint, status);
-
-        if status.is_success() {
-            let bytes = resp_ok.bytes().await.map_err(|e| {
-                DsmError::internal(
-                    format!("RegisterDeviceResponse read failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-            let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("RegisterDeviceResponse decode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-            if let Err(e) = crate::storage::client_db::store_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-                &token_b32,
-            ) {
-                warn!("Persist token failed: {e}");
-            }
-            return Ok(token_b32);
-        }
-
-        if status == reqwest::StatusCode::CONFLICT {
-            let url_token = format!("{}/api/v2/device/token", endpoint);
-            let resp2 = self
-                .http_client
-                .post(&url_token)
-                .header("Content-Type", "application/protobuf")
-                .body(body)
-                .send()
-                .await
-                .map_err(|e| {
-                    DsmError::internal(format!("token HTTP error: {e}"), None::<std::io::Error>)
-                })?;
-            if !resp2.status().is_success() {
-                return Err(DsmError::internal(
-                    format!("token re-issue failed: status={}", resp2.status()),
-                    None::<std::io::Error>,
-                ));
-            }
-            let bytes = resp2.bytes().await.map_err(|e| {
-                DsmError::internal(
-                    format!("Token response read failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
-            let parsed = dsm::types::proto::RegisterDeviceResponse::decode(bytes.as_ref())
-                .map_err(|e| {
-                    DsmError::internal(
-                        format!("Token response decode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-            let token_b32 = text_id::encode_base32_crockford(&parsed.token);
-            if let Err(e) = crate::storage::client_db::store_auth_token(
-                endpoint,
-                &device_id_b32,
-                &genesis_b32,
-                &token_b32,
-            ) {
-                warn!("Persist token failed: {e}");
-            }
-            return Ok(token_b32);
-        }
-
-        // Unexpected status — read body for diagnostics
-        let resp_body = resp_ok
-            .text()
-            .await
-            .unwrap_or_else(|_| "<unreadable>".into());
-        let msg = format!(
-            "register_device_on {} failed: status={} body={}",
-            endpoint, status, resp_body
-        );
-        warn!("{}", msg);
-        Err(DsmError::internal(msg, None::<std::io::Error>))
+        let sealed = seal_for(recipient_device, &message_id_b32, &buf)?;
+        self.deliver(
+            &routing_key,
+            &message_id_b32,
+            &sealed,
+            &B0xRetryConfig::default(),
+        )
+        .await
+        .map_err(|e| {
+            DsmError::network(
+                format!("cert-resync {method} delivery: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        Ok(message_id_b32)
     }
 
     // ------------------------------------------------------------------------
     // Submission (Envelope v3 over HTTP)
     // ------------------------------------------------------------------------
 
+    /// Build the FINAL canonical envelope bytes for `params` without sending
+    /// anything. Used by the send path to freeze the exact wire artifact into
+    /// the durable outbox before any network call.
     pub async fn submit_to_b0x(&mut self, params: B0xSubmissionParams) -> Result<String, DsmError> {
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            let test_retry = B0xRetryConfig {
-                max_retries: 0,
-                base_delay_ms: 0,
-                max_delay_ms: 0,
-                backoff_multiplier: 1.0,
-            };
-            self.submit_to_b0x_with_retry(params, &test_retry).await
-        } else {
-            self.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
-                .await
-        }
+        self.submit_to_b0x_with_retry(params, &B0xRetryConfig::default())
+            .await
     }
 
     /// Submit to b0x with configurable retry logic and enhanced validation
@@ -1218,312 +1704,234 @@ impl B0xSDK {
         params: B0xSubmissionParams,
         retry_config: &B0xRetryConfig,
     ) -> Result<String, DsmError> {
-        info!("🎯 submit_to_b0x_with_retry");
+        self.submit_inner(params, retry_config).await
+    }
 
-        // Enhanced input validation
-        self.validate_submission_params(&params)?;
+    /// PURE envelope construction — no network capability, by type.
+    ///
+    /// Takes `&self` and returns bytes. It cannot submit, retry, or touch the
+    /// circuit breaker, and a future edit cannot make it do so without changing
+    /// this signature. That is the point: the durable outbox freezes the exact
+    /// wire bytes BEFORE anything is deliverable, so the builder must be
+    /// callable from inside a synchronous, pre-commit context.
+    /// Build the frozen wire bytes for an A-side receipt-evidence artifact
+    /// (ADR 0003).
+    ///
+    /// Deliberately NOT routed through `build_envelope_for_submission`: that
+    /// builder dispatches on `params.transaction`, and evidence is not an
+    /// `Operation`. Inventing a fake variant to satisfy it would put a
+    /// non-operation into the operation type purely for transport convenience.
+    ///
+    /// Enforces the artifact budget at CONSTRUCTION. CI already asserts the
+    /// accepted shapes fit, but production must not cheerfully build an
+    /// artifact the peer can never accept -- a 413 at submit time is a far
+    /// worse place to learn this than a hard error here.
+    pub(crate) fn build_evidence_envelope(
+        &self,
+        recipient_device_id: &str,
+        recipient_genesis_hash: &str,
+        evidence_submission_id: &str,
+        evidence_digest: &[u8; 32],
+        full_receipt_bytes: &[u8],
+    ) -> Result<BuiltEnvelope, DsmError> {
+        // The artifact must be self-consistent before it is frozen.
+        let recomputed = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            full_receipt_bytes,
+        );
+        if &recomputed != evidence_digest {
+            return Err(DsmError::internal(
+                "build_evidence_envelope: digest does not match full_receipt_bytes",
+                None::<std::io::Error>,
+            ));
+        }
 
-        // 2) Build Envelope v3 with proper request payload
-        let mut rand_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut rand_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
+        let self_device_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter("build_evidence_envelope: device_id must be base32")
+            })?;
+        let recipient_bytes = crate::util::text_id::decode_base32_crockford(recipient_device_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter("build_evidence_envelope: recipient must be base32")
+            })?;
+        let genesis_bytes = crate::util::text_id::decode_base32_crockford(recipient_genesis_hash)
+            .ok_or_else(|| {
+            DsmError::invalid_parameter("build_evidence_envelope: recipient genesis must be base32")
+        })?;
+        let msg_id_bytes = crate::util::text_id::decode_base32_crockford(evidence_submission_id)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "build_evidence_envelope: evidence submission id must be base32",
+                )
+            })?;
+        if msg_id_bytes.len() != 16 {
+            return Err(DsmError::invalid_parameter(format!(
+                "build_evidence_envelope: message id must be 16 bytes, got {}",
+                msg_id_bytes.len()
+            )));
+        }
+
+        let body = dsm::types::proto::ReceiptEvidenceA {
+            full_receipt_bytes: full_receipt_bytes.to_vec(),
+        };
+        let mut body_bytes = Vec::with_capacity(body.encoded_len());
+        body.encode(&mut body_bytes).map_err(|e| {
+            DsmError::internal(
+                format!("ReceiptEvidenceA encode failed: {e}"),
                 None::<std::io::Error>,
             )
         })?;
-        let mut msgid_buf = Vec::with_capacity(11 + 16 + 8 + self.device_id.len());
-        msgid_buf.extend_from_slice(b"DSM/b0x-msgid\0");
-        msgid_buf.extend_from_slice(&rand_bytes);
-        msgid_buf.extend_from_slice(&dt::tick().to_le_bytes());
-        msgid_buf.extend_from_slice(&std::process::id().to_le_bytes());
-        let ctr = MSG_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        msgid_buf.extend_from_slice(&ctr.to_le_bytes());
-        msgid_buf.extend_from_slice(self.device_id.as_bytes());
-        let full = dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_B0X_MSGID,
-            &msgid_buf,
-        );
-        let mut message_id_bytes = [0u8; 16];
-        message_id_bytes.copy_from_slice(&full.as_bytes()[..16]);
-        let message_id_b32 = text_id::encode_base32_crockford(&message_id_bytes);
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            log::debug!("[B0X] submit msg_id={}", message_id_b32);
+
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: None,
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: body_bytes,
+        };
+        let invoke = dsm::types::proto::Invoke {
+            program: None,
+            method: RECEIPT_EVIDENCE_A_METHOD.to_string(),
+            args: Some(arg_pack),
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        };
+        let envelope = dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: self_device_bytes.clone(),
+                genesis_hash: genesis_bytes,
+            }),
+            message_id: msg_id_bytes,
+            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
+                dsm::types::proto::UniversalTx {
+                    ops: vec![dsm::types::proto::UniversalOp {
+                        op_id: Some(dsm::types::proto::Hash32 {
+                            v: evidence_digest.to_vec(),
+                        }),
+                        actor: self_device_bytes.clone(),
+                        kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+                    }],
+                    atomic: true,
+                },
+            )),
+        };
+
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        prost::Message::encode(&envelope, &mut buf).map_err(|e| {
+            DsmError::internal(
+                format!("evidence Envelope encode failed: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+
+        if buf.len() >= MAX_B0X_ENVELOPE_BYTES {
+            return Err(DsmError::internal(
+                format!(
+                    "build_evidence_envelope: artifact is {} bytes, at or over the storage \
+                     node's {MAX_B0X_ENVELOPE_BYTES}-byte envelope cap; it could never be \
+                     accepted. Split the evidence rather than raising the cap (ADR 0003).",
+                    buf.len()
+                ),
+                None::<std::io::Error>,
+            ));
         }
 
+        info!(
+            "build_evidence_envelope: {} bytes ({}% of cap)",
+            buf.len(),
+            100 * buf.len() / MAX_B0X_ENVELOPE_BYTES
+        );
+
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32: evidence_submission_id.to_string(),
+            to_device_id_bytes: recipient_bytes,
+        })
+    }
+
+    fn build_envelope_for_submission(
+        &self,
+        params: &B0xSubmissionParams,
+    ) -> Result<BuiltEnvelope, DsmError> {
+        info!("🎯 submit_to_b0x_with_retry");
+
+        // Enhanced input validation
+        self.validate_submission_params(params)?;
+
+        // 2) Build Envelope v3 with the transfer request.
+        //
+        // MESSAGE ID: the submission id the send derived from the receipt
+        // commitment (`sender_outbox::derive_submission_id`). It is known
+        // before the send is committed locally and is identical on every retry;
+        // storage nodes enforce `UNIQUE(message_id)`, so a resend collapses onto
+        // the same spool row instead of spooling a duplicate.
+        let message_id_b32 = params.submission_id.clone();
+        let message_id_bytes: [u8; 16] = {
+            let decoded = text_id::decode_base32_crockford(&message_id_b32).ok_or_else(|| {
+                DsmError::invalid_parameter("submission_id must be canonical base32 Crockford")
+            })?;
+            <[u8; 16]>::try_from(decoded.as_slice()).map_err(|e| {
+                DsmError::invalid_parameter(format!(
+                    "submission_id must decode to 16 bytes (deployed nodes enforce this), got {}: {e}",
+                    decoded.len()
+                ))
+            })?
+        };
         let actor_device_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
             .ok_or_else(|| {
                 DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
             })?;
-        let sender_tip_bytes = if params.sender_chain_tip.is_empty() {
-            Vec::new()
-        } else {
-            crate::util::text_id::decode_base32_crockford(&params.sender_chain_tip).ok_or_else(
-                || {
-                    DsmError::internal(
-                        "sender_chain_tip base32 decode failed",
-                        None::<std::io::Error>,
-                    )
-                },
-            )?
+        let Operation::Transfer { to_device_id, .. } = &params.transaction else {
+            return Err(DsmError::internal(
+                "submit_to_b0x: expected Operation::Transfer",
+                None::<std::io::Error>,
+            ));
+        };
+        let to_device_id_bytes = to_device_id.clone();
+
+        // The signed operation and the terms it commits to, and nothing that
+        // restates either: the recipient reads the recipient, amount and asset
+        // from the bytes SIG A covers, and the token, nonce and memo from
+        // terms that open its commitment. The request travels sealed.
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: None,
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body: dsm::types::proto::OnlineTransferRequest {
+                signature: params.signature.clone(),
+                canonical_operation_bytes: params.canonical_operation_bytes.clone(),
+                sender_economic_position: params.sender_economic_position,
+                sender_debit_mutation_index: params.sender_debit_mutation_index,
+                transfer_terms: params.transfer_terms.clone(),
+            }
+            .encode_to_vec(),
         };
 
-        enum SubmitOp {
-            Transfer {
-                to_device_id_bytes: Vec<u8>,
-                amount: u64,
-                token_id: String,
-                memo: String,
-                nonce_bytes: Vec<u8>,
-            },
-            Message {
-                to_device_id_bytes: Vec<u8>,
-                payload: Vec<u8>,
-                memo: String,
-                nonce_bytes: Vec<u8>,
-            },
-        }
-
-        let submit_op = match &params.transaction {
-            Operation::Transfer {
-                to_device_id,
-                amount,
-                token_id,
-                message,
-                nonce,
-                ..
-            } => {
-                info!(
-                    "🔍 submit_to_b0x: to_device_id raw bytes (first 8): {:?}",
-                    &to_device_id[..8.min(to_device_id.len())]
-                );
-                SubmitOp::Transfer {
-                    to_device_id_bytes: to_device_id.clone(),
-                    amount: amount.value(),
-                    token_id: String::from_utf8_lossy(token_id).into_owned(),
-                    memo: message.clone(),
-                    nonce_bytes: nonce.clone(),
-                }
-            }
-            Operation::Generic {
-                operation_type,
-                data,
-                message,
-                ..
-            } if operation_type.as_slice() == b"online.message" => {
-                let to_device_id_bytes =
-                    crate::util::text_id::decode_base32_crockford(&params.recipient_device_id)
-                        .ok_or_else(|| {
-                            DsmError::internal(
-                                "submit_to_b0x: recipient_device_id base32 decode failed",
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                let mut from_arr = [0u8; 32];
-                if actor_device_bytes.len() == 32 {
-                    from_arr.copy_from_slice(&actor_device_bytes);
-                }
-                let mut to_arr = [0u8; 32];
-                if to_device_id_bytes.len() == 32 {
-                    to_arr.copy_from_slice(&to_device_id_bytes);
-                }
-                let mut tip_arr = [0u8; 32];
-                if sender_tip_bytes.len() == 32 {
-                    tip_arr.copy_from_slice(&sender_tip_bytes);
-                }
-                let nonce_arr = dsm::envelope::compute_online_message_nonce_v3(
-                    &from_arr, &to_arr, &tip_arr, params.seq, data, message,
-                );
-                SubmitOp::Message {
-                    to_device_id_bytes,
-                    payload: data.clone(),
-                    memo: message.clone(),
-                    nonce_bytes: nonce_arr.to_vec(),
-                }
-            }
-            _ => {
-                return Err(DsmError::internal(
-                    "submit_to_b0x: expected Operation::Transfer or online.message",
-                    None::<std::io::Error>,
-                ));
-            }
-        };
-
-        let (invoke_method, arg_pack, to_device_id_bytes, log_context) = match submit_op {
-            SubmitOp::Transfer {
-                to_device_id_bytes,
-                amount,
-                token_id,
-                memo,
-                nonce_bytes,
-            } => {
-                let transfer_req = dsm::types::proto::OnlineTransferRequest {
-                    token_id: token_id.clone(),
-                    to_device_id: to_device_id_bytes.clone(),
-                    amount,
-                    memo: memo.clone(),
-                    signature: params.signature.clone(),
-                    nonce: nonce_bytes.clone(),
-                    from_device_id: actor_device_bytes.clone(),
-                    chain_tip: sender_tip_bytes.clone(),
-                    seq: params.seq,
-                    receipt_commit: params.receipt_commit.clone(),
-                    canonical_operation_bytes: params.canonical_operation_bytes.clone(),
-                };
-                info!(
-                    "submit_to_b0x: transfer req context from_device_id(first4)={:?} seq={}",
-                    &transfer_req.from_device_id[..4.min(transfer_req.from_device_id.len())],
-                    transfer_req.seq
-                );
-
-                let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-                transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-                    DsmError::internal(
-                        format!("OnlineTransferRequest encode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-                    codec: dsm::types::proto::Codec::Proto as i32,
-                    body: transfer_req_bytes.clone(),
-                };
-                let decoded_req = dsm::types::proto::OnlineTransferRequest::decode(&*arg_pack.body)
-                    .map_err(|e| {
-                        DsmError::serialization_error(
-                            "decode transfer req",
-                            "OnlineTransferRequest",
-                            None::<String>,
-                            Some(e),
-                        )
-                    })?;
-                debug!(
-                    "submit_to_b0x: decoded OnlineTransferRequest signature len={}",
-                    decoded_req.signature.len()
-                );
-                assert_eq!(decoded_req.signature, params.signature);
-
-                (
-                    "wallet.send".to_string(),
-                    arg_pack,
-                    to_device_id_bytes,
-                    format!("amount={}, token={}", amount, token_id),
-                )
-            }
-            SubmitOp::Message {
-                to_device_id_bytes,
-                payload,
-                memo,
-                nonce_bytes,
-            } => {
-                let msg_req = dsm::types::proto::OnlineMessageRequest {
-                    to_device_id: to_device_id_bytes.clone(),
-                    payload: payload.clone(),
-                    memo: memo.clone(),
-                    signature: params.signature.clone(),
-                    nonce: nonce_bytes.clone(),
-                    from_device_id: actor_device_bytes.clone(),
-                    chain_tip: sender_tip_bytes.clone(),
-                    seq: params.seq,
-                };
-                let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
-                msg_req.encode(&mut msg_req_bytes).map_err(|e| {
-                    DsmError::internal(
-                        format!("OnlineMessageRequest encode failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                let arg_pack = dsm::types::proto::ArgPack {
-                    schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-                    codec: dsm::types::proto::Codec::Proto as i32,
-                    body: msg_req_bytes.clone(),
-                };
-                let decoded_req = dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body)
-                    .map_err(|e| {
-                        DsmError::serialization_error(
-                            "decode message req",
-                            "OnlineMessageRequest",
-                            None::<String>,
-                            Some(e),
-                        )
-                    })?;
-                debug!(
-                    "submit_to_b0x: decoded OnlineMessageRequest signature len={}",
-                    decoded_req.signature.len()
-                );
-                assert_eq!(decoded_req.signature, params.signature);
-
-                (
-                    "message.send".to_string(),
-                    arg_pack,
-                    to_device_id_bytes,
-                    format!("payload_len={}", payload.len()),
-                )
-            }
-        };
-
-        // Build Invoke with method="wallet.send"
-        // IMPORTANT: SPHINCS+ signatures are large (~50KB). The canonical sender
-        // signature already lives in OnlineTransferRequest.signature / OnlineMessageRequest.signature.
-        // Do NOT duplicate that signature into EvidenceOracle.signature for b0x transport,
-        // or envelopes can exceed storage-node body limits (HTTP 413).
-        // Keep only oracle_key in evidence so receivers can still verify without extra lookups.
-        //
-        // Source of truth: signing_authority derives the pk deterministically from
-        // (genesis_hash, device_id, C-DBRW binding key) — the SAME derivation that
-        // produces the secret key used by `wallet.sign_operation_bytes`. Embedding
-        // this pk guarantees the receiver's sphincs_verify uses the same pk that
-        // produced the signature; using `state.device_info.public_key` or
-        // `AppState::get_public_key()` can drift (stale genesis pk, fallback
-        // 32-byte placeholder, etc.) and silently poison the inbox.
-        let sender_signing_public_key = match crate::sdk::signing_authority::current_public_key() {
-            Ok(pk) => pk,
-            Err(e) => {
-                log::warn!(
-                        "submit_to_b0x: signing_authority pk unavailable ({e}); falling back to core state pk"
-                    );
-                self.core_sdk
-                    .get_current_state()
-                    .map(|s| s.device_info.public_key.clone())
-                    .unwrap_or_else(|_| {
-                        crate::sdk::app_state::AppState::get_public_key().unwrap_or_default()
-                    })
-            }
-        };
-
-        let evidence = if !sender_signing_public_key.is_empty() {
-            Some(dsm::types::proto::Evidence {
-                kind: Some(dsm::types::proto::evidence::Kind::Oracle(
-                    dsm::types::proto::EvidenceOracle {
-                        payload: vec![],
-                        signature: vec![],
-                        // Carry sender signing public key so receivers can verify without contact lookups.
-                        oracle_key: sender_signing_public_key.clone(),
-                    },
-                )),
-            })
-        } else {
-            None
-        };
-
-        let post_state_hash = match params.next_chain_tip.as_ref() {
-            Some(t) if t.len() == 32 => Some(dsm::types::proto::Hash32 { v: t.clone() }),
-            _ => None,
-        };
-
+        // The Invoke carries no evidence. The sender's signature is inside the
+        // request (SIG A), and the receiver verifies it under the key it stored
+        // for the contact — a key carried here would be a key nothing reads.
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: invoke_method,
+            method: "wallet.send".to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash,
             cosigners: vec![],
-            evidence,
+            evidence: None,
             nonce: None,
         };
 
-        // Build UniversalOp with the Invoke
-        let local_genesis_bytes = self.core_sdk.local_genesis_hash().await?;
+        // Build UniversalOp with the Invoke.
+        //
+        // §16.6 defect zero: use the sender genesis ALREADY carried (and
+        // validated as base32(32)) in `params` rather than an async DB read.
+        // That keeps envelope construction fully SYNCHRONOUS, which is the
+        // precondition for building it inside the staged advance closure — the
+        // closure runs under the state-machine lock and cannot await.
+        let local_genesis_bytes = text_id::decode_base32_crockford(&params.sender_genesis_hash)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| {
+                DsmError::invalid_parameter(
+                    "sender_genesis_hash must be base32 Crockford of exactly 32 bytes",
+                )
+            })?;
         // AF-4 fix: routing MUST be keyed by the *sender's* current relationship parent tip (hn)
         // (whitepaper: b0x key rotates with hn; sender posts to the key derived from the live parent)
         // Do NOT use a cached/stale recipient tip for routing.
@@ -1532,7 +1940,6 @@ impl B0xSDK {
                 v: message_id_bytes.to_vec(),
             }),
             actor: actor_device_bytes.clone(),
-            genesis_hash: local_genesis_bytes.clone(),
             kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
         };
 
@@ -1546,9 +1953,6 @@ impl B0xSDK {
             headers: Some(dsm::types::proto::Headers {
                 device_id: actor_device_bytes,
                 genesis_hash: local_genesis_bytes.to_vec(),
-                // chain_tip in headers must be the live relationship parent tip used for addressing
-                chain_tip: sender_tip_bytes,
-                seq: 0,
             }),
             message_id: message_id_bytes.to_vec(),
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
@@ -1556,7 +1960,7 @@ impl B0xSDK {
             )),
         };
 
-        info!("📦 submit_to_b0x: envelope built with {}", log_context);
+        info!("📦 submit_to_b0x: envelope built for transfer {message_id_b32}");
 
         let mut buf = Vec::with_capacity(envelope.encoded_len());
         prost::Message::encode(&envelope, &mut buf).map_err(|e| {
@@ -1566,299 +1970,305 @@ impl B0xSDK {
             )
         })?;
         info!("submit_to_b0x: envelope bytes={}", buf.len());
-
-        // Signature is embedded in the request body only (canonical path).
-        // Avoid duplicating into EvidenceOracle.signature to keep payload bounded.
-        if !params.signature.is_empty() {
-            info!(
-                "submit_to_b0x: embedded sender signature in request (len={})",
-                params.signature.len()
-            );
-        }
-
-        // 3) Replicate to multiple endpoints; require quorum_k successes.
-        let auth_device_id = self.device_id.clone(); // base32 textual id for auth header
-
-        // Derive recipient routing key from the *validated* params (base32(32) string).
-        // This avoids accidental mismatches if the Operation payload was constructed incorrectly.
-        let recipient_device_id_b32 = params.recipient_device_id.trim().to_string();
-        let recipient_device_id_from_op = text_id::encode_base32_crockford(&to_device_id_bytes);
-        if recipient_device_id_b32 != recipient_device_id_from_op {
-            warn!(
-                "submit_to_b0x: recipient_device_id mismatch: params={} op={} (using params)",
-                &recipient_device_id_b32[..16.min(recipient_device_id_b32.len())],
-                &recipient_device_id_from_op[..16.min(recipient_device_id_from_op.len())]
-            );
-        }
-
-        // §16.4 Tip-scoped b0x address rotation:
-        // The inbox key is always the explicit rotated address.
-        let routing_key = params.routing_address.clone();
-        info!(
-            "🔄 submit_to_b0x: using rotated b0x address = {}... (tip-scoped §16.4)",
-            &routing_key[..16.min(routing_key.len())]
-        );
-        if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-            println!(
-                "submit route debug: routing={} recipient_device_id={} recipient_genesis_hash={} sender_chain_tip={}",
-                routing_key,
-                params.recipient_device_id,
-                params.recipient_genesis_hash,
-                params.sender_chain_tip,
-            );
-        }
-
-        // DEBUG: Log the routing key prefix to diagnose mismatch issues
-        info!(
-            "🔍 submit_to_b0x: recipient routing key = {} (op_bytes_len={})",
-            &routing_key[..16.min(routing_key.len())],
-            to_device_id_bytes.len()
-        );
-
-        // 🔎 Instrument outgoing auth device id format (NO token leakage)
-        // If this ever logs dotted=true or base32_32=false, we will get retrieve/submit mismatches.
-        let auth_device_id_diag = auth_device_id.trim();
-        info!(
-            "🔐 submit_to_b0x auth_device_id diag: len={} prefix={}... base32_32={} dotted={}",
-            auth_device_id_diag.len(),
-            &auth_device_id_diag[..8.min(auth_device_id_diag.len())],
-            base32_decodes_to_32_bytes(auth_device_id_diag),
-            looks_like_dotted_decimal_bytes(auth_device_id_diag)
-        );
-
-        // Get healthy endpoints for submission
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints available for submission",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let total = endpoints.len();
-        let quorum = self.quorum_k.min(total);
-        let mut successes = 0usize;
-        let mut submit_errors: Vec<String> = Vec::new();
-
-        // Submit to endpoints with enhanced retry logic
-        for epc in endpoints {
-            match self
-                .submit_with_retry(
-                    &epc,
-                    &buf,
-                    &auth_device_id,
-                    &routing_key,
-                    &message_id_b32,
-                    retry_config,
-                )
-                .await
-            {
-                Ok(()) => {
-                    successes += 1;
-                    if successes >= quorum {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to submit to endpoint {}: {}", epc, e);
-                    submit_errors.push(format!("{}: {}", epc, e));
-                    // Continue to next endpoint
-                }
-            }
-        }
-
-        if successes >= quorum {
-            info!(
-                "✅ submit quorum satisfied: {}/{} (K={})",
-                successes, total, quorum
-            );
-            return Ok(message_id_b32);
-        }
-
-        Err(DsmError::internal(
-            format!(
-                "submit quorum not met: {}/{} (K={}); msg_id={}; errors={:?}",
-                successes, total, quorum, message_id_b32, submit_errors
-            ),
-            None::<std::io::Error>,
-        ))
+        Ok(BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes: to_device_id_bytes.to_vec(),
+        })
     }
 
-    /// Submit envelope to a single endpoint with retry logic
-    async fn submit_with_retry(
+    /// Build the exact canonical wire bytes without transmitting them.
+    /// Synchronous: freezing bytes into the durable outbox must not require an
+    /// async context.
+    pub fn build_envelope_bytes(
+        &self,
+        params: &B0xSubmissionParams,
+    ) -> Result<(Vec<u8>, String), DsmError> {
+        let built = self.build_envelope_for_submission(params)?;
+        Ok((built.bytes, built.message_id_b32))
+    }
+
+    /// Submit: build the envelope, then replicate it to quorum.
+    async fn submit_inner(
         &mut self,
+        params: B0xSubmissionParams,
+        retry_config: &B0xRetryConfig,
+    ) -> Result<String, DsmError> {
+        let BuiltEnvelope {
+            bytes: buf,
+            message_id_b32,
+            to_device_id_bytes,
+        } = self.build_envelope_for_submission(&params)?;
+
+        // The recipient the operation names is the one the envelope is sealed
+        // for and addressed to; params naming another is a malformed send.
+        let recipient = decode_base32_32("recipient_device_id", params.recipient_device_id.trim())?;
+        if recipient.as_slice() != to_device_id_bytes.as_slice() {
+            return Err(DsmError::invalid_operation(
+                "submit_to_b0x: the recipient the params name is not the one the operation names",
+            ));
+        }
+        // §16.4: the inbox key is always the explicit rotated address.
+        let routing_key = params.routing_address.clone();
+        let sealed = seal_for(&recipient, &message_id_b32, &buf)?;
+        self.deliver(&routing_key, &message_id_b32, &sealed, retry_config)
+            .await?;
+        Ok(message_id_b32)
+    }
+
+    /// §16.6 defect zero — submit the EXACT bytes frozen in the durable outbox:
+    /// the seal the send path made and kept when it froze them
+    /// ([`seal_for`]). No envelope reconstruction, so retry identity cannot
+    /// drift if envelope-building code changes across upgrades, and the
+    /// deterministic `message_id` makes the node collapse duplicates onto one
+    /// spool row.
+    pub async fn submit_stored_envelope(
+        &mut self,
+        routing_address: &str,
+        message_id_b32: &str,
+    ) -> Result<(), DsmError> {
+        self.submit_stored_envelope_with_retry(
+            routing_address,
+            message_id_b32,
+            &B0xRetryConfig::default(),
+        )
+        .await
+    }
+
+    /// The bounded time this transport call can take, derived from its own
+    /// retry schedule rather than guessed by the caller.
+    ///
+    /// Sequential per-endpoint attempts, each with up to `max_retries` retries
+    /// and exponential backoff capped at `max_delay_ms`. Callers that need to
+    /// bound a stored-envelope submission use THIS, so an outer deadline can
+    /// never expire before the quorum algorithm has legitimately exhausted the
+    /// configured fleet — that would manufacture `submission_uncertain` out of a
+    /// still-viable attempt.
+    ///
+    /// The per-request timeout is not modelled here (it is a property of the
+    /// HTTP client, not the retry config); the small fixed margin absorbs it.
+    pub fn stored_envelope_deadline(&self, retry: &B0xRetryConfig) -> std::time::Duration {
+        let mut per_endpoint_ms: u64 = 0;
+        let mut delay = std::time::Duration::from_millis(retry.base_delay_ms);
+        for _ in 0..retry.max_retries {
+            per_endpoint_ms += delay.as_millis() as u64;
+            delay = std::cmp::min(
+                delay.mul_f64(retry.backoff_multiplier),
+                std::time::Duration::from_millis(retry.max_delay_ms),
+            );
+        }
+        let endpoints = self.storage_node_endpoints.len().max(1) as u64;
+        // Attempts themselves are not free: allow a generous per-attempt margin
+        // on top of the sleeps, per endpoint, plus a fixed floor.
+        let per_attempt_margin_ms: u64 = 5_000 * (retry.max_retries as u64 + 1);
+        std::time::Duration::from_millis(
+            (per_endpoint_ms + per_attempt_margin_ms) * endpoints + 5_000,
+        )
+    }
+
+    /// `submit_stored_envelope` with an explicit retry schedule. The schedule
+    /// is what bounds the call — see `stored_envelope_deadline`.
+    pub async fn submit_stored_envelope_with_retry(
+        &mut self,
+        routing_address: &str,
+        message_id_b32: &str,
+        retry: &B0xRetryConfig,
+    ) -> Result<(), DsmError> {
+        let sealed = kept_seal(message_id_b32)?;
+        self.deliver(routing_address, message_id_b32, &sealed, retry)
+            .await
+    }
+
+    /// Deliver ONE frozen logical send — the transfer envelope plus every
+    /// frozen outbound artifact — under the ids and route it was frozen with.
+    ///
+    /// This is the single delivery path for both the first attempt in
+    /// `wallet.send` and the recovery sweep. Having one path is the point: the
+    /// initial send used to submit only the transfer and discard the ADR 0003
+    /// evidence, and the recovery sweep did not exist, so a split send could
+    /// never be completed by any code that ran. Two callers, one operation over
+    /// the same frozen bytes.
+    ///
+    /// Invariants, all enforced here and nowhere else:
+    ///
+    ///  - **No rebuilding.** Only `envelope_bytes` from the durable rows are
+    ///    sent. Nothing is re-encoded from current state.
+    ///  - **No route derivation.** Every artifact — transfer and evidence alike
+    ///    — is submitted under the OWNING outbox's frozen `routing_address`.
+    ///    An artifact's `content_digest` names its bytes; it never selects a
+    ///    route. Replaying the same message id under a different recipient is
+    ///    not a relocation: the node dedups on `message_id` alone and would
+    ///    silently keep the first row while returning success.
+    ///  - **All or nothing.** `Ok` only when every submission reached quorum.
+    ///    Any failure returns `Err`, and the caller leaves the logical send
+    ///    `submission_uncertain` so the next sweep replays the whole frozen
+    ///    set. Replaying an already-accepted half is free (deterministic id +
+    ///    node `DO NOTHING`), which is why no half-delivery lifecycle exists.
+    ///  - **The transport owns its deadline.** No outer timeout is imposed;
+    ///    the retry schedule bounds each submission (`stored_envelope_deadline`).
+    ///
+    /// Every half is delivered at once, and the send is delivered when every
+    /// half has reached quorum. Correctness does not depend on which lands
+    /// first: the recipient stages whichever half lands first and binds the
+    /// pair when the other does (`recipient_dispatch`'s
+    /// `evidence_first_binds_when_the_transfer_lands`). Every artifact's role
+    /// is checked before anything is sent, and the outcome is reported in the
+    /// order the halves are named: the transfer, then the artifacts in role
+    /// order.
+    pub async fn deliver_frozen_logical_send(
+        &mut self,
+        outbox: &crate::storage::client_db::SenderOutboxRecord,
+        artifacts: &[crate::storage::client_db::SenderOutboxArtifact],
+        retry: &B0xRetryConfig,
+    ) -> Result<FrozenSendDelivery, DsmError> {
+        let route = outbox.routing_address.as_str();
+        // Only initial-send artifacts ride the transfer's route. A received
+        // countersign delta or the finality certificate (own route, own
+        // sweep) reaching this primitive is a caller bug — refuse, never
+        // relocate it under a route the node would silently dedup.
+        for artifact in artifacts {
+            if !artifact.role.is_initial_send_artifact() {
+                return Err(DsmError::internal(
+                    format!(
+                        "frozen send {}: artifact role {} is not part of the initial send",
+                        outbox.submission_id,
+                        artifact.role.as_str()
+                    ),
+                    None::<std::io::Error>,
+                ));
+            }
+        }
+        let this = &*self;
+        let deliver = |id: String| async move {
+            let sealed = kept_seal(&id)?;
+            this.deliver(route, &id, &sealed, retry).await
+        };
+        let (transfer, delivered) = futures::future::join(
+            deliver(outbox.submission_id.clone()),
+            futures::future::join_all(
+                artifacts
+                    .iter()
+                    .map(|artifact| deliver(artifact.submission_id.clone())),
+            ),
+        )
+        .await;
+        transfer.map_err(|e| {
+            DsmError::internal(
+                format!(
+                    "frozen send {}: transfer half not delivered: {e}",
+                    outbox.submission_id
+                ),
+                None::<std::io::Error>,
+            )
+        })?;
+        let mut artifact_ids = Vec::with_capacity(artifacts.len());
+        for (artifact, answer) in artifacts.iter().zip(delivered) {
+            answer.map_err(|e| {
+                DsmError::internal(
+                    format!(
+                        "frozen send {}: {} artifact {} not delivered: {e}",
+                        outbox.submission_id,
+                        artifact.role.as_str(),
+                        artifact.submission_id
+                    ),
+                    None::<std::io::Error>,
+                )
+            })?;
+            artifact_ids.push(artifact.submission_id.clone());
+        }
+
+        info!(
+            "✅ frozen logical send delivered: transfer={} artifacts={} route={}..",
+            outbox.submission_id,
+            artifact_ids.len(),
+            &route[..route.len().min(12)]
+        );
+        Ok(FrozenSendDelivery {
+            transfer_id: outbox.submission_id.clone(),
+            artifact_ids,
+        })
+    }
+
+    /// One submit of sealed spool bytes to `endpoint`: `Ok` once the node
+    /// answers 204 (it holds them; a replay of a held message id answers the
+    /// same), and otherwise whether a retry may still succeed.
+    async fn submit_once(
+        &self,
         endpoint: &str,
-        envelope_buf: &[u8],
-        auth_device_id: &str,
+        sealed: &[u8],
+        routing_key: &str,
+        message_id_b32: &str,
+    ) -> Result<(), Refused> {
+        let url = format!("{}/api/v2/b0x/submit", endpoint);
+        let resp = self
+            .client_for(endpoint)
+            .map_err(Refused::Final)?
+            .post(&url)
+            .header("Content-Type", "application/protobuf")
+            .header("x-dsm-message-id", message_id_b32)
+            .header("x-dsm-recipient", routing_key)
+            .body(sealed.to_vec())
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                self.circuit_breaker.mark_node_healthy(endpoint).await;
+                Ok(())
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body = match r.text().await {
+                    Ok(text) => text,
+                    Err(e) => format!("(body unreadable: {e})"),
+                };
+                warn!("Submit failed {} via {}: {}", status, endpoint, body);
+                self.circuit_breaker.mark_node_failed(endpoint).await;
+                if !Self::is_retryable_error(status) {
+                    return Err(Refused::Final(DsmError::network(
+                        format!("Submit failed {status} via {endpoint}: {body}"),
+                        None::<std::io::Error>,
+                    )));
+                }
+                Err(Refused::Retryable(format!("{status}: {body}")))
+            }
+            Err(e) => {
+                warn!("HTTP error via {}: {}", endpoint, e);
+                self.circuit_breaker.mark_node_failed(endpoint).await;
+                Err(Refused::Retryable(e.to_string()))
+            }
+        }
+    }
+
+    /// The retries of a submit whose first attempt failed with `first`, a
+    /// retryable failure: each after the backoff `retry_config` sets, until
+    /// one is taken, one fails for good, or the retries run out.
+    async fn submit_retries(
+        &self,
+        endpoint: &str,
+        sealed: &[u8],
         routing_key: &str,
         message_id_b32: &str,
         retry_config: &B0xRetryConfig,
+        first: String,
     ) -> Result<(), DsmError> {
-        let mut attempt = 0;
+        let mut last = first;
         let mut delay = std::time::Duration::from_millis(retry_config.base_delay_ms);
-
-        loop {
-            // Ensure token for this endpoint
-            let token = match self.ensure_token_for_endpoint(endpoint).await {
-                Ok(t) => t,
-                Err(e) => {
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-                    return Err(DsmError::internal(
-                        format!("Failed to get token for endpoint {}: {}", endpoint, e),
-                        None::<std::io::Error>,
-                    ));
-                }
-            };
-
-            let url = format!("{}/api/v2/b0x/submit", endpoint);
-            if attempt == 0 {
-                info!(
-                    "🚀 submit -> {} (recipient={}...)",
-                    url,
-                    &routing_key[..8.min(routing_key.len())]
-                );
-            } else {
-                info!("🔄 retry submit -> {} (attempt {})", url, attempt + 1);
-            }
-
-            let mut req = self
-                .http_client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", auth_device_id, token))
-                .header("x-dsm-message-id", message_id_b32)
-                .header("x-dsm-recipient", routing_key)
-                .body(envelope_buf.to_vec());
-
-            if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                req = req.timeout(std::time::Duration::from_secs(2));
-            }
-
-            let resp = req.send().await;
-
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "submit success debug: endpoint={} route={} msg_id={}",
-                            endpoint, routing_key, message_id_b32
-                        );
-                    }
-                    self.circuit_breaker.mark_node_healthy(endpoint).await;
-                    return Ok(());
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
-                    // Idempotent replay: treat as success since the message_id was already accepted.
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "submit conflict debug: endpoint={} route={} msg_id={}",
-                            endpoint, routing_key, message_id_b32
-                        );
-                    }
-                    self.circuit_breaker.mark_node_healthy(endpoint).await;
-                    return Ok(());
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    if attempt == 0 {
-                        warn!("⚠️ 401 Unauthorized at {}; refreshing token...", endpoint);
-                        self.purge_persisted_token_for_endpoint(endpoint).await;
-                        // Try to re-register immediately
-                        if let Ok(tok) = self.register_device_on(endpoint).await {
-                            if let Ok((genesis_b32, device_id_b32, cache_key)) =
-                                self.auth_binding_key(endpoint).await
-                            {
-                                self.tokens_by_endpoint
-                                    .write()
-                                    .await
-                                    .insert(cache_key, tok.clone());
-                                let _ = crate::storage::client_db::store_auth_token(
-                                    endpoint,
-                                    &device_id_b32,
-                                    &genesis_b32,
-                                    &tok,
-                                );
-                                // Continue to next attempt (retry)
-                                attempt += 1;
-                                if attempt < retry_config.max_retries {
-                                    tokio::time::sleep(delay).await;
-                                    delay = std::cmp::min(
-                                        delay.mul_f64(retry_config.backoff_multiplier),
-                                        std::time::Duration::from_millis(retry_config.max_delay_ms),
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                        warn!("❌ Token refresh failed at {}", endpoint);
-                        self.circuit_breaker.mark_node_failed(endpoint).await;
-                        return Err(DsmError::internal(
-                            format!("Token refresh failed at {}", endpoint),
-                            None::<std::io::Error>,
-                        ));
-                    } else {
-                        warn!("❌ 401 Unauthorized persists at {} after refresh", endpoint);
-                        self.circuit_breaker.mark_node_failed(endpoint).await;
-                        return Err(DsmError::internal(
-                            format!("401 Unauthorized persists at {} after refresh", endpoint),
-                            None::<std::io::Error>,
-                        ));
-                    }
-                }
-                Ok(r) => {
-                    let status = r.status();
-                    let body_txt = r.text().await.unwrap_or_default();
-                    warn!("Submit failed {} via {}: {}", status, endpoint, body_txt);
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-
-                    // Check if this is a retryable error
-                    if Self::is_retryable_error(status) && attempt < retry_config.max_retries {
-                        attempt += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(
-                            delay.mul_f64(retry_config.backoff_multiplier),
-                            std::time::Duration::from_millis(retry_config.max_delay_ms),
-                        );
-                        continue;
-                    } else {
-                        return Err(DsmError::internal(
-                            format!("Submit failed {} via {}: {}", status, endpoint, body_txt),
-                            None::<std::io::Error>,
-                        ));
-                    }
-                }
-                Err(e) => {
-                    warn!("HTTP error via {}: {}", endpoint, e);
-                    self.circuit_breaker.mark_node_failed(endpoint).await;
-
-                    // Network errors are retryable
-                    if attempt < retry_config.max_retries {
-                        attempt += 1;
-                        tokio::time::sleep(delay).await;
-                        delay = std::cmp::min(
-                            delay.mul_f64(retry_config.backoff_multiplier),
-                            std::time::Duration::from_millis(retry_config.max_delay_ms),
-                        );
-                        continue;
-                    } else {
-                        return Err(DsmError::internal(
-                            format!(
-                                "HTTP error via {} after {} attempts: {}",
-                                endpoint,
-                                attempt + 1,
-                                e
-                            ),
-                            None::<std::io::Error>,
-                        ));
-                    }
-                }
+        for _ in 0..retry_config.max_retries {
+            tokio::time::sleep(delay).await;
+            delay = std::cmp::min(
+                delay.mul_f64(retry_config.backoff_multiplier),
+                std::time::Duration::from_millis(retry_config.max_delay_ms),
+            );
+            match self
+                .submit_once(endpoint, sealed, routing_key, message_id_b32)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(Refused::Final(e)) => return Err(e),
+                Err(Refused::Retryable(why)) => last = why,
             }
         }
+        Err(Refused::Retryable(last).into_error(endpoint, retry_config.max_retries + 1))
     }
 
     /// Validate submission parameters comprehensively
@@ -1870,7 +2280,7 @@ impl B0xSDK {
                 None::<std::io::Error>,
             ));
         }
-        if !is_canonical_auth_device_id(&params.recipient_device_id) {
+        if !base32_decodes_to_32_bytes(&params.recipient_device_id) {
             return Err(DsmError::internal(
                 "recipient_device_id must be valid base32 encoding of 32 bytes",
                 None::<std::io::Error>,
@@ -1905,20 +2315,6 @@ impl B0xSDK {
             ));
         }
 
-        // Validate sender chain tip
-        if params.sender_chain_tip.is_empty() {
-            return Err(DsmError::internal(
-                "sender_chain_tip cannot be empty",
-                None::<std::io::Error>,
-            ));
-        }
-        if !base32_decodes_to_32_bytes(&params.sender_chain_tip) {
-            return Err(DsmError::internal(
-                "sender_chain_tip must be valid base32 encoding of 32 bytes",
-                None::<std::io::Error>,
-            ));
-        }
-
         if params.routing_address.is_empty() {
             return Err(DsmError::internal(
                 "routing_address cannot be empty",
@@ -1932,7 +2328,6 @@ impl B0xSDK {
             dsm::types::operations::Operation::Transfer {
                 to_device_id,
                 amount,
-                token_id,
                 ..
             } => {
                 if to_device_id.len() != 32 {
@@ -1947,55 +2342,24 @@ impl B0xSDK {
                         None::<std::io::Error>,
                     ));
                 }
-                if token_id.is_empty() {
+                // The terms ride beside the operation and must open it: the
+                // recipient refuses a transfer whose terms do not.
+                let terms =
+                    dsm::types::operations::TransferTerms::from_bytes(&params.transfer_terms)?;
+                terms.open(&params.transaction)?;
+                if terms.token_id.is_empty() {
                     return Err(DsmError::internal(
                         "token_id cannot be empty",
                         None::<std::io::Error>,
                     ));
                 }
             }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data,
-                ..
-            } if operation_type.as_slice() == b"online.message" => {
-                if data.is_empty() {
-                    return Err(DsmError::internal(
-                        "online.message payload cannot be empty",
-                        None::<std::io::Error>,
-                    ));
-                }
-                if data.len() > 4096 {
-                    return Err(DsmError::internal(
-                        "online.message payload exceeds 4096 bytes",
-                        None::<std::io::Error>,
-                    ));
-                }
-            }
             _ => {
                 return Err(DsmError::internal(
-                    "only Transfer or online.message operations are supported for b0x submission",
+                    "only Transfer operations are supported for b0x submission",
                     None::<std::io::Error>,
                 ));
             }
-        }
-
-        // Validate signature if present
-        if !params.signature.is_empty() && params.signature.len() < 64 {
-            return Err(DsmError::internal(
-                "signature must be at least 64 bytes if present",
-                None::<std::io::Error>,
-            ));
-        }
-
-        // Validate sender public key if present
-        if !params.sender_signing_public_key.is_empty()
-            && params.sender_signing_public_key.len() != 64
-        {
-            return Err(DsmError::internal(
-                "sender_signing_public_key must be exactly 64 bytes (SPHINCS+ public key)",
-                None::<std::io::Error>,
-            ));
         }
 
         Ok(())
@@ -2015,30 +2379,159 @@ impl B0xSDK {
     }
 
     // ------------------------------------------------------------------------
-    // v2 Retrieval & Acknowledgement (Envelope v3 over HTTP)
-    // These are implemented conservatively to avoid schema drift:
-    // - retrieve: POST /api/v2/b0x/retrieve with a small protobuf request
-    // - ack:      POST /api/v2/b0x/ack with a small protobuf request
-    // If your proto defines specific messages, wire them here; otherwise
-    // this remains a safe, binary-first contract.
+    // v2 retrieval (Envelope v3 over HTTP)
+    //
+    // A node's spool is append-only and read from a position (storage spec
+    // §4): it never marks, hides or removes a message. Which messages this
+    // device has consumed is its own state (`client_db::b0x_consumed`): each
+    // node is read from the position below which everything is consumed,
+    // consumed messages are skipped, and the rest are merged across nodes.
     // ------------------------------------------------------------------------
 
+    /// Pages read from one node in one retrieval: bounds the work per call.
+    /// The next call continues from the stored position.
+    const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
+
+    /// The position after `seq` on a node's spool, when `seq` is one the node
+    /// could hold. A spool position is the node's database sequence number,
+    /// so it and the one after it are at most `i64::MAX`; a number past that
+    /// is not an answer from a spool, and nothing is advanced by it.
+    fn position_after(seq: u64) -> Option<u64> {
+        seq.checked_add(1)
+            .filter(|next| *next <= Self::MAX_SPOOL_POSITION)
+    }
+
+    /// The largest position a node's spool can name.
+    const MAX_SPOOL_POSITION: u64 = i64::MAX as u64;
+
+    /// Read the spool at `b0x_address` from every member that answers. `Err`
+    /// when no member answered: nothing was read, which is not an empty
+    /// inbox. Otherwise the entries found and what the read covers
+    /// ([`SpoolCoverage`]): a read that did not reach enough members to meet
+    /// every delivery is partial, and no caller may take it for "nothing
+    /// more".
+    ///
+    /// Each member is read from the read position and no cursor is left: a
+    /// preview (`inbox.pull`) moves nothing the next sync reads.
     pub async fn retrieve_from_b0x_v2(
         &mut self,
         b0x_address: &str,
-        _limit: usize,
-    ) -> Result<Vec<B0xEntry>, DsmError> {
-        // Multi-node retrieve: query all healthy endpoints; merge unique entries by id.
-        // Generate a unique message ID for this retrieve request (required by auth middleware)
-        let mut msg_id_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut msg_id_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
+    ) -> Result<RetrievalOutcome, DsmError> {
+        self.retrieve_from(b0x_address, ReadFrom::Position).await
+    }
+
+    /// [`Self::retrieve_from_b0x_v2`] for `storage.sync`: each member's read
+    /// resumes where the previous one stopped at its page cap, and leaves its
+    /// own cursor for the next; a read that reaches the end of a member's
+    /// spool sends the next back to the read position. Repeated syncs work
+    /// through a route however much waits on it (pre-audit item 11).
+    pub async fn retrieve_resuming(
+        &mut self,
+        b0x_address: &str,
+    ) -> Result<RetrievalOutcome, DsmError> {
+        self.retrieve_from(b0x_address, ReadFrom::Resume).await
+    }
+
+    /// The pages of `epc`'s spool at `b0x_address` from `start`, as the member
+    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`]: fetched only,
+    /// nothing opened or recorded. The read stops at the spool's end, at the
+    /// page cap, at a page whose next position no spool can hold (the caller
+    /// refuses it), or at a member that does not answer. No client for the
+    /// member is this device's failure, not the member's, and is returned.
+    async fn fetch_member_pages(
+        &self,
+        epc: &str,
+        b0x_address: &str,
+        start: u64,
+    ) -> Result<MemberPages, DsmError> {
+        let mut pages = Vec::new();
+        let mut cursor = start;
+        while pages.len() < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+            let client = self.client_for(epc)?;
+            let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
+            let resp = client
+                .get(&url)
+                .header("Accept", "application/protobuf")
+                .header("x-dsm-b0x-address", b0x_address)
+                .send()
+                .await;
+            let batch = match resp {
+                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::End,
+                    });
+                }
+                Ok(r) if r.status().is_success() => {
+                    let bytes = match r.bytes().await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("b0x retrieve read failed from {}: {}", epc, e);
+                            return Ok(MemberPages {
+                                pages,
+                                ended: PagesEnded::Failed,
+                            });
+                        }
+                    };
+                    match dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_ref()) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!("SequencedBatchEnvelope decode failed from {}: {}", epc, e);
+                            return Ok(MemberPages {
+                                pages,
+                                ended: PagesEnded::Failed,
+                            });
+                        }
+                    }
+                }
+                Ok(r) => {
+                    warn!("b0x retrieve from {} answered HTTP {}", epc, r.status());
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::Failed,
+                    });
+                }
+                Err(e) => {
+                    warn!("b0x retrieve transport failure for {}: {}", epc, e);
+                    return Ok(MemberPages {
+                        pages,
+                        ended: PagesEnded::Failed,
+                    });
+                }
+            };
+            if batch.envelopes.is_empty() || batch.next_seq <= cursor {
+                return Ok(MemberPages {
+                    pages,
+                    ended: PagesEnded::End,
+                });
+            }
+            let next = batch.next_seq;
+            pages.push(batch);
+            if next > Self::MAX_SPOOL_POSITION {
+                // Not a position a spool can hold: the reader refuses this
+                // page, and nothing past it is fetched.
+                return Ok(MemberPages {
+                    pages,
+                    ended: PagesEnded::End,
+                });
+            }
+            cursor = next;
+        }
+        Ok(MemberPages {
+            pages,
+            ended: PagesEnded::PageCap,
+        })
+    }
+
+    async fn retrieve_from(
+        &mut self,
+        b0x_address: &str,
+        from: ReadFrom,
+    ) -> Result<RetrievalOutcome, DsmError> {
+        use crate::storage::client_db::b0x_consumed;
+        let local = |e: anyhow::Error| {
+            DsmError::storage(format!("b0x consumed record: {e}"), None::<std::io::Error>)
+        };
 
         if b0x_address.is_empty() {
             return Err(DsmError::internal(
@@ -2048,825 +2541,345 @@ impl B0xSDK {
         }
         validate_b0x_address(b0x_address)?;
 
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-        if endpoints.is_empty() {
-            return Ok(vec![]);
-        }
-        let mut map: HashMap<String, dsm::types::proto::Envelope> = HashMap::new();
-        let mut unauthorized_count = 0usize;
-        let mut polled_count = 0usize;
-        for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve token debug: endpoint={} route={} token_error=1",
-                            epc, b0x_address
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/retrieve", &epc);
-            // NOTE: Do not log the full Authorization header (it contains a bearer-like token).
-            let did = self.device_id.trim();
-            info!(
-                "📬 retrieve_from_b0x_v2: GET {} (device_prefix={}..., msg_id={}...) auth_device_id diag: len={} base32_32={} dotted={}",
-                url,
-                &did[..8.min(did.len())],
-                &msg_id_b32[..8.min(msg_id_b32.len())],
-                did.len(),
-                base32_decodes_to_32_bytes(did),
-                looks_like_dotted_decimal_bytes(did)
-            );
-
-            let mut req = self
-                .http_client
-                .get(&url)
-                .header("Accept", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &msg_id_b32);
-
-            // Scope retrieval to the explicit rotated inbox key.
-            req = req.header("x-dsm-b0x-address", b0x_address);
-
-            if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                req = req.header("x-dsm-include-acked", "1");
+        let mut endpoints: Vec<String> = Vec::new();
+        for endpoint in &self.storage_node_endpoints {
+            if self.circuit_breaker.is_node_healthy(endpoint).await {
+                endpoints.push(endpoint.clone());
             }
+        }
+        if endpoints.is_empty() {
+            return Err(DsmError::network(
+                "b0x retrieve: every storage node is marked failed",
+                None::<std::io::Error>,
+            ));
+        }
 
-            let resp = req.send().await;
-            polled_count += 1;
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve empty debug: endpoint={} route={}",
-                            epc, b0x_address
-                        );
-                    }
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
+        // This device's key, once for the whole read: without it nothing can
+        // be opened, which is this device's state and not the envelopes'.
+        let kyber_secret = local_kyber_secret()?;
+        // Each distinct copy once, by `envelope_merge_key`, in the order the
+        // spools hold them: a consumer that takes only some takes the oldest,
+        // and nothing spooled later gets ahead of them.
+        let mut copies: Vec<(String, dsm::types::proto::Envelope)> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Members whose spool was read to an answer. None is not an empty
+        // inbox: nothing was read (storage spec §4).
+        let mut answered = 0usize;
+        // Members whose read answered and stopped at its page cap.
+        let mut capped_members = 0usize;
+        // Where each member's read starts, from this device's own records.
+        let mut starts = Vec::with_capacity(endpoints.len());
+        for epc in endpoints {
+            // `position`: below it, everything on this node is consumed.
+            // `cursor`: where the next page is read from. A message still
+            // waiting (one half of a pair) stops `position`, never `cursor`,
+            // so nothing behind it is held up.
+            let position = b0x_consumed::read_position(b0x_address, &epc).map_err(local)?;
+            let resumed_at = match from {
+                ReadFrom::Position => None,
+                ReadFrom::Resume => b0x_consumed::scan_cursor(b0x_address, &epc)
+                    .map_err(local)?
+                    .filter(|resume| *resume > position),
+            };
+            let cursor = match resumed_at {
+                Some(resume) => resume,
+                None => position,
+            };
+            starts.push((epc, position, resumed_at, cursor));
+        }
+        // Every member's pages are fetched at once: a read costs the slowest
+        // member's round trips, not the sum of every member's. What came back
+        // is then read member by member, in set order, exactly as before.
+        let fetched = futures::future::join_all(
+            starts
+                .iter()
+                .map(|(epc, _, _, cursor)| self.fetch_member_pages(epc, b0x_address, *cursor)),
+        )
+        .await;
+        for ((epc, mut position, resumed_at, mut cursor), member) in starts.into_iter().zip(fetched)
+        {
+            let member = member?;
+            // Only a read that starts at the position can move it: one that
+            // resumed past it has not read what lies between.
+            let mut consumed_run = resumed_at.is_none();
+            let failed = member.ended == PagesEnded::Failed;
+            // Why this node's answer is not a spool's, when it is not:
+            // nothing past it is read or advanced by it.
+            let mut malformed: Option<String> = None;
+            // Where the read stopped: at the page cap unless a page ends the
+            // spool first.
+            let stop = match member.ended {
+                PagesEnded::End => ReadStop::End,
+                PagesEnded::PageCap | PagesEnded::Failed => ReadStop::PageCap,
+            };
+            'pages: for batch in member.pages {
+                if batch.next_seq > Self::MAX_SPOOL_POSITION {
+                    malformed = Some(format!(
+                        "next position {} is not a spool position",
+                        batch.next_seq
+                    ));
+                    break;
                 }
-                Ok(r) if r.status().is_success() => {
-                    let bytes = r.bytes().await.map_err(|e| {
-                        DsmError::internal(
-                            format!("retrieve read failed: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    let batch = match dsm::types::proto::BatchEnvelope::decode(bytes.as_ref()) {
-                        Ok(b) => b,
+                for sequenced in batch.envelopes {
+                    let Some(after) = Self::position_after(sequenced.seq_num) else {
+                        malformed =
+                            Some(format!("seq {} is not a spool position", sequenced.seq_num));
+                        break 'pages;
+                    };
+                    // The node never opens what it holds (storage spec §8);
+                    // this device decodes. Bytes that are not a canonical
+                    // envelope never will be, so nothing waits on them.
+                    let env = match dsm::envelope::from_canonical_bytes(&sequenced.envelope) {
+                        Ok(env) => env,
                         Err(e) => {
-                            warn!("BatchEnvelope decode failed from {}: {}", epc, e);
-                            self.circuit_breaker.mark_node_failed(&epc).await;
+                            warn!(
+                                "b0x retrieve from {}: seq {} is not an envelope: {}",
+                                epc, sequenced.seq_num, e
+                            );
+                            if consumed_run {
+                                position = position.max(after);
+                            }
                             continue;
                         }
                     };
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve raw debug: endpoint={} route={} raw_envelopes={}",
-                            epc,
-                            b0x_address,
-                            batch.envelopes.len(),
-                        );
+                    let id = text_id::encode_base32_crockford(&env.message_id);
+                    if b0x_consumed::is_consumed(b0x_address, &id).map_err(local)? {
+                        if consumed_run {
+                            position = position.max(after);
+                        }
+                        continue;
                     }
-                    for env in batch.envelopes {
-                        let key = text_id::encode_base32_crockford(&env.message_id);
-                        map.entry(key).or_insert(env);
+                    // DSM Amendment A7: open the seal before anything reads
+                    // the envelope. What opens says nothing about who sealed
+                    // it: anyone can seal to this device, and the sender is
+                    // whoever the ingestion boundary verifies. What does not
+                    // open was not sealed to this device and never will open
+                    // here, so it is passed over like bytes that are not an
+                    // envelope: it holds up nothing behind it.
+                    match open_sealed(&kyber_secret, &env) {
+                        Ok(inner) => {
+                            // A copy this device passed over is not read
+                            // again: by its content, so another copy under
+                            // the same id still is.
+                            let copy_key = envelope_merge_key(&inner);
+                            if b0x_consumed::is_passed_over(b0x_address, &copy_key)
+                                .map_err(local)?
+                            {
+                                if consumed_run {
+                                    position = position.max(after);
+                                }
+                                continue;
+                            }
+                            consumed_run = false;
+                            if seen.insert(copy_key.clone()) {
+                                copies.push((copy_key, inner));
+                            }
+                        }
+                        Err(e) => {
+                            warn!("b0x envelope {} does not open: {}", id, e);
+                            if consumed_run {
+                                position = position.max(after);
+                            }
+                        }
                     }
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
                 }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    // Token is invalid for this endpoint/device-id. Purge it and continue with other endpoints.
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve unauthorized debug: endpoint={} route={}",
-                            epc, b0x_address
-                        );
-                    }
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    unauthorized_count += 1;
-                    warn!("[DSM_SDK] Inbox token invalid for endpoint {}. Purged token and continuing with other endpoints.", epc);
-                }
-                Ok(r) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve other-status debug: endpoint={} route={} status={}",
-                            epc,
-                            b0x_address,
-                            r.status()
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(e) => {
-                    if std::env::var("DSM_SDK_TEST_MODE").is_ok() {
-                        println!(
-                            "retrieve transport debug: endpoint={} route={} error={}",
-                            epc, b0x_address, e
-                        );
-                    }
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
+                cursor = batch.next_seq;
+            }
+            b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
+            // A read that failed leaves the cursor where it was: what it did
+            // not reach is read from there again.
+            let read_answered = !failed && malformed.is_none();
+            let capped = read_answered && stop == ReadStop::PageCap;
+            // A sync that read this member's spool to its end has seen all of
+            // it: a wait on this spool wakes for what lands after.
+            if from == ReadFrom::Resume && read_answered && stop == ReadStop::End {
+                record_spool_end(b0x_address, &epc, cursor);
+            }
+            if from == ReadFrom::Resume && read_answered {
+                b0x_consumed::set_scan_cursor(b0x_address, &epc, capped.then_some(cursor))
+                    .map_err(local)?;
+            }
+            if capped {
+                capped_members += 1;
+            }
+            if let Some(why) = &malformed {
+                warn!("b0x retrieve from {}: {}", epc, why);
+            }
+            if failed || malformed.is_some() {
+                self.circuit_breaker.mark_node_failed(&epc).await;
+            } else {
+                answered += 1;
+                self.circuit_breaker.mark_node_healthy(&epc).await;
             }
         }
+        if answered == 0 {
+            return Err(DsmError::network(
+                "b0x retrieve: no storage node answered; nothing was read",
+                None::<std::io::Error>,
+            ));
+        }
+        let members = self.storage_node_endpoints.len();
+        let coverage = SpoolCoverage::of(answered, members, self.quorum_k);
 
         let mut entries = Vec::new();
-        for (_, env) in map.into_iter() {
-            if let Some(mut e) = self.envelope_to_b0x_entry(env) {
-                e.inbox_key = b0x_address.to_string();
-                entries.push(e);
+        let mut unknown = Vec::new();
+        for (copy_key, env) in copies {
+            // §16.6 reply window: an acceptance artifact is NOT a forward transfer and
+            // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
+            // (never a trial-decode) and buffered for the sender-finalization path;
+            // dropping it here is what would strand a countersigned receipt.
+            if let Some((method, body)) = Self::decode_cert_resync_message(&env) {
+                info!(
+                    "📬 cert-resync message method={} body={}B",
+                    method,
+                    body.len()
+                );
+                self.pending_cert_resync.push((method, body));
+                continue;
             }
-        }
-        info!("📬 retrieve_from_b0x_v2: merged {} entries", entries.len());
-        // Only surface InboxTokenInvalid if ALL polled endpoints responded 401.
-        // If at least one endpoint is healthy (NO_CONTENT/success/other), do not escalate to UI error.
-        if polled_count > 0 && unauthorized_count == polled_count && entries.is_empty() {
-            return Err(DsmError::InboxTokenInvalid(
-                "Inbox token invalid for this device across all endpoints. Genesis-bound inbox cannot be re-registered. Please re-bind device or contact support.".to_string()
-            ));
-        }
-        Ok(entries)
-    }
-
-    pub async fn is_message_acknowledged(
-        &mut self,
-        message_id_b32: &str,
-    ) -> Result<bool, DsmError> {
-        let msg_id_bytes = text_id::decode_base32_crockford(message_id_b32).ok_or_else(|| {
-            DsmError::internal("message_id must be valid base32", None::<std::io::Error>)
-        })?;
-        if msg_id_bytes.len() != 16 {
-            return Err(DsmError::internal(
-                format!(
-                    "message_id must decode to 16 bytes (got {})",
-                    msg_id_bytes.len()
-                ),
-                None::<std::io::Error>,
-            ));
-        }
-
-        let mut request_msg_id = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut request_msg_id).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let request_msg_id_b32 = text_id::encode_base32_crockford(&request_msg_id);
-
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints",
-                None::<std::io::Error>,
-            ));
-        }
-
-        let quorum = self.quorum_k.min(endpoints.len()).max(1);
-        let mut acked_count = 0usize;
-        let mut seen_unacked = false;
-        let mut saw_authoritative_status = false;
-
-        for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
+            if let Some(body) = Self::decode_countersign_b(&env) {
+                info!(
+                    "📬 ADR 0003 countersign delta message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
+                );
+                self.pending_countersign_deltas.push(CountersignDelta {
+                    message_id: text_id::encode_base32_crockford(&env.message_id),
+                    envelope_bytes: env.encode_to_vec(),
+                    body,
+                });
+                continue;
+            }
+            if let Some(body) = Self::decode_relationship_finalized(&env) {
+                info!(
+                    "📬 finality checkpoint message_id={} ({}B body)",
+                    text_id::encode_base32_crockford(&env.message_id),
+                    body.len()
+                );
+                self.pending_relationship_finalized
+                    .push(RelationshipFinalizedMessage {
+                        message_id: text_id::encode_base32_crockford(&env.message_id),
+                        body,
+                    });
+                continue;
+            }
+            if let Some(evidence) = Self::decode_receipt_evidence_a(&env) {
+                let message_id = text_id::encode_base32_crockford(&env.message_id);
+                info!(
+                    "📬 ADR 0003 evidence half message_id={} ({}B receipt)",
+                    message_id,
+                    evidence.full_receipt_bytes.len()
+                );
+                self.pending_evidence_artifacts.push(EvidenceArtifact {
+                    message_id,
+                    copy_key,
+                    evidence,
+                });
+                continue;
+            }
+            match self.envelope_to_b0x_entry(env, &copy_key) {
+                Some(mut e) => {
+                    e.inbox_key = b0x_address.to_string();
+                    entries.push(e);
                 }
-            };
-
-            let url = format!("{}/api/v2/b0x/status/{}", epc, message_id_b32);
-            let resp = self
-                .http_client
-                .get(&url)
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &request_msg_id_b32)
-                .send()
-                .await;
-
-            match resp {
-                Ok(r) if r.status() == reqwest::StatusCode::NO_CONTENT => {
-                    acked_count += 1;
-                    saw_authoritative_status = true;
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                    if acked_count >= quorum {
-                        return Ok(true);
-                    }
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
-                    seen_unacked = true;
-                    saw_authoritative_status = true;
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                }
-                Ok(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
+                None => {
+                    info!("📬 copy {copy_key} on {b0x_address} is none of the spooled payloads");
+                    unknown.push(copy_key);
                 }
             }
         }
-
-        match summarize_ack_status(acked_count, quorum, seen_unacked, saw_authoritative_status) {
-            AckStatusSummary::Acked => Ok(true),
-            AckStatusSummary::NotAcked => Ok(false),
-            AckStatusSummary::Unavailable => Err(DsmError::internal(
-                format!("message status unavailable or below quorum: acked {acked_count}/{quorum}"),
-                None::<std::io::Error>,
-            )),
-        }
+        info!(
+            "📬 retrieve_from_b0x_v2: merged {} entries from {answered} of {members} members ({coverage:?})",
+            entries.len()
+        );
+        Ok(RetrievalOutcome {
+            entries,
+            responded: answered,
+            members,
+            coverage,
+            unknown,
+            more: capped_members > 0,
+        })
     }
 
-    pub async fn acknowledge_b0x_v2(
+    /// Record `message_ids` (base32 transport ids) as consumed from
+    /// `b0x_address` — on this device only. A node is never told: its spool is
+    /// append-only, and what this device has consumed is its own state. Call
+    /// it for exactly the messages processed; a message left unrecorded is
+    /// read again on the next retrieval.
+    pub async fn record_consumed_b0x(
         &mut self,
         b0x_address: &str,
-        tx_ids: Vec<String>,
+        message_ids: Vec<String>,
     ) -> Result<(), DsmError> {
-        if tx_ids.is_empty() {
+        if message_ids.is_empty() {
             return Ok(());
-        }
-        if b0x_address.is_empty() {
-            return Err(DsmError::internal(
-                "acknowledge_b0x_v2 requires a rotated b0x address",
-                None::<std::io::Error>,
-            ));
         }
         validate_b0x_address(b0x_address)?;
-        // Multi-node ack: broadcast; require quorum_k successes.
-        // Generate a unique message ID for this ack request (required by auth middleware)
-        let mut msg_id_bytes = [0u8; 16];
-        let mut os_rng = OsRng;
-        rand::TryRngCore::try_fill_bytes(&mut os_rng, &mut msg_id_bytes).map_err(|e| {
-            DsmError::crypto(
-                format!("OsRng entropy failure: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-        let msg_id_b32 = text_id::encode_base32_crockford(&msg_id_bytes);
-
-        // ACK scoping:
-        // - `x-dsm-b0x-address` MUST match the rotated inbox key used at submit.
-        // - Authorization remains the recipient device identity for auth only.
-
-        // Build BatchEnvelope with envelopes containing only message_id
-        let mut batch = dsm::types::proto::BatchEnvelope::default();
-        for tx_id in tx_ids {
-            if let Some(mid_bytes) = text_id::decode_base32_crockford(&tx_id) {
-                let env = dsm::types::proto::Envelope {
-                    message_id: mid_bytes,
-                    ..Default::default()
-                };
-                batch.envelopes.push(env);
-            } else {
-                warn!("Skipping invalid tx_id in ack: {}", tx_id);
-            }
-        }
-
-        let mut body = Vec::with_capacity(batch.encoded_len());
-        batch.encode(&mut body).map_err(|e| {
-            DsmError::internal(
-                format!("ack batch encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let endpoints: Vec<String> = self
-            .storage_node_endpoints
-            .iter()
-            .filter(|ep| futures::executor::block_on(self.circuit_breaker.is_node_healthy(ep)))
-            .cloned()
-            .collect();
-        if endpoints.is_empty() {
-            return Err(DsmError::internal(
-                "No healthy endpoints",
-                None::<std::io::Error>,
-            ));
-        }
-        let total = endpoints.len();
-        let quorum = self.quorum_k.min(total);
-        let mut successes = 0usize;
-        for epc in endpoints {
-            let token = match self.ensure_token_for_endpoint(&epc).await {
-                Ok(t) => t,
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                    continue;
-                }
-            };
-            let url = format!("{}/api/v2/b0x/ack", &epc);
-
-            let mut req = self
-                .http_client
-                .post(&url)
-                .header("Content-Type", "application/protobuf")
-                .header("Authorization", format!("DSM {}:{}", self.device_id, token))
-                .header("x-dsm-message-id", &msg_id_b32);
-            // Explicitly scope ACK to the rotated inbox key that was retrieved.
-            req = req.header("x-dsm-b0x-address", b0x_address);
-
-            let resp = req.body(body.clone()).send().await;
-            match resp {
-                Ok(r)
-                    if r.status().is_success() || r.status() == reqwest::StatusCode::NO_CONTENT =>
-                {
-                    self.circuit_breaker.mark_node_healthy(&epc).await;
-                    successes += 1;
-                    if successes >= quorum {
-                        break;
-                    }
-                }
-                Ok(r) if r.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    self.purge_persisted_token_for_endpoint(&epc).await;
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Ok(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-                Err(_) => {
-                    self.circuit_breaker.mark_node_failed(&epc).await;
-                }
-            }
-        }
-        if successes >= quorum {
-            info!(
-                "✅ ack quorum satisfied: {}/{} (K={})",
-                successes, total, quorum
-            );
-            return Ok(());
-        }
-        Err(DsmError::internal(
-            format!("ack quorum not met: {}/{} (K={})", successes, total, quorum),
-            None::<std::io::Error>,
-        ))
+        crate::storage::client_db::b0x_consumed::record_consumed(b0x_address, &message_ids).map_err(
+            |e| {
+                DsmError::storage(
+                    format!("record consumed b0x messages: {e}"),
+                    None::<std::io::Error>,
+                )
+            },
+        )
     }
 
     // ------------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------------
 
-    fn envelope_to_b0x_entry(&self, env: dsm::types::proto::Envelope) -> Option<B0xEntry> {
+    fn envelope_to_b0x_entry(
+        &self,
+        env: dsm::types::proto::Envelope,
+        copy_key: &str,
+    ) -> Option<B0xEntry> {
         let tid = text_id::encode_base32_crockford(&env.message_id);
-        let (sender_dev, genesis_b32, chain_tip_text) = match &env.headers {
-            Some(h) => {
-                let dev = crate::util::text_id::encode_base32_crockford(&h.device_id);
-                let gen_b32 = text_id::encode_base32_crockford(&h.genesis_hash);
-                let tip_txt = crate::util::text_id::encode_base32_crockford(&h.chain_tip);
-                (dev, gen_b32, tip_txt)
-            }
-            None => (String::new(), String::new(), String::new()),
+        let sender_dev = match &env.headers {
+            Some(h) => crate::util::text_id::encode_base32_crockford(&h.device_id),
+            None => String::new(),
         };
 
-        if let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload {
-            for op in &tx.ops {
-                if let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind {
-                    if invoke.method == "wallet.send" {
-                        if let Some(ref arg_pack) = invoke.args {
-                            if let Ok(transfer_req) =
-                                dsm::types::proto::OnlineTransferRequest::decode(&*arg_pack.body)
-                            {
-                                if transfer_req.nonce.len() != 32 {
-                                    log::warn!(
-                                        "📥 envelope_to_b0x_entry: nonce len={} (expected 32)",
-                                        transfer_req.nonce.len()
-                                    );
-                                }
-
-                                let _balance_tick = if transfer_req.nonce.len() >= 8 {
-                                    let mut tick_bytes = [0u8; 8];
-                                    tick_bytes.copy_from_slice(&transfer_req.nonce[..8]);
-                                    u64::from_le_bytes(tick_bytes)
-                                } else {
-                                    0
-                                };
-                                let balance_anchor = dsm::crypto::blake3::domain_hash(
-                                    dsm::common::domain_tags::TAG_DSM_BALANCE_ANCHOR,
-                                    &[],
-                                );
-                                let recipient_id =
-                                    text_id::encode_base32_crockford(&transfer_req.to_device_id);
-                                // Prefer an explicit signature embedded in the OnlineTransferRequest
-                                // Fall back to any Evidence::oracle.signature attached to the Invoke if present
-                                let sig = if !transfer_req.signature.is_empty() {
-                                    transfer_req.signature.clone()
-                                } else if let Some(evd) = &invoke.evidence {
-                                    match &evd.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.signature.clone()
-                                        }
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-
-                                // The sender signs the Operation with recipient = receiver's
-                                // PUBLIC KEY (not device_id).  The receiver must reconstruct
-                                // the same Operation for signature verification.  Use local
-                                // public key since we ARE the recipient.
-                                let recipient_owner =
-                                    crate::sdk::app_state::AppState::get_public_key()
-                                        .unwrap_or_else(|| transfer_req.to_device_id.clone());
-
-                                // §9.5: take the sender's signed policy_commit from the
-                                // canonical preimage so the reconstructed op matches what
-                                // was signed. The receiver independently re-resolves and
-                                // rejects on mismatch at apply (no peer-policy absorption).
-                                let policy_commit: [u8; 32] = match Operation::from_bytes(
-                                    &transfer_req.canonical_operation_bytes,
-                                ) {
-                                    Ok(Operation::Transfer { policy_commit, .. }) => policy_commit,
-                                    _ => [0u8; 32],
-                                };
-
-                                let transfer_op = Operation::Transfer {
-                                    to_device_id: transfer_req.to_device_id.clone(),
-                                    amount: dsm::types::token_types::Balance::from_state(
-                                        transfer_req.amount,
-                                        *balance_anchor.as_bytes(),
-                                    ),
-                                    token_id: if transfer_req.token_id.is_empty() {
-                                        b"ERA".to_vec()
-                                    } else {
-                                        transfer_req.token_id.clone().into_bytes()
-                                    },
-                                    policy_commit,
-                                    mode: dsm::types::operations::TransactionMode::Unilateral,
-                                    nonce: transfer_req.nonce.clone(),
-                                    verification:
-                                        dsm::types::operations::VerificationType::Standard,
-                                    pre_commit: None,
-                                    recipient: recipient_owner,
-                                    to: recipient_id.clone().into_bytes(),
-                                    message: transfer_req.memo.clone(),
-                                    signature: sig.clone(),
-                                    authority_policy: None,
-                                };
-
-                                // Capture sender signing public key from Evidence.oracle.oracle_key if present
-                                let sender_pk = match &invoke.evidence {
-                                    Some(ev) => match &ev.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.oracle_key.clone()
-                                        }
-                                        _ => Vec::new(),
-                                    },
-                                    None => Vec::new(),
-                                };
-
-                                info!("📥 envelope_to_b0x_entry: extracted Transfer (amount={}, to={}, sig_len={}, seq={})", transfer_req.amount, recipient_id, sig.len(), transfer_req.seq);
-                                let next_tip_bytes = invoke
-                                    .post_state_hash
-                                    .as_ref()
-                                    .map(|h| h.v.clone())
-                                    .filter(|v| v.len() == 32)
-                                    .unwrap_or_default();
-                                let next_tip_text = if next_tip_bytes.len() == 32 {
-                                    text_id::encode_base32_crockford(&next_tip_bytes)
-                                } else {
-                                    chain_tip_text.clone()
-                                };
-                                let tick_anchor_bytes = if next_tip_bytes.len() == 32 {
-                                    next_tip_bytes.clone()
-                                } else {
-                                    crate::util::text_id::decode_base32_crockford(&chain_tip_text)
-                                        .filter(|b| b.len() == 32)
-                                        .unwrap_or_else(|| vec![0u8; 32])
-                                };
-                                return Some(B0xEntry {
-                                    transaction_id: tid,
-                                    inbox_key: String::new(),
-                                    sender_device_id: sender_dev,
-                                    sender_genesis_hash: genesis_b32,
-                                    sender_chain_tip: chain_tip_text,
-                                    next_chain_tip: next_tip_text,
-                                    recipient_device_id: recipient_id,
-                                    transaction: transfer_op,
-                                    signature: sig,
-                                    sender_signing_public_key: sender_pk,
-                                    tick: anchor_tick_from_tip(&tick_anchor_bytes),
-                                    ttl_seconds: 0,
-                                    seq: transfer_req.seq,
-                                    receipt_commit: transfer_req.receipt_commit.clone(),
-                                    canonical_operation_bytes: transfer_req
-                                        .canonical_operation_bytes
-                                        .clone(),
-                                });
-                            }
-                        }
-                    } else if invoke.method == "message.send" {
-                        if let Some(ref arg_pack) = invoke.args {
-                            if let Ok(msg_req) =
-                                dsm::types::proto::OnlineMessageRequest::decode(&*arg_pack.body)
-                            {
-                                let recipient_id =
-                                    text_id::encode_base32_crockford(&msg_req.to_device_id);
-                                let msg_op = Operation::Generic {
-                                    operation_type: b"online.message".to_vec(),
-                                    data: msg_req.payload.clone(),
-                                    message: msg_req.memo.clone(),
-                                    signature: vec![],
-                                };
-
-                                let sig = if !msg_req.signature.is_empty() {
-                                    msg_req.signature.clone()
-                                } else if let Some(evd) = &invoke.evidence {
-                                    match &evd.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.signature.clone()
-                                        }
-                                        _ => vec![],
-                                    }
-                                } else {
-                                    vec![]
-                                };
-
-                                let sender_pk = match &invoke.evidence {
-                                    Some(ev) => match &ev.kind {
-                                        Some(dsm::types::proto::evidence::Kind::Oracle(oracle)) => {
-                                            oracle.oracle_key.clone()
-                                        }
-                                        _ => Vec::new(),
-                                    },
-                                    None => Vec::new(),
-                                };
-
-                                info!(
-                                    "📥 envelope_to_b0x_entry: extracted OnlineMessage (payload_len={}, to={}, sig_len={}, seq={})",
-                                    msg_req.payload.len(),
-                                    recipient_id,
-                                    sig.len(),
-                                    msg_req.seq
-                                );
-                                let next_tip_bytes = invoke
-                                    .post_state_hash
-                                    .as_ref()
-                                    .map(|h| h.v.clone())
-                                    .filter(|v| v.len() == 32)
-                                    .unwrap_or_default();
-                                let next_tip_text = if next_tip_bytes.len() == 32 {
-                                    text_id::encode_base32_crockford(&next_tip_bytes)
-                                } else {
-                                    chain_tip_text.clone()
-                                };
-                                let tick_anchor_bytes = if next_tip_bytes.len() == 32 {
-                                    next_tip_bytes.clone()
-                                } else {
-                                    crate::util::text_id::decode_base32_crockford(&chain_tip_text)
-                                        .filter(|b| b.len() == 32)
-                                        .unwrap_or_else(|| vec![0u8; 32])
-                                };
-                                return Some(B0xEntry {
-                                    transaction_id: tid,
-                                    inbox_key: String::new(),
-                                    sender_device_id: sender_dev,
-                                    sender_genesis_hash: genesis_b32,
-                                    sender_chain_tip: chain_tip_text,
-                                    next_chain_tip: next_tip_text,
-                                    recipient_device_id: recipient_id,
-                                    transaction: msg_op,
-                                    signature: sig,
-                                    sender_signing_public_key: sender_pk,
-                                    tick: anchor_tick_from_tip(&tick_anchor_bytes),
-                                    ttl_seconds: 0,
-                                    seq: msg_req.seq,
-                                    receipt_commit: Vec::new(),
-                                    canonical_operation_bytes: Vec::new(),
-                                });
-                            }
-                        }
-                    }
-                }
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        for op in &tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                continue;
+            };
+            if invoke.method != "wallet.send" {
+                continue;
             }
+            let Some(arg_pack) = &invoke.args else {
+                // A transfer with no request is listed as what it is, never
+                // dropped.
+                info!("📥 envelope_to_b0x_entry: transfer {tid} carries no request");
+                return Some(B0xEntry {
+                    transaction_id: tid,
+                    inbox_key: String::new(),
+                    sender_device_id: sender_dev,
+                    kind: B0xEntryKind::Unrecognized {
+                        reason: "the wallet.send invoke carries no request".to_string(),
+                    },
+                    transfer_wire_bytes: Vec::new(),
+                    copy_key: copy_key.to_string(),
+                });
+            };
+            // The request bytes, exactly as they arrived. Nothing in them is
+            // read here: the ingestion boundary verifies SIG A over the
+            // canonical operation and reads every term from it.
+            info!("📥 envelope_to_b0x_entry: transfer {tid}");
+            return Some(B0xEntry {
+                transaction_id: tid,
+                inbox_key: String::new(),
+                sender_device_id: sender_dev,
+                kind: B0xEntryKind::Transfer,
+                transfer_wire_bytes: arg_pack.body.clone(),
+                copy_key: copy_key.to_string(),
+            });
         }
-
         None
-    }
-}
-
-impl B0xSDK {
-    /// Push any pending bilateral messages that were persisted for reliability.
-    ///
-    /// Deterministic rules:
-    /// - Only sessions that are not terminal (committed/rejected/failed) are considered.
-    /// - A message is constructed from the persisted operation bytes and signatures.
-    /// - Signatures: prefer counterparty_signature, otherwise local_signature; if neither
-    ///   exists, the record is skipped (fail-closed, no alternate-path signing).
-    /// - Recipient genesis hash must be found in the contact store; otherwise skip.
-    /// - Sender signing public key is sourced from CoreSDK device identity.
-    pub async fn push_pending_bilateral_messages(
-        device_id_b32: String,
-        core_sdk: Arc<CoreSDK>,
-        storage_endpoints: Vec<String>,
-    ) -> Result<usize, DsmError> {
-        // Ensure DB is ready; ignore init failure and continue with empty result
-        let _ = crate::storage::client_db::init_database();
-
-        let sessions = match crate::storage::client_db::get_all_bilateral_sessions() {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: failed to list sessions: {}",
-                    e
-                );
-                return Ok(0);
-            }
-        };
-
-        if sessions.is_empty() {
-            return Ok(0);
-        }
-
-        let sender_genesis_hash = core_sdk
-            .local_genesis_hash()
-            .await
-            .map(|v| text_id::encode_base32_crockford(&v))?;
-        let sender_chain_tip = core_sdk
-            .local_chain_tip()
-            .await
-            .map(|v| text_id::encode_base32_crockford(&v))?;
-        // Use signing_authority to match the key used by
-        // wallet.sign_operation_bytes — see submit_to_b0x for rationale.
-        let sender_signing_public_key = crate::sdk::signing_authority::current_public_key()
-            .unwrap_or_else(|_| core_sdk.get_device_identity().public_key);
-
-        let mut sdk = B0xSDK::new(device_id_b32, core_sdk.clone(), storage_endpoints)?;
-        let mut pushed = 0usize;
-
-        for record in sessions {
-            // Skip terminal states
-            if record.phase == "committed" || record.phase == "rejected" || record.phase == "failed"
-            {
-                continue;
-            }
-
-            if record.counterparty_device_id.len() != 32 {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: skipping record with invalid counterparty id len {}",
-                    record.counterparty_device_id.len()
-                );
-                continue;
-            }
-
-            // Deserialize operation strictly
-            let operation = match crate::storage::client_db::deserialize_operation(
-                &record.operation_bytes,
-            ) {
-                Ok(op) => op,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: failed to deserialize operation: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            // Choose signature deterministically
-            let signature = if let Some(sig) = record.counterparty_signature.clone() {
-                sig
-            } else if let Some(sig) = record.local_signature.clone() {
-                sig
-            } else {
-                warn!(
-                    "[B0xSDK] push_pending_bilateral_messages: no signature present, commitment prefix={:02x}{:02x}{:02x}{:02x}",
-                    record.commitment_hash.first().copied().unwrap_or(0),
-                    record.commitment_hash.get(1).copied().unwrap_or(0),
-                    record.commitment_hash.get(2).copied().unwrap_or(0),
-                    record.commitment_hash.get(3).copied().unwrap_or(0)
-                );
-                continue;
-            };
-
-            // Resolve recipient genesis hash, preferring the persisted session binding.
-            let recipient_genesis_hash = if let Some(g) = record.counterparty_genesis_hash.as_ref()
-            {
-                if g.len() == 32 {
-                    text_id::encode_base32_crockford(g)
-                } else {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: stored counterparty genesis has invalid length {}",
-                        g.len()
-                    );
-                    continue;
-                }
-            } else {
-                match crate::storage::client_db::get_contact_by_device_id(
-                    &record.counterparty_device_id,
-                ) {
-                    Ok(Some(c)) => text_id::encode_base32_crockford(&c.genesis_hash),
-                    Ok(None) => {
-                        warn!(
-                            "[B0xSDK] push_pending_bilateral_messages: contact not found for counterparty"
-                        );
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "[B0xSDK] push_pending_bilateral_messages: contact lookup failed: {}",
-                            e
-                        );
-                        continue;
-                    }
-                }
-            };
-
-            let recipient_device_id =
-                text_id::encode_base32_crockford(&record.counterparty_device_id);
-            let sender_chain_tip_arr = match decode_base32_32("sender_chain_tip", &sender_chain_tip)
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: sender chain tip invalid: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-            let recipient_genesis_arr =
-                match decode_base32_32("recipient_genesis_hash", &recipient_genesis_hash) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: recipient genesis invalid: {}",
-                        e
-                    );
-                        continue;
-                    }
-                };
-            let routing_address = match B0xSDK::compute_b0x_address(
-                &recipient_genesis_arr,
-                &record.counterparty_device_id,
-                &sender_chain_tip_arr,
-            ) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: routing address computation failed: {}",
-                        e
-                    );
-                    continue;
-                }
-            };
-
-            let params = B0xSubmissionParams {
-                recipient_device_id,
-                recipient_genesis_hash,
-                transaction: operation,
-                signature,
-                sender_signing_public_key: sender_signing_public_key.clone(),
-                sender_genesis_hash: sender_genesis_hash.clone(),
-                sender_chain_tip: sender_chain_tip.clone(),
-                ttl_seconds: 0,
-                // AF-2 remediation: seq participates in canonical signing bytes.
-                // We currently do not persist a per-session seq in the SQLite schema
-                // (BilateralSessionRecord). Use a deterministic non-zero default so
-                // we do not emit new submissions with seq=0.
-                // NOTE: This is a stopgap until session rows capture the canonical seq.
-                seq: std::cmp::max(1, record.created_at_step),
-                next_chain_tip: None,
-                receipt_commit: Vec::new(),
-                routing_address,
-                canonical_operation_bytes: Vec::new(),
-            };
-
-            match sdk.submit_to_b0x(params).await {
-                Ok(msg_id) => {
-                    pushed += 1;
-                    info!("[B0xSDK] ✅ pushed pending bilateral (msg_id={})", msg_id);
-                }
-                Err(e) => {
-                    warn!(
-                        "[B0xSDK] push_pending_bilateral_messages: submit failed: {}",
-                        e
-                    );
-                }
-            }
-        }
-
-        Ok(pushed)
     }
 }
 
@@ -2876,13 +2889,153 @@ impl B0xSDK {
 #[cfg(test)]
 #[allow(clippy::disallowed_methods, clippy::useless_conversion)]
 mod tests {
+
+    /// IMPACT-TABLE ROWS B5 and B6, asserted in both directions.
+    ///
+    /// Both derive a spool message id. The double-NUL spelling carried its own
+    /// NUL into `dsm_domain_hasher`, which appends another, so its preimage
+    /// began `"…id" || 0x00 || 0x00`; it is reconstructed below to show the
+    /// id moved.
+    #[test]
+    fn b5_and_b6_message_ids_moved_off_the_double_nul_digest() {
+        fn old_id(tag_with_nul: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+            let mut h = blake3::Hasher::new();
+            h.update(tag_with_nul); // the literal, NUL included
+            h.update(&[0u8]); // the helper's appended NUL
+            for p in parts {
+                h.update(p);
+            }
+            h.finalize().as_bytes()[..16].to_vec()
+        }
+        fn canonical_id(tag: &[u8], parts: &[&[u8]]) -> Vec<u8> {
+            let mut h = blake3::Hasher::new();
+            h.update(tag);
+            h.update(&[0u8]);
+            for p in parts {
+                h.update(p);
+            }
+            h.finalize().as_bytes()[..16].to_vec()
+        }
+
+        // B5
+        let commitment = [0xA1u8; 32];
+        let tip = [0xB2u8; 32];
+        let b5 = super::reply_message_id(&commitment, &tip);
+        assert_ne!(
+            b5,
+            old_id(b"DSM/b0x-reply-message-id\0", &[&commitment, &tip]),
+            "B5 still produces the doubled-NUL id"
+        );
+        assert_eq!(
+            b5,
+            canonical_id(b"DSM/b0x-reply-message-id", &[&commitment, &tip]),
+            "B5 did not land on the canonical id"
+        );
+        assert_eq!(b5.len(), 16, "the spool id is 16 truncated bytes");
+
+        // B6
+        let method = "cert.resync";
+        let rtip = [0xC3u8; 32];
+        let body = [0xD4u8; 48];
+        let b6 = super::certresync_message_id(method, &rtip, &body);
+        assert_ne!(
+            b6,
+            old_id(
+                b"DSM/b0x-certresync-message-id\0",
+                &[method.as_bytes(), &rtip, &body]
+            ),
+            "B6 still produces the doubled-NUL id"
+        );
+        assert_eq!(
+            b6,
+            canonical_id(
+                b"DSM/b0x-certresync-message-id",
+                &[method.as_bytes(), &rtip, &body]
+            ),
+            "B6 did not land on the canonical id"
+        );
+
+        // The two domains stay separated from each other.
+        assert_ne!(b5, b6, "B5 and B6 must not share an id space");
+    }
+
+    /// The property the ids exist for, preserved across the cut: a repost of the
+    /// same logical message derives the SAME id, so a redelivery collapses onto
+    /// one spool row rather than piling up.
+    #[test]
+    fn a_repost_still_derives_the_same_spool_id() {
+        let c = [0x11u8; 32];
+        let t = [0x22u8; 32];
+        assert_eq!(
+            super::reply_message_id(&c, &t),
+            super::reply_message_id(&c, &t)
+        );
+        assert_ne!(
+            super::reply_message_id(&c, &t),
+            super::reply_message_id(&c, &[0x23u8; 32]),
+            "a different projection tip must give a different id"
+        );
+    }
+
+    /// Cross-endpoint merge must not be first-responder-wins.
+    ///
+    /// Because spool ids are deterministic, a merge keyed on `message_id` alone
+    /// let ONE replica serving a tampered copy shadow every honest copy, on every
+    /// poll, forever. That is what made a bad acceptance artifact unrecoverable:
+    /// the corrected copy existed on other replicas and could never be seen.
+    #[test]
+    fn divergent_copies_of_one_message_id_do_not_shadow_each_other() {
+        // `genesis_hash` stands in for "the bytes a middlebox could alter": any
+        // encoded-byte difference under one message id must survive the merge.
+        let envelope = |message_id: &[u8; 16], content: u8| dsm::types::proto::Envelope {
+            version: 3,
+            headers: Some(dsm::types::proto::Headers {
+                device_id: vec![0x11; 32],
+                genesis_hash: vec![content; 32],
+            }),
+            message_id: message_id.to_vec(),
+            payload: None,
+        };
+        let (id1, id2) = (&[0xA1u8; 16], &[0xB2u8; 16]);
+
+        // Identical replicas of the same message still collapse: the honest
+        // multi-replica case is unchanged.
+        assert_eq!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            "identical replicas must still merge to one entry"
+        );
+
+        // A tampered copy under the SAME id gets its own key, so both survive the
+        // merge and the consumer can reject one and accept the other.
+        assert_ne!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id1, 0xBB)),
+            "two copies that disagree under one message id must BOTH survive"
+        );
+
+        // The message id is still part of the key -- identical bytes under
+        // different ids remain distinct messages.
+        assert_ne!(
+            super::envelope_merge_key(&envelope(id1, 0xAA)),
+            super::envelope_merge_key(&envelope(id2, 0xAA)),
+        );
+    }
     use super::*;
 
-    fn dev_id32_b32() -> String {
-        // Deterministic 32-byte device id for tests.
-        // Must satisfy B0xSDK::new base32(32 bytes) invariant.
-        crate::util::text_id::encode_base32_crockford(&[0x11u8; 32])
+    /// A device with a real identity, over a fresh database: its device id
+    /// and its `CoreSDK`.
+    /// A device created as wallet creation creates it, with its fleet
+    /// running and configured.
+    fn test_device() -> (String, Arc<CoreSDK>, crate::test_support::one_device::Fleet) {
+        let (identity, core) = crate::economic_fixtures::local_device(0x11);
+        (
+            crate::util::text_id::encode_base32_crockford(&identity.device_id),
+            Arc::new(core),
+            crate::test_support::one_device::Fleet::start(),
+        )
     }
+
     use std::sync::Arc;
 
     #[test]
@@ -2976,9 +3129,9 @@ mod tests {
 
         let actual = B0xSDK::compute_b0x_address(&genesis, &device, &tip).expect("ok");
 
-        let h_g = B0xSDK::hash_b0x_component("DSM/b0x-G", &genesis);
-        let h_d = B0xSDK::hash_b0x_component("DSM/b0x-D", &device);
-        let h_t = B0xSDK::hash_b0x_component("DSM/b0x-T", &tip);
+        let h_g = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), &genesis);
+        let h_d = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), &device);
+        let h_t = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), &tip);
 
         let mut hasher =
             dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
@@ -3039,34 +3192,6 @@ mod tests {
         assert!(validate_b0x_address(legacy).is_err());
     }
 
-    #[test]
-    fn test_summarize_ack_status_requires_quorum_for_success() {
-        assert_eq!(
-            summarize_ack_status(1, 3, false, true),
-            AckStatusSummary::Unavailable
-        );
-        assert_eq!(
-            summarize_ack_status(3, 3, false, true),
-            AckStatusSummary::Acked
-        );
-    }
-
-    #[test]
-    fn test_summarize_ack_status_conflict_blocks_sender_progress() {
-        assert_eq!(
-            summarize_ack_status(0, 3, true, true),
-            AckStatusSummary::NotAcked
-        );
-    }
-
-    #[test]
-    fn test_summarize_ack_status_without_authoritative_responses_is_unavailable() {
-        assert_eq!(
-            summarize_ack_status(0, 3, false, false),
-            AckStatusSummary::Unavailable
-        );
-    }
-
     #[tokio::test]
     async fn test_circuit_breaker() {
         let cb = CircuitBreaker::new();
@@ -3079,360 +3204,1048 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_sdk_new_scans_tokens() {
         // Construct without endpoints just to call new()
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let device_id = dev_id32_b32();
-        let sdk = B0xSDK::new(device_id.clone(), core, vec![]).unwrap();
+        let (device_id, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_id.clone(), core, fleet.endpoints()).unwrap();
         assert_eq!(sdk.device_id(), &device_id);
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_sdk_new_rejects_dotted_decimal_device_id() {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let res = B0xSDK::new(
-            "1.2.3.4".to_string(),
-            core,
-            vec!["http://127.0.0.1:8080".to_string()],
-        );
+        let device = test_device();
+        let res = B0xSDK::new("1.2.3.4".to_string(), device.1, device.2.endpoints());
         assert!(res.is_err());
     }
 
-    #[tokio::test]
-    async fn test_envelope_to_b0x_entry_preserves_signature(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
-
-        // Build an OnlineTransferRequest with an embedded signature
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 42,
-            memo: "test".to_string(),
-            signature: vec![1, 2, 3, 4, 5],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-            seq: 1,
-            receipt_commit: vec![],
-            canonical_operation_bytes: vec![],
+    /// A transfer as its sender sealed it, opened here, is a transfer entry:
+    /// the id the spool holds it by, the device its header names, and the
+    /// request bytes exactly as the sender wrote them. Those bytes are SIG A
+    /// over the canonical operation and nothing that restates it. The same
+    /// envelope with its request stripped, as a hostile sender can send it,
+    /// is listed as unrecognized, never dropped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_sent_transfer_opens_to_an_entry_carrying_its_request_verbatim() {
+        use crate::util::text_id::encode_base32_crockford;
+        let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = crate::test_support::arrivals::the_one_transfer(&p.b, &p.fleet).await;
+        p.a.enter();
+        let sealed = kept_seal(&one.message_id).expect("A kept the sealed send");
+        p.b.enter();
+        let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
+        let inner =
+            open_sealed(&local_kyber_secret().expect("B's key"), &outer).expect("B opens it");
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &inner.payload else {
+            panic!("A's transfer envelope carries a UniversalTx");
         };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        // Build ArgPack directly (not serialized - passed as struct)
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes.clone(),
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
+            panic!("its op is an invoke");
         };
+        let written = invoke
+            .args
+            .as_ref()
+            .expect("the invoke carries A's request")
+            .body
+            .clone();
 
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "wallet.send".to_string(),
-            args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
+        let sdk = B0xSDK::new(
+            encode_base32_crockford(&p.b.device_id),
+            p.b.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B's spool client");
+        let copy_key = envelope_merge_key(&inner);
         let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-        assert_eq!(entry.signature, vec![1, 2, 3, 4, 5]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_envelope_to_b0x_entry_prefers_transfer_sig_but_falls_back_to_evidence(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
-
-        // Build an OnlineTransferRequest WITHOUT an embedded signature
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 42,
-            memo: "test".to_string(),
-            signature: vec![],
-            nonce: vec![0xBB; 32],
-            from_device_id: vec![0x44; 32],
-            chain_tip: vec![0x55; 32],
-            seq: 2,
-            receipt_commit: vec![],
-            canonical_operation_bytes: vec![],
-        };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes.clone(),
-        };
-
-        let evidence = Some(dsm::types::proto::Evidence {
-            kind: Some(dsm::types::proto::evidence::Kind::Oracle(
-                dsm::types::proto::EvidenceOracle {
-                    payload: vec![],
-                    signature: vec![9, 8, 7],
-                    oracle_key: vec![],
-                },
-            )),
-        });
-
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "wallet.send".to_string(),
-            args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            cosigners: vec![],
-            evidence,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-        assert_eq!(entry.signature, vec![9, 8, 7]);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_envelope_to_b0x_entry_online_message_payload_and_signature(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
-
-        let payload = vec![1, 2, 3, 4, 5, 6];
-        let memo = "hello".to_string();
-        let msg_req = dsm::types::proto::OnlineMessageRequest {
-            to_device_id: vec![0x11; 32],
-            payload: payload.clone(),
-            memo: memo.clone(),
-            signature: vec![9, 9, 9],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-            seq: 7,
-        };
-        let mut msg_req_bytes = Vec::with_capacity(msg_req.encoded_len());
-        msg_req.encode(&mut msg_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineMessageRequest encode failed: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: msg_req_bytes,
-        };
-
-        let invoke = dsm::types::proto::Invoke {
-            program: None,
-            method: "message.send".to_string(),
-            args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            cosigners: vec![],
-            evidence: None,
-            nonce: None,
-        };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
-            }),
-            message_id: vec![8; 16],
-            payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
-                dsm::types::proto::UniversalTx {
-                    ops: vec![op],
-                    atomic: true,
-                },
-            )),
-        };
-
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
-
+            .envelope_to_b0x_entry(inner.clone(), &copy_key)
+            .expect("a transfer entry");
+        assert_eq!(entry.copy_key, copy_key, "the entry carries its copy's key");
+        assert_eq!(entry.kind, B0xEntryKind::Transfer);
+        assert_eq!(entry.transaction_id, one.message_id);
         assert_eq!(
-            entry.recipient_device_id,
-            crate::util::text_id::encode_base32_crockford(&[0x11u8; 32])
+            entry.sender_device_id,
+            encode_base32_crockford(&p.a.device_id)
         );
-        assert_eq!(entry.signature, vec![9, 9, 9]);
+        assert_eq!(entry.transfer_wire_bytes, written, "the request, verbatim");
 
-        match entry.transaction {
-            Operation::Generic {
-                operation_type,
-                data,
-                message,
-                ..
-            } => {
-                assert_eq!(operation_type.as_slice(), b"online.message");
-                assert_eq!(data, payload);
-                assert_eq!(message, memo);
-            }
-            other => panic!("expected Generic op, got {other:?}"),
+        let request =
+            dsm::types::proto::OnlineTransferRequest::decode(entry.transfer_wire_bytes.as_slice())
+                .expect("A's request decodes");
+        // Decoding drops any field the message does not define, so the bytes
+        // re-encode to themselves only if they carry nothing else.
+        assert_eq!(
+            request.encode_to_vec(),
+            entry.transfer_wire_bytes,
+            "the request restates nothing"
+        );
+        let ak =
+            crate::handlers::storage_routes::resolve_trusted_sender_ak(&entry.sender_device_id)
+                .expect("B holds A's key");
+        dsm::types::operations::Operation::decode_and_bind_signed(
+            &request.canonical_operation_bytes,
+            &request.signature,
+            &ak,
+        )
+        .expect("SIG A verifies over the canonical operation");
+
+        let mut stripped = inner;
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &mut stripped.payload
+        else {
+            panic!("a UniversalTx");
+        };
+        for op in &mut tx.ops {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &mut op.kind else {
+                panic!("an invoke");
+            };
+            invoke.args = None;
+        }
+        let copy_key = envelope_merge_key(&stripped);
+        let entry = sdk
+            .envelope_to_b0x_entry(stripped, &copy_key)
+            .expect("still listed");
+        assert!(
+            matches!(&entry.kind, B0xEntryKind::Unrecognized { reason } if reason.contains("carries no request")),
+            "{:?}",
+            entry.kind
+        );
+    }
+
+    /// A spool position is a node's database sequence number. The position
+    /// after one a node could hold is the next number; past the largest a
+    /// node can hold there is none, rather than an overflow: the position
+    /// after `u64::MAX` panicked the poller task once, and a node chooses
+    /// the numbers it answers with.
+    #[test]
+    fn a_position_past_what_a_spool_can_hold_is_none() {
+        assert_eq!(B0xSDK::position_after(0), Some(1));
+        assert_eq!(B0xSDK::position_after(41), Some(42));
+        assert_eq!(
+            B0xSDK::position_after(B0xSDK::MAX_SPOOL_POSITION - 1),
+            Some(B0xSDK::MAX_SPOOL_POSITION)
+        );
+        assert_eq!(B0xSDK::position_after(B0xSDK::MAX_SPOOL_POSITION), None);
+        assert_eq!(B0xSDK::position_after(u64::MAX), None);
+    }
+
+    /// A route's read position moves past what will never open for this
+    /// device. An envelope sealed to another key, first on a route, is passed
+    /// over like bytes that are not an envelope, so it holds up nothing behind
+    /// it: the read used to stop there for good, and enough of them on a route
+    /// put everything after them out of reach. On the storage nodes' own app,
+    /// on Postgres, read as a created device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn what_never_opens_for_this_device_holds_up_nothing_behind_it() {
+        use crate::storage::client_db::b0x_consumed;
+        use crate::util::text_id::encode_base32_crockford;
+        use dsm::types::proto::{envelope::Payload, Envelope, Headers, SealedEnvelopeV1};
+
+        let device = crate::test_support::one_device::Device::start(0x6B).await;
+        let mut sdk = B0xSDK::new(
+            encode_base32_crockford(&device.identity.device_id),
+            device.router.core_sdk.clone(),
+            device.fleet.endpoints(),
+        )
+        .expect("the device's spool client");
+        let route = encode_base32_crockford(&rand::random::<[u8; 32]>());
+        for endpoint in device.fleet.endpoints() {
+            assert_eq!(
+                b0x_consumed::read_position(&route, &endpoint).expect("the position"),
+                0,
+                "a new route is read from its start"
+            );
         }
 
-        Ok(())
+        // A well-formed sealed envelope, sealed to a key this device does not
+        // hold.
+        let other = dsm::crypto::kyber::generate_kyber_keypair().expect("another device's key");
+        let message_id: [u8; 16] = rand::random();
+        let inner = Envelope {
+            version: 3,
+            headers: Some(Headers {
+                device_id: rand::random::<[u8; 32]>().to_vec(),
+                genesis_hash: rand::random::<[u8; 32]>().to_vec(),
+            }),
+            message_id: message_id.to_vec(),
+            payload: None,
+        }
+        .encode_to_vec();
+        let (shared_secret, kem_ciphertext) =
+            dsm::crypto::kyber::kyber_encapsulate(&other.public_key).expect("encapsulate");
+        let ciphertext =
+            dsm::crypto::spool_seal::seal(&shared_secret, &message_id, &inner).expect("seal");
+        let sealed = Envelope {
+            version: 3,
+            headers: None,
+            message_id: message_id.to_vec(),
+            payload: Some(Payload::Sealed(SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            })),
+        }
+        .encode_to_vec();
+        let id = encode_base32_crockford(&message_id);
+        for endpoint in device.fleet.endpoints() {
+            sdk.submit_once(&endpoint, &sealed, &route, &id)
+                .await
+                .expect("the node spools it");
+        }
+
+        let read = sdk
+            .retrieve_from_b0x_v2(&route)
+            .await
+            .expect("the route is read");
+        assert_eq!(read.entries.len(), 0, "nothing opened for this device");
+        for endpoint in device.fleet.endpoints() {
+            assert!(
+                b0x_consumed::read_position(&route, &endpoint).expect("the position") > 0,
+                "the read at {endpoint} stopped at an envelope that will never open here"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn test_envelope_to_b0x_entry_uses_post_state_hash_as_next_tip(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let core = Arc::new(CoreSDK::new().expect("CoreSDK"));
-        let sdk = B0xSDK::new(dev_id32_b32(), core, vec![]).unwrap();
+    // ==================================================================
+    // WIRE BUDGET (ADR 0003) — real-size encoded artifacts must fit the
+    // storage node's MAX_ENVELOPE_BYTES.
+    //
+    // These build PRODUCTION-SIZED cryptographic material and measure the
+    // ACTUAL encoded `Envelope`, not inner structs. The node enforces the
+    // cap with `RequestBodyLimitLayer::new(MAX_ENVELOPE_BYTES)` as its
+    // OUTERMOST layer, so the wire message is what must fit — an inner
+    // object that fits while its envelope does not still 413s.
+    //
+    // This budget was absent, which is why a 168,400-byte transfer reached
+    // hardware and failed 413 on every fleet node, permanently: the outbox
+    // freezes exact submitted bytes, so each retry replayed the same
+    // oversized message.
+    // ==================================================================
 
-        let post_tip = vec![0x42; 32];
-        let transfer_req = dsm::types::proto::OnlineTransferRequest {
-            token_id: "ERA".to_string(),
-            to_device_id: vec![0x11; 32],
-            amount: 7,
-            memo: "tip".to_string(),
-            signature: vec![1, 2, 3],
-            nonce: vec![0xAA; 32],
-            from_device_id: vec![0x22; 32],
-            chain_tip: vec![0x33; 32],
-            seq: 9,
-            receipt_commit: vec![],
-            canonical_operation_bytes: vec![],
+    /// The storage node's cap (`dsm_storage_node/src/api/transport/b0x.rs`).
+    /// Duplicated deliberately: the client must not silently track a change
+    /// to the node's limit.
+    const NODE_MAX_ENVELOPE_BYTES: usize = 128 * 1024;
+
+    /// Report a measured artifact against the budget. A wire-budget test whose
+    /// numbers are invisible tells you it passed but not how close it came.
+    fn report_budget(shape: &str, bytes: usize) {
+        let pct = 100.0 * bytes as f64 / NODE_MAX_ENVELOPE_BYTES as f64;
+        let headroom = NODE_MAX_ENVELOPE_BYTES as i64 - bytes as i64;
+        println!(
+            "[wire-budget] {shape:<34} {bytes:>8} bytes  {pct:5.1}% of cap  headroom {headroom:>8}"
+        );
+    }
+
+    fn sphincs_sig_len() -> usize {
+        dsm::crypto::sphincs::signature_bytes(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+    }
+
+    /// Field sizes decoded from a REAL stuck envelope pulled off the bench rig
+    /// (submission RX6BA3TY6KRDEBVXGXNCTHWVT0, 168,400 bytes). Using measured
+    /// production values, not guesses, is the whole point of this budget.
+    const KYBER_CT_LEN: usize = 1_088;
+    const EK_PK_LEN: usize = 64;
+    const CANONICAL_OP_LEN: usize = 303;
+
+    /// The budget's step: two wallets, the sender's first transfer, its A
+    /// side answered by the sender's per-step EK over the receipt's own
+    /// commitment (the online session binding), and the receiver's
+    /// countersignature of it over its canonical pair. Derived once: SPHINCS+
+    /// keygen and signing are slow, and a countersignature is compared with
+    /// itself across tests.
+    struct BudgetStep {
+        a_side: Vec<u8>,
+        countersign_b: dsm::types::receipt_types::CountersignB,
+    }
+
+    fn budget_step() -> &'static BudgetStep {
+        use crate::test_support::receipts::{transfer_step, Party};
+        static STEP: std::sync::OnceLock<BudgetStep> = std::sync::OnceLock::new();
+        STEP.get_or_init(|| {
+            let (sender, receiver) = (Party::from_seed(0x41), Party::from_seed(0x42));
+            let step = transfer_step(&sender, &receiver, 7);
+            let mut receipt = step.receipt;
+            let commitment = receipt.compute_commitment().expect("commitment");
+            let a = sender.answer(
+                &receiver,
+                &receipt.parent_tip,
+                &step.c_pre,
+                &dsm::types::receipt_types::compute_receipt_challenge_response_target(
+                    &commitment,
+                    &commitment,
+                ),
+            );
+            assert_eq!(a.sig.len(), sphincs_sig_len());
+            assert_eq!(a.ek_pk.len(), EK_PK_LEN);
+            assert_eq!(a.kyber_ct.len(), KYBER_CT_LEN);
+            receipt.add_sig_a(a.sig);
+            receipt.set_ek_cert_a(a.ek_cert);
+            receipt.set_ek_pk_a(a.ek_pk);
+            receipt.set_kyber_ct_a(a.kyber_ct);
+            let (b_parent, b_child) = TEST_B_PAIR;
+            let b = receiver.answer(
+                &sender,
+                &b_parent,
+                &step.c_pre,
+                &dsm::types::receipt_types::compute_receipt_b_canonical_target(
+                    &commitment,
+                    &commitment,
+                    &b_parent,
+                    &b_child,
+                ),
+            );
+            BudgetStep {
+                a_side: receipt.to_full_protobuf().expect("encode the A side"),
+                countersign_b: dsm::types::receipt_types::CountersignB {
+                    sig_b: b.sig,
+                    ek_cert_b: b.ek_cert,
+                    ek_pk_b: b.ek_pk,
+                    kyber_ct_b: b.kyber_ct,
+                },
+            }
+        })
+    }
+
+    /// A real one-way (A-side) receipt in its full wire form.
+    fn production_sized_receipt_a() -> Vec<u8> {
+        budget_step().a_side.clone()
+    }
+
+    fn evidence_content_digest_for_test() -> [u8; 32] {
+        crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &production_sized_receipt_a(),
+        )
+    }
+
+    /// A production-shaped transfer submission: production-sized SIG A and
+    /// canonical operation bytes, no inline receipt (ADR 0003).
+    fn params_base() -> B0xSubmissionParams {
+        let terms = dsm::types::operations::TransferTerms {
+            token_id: b"ERA".to_vec(),
+            nonce: vec![0x7E; 32],
+            mode: dsm::types::operations::TransactionMode::Unilateral,
+            memo: String::new(),
+            salt: vec![0x5A; 32],
         };
-        let mut transfer_req_bytes = Vec::with_capacity(transfer_req.encoded_len());
-        transfer_req.encode(&mut transfer_req_bytes).map_err(|e| {
-            DsmError::internal(
-                format!("OnlineTransferRequest encode failed: {e}"),
-                None::<std::io::Error>,
+        B0xSubmissionParams {
+            recipient_device_id: crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+            recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+            transaction: dsm::types::operations::Operation::Transfer {
+                to_device_id: vec![0x44; 32],
+                amount: dsm::types::token_types::Balance::amount(100),
+                policy_commit: [0x0F; 32],
+                terms_commitment: terms.commitment(),
+                signature: vec![0xA5; sphincs_sig_len()],
+                authority_policy: None,
+            },
+            signature: vec![0xA5; sphincs_sig_len()],
+            sender_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x66u8; 32]),
+            routing_address: crate::util::text_id::encode_base32_crockford(&[0xABu8; 32]),
+            canonical_operation_bytes: vec![0xCD; CANONICAL_OP_LEN],
+            submission_id: crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+            sender_economic_position: 0,
+            sender_debit_mutation_index: 0,
+            transfer_terms: terms.to_bytes(),
+        }
+    }
+
+    /// THE FAN-OUT FOLLOWS THE REGISTER QUORUM, not the fleet size (#867): a
+    /// send's transfer and its evidence each land on exactly K members of the
+    /// pinned set, K the resolved profile's quorum, never on all of them.
+    /// A delivery lands on `quorum_k` of `members`, so a read meets every
+    /// delivery exactly when at least `members - quorum_k + 1` answered —
+    /// the quorum-intersection boundary, pinned on both sides for the 5/3
+    /// and 3/2 profiles.
+    #[test]
+    fn a_read_covers_every_delivery_only_from_the_quorum_intersection_up() {
+        for (members, quorum_k) in [(5, 3), (3, 2)] {
+            let needed = members - quorum_k + 1;
+            assert_eq!(
+                SpoolCoverage::of(needed, members, quorum_k),
+                SpoolCoverage::Complete
+            );
+            assert_eq!(
+                SpoolCoverage::of(needed - 1, members, quorum_k),
+                SpoolCoverage::Partial {
+                    responded: needed - 1,
+                    needed
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_send_lands_on_exactly_the_register_quorum_of_members() {
+        let profile = dsm::economic::register::resolve_root_register_profile(
+            dsm::economic::register::BETA_NETWORK_ID,
+        )
+        .expect("beta profile");
+        let k = crate::storage::client_db::publication::quorum_for(profile.members.len()) as usize;
+        assert!(
+            k < profile.members.len(),
+            "the set is wider than its quorum, so reaching K and reaching all differ"
+        );
+
+        let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let submission_ids: Vec<String> = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut ids = Vec::new();
+            for sql in [
+                "SELECT submission_id FROM sender_outbox",
+                "SELECT submission_id FROM sender_outbox_artifacts",
+            ] {
+                let mut stmt = conn.prepare(sql).expect("prepare");
+                ids.extend(
+                    stmt.query_map([], |row| row.get::<_, String>(0))
+                        .expect("query")
+                        .map(|row| row.expect("row")),
+                );
+            }
+            ids
+        };
+        assert_eq!(
+            submission_ids.len(),
+            2,
+            "a send freezes its transfer and its evidence"
+        );
+
+        let mut spools = Vec::new();
+        for node in 0..p.nodes.nodes.len() {
+            spools.push(p.spooled_message_ids(node).await);
+        }
+        for id in &submission_ids {
+            let holders = spools.iter().filter(|spool| spool.contains(id)).count();
+            assert_eq!(
+                holders, k,
+                "{id} is held by {holders} members; the register quorum is {k}"
+            );
+        }
+    }
+
+    /// DELIVERY NEVER COUNTS FEWER THAN THE QUORUM. With n − q + 1 members
+    /// down, a frozen send cannot reach K. A second attempt — once the circuit
+    /// breaker has marked those members failed — must refuse exactly as the
+    /// first did, never deliver to the q − 1 still answering and report done.
+    /// With the members back, the same bytes reach the quorum.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn delivery_below_the_quorum_is_refused_however_many_members_are_marked_failed() {
+        let mut p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let (route, id): (String, String) = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = binding
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            conn.query_row(
+                "SELECT routing_address, submission_id FROM sender_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-        })?;
-
-        let arg_pack = dsm::types::proto::ArgPack {
-            schema_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            codec: dsm::types::proto::Codec::Proto as i32,
-            body: transfer_req_bytes,
+            .expect("the frozen transfer")
         };
+        let down = crate::economic_fixtures::members_to_break_quorum();
+        p.nodes.take_down(&down).await;
+        let mut sdk = B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B0xSDK");
+        let once = B0xRetryConfig {
+            max_retries: 0,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+            backoff_multiplier: 1.0,
+        };
+        for attempt in 1..=2 {
+            let err = sdk
+                .submit_stored_envelope_with_retry(&route, &id, &once)
+                .await
+                .expect_err("q − 1 members cannot hold a delivery");
+            assert!(
+                err.to_string().contains("delivery below quorum"),
+                "attempt {attempt}: {err}"
+            );
+        }
 
+        p.nodes.bring_up(&down).await;
+        sdk.submit_stored_envelope_with_retry(&route, &id, &once)
+            .await
+            .expect("with the members back, the same bytes reach the quorum");
+    }
+
+    /// A member that does not take a delivery is replaced at once. The first
+    /// member asked is down; the default retries would back off 1, 2 and 4 s
+    /// before the delivery asked another member, and the delivery waited for
+    /// them. The next member is asked at the first failure, so the frozen
+    /// bytes reach the quorum in about one round of answers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_member_that_fails_a_delivery_is_replaced_before_its_retries_back_off() {
+        let mut p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+
+        p.a.enter();
+        let (route, id): (String, String) = {
+            let binding = crate::storage::client_db::get_connection().expect("conn");
+            let conn = match binding.lock() {
+                Ok(conn) => conn,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            conn.query_row(
+                "SELECT routing_address, submission_id FROM sender_outbox",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("the frozen transfer")
+        };
+        let first = p.nodes.members()[0].0.clone();
+        p.nodes.take_down(std::slice::from_ref(&first)).await;
+        let mut sdk = B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("B0xSDK");
+        let delivered = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            sdk.submit_stored_envelope_with_retry(&route, &id, &B0xRetryConfig::default()),
+        )
+        .await;
+        p.nodes.bring_up(&[first]).await;
+        delivered
+            .expect("the delivery does not wait for the down member's retries")
+            .expect("the members still up take the delivery");
+    }
+
+    fn encode_via_production_path(params: &B0xSubmissionParams) -> usize {
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+        sdk.build_envelope_for_submission(params)
+            .expect("build envelope")
+            .bytes
+            .len()
+    }
+
+    /// ADR 0003 shape 1, as PRODUCTION builds it: the signed operation and
+    /// SIG A, no inline receipt.
+    #[test]
+    #[serial_test::serial]
+    fn adr0003_transfer_envelope_fits_the_node_cap() {
+        let params = params_base();
+        let bytes = encode_via_production_path(&params);
+        report_budget("ADR0003 TransferEnvelope", bytes);
+        assert!(
+            bytes < NODE_MAX_ENVELOPE_BYTES,
+            "TransferEnvelope measured {bytes} bytes, over the {NODE_MAX_ENVELOPE_BYTES} cap"
+        );
+        // ~50.8 KB. Bounded on both sides: a shape that suddenly got much
+        // smaller has probably dropped something the receiver needs.
+        assert!(
+            (45_000..60_000).contains(&bytes),
+            "TransferEnvelope should be ~50.8 KB, measured {bytes}"
+        );
+    }
+
+    /// The evidence builder must REFUSE to construct an artifact the peer could
+    /// never accept. CI asserts the accepted fixtures fit, but production must
+    /// not cheerfully build an oversized artifact and discover it as a 413 that
+    /// no retry can clear.
+    #[test]
+    #[serial_test::serial]
+    fn the_evidence_builder_refuses_to_build_over_the_cap() {
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+
+        // A receipt larger than the cap on its own.
+        let oversized = vec![0xAB; MAX_B0X_ENVELOPE_BYTES + 1];
+        let digest = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &oversized,
+        );
+        let err = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &digest,
+                &oversized,
+            )
+            .expect_err("an over-cap artifact must not be constructible");
+        assert!(
+            format!("{err:?}").contains("envelope cap"),
+            "expected the budget refusal, got: {err:?}"
+        );
+    }
+
+    /// The evidence artifact must be self-consistent before it is frozen: the
+    /// digest it carries has to match the bytes it carries. A mismatch here
+    /// would produce an artifact that can never satisfy the transfer's
+    /// reference.
+    #[test]
+    #[serial_test::serial]
+    fn the_evidence_builder_rejects_a_digest_that_does_not_match_its_bytes() {
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+
+        let receipt = production_sized_receipt_a();
+        let wrong_digest = [0x00u8; 32];
+        let err = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &wrong_digest,
+                &receipt,
+            )
+            .expect_err("a mismatched digest must be refused");
+        assert!(
+            format!("{err:?}").contains("does not match"),
+            "expected the self-consistency refusal, got: {err:?}"
+        );
+    }
+
+    /// The evidence artifact round-trips: it decodes to the EXACT receipt bytes
+    /// the digest was derived from, and says nothing else about itself.
+    #[test]
+    #[serial_test::serial]
+    fn the_evidence_artifact_carries_the_exact_bytes_its_digest_binds() {
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+
+        let receipt = production_sized_receipt_a();
+        let digest = crate::storage::client_db::evidence_content_digest(
+            crate::storage::client_db::ArtifactRole::EvidenceA,
+            &receipt,
+        );
+        let built = sdk
+            .build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &digest,
+                &receipt,
+            )
+            .expect("evidence envelope");
+        report_budget("ADR0003 A-side evidence (built)", built.bytes.len());
+        assert!(built.bytes.len() < NODE_MAX_ENVELOPE_BYTES);
+
+        // Decode back down to the body and compare byte-for-byte.
+        let env = dsm::types::proto::Envelope::decode(built.bytes.as_slice()).expect("decode");
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(utx)) = env.payload else {
+            panic!("expected a UniversalTx payload");
+        };
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = utx.ops[0].kind.clone()
+        else {
+            panic!("expected an Invoke");
+        };
+        assert_eq!(invoke.method, "receipt.evidence.a");
+        let invoke_body_bytes = invoke.args.expect("args").body;
+        let body = dsm::types::proto::ReceiptEvidenceA::decode(invoke_body_bytes.as_slice())
+            .expect("decode ReceiptEvidenceA");
+
+        assert_eq!(
+            body.full_receipt_bytes, receipt,
+            "the artifact must carry the EXACT bytes the digest binds"
+        );
+        assert_eq!(
+            body.encode_to_vec(),
+            invoke_body_bytes,
+            "the artifact carries the receipt and nothing else"
+        );
+    }
+
+    /// Byte stability: the same logical send must produce an identical digest
+    /// and identical encoded bytes on every attempt. A retry replays frozen
+    /// bytes, so instability here would mean a retry submits a DIFFERENT
+    /// artifact under the same deterministic id.
+    #[test]
+    #[serial_test::serial]
+    fn the_split_transfer_encoding_is_byte_stable_across_attempts() {
+        let d1 = evidence_content_digest_for_test();
+        let d2 = evidence_content_digest_for_test();
+        assert_eq!(d1, d2, "evidence digest must be deterministic");
+
+        let a = encode_via_production_path(&params_base());
+        let b = encode_via_production_path(&params_base());
+        assert_eq!(
+            a, b,
+            "the same logical send must encode to the same number of bytes"
+        );
+
+        // ...and the evidence artifact must be byte-IDENTICAL, not merely the
+        // same length: a retry replays frozen bytes under a deterministic id,
+        // so instability would submit a different artifact under the same id.
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+        let receipt = production_sized_receipt_a();
+        let build = || {
+            sdk.build_evidence_envelope(
+                &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
+                &crate::util::text_id::encode_base32_crockford(&[0xEFu8; 16]),
+                &d1,
+                &receipt,
+            )
+            .expect("evidence envelope")
+            .bytes
+        };
+        assert_eq!(
+            build(),
+            build(),
+            "the evidence artifact must encode byte-identically across attempts"
+        );
+
+        // The submission id derived from that digest is stable too.
+        assert_eq!(
+            crate::storage::client_db::derive_artifact_submission_id(&d1),
+            crate::storage::client_db::derive_artifact_submission_id(&d2),
+        );
+    }
+
+    /// ADR 0003 shape 2: the A-side evidence artifact. This is the tightest of
+    /// the three (~90% of cap) and the one to watch — 99,712 of its bytes are
+    /// two SPHINCS+ objects.
+    #[test]
+    fn adr0003_a_side_evidence_envelope_fits_the_node_cap() {
+        let bytes = envelope_bytes_for_evidence_body(production_sized_receipt_a());
+        report_budget("ADR0003 A-side evidence", bytes);
+        assert!(
+            bytes < NODE_MAX_ENVELOPE_BYTES,
+            "A-side ReceiptEvidenceEnvelope measured {bytes} bytes, over the cap"
+        );
+    }
+
+    /// The FULL countersigned receipt as the recipient stores it: the real A
+    /// side plus the receiver's real countersignature — about 202 KB, over
+    /// 150% of the node cap, which is why it never travels whole.
+    fn production_sized_full_countersigned_receipt() -> Vec<u8> {
+        let a_bytes = production_sized_receipt_a();
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&a_bytes)
+            .expect("A side decodes");
+        let b = budget_step().countersign_b.clone();
+        let b_fields: usize = [
+            (13, &b.sig_b),
+            (15, &b.ek_cert_b),
+            (17, &b.ek_pk_b),
+            (19, &b.kyber_ct_b),
+        ]
+        .into_iter()
+        .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
+        .sum();
+        let bytes = a
+            .with_countersign_b(b)
+            .expect("overlay")
+            .to_full_protobuf()
+            .expect("encode");
+        assert_eq!(
+            bytes.len(),
+            a_bytes.len() + b_fields,
+            "the countersignature adds exactly its four fields"
+        );
+        bytes
+    }
+
+    fn test_reply_sdk() -> B0xSDK {
+        let (device_b32, core, fleet) = test_device();
+        B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK")
+    }
+
+    /// The recipient's canonical pair the reply builder carries (delta-only
+    /// metadata; the receipt bytes are untouched by it).
+    const TEST_B_PAIR: ([u8; 32], [u8; 32]) = ([0x71u8; 32], [0x72u8; 32]);
+
+    fn commitment_of(full_bytes: &[u8]) -> [u8; 32] {
+        dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(full_bytes)
+            .expect("decode")
+            .compute_commitment()
+            .expect("commitment")
+    }
+
+    /// ADR 0003 shape 3: the B-side countersign DELTA, built by the REAL
+    /// producer from the REAL stored shape (the full 218,541-byte receipt),
+    /// wrapped exactly as it goes on the wire.
+    ///
+    /// NORMATIVE (ADR 0003): this artifact carries exactly TWO SPHINCS+
+    /// signature-sized objects, `sig_b` and `ek_cert_b`. Its headroom is less
+    /// than one signature, so a third does not degrade it gradually — it
+    /// breaks it. Adding one is a transport-design change, not a schema
+    /// extension.
+    #[test]
+    #[serial_test::serial]
+    fn adr0003_b_side_countersign_delta_fits_the_node_cap() {
+        let full = production_sized_full_countersigned_receipt();
+        let sdk = test_reply_sdk();
+        let built = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&full),
+                &full,
+                TEST_B_PAIR,
+                &[],
+            )
+            .expect("real delta builder");
+        report_budget("ADR0003 B-side countersign", built.bytes.len());
+        assert!(
+            built.bytes.len() < NODE_MAX_ENVELOPE_BYTES,
+            "B-side countersign delta measured {} bytes, over the cap",
+            built.bytes.len()
+        );
+
+        // Decode it the way the sender does: method-discriminated, then the
+        // strict wire codec.
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = B0xSDK::decode_countersign_b(&env).expect("discriminated by method");
+        let delta =
+            dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
+        let sig = sphincs_sig_len();
+        let b = &budget_step().countersign_b;
+        assert_eq!(delta.sig_b, b.sig_b);
+        assert_eq!(delta.ek_cert_b, b.ek_cert_b);
+        assert_eq!(delta.ek_pk_b, b.ek_pk_b);
+        assert_eq!(delta.kyber_ct_b, b.kyber_ct_b);
+        assert!(
+            body.len() < 2 * sig + 8 * 1024,
+            "B delta grew beyond two signatures plus reference material: {} bytes",
+            body.len()
+        );
+        // Nothing A-side rides back: no run of σ_A or of the A-side EK
+        // certificate appears in the reply.
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+            &production_sized_receipt_a(),
+        )
+        .expect("A side decodes");
+        for a_object in [&a.sig_a, &a.ek_cert_a] {
+            let run = &a_object[..1024];
+            assert!(!built.bytes.windows(1024).any(|w| w == run));
+        }
+        // Born canonical: the ArgPack codec is PROTO.
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            panic!("UniversalTx")
+        };
+        let Some(dsm::types::proto::universal_op::Kind::Invoke(inv)) = &tx.ops[0].kind else {
+            panic!("Invoke")
+        };
+        assert_eq!(inv.method, RECEIPT_COUNTERSIGN_B_METHOD);
+        assert_eq!(
+            inv.args.as_ref().unwrap().codec,
+            dsm::types::proto::Codec::Proto as i32
+        );
+        assert_eq!(env.headers.as_ref().unwrap().genesis_hash, vec![0x77; 32]);
+    }
+
+    /// The recipient-derived A digest equals the digest the sender computed at
+    /// send over the SAME bytes — the delta names exactly what was countersigned.
+    #[test]
+    #[serial_test::serial]
+    fn the_countersign_reply_names_the_exact_a_side_bytes() {
+        let a_bytes = production_sized_receipt_a();
+        let full = production_sized_full_countersigned_receipt();
+        let built = test_reply_sdk()
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&full),
+                &full,
+                TEST_B_PAIR,
+                &[],
+            )
+            .expect("build");
+        let env = dsm::types::proto::Envelope::decode(&*built.bytes).expect("Envelope");
+        let body = B0xSDK::decode_countersign_b(&env).expect("method");
+        let delta =
+            dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
+        assert_eq!(
+            delta.receipt_evidence_digest_a,
+            crate::storage::client_db::evidence_content_digest(
+                crate::storage::client_db::ArtifactRole::EvidenceA,
+                &a_bytes
+            )
+            .to_vec()
+        );
+        assert_eq!(delta.commitment, commitment_of(&full).to_vec());
+    }
+
+    /// Two builds from the same inputs are byte-identical — required because
+    /// the reply id is deterministic and the node keeps the first body per id.
+    #[test]
+    #[serial_test::serial]
+    fn the_countersign_reply_is_byte_stable_across_attempts() {
+        let full = production_sized_full_countersigned_receipt();
+        let sdk = test_reply_sdk();
+        let c = commitment_of(&full);
+        let one = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
+            .expect("one");
+        let two = sdk
+            .build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
+            .expect("two");
+        assert_eq!(one.bytes, two.bytes);
+        assert_eq!(one.message_id_b32, two.message_id_b32);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_countersign_builder_refuses_what_it_must() {
+        let sdk = test_reply_sdk();
+        let full = production_sized_full_countersigned_receipt();
+        let c = commitment_of(&full);
+
+        // Not countersigned: an A-only receipt has no delta to send.
+        let a_only = production_sized_receipt_a();
+        let err = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&a_only),
+                &a_only,
+                TEST_B_PAIR,
+                &[],
+            )
+            .expect_err("A-only");
+        assert!(
+            err.to_string()
+                .contains("no complete B-side countersignature"),
+            "{err}"
+        );
+
+        // The stored receipt is not the one this reply is for.
+        let err = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &[0x99; 32],
+                &full,
+                TEST_B_PAIR,
+                &[],
+            )
+            .expect_err("wrong commitment");
+        assert!(
+            err.to_string().contains("commitment != reply commitment"),
+            "{err}"
+        );
+
+        // Over the cap: two 65,535-byte "signatures" cannot be delivered, so the
+        // builder refuses rather than handing the sweep a guaranteed 413.
+        let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&a_only)
+            .expect("A");
+        let fat = a
+            .with_countersign_b(dsm::types::receipt_types::CountersignB {
+                sig_b: vec![0xBB; 65_535],
+                ek_cert_b: vec![0xCB; 65_535],
+                ek_pk_b: vec![0xEB; EK_PK_LEN],
+                kyber_ct_b: vec![0x1B; KYBER_CT_LEN],
+            })
+            .expect("overlay")
+            .to_full_protobuf()
+            .expect("encode");
+        let err = sdk
+            .build_countersign_reply_envelope(
+                &[0x77; 32],
+                &[0x22; 32],
+                &commitment_of(&fat),
+                &fat,
+                TEST_B_PAIR,
+                &[],
+            )
+            .expect_err("over cap");
+        assert!(err.to_string().contains("envelope cap"), "{err}");
+
+        // Positive control in the same shape.
+        sdk.build_countersign_reply_envelope(&[0x77; 32], &[0x22; 32], &c, &full, TEST_B_PAIR, &[])
+            .expect("the production shape builds");
+    }
+
+    /// Wrap an evidence body in the same Envelope framing the production
+    /// submit path uses, and return the encoded wire length.
+    fn envelope_bytes_for_evidence_body(body: Vec<u8>) -> usize {
+        let envelope = test_invoke_envelope("receipt.evidence", body);
+        let mut buf = Vec::with_capacity(envelope.encoded_len());
+        envelope.encode(&mut buf).expect("encode Envelope");
+        buf.len()
+    }
+
+    /// One UniversalTx invoke envelope with the given method and ArgPack body,
+    /// framed as the production submit path frames it.
+    fn test_invoke_envelope(method: &str, body: Vec<u8>) -> dsm::types::proto::Envelope {
+        let arg_pack = dsm::types::proto::ArgPack {
+            schema_hash: None,
+            codec: dsm::types::proto::Codec::Proto as i32,
+            body,
+        };
         let invoke = dsm::types::proto::Invoke {
             program: None,
-            method: "wallet.send".to_string(),
+            method: method.to_string(),
             args: Some(arg_pack),
-            pre_state_hash: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
-            post_state_hash: Some(dsm::types::proto::Hash32 {
-                v: post_tip.clone(),
-            }),
             cosigners: vec![],
             evidence: None,
-            nonce: None,
+            nonce: Some(dsm::types::proto::Hash16 { v: vec![0u8; 16] }),
         };
-
-        let op = dsm::types::proto::UniversalOp {
-            op_id: Some(dsm::types::proto::Hash32 { v: vec![9; 32] }),
-            actor: vec![2; 32],
-            genesis_hash: vec![3; 32],
-            kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
-        };
-
-        let env = dsm::types::proto::Envelope {
+        dsm::types::proto::Envelope {
             version: 3,
             headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0xAB; 32],
-                chain_tip: vec![7; 32],
-                genesis_hash: vec![0; 32],
-                seq: 5,
+                device_id: vec![0x11; 32],
+                genesis_hash: vec![0x33; 32],
             }),
-            message_id: vec![8; 16],
+            message_id: vec![0x44; 16],
             payload: Some(dsm::types::proto::envelope::Payload::UniversalTx(
                 dsm::types::proto::UniversalTx {
-                    ops: vec![op],
+                    ops: vec![dsm::types::proto::UniversalOp {
+                        op_id: Some(dsm::types::proto::Hash32 { v: vec![0u8; 32] }),
+                        actor: vec![0x11; 32],
+                        kind: Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)),
+                    }],
                     atomic: true,
                 },
             )),
-        };
+        }
+    }
 
-        let entry = sdk
-            .envelope_to_b0x_entry(env)
-            .expect("should extract B0xEntry");
+    /// The return leg is discriminated by its explicit method string and
+    /// nothing else: no trial decode, no size heuristic. An evidence half and a
+    /// legacy full-receipt reply on the retired `wallet.acceptanceReceipt`
+    /// method are both `None` here, and the legacy one is not a transfer either
+    /// — it matches no discriminator. The read lists it among the copies of no
+    /// spooled payload, which a sync passes over by its content; no id is ever
+    /// consumed for it.
+    #[test]
+    #[serial_test::serial]
+    fn retrieve_discriminates_a_countersign_delta_by_its_method_only() {
+        let body = vec![0xB0u8; 96];
+        let delta = test_invoke_envelope(RECEIPT_COUNTERSIGN_B_METHOD, body.clone());
+        assert_eq!(B0xSDK::decode_countersign_b(&delta), Some(body.clone()));
+        assert!(B0xSDK::decode_receipt_evidence_a(&delta).is_none());
 
-        let post_b32 = crate::util::text_id::encode_base32_crockford(&post_tip);
-        assert_eq!(entry.next_chain_tip, post_b32);
+        let evidence = test_invoke_envelope(RECEIPT_EVIDENCE_A_METHOD, body.clone());
+        assert!(B0xSDK::decode_countersign_b(&evidence).is_none());
 
-        Ok(())
+        let legacy = test_invoke_envelope("wallet.acceptanceReceipt", body);
+        assert!(B0xSDK::decode_countersign_b(&legacy).is_none());
+        assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
+        let (device_b32, core, fleet) = test_device();
+        let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
+        let copy_key = envelope_merge_key(&legacy);
+        assert!(
+            sdk.envelope_to_b0x_entry(legacy, &copy_key).is_none(),
+            "a legacy full-receipt reply is not a transfer"
+        );
     }
 }

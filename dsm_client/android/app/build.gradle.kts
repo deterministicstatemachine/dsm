@@ -66,8 +66,8 @@ android {
         applicationId = "com.dsm.wallet"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.0-beta.3"
+        versionCode = 4
+        versionName = "0.1.0-beta.4"
 
         // Instrumentation runner for androidTest
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -176,6 +176,17 @@ android {
     }
 
     testOptions {
+        // Gradle managed device for the instrumented suite in CI (device-local
+        // tests only; `@RealHardware` classes are excluded by runner argument).
+        managedDevices {
+            localDevices {
+                create("pixel6Api34") {
+                    device = "Pixel 6"
+                    apiLevel = 34
+                    systemImageSource = "aosp-atd"
+                }
+            }
+        }
         unitTests {
             isIncludeAndroidResources = true
             // Many Android platform APIs in unit tests don't have real implementations; returning defaults makes tests less flaky
@@ -265,8 +276,6 @@ tasks.register("failOnJsonOrB64") {
         fileTree("src").matching {
             include("**/*.kt", "**/*.java")
             exclude("**/build/**")
-            // Allow JSON in infrastructure plumbing (event dispatch, MCP serialization)
-            exclude("**/EventPoller.kt", "**/McpService.kt")
         }.files.forEach { f ->
             val t = f.readText()
             if (rx.containsMatchIn(t)) {
@@ -287,6 +296,24 @@ tasks.named("preBuild").configure {
     dependsOn("failOnJsonOrB64")
 }
 
+// The build refuses what scripts/real_code_guard.py forbids anywhere under dsm_client/android:
+// a source line holding one of its tokens that the baseline does not already record fails it.
+val realCodeGuard = tasks.register<Exec>("realCodeGuard") {
+    val repoRoot = rootProject.projectDir.parentFile.parentFile
+    workingDir = repoRoot
+    commandLine(
+        "python3",
+        "scripts/real_code_guard.py",
+        "--root",
+        repoRoot.absolutePath,
+        "--scope",
+        "dsm_client/android",
+    )
+}
+tasks.named("preBuild").configure {
+    dependsOn(realCodeGuard)
+}
+
 
 // Disable Kotlin incremental compilation for release tasks to avoid flaky cache/daemon issues.
 val isCi = (System.getenv("CI") ?: "").equals("true", ignoreCase = true)
@@ -297,10 +324,22 @@ tasks.withType<KotlinCompile>().configureEach {
 }
 
 // ---- Native libs refresh (Rust cargo output -> Android jniLibs) ----
-// Prefer cargo's target/<triple> output, but also accept direct cargo-ndk `-o`
-// output written into jniLibs. Both are produced by the same Rust build.
+// The shipping native library is the `dsm-android-anchor` cdylib. It links
+// dsm_sdk statically, so it carries ALL of dsm_sdk's JNI exports PLUS the
+// anchor glue's; a plain `dsm_sdk` cdylib is missing the latter and the
+// offline/anchor paths silently die on device.
+//
+// This task used to prefer `deterministic_state_machine/target/<triple>/` over
+// everything else, with no recency check. That preferred the WRONG artifact
+// class, and preferred it even when it was stale: on 2026-07-26 it overwrote a
+// freshly staged anchor build with a three-day-old plain dsm_sdk .so and
+// packaged an APK whose native library had no token.mint/token.burn at all.
+// Gradle logged which file it used, and the APK still built and "succeeded".
+//
+// So: only real candidates are considered, and the NEWEST one wins. Nothing is
+// silently preferred by path order.
 val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
-    val cargoTarget = project.file("../../deterministic_state_machine/target")
+    val anchorTarget = project.file("../../../crates/dsm-android-anchor/target")
     val appJniLibs = project.file("src/main/jniLibs")
     val repoJniLibs = project.file("../../deterministic_state_machine/jniLibs")
 
@@ -311,18 +350,21 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
         "x86_64"      to "x86_64-linux-android",
     )
 
-    // Resolve .so path: prefer cargo target release/debug, then accept direct
-    // cargo-ndk `-o` output already written into jniLibs.
+    // The anchor cdylib is the SOURCE; the jniLibs copies are this task's own
+    // OUTPUT. Ranking them together is what made the bad build stick: the task
+    // writes into its own candidate set, so one wrong run leaves a poisoned
+    // copy that is newer than the real source and wins every run after it.
+    // A freshly built cdylib therefore always wins outright; the staged copies
+    // are consulted only when there is no cdylib at all (no Rust toolchain).
     fun resolveSo(abi: String, triple: String): File? {
-        val release = File(cargoTarget, "$triple/release/libdsm_sdk.so")
-        if (release.exists()) return release
-        val debug = File(cargoTarget, "$triple/debug/libdsm_sdk.so")
-        if (debug.exists()) return debug
-        val appOutput = File(File(appJniLibs, abi), "libdsm_sdk.so")
-        if (appOutput.exists()) return appOutput
-        val repoOutput = File(File(repoJniLibs, abi), "libdsm_sdk.so")
-        if (repoOutput.exists()) return repoOutput
-        return null
+        listOf("release", "debug")
+            .map { File(anchorTarget, "$triple/$it/libdsm_android_anchor.so") }
+            .firstOrNull { it.exists() }
+            ?.let { return it }
+        return listOf(
+            File(File(appJniLibs, abi), "libdsm_sdk.so"),
+            File(File(repoJniLibs, abi), "libdsm_sdk.so"),
+        ).firstOrNull { it.exists() }
     }
 
     // Declare cargo target .so files as inputs so Gradle detects rebuilds
@@ -350,8 +392,9 @@ val refreshDsmJniLibs = tasks.register("refreshDsmJniLibs") {
             val src = resolveSo(abi, triple)
             if (src == null) {
                 throw GradleException(
-                    "Missing Rust build output for $triple (checked release/, debug/, and jniLibs/)\n" +
-                    "(hint: run cargo ndk build first)"
+                    "Missing native library for $triple — checked the dsm-android-anchor " +
+                    "cdylib (release/ and debug/) and the staged jniLibs/ copies.\n" +
+                    "(hint: cd crates/dsm-android-anchor && cargo ndk -t $abi build --release --features on_device_installs)"
                 )
             }
 
@@ -460,7 +503,6 @@ dependencies {
     // Reverted upgrades: latest versions require AGP >=8.6 & compileSdk 36.
     // Keep previous stable versions until AGP/toolchain bump planned.
     implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.biometric:biometric:1.1.0")
     // Phase 13: androidx.security:security-crypto dependency removed.
     // The only consumer was `security/CdbrwKeystoreSalt.kt` which
     // wrapped the now-defunct random DBRW salt in
@@ -484,10 +526,14 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-tooling")
 
     // ML Kit Barcode Scanning - production-grade QR decoder (replaces html5-qrcode as primary)
-    implementation("com.google.mlkit:barcode-scanning:17.2.0")
+    // 17.3.0+ ships 16 KB-page-aligned native libs (libbarhopper_v3.so); 17.2.0 was 4 KB
+    // aligned and fails the Android 15+ ELF alignment check.
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
-    // CameraX for consistent camera handling across device stacks
-    val cameraxVersion = "1.3.1"
+    // CameraX for consistent camera handling across device stacks.
+    // 1.4.x is the first line with 16 KB-aligned native libs
+    // (libimage_processing_util_jni.so); 1.3.1 was 4 KB aligned.
+    val cameraxVersion = "1.4.2"
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")

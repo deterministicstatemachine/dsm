@@ -36,6 +36,8 @@
 //! authority holder must not be able to post a SHRUNK value-capable set) is an open
 //! design point recorded in §0.2 gap 13 and is NOT resolved by this module.
 
+use crate::crypto::domain::TaggedHashDomain;
+
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::sphincs::{sphincs_sign, sphincs_verify};
 use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
@@ -46,8 +48,8 @@ use crate::types::proto::{
     Message as _, PostedPdsmtHeadV1, PostedPdsmtLeafRecordV1, PostedPdsmtLeafSetV1,
 };
 
-const PDSMT_HEAD_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_HEAD;
-const PDSMT_LEAF_DOMAIN: &str = crate::common::domain_tags::TAG_DSM_PDSMT_LEAF;
+const PDSMT_HEAD_DOMAIN: TaggedHashDomain<'static> = crate::common::domain_tags::TAG_DSM_PDSMT_HEAD;
+const PDSMT_LEAF_DOMAIN: TaggedHashDomain<'static> = crate::common::domain_tags::TAG_DSM_PDSMT_LEAF;
 
 /// Fail-closed `Vec<u8>` → `[u8; 32]` (proto `dsm_fixed_len` is a hint, not enforced).
 fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
@@ -62,10 +64,8 @@ fn fixed32(b: &[u8], field: &str) -> Result<[u8; 32], DsmError> {
 /// Verify a single `SparseMerkleTree` inclusion: the `proof_bytes` must decode, be for
 /// exactly `key`, carry exactly `Some(value)`, and recompute `root`. Both the PDSMT
 /// (`pd_smt_root`) and the leaf index (`leaf_index_root`) are `SparseMerkleTree`s, so
-/// both use this verifier (format: `SmtInclusionProof::to_bytes`). NOTE: this is a
-/// distinct proof system from `verification::proof_primitives::verify_smt_inclusion_proof_bytes`
-/// (protobuf `SmtProof`, used for cross-device receipt proofs); the two are not
-/// interchangeable. We pin to `SparseMerkleTree` here because `pd_smt_root` IS a
+/// both use this verifier (format: `SmtInclusionProof::to_bytes`, the same
+/// encoding receipt relationship paths use), because `pd_smt_root` IS a
 /// `SparseMerkleTree` root (`device_state.rs`).
 ///
 /// `pub(crate)` so the recovery-evidence path
@@ -444,7 +444,7 @@ pub fn build_pdsmt_snapshot(
 
     // 1. Build leaf records (proofs filled once both roots exist) + the leaf index.
     let rel_keys = device_state.relationship_keys();
-    let mut index = SparseMerkleTree::new(rel_keys.len().max(1));
+    let mut index = SparseMerkleTree::new();
     let mut leaves: Vec<PostedPdsmtLeafRecord> = Vec::with_capacity(rel_keys.len());
     for rel_key in &rel_keys {
         let tip = device_state.rel_chain_tip(rel_key).ok_or_else(|| {
@@ -468,11 +468,7 @@ pub fn build_pdsmt_snapshot(
             inclusion_proof_to_pd_smt_root: Vec::new(),
             inclusion_proof_to_leaf_index_root: Vec::new(),
         };
-        index
-            .update_leaf(rel_key, &leaf.committed_digest())
-            .map_err(|e| {
-                DsmError::invalid_operation(format!("pdsmt snapshot: leaf index update: {e}"))
-            })?;
+        index.update_leaf(rel_key, &leaf.committed_digest());
         leaves.push(leaf);
     }
     let leaf_index_root = *index.root();
@@ -679,14 +675,14 @@ mod tests {
     /// `rel_key → committed_digest`. Returns (leaf, pd_smt_root, leaf_index_root).
     fn leaf_with_real_proofs() -> (PostedPdsmtLeafRecord, [u8; 32], [u8; 32]) {
         let mut l = leaf(ValueCapability::Yes);
-        let mut pd = SparseMerkleTree::new(256);
-        pd.update_leaf(&l.rel_key, &l.current_tip).unwrap();
+        let mut pd = SparseMerkleTree::new();
+        pd.update_leaf(&l.rel_key, &l.current_tip);
         let pd_root = *pd.root();
         let tip_proof = pd.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
 
         let cd = l.committed_digest();
-        let mut idx = SparseMerkleTree::new(256);
-        idx.update_leaf(&l.rel_key, &cd).unwrap();
+        let mut idx = SparseMerkleTree::new();
+        idx.update_leaf(&l.rel_key, &cd);
         let idx_root = *idx.root();
         let idx_proof = idx.get_inclusion_proof(&l.rel_key, 256).unwrap().to_bytes();
 
@@ -783,39 +779,42 @@ mod tests {
 
     #[test]
     fn build_pdsmt_snapshot_from_real_device_state_end_to_end() {
-        use crate::core::bilateral_transaction_manager::{
-            compute_smt_key, initial_chain_tip_from_device_ids,
-        };
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
         use crate::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
         use crate::types::operations::Operation;
         use crate::types::token_types::Balance;
 
         let genesis = [0x6E; 32];
         let owner = [0xA0; 32];
-        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64], 1024);
+        // The creation lands on the device's SELF-LOOP — a value relationship
+        // of its own, exactly as a real device's faucet claim is.
+        let dev = DeviceState::new(genesis, owner, vec![0xAA; 64])
+            .created_token([0xF1; 32], 1_000)
+            .expect("token created");
+        let rk_self = compute_smt_key(&owner, &owner);
 
-        // A value relationship (Mint → Yes).
+        // A value relationship (Burn → Yes). A burn is value-bearing without
+        // needing an issuance admission attached; what this test needs is a
+        // relationship FLAGGED value-bearing, and either direction does that.
         let c_yes = [0xC1; 32];
         let rk_yes = compute_smt_key(&owner, &c_yes);
         let dev = dev
+            .establish_relationship(c_yes)
+            .expect("establish")
             .advance(
                 rk_yes,
                 c_yes,
-                Operation::Mint {
-                    amount: Balance::from_state(10, [0u8; 32]),
+                Operation::Burn {
+                    amount: Balance::amount(10),
                     token_id: b"ERA".to_vec(),
-                    authorized_by: vec![],
-                    proof_of_authorization: vec![],
+                    policy_commit: [0xF1; 32],
                     message: String::new(),
                 },
-                vec![1; 32],
-                None,
                 &[BalanceDelta {
                     policy_commit: [0xF1; 32],
-                    direction: BalanceDirection::Credit,
+                    direction: BalanceDirection::Debit,
                     amount: 10,
                 }],
-                Some(initial_chain_tip_from_device_ids(&owner, &c_yes)),
                 None,
                 None,
             )
@@ -826,6 +825,8 @@ mod tests {
         let c_no = [0xC2; 32];
         let rk_no = compute_smt_key(&owner, &c_no);
         let dev = dev
+            .establish_relationship(c_no)
+            .expect("establish")
             .advance(
                 rk_no,
                 c_no,
@@ -835,10 +836,7 @@ mod tests {
                     message: "t".into(),
                     signature: vec![],
                 },
-                vec![2; 32],
-                None,
                 &[],
-                Some(initial_chain_tip_from_device_ids(&owner, &c_no)),
                 None,
                 None,
             )
@@ -865,15 +863,24 @@ mod tests {
         assert_eq!(head.genesis_id, genesis);
         assert_eq!(head.pd_smt_root, dev.root());
         assert!(head.is_genesis_head());
-        assert_eq!(leaves.len(), 2);
+        assert_eq!(
+            leaves.len(),
+            3,
+            "the self-loop the issuance landed on, the burn relationship, the generic one"
+        );
 
-        // Gate-set: the value relationship is included, the proven-No one excluded.
+        // Gate-set: the value relationships are included, the proven-No one excluded.
         let gs = crate::recovery::gate_set::build_gate_set(&owner, &head, &anchored, &leaves, &[])
             .expect("gate set");
         assert!(gs.members.contains(&c_yes));
+        assert!(
+            gs.members.contains(&owner),
+            "the self-loop carried value too"
+        );
         assert!(!gs.members.contains(&c_no));
-        // The included leaf's rel_key matches the symmetric derivation.
+        // The included leaves' rel_keys match the symmetric derivation.
         assert_eq!(gs.rel_keys.get(&c_yes), Some(&rk_yes));
+        assert_eq!(gs.rel_keys.get(&owner), Some(&rk_self));
         let _ = rk_no;
     }
 }

@@ -149,14 +149,6 @@ impl SignatureKeyPair {
         &self.secret_key
     }
 
-    /// Test-only convenience: generate a keypair quickly for unit tests.
-    /// Panics on failure, so do not use in production paths.
-    #[cfg(any(test, feature = "testing"))]
-    pub fn generate_for_testing() -> Self {
-        #[allow(clippy::expect_used)]
-        Self::new().expect("keygen")
-    }
-
     /// Back-compat: static-style verifier matching historical call sites.
     pub fn verify_raw(
         message: &[u8],
@@ -349,6 +341,15 @@ mod tests {
         }
     }
 
+    /// These digests were REGENERATED for SPHINCS+ construction version 2
+    /// (2026-10-01, security pre-audit item 17: the FIPS 205 structure, BLAKE3
+    /// kept). The root moved, and with it both digests: the secret key carries
+    /// the root after its seeds, which key generation still draws from the
+    /// same seed as before. Every
+    /// SPHINCS+ public key and signature this repository produces changed with
+    /// it, and keys minted before must not be carried across: the same
+    /// mnemonic now yields a different identity. If this test fails again,
+    /// the key derivation moved — find out why before updating it.
     #[test]
     fn default_entropy_keypair_digest_is_stable() {
         let kp = SignatureKeyPair::generate_from_entropy(b"DSM/default-entropy-kat")
@@ -359,15 +360,15 @@ mod tests {
         assert_eq!(
             pk_digest,
             [
-                236, 23, 150, 97, 121, 151, 231, 49, 137, 242, 102, 79, 185, 13, 132, 232, 170,
-                132, 189, 216, 124, 118, 71, 87, 182, 168, 208, 245, 46, 79, 201, 96,
+                110, 139, 46, 55, 41, 137, 15, 190, 249, 131, 233, 5, 224, 45, 16, 57, 237, 225,
+                87, 185, 30, 123, 170, 25, 94, 221, 40, 188, 138, 197, 122, 154,
             ]
         );
         assert_eq!(
             sk_digest,
             [
-                136, 152, 136, 166, 60, 168, 196, 13, 64, 154, 36, 9, 16, 132, 236, 213, 143, 244,
-                113, 186, 132, 38, 108, 122, 25, 110, 74, 26, 87, 32, 211, 39,
+                193, 136, 178, 70, 212, 51, 207, 45, 0, 236, 249, 99, 98, 230, 190, 83, 90, 7, 20,
+                229, 6, 200, 254, 8, 64, 13, 251, 115, 13, 50, 14, 235,
             ]
         );
     }

@@ -1,45 +1,59 @@
-# DSM environment config — GCP storage nodes (6-node, 3-region)
-# Push to device with: scripts/push_env_override.sh --gcp
+# DSM environment config — the beta storage fleet (5 nodes, GCP us-central1).
+# Bundled into the APK: this file and ca.crt beside it are what a default
+# install reaches the network with.
 #
-# Nodes:
-#   us-east1:         34.73.141.32, 35.243.157.151
-#   europe-west1:     35.205.9.157, 34.53.251.120
-#   asia-southeast1:  34.21.157.56, 34.87.93.29
+# The fleet was reprovisioned 2026-09-27 on the storage node at main f779cb872;
+# every member minted a new register incarnation into its fresh database, and
+# the committed set id every member logs is
+#   7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0
+# which is the id core pins (dsm::economic::register), so this list must stay
+# exactly the pinned pairs: `dsm_sdk::sdk::storage_set::tests::
+# the_bundled_env_config_resolves_the_pinned_beta_set` refuses anything else.
 
-protocol = "https"
-lan_ip = "0.0.0.0"
 allow_localhost = false
-storage_node_mode = "remote"
-ports = [8080]
 
 bitcoin_network = "signet"
 dbtc_min_confirmations = 1
 mempool_api_url = "https://mempool.space"
 
-# Self-signed CA for GCP storage node TLS certs
-# Path is relative to this config file's directory (resolved by SDK).
+# The fleet's CA (CN=DSM-Storage-CA): every member serves a certificate for
+# its IP and CN=dsm-node-N issued by it. Path is relative to this config
+# file's directory (resolved by the SDK); the app installs the bundled ca.crt
+# next to the config.
 custom_ca_certs = ["ca.crt"]
 
+# `name` IS THE MEMBER ID OF THE CANONICAL STORAGE SET, not a label. It is
+# hashed (sorted, length-prefixed) into the storage_set_id a vault is born
+# under, and it is what an acceptance is counted against: a member only counts
+# toward quorum when the node echoes this exact string back as x-dsm-node-id.
+#
+# So each name MUST equal that node's own `[node] id`, which is also the CN of
+# the TLS certificate it serves. `register_incarnation` is the register history
+# that member serves, as its own database minted it at first boot and logged
+# it; the set id is derived from the (name, register_incarnation) pairs, so a
+# stale incarnation makes the client compute a set id no member belongs to and
+# every read of the canonical set fails closed.
 [[nodes]]
-name = "us-east1-a"
-endpoint = "https://34.73.141.32:8080"
+name = "dsm-node-1"
+endpoint = "https://34.58.75.224:8080"
+register_incarnation = "B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG"
 
 [[nodes]]
-name = "us-east1-b"
-endpoint = "https://35.243.157.151:8080"
+name = "dsm-node-2"
+endpoint = "https://35.254.209.202:8080"
+register_incarnation = "QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20"
 
 [[nodes]]
-name = "europe-west1-a"
-endpoint = "https://35.205.9.157:8080"
+name = "dsm-node-3"
+endpoint = "https://146.148.99.141:8080"
+register_incarnation = "2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG"
 
 [[nodes]]
-name = "europe-west1-b"
-endpoint = "https://34.53.251.120:8080"
+name = "dsm-node-4"
+endpoint = "https://104.197.96.66:8080"
+register_incarnation = "S95VHW0YZ413DA4YX972ZA9XDA69FXF4KBCG2AHG89DA8PTY200G"
 
 [[nodes]]
-name = "asia-southeast1-a"
-endpoint = "https://34.21.157.56:8080"
-
-[[nodes]]
-name = "asia-southeast1-b"
-endpoint = "https://34.87.93.29:8080"
+name = "dsm-node-5"
+endpoint = "https://35.184.46.44:8080"
+register_incarnation = "56VB5TY2G8QKVJNVFKJQX9N0GHJN6VEQ1KV9E88GX272V8G43RWG"

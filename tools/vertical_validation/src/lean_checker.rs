@@ -2,8 +2,11 @@
 
 //! Lean 4 proof checker.
 //!
-//! Discovers all `.lean` files under `lean4/`, type-checks each one,
-//! and extracts theorem/axiom counts for formal verification reports.
+//! Discovers all `.lean` files under `lean4/`, kernel-checks each one with
+//! warnings as errors (a `sorry` is a warning to plain `lean` and passes it),
+//! and extracts theorem/axiom counts for formal verification reports. A
+//! missing or empty `lean4/` is a failure, not a pass: a report that checked
+//! no proof has nothing to say about them.
 
 use instant::Instant;
 use serde::Serialize;
@@ -53,10 +56,10 @@ pub fn collect_lean_results(project_root: &Path) -> LeanSuiteResult {
     let mut results = Vec::new();
 
     if !lean_dir.exists() {
-        eprintln!("  lean4/ directory not found — skipping");
+        eprintln!("  lean4/ directory not found: nothing was checked, so nothing passed");
         return LeanSuiteResult {
             results,
-            all_passed: true,
+            all_passed: false,
             duration_ms: suite_start.elapsed().as_secs_f64() * 1000.0,
             lean_version,
         };
@@ -105,10 +108,14 @@ pub fn collect_lean_results(project_root: &Path) -> LeanSuiteResult {
         let axioms = extract_declarations(&source, "axiom");
         let has_sorry = source.contains("sorry");
 
-        // Run `lean <file>` and capture result
-        let output = std::process::Command::new("lean").arg(path).output();
+        // Kernel-check with warnings as errors: `sorry` is a warning to plain
+        // `lean`, which exits 0 over an unfinished proof.
+        let output = std::process::Command::new("lean")
+            .arg("-DwarningAsError=true")
+            .arg(path)
+            .output();
 
-        let (passed, errors) = match output {
+        let (mut passed, mut errors) = match output {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                 if out.status.success() {
@@ -130,6 +137,10 @@ pub fn collect_lean_results(project_root: &Path) -> LeanSuiteResult {
             }
             Err(e) => (false, vec![format!("failed to execute lean: {e}")]),
         };
+        if has_sorry {
+            passed = false;
+            errors.push("contains `sorry`: an unfinished proof is not a proof".to_string());
+        }
 
         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
         let icon = if passed { "PASS" } else { "FAIL" };
@@ -157,7 +168,12 @@ pub fn collect_lean_results(project_root: &Path) -> LeanSuiteResult {
         });
     }
 
-    let all_passed = results.iter().all(|r| r.passed);
+    // No files checked is not "all passed": the fold over an empty set is
+    // vacuously true and would headline a report that checked nothing.
+    let all_passed = !results.is_empty() && results.iter().all(|r| r.passed);
+    if results.is_empty() {
+        eprintln!("  no .lean files under lean4/: nothing was checked, so nothing passed");
+    }
     let duration_ms = suite_start.elapsed().as_secs_f64() * 1000.0;
 
     LeanSuiteResult {

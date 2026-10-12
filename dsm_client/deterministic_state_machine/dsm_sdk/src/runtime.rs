@@ -2,10 +2,10 @@
 
 //! # Tokio Runtime Singleton
 //!
-//! Provides a process-wide multi-threaded Tokio runtime for the SDK.
-//! Initialized lazily on first use (or explicitly via the `extern "C"`
-//! [`dsm_init_runtime`] entry point). The runtime is never reset during
-//! the process lifetime to preserve production safety invariants.
+//! Provides a process-wide multi-threaded Tokio runtime for the SDK,
+//! initialized lazily on first use by [`get_runtime`]. The runtime is never
+//! reset during the process lifetime to preserve production safety
+//! invariants.
 
 use once_cell::sync::OnceCell;
 use log::{error, info};
@@ -28,11 +28,6 @@ fn build_runtime_or_abort() -> Runtime {
             std::process::abort();
         }
     }
-}
-
-#[no_mangle]
-pub extern "C" fn dsm_init_runtime() {
-    RUNTIME.get_or_init(build_runtime_or_abort);
 }
 
 pub fn get_runtime() -> &'static Runtime {

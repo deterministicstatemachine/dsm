@@ -1,0 +1,25 @@
+# The fixture's intent manifest: one row per comparator outcome, read by
+# ci/intent_comparator.py against the fixture's map (make requirement-map-fixture).
+requirement	symbol	artifact	reachability	lifecycle	root	evidence	exception	cites
+MR-FIX-0001	probe::fold	fixture	MUST_REACH	active	-	-	-	fixture: a direct call from the entry point
+MR-FIX-0001	probe::Named::Example::static_fn	fixture	MUST_REACH	active	-	-	-	fixture: reached only through dispatch, which MUST_REACH accepts
+MR-FIX-0002	probe::Named::Example::static_fn	fixture	MUST_REACH_DIRECT	active	-	-	-	fixture: a path shape only dispatch gives
+MR-FIX-0002	probe::fold	fixture	MUST_REACH_DIRECT	active	-	-	-	fixture: a direct path
+MR-FIX-0003	probe::Never::Example::instance_fn	fixture	MUST_REACH	active	-	-	-	fixture: the map cannot decide it
+MR-FIX-0003	probe::unused	fixture	MUST_REACH	active	-	-	-	fixture: nothing reaches it
+MR-FIX-0003	probe::gates::leaked	fixture	MUST_REACH	active	-	-	-	fixture: the build does not compile it
+MR-FIX-0004	probe::roots::on_load	fixture	MUST_REACH	active	probe::roots::JNI_OnLoad	-	-	fixture: reached from its own entry point
+MR-FIX-0005	probe::roots::on_load	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	-	-	fixture: reached, but not from this entry point
+MR-FIX-0004	probe::fold	fixture	MUST_NOT_REACH	active	-	-	the fixture's live path, declared forbidden	fixture: a forbidden live path
+MR-FIX-0004	probe::paths::Inherent::get	fixture	MUST_NOT_REACH	test-only	-	-	declared test-only, and production reaches it	fixture: test-only code production reaches
+MR-FIX-0004	probe::macros::len	fixture	MUST_NOT_REACH	active	-	-	nothing may call it	fixture: a forbidden path that does not exist
+MR-FIX-0004	probe::Never::Example::instance_fn	fixture	MUST_NOT_REACH	active	-	-	it must not run	fixture: a forbidden path the map cannot rule out
+-	probe::unused	fixture	MAY_REACH	active	-	-	kept as the fixture's dead case	fixture: no requirement; kept on purpose
+MR-FIX-0005	probe::paths::Inherent::get	fixture	MAY_REACH	deprecated	-	-	superseded	fixture: deprecated and still reached
+MR-FIX-0005	probe::paths::Inherent::never_called	fixture	MAY_REACH	deprecated	-	-	superseded	fixture: deprecated and dead
+MR-FIX-0005	probe::nowhere	fixture	MUST_REACH	active	-	-	-	fixture: a path that names nothing
+MR-FIX-0005	probe::outside::Made::From::from	fixture	MUST_REACH	active	-	-	-	fixture: a path two impls share
+MR-FIX-0020	probe::unused	fixture	MUST_REACH	active	-	-	-	fixture: a gap under a Partial requirement
+MR-FIX-0006	probe::gates::leaked	fixture	MUST_NOT_REACH	target-specific	-	-	compiled only with a feature the shipped build lacks	fixture: excluded from this build
+MR-FIX-0007	probe::installed::Installed::Example::instance_fn	fixture	MUST_REACH	active	probe::installed::Java_fixture_Probe_query	-	-	fixture: reached from the entry point that calls it, on the value another entry point made
+MR-FIX-0008	probe::main	fixture	MUST_REACH	active	probe::Java_fixture_Probe_entry	-	-	fixture: a path its build script's main shares, asked from the entry point

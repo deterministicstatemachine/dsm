@@ -17,7 +17,7 @@
 //! identity witnesses over the one DSM root-advance message `M_{i+1}` and nothing else:
 //!   - `σ^chip` — the resident non-exportable Ed25519 key inside TROPIC01 (`eddsa_sign`),
 //!   - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 secure-partition key (`dsm_sphincs`),
-//!     byte-compatible with the DSM receiver's verifier (`DSM/sphincs-kdf`).
+//!     the same crate the DSM receiver verifies with (construction version 2).
 //! There is no boot fence, no MAC-and-destroy witness, and no on-device counter-read / verify
 //! path — the counter is moved only as a local floor at commit and is never read by a receiver.
 //!
@@ -474,6 +474,10 @@ fn main() -> ! {
     // ---- Phase 1: raw link probe ~3s while USB enumerates ----
     let probe_until = timer.get_counter().ticks() + 3_000_000;
     let mut last = timer.get_counter();
+    // What the chip last put on MISO for the raw probe: the halt below reports
+    // it, so a silent bus (all 0x00 or all 0xFF) reads apart from a chip that
+    // answers but is refused.
+    let mut probe_rx = [0u8; 4];
     while timer.get_counter().ticks() < probe_until {
         usb_dev.poll(&mut [&mut serial]);
         if (timer.get_counter() - last).to_millis() >= 1000 {
@@ -481,6 +485,7 @@ fn main() -> ! {
             let mut rx = [0u8; 4];
             let tx = [0xAAu8, 0, 0, 0];
             let _ = spi_dev.transfer(&mut rx, &tx);
+            probe_rx = rx;
             let _ = serial.flush();
         }
     }
@@ -493,14 +498,22 @@ fn main() -> ! {
     let mut tropic = Tropic01::new(spi_dev);
     let chip_id_hash = match tropic.get_info_chip_id() {
         Ok(id) => anchor_core::hash::h("DSM/anchor/chip-id/v1", &[id]),
-        Err(_) => {
-            put(
-                &mut serial,
-                b"[T1] chip id: FAIL (no real identity; halting)\r\n",
+        Err(e) => {
+            // The halt names its cause, and repeats it: the banner is printed
+            // once at boot, before a phone or a Mac has attached to read it.
+            let why = alloc::format!(
+                "[T1] chip id: FAIL (no real identity; halting): {e:?}; raw probe MISO {probe_rx:?}\r\n"
             );
+            put(&mut serial, why.as_bytes());
             let _ = serial.flush();
+            let mut last = timer.get_counter();
             loop {
                 usb_dev.poll(&mut [&mut serial]);
+                if (timer.get_counter() - last).to_millis() >= 2000 {
+                    last = timer.get_counter();
+                    put(&mut serial, why.as_bytes());
+                    let _ = serial.flush();
+                }
             }
         }
     };

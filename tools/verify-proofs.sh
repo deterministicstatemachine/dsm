@@ -158,6 +158,7 @@ RESULTS+=("$(run_lean_module "Lean4_DSMCardinality" "DSMCardinality.lean" '"fres
 RESULTS+=("$(run_lean_module "Lean4_DSMCryptoBinding" "DSMCryptoBinding.lean" '"signed_digest_verifies","signature_retargeting_requires_same_digest","cross_domain_signature_retargeting_impossible","math_owned_claim_retargeting_impossible"' 4)")
 RESULTS+=("$(run_lean_module "Lean4_DSMGuardedTripwire" "DSMGuardedTripwire.lean" '"realized_unique_at_key","guarded_tripwire_at_key","guarded_tripwire_exists","conflict_excludes_corealization","hardened_single_consumption","no_resource_local_cycle","candidate_multiplicity_without_realized_fork","malformed_family_admits_fork","step_inhabited","disjoint_progress_two_steps"' 15)")
 RESULTS+=("$(run_lean_module "Lean4_DSMOfflineAnchorOrigin" "DSMOfflineAnchorOrigin.lean" '"offline_anchor_origin_unique","committed_record_unique_per_anchor_origin","keyOf_inj","commit_inhabited","distinct_content_forks"' 5)")
+RESULTS+=("$(run_lean_module "Lean4_DSMTokenIssuance" "DSMTokenIssuance.lean" '"create_fee_conserves_era_modulo_burn","create_fee_debits_exactly","create_insufficient_fee_is_noop","create_affordable_applies_the_burn","create_issues_exactly_initial_supply","create_touches_two_distinct_assets","create_zero_allocation_still_burns"' 7)")
 
 log ""
 log "JSON report written to: $REPORT_JSON"

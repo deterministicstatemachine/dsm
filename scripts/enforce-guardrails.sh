@@ -88,15 +88,14 @@ fi
 
 # Check 3: Envelope v3 framing (0x03 prefix) present in TS bridge
 echo "3. Checking envelope v3 framing in TS bridge..."
-BRIDGE_TS="$REPO_ROOT/dsm_client/frontend/src/dsm/WebViewBridge.ts"
-if [ -f "$BRIDGE_TS" ]; then
-    if grep -qE "0x03" "$BRIDGE_TS"; then
-        report_success "Envelope v3 framing (0x03 prefix) documented/used in WebViewBridge.ts"
-    else
-        report_violation "MISSING ENVELOPE V3 FRAMING" "WebViewBridge.ts must reference 0x03 framing byte (envelope v3)."
-    fi
+# The framing byte is checked where every transport envelope is decoded,
+# dsm/decoding.ts. A missing input is a failed check, never a skipped one
+# reported green.
+FRAMING_TS="$REPO_ROOT/dsm_client/frontend/src/dsm/decoding.ts"
+if [ -f "$FRAMING_TS" ] && grep -qE "0x03" "$FRAMING_TS"; then
+    report_success "Envelope v3 framing (0x03 prefix) enforced in dsm/decoding.ts"
 else
-    report_success "Skipped TS bridge framing check (WebViewBridge.ts not present)"
+    report_violation "MISSING ENVELOPE V3 FRAMING" "dsm_client/frontend/src/dsm/decoding.ts must exist and enforce the 0x03 framing byte (envelope v3)."
 fi
 
 # Check 4: Rust-side envelope size limit constant present

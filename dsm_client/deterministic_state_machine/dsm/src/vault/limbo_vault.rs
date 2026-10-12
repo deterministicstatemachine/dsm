@@ -6,7 +6,6 @@
 //! No wall-clock usage; verification relies on state numbers and deterministic data.
 //! No hex/json/base64/serde anywhere in Rust.
 
-use core::fmt;
 use std::collections::{HashMap, HashSet};
 
 use prost::Message;
@@ -43,7 +42,6 @@ fn dlv_content_commitment(blinding: &[u8; 32], content: &[u8]) -> [u8; 32] {
     h.update(content);
     *h.finalize().as_bytes()
 }
-use crate::types::policy_types::VaultCondition;
 // State import removed: vault lifecycle APIs now take &[u8; 32] (the
 // resolved reference state hash) directly. Callers supply the digest from
 // DeviceState::root(), RelationshipChainState::compute_chain_tip(), or any
@@ -476,17 +474,45 @@ pub struct LimboVault {
     /// routed unlock.  The chunks #7 gate verifies a trader's
     /// `RouteCommitHop.vault_state_anchor_seq` matches this value.  This
     /// is the LOCAL authoritative truth — never read from storage.
-    /// Domain-only: not persisted in `LimboVaultProto`.
+    ///
+    /// Not in `LimboVaultProto`, and deliberately not: it is recovered after a
+    /// restart from the vault's own committed state, which stamps this
+    /// sequence. Storing it here as well would be a second copy of
+    /// a fact the device root already authenticates, and the two would
+    /// eventually disagree with nothing to say which was right. See
+    /// `dsm_sdk::sdk::vault_rehydration`.
     pub current_sequence: u64,
-    /// Tier 2 Foundation: anchor-enforcement policy carried over from the
-    /// vault's `DlvSpecV1.anchor_enforcement` at creation time.  Stored as
-    /// `i32` to match the proto-generated `AnchorEnforcement` enum (0 =
-    /// `Unspecified`, 1 = `Optional`, 2 = `Required`).  The chunks #7 gate
-    /// uses this to decide whether `RouteCommitHop` anchor binding fields
-    /// are mandatory, accepted-if-present, or grandfathered.  Domain-only:
-    /// not persisted in `LimboVaultProto`.
+    /// DEPRECATION RESIDUE — SEMANTICALLY DEAD. Do not read this for any
+    /// decision, and do not add a reader. SCHEDULED FOR REMOVAL together with
+    /// the `amm_vault_records.anchor_enforcement` column.
+    ///
+    /// It was meant to select whether a `RouteCommitHop`'s anchor binding
+    /// fields were mandatory, accepted-if-present or grandfathered. The code
+    /// that decides that — `route_commit_sdk::enforce_parent_binding` — is
+    /// UNCONDITIONAL and never consulted this, so the selector could only ever
+    /// have described a weaker posture than the one in force. AMM `dlv.create`
+    /// now refuses any spec that is not the canonical `Required`, and
+    /// `vault_rehydration` derives the posture instead of reading it back.
+    ///
+    /// It is not in `LimboVaultProto` either: the decoder hardcodes 0, so a
+    /// loaded vault has never carried a meaningful value here.
     pub anchor_enforcement: i32,
-    /// Phase 13 follow-up: persisted copy of `DlvSpecV1.policy_digest`
+    /// THE DLV-POLICY DIGEST - the vault's behavioural-policy identity, and a
+    /// creator-SIGNED one: it is folded into `parameters_hash`, so `verify`
+    /// refuses a vault whose digest was altered after birth. For an AMM DLV it
+    /// is `dsm::ccb::dlv_policy_digest(release_policy, fee_policy)`, a
+    /// deterministic view of the two DLV-layer members the signed
+    /// `VaultStateV2` already commits - never the pair's CPTA commits, which
+    /// are the token layer and stay independent. AMM `dlv.create` DERIVES it;
+    /// a supplied value that does not match is refused.
+    ///
+    /// Non-AMM DLVs have no `ReleasePolicy`/`FeePolicy` object to derive from,
+    /// so their supplied 32-byte digest remains caller-supplied but
+    /// creator-signed. Tightening that non-AMM meaning is follow-up semantic
+    /// debt; this change only makes the existing bytes covered by the creator
+    /// signature.
+    ///
+    /// Historical: persisted copy of `DlvSpecV1.policy_digest`
     /// (the 32-byte BLAKE3 anchor of the CPTA spec).  Re-used as the
     /// routing advertisement's `unlock_spec_digest` so the owner-side
     /// LiquidityScreen republish path can read the canonical digest
@@ -520,6 +546,9 @@ pub struct LimboVaultDraft {
     pub parameters_hash: Vec<u8>,
     pub verification_positions: Vec<Position>,
     pub reference_state_hash: [u8; 32],
+    /// The vault's DLV-POLICY digest, folded into `parameters_hash` and so
+    /// covered by the creator signature — see [`LimboVault::policy_digest`].
+    pub policy_digest: Option<[u8; 32]>,
 }
 
 /* ------------------------------ Proto conversions ---------------------------- */
@@ -623,10 +652,9 @@ impl TryFrom<crate::types::proto::LimboVaultProto> for LimboVault {
             // Tier 2 Foundation: domain-only; not persisted in the proto.
             // Loaded vaults start at 0 and advance through routed unlocks.
             current_sequence: 0,
-            // Tier 2 Foundation: domain-only; defaults to Unspecified when
-            // loaded from the proto (no anchor enforcement on legacy
-            // vaults).  Routed-unlock construction sites override this
-            // from `DlvSpecV1.anchor_enforcement`.
+            // Deprecation residue: not in the proto, and nothing reads it for
+            // a decision. The 0 here is NOT "no enforcement" — anchor binding
+            // is unconditional; see the field's doc.
             anchor_enforcement: 0,
             // Phase 13 follow-up: decode the persisted policy_digest if
             // present.  Length is strict-validated as 32 bytes; any
@@ -671,7 +699,7 @@ impl From<&LimboVault> for crate::types::proto::LimboVaultProto {
                 .collect(),
             reference_state_hash: v.reference_state_hash.to_vec(),
             entry_header: v.entry_header.map(|eh| eh.to_vec()),
-            // Phase 13 follow-up: persisted policy_digest (CPTA anchor).
+            // The DLV-policy digest (creator-signed via parameters_hash).
             // Re-used as routing advertisement unlock_spec_digest.
             policy_digest: v.policy_digest.map(|d| d.to_vec()),
         }
@@ -782,16 +810,12 @@ impl From<&FulfillmentMechanism> for crate::types::proto::FulfillmentMechanism {
             FulfillmentMechanism::AmmConstantProduct {
                 token_a,
                 token_b,
-                reserve_a,
-                reserve_b,
                 fee_bps,
             } => proto::FulfillmentMechanism {
                 kind: Some(fulfillment_mechanism::Kind::AmmConstantProduct(
                     proto::AmmConstantProduct {
                         token_a: token_a.clone(),
                         token_b: token_b.clone(),
-                        reserve_a_u128: reserve_a.to_be_bytes().to_vec(),
-                        reserve_b_u128: reserve_b.to_be_bytes().to_vec(),
                         fee_bps: *fee_bps,
                     },
                 )),
@@ -876,26 +900,6 @@ impl TryFrom<crate::types::proto::FulfillmentMechanism> for FulfillmentMechanism
                 FulfillmentMechanism::Or(out)
             }
             Kind::AmmConstantProduct(amm) => {
-                if amm.reserve_a_u128.len() != 16 {
-                    return Err(DsmError::serialization_error(
-                        "AmmConstantProduct",
-                        "reserve_a_u128 must be 16 bytes",
-                        None::<&str>,
-                        None::<core::convert::Infallible>,
-                    ));
-                }
-                if amm.reserve_b_u128.len() != 16 {
-                    return Err(DsmError::serialization_error(
-                        "AmmConstantProduct",
-                        "reserve_b_u128 must be 16 bytes",
-                        None::<&str>,
-                        None::<core::convert::Infallible>,
-                    ));
-                }
-                let mut a_buf = [0u8; 16];
-                a_buf.copy_from_slice(&amm.reserve_a_u128);
-                let mut b_buf = [0u8; 16];
-                b_buf.copy_from_slice(&amm.reserve_b_u128);
                 // Lex-canonical pair invariant: token_a <= token_b.  An
                 // ad/vault that violates this is malformed.
                 if !amm.token_a.is_empty()
@@ -909,11 +913,12 @@ impl TryFrom<crate::types::proto::FulfillmentMechanism> for FulfillmentMechanism
                         None::<core::convert::Infallible>,
                     ));
                 }
+                // No reserve decoding: the condition carries the predicate, and
+                // the quantities it governs are encumbered leaves in the
+                // owner's device SMT.
                 FulfillmentMechanism::AmmConstantProduct {
                     token_a: amm.token_a,
                     token_b: amm.token_b,
-                    reserve_a: u128::from_be_bytes(a_buf),
-                    reserve_b: u128::from_be_bytes(b_buf),
                     fee_bps: amm.fee_bps,
                 }
             }
@@ -1032,6 +1037,11 @@ impl LimboVault {
     /// `reference_state.hash[0] as u64`) has been dropped: the full 32-byte
     /// reference hash already serves the position-in-chain identifier role,
     /// so the u64 reduction was both redundant and a §4.3 violation.
+    // Eight parameters: the DLV-policy digest joined the signed parameters, and
+    // it belongs here rather than in a post-finalize stamp, because the draft is
+    // what gets signed. The repo's other signed-preimage builders carry the same
+    // allowance.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_draft(
         creator_public_key: &[u8],
         fulfillment_condition: FulfillmentMechanism,
@@ -1040,6 +1050,11 @@ impl LimboVault {
         intended_recipient: Option<Vec<u8>>, // Kyber public key for access control (if Some)
         encryption_public_key: &[u8],        // Kyber public key for content encryption (required)
         reference_state_hash: &[u8; 32],
+        // The DLV-policy digest, signed with the rest of the parameters. AMM
+        // callers pass the derived ReleasePolicy/FeePolicy digest; non-AMM
+        // callers still supply their 32 bytes because no such authority object
+        // exists yet. That non-AMM meaning is follow-up semantic debt.
+        policy_digest: Option<[u8; 32]>,
     ) -> Result<LimboVaultDraft, DsmError> {
         // dBTC bearer-fungibility guard (see
         // .github/instructions/dBTCimplement.instructions.md, Definition 17 +
@@ -1122,7 +1137,7 @@ impl LimboVault {
 
         // Symmetric key for AES-GCM: bind KEM secret + aad + content hash
         let sym_key = domain_hash_bytes(
-            "DSM/dlv-sym-key",
+            crate::tagged_domain!(b"DSM/dlv-sym-key"),
             &concat_bytes(&[
                 &shared_secret,
                 &aad,
@@ -1166,6 +1181,10 @@ impl LimboVault {
         // commitment's variable-length to_bytes(); now just the
         // salted-BLAKE3 32 bytes).
         parameters.extend_from_slice(&commitment);
+        // The DLV-policy digest, presence-tagged so "absent" and "32 zero
+        // bytes" are different preimages. Folding it here makes AMM-derived
+        // bytes, and today's non-AMM caller-supplied bytes, creator-signed.
+        fold_policy_digest(&mut parameters, policy_digest.as_ref());
 
         let parameters_hash =
             domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
@@ -1202,7 +1221,21 @@ impl LimboVault {
             parameters_hash,
             verification_positions,
             reference_state_hash: ref_hash,
+            policy_digest,
         })
+    }
+}
+
+/// Fold an optional DLV-policy digest into a parameters preimage:
+/// `0x00` when absent, `0x01 || digest` when present. Shared by the builder
+/// and `verify` so the two cannot drift.
+fn fold_policy_digest(parameters: &mut Vec<u8>, policy_digest: Option<&[u8; 32]>) {
+    match policy_digest {
+        None => parameters.push(0x00),
+        Some(d) => {
+            parameters.push(0x01);
+            parameters.extend_from_slice(d);
+        }
     }
 }
 
@@ -1228,7 +1261,7 @@ impl LimboVaultDraft {
             // Phase 13 follow-up: no policy digest at finalize time;
             // dlv.create stamps the real value via `dlv_manager.get_vault()`
             // after this function returns.
-            policy_digest: None,
+            policy_digest: self.policy_digest,
         };
 
         if !vault.verify()? {
@@ -1269,6 +1302,7 @@ impl LimboVault {
         }
         // 32-byte raw commitment hash (Issue #184 F2).
         parameters.extend_from_slice(&self.content_commitment);
+        fold_policy_digest(&mut parameters, self.policy_digest.as_ref());
 
         let computed =
             domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_PARAMS, &parameters).to_vec();
@@ -1332,7 +1366,7 @@ impl LimboVault {
                 proof_ref @ FulfillmentProof::CryptoConditionProof { solution, .. },
             ) => {
                 let h = domain_hash(
-                    "DSM/dlv-crypto-cond",
+                    crate::tagged_domain!(b"DSM/dlv-crypto-cond"),
                     &concat_bytes(&[solution, public_params]),
                 );
                 let result = secure_eq(h.as_bytes(), condition_hash);
@@ -1391,7 +1425,7 @@ impl LimboVault {
                 },
             ) => {
                 let seed = domain_hash(
-                    "DSM/dlv-rw-seed",
+                    crate::tagged_domain!(b"DSM/dlv-rw-seed"),
                     &concat_bytes(&[verification_key, statement.as_bytes()]),
                 );
                 let expected = generate_positions(
@@ -1759,7 +1793,6 @@ impl LimboVault {
             log::error!("verify_bitcoin_htlc failed: verify_header_chain failed");
             return Ok(false);
         }
-        let checkpoint_rooted = matches!(btc_network, BitcoinNetwork::Mainnet) && header_chain_ok;
 
         // 7. Entry-header anchor check (dBTC paper §12.2.3, Invariant 19):
         //    If this vault has a cached entry header (from BTC→dBTC entry),
@@ -1777,6 +1810,7 @@ impl LimboVault {
         }
 
         let verifier_evidence = RustVerifierAcceptedEvidence {
+            checkpoint_rooted: header_chain_ok,
             observation: BitcoinSettlementObservation {
                 network: btc_network,
                 bitcoin_spend_observed: true,
@@ -1792,7 +1826,6 @@ impl LimboVault {
             },
             spv_inclusion_valid,
             pow_valid,
-            checkpoint_rooted,
             same_chain_anchored,
         };
 
@@ -2076,7 +2109,7 @@ impl LimboVault {
 
         // Final symmetric key binds KEM secret + unlocking key + AAD
         let final_key = domain_hash_bytes(
-            "DSM/dlv-final-key",
+            crate::tagged_domain!(b"DSM/dlv-final-key"),
             &concat_bytes(&[&shared_secret, &unlocking_key, &self.encrypted_content.aad]),
         )
         .to_vec();
@@ -2182,12 +2215,9 @@ impl LimboVault {
             } => format!("Bitcoin HTLC vault ({expected_btc_amount_sats} sats)"),
             FulfillmentMechanism::And(v) => format!("All of {} conditions must be met", v.len()),
             FulfillmentMechanism::Or(v) => format!("Any of {} conditions must be met", v.len()),
-            FulfillmentMechanism::AmmConstantProduct {
-                reserve_a,
-                reserve_b,
-                fee_bps,
-                ..
-            } => format!("AMM constant-product (a={reserve_a}, b={reserve_b}, fee={fee_bps}bps)"),
+            FulfillmentMechanism::AmmConstantProduct { fee_bps, .. } => {
+                format!("AMM constant-product (fee={fee_bps}bps)")
+            }
         };
 
         let mut metadata = HashMap::new();
@@ -2261,7 +2291,6 @@ impl Default for LimboVault {
 mod tests {
     use super::*;
     use crate::core::state_machine::random_walk::algorithms::Position;
-    use crate::types::policy_types::VaultCondition;
 
     // ───────── secure_eq ─────────
 
@@ -2609,89 +2638,6 @@ mod tests {
         assert_ne!(VaultState::Limbo, VaultState::Active);
     }
 
-    // ───────── DeterministicLimboVault ─────────
-
-    #[test]
-    fn dlv_new_and_getters() {
-        let cond = VaultCondition::Hash(b"test".to_vec());
-        let v = DeterministicLimboVault::new("alice", "bob", vec![1, 2, 3], cond);
-
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "alice");
-        assert_eq!(v.recipient_id(), "bob");
-        assert_eq!(v.data(), &[1, 2, 3]);
-        assert_eq!(*v.status(), VaultStatus::Active);
-    }
-
-    #[test]
-    fn dlv_set_status() {
-        let cond = VaultCondition::Hash(vec![]);
-        let mut v = DeterministicLimboVault::new("c", "r", vec![], cond);
-
-        v.set_status(VaultStatus::Claimed);
-        assert_eq!(*v.status(), VaultStatus::Claimed);
-
-        v.set_status(VaultStatus::Revoked);
-        assert_eq!(*v.status(), VaultStatus::Revoked);
-
-        v.set_status(VaultStatus::Expired);
-        assert_eq!(*v.status(), VaultStatus::Expired);
-    }
-
-    #[test]
-    fn dlv_id_is_deterministic() {
-        let cond1 = VaultCondition::Hash(b"h".to_vec());
-        let cond2 = VaultCondition::Hash(b"h".to_vec());
-        let v1 = DeterministicLimboVault::new("alice", "bob", vec![42], cond1);
-        let v2 = DeterministicLimboVault::new("alice", "bob", vec![42], cond2);
-        assert_eq!(v1.id(), v2.id());
-    }
-
-    #[test]
-    fn dlv_different_data_different_id() {
-        let cond1 = VaultCondition::Hash(vec![]);
-        let cond2 = VaultCondition::Hash(vec![]);
-        let v1 = DeterministicLimboVault::new("a", "b", vec![1], cond1);
-        let v2 = DeterministicLimboVault::new("a", "b", vec![2], cond2);
-        assert_ne!(v1.id(), v2.id());
-    }
-
-    // ───────── factory functions ─────────
-
-    #[test]
-    fn create_deterministic_limbo_vault_basic() {
-        let v = create_deterministic_limbo_vault(
-            "creator1",
-            vec![10, 20],
-            VaultCondition::MinimumBalance(100),
-        );
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator1");
-        assert_eq!(v.recipient_id(), "");
-        assert_eq!(v.data(), &[10, 20]);
-    }
-
-    #[test]
-    fn create_deterministic_limbo_vault_with_timeout_basic() {
-        let v = create_deterministic_limbo_vault_with_timeout("creator2", vec![30], 999);
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator2");
-        assert_eq!(v.recipient_id(), "");
-    }
-
-    #[test]
-    fn create_deterministic_limbo_vault_with_timeout_and_recipient_basic() {
-        let v = create_deterministic_limbo_vault_with_timeout_and_recipient(
-            "creator3",
-            "recip3",
-            vec![40],
-            500,
-        );
-        assert!(v.id().starts_with("dlv-"));
-        assert_eq!(v.creator_id(), "creator3");
-        assert_eq!(v.recipient_id(), "recip3");
-    }
-
     // ───────── VaultPost from LimboVault (proto conversion) ─────────
 
     #[test]
@@ -2796,28 +2742,6 @@ mod tests {
         ));
     }
 
-    // ───────── VaultStatus Display ─────────
-
-    #[test]
-    fn vault_status_display_active() {
-        assert_eq!(format!("{}", VaultStatus::Active), "active");
-    }
-
-    #[test]
-    fn vault_status_display_claimed() {
-        assert_eq!(format!("{}", VaultStatus::Claimed), "claimed");
-    }
-
-    #[test]
-    fn vault_status_display_revoked() {
-        assert_eq!(format!("{}", VaultStatus::Revoked), "revoked");
-    }
-
-    #[test]
-    fn vault_status_display_expired() {
-        assert_eq!(format!("{}", VaultStatus::Expired), "expired");
-    }
-
     // ───────── to_vault_post lock descriptions ─────────
 
     fn make_minimal_vault_with_condition(cond: FulfillmentMechanism) -> LimboVault {
@@ -2845,6 +2769,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft");
         (draft, creator_secret_key, reference_state_hash)
@@ -2857,6 +2782,52 @@ mod tests {
                 .expect("creator signature");
         let vault = draft.finalize(&creator_signature).expect("signed vault");
         (vault, creator_secret_key, reference_state_hash)
+    }
+
+    /// THE DLV-POLICY DIGEST IS CREATOR-SIGNED. It rides `parameters_hash`,
+    /// so a vault whose digest is altered — or dropped — after signing fails
+    /// `verify`, and "absent" is a different preimage from any 32 bytes.
+    #[test]
+    fn a_policy_digest_altered_after_signing_fails_verify() {
+        let (creator_public_key, creator_secret_key) =
+            crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
+        let kyber_pair = crate::crypto::kyber::generate_kyber_keypair().expect("kyber keypair");
+        let draft = LimboVault::create_draft(
+            &creator_public_key,
+            FulfillmentMechanism::CryptoCondition {
+                condition_hash: vec![0x11; 32],
+                public_params: vec![0x22; 16],
+            },
+            b"policy digest under signature",
+            "application/octet-stream",
+            None,
+            &kyber_pair.public_key,
+            &[0x24; 32],
+            Some([0x77; 32]),
+        )
+        .expect("vault draft");
+        let sig = crate::crypto::sphincs::sphincs_sign(&creator_secret_key, &draft.parameters_hash)
+            .expect("creator signature");
+        let vault = draft.finalize(&sig).expect("signed vault");
+        assert_eq!(
+            vault.policy_digest,
+            Some([0x77; 32]),
+            "finalize carries the digest"
+        );
+        assert!(vault.verify().expect("verify"), "as signed, it verifies");
+
+        let mut altered = vault.clone();
+        altered.policy_digest = Some([0x78; 32]);
+        assert!(
+            !altered.verify().expect("verify"),
+            "a different digest is not what was signed"
+        );
+        let mut dropped = vault.clone();
+        dropped.policy_digest = None;
+        assert!(
+            !dropped.verify().expect("verify"),
+            "an absent digest is not what was signed either"
+        );
     }
 
     #[test]
@@ -2890,6 +2861,7 @@ mod tests {
             None,
             encryption_pk,
             &ref_hash,
+            None,
         )
         .expect("vault draft")
     }
@@ -3008,6 +2980,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft a");
         let draft_b = LimboVault::create_draft(
@@ -3021,6 +2994,7 @@ mod tests {
             None,
             &kyber_pair.public_key,
             &reference_state_hash,
+            None,
         )
         .expect("vault draft b");
 
@@ -3236,38 +3210,6 @@ mod tests {
         assert_eq!(v.to_vault_post("t", None).unwrap().status, "invalidated");
     }
 
-    // ───────── from_limbo_vault status mapping ─────────
-
-    #[test]
-    fn from_limbo_vault_status_mapping() {
-        let cond = VaultCondition::Hash(vec![]);
-
-        let mut v = LimboVault {
-            state: VaultState::Limbo,
-            ..Default::default()
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Active);
-
-        v.state = VaultState::Active;
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Active);
-
-        v.state = VaultState::Claimed {
-            claimant: vec![],
-            claim_proof: vec![],
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond.clone()).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Claimed);
-
-        v.state = VaultState::Invalidated {
-            reason: "test".to_string(),
-            creator_signature: vec![],
-        };
-        let dlv = DeterministicLimboVault::from_limbo_vault(&v, cond).unwrap();
-        assert_eq!(*dlv.status(), VaultStatus::Revoked);
-    }
-
     // ───────── EncryptedContent struct ─────────
 
     #[test]
@@ -3319,6 +3261,7 @@ mod tests {
             Some(bogus_recipient),
             &kyber_pair.public_key,
             &[0x42; 32],
+            None,
         );
         let err = result.expect_err("create_draft must reject intended_recipient + BitcoinHTLC");
         let msg = format!("{err}");
@@ -3345,6 +3288,7 @@ mod tests {
             None, // bearer-authorized: no recipient binding at DSM layer
             &kyber_pair.public_key,
             &[0x42; 32],
+            None,
         )
         .expect("create_draft must accept BitcoinHTLC + intended_recipient=None");
         assert!(draft.intended_recipient.is_none());
@@ -3386,143 +3330,5 @@ mod tests {
             Some(vec![0xEEu8; 64]),
             "decoded vault must preserve legacy intended_recipient field verbatim"
         );
-    }
-}
-
-/* ------------------- Optional Deterministic Limbo (lightweight) -------------- */
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum VaultStatus {
-    Active,
-    Claimed,
-    Revoked,
-    Expired,
-}
-
-#[derive(Debug, Clone)]
-pub struct DeterministicLimboVault {
-    id: String,
-    creator_id: String,
-    recipient_id: String,
-    data: Vec<u8>,
-    condition: VaultCondition,
-    status: VaultStatus,
-}
-
-impl DeterministicLimboVault {
-    pub fn new(
-        creator_id: &str,
-        recipient_id: &str,
-        data: Vec<u8>,
-        condition: VaultCondition,
-    ) -> Self {
-        let id = decimal_label(
-            "dlv-",
-            concat_bytes(&[
-                creator_id.as_bytes(),
-                recipient_id.as_bytes(),
-                &domain_hash_bytes(crate::common::domain_tags::TAG_DSM_DLV_CONTENT, &data)[..],
-            ])
-            .as_slice(),
-        );
-        Self {
-            id,
-            creator_id: creator_id.to_string(),
-            recipient_id: recipient_id.to_string(),
-            data,
-            condition,
-            status: VaultStatus::Active,
-        }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-    pub fn creator_id(&self) -> &str {
-        &self.creator_id
-    }
-    pub fn recipient_id(&self) -> &str {
-        &self.recipient_id
-    }
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
-    pub fn condition(&self) -> &VaultCondition {
-        &self.condition
-    }
-    pub fn status(&self) -> &VaultStatus {
-        &self.status
-    }
-    pub fn set_status(&mut self, s: VaultStatus) {
-        self.status = s;
-    }
-
-    pub fn from_limbo_vault(v: &LimboVault, condition: VaultCondition) -> Result<Self, DsmError> {
-        let creator_id = decimal_label("pk-", &v.creator_public_key);
-        let recipient_id = match &v.intended_recipient {
-            Some(pk) => decimal_label("pk-", pk),
-            None => String::new(),
-        };
-        Ok(Self {
-            id: base32::encode(base32::Alphabet::Crockford, &v.id),
-            creator_id,
-            recipient_id,
-            data: v.encrypted_content.encrypted_data.clone(),
-            condition,
-            status: match v.state {
-                VaultState::Limbo => VaultStatus::Active,
-                VaultState::Active => VaultStatus::Active,
-                VaultState::Unlocked { .. } => VaultStatus::Active,
-                VaultState::Claimed { .. } => VaultStatus::Claimed,
-                VaultState::Invalidated { .. } => VaultStatus::Revoked,
-            },
-        })
-    }
-}
-
-pub fn convert_vault(
-    vault: &LimboVault,
-    condition: VaultCondition,
-) -> Result<DeterministicLimboVault, DsmError> {
-    DeterministicLimboVault::from_limbo_vault(vault, condition)
-}
-
-pub fn create_deterministic_limbo_vault(
-    creator_id: &str,
-    data: Vec<u8>,
-    condition: VaultCondition,
-) -> DeterministicLimboVault {
-    DeterministicLimboVault::new(creator_id, "", data, condition)
-}
-
-pub fn create_deterministic_limbo_vault_with_timeout(
-    creator_id: &str,
-    data: Vec<u8>,
-    _timeout_ticks: u64, // logical ticks; not used in minimal builder
-) -> DeterministicLimboVault {
-    let condition = VaultCondition::Hash(b"timeout_disabled".to_vec());
-    DeterministicLimboVault::new(creator_id, "", data, condition)
-}
-
-pub fn create_deterministic_limbo_vault_with_timeout_and_recipient(
-    creator_id: &str,
-    recipient_id: &str,
-    data: Vec<u8>,
-    _timeout_ticks: u64,
-) -> DeterministicLimboVault {
-    let condition = VaultCondition::Hash(b"timeout_disabled".to_vec());
-    DeterministicLimboVault::new(creator_id, recipient_id, data, condition)
-}
-
-/* --------------------------------- Display impls ----------------------------- */
-
-impl fmt::Display for VaultStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VaultStatus::Active => write!(f, "active"),
-            VaultStatus::Claimed => write!(f, "claimed"),
-            VaultStatus::Revoked => write!(f, "revoked"),
-            VaultStatus::Expired => write!(f, "expired"),
-        }
     }
 }

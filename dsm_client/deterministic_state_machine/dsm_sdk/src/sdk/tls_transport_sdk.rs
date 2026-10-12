@@ -95,7 +95,6 @@ impl TlsConfig {
 
 // Transport abstractions live in this crate under sdk; provide minimal trait aliases here to decouple
 // from the removed `communication` module. These are intentionally lightweight wrappers.
-#[allow(dead_code)]
 pub trait Transport {
     fn name(&self) -> &'static str {
         "tls"

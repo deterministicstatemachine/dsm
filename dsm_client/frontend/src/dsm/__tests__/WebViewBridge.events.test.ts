@@ -49,35 +49,12 @@ describe("WebViewBridge dsm-event listener", () => {
   });
 });
 
-describe("WebViewBridge error surfacing via lastError", () => {
-  test("throws when native returns empty and lastError present", async () => {
-    // Stub bridge
-    (globalThis as any).window = (globalThis as any).window || {};
-    (globalThis as any).window.DsmBridge = {
-      __binary: true,
-      __callBin: async () => (global as any).createDsmBridgeSuccessResponse(new Uint8Array(0)),
-      lastError: () => "sdk_context_uninitialized",
-    };
-    await expect(queryTransportHeadersV3()).rejects.toThrow(/sdk_context_uninitialized/);
-  });
-
-  test("does not throw when empty and no lastError", async () => {
-    (globalThis as any).window.DsmBridge = {
-      __binary: true,
-      __callBin: async () => (global as any).createDsmBridgeSuccessResponse(new Uint8Array(0)),
-    };
-    const res = await queryTransportHeadersV3();
-    expect(res).toBeInstanceOf(Uint8Array);
-    expect(res.length).toBe(0);
-  });
-});
-
 describe("WebViewBridge preference gating", () => {
   test("getPreference executes through bridgeGate", async () => {
     const enqueueSpy = jest.spyOn(bridgeGate, "enqueue");
     const bridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require("../../proto/dsm_app_pb");
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         expect(req.method).toBe("getPreference");
@@ -99,7 +76,7 @@ describe("WebViewBridge preference gating", () => {
     const enqueueSpy = jest.spyOn(bridgeGate, "enqueue");
     const bridge = {
       __binary: true,
-      __callBin: async (reqBytes: Uint8Array) => {
+      sendMessageBin: async (reqBytes: Uint8Array) => {
         const pb = require("../../proto/dsm_app_pb");
         const req = pb.BridgeRpcRequest.fromBinary(reqBytes);
         expect(req.method).toBe("setPreference");

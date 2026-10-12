@@ -30,12 +30,10 @@ use dsm::types::device_state::{
     DeviceState, OfflineAllocation, RelChainTip, RelationshipChainState, ValueCapability,
 };
 use dsm::types::operations::Operation;
-use log::warn;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::get_connection;
 use crate::storage::codecs::{read_len_u32, read_u8, read_vec, take};
-use crate::util::deterministic_time::tick;
 
 /// Store a compact suspicious-activity report (bytes-only).
 pub fn store_bcr_report(report: &[u8]) -> Result<()> {
@@ -44,11 +42,9 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-
     conn.execute(
-        "INSERT INTO bcr_reports(report, created_at) VALUES (?1, ?2)",
-        params![report, now as i64],
+        "INSERT INTO bcr_reports(report) VALUES (?1)",
+        params![report],
     )?;
 
     Ok(())
@@ -61,11 +57,13 @@ pub fn store_bcr_report(report: &[u8]) -> Result<()> {
 // `dsm/src/types/device_state.rs`. The hashed prefix of a RelationshipChainState
 // matches `compute_chain_tip()` (rel_key ‖ embedded_parent ‖ counterparty_devid
 // ‖ op(len+bytes) ‖ entropy(len+bytes) ‖ encap_flag+optional ‖ witness count
-// + (policy_commit ‖ value u64 le) sorted). Sigs are appended outside the
-// hashed prefix.
+// Sigs are appended outside the hashed prefix.
 // ──────────────────────────────────────────────────────────────────────────
 
-const REL_CHAIN_STATE_VERSION: u8 = 0x02;
+// 0x03: balance_witness REMOVED — the relationship chain-tip commitment is
+// balance-free (DSM/relationship-chain-tip/v2); R_econ is the sole
+// authenticated online balance representation. Beta wipe, no migration.
+const REL_CHAIN_STATE_VERSION: u8 = 0x03;
 // v0x02 (spec §0.5 gap 13): adds the canonical per-tip `value_capability` byte. This is a
 // BREAKING bump with NO back-compat reader by design (no-legacy directive) — an older blob
 // is rejected by `decode_device_state`; the device head is re-derived from the authoritative
@@ -73,7 +71,23 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x02;
 // v0x03 adds the non-tip `extra_leaves` section (offline-bearer anchor-state + SoFi vault-state
 // leaves) so a state with any such leaf round-trips: without it, restore replayed only tips and
 // recomputed a mismatched root, bricking the wallet after one offline-bearer transfer.
-const DEVICE_STATE_VERSION: u8 = 0x04;
+// v0x05 adds the `vault_reserves` section — the extractable (amount, sequence) behind each
+// vault-reserve leaf. Same reasoning as v0x04: the leaf HASH commits into the root and is
+// already in `extra_leaves`, but the amount is not recoverable from it. Without this section a
+// funded vault reloads with its reserves absent, recomputes a different root, and the wallet
+// refuses to start — after the owner has already had value debited into the vault. Breaking
+// bump with NO back-compat reader, per the no-legacy directive.
+// v0x06 replaces the per-tip cached `RelationshipChainState` with the 32-byte `tip_entropy`.
+// The cached state cost ~50 KB per relationship (its operation embeds a 49,856-byte SPHINCS+
+// signature) while only two values were ever read back: `entropy`, and a chain-tip
+// recomputation this codec already forced to equal the stored `chain_tip`. Heads therefore
+// grew ~50 KB per counterparty, and the b0x envelope — which carries the head — overran the
+// storage node's 128 KiB MAX_ENVELOPE_BYTES, deterministically 413-ing every transfer once a
+// device had two relationships. `root()` is unaffected: the SMT leaf has always been
+// `rel_key -> chain_tip`, never the state. Breaking bump with NO back-compat reader.
+// v0x07 drops the `vault_reserves` section: the old market's reserve leaves are gone from
+// `DeviceState`, so a head has nothing to persist there. Breaking bump, NO back-compat reader.
+const DEVICE_STATE_VERSION: u8 = 0x07;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -112,14 +126,6 @@ pub fn encode_rel_chain_state(state: &RelationshipChainState) -> Vec<u8> {
             put_vec(&mut out, enc);
         }
         None => out.push(0u8),
-    }
-
-    // BTreeMap iteration is sorted by key; balance_witness is keyed by 32B
-    // policy_commit so the iteration order matches the canonical hash.
-    put_len_u32(&mut out, state.balance_witness.len());
-    for (policy_commit, value) in &state.balance_witness {
-        out.extend_from_slice(policy_commit);
-        out.extend_from_slice(&value.to_le_bytes());
     }
 
     // ── sigs appended after hashed prefix (NOT part of hash) ──────────
@@ -173,15 +179,6 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         other => return Err(anyhow!("encap_flag invalid: {other}")),
     };
 
-    let witness_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("witness count: {e}"))?;
-    let mut balance_witness: BTreeMap<[u8; 32], u64> = BTreeMap::new();
-    for _ in 0..witness_count {
-        let pc: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("witness pc: {e}"))?;
-        let val_bytes: [u8; 8] =
-            take::<8>(&mut cursor).map_err(|e| anyhow!("witness value: {e}"))?;
-        balance_witness.insert(pc, u64::from_le_bytes(val_bytes));
-    }
-
     // ── sigs (after hashed prefix) ─────────────────────────────────────
     let entity_sig_flag = read_u8(&mut cursor).map_err(|e| anyhow!("entity_sig_flag: {e}"))?;
     let entity_sig = match entity_sig_flag {
@@ -203,7 +200,6 @@ pub fn decode_rel_chain_state(bytes: &[u8]) -> Result<(RelationshipChainState, [
         operation,
         entropy,
         encapsulated_entropy,
-        balance_witness,
         entity_sig,
         counterparty_sig,
     };
@@ -264,14 +260,10 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         // Canonical value-capability (R4): 1=Yes, 2=No, 3=Unknown. Always explicit.
         out.push(tip.value_capability.commit_tag());
 
-        match tip.state.as_ref() {
-            Some(s) => {
-                out.push(1u8);
-                let inner = encode_rel_chain_state(s);
-                put_vec(&mut out, &inner);
-            }
-            None => out.push(0u8),
-        }
+        // v0x06: the tip's entropy, length-prefixed. Empty is legal and means a
+        // digest-only tip (recovery-capsule restore) whose next advance falls
+        // back to the SMT-root derivation.
+        put_vec(&mut out, &tip.tip_entropy);
     }
 
     // v0x03: non-tip SMT leaves (offline-bearer anchor-state + SoFi vault-state), sorted by key
@@ -302,7 +294,15 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
 ///
 /// Returns the decoded state and the stored `smt_root` sanity-check value;
 /// the caller asserts `decoded.root() == stored_smt_root`.
-pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
+pub fn decode_device_state(
+    bytes: &[u8],
+    // The admission in flight, read from `economic_pending_admissions`. A
+    // REQUIRED argument rather than a defaulted `None`: the fence state is not
+    // in `head_bytes`, so if this could be omitted, every decode path that
+    // forgot would silently produce an unfenced head. Making it explicit means
+    // the compiler names every rebuild path.
+    pending_economic_admission: Option<dsm::economic::admission::PendingEconomicAdmission>,
+) -> Result<(DeviceState, [u8; 32])> {
     let mut cursor = bytes;
 
     let version = read_u8(&mut cursor).map_err(|e| anyhow!("device_state version: {e}"))?;
@@ -345,29 +345,13 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         let vc_byte = read_u8(&mut cursor).map_err(|e| anyhow!("tip value_capability: {e}"))?;
         let value_capability = ValueCapability::from_wire(vc_byte as i32)
             .ok_or_else(|| anyhow!("tip value_capability invalid byte: {vc_byte}"))?;
-        let state_flag = read_u8(&mut cursor).map_err(|e| anyhow!("tip state flag: {e}"))?;
-        let state = match state_flag {
-            0 => None,
-            1 => {
-                let inner = read_vec(&mut cursor).map_err(|e| anyhow!("tip state bytes: {e}"))?;
-                let (decoded, recomputed_tip) = decode_rel_chain_state(&inner)?;
-                if recomputed_tip != chain_tip {
-                    return Err(anyhow!(
-                        "tip cached state digest mismatch: encoded {} != recomputed {}",
-                        crate::util::text_id::encode_base32_crockford(&chain_tip),
-                        crate::util::text_id::encode_base32_crockford(&recomputed_tip)
-                    ));
-                }
-                Some(decoded)
-            }
-            other => return Err(anyhow!("tip state_flag invalid: {other}")),
-        };
+        let tip_entropy = read_vec(&mut cursor).map_err(|e| anyhow!("tip entropy: {e}"))?;
         tips_in_order.push((
             rk,
             RelChainTip {
                 chain_tip,
                 counterparty_devid: cp_devid,
-                state,
+                tip_entropy,
                 value_capability,
             },
         ));
@@ -412,7 +396,7 @@ pub fn decode_device_state(bytes: &[u8]) -> Result<(DeviceState, [u8; 32])> {
         tips_in_order,
         extra_leaves,
         offline_allocations,
-        1024,
+        pending_economic_admission,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
 
@@ -449,8 +433,7 @@ pub fn store_bcr_chain_state(
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-    store_bcr_chain_state_with_conn(&conn, device_id, state, published, now)
+    store_bcr_chain_state_with_conn(&conn, device_id, state, published)
 }
 
 pub(crate) fn store_bcr_chain_state_with_conn(
@@ -458,7 +441,6 @@ pub(crate) fn store_bcr_chain_state_with_conn(
     device_id: &[u8; 32],
     state: &RelationshipChainState,
     published: bool,
-    now: u64,
 ) -> Result<()> {
     let chain_tip = state.compute_chain_tip();
     let bytes = encode_rel_chain_state(state);
@@ -466,8 +448,8 @@ pub(crate) fn store_bcr_chain_state_with_conn(
     conn.execute(
         "INSERT OR REPLACE INTO bcr_chain_states(
             device_id, rel_key, chain_tip, embedded_parent, state_bytes,
-            published, created_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            published
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             device_id.as_slice(),
             state.rel_key.as_slice(),
@@ -475,15 +457,14 @@ pub(crate) fn store_bcr_chain_state_with_conn(
             state.embedded_parent.as_slice(),
             bytes,
             if published { 1i32 } else { 0i32 },
-            now as i64,
         ],
     )?;
 
     Ok(())
 }
 
-/// Load all archived [`RelationshipChainState`]s for a device, ordered by
-/// insertion time. Optionally filter to published-only.
+/// Load all archived [`RelationshipChainState`]s for a device, in insertion
+/// order. Optionally filter to published-only.
 pub fn get_bcr_chain_states(
     device_id: &[u8],
     published_only: bool,
@@ -502,13 +483,13 @@ pub fn get_bcr_chain_states(
         conn.prepare(
             "SELECT state_bytes, chain_tip FROM bcr_chain_states
              WHERE device_id = ?1 AND published = 1
-             ORDER BY created_at ASC, rowid ASC",
+             ORDER BY rowid ASC",
         )?
     } else {
         conn.prepare(
             "SELECT state_bytes, chain_tip FROM bcr_chain_states
              WHERE device_id = ?1
-             ORDER BY created_at ASC, rowid ASC",
+             ORDER BY rowid ASC",
         )?
     };
 
@@ -519,21 +500,26 @@ pub fn get_bcr_chain_states(
     })?;
     let mut out = Vec::new();
     for row in iter {
-        let (bytes, expected_tip) = row?;
-        match decode_rel_chain_state(&bytes) {
-            Ok((state, recomputed_tip)) => {
-                if expected_tip.len() == 32 && recomputed_tip.as_slice() != expected_tip.as_slice()
-                {
-                    warn!("[client_db] bcr_chain_states tip mismatch (corruption?), skipping row");
-                    continue;
-                }
-                out.push(state);
-            }
-            Err(e) => warn!("[client_db] Skipping invalid bcr_chain_states row: {e}"),
-        }
+        let (bytes, stored_tip) = row?;
+        out.push(archived_state(&bytes, &stored_tip)?);
     }
 
     Ok(out)
+}
+
+/// One archived row, exactly as stored: bytes that decode to a chain state
+/// whose tip is the tip the row is keyed by. Anything else is a corrupt row,
+/// and a corrupt row is an error — never skipped, because a history read with
+/// a row missing is a history of another chain.
+fn archived_state(bytes: &[u8], stored_tip: &[u8]) -> Result<RelationshipChainState> {
+    let (state, recomputed_tip) = decode_rel_chain_state(bytes)
+        .map_err(|e| anyhow!("bcr_chain_states: a row does not decode: {e}"))?;
+    if recomputed_tip.as_slice() != stored_tip {
+        return Err(anyhow!(
+            "bcr_chain_states: a row's state does not recompute the tip it is stored under"
+        ));
+    }
+    Ok(state)
 }
 
 /// Load all archived chain states for a specific relationship `rel_key`,
@@ -555,7 +541,7 @@ pub fn get_bcr_chain_states_for_rel(
     let mut stmt = conn.prepare(
         "SELECT state_bytes, chain_tip FROM bcr_chain_states
          WHERE device_id = ?1 AND rel_key = ?2
-         ORDER BY created_at ASC, rowid ASC",
+         ORDER BY rowid ASC",
     )?;
 
     let iter = stmt.query_map(params![device_id, rel_key.as_slice()], |row| {
@@ -566,18 +552,8 @@ pub fn get_bcr_chain_states_for_rel(
 
     let mut out = Vec::new();
     for row in iter {
-        let (bytes, expected_tip) = row?;
-        match decode_rel_chain_state(&bytes) {
-            Ok((state, recomputed_tip)) => {
-                if expected_tip.len() == 32 && recomputed_tip.as_slice() != expected_tip.as_slice()
-                {
-                    warn!("[client_db] bcr_chain_states tip mismatch (corruption?), skipping row");
-                    continue;
-                }
-                out.push(state);
-            }
-            Err(e) => warn!("[client_db] Skipping invalid bcr_chain_states row: {e}"),
-        }
+        let (bytes, stored_tip) = row?;
+        out.push(archived_state(&bytes, &stored_tip)?);
     }
 
     Ok(out)
@@ -590,27 +566,24 @@ pub fn update_bcr_device_head(head: &DeviceState) -> Result<()> {
         log::warn!("DB lock poisoned, recovering");
         poisoned.into_inner()
     });
-    let now = tick();
-    update_bcr_device_head_with_conn(&conn, head, now)
+    update_bcr_device_head_with_conn(&conn, head)
 }
 
 pub(crate) fn update_bcr_device_head_with_conn(
     conn: &Connection,
     head: &DeviceState,
-    now: u64,
 ) -> Result<()> {
     let smt_root = head.root();
     let bytes = encode_device_state(head);
     let devid = head.devid();
 
     conn.execute(
-        "INSERT INTO bcr_device_heads(device_id, smt_root, head_bytes, updated_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO bcr_device_heads(device_id, smt_root, head_bytes)
+         VALUES (?1, ?2, ?3)
          ON CONFLICT(device_id) DO UPDATE SET
             smt_root = excluded.smt_root,
-            head_bytes = excluded.head_bytes,
-            updated_at = excluded.updated_at",
-        params![devid.as_slice(), smt_root.as_slice(), bytes, now as i64,],
+            head_bytes = excluded.head_bytes",
+        params![devid.as_slice(), smt_root.as_slice(), bytes],
     )?;
 
     Ok(())
@@ -638,7 +611,16 @@ pub fn load_bcr_device_head(device_id: &[u8; 32]) -> Result<Option<DeviceState>>
     match row {
         None => Ok(None),
         Some(bytes) => {
-            let (head, _root) = decode_device_state(&bytes)?;
+            // Read the fence state under the SAME lock as the head. Two reads
+            // could straddle a concurrent writer and hand back a head whose
+            // fence belongs to a different moment — and the direction that
+            // matters is the unsafe one: a head from after an admission
+            // started, paired with a fence read from before it.
+            let pending =
+                crate::storage::client_db::economic_admission::load_pending_admission_with_conn(
+                    &conn, device_id,
+                )?;
+            let (head, _root) = decode_device_state(&bytes, pending)?;
             Ok(Some(head))
         }
     }
@@ -646,14 +628,97 @@ pub fn load_bcr_device_head(device_id: &[u8; 32]) -> Result<Option<DeviceState>>
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
-    use dsm::types::operations::{Operation, TransactionMode, VerificationType};
+    use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance as TokenBalance;
     use serial_test::serial;
 
+    /// THE RESTART TEST for the pending-admission fence.
+    ///
+    /// The fence lives on the head but is NOT in `head_bytes`. That is only
+    /// safe if the loader re-attaches it, so this stores a head, writes a
+    /// pending row, and reloads through the real production path
+    /// (`load_bcr_device_head`) to confirm the reloaded head is still fenced.
+    ///
+    /// Without this the fence would be session-local: a crash or restart
+    /// between local acceptance and registration would silently unfence a
+    /// device that is holding value with no registered economic ancestry —
+    /// exactly the window the fence exists for.
+    #[test]
+    #[serial]
+    fn the_fence_survives_a_reload_through_the_production_loader() {
+        use dsm::economic::admission::{PendingAdmissionKind, PendingEconomicAdmission};
+
+        init_test_db();
+        let devid = [0xC3u8; 32];
+        let head = DeviceState::new([0xB2u8; 32], devid, vec![0xAAu8; 32]);
+        update_bcr_device_head(&head).expect("store head");
+
+        // A head with no pending row reloads unfenced.
+        let plain = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert!(plain.pending_economic_admission().is_none());
+
+        let pending = PendingEconomicAdmission::prepared(
+            PendingAdmissionKind::OfflineLoad {
+                asset_policy_commit: [0xE5u8; 32],
+            },
+            3,
+            [1u8; 32],
+            [3u8; 32],
+        )
+        .into_locally_accepted(dsm::economic::admission::AcceptedAdmissionCoords {
+            post_economic_root: [2u8; 32],
+            accepted_substrate_addr: [4u8; 32],
+            admission_manifest_addr: [5u8; 32],
+            embedded_parent: [0x5E; 32],
+            c_dsm_plus: [6u8; 32],
+        })
+        .expect("prepared -> accepted");
+        {
+            let binding = get_connection().expect("conn");
+            let mut conn = binding.lock().unwrap();
+            let tx = conn.transaction().expect("tx");
+            crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+                &tx, &devid, &pending,
+            )
+            .expect("write pending");
+            tx.commit().expect("commit");
+        }
+
+        let reloaded = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert_eq!(
+            reloaded.pending_economic_admission(),
+            Some(&pending),
+            "a reloaded head must still be fenced — the fence is not in head_bytes, so the \
+             loader re-attaching it is the ONLY thing making it survive a restart"
+        );
+
+        // And clearing it unfences the reloaded head, so the round trip
+        // carries the real value rather than always reporting Some.
+        {
+            let binding = get_connection().expect("conn");
+            let mut conn = binding.lock().unwrap();
+            let tx = conn.transaction().expect("tx");
+            crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
+                &tx, &devid,
+            )
+            .expect("clear pending");
+            tx.commit().expect("commit");
+        }
+        let cleared = load_bcr_device_head(&devid)
+            .expect("load")
+            .expect("present");
+        assert!(cleared.pending_economic_admission().is_none());
+    }
+
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -663,111 +728,48 @@ mod tests {
     fn sample_operation(tag: &[u8], amount: u64) -> Operation {
         Operation::Transfer {
             policy_commit: [0xD4; 32],
+            terms_commitment: dsm::types::operations::TransferTerms {
+                token_id: b"ERA".to_vec(),
+                nonce: vec![0xCC; 8],
+                mode: TransactionMode::Bilateral,
+                memo: String::from_utf8_lossy(tag).into_owned(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
             to_device_id: vec![0xA1; 32],
-            amount: TokenBalance::from_state(amount, [0u8; 32]),
-            token_id: b"ERA".to_vec(),
-            mode: TransactionMode::Bilateral,
-            nonce: vec![0xCC; 8],
-            verification: VerificationType::Bilateral,
-            pre_commit: None,
-            recipient: vec![0xDD; 64],
-            to: tag.to_vec(),
-            message: String::from_utf8_lossy(tag).into_owned(),
+            amount: TokenBalance::amount(amount),
             signature: vec![0xEE; 64],
             authority_policy: None,
         }
     }
 
-    fn sample_device_and_rel() -> (
-        [u8; 32],
-        [u8; 32],
-        [u8; 32],
-        RelationshipChainState,
-        DeviceState,
-    ) {
-        let device_id = [0xA1; 32];
-        let counterparty = [0xB2; 32];
-        let rel_key = [0xC3; 32];
-        let policy_commit = [0xD4; 32];
-        let device = DeviceState::new([0x11; 32], device_id, vec![0x22; 64], 1024);
-        let outcome = device
-            .advance(
-                rel_key,
-                counterparty,
-                sample_operation(b"rel-1", 7),
-                vec![0x33; 32],
-                Some(vec![0x44; 48]),
-                &[BalanceDelta {
-                    policy_commit,
-                    direction: BalanceDirection::Credit,
-                    amount: 7,
-                }],
-                Some([0x55; 32]),
-                None,
-                None,
-            )
-            .expect("advance relationship");
-
-        let mut rel = outcome.new_chain_state.clone();
-        rel.entity_sig = Some(vec![0x77; 64]);
-        rel.counterparty_sig = Some(vec![0x88; 64]);
-
-        let tips = outcome.new_device_state.relationship_keys();
-        assert_eq!(tips, vec![rel_key]);
-
-        let head = DeviceState::restore(
-            outcome.new_device_state.genesis_digest(),
-            outcome.new_device_state.devid(),
-            outcome.new_device_state.public_key().to_vec(),
-            Some([0x99; 32]),
-            outcome.new_device_state.balances_snapshot().clone(),
-            vec![(
-                rel_key,
-                RelChainTip {
-                    chain_tip: rel.compute_chain_tip(),
-                    counterparty_devid: counterparty,
-                    state: Some(rel.clone()),
-                    value_capability: ValueCapability::Unknown,
-                },
-            )],
-            outcome.new_device_state.extra_leaves_snapshot().clone(),
-            outcome
-                .new_device_state
-                .offline_allocations_snapshot()
-                .clone(),
-            1024,
-        )
-        .expect("restore head with signed rel state");
-
-        (device_id, counterparty, rel_key, rel, head)
+    /// Attach the honest gate precondition for one credit-direction advance
+    /// (PR4): a matching Prepared DsmBacked admission. `Prepared` is never
+    /// durable, so callers strip it from the produced head before persisting.
+    fn with_credit_admission(head: DeviceState, op: &Operation) -> DeviceState {
+        head.with_pending_economic_admission(Some(
+            dsm::economic::admission::PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
+            ),
+        ))
     }
 
-    fn head_with_state_less_tip() -> ([u8; 32], [u8; 32], DeviceState) {
-        let device_id = [0xA9; 32];
-        let rel_key = [0xBC; 32];
-        let counterparty = [0xCD; 32];
-        let chain_tip = [0xDE; 32];
-        let head = DeviceState::restore(
-            [0xEF; 32],
-            device_id,
-            vec![0xAB; 64],
-            None,
-            BTreeMap::new(),
-            vec![(
-                rel_key,
-                RelChainTip {
-                    chain_tip,
-                    counterparty_devid: counterparty,
-                    state: None,
-                    value_capability: ValueCapability::Unknown,
-                },
-            )],
-            BTreeMap::new(),
-            BTreeMap::new(),
-            1024,
-        )
-        .expect("restore head with state-less tip");
-        (device_id, rel_key, head)
+    /// The owner keypair the fixture head is built on.
+    ///
+    /// A vault is funded by a SIGNED `DlvCreateFundedV2`, and `advance`
+    /// verifies that signature against the head's OWN public key — so a head
+    /// carrying a placeholder key cannot reach the production funding
+    /// transition at all. Deterministic and cached: SPHINCS+ keygen is not
+    /// cheap and every test in this module shares one owner.
+    fn owner_keypair() -> &'static dsm::crypto::SignatureKeyPair {
+        static KP: std::sync::OnceLock<dsm::crypto::SignatureKeyPair> = std::sync::OnceLock::new();
+        KP.get_or_init(|| {
+            dsm::crypto::SignatureKeyPair::generate_from_entropy(b"DSM/test/bcr-device-head")
+                .expect("owner keypair")
+        })
     }
 
     #[test]
@@ -787,172 +789,124 @@ mod tests {
         store_bcr_report(b"report-3").unwrap();
     }
 
-    #[test]
-    fn rel_chain_state_codec_roundtrip() {
-        let (_, _, _, rel, _) = sample_device_and_rel();
-        let bytes = encode_rel_chain_state(&rel);
-        let (decoded, tip) = decode_rel_chain_state(&bytes).expect("decode rel state");
+    fn sample_device_and_rel() -> (
+        [u8; 32],
+        [u8; 32],
+        [u8; 32],
+        RelationshipChainState,
+        DeviceState,
+    ) {
+        let device_id = [0xA1; 32];
+        let counterparty = [0xB2; 32];
+        let rel_key =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &counterparty);
+        let policy_commit = [0xD4; 32];
+        let device = DeviceState::new([0x11; 32], device_id, owner_keypair().public_key.clone());
+        // Adoption precedes receipt (owner ruling 2026-09-13): a credit of a
+        // policy the head has not adopted is refused at `advance`, so the
+        // fixture adopts through the real self-loop `AdoptToken` transition
+        // first — the same shape `tokens.addByAnchor` commits on a device.
+        let self_rel =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &device_id);
+        let adopted = device
+            .advance(
+                self_rel,
+                device_id,
+                Operation::AdoptToken {
+                    policy_commit,
+                    signature: vec![0xAD; 64],
+                },
+                &[],
+                None,
+                None,
+            )
+            .expect("adoption precedes receipt");
+        let self_loop_tip = RelChainTip {
+            chain_tip: adopted.new_chain_state.compute_chain_tip(),
+            counterparty_devid: device_id,
+            tip_entropy: adopted.new_chain_state.entropy.clone(),
+            value_capability: ValueCapability::Unknown,
+        };
+        let device = adopted
+            .new_device_state
+            .establish_relationship(counterparty)
+            .expect("the relationship is established before its first step");
+        // The PR4 credit gate: a credit-direction Transfer advances only
+        // with a matching Prepared DsmBacked admission attached — the honest
+        // fixture precondition, exactly what production attaches. Stripped
+        // below (`Prepared` is never durable).
+        let op = sample_operation(b"rel-1", 7);
+        let device = device.with_pending_economic_admission(Some(
+            dsm::economic::admission::PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::DsmBacked,
+                1,
+                [0u8; 32],
+                dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
+            ),
+        ));
+        let outcome = device
+            .advance(
+                rel_key,
+                counterparty,
+                op,
+                &[BalanceDelta {
+                    policy_commit,
+                    direction: BalanceDirection::Credit,
+                    amount: 7,
+                }],
+                None,
+                None,
+            )
+            .expect("advance relationship");
 
-        assert_eq!(tip, rel.compute_chain_tip());
-        assert_eq!(decoded.rel_key, rel.rel_key);
-        assert_eq!(decoded.embedded_parent, rel.embedded_parent);
-        assert_eq!(decoded.counterparty_devid, rel.counterparty_devid);
-        assert_eq!(decoded.operation.to_bytes(), rel.operation.to_bytes());
-        assert_eq!(decoded.entropy, rel.entropy);
-        assert_eq!(decoded.encapsulated_entropy, rel.encapsulated_entropy);
-        assert_eq!(decoded.balance_witness, rel.balance_witness);
-        assert_eq!(decoded.entity_sig, rel.entity_sig);
-        assert_eq!(decoded.counterparty_sig, rel.counterparty_sig);
-    }
+        let mut rel = outcome.new_chain_state.clone();
+        rel.entity_sig = Some(vec![0x77; 64]);
+        rel.counterparty_sig = Some(vec![0x88; 64]);
 
-    #[test]
-    fn device_head_codec_roundtrip_preserves_tip_and_root() {
-        let (_, _, rel_key, rel, head) = sample_device_and_rel();
-        let bytes = encode_device_state(&head);
-        let (decoded, stored_root) = decode_device_state(&bytes).expect("decode device head");
+        let new_device_state = outcome
+            .new_device_state
+            .clone()
+            .with_pending_economic_admission(None);
+        // Two relationships now: the self-loop that carried the adoption and
+        // the bilateral one that carried the credit. Restore lists them in
+        // the head's own order so the rebuilt root equals the live one.
+        let tips = new_device_state.relationship_keys();
+        assert_eq!(tips.len(), 2);
+        assert!(tips.contains(&self_rel) && tips.contains(&rel_key));
+        let rel_tip = RelChainTip {
+            chain_tip: rel.compute_chain_tip(),
+            counterparty_devid: counterparty,
+            tip_entropy: rel.entropy.clone(),
+            value_capability: ValueCapability::Unknown,
+        };
+        let tips_in_order: Vec<([u8; 32], RelChainTip)> = tips
+            .iter()
+            .map(|k| {
+                if *k == self_rel {
+                    (self_rel, self_loop_tip.clone())
+                } else {
+                    (rel_key, rel_tip.clone())
+                }
+            })
+            .collect();
 
-        assert_eq!(stored_root, head.root());
-        assert_eq!(decoded.root(), head.root());
-        assert_eq!(decoded.genesis_digest(), head.genesis_digest());
-        assert_eq!(decoded.devid(), head.devid());
-        assert_eq!(decoded.legacy_anchor(), head.legacy_anchor());
-        assert_eq!(decoded.balances_snapshot(), head.balances_snapshot());
-        assert_eq!(decoded.chain_tip(&rel_key), Some(rel.compute_chain_tip()));
-        assert_eq!(
-            decoded
-                .rel_chain_tip(&rel_key)
-                .map(|t| t.counterparty_devid),
-            Some(rel.counterparty_devid)
-        );
-        assert!(decoded.tip_state(&rel_key).is_some());
-        // Canonical value_capability round-trips (the sample tip is Unknown).
-        assert_eq!(
-            decoded.rel_chain_tip(&rel_key).map(|t| t.value_capability),
-            head.rel_chain_tip(&rel_key).map(|t| t.value_capability)
-        );
-    }
+        let head = DeviceState::restore(
+            new_device_state.genesis_digest(),
+            new_device_state.devid(),
+            new_device_state.public_key().to_vec(),
+            Some([0x99; 32]),
+            outcome.new_device_state.balances_snapshot().clone(),
+            tips_in_order,
+            outcome.new_device_state.extra_leaves_snapshot().clone(),
+            outcome
+                .new_device_state
+                .offline_allocations_snapshot()
+                .clone(),
+            None, // no admission pending in this fixture
+        )
+        .expect("restore head with signed rel state");
 
-    /// Regression for the reload-brick bug: an offline-bearer transfer adds a non-tip anchor-state
-    /// leaf to the device SMT. Before v0x03, that leaf committed into the STORED root but was never
-    /// persisted/replayed, so decode recomputed a different root → `root mismatch` → the wallet
-    /// failed to load after one such transfer. Assert the leaf now round-trips and the root matches.
-    #[test]
-    fn device_head_codec_roundtrip_preserves_anchor_state_leaf() {
-        let (_, _, _, _, head0) = sample_device_and_rel();
-        let key = [0x11u8; 32];
-        let value = [0x22u8; 32];
-        let head = head0
-            .with_anchor_state_leaf(&key, &value)
-            .expect("add anchor-state leaf");
-        assert_ne!(
-            head.root(),
-            head0.root(),
-            "the anchor-state leaf must change the device root"
-        );
-
-        let bytes = encode_device_state(&head);
-        let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with anchor-state leaf");
-
-        // The load-time sanity check (encoded root == recomputed root) is exactly what bricked
-        // before the fix; it must now pass.
-        assert_eq!(stored_root, head.root());
-        assert_eq!(
-            decoded.root(),
-            head.root(),
-            "reloaded root must equal the stored root (the reload-brick regression)"
-        );
-        assert_eq!(decoded.extra_leaves_snapshot().get(&key), Some(&value));
-    }
-
-    /// The offline-cash allocation amount is not recoverable from the leaf hash, so v0x04 persists it
-    /// separately. Assert a loaded allocation survives an encode/decode and the root still matches.
-    #[test]
-    fn device_head_codec_roundtrip_preserves_offline_allocation() {
-        let (_, _, _, _, head0) = sample_device_and_rel();
-        let token = [0xD4u8; 32]; // funded with 7 by sample_device_and_rel
-        let bundle = [0x7Bu8; 32];
-        let head = head0
-            .load_offline_cash(&bundle, &token, 3)
-            .expect("load 3 offline")
-            .new_device_state;
-        assert_ne!(
-            head.root(),
-            head0.root(),
-            "load must advance the device root"
-        );
-
-        let bytes = encode_device_state(&head);
-        let (decoded, stored_root) =
-            decode_device_state(&bytes).expect("decode device head with offline allocation");
-        assert_eq!(stored_root, head.root());
-        assert_eq!(
-            decoded.root(),
-            head.root(),
-            "reloaded root must equal the stored root (allocation leaf replayed)"
-        );
-
-        let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
-            &head.genesis_digest(),
-            &head.devid(),
-            &bundle,
-            &token,
-        );
-        assert_eq!(
-            decoded.offline_allocation(&key),
-            3,
-            "allocation amount must survive reload"
-        );
-        // And the online balance was debited by the load (7 -> 4).
-        assert_eq!(decoded.balances_snapshot().get(&token), Some(&4));
-    }
-
-    #[test]
-    fn device_head_codec_preserves_state_less_tip_counterparty() {
-        let (_, rel_key, head) = head_with_state_less_tip();
-        let bytes = encode_device_state(&head);
-        let (decoded, _) = decode_device_state(&bytes).expect("decode device head");
-
-        let original_tip = head.rel_chain_tip(&rel_key).expect("original rel tip");
-        let decoded_tip = decoded.rel_chain_tip(&rel_key).expect("decoded rel tip");
-        assert_eq!(decoded_tip.chain_tip, original_tip.chain_tip);
-        assert_eq!(
-            decoded_tip.counterparty_devid,
-            original_tip.counterparty_devid
-        );
-        assert!(decoded_tip.state.is_none());
-        assert_eq!(decoded_tip.value_capability, original_tip.value_capability);
-    }
-
-    #[test]
-    fn device_head_codec_rejects_invalid_value_capability_byte() {
-        // A state-less tip serializes as [..value_capability, state_flag], then two trailing
-        // u32 counts: the v0x03 extra_leaves count and the v0x04 offline-allocations count (both = 0
-        // here, 8 bytes total). So value_capability sits at n-10 and state_flag at n-9.
-        let (_, _rel_key, head) = head_with_state_less_tip();
-        let bytes = encode_device_state(&head);
-        let n = bytes.len();
-        let vc = n - 10; // value_capability
-        let sf = n - 9; // state_flag
-        assert_eq!(
-            &bytes[n - 8..],
-            &[0, 0, 0, 0, 0, 0, 0, 0],
-            "trailing extra_leaves + allocations counts should be 0"
-        );
-        assert_eq!(bytes[sf], 0, "state_flag should be 0 (state-less tip)");
-        assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
-
-        // Corrupt to UNSPECIFIED(0): decode MUST reject — never silently read as `No`.
-        let mut zeroed = bytes.clone();
-        zeroed[vc] = 0;
-        assert!(
-            decode_device_state(&zeroed).is_err(),
-            "UNSPECIFIED value_capability must be rejected, never read as No"
-        );
-        // Out-of-range value is also rejected.
-        let mut oob = bytes;
-        oob[vc] = 9;
-        assert!(decode_device_state(&oob).is_err());
+        (device_id, counterparty, rel_key, rel, head)
     }
 
     #[test]
@@ -963,19 +917,17 @@ mod tests {
 
         store_bcr_chain_state(&device_id, &rel0, true).expect("store published rel state");
 
-        let outcome1 = head0
+        let op2 = sample_operation(b"rel-2", 9);
+        let outcome1 = with_credit_admission(head0, &op2)
             .advance(
                 rel_key,
                 counterparty,
-                sample_operation(b"rel-2", 9),
-                vec![0x45; 32],
-                None,
+                op2,
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,
                     amount: 9,
                 }],
-                None,
                 None,
                 None,
             )
@@ -997,6 +949,46 @@ mod tests {
         );
     }
 
+    /// A row whose bytes do not decode, or whose state does not recompute the
+    /// tip it is stored under, fails the load — both loaders, every caller.
+    #[test]
+    #[serial]
+    fn a_corrupt_archived_row_fails_the_load() {
+        let (device_id, _, rel_key, rel0, _) = sample_device_and_rel();
+        for corrupt in ["undecodable", "wrong tip"] {
+            init_test_db();
+            store_bcr_chain_state(&device_id, &rel0, true).expect("store");
+            {
+                let binding = get_connection().expect("conn");
+                let conn = binding.lock().expect("lock");
+                let changed = match corrupt {
+                    "undecodable" => conn.execute(
+                        "UPDATE bcr_chain_states SET state_bytes = X'00' WHERE device_id = ?1",
+                        params![device_id.as_slice()],
+                    ),
+                    _ => conn.execute(
+                        "UPDATE bcr_chain_states SET chain_tip = ?1 WHERE device_id = ?2",
+                        params![[0x5Au8; 32].as_slice(), device_id.as_slice()],
+                    ),
+                }
+                .expect("corrupt the row");
+                assert_eq!(changed, 1);
+            }
+            assert!(
+                get_bcr_chain_states(&device_id, false).is_err(),
+                "{corrupt}: device load"
+            );
+            assert!(
+                get_bcr_chain_states(&device_id, true).is_err(),
+                "{corrupt}: published load"
+            );
+            assert!(
+                get_bcr_chain_states_for_rel(&device_id, &rel_key).is_err(),
+                "{corrupt}: relationship load"
+            );
+        }
+    }
+
     #[test]
     #[serial]
     fn bcr_device_head_upsert_roundtrip() {
@@ -1010,13 +1002,12 @@ mod tests {
         assert_eq!(cached0.root(), head0.root());
         assert_eq!(cached0.chain_tip(&rel_key), Some(rel0.compute_chain_tip()));
 
-        let outcome1 = head0
+        let op3 = sample_operation(b"rel-3", 11);
+        let outcome1 = with_credit_admission(head0, &op3)
             .advance(
                 rel_key,
                 rel0.counterparty_devid,
-                sample_operation(b"rel-3", 11),
-                vec![0x56; 32],
-                None,
+                op3,
                 &[BalanceDelta {
                     policy_commit: [0xD4; 32],
                     direction: BalanceDirection::Credit,
@@ -1024,10 +1015,15 @@ mod tests {
                 }],
                 None,
                 None,
-                None,
             )
             .expect("third advance");
-        update_bcr_device_head(&outcome1.new_device_state).expect("upsert head1");
+        update_bcr_device_head(
+            &outcome1
+                .new_device_state
+                .clone()
+                .with_pending_economic_admission(None),
+        )
+        .expect("upsert head1");
 
         let cached1 = load_bcr_device_head(&device_id)
             .expect("load head1")
@@ -1037,5 +1033,89 @@ mod tests {
             cached1.chain_tip(&rel_key),
             Some(outcome1.new_chain_state.compute_chain_tip())
         );
+    }
+
+    #[test]
+    fn device_head_codec_rejects_invalid_value_capability_byte() {
+        // An entropy-less tip serializes as [..value_capability, entropy_len:u32],
+        // followed by one u32 count per trailing section — v0x03 extra_leaves and
+        // v0x04 offline-allocations — both empty here. Derived from those counts
+        // rather than hardcoded, so adding the next section is a one-line change
+        // instead of a puzzling off-by-four in an unrelated test.
+        const TRAILING_COUNT_SECTIONS: usize = 2;
+        const TRAILING: usize = TRAILING_COUNT_SECTIONS * 4;
+        // v0x06: the tip tail is value_capability(1) + entropy length prefix(4).
+        const TIP_TAIL: usize = 1 + 4;
+
+        let (_, _rel_key, head) = head_with_state_less_tip();
+        let bytes = encode_device_state(&head);
+        let n = bytes.len();
+        let vc = n - TRAILING - TIP_TAIL; // value_capability
+        assert!(
+            bytes[n - TRAILING..].iter().all(|b| *b == 0),
+            "every trailing section count should be 0"
+        );
+        assert!(
+            bytes[vc + 1..vc + 1 + 4].iter().all(|b| *b == 0),
+            "entropy length should be 0 for an entropy-less tip"
+        );
+        assert_eq!(bytes[vc], 3, "value_capability should be Unknown(3)");
+
+        // Corrupt to UNSPECIFIED(0): decode MUST reject — never silently read as `No`.
+        let mut zeroed = bytes.clone();
+        zeroed[vc] = 0;
+        assert!(
+            decode_device_state(&zeroed, None).is_err(),
+            "UNSPECIFIED value_capability must be rejected, never read as No"
+        );
+        // Out-of-range value is also rejected.
+        let mut oob = bytes;
+        oob[vc] = 9;
+        assert!(decode_device_state(&oob, None).is_err());
+    }
+
+    fn head_with_state_less_tip() -> ([u8; 32], [u8; 32], DeviceState) {
+        let device_id = [0xA9; 32];
+        let rel_key = [0xBC; 32];
+        let counterparty = [0xCD; 32];
+        let chain_tip = [0xDE; 32];
+        let head = DeviceState::restore(
+            [0xEF; 32],
+            device_id,
+            vec![0xAB; 64],
+            None,
+            BTreeMap::new(),
+            vec![(
+                rel_key,
+                RelChainTip {
+                    chain_tip,
+                    counterparty_devid: counterparty,
+                    tip_entropy: Vec::new(),
+                    value_capability: ValueCapability::Unknown,
+                },
+            )],
+            BTreeMap::new(),
+            BTreeMap::new(),
+            None, // no admission pending in this fixture
+        )
+        .expect("restore head with state-less tip");
+        (device_id, rel_key, head)
+    }
+
+    #[test]
+    fn rel_chain_state_codec_roundtrip() {
+        let (_, _, _, rel, _) = sample_device_and_rel();
+        let bytes = encode_rel_chain_state(&rel);
+        let (decoded, tip) = decode_rel_chain_state(&bytes).expect("decode rel state");
+
+        assert_eq!(tip, rel.compute_chain_tip());
+        assert_eq!(decoded.rel_key, rel.rel_key);
+        assert_eq!(decoded.embedded_parent, rel.embedded_parent);
+        assert_eq!(decoded.counterparty_devid, rel.counterparty_devid);
+        assert_eq!(decoded.operation.to_bytes(), rel.operation.to_bytes());
+        assert_eq!(decoded.entropy, rel.entropy);
+        assert_eq!(decoded.encapsulated_entropy, rel.encapsulated_entropy);
+        assert_eq!(decoded.entity_sig, rel.entity_sig);
+        assert_eq!(decoded.counterparty_sig, rel.counterparty_sig);
     }
 }

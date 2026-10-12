@@ -1,144 +1,265 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// path: src/dsm/sofi.ts
-// SPDX-License-Identifier: Apache-2.0
-// SoFi (Deterministic Token Finance) launch helpers.
-// All calls go through the normal AppRouter protobuf envelope path:
-//   TypeScript → routerInvokeBin → MessagePort → Kotlin → JNI → Rust
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// SoFi routes (SoFi §27): the app reaches SoFi only through these. Each call
+// sends the user's intent; Rust assembles, Core decides. An amount the user
+// enters goes as the text entered, in token units ("1000.50"): Rust parses it
+// against the token's decimals, and renders every amount it reports.
 import * as pb from '../proto/dsm_app_pb';
 import { routerInvokeBin } from './WebViewBridge';
-import { decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { emitWalletRefresh } from './events';
 
-/** Header byte meanings for a compiled SoFi spec blob. */
-const SOFI_TYPE_NAMES: Record<number, string> = { 0: 'vault', 1: 'policy' };
-const SOFI_MODE_NAMES: Record<number, string> = { 0: 'local', 1: 'posted' };
+type Bytes32 = Uint8Array;
 
-export type SoFiHeader = {
-  version: number;
-  mode: string;
-  type: string;
-  sizeBytes: number;
-};
+async function call(method: string, req: { toBinary(): Uint8Array }) {
+  const argPack = new pb.ArgPack({
+    codec: pb.Codec.PROTO as any,
+    body: new Uint8Array(req.toBinary()),
+  });
+  const env = decodeFramedEnvelopeV3(
+    await routerInvokeBin(method, new Uint8Array(argPack.toBinary())),
+  );
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  return env.payload;
+}
 
-/**
- * Parse just the 3-byte header of a compiled SoFi spec blob for UI preview.
- *
- * Header layout:
- *   byte 0 — version (must be 1)
- *   byte 1 — mode    (0 = local, 1 = posted)
- *   byte 2 — type    (0 = vault, 1 = policy)
- */
-export function parseSoFiHeader(blob: string): {
-  success: boolean;
-  header?: SoFiHeader;
-  error?: string;
-} {
-  try {
-    const trimmed = typeof blob === 'string' ? blob.trim() : '';
-    if (!trimmed) return { success: false, error: 'blob is empty' };
+/** Where a trade, route, close or resolve left the device's position. */
+export type PositionState = 'realized' | 'void' | 'invalid' | 'retriesExhausted';
 
-    const bytes = decodeBase32Crockford(trimmed);
-    if (!bytes || bytes.length < 3) {
-      return { success: false, error: 'decoded blob too short (need >= 3 header bytes)' };
-    }
+export interface PositionResult {
+  position: bigint;
+  state: PositionState;
+}
 
-    const version = bytes[0];
-    const mode = bytes[1];
-    const type = bytes[2];
-
-    if (version !== 1) {
-      return { success: false, error: `unsupported version: ${version} (expected 1)` };
-    }
-    if (mode !== 0 && mode !== 1) {
-      return { success: false, error: `invalid mode: ${mode} (expected 0 or 1)` };
-    }
-    if (type !== 0 && type !== 1) {
-      return { success: false, error: `invalid type: ${type} (expected 0 or 1)` };
-    }
-
-    return {
-      success: true,
-      header: {
-        version,
-        mode: SOFI_MODE_NAMES[mode],
-        type: SOFI_TYPE_NAMES[type],
-        sizeBytes: bytes.length,
-      },
-    };
-  } catch (e: any) {
-    return { success: false, error: e?.message || 'parseSoFiHeader failed' };
+export function positionResult(payload: any): PositionResult {
+  if (payload.case !== 'sofiPositionResponse') {
+    throw new Error(`Expected sofiPositionResponse, got ${payload.case}`);
   }
+  const r = payload.value;
+  const state: PositionState =
+    r.state === pb.SofiPositionState.REALIZED
+      ? 'realized'
+      : r.state === pb.SofiPositionState.VOID
+        ? 'void'
+        : r.state === pb.SofiPositionState.INVALID
+          ? 'invalid'
+          : r.state === pb.SofiPositionState.RETRIES_EXHAUSTED
+            ? 'retriesExhausted'
+            : (() => {
+                throw new Error(`unknown SoFi position state ${r.state}`);
+              })();
+  if (state === 'realized' || state === 'void') {
+    emitWalletRefresh({ source: 'sofi', tokenId: '', anchorBase32: '' });
+  }
+  return { position: r.position, state };
+}
+
+/** sofi.createVault (§28): the two tokens in either order, each reserve as entered, and the fee. Rust orders the pair. */
+export async function createVault(args: {
+  tokenA: Bytes32;
+  tokenB: Bytes32;
+  reserveA: string;
+  reserveB: string;
+  feeBps: number;
+}): Promise<{ vaultId: Bytes32; position: bigint }> {
+  const payload = await call(
+    'sofi.createVault',
+    new pb.SofiCreateVaultRequest({
+      tokenAPolicyCommit: args.tokenA,
+      tokenBPolicyCommit: args.tokenB,
+      reserveAEntered: args.reserveA,
+      reserveBEntered: args.reserveB,
+      feeBps: args.feeBps,
+    } as any),
+  );
+  if (payload.case !== 'sofiVaultCreatedResponse') {
+    throw new Error(`Expected sofiVaultCreatedResponse, got ${payload.case}`);
+  }
+  emitWalletRefresh({ source: 'sofi.createVault', tokenId: '', anchorBase32: '' });
+  return { vaultId: payload.value.vaultId, position: payload.value.position };
+}
+
+export interface Hop {
+  vaultId: Bytes32;
+  parentRoot: Bytes32;
+  tokenIn: Bytes32;
+  tokenOut: Bytes32;
+  amountIn: bigint;
+  amountOut: bigint;
+  /** Rendered by Rust from each token's decimals. */
+  amountInDisplay: string;
+  amountOutDisplay: string;
 }
 
 /**
- * Launch a compiled SoFi spec.
- *
- * @param blob  Base32 Crockford encoding of the compiled SoFi spec bytes.
- * @returns { success, id?, type?, mode?, error? }
+ * A proposed route (Amendment S19): its hops, its shape, and what it takes and
+ * gives as one operation, rendered by Rust by the rule a trade is checked by.
+ * A chain gives its last hop's output; a split, the sum of its hops'.
  */
-export async function launchSoFi(blob: string): Promise<{
-  success: boolean;
-  id?: string;
-  type?: string;
-  mode?: string;
-  error?: string;
-}> {
-  try {
-    const trimmed = typeof blob === 'string' ? blob.trim() : '';
-    if (!trimmed) return { success: false, error: 'SoFi spec blob required' };
+export interface Route {
+  hops: Hop[];
+  shape: 'chain' | 'split';
+  amountInDisplay: string;
+  amountOutDisplay: string;
+}
 
-    const specBytes = decodeBase32Crockford(trimmed);
-    if (!specBytes || specBytes.length === 0) {
-      return { success: false, error: 'decoded SoFi spec bytes empty' };
-    }
-
-    // Validate the 3-byte header.
-    if (specBytes.length < 3) {
-      return { success: false, error: 'SoFi spec too short (need >= 3 header bytes)' };
-    }
-
-    const version = specBytes[0];
-    const mode = specBytes[1];
-    const type = specBytes[2];
-
-    if (version !== 1) {
-      return { success: false, error: `unsupported SoFi version: ${version} (expected 1)` };
-    }
-    if (mode !== 0 && mode !== 1) {
-      return { success: false, error: `invalid SoFi mode: ${mode} (expected 0 or 1)` };
-    }
-    if (type !== 0 && type !== 1) {
-      return { success: false, error: `invalid SoFi type: ${type} (expected 0 or 1)` };
-    }
-
-    // Pack the raw spec bytes into an ArgPack for transport.
-    const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(specBytes),
-    });
-
-    const resBytes = await routerInvokeBin('sofi.launch', new Uint8Array(argPack.toBinary()));
-    const env = decodeFramedEnvelopeV3(resBytes);
-
-    if (env.payload.case === 'error') {
-      return { success: false, error: env.payload.value.message || 'sofi.launch failed' };
-    }
-
-    if (env.payload.case === 'appStateResponse') {
-      return {
-        success: true,
-        id: env.payload.value.value ?? undefined,
-        type: SOFI_TYPE_NAMES[type],
-        mode: SOFI_MODE_NAMES[mode],
-      };
-    }
-
-    return {
-      success: false,
-      error: `Unexpected response payload: ${env.payload.case}`,
-    };
-  } catch (e: any) {
-    return { success: false, error: e?.message || 'launchSoFi failed' };
+/**
+ * sofi.findRoute (§30, Amendment S16): a proposed route over every vault of
+ * the two tokens, set up with or not. It carries no authority. No hops is no
+ * route among every vault the tokens' indexes name; a search that found none
+ * while some vault could not be read is an error, never "no route".
+ */
+export async function findRoute(args: {
+  tokenIn: Bytes32;
+  tokenOut: Bytes32;
+  amountIn: string;
+}): Promise<Route> {
+  const payload = await call(
+    'sofi.findRoute',
+    new pb.SofiFindRouteRequest({
+      tokenInPolicyCommit: args.tokenIn,
+      tokenOutPolicyCommit: args.tokenOut,
+      amountInEntered: args.amountIn,
+    } as any),
+  );
+  if (payload.case !== 'sofiFindRouteResponse') {
+    throw new Error(`Expected sofiFindRouteResponse, got ${payload.case}`);
   }
+  if (payload.value.hops.length === 0 && payload.value.search !== pb.SofiSearch.COMPLETE) {
+    throw new Error('no route among the liquidity that could be read; some could not be reached, try again');
+  }
+  const found = payload.value;
+  const hops = found.hops.map((h: pb.SofiHopV1) => ({
+    vaultId: h.vaultId,
+    parentRoot: h.parentRoot,
+    tokenIn: h.tokenInPolicyCommit,
+    tokenOut: h.tokenOutPolicyCommit,
+    amountIn: h.amountIn,
+    amountOut: h.amountOut,
+    amountInDisplay: h.amountInDisplay,
+    amountOutDisplay: h.amountOutDisplay,
+  }));
+  return {
+    hops,
+    shape: found.shape === pb.SofiRouteShape.SPLIT ? 'split' : 'chain',
+    amountInDisplay: found.amountInDisplay,
+    amountOutDisplay: found.amountOutDisplay,
+  };
+}
+
+/**
+ * sofi.trade (§31): one hop against one vault, for the token asked for. A
+ * vault this device has no setup with is set up with first (Amendment S16).
+ */
+export async function trade(args: {
+  vaultId: Bytes32;
+  tokenIn: Bytes32;
+  tokenOut: Bytes32;
+  amountIn: string;
+  minAmountOut: string;
+}): Promise<PositionResult> {
+  return positionResult(
+    await call(
+      'sofi.trade',
+      new pb.SofiTradeRequest({
+        vaultId: args.vaultId,
+        tokenInPolicyCommit: args.tokenIn,
+        tokenOutPolicyCommit: args.tokenOut,
+        amountInEntered: args.amountIn,
+        minAmountOutEntered: args.minAmountOut,
+      } as any),
+    ),
+  );
+}
+
+/** sofi.route (§31): a multihop route through distinct vaults, all or none. */
+export async function route(args: {
+  vaultIds: Bytes32[];
+  tokenIn: Bytes32;
+  tokenOut: Bytes32;
+  amountIn: string;
+  minAmountOut: string;
+}): Promise<PositionResult> {
+  return positionResult(
+    await call(
+      'sofi.route',
+      new pb.SofiRouteRequest({
+        vaultIds: args.vaultIds,
+        tokenInPolicyCommit: args.tokenIn,
+        tokenOutPolicyCommit: args.tokenOut,
+        amountInEntered: args.amountIn,
+        minAmountOutEntered: args.minAmountOut,
+      } as any),
+    ),
+  );
+}
+
+/** sofi.close (§32): the owner closes its own vault. */
+export async function close(vaultId: Bytes32): Promise<PositionResult> {
+  return positionResult(await call('sofi.close', new pb.SofiCloseRequest({ vaultId } as any)));
+}
+
+/** sofi.resolve (§27): resolve and advance this device's pending position. */
+export async function resolve(): Promise<PositionResult> {
+  return positionResult(await call('sofi.resolve', new pb.SofiResolveRequest({} as any)));
+}
+
+/** sofi.relay (§33): complete someone's registered fulfillment. */
+export async function relay(args: {
+  traderGenesis: Bytes32;
+  traderDeviceId: Bytes32;
+  position: bigint;
+}): Promise<{ cellsWritten: number }> {
+  const payload = await call(
+    'sofi.relay',
+    new pb.SofiRelayRequest({
+      traderGenesis: args.traderGenesis,
+      traderDeviceId: args.traderDeviceId,
+      position: args.position,
+    } as any),
+  );
+  if (payload.case !== 'sofiRelayResponse') {
+    throw new Error(`Expected sofiRelayResponse, got ${payload.case}`);
+  }
+  return { cellsWritten: payload.value.cellsWritten };
+}
+
+/** One vault this device created, at its walked head. */
+export interface OwnedVault {
+  vaultId: Bytes32;
+  tokenA: Bytes32;
+  tokenB: Bytes32;
+  symbolA: string;
+  symbolB: string;
+  reserveADisplay: string;
+  reserveBDisplay: string;
+  feeBps: number;
+  generation: bigint;
+  status: 'active' | 'retired';
+}
+
+/** sofi.vaults: every vault this device created, with its live reserves. */
+export async function vaults(): Promise<OwnedVault[]> {
+  const payload = await call('sofi.vaults', new pb.SofiVaultsRequest());
+  if (payload.case !== 'sofiVaultsResponse') {
+    throw new Error(`Expected sofiVaultsResponse, got ${payload.case}`);
+  }
+  return payload.value.vaults.map((v) => {
+    if (v.status !== pb.SofiVaultStatus.ACTIVE && v.status !== pb.SofiVaultStatus.RETIRED) {
+      throw new Error(`unknown SoFi vault status ${v.status}`);
+    }
+    return {
+      vaultId: v.vaultId,
+      tokenA: v.tokenAPolicyCommit,
+      tokenB: v.tokenBPolicyCommit,
+      symbolA: v.tokenASymbol,
+      symbolB: v.tokenBSymbol,
+      reserveADisplay: v.reserveADisplay,
+      reserveBDisplay: v.reserveBDisplay,
+      feeBps: v.feeBps,
+      generation: v.generation,
+      status: v.status === pb.SofiVaultStatus.ACTIVE ? 'active' : 'retired',
+    };
+  });
 }

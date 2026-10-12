@@ -13,39 +13,6 @@
 
 use std::fmt;
 
-/// Base32 Crockford encoding for display boundaries only.
-/// Alphabet: 0-9 A-H J-K M-N P-T V-Z (excludes I, L, O, U).
-/// Crockford Base32 encoder (MSB-first 5-bit packing, no padding).
-///
-/// `pub(crate)` so the recovery contact-set commitment can encode raw device-id
-/// bytes to the EXACT same canonical string the SDK uses for capsule
-/// `counterparty_tips` keys — keeping the capsule and activation-seal contact-set
-/// commitments byte-identical. This algorithm MUST match
-/// `dsm_sdk::util::text_id::encode_base32_crockford`.
-pub(crate) fn encode_crockford(bytes: &[u8]) -> String {
-    if bytes.is_empty() {
-        return String::new();
-    }
-    const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let mut out = String::new();
-    let mut buffer: u16 = 0;
-    let mut bits_left: u8 = 0;
-    for &b in bytes {
-        buffer = (buffer << 8) | b as u16;
-        bits_left += 8;
-        while bits_left >= 5 {
-            let idx = ((buffer >> (bits_left - 5)) & 0b1_1111) as usize;
-            out.push(ALPHABET[idx] as char);
-            bits_left -= 5;
-        }
-    }
-    if bits_left > 0 {
-        let idx = ((buffer << (5 - bits_left)) & 0b1_1111) as usize;
-        out.push(ALPHABET[idx] as char);
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Macro to reduce boilerplate for the four routing/logging ID types.
 // All share: Vec<u8> inner, new() from string, from_bytes(), as_bytes(),
@@ -77,21 +44,11 @@ macro_rules! define_id_type {
             pub fn as_bytes(&self) -> &[u8] {
                 &self.0
             }
-
-            /// Generate a fresh ID (deterministic, process-local).
-            /// 8 bytes from monotonic counter (LE) + 8 bytes from RNG.
-            pub fn generate() -> Self {
-                let counter = crate::performance::mono_commit_height();
-                let mut bytes = Vec::with_capacity(16);
-                bytes.extend_from_slice(&counter.to_le_bytes());
-                bytes.extend_from_slice(&crate::crypto::rng::random_bytes(8));
-                Self(bytes)
-            }
         }
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}_{}", $prefix, encode_crockford(&self.0))
+                write!(f, "{}_{}", $prefix, crate::utils::text_id::encode_base32_crockford(&self.0))
             }
         }
 
@@ -324,28 +281,6 @@ impl fmt::Display for Signature {
 mod tests {
     use super::*;
 
-    // --- encode_crockford ---
-
-    #[test]
-    fn crockford_empty_input() {
-        assert_eq!(encode_crockford(&[]), "");
-    }
-
-    #[test]
-    fn crockford_single_byte() {
-        let result = encode_crockford(&[0xFF]);
-        assert!(!result.is_empty());
-        for c in result.chars() {
-            assert!("0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c));
-        }
-    }
-
-    #[test]
-    fn crockford_deterministic() {
-        let data = b"hello";
-        assert_eq!(encode_crockford(data), encode_crockford(data));
-    }
-
     // --- Macro-generated ID types (VaultId, SessionId, NodeId, TransactionId) ---
 
     #[test]
@@ -427,13 +362,6 @@ mod tests {
         set.insert(VaultId::new("x"));
         set.insert(VaultId::new("x"));
         assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn id_generate_is_unique() {
-        let a = VaultId::generate();
-        let b = VaultId::generate();
-        assert_ne!(a, b);
     }
 
     // --- GenesisHash ---

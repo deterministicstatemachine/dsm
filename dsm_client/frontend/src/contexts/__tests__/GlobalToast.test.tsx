@@ -35,7 +35,7 @@ describe('GlobalToast', () => {
     );
 
     act(() => {
-      bridgeEvents.emit('inbox.updated', { unreadCount: 1, newItems: 1, source: 'poll' });
+      bridgeEvents.emit('inbox.updated', { newItems: 1, source: 'poll' });
     });
 
     await waitFor(() => expect(screen.getByText(/New inbox item received/)).toBeInTheDocument());

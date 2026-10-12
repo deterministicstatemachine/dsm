@@ -4,50 +4,54 @@ package com.dsm.wallet.bridge
 
 import android.util.Log
 import com.dsm.wallet.bridge.ble.BleCoordinator
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 
 internal object UnifiedBleBridge {
 
     private var bleCoordinator: BleCoordinator? = null
-    // Bumped from 3 → 8 because slower phones (e.g. mid-tier non-Samsung)
-    // can take ~1.8s to complete GATT service discovery after the connect
-    // event. With 200ms*attempt backoff, 3 attempts only span 1.2s and abort
-    // before `responseCharacteristic` becomes non-null. 8 attempts span
-    // ~5.6s of backoff — comfortably above observed discovery latency.
-    private const val TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS = 8
-    private const val TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS = 2500L
-
-    private fun sendViaActiveClientSession(
+    /**
+     * Write one message over our client link to [address]: TX_RESPONSE is
+     * subscribed first, so the peer's answer can come back on this link.
+     */
+    private suspend fun sendOverClientLink(
         svc: BleCoordinator,
-        deviceAddress: String,
+        address: String,
         chunks: Array<ByteArray>,
         failureCode: String,
     ): Boolean {
-        Log.i(
-            "UnifiedBleBridge",
-            "sendViaActiveClientSession: sending ${chunks.size} chunk(s) to $deviceAddress via existing GATT client session"
-        )
-        var sentCount = 0
-        for ((index, chunk) in chunks.withIndex()) {
-            val sent = svc.sendTransactionRequest(deviceAddress, chunk)
-            if (sent) {
-                sentCount += 1
-            } else {
-                Log.e(
-                    "UnifiedBleBridge",
-                    "sendViaActiveClientSession: failed chunk ${index + 1}/${chunks.size} to $deviceAddress"
-                )
-                break // Fail fast instead of partial spray
-            }
+        if (!svc.ensureClientTxResponseSubscribed(address).await()) {
+            Log.e("UnifiedBleBridge", "TX_RESPONSE not subscribed on the client link to $address; the message is not sent")
+            UnifiedBleEvents.onConnectionFailed(address, "tx_response_subscription_failed")
+            return false
         }
-        if (sentCount != chunks.size) {
-            UnifiedBleEvents.onConnectionFailed(deviceAddress, "$failureCode:$sentCount/${chunks.size}")
+        Log.i("BleTransferTrace", "client link -> $address (chunks=${chunks.size})")
+        val sent = svc.writeMessage(address, chunks)
+        if (!sent) {
+            Log.e("UnifiedBleBridge", "the message to $address was not written")
+            UnifiedBleEvents.onConnectionFailed(address, failureCode)
         }
-        return sentCount == chunks.size
+        return sent
     }
 
+    private suspend fun sendOverServerLink(
+        svc: BleCoordinator,
+        address: String,
+        chunks: Array<ByteArray>,
+        failureCode: String,
+    ): Boolean {
+        Log.i("BleTransferTrace", "server notifications -> $address (chunks=${chunks.size})")
+        val sent = svc.sendViaServerNotifications(address, chunks)
+        if (!sent) UnifiedBleEvents.onConnectionFailed(address, failureCode)
+        return sent
+    }
+
+    /**
+     * Send a reply on the link at [deviceAddress] that the frame it answers
+     * arrived on. Nothing reconnects for it: a reply whose link is gone is
+     * answered again when the counterparty sends its frame again.
+     * [useReliableWrite] prefers our client link to the peer's subscription to
+     * our server when both exist.
+     */
     fun dispatchRustFollowUp(
         deviceAddress: String,
         chunks: Array<ByteArray>,
@@ -57,35 +61,21 @@ internal object UnifiedBleBridge {
         if (chunks.isEmpty()) {
             return true
         }
-
         return try {
-            if (useReliableWrite) {
-                requestGattWriteChunks(deviceAddress, chunks)
-            } else if (svc.isGattServerClient(deviceAddress) && svc.isServerClientSubscribedToTxResponse(deviceAddress)) {
-                Log.i(
-                    "UnifiedBleBridge",
-                    "dispatchRustFollowUp: routing ${chunks.size} chunk(s) via existing GATT server notification path to $deviceAddress"
-                )
-                runBlocking {
-                    val ok = svc.sendViaServerNotifications(deviceAddress, chunks)
-                    if (!ok) {
-                        UnifiedBleEvents.onConnectionFailed(deviceAddress, "followup_server_notify_failed")
+            runBlocking {
+                val client = svc.hasActiveClientSession(deviceAddress)
+                val server = svc.isGattServerClient(deviceAddress) &&
+                    svc.isServerClientSubscribedToTxResponse(deviceAddress)
+                when {
+                    client && (useReliableWrite || !server) ->
+                        sendOverClientLink(svc, deviceAddress, chunks, "followup_client_send_failed")
+                    server ->
+                        sendOverServerLink(svc, deviceAddress, chunks, "followup_server_notify_failed")
+                    else -> {
+                        Log.w("UnifiedBleBridge", "dispatchRustFollowUp: the link at $deviceAddress is gone; the reply is not sent")
+                        false
                     }
-                    ok
                 }
-            } else if (svc.hasActiveClientSession(deviceAddress)) {
-                sendViaActiveClientSession(
-                    svc,
-                    deviceAddress,
-                    chunks,
-                    "followup_client_send_partial",
-                )
-            } else {
-                Log.w(
-                    "UnifiedBleBridge",
-                    "dispatchRustFollowUp: no existing route for non-reliable follow-up to $deviceAddress; refusing transport re-prime"
-                )
-                false
             }
         } catch (t: Throwable) {
             Log.e("UnifiedBleBridge", "dispatchRustFollowUp failed for $deviceAddress", t)
@@ -93,25 +83,12 @@ internal object UnifiedBleBridge {
         }
     }
 
-    private fun publishLocalIdentityIfAvailable(svc: BleCoordinator): Boolean {
-        try {
-            val deviceIdBytes = try { Unified.getDeviceIdBin() } catch (_: Throwable) { byteArrayOf() }
-            val genesisHashBytes = try { Unified.getGenesisHashBin() } catch (_: Throwable) { byteArrayOf() }
-            if (deviceIdBytes.size == 32 && genesisHashBytes.size == 32) {
-                svc.setIdentityValue(genesisHashBytes, deviceIdBytes)
-                Log.i("UnifiedBleBridge", "publishLocalIdentityIfAvailable: local BLE identity published to GATT")
-                return true
-            } else {
-                Log.w(
-                    "UnifiedBleBridge",
-                    "publishLocalIdentityIfAvailable: identity bytes unavailable (genesis=${genesisHashBytes.size}, device=${deviceIdBytes.size})"
-                )
-                return false
-            }
-        } catch (t: Throwable) {
-            Log.w("UnifiedBleBridge", "publishLocalIdentityIfAvailable failed", t)
-            return false
-        }
+    // The GATT server reads the identity from Rust when a peer asks for it;
+    // advertising without one would answer every identity read with a failure.
+    private fun localIdentityAvailable(): Boolean = try {
+        Unified.getDeviceIdBin().size == 32 && Unified.getGenesisHashBin().size == 32
+    } catch (_: Throwable) {
+        false
     }
 
     fun initBleCoordinator(
@@ -128,15 +105,10 @@ internal object UnifiedBleBridge {
         }
     }
 
-    fun requestGattWrite(deviceAddress: String, transactionData: ByteArray): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.sendTransactionRequest(deviceAddress, transactionData) } catch (_: Throwable) { false }
-    }
-
     fun startBlePairingAdvertise(): Boolean {
         val svc = bleCoordinator ?: return false
         return try {
-            if (!publishLocalIdentityIfAvailable(svc)) {
+            if (!localIdentityAvailable()) {
                 Log.w("UnifiedBleBridge", "startBlePairingAdvertise: refusing to advertise without local identity")
                 return false
             }
@@ -154,154 +126,39 @@ internal object UnifiedBleBridge {
         return try { svc.stopScanning() } catch (_: Throwable) { false }
     }
 
-    fun stopBlePairingAdvertise(): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.stopAdvertising() } catch (_: Throwable) { false }
-    }
 
-    fun requestGattWriteChunks(deviceAddress: String, chunks: Array<ByteArray>): Boolean {
+    /**
+     * Send one message to the appliance [deviceId]. Only a link whose identity
+     * is anchored to it carries the message; with none, the coordinator
+     * reaches for it — [addressHint] first. False is "not delivered now": the
+     * SDK's frame stays owed and is delivered again when the appliance is
+     * reached.
+     */
+    fun requestGattWriteChunks(deviceId: ByteArray, addressHint: String, chunks: Array<ByteArray>): Boolean {
         val svc = bleCoordinator ?: return false
+        if (deviceId.size != 32) {
+            Log.e("UnifiedBleBridge", "requestGattWriteChunks: a device id of ${deviceId.size} bytes routes nowhere")
+            return false
+        }
+        val target = BridgeEncoding.base32CrockfordEncode(deviceId).take(8)
         return try {
-            // --- RPA resolution ---
-            // Rust may pass a stale BLE address. Resolve via identity-anchored
-            // registry (addressIndex → PeerIdentity → current address) or fall
-            // back to any ready session in single-peer scenarios.
-            val resolved = svc.resolveSession(deviceAddress)
-            val effectiveAddr = resolved?.second ?: deviceAddress
-
-            // Routing priority:
-            // 1. If we have an active GATT client session (we connected to them), use regular writes.
-            //    Both devices may have bidirectional GATT connections, so prefer the client path
-            //    since the client subscribed to TX_RESPONSE on the remote server.
-            // 2. Only fall back to server notifications if we DON'T have a client session but
-            //    the target is connected as a client to our GATT server (reverse path).
-            if (svc.hasActiveClientSession(effectiveAddr)) {
-                Log.i("BleTransferTrace", "requestGattWriteChunks routing: client writes -> $effectiveAddr (chunks=${chunks.size})")
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: routing ${chunks.size} chunks via GATT client writes to $effectiveAddr")
-                // Ensure TX_RESPONSE is subscribed so we can receive the response
-                // back from the peer via GATT server notifications.
-                runBlocking {
-                    try {
-                        var subscribed = false
-                        for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
-                            subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(effectiveAddr).await()
-                            } ?: false
-                            if (subscribed) {
-                                Log.i(
-                                    "UnifiedBleBridge",
-                                    "requestGattWriteChunks: TX_RESPONSE subscribed for $effectiveAddr (attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS})"
-                                )
-                                break
-                            }
-                            Log.w(
-                                "UnifiedBleBridge",
-                                "requestGattWriteChunks: TX_RESPONSE subscription attempt $attempt/${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} failed for $effectiveAddr"
-                            )
-                            if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
-                                delay(200L * attempt)
-                            }
-                        }
-
-                        if (!subscribed) {
-                            Log.e(
-                                "UnifiedBleBridge",
-                                "requestGattWriteChunks: TX_RESPONSE subscription failed after ${TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS} attempts for $effectiveAddr; aborting send"
-                            )
-                            UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_failed")
-                            return@runBlocking false
-                        }
-
-                        sendViaActiveClientSession(
-                            svc,
-                            effectiveAddr,
-                            chunks,
-                            "tx_chunk_send_partial",
-                        )
-                    } catch (t: Throwable) {
-                        Log.w("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription/send error for $effectiveAddr", t)
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "tx_response_subscription_exception")
-                        false
-                    }
+            runBlocking {
+                val route = svc.resolveRoute(deviceId, addressHint) ?: svc.reach(deviceId, addressHint)
+                if (route == null) {
+                    Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route to $target; the frame stays owed")
+                    return@runBlocking false
                 }
-            } else if (svc.isGattServerClient(effectiveAddr) && svc.isServerClientSubscribedToTxResponse(effectiveAddr)) {
-                Log.i("BleTransferTrace", "requestGattWriteChunks routing: server notifications -> $effectiveAddr (chunks=${chunks.size})")
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: target is GATT server client AND subscribed — using server notifications immediately for $effectiveAddr")
-                runBlocking {
-                    val ok = svc.sendViaServerNotifications(effectiveAddr, chunks)
-                    if (!ok) {
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "server_notify_failed")
-                    }
-                    ok
-                }
-            } else {
-                // No active session — on-demand connect.
-                // connectToDevice handles: scan for RPA, connect, MTU negotiation.
-                // resolveSession re-resolves after connect so we target the actual address.
-                Log.i("BleTransferTrace", "requestGattWriteChunks routing: no route -> $effectiveAddr (on-demand connect)")
-                Log.i("UnifiedBleBridge", "requestGattWriteChunks: no route for $effectiveAddr — on-demand connect")
-                svc.ensureGattServerStarted()
-                publishLocalIdentityIfAvailable(svc)
-                svc.startAdvertising()
-                runBlocking {
-                    try {
-                        val connected = withTimeoutOrNull(15000L) {
-                            svc.connectToDevice(effectiveAddr).await()
-                        } ?: false
-
-                        // Re-resolve: connectToDevice may have found the peer under a new RPA.
-                        val currentAddr = svc.resolveSession(deviceAddress)?.second ?: effectiveAddr
-
-                        if (!connected) {
-                            // Check if peer connected to our server while we tried
-                            if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
-                                Log.i("UnifiedBleBridge", "requestGattWriteChunks: peer connected to our GATT server during wait — using server notifications for $currentAddr")
-                                val ok = svc.sendViaServerNotifications(currentAddr, chunks)
-                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_fallback_failed")
-                                return@runBlocking ok
-                            }
-                            // connectToDevice may have failed on the stale address while a
-                            // scan-triggered auto-connect (onDeviceDiscovered) simultaneously
-                            // established a GATT client session at the re-resolved address.
-                            // Fall through to TX_RESPONSE subscription if that happened.
-                            if (!svc.hasActiveClientSession(currentAddr)) {
-                                Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand GATT connection failed for $currentAddr")
-                                UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_connect_failed")
-                                return@runBlocking false
-                            }
-                            Log.i("UnifiedBleBridge", "requestGattWriteChunks: scan-resolved client session at $currentAddr — continuing with TX_RESPONSE")
-                        }
-
-                        // Subscribe to TX_RESPONSE
-                        var subscribed = false
-                        for (attempt in 1..TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) {
-                            subscribed = withTimeoutOrNull(TX_RESPONSE_SUBSCRIBE_TIMEOUT_MS) {
-                                svc.ensureClientTxResponseSubscribed(currentAddr).await()
-                            } ?: false
-                            if (subscribed) break
-                            if (attempt < TX_RESPONSE_SUBSCRIBE_MAX_ATTEMPTS) delay(200L * attempt)
-                        }
-                        if (!subscribed) {
-                            Log.e("UnifiedBleBridge", "requestGattWriteChunks: TX_RESPONSE subscription failed for $currentAddr")
-                            // Last resort: server notification path
-                            if (svc.isGattServerClient(currentAddr) && svc.isServerClientSubscribedToTxResponse(currentAddr)) {
-                                val ok = svc.sendViaServerNotifications(currentAddr, chunks)
-                                if (!ok) UnifiedBleEvents.onConnectionFailed(currentAddr, "on_demand_server_notify_after_subscribe_failed")
-                                return@runBlocking ok
-                            }
-                            UnifiedBleEvents.onConnectionFailed(currentAddr, "tx_response_subscription_failed")
-                            return@runBlocking false
-                        }
-
-                        sendViaActiveClientSession(svc, currentAddr, chunks, "tx_chunk_send_partial")
-                    } catch (t: Throwable) {
-                        Log.e("UnifiedBleBridge", "requestGattWriteChunks: on-demand error", t)
-                        UnifiedBleEvents.onConnectionFailed(effectiveAddr, "on_demand_connect_exception")
-                        false
-                    }
+                Log.i("UnifiedBleBridge", "requestGattWriteChunks: $target at ${route.address} (client link=${route.clientLink})")
+                if (route.clientLink) {
+                    sendOverClientLink(svc, route.address, chunks, "tx_chunk_send_failed")
+                } else {
+                    sendOverServerLink(svc, route.address, chunks, "server_notify_failed")
                 }
             }
-        } catch (_: Throwable) { false }
+        } catch (t: Throwable) {
+            Log.e("UnifiedBleBridge", "requestGattWriteChunks failed for $target", t)
+            false
+        }
     }
 
     fun deliverDeferredPairingAck(deviceAddress: String, ackBytes: ByteArray) {
@@ -312,11 +169,6 @@ internal object UnifiedBleBridge {
     fun getBleStats(deviceAddress: String): ByteArray {
         val svc = bleCoordinator ?: return ByteArray(0)
         return try { svc.getStatsString(deviceAddress).toByteArray(Charsets.UTF_8) } catch (_: Throwable) { ByteArray(0) }
-    }
-
-    fun retryLastBleTransaction(deviceAddress: String): Boolean {
-        val svc = bleCoordinator ?: return false
-        return try { svc.retryLastTransaction(deviceAddress) } catch (_: Throwable) { false }
     }
 
     fun getConnectedBluetoothDevices(): ByteArray {

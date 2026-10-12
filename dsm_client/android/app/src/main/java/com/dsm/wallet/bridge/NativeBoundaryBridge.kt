@@ -5,7 +5,6 @@ package com.dsm.wallet.bridge
 import android.util.Log
 import com.google.protobuf.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
-import com.dsm.wallet.ui.MainActivity
 import dsm.types.proto.IngressRequest
 import dsm.types.proto.RouterInvokeOp
 import dsm.types.proto.RouterQueryOp
@@ -61,12 +60,6 @@ internal object NativeBoundaryBridge {
                     UnifiedNativeApi.maybeRefreshNfcCapsule()
                 } catch (_: Throwable) {
                     // no-op
-                }
-                val method = request.routerInvoke.method
-                if (method == "session.lock" || method == "session.unlock") {
-                    MainActivity.getActiveInstance()?.runOnUiThread {
-                        MainActivity.getActiveInstance()?.publishCurrentSessionState(method)
-                    }
                 }
             }
             IngressRequest.OperationCase.ENVELOPE -> {

@@ -28,7 +28,6 @@ class BleScanner(private val context: Context) {
 
     private val scanning = AtomicBoolean(false)
     private var bluetoothLeScanner: BluetoothLeScanner? = null
-    private var currentSessionMode: BleSessionMode = BleSessionMode.IDLE
     private var callback: Callback? = null
 
     fun setCallback(callback: Callback) {
@@ -72,10 +71,6 @@ class BleScanner(private val context: Context) {
             scanning.set(false)
             callback?.onScanFailed(errorCode)
         }
-    }
-
-    fun setSessionMode(mode: BleSessionMode) {
-        currentSessionMode = mode
     }
 
     /**
@@ -127,7 +122,7 @@ class BleScanner(private val context: Context) {
             bluetoothLeScanner?.startScan(filters, settings, scanCallback)
             scanning.set(true)
             val modeLabel = if (lowLatency) "LOW_LATENCY" else "BALANCED"
-            Log.i("BleScanner", "BLE scan started ($modeLabel), mode: $currentSessionMode")
+            Log.i("BleScanner", "BLE scan started ($modeLabel)")
             true
         } catch (t: Throwable) {
             Log.e("BleScanner", "Failed to start scan", t)
@@ -154,6 +149,18 @@ class BleScanner(private val context: Context) {
     }
 
     fun isScanning(): Boolean = scanning.get()
+
+    /**
+     * Bluetooth is going off: the stack ends the scan with the radio. Nothing is
+     * scanning after this, so the next start issues a new scan. Returns whether a
+     * scan was running.
+     */
+    fun radioOff(): Boolean {
+        val wasScanning = scanning.getAndSet(false)
+        bluetoothLeScanner = null
+        if (wasScanning) Log.i("BleScanner", "Bluetooth off: scan state cleared")
+        return wasScanning
+    }
 
     private fun getBluetoothAdapter() = BlePermissionsGate(context).getBluetoothAdapter()
 }

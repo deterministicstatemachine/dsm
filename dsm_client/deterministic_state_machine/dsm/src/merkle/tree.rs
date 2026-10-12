@@ -121,7 +121,6 @@ impl MerkleTree {
     }
 
     /// Create a new empty Merkle tree
-    #[allow(dead_code)]
     pub fn new_empty() -> Self {
         MerkleTree {
             root: None,
@@ -188,15 +187,6 @@ impl MerkleTree {
     /// Get the Merkle root hash
     pub fn root_hash(&self) -> Option<[u8; 32]> {
         self.root.as_ref().map(|node| node.hash)
-    }
-
-    #[allow(dead_code)]
-    fn get_tree_height(&self) -> usize {
-        if self.leaves.is_empty() {
-            return 0;
-        }
-        let leaf_count = self.leaves.len();
-        (leaf_count - 1).next_power_of_two().trailing_zeros() as usize + 1
     }
 
     /// Generate a proof for a leaf using proper indices

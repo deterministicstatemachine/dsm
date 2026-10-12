@@ -1,0 +1,243 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/*
+ * The DGen building blocks, drawn in the Modern skin. Every DGen screen and
+ * pop-up is made of the same parts (sb-screen, sb-card, sb-btn, sb-popover,
+ * the transfer dialogs, …). While the Modern skin is in use these rules give
+ * each part the Modern look, so a screen the Modern skin opens inside itself,
+ * and every pop-up, including ones added later, is Modern without a second
+ * copy of it. Nothing here applies to the DGen Game Boy.
+ */
+
+/* ---- Screens ---- */
+html[data-skin="modern"] .sb-screen {
+  color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  line-height: 1.45;
+}
+html[data-skin="modern"] .sb-screen__head { border-bottom: none; min-height: 48px; padding: 4px 0 8px; }
+html[data-skin="modern"] .sb-screen__title {
+  font-size: 26px; font-weight: 900; letter-spacing: 0; text-transform: none; white-space: normal;
+}
+html[data-skin="modern"] .sb-screen__body { padding-left: 0; padding-right: 0; }
+html[data-skin="modern"] .sb-icon-btn {
+  border: none; border-radius: 999px; background: var(--s-surface-2); color: var(--s-text);
+}
+
+/* A DGen screen inside the Modern skin: its Back sits in the title row. */
+.s-classic { position: relative; }
+.s-classic > .s-classic-back { position: absolute; top: 2px; left: 0; z-index: 3; }
+html[data-skin="modern"] .s-classic .sb-screen__head { padding-left: 56px; }
+html[data-skin="modern"] .s-classic .sb-screen__head > .sb-icon-btn[aria-label="Back"] { display: none; }
+
+/* The Game Boy's D-pad cursor has no place on a touch screen. */
+html[data-skin="modern"] .focused { outline: none !important; }
+html[data-skin="modern"] .sb-btn.focused,
+html[data-skin="modern"] .sb-menu__item.focused { box-shadow: none; border-color: var(--s-line); }
+
+/* Icon buttons: Modern glyphs in place of the pixel icons. */
+html[data-skin="modern"] .sb-icon-btn { width: 40px; height: 40px; display: inline-grid; place-items: center; }
+html[data-skin="modern"] .sb-icon-btn > img { display: none; }
+html[data-skin="modern"] .sb-icon-btn[aria-label="Refresh"]::before,
+html[data-skin="modern"] .sb-icon-btn.b0x-button::before {
+  content: ""; width: 20px; height: 20px; background: currentColor;
+  -webkit-mask: var(--s-glyph) center / contain no-repeat; mask: var(--s-glyph) center / contain no-repeat;
+}
+html[data-skin="modern"] .sb-icon-btn[aria-label="Refresh"] {
+  --s-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 11a8 8 0 1 0-2.3 5.7'/%3E%3Cpath d='M20 4v7h-7'/%3E%3C/svg%3E");
+}
+html[data-skin="modern"] .sb-icon-btn.b0x-button {
+  --s-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='5' width='18' height='14' rx='2.5'/%3E%3Cpath d='m4 7 8 6 8-6'/%3E%3C/svg%3E");
+}
+html[data-skin="modern"] .sb-icon-btn.spinning::before { animation: s-spin 1s linear infinite; }
+
+/* The info badge: a small round "i" in the Modern colours. */
+html[data-skin="modern"] .sb-info {
+  width: 22px; height: 22px; border: none; background: var(--s-surface-2); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 800; font-style: normal;
+}
+html[data-skin="modern"] .sb-card__title .sb-info,
+html[data-skin="modern"] .sb-label .sb-info,
+html[data-skin="modern"] .sb-field > label .sb-info { width: 20px; height: 20px; font-size: 12px; }
+
+/* ---- Text ---- */
+html[data-skin="modern"] .sb-card__title,
+html[data-skin="modern"] .sb-section-title,
+html[data-skin="modern"] .sb-screen h3.sb-section-title,
+html[data-skin="modern"] .sb-screen .recent-transactions h3.sb-section-title,
+html[data-skin="modern"] .sb-subhead h3 {
+  font-size: 18px; font-weight: 900; letter-spacing: 0; text-transform: none; color: var(--s-text);
+}
+html[data-skin="modern"] .sb-hint,
+html[data-skin="modern"] .sb-hero__sub,
+html[data-skin="modern"] .sb-row__sub,
+html[data-skin="modern"] .sb-menu__desc,
+html[data-skin="modern"] .sb-stats__label { font-size: 14px; color: var(--s-muted); }
+html[data-skin="modern"] .sb-label,
+html[data-skin="modern"] .sb-field > label {
+  font-size: 15px; font-weight: 700; letter-spacing: 0; text-transform: none; color: var(--s-text);
+}
+html[data-skin="modern"] .sb-empty { color: var(--s-muted); border-color: var(--s-line); font-size: 15px; }
+
+/* ---- Cards, rows, values ---- */
+html[data-skin="modern"] .sb-card,
+html[data-skin="modern"] .sb-card--dark,
+html[data-skin="modern"] .sb-details,
+html[data-skin="modern"] .sb-screen .transaction-item {
+  border: 1px solid var(--s-line); border-radius: var(--s-radius); padding: 16px; margin-bottom: 14px;
+  background: var(--s-surface); color: var(--s-text); box-shadow: var(--s-shadow);
+}
+html[data-skin="modern"] .sb-card--dark .sb-card__title,
+html[data-skin="modern"] .sb-card--dark .sb-section-title,
+html[data-skin="modern"] .sb-card--dark .sb-hint,
+html[data-skin="modern"] .sb-card--dark .sb-kv__k,
+html[data-skin="modern"] .sb-card--dark .sb-label { color: var(--s-muted); }
+html[data-skin="modern"] .sb-details > summary {
+  font-size: 15px; letter-spacing: 0; text-transform: none; color: var(--s-text); padding: 4px 0;
+}
+html[data-skin="modern"] .sb-details[open] > summary { border-bottom-color: var(--s-line); }
+html[data-skin="modern"] .sb-hero__label { font-size: 15px; color: var(--s-muted); }
+html[data-skin="modern"] .sb-hero__value { font-size: 36px; font-weight: 900; letter-spacing: -1px; }
+html[data-skin="modern"] .sb-hero__unit { color: var(--s-gold-deep); }
+html[data-skin="modern"] .sb-hero__unit { font-size: 18px; }
+html[data-skin="modern"] .sb-hero__row { border-top: 1px solid var(--s-line); font-size: 15px; }
+html[data-skin="modern"] .sb-kv { border-bottom: 1px solid var(--s-line); font-size: 15px; }
+html[data-skin="modern"] .sb-kv__k { color: var(--s-muted); text-transform: none; letter-spacing: 0; font-size: 14px; }
+html[data-skin="modern"] .sb-kv__v { font-size: 15px; }
+html[data-skin="modern"] .sb-row { border-bottom: 1px solid var(--s-line); }
+html[data-skin="modern"] .sb-row__title { font-size: 16px; font-weight: 800; text-transform: none; letter-spacing: 0; }
+html[data-skin="modern"] .sb-tag {
+  border: none; border-radius: 999px; padding: 3px 10px; background: var(--s-surface-2); color: var(--s-text);
+  text-transform: none; letter-spacing: 0; font-size: 13px;
+}
+html[data-skin="modern"] .sb-tag--solid { background: var(--s-gold); color: #0f0f0f; }
+html[data-skin="modern"] .sb-notice { border: none; border-radius: 16px; background: var(--s-surface-2); color: var(--s-text); font-size: 14px; }
+html[data-skin="modern"] .sb-notice--error { background: #fde4ec; color: #9b0c3c; }
+html[data-skin="modern"][data-scheme="dark"] .sb-notice--error { background: #3a0d1c; color: #ff9ab9; }
+html[data-skin="modern"] .sb-progress { border: none; border-radius: 999px; height: 10px; background: var(--s-surface-2); }
+html[data-skin="modern"] .sb-progress__fill { background: linear-gradient(90deg, var(--s-gold), var(--s-fuchsia)); border-radius: 999px; }
+
+/* ---- Menus (the SoFi hub, …) ---- */
+html[data-skin="modern"] .sb-menu__item {
+  border: 1px solid var(--s-line); border-radius: var(--s-radius); padding: 14px 16px;
+  background: var(--s-surface); box-shadow: var(--s-shadow); image-rendering: auto;
+}
+html[data-skin="modern"] .sb-menu__item.focused,
+html[data-skin="modern"] .sb-menu__item:focus-visible { border-color: var(--s-primary); box-shadow: 0 0 0 2px var(--s-primary); }
+html[data-skin="modern"] .sb-menu__glyph { border: none; background: var(--s-avatar-a); color: var(--s-avatar-a-text); width: 44px; height: 44px; font-size: 18px; }
+html[data-skin="modern"] .sb-menu__label { font-size: 17px; font-weight: 800; letter-spacing: 0; text-transform: none; }
+
+/* ---- Tabs and segments ---- */
+html[data-skin="modern"] .sb-tabs,
+html[data-skin="modern"] .sb-seg {
+  border: none; border-radius: 14px; padding: 4px; gap: 4px; background: var(--s-surface-2); margin-left: 0; margin-right: 0;
+}
+html[data-skin="modern"] .sb-tabs__tab,
+html[data-skin="modern"] .sb-seg__opt {
+  border: none; border-radius: 10px; padding: 10px 6px; background: transparent; color: var(--s-muted);
+  font-size: 14px; letter-spacing: 0; text-transform: none;
+}
+html[data-skin="modern"] .sb-tabs__tab.active,
+html[data-skin="modern"] .sb-seg__opt.active { background: var(--s-fuchsia); color: #ffffff; }
+
+/* ---- Fields ---- */
+html[data-skin="modern"] .sb-input,
+html[data-skin="modern"] .sb-screen .sb-input,
+html[data-skin="modern"] .sb-screen select.sb-input,
+html[data-skin="modern"] .sb-screen textarea.sb-input,
+html[data-skin="modern"] .sb-screen .sb-card--dark .sb-input {
+  border: 1px solid var(--s-line); border-radius: 14px; padding: 14px; background: var(--s-surface); color: var(--s-text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px;
+}
+html[data-skin="modern"] .sb-input::placeholder { color: var(--s-muted); opacity: 1; }
+html[data-skin="modern"] .sb-input:focus { border-color: var(--s-primary); }
+
+/* ---- Buttons ---- */
+html[data-skin="modern"] .sb-btn,
+html[data-skin="modern"] .sb-card--dark .sb-btn,
+html[data-skin="modern"] .bilateral-btn,
+html[data-skin="modern"] .bilateral-btn-reject {
+  min-height: 48px; padding: 12px 16px; border: none; border-radius: 16px;
+  background: var(--s-surface-2); color: var(--s-text); box-shadow: none; image-rendering: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px; font-weight: 800; letter-spacing: 0; text-transform: none; white-space: normal;
+}
+html[data-skin="modern"] .sb-btn--primary,
+html[data-skin="modern"] .sb-card--dark .sb-btn--primary,
+html[data-skin="modern"] .sb-popover .sb-popover__ok,
+html[data-skin="modern"] .bilateral-btn-accept { background: var(--s-primary); color: var(--s-on-primary); }
+html[data-skin="modern"] .sb-btn--ghost { background: transparent; color: var(--s-text); }
+html[data-skin="modern"] .sb-btn--small { min-height: 36px; padding: 6px 12px; font-size: 14px; border-radius: 12px; }
+html[data-skin="modern"] .sb-btn.focused { box-shadow: 0 0 0 2px var(--s-primary); }
+
+/* ---- Pop-ups: a sheet up from the bottom, over the whole page ---- */
+html[data-skin="modern"] .sb-popover-backdrop,
+html[data-skin="modern"] .bilateral-transfer-overlay {
+  position: fixed; inset: 0; z-index: 9000; padding: 0; align-items: flex-end; justify-content: stretch;
+  background: rgba(0, 0, 0, 0.45);
+}
+html[data-skin="modern"] .sb-popover,
+html[data-skin="modern"] .sb-popover.sb-card--dark,
+html[data-skin="modern"] .bilateral-transfer-dialog {
+  width: 100%; max-width: none; max-height: 90%; margin: 0; overflow-y: auto; box-sizing: border-box;
+  border: none; border-radius: 26px 26px 0 0; padding: 22px 20px 22px;
+  background: var(--s-bg); background-image: none; color: var(--s-text); box-shadow: none; image-rendering: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px;
+}
+html[data-skin="modern"] .sb-popover__title,
+html[data-skin="modern"] .bilateral-transfer-header h2,
+html[data-skin="modern"] .bilateral-transfer-header h3 {
+  font-size: 22px; font-weight: 900; letter-spacing: 0; text-transform: none; color: var(--s-text); font-family: inherit;
+}
+html[data-skin="modern"] .bilateral-transfer-header { border-bottom: none; padding: 0 0 8px; text-align: left; }
+html[data-skin="modern"] .sb-popover__close {
+  width: 36px; height: 36px; border: none; border-radius: 999px; background: var(--s-surface-2); color: var(--s-text);
+}
+html[data-skin="modern"] .sb-popover__body,
+html[data-skin="modern"] .bilateral-transfer-body,
+html[data-skin="modern"] .bilateral-transfer-message {
+  font-size: 16px; line-height: 1.45; color: var(--s-muted); padding-left: 0; padding-right: 0; font-family: inherit;
+}
+html[data-skin="modern"] .bilateral-transfer-label { color: var(--s-muted); text-transform: none; letter-spacing: 0; font-family: inherit; font-size: 14px; }
+html[data-skin="modern"] .bilateral-transfer-value { color: var(--s-text); font-family: inherit; font-size: 16px; font-weight: 800; }
+html[data-skin="modern"] .bilateral-transfer-actions { padding-left: 0; padding-right: 0; gap: 10px; }
+html[data-skin="modern"] .sb-popover .sb-actions { gap: 10px; }
+html[data-skin="modern"] .sb-popover .sb-btn[style] { color: var(--s-text) !important; border-color: transparent !important; background: var(--s-surface-2) !important; }
+
+/* ---- The transfer and confirm dialogs, every part of them ---- */
+html[data-skin="modern"] .bilateral-transfer-message,
+html[data-skin="modern"] .bilateral-transfer-info,
+html[data-skin="modern"] .bilateral-transfer-status-message {
+  background: none; border: none; border-radius: 0; padding: 0; margin: 0 0 10px;
+  color: var(--s-muted); font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 16px; text-align: left;
+}
+html[data-skin="modern"] .bilateral-transfer-info { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--s-line); padding: 10px 0; margin: 0; }
+html[data-skin="modern"] .bilateral-transfer-actions { border-top: none; margin-top: 8px; }
+html[data-skin="modern"] .bilateral-transfer-status {
+  background: var(--s-bg); background-image: none; border: none; border-radius: 20px; color: var(--s-text);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18); image-rendering: auto;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+html[data-skin="modern"] .bilateral-transfer-status-header { border-bottom: none; }
+html[data-skin="modern"] .bilateral-transfer-status-header h4 {
+  color: var(--s-text); font-family: inherit; font-size: 18px; font-weight: 900; text-transform: none; letter-spacing: 0;
+}
+html[data-skin="modern"] .bilateral-transfer-status-progress::before { background: var(--s-line); }
+html[data-skin="modern"] .progress-step { color: var(--s-muted); font-family: inherit; text-transform: none; letter-spacing: 0; font-size: 13px; }
+html[data-skin="modern"] .progress-step::before { background: var(--s-surface-2); border: none; border-radius: 50%; }
+html[data-skin="modern"] .progress-step.active { color: var(--s-text); }
+html[data-skin="modern"] .progress-step.active::before { background: var(--s-fuchsia); }
+html[data-skin="modern"] .bilateral-spinner { border-color: var(--s-surface-2); border-top-color: var(--s-fuchsia); }
+html[data-skin="modern"] .bilateral-btn-reject:hover:not(:disabled),
+html[data-skin="modern"] .bilateral-btn-reject:active:not(:disabled) { background: var(--s-surface-2); filter: none; transform: none; box-shadow: none; }
+html[data-skin="modern"] .bilateral-btn-accept:hover:not(:disabled),
+html[data-skin="modern"] .bilateral-btn-accept:active:not(:disabled) { background: var(--s-primary); color: var(--s-on-primary); filter: none; transform: none; box-shadow: none; }
+
+/* ---- The toast at the bottom of the screen (its Game Boy colours are set inline) ---- */
+html[data-skin="modern"] .wallet-toast {
+  position: fixed !important; bottom: 84px !important; left: 16px !important; right: 16px !important;
+  border: none !important; border-radius: 16px !important; padding: 14px 16px !important;
+  background: var(--s-text) !important; color: var(--s-bg) !important;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 15px !important; font-weight: 700;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}

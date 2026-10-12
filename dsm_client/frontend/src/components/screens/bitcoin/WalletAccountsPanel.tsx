@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+// Bitcoin accounts: the list of accounts on this device, and a form to add one
+// (create a new wallet, or import a phrase / key). Rendered inline when there
+// is no account yet, and under the Advanced fold once there is.
 import React from 'react';
+import { bitcoinNetworkLabel } from '../../../services/bitcoinTap';
+import { middleTruncate } from '../../common/ScreenFrame';
+import { importKindLabel } from './labels';
 import type { BitcoinWalletAccountEntry } from '../../../services/bitcoinTap';
 
 type Props = {
@@ -46,105 +52,157 @@ const WalletAccountsPanel = React.memo(function WalletAccountsPanel(props: Props
     handleCreateWallet, handleImportWallet, handleMnemonicCopy, handleMnemonicDone, handleSelectWallet,
   } = props;
 
+  const hasAccounts = walletAccounts.length > 0;
+
   return (
-    <div style={{ marginBottom: 16 }}>
-      <h3 style={{ margin: '0 0 8px 0', fontSize: 14, fontWeight: 500 }}>Bitcoin Accounts</h3>
+    <div className="btc-accounts">
+      {hasAccounts && (
+        <div className="sb-card" style={{ padding: '0 10px' }}>
+          {walletAccounts.map((acct) => {
+            const isActive = acct.active || acct.accountId === walletActiveId;
+            return (
+              <div key={acct.accountId} className="sb-row">
+                <div className="sb-row__main">
+                  <div className="sb-row__title">{acct.label || 'Bitcoin wallet'}</div>
+                  <div className="sb-row__sub">
+                    {importKindLabel(acct.importKind)} {'·'} {bitcoinNetworkLabel(acct.network)} {'·'} {middleTruncate(acct.firstAddress || acct.accountId, 8, 6)}
+                  </div>
+                </div>
+                {isActive ? (
+                  <span className="sb-tag sb-tag--solid">Active</span>
+                ) : (
+                  <button type="button" onClick={() => void handleSelectWallet(acct.accountId)} className="sb-btn sb-btn--small" disabled={walletLoading}>
+                    Use
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-        <select value={globalNetwork} onChange={(e) => setGlobalNetwork(Number(e.target.value))} className="form-input" style={{ flex: 1 }}>
-          <option value={0}>mainnet</option>
-          <option value={1}>testnet</option>
-          <option value={2}>signet</option>
-        </select>
-      </div>
-
-      <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+      <div className="sb-seg sb-seg--block" role="group" aria-label="Add a Bitcoin account">
         {(['create', 'import'] as const).map((tab) => (
-          <button key={tab} onClick={() => setWalletTab(tab)} className="button-brick" style={{ flex: 1, padding: '6px 0', fontSize: 11, borderRadius: 8, opacity: walletTab === tab ? 1 : 0.45, fontWeight: walletTab === tab ? 600 : 400 }}>
-            {tab === 'create' ? 'New Wallet' : 'Import'}
+          <button
+            key={tab}
+            type="button"
+            onClick={() => setWalletTab(tab)}
+            className={`sb-seg__opt${walletTab === tab ? ' active' : ''}`}
+            aria-pressed={walletTab === tab}
+          >
+            {tab === 'create' ? 'New wallet' : 'Import'}
           </button>
         ))}
       </div>
 
-      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, marginBottom: 10 }}>
+      <div className="sb-card" style={{ marginTop: 8 }}>
         {walletTab === 'create' ? (
           generatedMnemonic ? (
             <>
-              <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 6, color: 'var(--text-dark)' }}>Back up your recovery phrase</div>
-              <div style={{ fontSize: 10, color: 'var(--text-disabled)', marginBottom: 8 }}>Write these words down or copy them somewhere safe. This is the only time you&apos;ll see this.</div>
-              <textarea readOnly value={generatedMnemonic} className="form-input btc-tap-themed-input" style={{ width: '100%', minHeight: 72, boxSizing: 'border-box', fontFamily: 'ui-monospace, monospace', fontSize: 10, marginBottom: 8, letterSpacing: '0.02em' }} />
-              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-                <button onClick={() => void handleMnemonicCopy()} className="button-brick" style={{ flex: 1, fontSize: 10, padding: '6px 0', borderRadius: 8 }}>
-                  {mnemonicCopied ? 'Copied' : 'Copy phrase'}
-                </button>
-              </div>
-              <label className="dsm-toggle" style={{ marginBottom: 8 }}>
+              <div className="sb-card__title">Back up your recovery phrase</div>
+              <p className="sb-hint">
+                Write these words down, in order, and keep them somewhere safe. They are the only way to recover this wallet, and this is the only time they are shown.
+              </p>
+              <textarea
+                readOnly
+                value={generatedMnemonic}
+                className="sb-input sb-input--mono"
+                style={{ minHeight: 84, marginBottom: 8, letterSpacing: '0.02em' }}
+                aria-label="Recovery phrase"
+              />
+              <button type="button" onClick={() => void handleMnemonicCopy()} className="sb-btn sb-btn--small sb-btn--block" style={{ marginBottom: 8 }}>
+                {mnemonicCopied ? 'Copied' : 'Copy phrase'}
+              </button>
+              <label className="dsm-toggle" style={{ marginBottom: 10 }}>
                 <input type="checkbox" checked={mnemonicConfirmed} onChange={(e) => setMnemonicConfirmed(e.target.checked)} />
                 <span className="dsm-checkmark" aria-hidden="true" />
-                <span className="dsm-label-text">I&apos;ve saved my recovery phrase</span>
+                <span className="dsm-label-text">I have saved my recovery phrase</span>
               </label>
-              <button onClick={handleMnemonicDone} className="button-brick" disabled={!mnemonicConfirmed} style={{ width: '100%', padding: '8px 0', fontSize: 11, borderRadius: 8 }}>Done</button>
+              <button type="button" onClick={handleMnemonicDone} className="sb-btn sb-btn--primary sb-btn--block" disabled={!mnemonicConfirmed}>
+                Done
+              </button>
             </>
           ) : (
             <>
-              <input type="text" value={createLabel} onChange={(e) => setCreateLabel(e.target.value)} placeholder="Wallet name (optional)" className="form-input" style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <label style={{ fontSize: 10, color: 'var(--text-disabled)', whiteSpace: 'nowrap' }}>Recovery phrase</label>
-                <select value={createWordCount} onChange={(e) => setCreateWordCount(Number(e.target.value) as 12 | 24)} className="form-input" style={{ flex: 1 }}>
+              <div className="sb-field">
+                <label htmlFor="btc-create-label">Name (optional)</label>
+                <input id="btc-create-label" type="text" value={createLabel} onChange={(e) => setCreateLabel(e.target.value)} placeholder="e.g. Main wallet" className="sb-input sb-input--small" />
+              </div>
+              <div className="sb-field">
+                <label htmlFor="btc-create-network">Network</label>
+                <select id="btc-create-network" value={globalNetwork} onChange={(e) => setGlobalNetwork(Number(e.target.value))} className="sb-input sb-input--small">
+                  <option value={0}>Mainnet</option>
+                  <option value={1}>Testnet</option>
+                  <option value={2}>Signet</option>
+                </select>
+              </div>
+              <div className="sb-field">
+                <label htmlFor="btc-create-words">Recovery phrase</label>
+                <select id="btc-create-words" value={createWordCount} onChange={(e) => setCreateWordCount(Number(e.target.value) as 12 | 24)} className="sb-input sb-input--small">
                   <option value={12}>12 words</option>
                   <option value={24}>24 words (recommended)</option>
                 </select>
               </div>
-              <button onClick={() => void handleCreateWallet()} className="button-brick" disabled={createLoading} style={{ width: '100%', padding: '8px 10px', fontSize: 11, borderRadius: 8 }}>
-                {createLoading ? 'Generating…' : 'Create Wallet'}
+              <button type="button" onClick={() => void handleCreateWallet()} className="sb-btn sb-btn--primary sb-btn--block" disabled={createLoading}>
+                {createLoading ? 'Generating…' : 'Create wallet'}
               </button>
             </>
           )
         ) : (
           <>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <select value={importKind} onChange={(e) => setImportKind(e.target.value as 'wif' | 'xpriv' | 'mnemonic')} className="form-input" style={{ flex: 1, boxSizing: 'border-box' }}>
-                <option value="mnemonic">mnemonic</option>
-                <option value="xpriv">xpriv</option>
-                <option value="wif">wif</option>
+            <div className="sb-field">
+              <label htmlFor="btc-import-kind">What are you importing?</label>
+              <select id="btc-import-kind" value={importKind} onChange={(e) => setImportKind(e.target.value as 'wif' | 'xpriv' | 'mnemonic')} className="sb-input sb-input--small">
+                <option value="mnemonic">Recovery phrase (12 or 24 words)</option>
+                <option value="xpriv">Extended private key (xprv)</option>
+                <option value="wif">Single private key (WIF)</option>
               </select>
             </div>
-            <input type="text" value={importLabel} onChange={(e) => setImportLabel(e.target.value)} placeholder="Label (optional)" className="form-input" style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }} />
+            <div className="sb-field">
+              <label htmlFor="btc-import-secret">
+                {importKind === 'mnemonic' ? 'Recovery phrase' : importKind === 'xpriv' ? 'Extended private key' : 'Private key'}
+              </label>
+              <textarea
+                id="btc-import-secret"
+                value={importSecret}
+                onChange={(e) => setImportSecret(e.target.value)}
+                placeholder={importKind === 'mnemonic' ? 'word word word …' : importKind === 'xpriv' ? 'xprv…' : 'WIF key'}
+                className="sb-input sb-input--mono"
+                style={{ minHeight: 56 }}
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+              />
+            </div>
+            <div className="sb-field">
+              <label htmlFor="btc-import-label">Name (optional)</label>
+              <input id="btc-import-label" type="text" value={importLabel} onChange={(e) => setImportLabel(e.target.value)} placeholder="e.g. Cold wallet" className="sb-input sb-input--small" />
+            </div>
+            <div className="sb-field">
+              <label htmlFor="btc-import-network">Network</label>
+              <select id="btc-import-network" value={globalNetwork} onChange={(e) => setGlobalNetwork(Number(e.target.value))} className="sb-input sb-input--small">
+                <option value={0}>Mainnet</option>
+                <option value={1}>Testnet</option>
+                <option value={2}>Signet</option>
+              </select>
+            </div>
             {importKind !== 'wif' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <label style={{ fontSize: 10, color: 'var(--text-disabled)', whiteSpace: 'nowrap' }}>Starting index</label>
-                <input type="number" min={0} max={999} value={importStartIndex} onChange={(e) => setImportStartIndex(Math.max(0, Number(e.target.value)))} className="form-input" style={{ width: 72, boxSizing: 'border-box' }} />
+              <div className="sb-field">
+                <label htmlFor="btc-import-index">Starting address index</label>
+                <input id="btc-import-index" type="number" min={0} max={999} value={importStartIndex} onChange={(e) => setImportStartIndex(Math.max(0, Number(e.target.value)))} className="sb-input sb-input--small" style={{ width: 96 }} />
+                <p className="sb-hint sb-hint--tight">Leave at 0 unless you know this wallet used later addresses.</p>
               </div>
             )}
-            <textarea value={importSecret} onChange={(e) => setImportSecret(e.target.value)} placeholder="Paste mnemonic, xpriv, or WIF" className="form-input btc-tap-themed-input" style={{ width: '100%', minHeight: 56, boxSizing: 'border-box', marginBottom: 8 }} />
-            <button onClick={() => void handleImportWallet()} className="button-brick" disabled={walletLoading || !importSecret.trim()} style={{ width: '100%', padding: '8px 10px', fontSize: 11, borderRadius: 8 }}>
-              {walletLoading ? 'Working…' : 'Import Wallet'}
+            <button type="button" onClick={() => void handleImportWallet()} className="sb-btn sb-btn--primary sb-btn--block" disabled={walletLoading || !importSecret.trim()}>
+              {walletLoading ? 'Working…' : 'Import wallet'}
             </button>
           </>
         )}
       </div>
 
-      {walletAccounts.length > 0 && (
-        <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 8 }}>
-          {walletAccounts.map((acct) => (
-            <div key={acct.accountId} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 4px', borderBottom: '1px solid var(--border)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 11, fontWeight: 500 }}>{acct.label}</div>
-                <div style={{ fontSize: 10, color: 'var(--text-disabled)', overflow: 'hidden', textOverflow: 'ellipsis' }}>{acct.importKind} • {acct.firstAddress || acct.accountId}</div>
-              </div>
-              {acct.active || acct.accountId === walletActiveId ? (
-                <span style={{ fontSize: 10, color: 'var(--text-dark)' }}>active</span>
-              ) : (
-                <button onClick={() => void handleSelectWallet(acct.accountId)} className="button-brick" disabled={walletLoading} style={{ fontSize: 10, padding: '4px 8px', borderRadius: 6 }}>Use</button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {walletMessage && (
-        <div style={{ marginTop: 8, padding: '6px 8px', border: '1px solid var(--border)', borderRadius: 4, fontSize: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-dark)', background: walletMessage.startsWith('Error') ? 'var(--bg-secondary)' : 'var(--bg)', borderStyle: walletMessage.startsWith('Error') ? 'dashed' : 'solid' }}>
-          {walletMessage}
+      {walletMessage && !hasAccounts && (
+        <div className={`sb-notice${walletMessage.startsWith('Error') ? ' sb-notice--error' : ''}`} role="status">
+          <span style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{walletMessage}</span>
         </div>
       )}
     </div>

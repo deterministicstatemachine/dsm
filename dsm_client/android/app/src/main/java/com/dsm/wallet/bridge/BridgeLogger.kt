@@ -46,22 +46,19 @@ internal object BridgeLogger {
         appendLine("DIAGNOSTICS: payload=${payload.size}b b32=$preview")
     }
 
+    /**
+     * The persisted line names the method, the sizes and a failure, never a
+     * byte of the payload or the answer: the log is exported by the
+     * diagnostics bundle, and a bridge payload can be the wallet's mnemonic
+     * (`generateMnemonic`'s answer, `createGenesisV2`'s request).
+     */
     fun logBridgeCall(method: String, payload: ByteArray, response: ByteArray?, error: Throwable?) {
-        // Always log to file for Beta diagnostics, even if !DEBUG
-        val payloadPreview = if (payload.size <= 32) {
-            BridgeEncoding.base32CrockfordEncode(payload)
-        } else {
-            BridgeEncoding.base32CrockfordEncode(payload.copyOfRange(0, 32)) + "..."
-        }
-
-        val responsePreview = when {
+        val outcome = when {
             error != null -> "ERROR: ${error.message}"
             response == null -> "null"
-            response.size <= 32 -> BridgeEncoding.base32CrockfordEncode(response)
-            else -> BridgeEncoding.base32CrockfordEncode(response.copyOfRange(0, 32)) + "..."
+            else -> "${response.size}b"
         }
-
-        val msg = "BRIDGE: $method(payload=${payload.size}b b32=$payloadPreview) -> $responsePreview"
+        val msg = "BRIDGE: $method(payload=${payload.size}b) -> $outcome"
         if (BuildConfig.DEBUG) {
             Log.d(TAG, msg)
         }

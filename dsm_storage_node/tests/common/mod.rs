@@ -20,3 +20,140 @@ pub fn some_or_panic<T>(value: Option<T>, context: &str) -> T {
         None => panic!("{context}"),
     }
 }
+
+/// A fresh, empty store for one node of one test: a Postgres database of its
+/// own on the server `DSM_TEST_DATABASE_URL` names, dropped and recreated so a
+/// rerun starts empty. `name` must be unique per node per test (letters,
+/// digits, `_`).
+pub async fn fresh_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBPool> {
+    let server = std::env::var("DSM_TEST_DATABASE_URL").unwrap_or_else(|_| {
+        panic!(
+            "DSM_TEST_DATABASE_URL must name a Postgres server: these suites run on the \
+             shipped backend, and skipping them would report a board that never executed it"
+        )
+    });
+    let database = format!("dsm_test_{name}");
+    let admin = ok_or_panic(
+        dsm_storage_node::db::create_pool(&server, dsm_storage_node::db::POOL_MAX_SIZE),
+        "admin pool",
+    );
+    let client = ok_or_panic(admin.get().await, "admin connection");
+    ok_or_panic(
+        client
+            .batch_execute(&format!("DROP DATABASE IF EXISTS {database}"))
+            .await,
+        "drop the test database",
+    );
+    ok_or_panic(
+        client
+            .batch_execute(&format!("CREATE DATABASE {database}"))
+            .await,
+        "create the test database",
+    );
+    drop(client);
+    let url = with_database(&server, &database);
+    let pool = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::db::create_pool(&url, dsm_storage_node::db::POOL_MAX_SIZE),
+        "pool",
+    ));
+    ok_or_panic(dsm_storage_node::db::init_db(&pool).await, "init db");
+    pool
+}
+
+/// The store `fresh_store(name)` made, opened again as a restarting node
+/// opens its store: a new pool on the same database, then `init_db`.
+pub async fn reopened_store(name: &str) -> std::sync::Arc<dsm_storage_node::db::DBPool> {
+    let server = ok_or_panic(
+        std::env::var("DSM_TEST_DATABASE_URL"),
+        "DSM_TEST_DATABASE_URL must name a Postgres server",
+    );
+    let url = with_database(&server, &format!("dsm_test_{name}"));
+    let pool = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::db::create_pool(&url, dsm_storage_node::db::POOL_MAX_SIZE),
+        "pool",
+    ));
+    ok_or_panic(dsm_storage_node::db::init_db(&pool).await, "init db");
+    pool
+}
+
+/// `url` with its database path replaced by `database`.
+fn with_database(url: &str, database: &str) -> String {
+    let (head, query) = match url.split_once('?') {
+        Some((head, query)) => (head, Some(query)),
+        None => (url, None),
+    };
+    let slash = some_or_panic(head.rfind('/'), "the database URL names no database");
+    match query {
+        Some(query) => format!("{}/{database}?{query}", &head[..slash]),
+        None => format!("{}/{database}", &head[..slash]),
+    }
+}
+
+/// A client pinned to a freshly generated storage set CA.
+pub fn set_client() -> reqwest::Client {
+    let ca = ok_or_panic(
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string()]),
+        "generate a test CA",
+    );
+    ok_or_panic(
+        dsm_storage_node::set_client::pinned_set_client(ca.cert.pem().as_bytes()),
+        "pinned client",
+    )
+}
+
+/// A Tokio runtime for a test that drives the served app. `#[tokio::test]`
+/// builds its runtime with `expect`, which this crate's lints refuse.
+pub fn runtime() -> tokio::runtime::Runtime {
+    ok_or_panic(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build(),
+        "a Tokio runtime",
+    )
+}
+
+/// The member the binary serves on `pool`, as member id `id`.
+pub fn member(id: &str, pool: std::sync::Arc<dsm_storage_node::db::DBPool>) -> axum::Router {
+    let state = std::sync::Arc::new(ok_or_panic(
+        dsm_storage_node::AppState::new(id.to_string(), pool, set_client()),
+        "app state",
+    ));
+    served(state)
+}
+
+/// `app`'s answer to `method uri` with `headers` and `body`: its status and
+/// its body.
+pub async fn call(
+    app: &axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Vec<u8>,
+) -> (axum::http::StatusCode, Vec<u8>) {
+    use tower::ServiceExt;
+    let mut req = axum::http::Request::builder().method(method).uri(uri);
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    let req = ok_or_panic(req.body(axum::body::Body::from(body)), "request");
+    let resp = ok_or_panic(app.clone().oneshot(req).await, "the router answers");
+    let status = resp.status();
+    let bytes = ok_or_panic(
+        axum::body::to_bytes(resp.into_body(), usize::MAX).await,
+        "body",
+    );
+    (status, bytes.to_vec())
+}
+
+/// The app the binary serves for `state`, with the deployed fleet's limits.
+pub fn served(state: std::sync::Arc<dsm_storage_node::AppState>) -> axum::Router {
+    dsm_storage_node::build_app(
+        state,
+        dsm_storage_node::AppLimits {
+            body_limit_bytes: 1_048_576,
+            concurrency_limit: 256,
+            request_timeout: std::time::Duration::from_secs(60),
+            wait_bound: dsm_storage_node::api::transport::b0x::MAX_WAIT,
+        },
+    )
+}

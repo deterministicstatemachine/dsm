@@ -27,14 +27,6 @@ object DsmNative {
      */
     @JvmStatic
     external fun initializeBilateralSdk(): Boolean
-
-    /**
-     * Extract device_id and genesis_hash from a GenesisCreated envelope
-     * @param envelopeBytes Protobuf-encoded envelope
-     * @return Byte array: [device_id 32 bytes][genesis_hash 32 bytes] or empty on error
-     */
-    @JvmStatic
-    external fun extractGenesisIdentity(envelopeBytes: ByteArray): ByteArray
 }
 
 class DsmNativeException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! Which `R_econ` obligation an operation carries.
+//!
+//! ## Exhaustive, with no wildcard arm
+//!
+//! [`classify`] matches every [`Operation`] variant by name. A new variant
+//! therefore **fails to compile** until somebody decides what it does to the
+//! economic root. That is the entire point: a wildcard arm would silently
+//! classify tomorrow's value-bearing operation as economically inert, and the
+//! failure would be a missing debit rather than a compile error.
+//!
+//! ## Not a mirror of `Operation::is_value_bearing`
+//!
+//! `is_value_bearing` exists to gate recovery, and it answers a different
+//! question. `DlvUnlock` is value-egress by that measure yet executes with
+//! empty deltas, so it is `None` here. Keeping the two separate is deliberate;
+//! wiring this to that would make one function serve two purposes and quietly
+//! change both when either moved.
+//!
+//! ## `UnsupportedValueTransition` is not `None`
+//!
+//! It means *"this really does touch online economic value, but its
+//! foreign-verifiable source predicate is unspecified."* A lineage containing
+//! one can never become a `ValidatedEconomicRoot` — which is the honest
+//! outcome, and categorically different from claiming the operation was inert.
+
+use crate::economic::state::EconomicLeafState;
+use crate::types::operations::Operation;
+
+/// What an operation does to `R_econ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EconomicEffect {
+    /// Touches no economic leaf.
+    None,
+    /// Has a closed, fully specified write set on `R_econ`.
+    ///
+    /// The write set itself is a function of the operation **and the
+    /// pre-state** — an exact subtraction needs the old value — so it is not
+    /// computable from the operation alone and is not carried here. This arm
+    /// names the category; the mutations and their credit sources are built by
+    /// the write-set construction, against the state.
+    ClosedWriteSet,
+    /// Moves value inside the device-bound offline allocation only.
+    ///
+    /// The allocation is not an `R_econ` member and has no leaf. An operation
+    /// classified here must leave every economic leaf untouched, which is what
+    /// [`check_tripwire`] enforces.
+    OfflineAccountOnly,
+    /// Touches online economic value with no defined foreign-verifiable
+    /// source predicate.
+    UnsupportedValueTransition,
+}
+
+/// Classify an operation's economic effect.
+pub fn classify(operation: &Operation) -> EconomicEffect {
+    use EconomicEffect::*;
+    use Operation::*;
+    match operation {
+        // ── No economic leaf ────────────────────────────────────────────
+        Genesis | Noop => None,
+        Create { .. } | Update { .. } | Delete { .. } => None,
+        AddRelationship { .. } | CreateRelationship { .. } | RemoveRelationship { .. } => None,
+        Link { .. } | Unlink { .. } | Invalidate { .. } | Generic { .. } => None,
+        // Adoption commits a policy leaf; it moves no value and has no write set.
+        AdoptToken { .. } => None,
+        // Recovery re-roots identity material; it does not move value.
+        Recovery { .. } => None,
+        // Value-egress by the recovery gate's measure, but it executes with
+        // empty deltas and moves nothing. This divergence is exactly why the
+        // two classifications are separate functions.
+        DlvUnlock { .. } => None,
+
+        // ── Closed write sets ───────────────────────────────────────────
+        Burn { .. } | CreateToken { .. } => ClosedWriteSet,
+        // One balance credit of exactly the beta payout, funded by one
+        // release of the network's native reserve
+        // (CreditSourceNativeReserveRelease, 0x005D): the units leave the
+        // fixed genesis supply, and the provenance verifier establishes the
+        // release.
+        FaucetClaim { .. } => ClosedWriteSet,
+        // One role-dependent economic event, not a Transfer fact and a
+        // separate Receive fact: the role follows from whether
+        // `to_device_id` is the local device.
+        Transfer {
+            authority_policy, ..
+        } => match authority_policy {
+            Option::None => ClosedWriteSet,
+            // Opting into the offline-bearer tier moves allocation, not
+            // balance. The boundaries (load and unload) are where the online
+            // balance changes, and they are their own operations.
+            Option::Some(_) => OfflineAccountOnly,
+        },
+
+        // ── Touches value, predicate unspecified ────────────────────────
+        //
+        // A standalone `Receive` credits with no independently verifiable
+        // debit to fund it: the peer's debit is what funds a recipient
+        // credit, and a bare Receive does not carry one.
+        Receive { .. } => UnsupportedValueTransition,
+        // Lock/unlock move value between spendable and encumbered. `R_econ`
+        // has no encumbered leaf, so there is no write set to state — not a
+        // no-op, an unspecified one.
+        Lock { .. } | Unlock { .. } | LockToken { .. } | UnlockToken { .. } => {
+            UnsupportedValueTransition
+        }
+        // DlvCreate is STRUCTURALLY state-only (owner directive 2026-08-28:
+        // the legacy value-bearing fields are deleted from the wire) — it
+        // moves nothing. The structural tripwire remains load-bearing: if
+        // balance/consumed-source state changed, `None` is impossible.
+        DlvCreate { .. } => None,
+        DlvClaim { .. } | DlvInvalidate { .. } => UnsupportedValueTransition,
+
+        // SoFi v8. A setup writes ONE relationship leaf and no value — but it
+        // is still a closed write set, because "writes nothing" is what the
+        // tripwire would then enforce and a relationship leaf is a write.
+        SofiSetup { .. } => ClosedWriteSet,
+        // Creation debits the funding into a vault's reserves, and a
+        // fulfillment commits the trader's position: both move value under a
+        // write set fixed by the operation's own preimage.
+        SofiVaultCreate { .. } | SofiFulfill { .. } | EscrowVaultCreate { .. } => ClosedWriteSet,
+    }
+}
+
+/// Economic leaf families observed to have changed across a transition.
+///
+/// Supplied by the caller that applied the transition, from the state it
+/// actually holds — the point of the tripwire is that it does **not** consult
+/// the classification it is checking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObservedEconomicChange {
+    pub balances_changed: bool,
+    pub consumed_sources_changed: bool,
+    /// A SoFi relationship leaf moved (P15-6). It carries no amount, but it is
+    /// still an `R_econ` write — an operation that claims to touch nothing and
+    /// advances a relationship has reached a leaf it has no write set for.
+    pub relationships_changed: bool,
+    /// A vault-creation record was inserted (P15-12).
+    pub vault_creations_changed: bool,
+    /// A token-creation record was inserted (SoFi Amendment S8).
+    pub token_creations_changed: bool,
+}
+
+impl ObservedEconomicChange {
+    pub fn any(&self) -> bool {
+        self.balances_changed
+            || self.consumed_sources_changed
+            || self.relationships_changed
+            || self.vault_creations_changed
+            || self.token_creations_changed
+    }
+}
+
+/// A classification contradicted by what the transition actually did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EconomicTripwire {
+    pub claimed: EconomicEffect,
+    pub observed: ObservedEconomicChange,
+}
+
+impl core::fmt::Display for EconomicTripwire {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "economic tripwire: operation classified {:?} but economic state changed \
+             (balances={}, consumed_sources={}, relationships={}, vault_creations={}) — the \
+             classification is wrong, or the operation reached a leaf it has no write set for",
+            self.claimed,
+            self.observed.balances_changed,
+            self.observed.consumed_sources_changed,
+            self.observed.relationships_changed,
+            self.observed.vault_creations_changed
+        )
+    }
+}
+
+impl std::error::Error for EconomicTripwire {}
+
+/// What a transition's witness actually writes, by leaf family.
+///
+/// Derived from the mutation list a verifier already holds, which is what
+/// makes the tripwire an independent check rather than a restatement of the
+/// classification: the witness is the operation's own account of the leaves it
+/// touches, and this reads it without consulting `classify` at all.
+///
+/// The match is exhaustive on purpose. A new `EconomicLeafState` variant
+/// cannot be added without the compiler demanding an arm here, so no leaf
+/// family can become observable without the tripwire learning to see it.
+pub fn observed_from_witness(
+    witness: &crate::economic::witness::EconomicTransitionWitness,
+) -> ObservedEconomicChange {
+    let mut observed = ObservedEconomicChange::default();
+    for mutation in &witness.mutations {
+        for state in [&mutation.pre_state, &mutation.post_state]
+            .into_iter()
+            .flatten()
+        {
+            match state {
+                EconomicLeafState::Balance(_) => observed.balances_changed = true,
+                EconomicLeafState::ConsumedSource(_) => observed.consumed_sources_changed = true,
+                EconomicLeafState::Relationship(_) => observed.relationships_changed = true,
+                EconomicLeafState::VaultCreation(_) => observed.vault_creations_changed = true,
+                EconomicLeafState::TokenCreation(_) => observed.token_creations_changed = true,
+            }
+        }
+    }
+    observed
+}
+
+/// The structural tripwire: a classification claiming no economic write must
+/// be contradicted by any economic write.
+///
+/// This matters more than the operation names above. The names are a decision
+/// somebody made; this is a check against what actually happened, so it catches
+/// a variant misclassified today and a code path that reaches a leaf by some
+/// route nobody enumerated. `OfflineAccountOnly` is held to the same standard
+/// — the offline allocation is outside `R_econ`, so an operation that claims to
+/// move only allocation and yet moved a leaf has broken the separation the
+/// whole regime split rests on.
+pub fn check_tripwire(
+    claimed: EconomicEffect,
+    observed: ObservedEconomicChange,
+) -> Result<(), EconomicTripwire> {
+    let must_not_write = matches!(
+        claimed,
+        EconomicEffect::None | EconomicEffect::OfflineAccountOnly
+    );
+    if must_not_write && observed.any() {
+        return Err(EconomicTripwire { claimed, observed });
+    }
+    Ok(())
+}

@@ -11,7 +11,6 @@ use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
 use super::get_connection;
-use crate::util::deterministic_time::tick;
 
 /// In-flight withdrawal record.
 #[derive(Debug, Clone)]
@@ -27,8 +26,6 @@ pub struct InFlightWithdrawal {
     pub burn_token_id: Option<String>,
     pub burn_amount_sats: u64,
     pub settlement_poll_count: u32,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 /// Persisted per-leg execution metadata for a withdrawal.
@@ -47,8 +44,6 @@ pub struct InFlightWithdrawalLeg {
     pub exit_vault_op_id: Option<String>,
     pub state: String,
     pub proof_digest: Option<Vec<u8>>,
-    pub created_at: u64,
-    pub updated_at: u64,
 }
 
 /// Parameters for creating a withdrawal entry.
@@ -67,13 +62,11 @@ pub struct CreateWithdrawalParams<'a> {
 pub fn create_withdrawal(params: CreateWithdrawalParams) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick();
 
     conn.execute(
         "INSERT INTO in_flight_withdrawals(
             withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
-            state, burn_token_id, burn_amount_sats, created_at, updated_at
-        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+            state, burn_token_id, burn_amount_sats) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             params.withdrawal_id,
             params.device_id,
@@ -82,8 +75,7 @@ pub fn create_withdrawal(params: CreateWithdrawalParams) -> Result<()> {
             params.policy_commit,
             params.state,
             params.burn_token_id,
-            params.burn_amount_sats as i64,
-            now as i64
+            params.burn_amount_sats as i64
         ],
     )?;
 
@@ -101,11 +93,10 @@ pub fn create_withdrawal(params: CreateWithdrawalParams) -> Result<()> {
 pub fn set_withdrawal_state(withdrawal_id: &str, state: &str) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick();
     conn.execute(
-        "UPDATE in_flight_withdrawals SET state = ?2, updated_at = ?3
+        "UPDATE in_flight_withdrawals SET state = ?2
          WHERE withdrawal_id = ?1",
-        params![withdrawal_id, state, now as i64],
+        params![withdrawal_id, state],
     )?;
     Ok(())
 }
@@ -136,17 +127,13 @@ pub fn set_withdrawal_redemption_txids(
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick();
     conn.execute(
-        "UPDATE in_flight_withdrawals SET redemption_txid = ?2, vault_content_hash = COALESCE(?3, vault_content_hash), updated_at = ?4
+        "UPDATE in_flight_withdrawals SET redemption_txid = ?2, vault_content_hash = COALESCE(?3, vault_content_hash)
          WHERE withdrawal_id = ?1",
         params![
             withdrawal_id,
             redemption_txids_csv,
-            vault_content_hash,
-            now as i64
-        ],
-    )?;
+            vault_content_hash])?;
     Ok(())
 }
 
@@ -154,14 +141,11 @@ pub fn set_withdrawal_redemption_txids(
 pub fn upsert_withdrawal_leg(leg: &InFlightWithdrawalLeg) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick();
     conn.execute(
         "INSERT OR REPLACE INTO in_flight_withdrawal_legs(
             withdrawal_id, leg_index, vault_id, leg_kind, amount_sats,
             estimated_fee_sats, estimated_net_sats, sweep_txid, successor_vault_id,
-            successor_vault_op_id, exit_vault_op_id, state, proof_digest,
-            created_at, updated_at
-        ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            successor_vault_op_id, exit_vault_op_id, state, proof_digest) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             leg.withdrawal_id,
             leg.leg_index as i64,
@@ -175,11 +159,7 @@ pub fn upsert_withdrawal_leg(leg: &InFlightWithdrawalLeg) -> Result<()> {
             leg.successor_vault_op_id,
             leg.exit_vault_op_id,
             leg.state,
-            leg.proof_digest,
-            leg.created_at as i64,
-            now as i64
-        ],
-    )?;
+            leg.proof_digest])?;
     Ok(())
 }
 
@@ -191,8 +171,7 @@ pub fn list_withdrawal_legs(withdrawal_id: &str) -> Result<Vec<InFlightWithdrawa
         r#"
         SELECT withdrawal_id, leg_index, vault_id, leg_kind, amount_sats,
                 estimated_fee_sats, estimated_net_sats, sweep_txid, successor_vault_id,
-                successor_vault_op_id, exit_vault_op_id, state, proof_digest,
-                created_at, updated_at
+                successor_vault_op_id, exit_vault_op_id, state, proof_digest
          FROM in_flight_withdrawal_legs
          WHERE withdrawal_id = ?1
          ORDER BY leg_index ASC
@@ -214,8 +193,6 @@ pub fn list_withdrawal_legs(withdrawal_id: &str) -> Result<Vec<InFlightWithdrawa
                 exit_vault_op_id: row.get(10)?,
                 state: row.get(11)?,
                 proof_digest: row.get(12)?,
-                created_at: row.get::<_, i64>(13)? as u64,
-                updated_at: row.get::<_, i64>(14)? as u64,
             })
         })?
         .filter_map(|r| r.ok())
@@ -227,11 +204,10 @@ pub fn list_withdrawal_legs(withdrawal_id: &str) -> Result<Vec<InFlightWithdrawa
 pub fn increment_settlement_poll_count(withdrawal_id: &str) -> Result<u32> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let now = tick();
     conn.execute(
-        "UPDATE in_flight_withdrawals SET settlement_poll_count = settlement_poll_count + 1, updated_at = ?2
+        "UPDATE in_flight_withdrawals SET settlement_poll_count = settlement_poll_count + 1
          WHERE withdrawal_id = ?1",
-        params![withdrawal_id, now as i64],
+        params![withdrawal_id],
     )?;
     let count: i64 = conn.query_row(
         "SELECT settlement_poll_count FROM in_flight_withdrawals WHERE withdrawal_id = ?1",
@@ -256,7 +232,7 @@ pub fn get_withdrawal(withdrawal_id: &str) -> Result<Option<InFlightWithdrawal>>
         .query_row(
             "SELECT withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
                     state, redemption_txid, vault_content_hash, burn_token_id,
-                    burn_amount_sats, settlement_poll_count, created_at, updated_at
+                    burn_amount_sats, settlement_poll_count
              FROM in_flight_withdrawals WHERE withdrawal_id = ?1",
             params![withdrawal_id],
             |row| {
@@ -272,8 +248,6 @@ pub fn get_withdrawal(withdrawal_id: &str) -> Result<Option<InFlightWithdrawal>>
                     burn_token_id: row.get(8)?,
                     burn_amount_sats: row.get::<_, i64>(9).unwrap_or(0) as u64,
                     settlement_poll_count: row.get::<_, i64>(10).unwrap_or(0) as u32,
-                    created_at: row.get::<_, i64>(11)? as u64,
-                    updated_at: row.get::<_, i64>(12)? as u64,
                 })
             },
         )
@@ -288,9 +262,9 @@ pub fn list_committed_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdra
     let mut stmt = conn.prepare(
         "SELECT withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
                 state, redemption_txid, vault_content_hash, burn_token_id,
-                burn_amount_sats, settlement_poll_count, created_at, updated_at
+                burn_amount_sats, settlement_poll_count
          FROM in_flight_withdrawals WHERE device_id = ?1 AND state = 'committed'
-         ORDER BY created_at ASC ",
+         ORDER BY rowid ASC",
     )?;
     let rows = stmt
         .query_map(params![device_id], |row| {
@@ -306,8 +280,6 @@ pub fn list_committed_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdra
                 burn_token_id: row.get(8)?,
                 burn_amount_sats: row.get::<_, i64>(9).unwrap_or(0) as u64,
                 settlement_poll_count: row.get::<_, i64>(10).unwrap_or(0) as u32,
-                created_at: row.get::<_, i64>(11)? as u64,
-                updated_at: row.get::<_, i64>(12)? as u64,
             })
         })?
         .filter_map(|r| r.ok())
@@ -324,14 +296,14 @@ pub fn list_unresolved_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdr
     let mut stmt = conn.prepare(
                "SELECT withdrawal_id, device_id, amount_sats, dest_address, policy_commit,
                      state, redemption_txid, vault_content_hash, burn_token_id,
-                     burn_amount_sats, settlement_poll_count, created_at, updated_at
+                     burn_amount_sats, settlement_poll_count
                 FROM in_flight_withdrawals
                 WHERE device_id = ?1
                  AND (
                      state = 'committed'
                      OR (state = 'executing' AND redemption_txid IS NOT NULL AND redemption_txid != '')
                  )
-                ORDER BY created_at ASC "
+                ORDER BY rowid ASC"
             )?;
     let rows = stmt
         .query_map(params![device_id], |row| {
@@ -347,8 +319,6 @@ pub fn list_unresolved_withdrawals(device_id: &str) -> Result<Vec<InFlightWithdr
                 burn_token_id: row.get(8)?,
                 burn_amount_sats: row.get::<_, i64>(9).unwrap_or(0) as u64,
                 settlement_poll_count: row.get::<_, i64>(10).unwrap_or(0) as u32,
-                created_at: row.get::<_, i64>(11)? as u64,
-                updated_at: row.get::<_, i64>(12)? as u64,
             })
         })?
         .filter_map(|r| r.ok())
@@ -366,12 +336,12 @@ pub fn find_withdrawal_by_exit_vault_op_id(
         .query_row(
             "SELECT w.withdrawal_id, w.device_id, w.amount_sats, w.dest_address, w.policy_commit,
                     w.state, w.redemption_txid, w.vault_content_hash, w.burn_token_id,
-                    w.burn_amount_sats, w.settlement_poll_count, w.created_at, w.updated_at
+                    w.burn_amount_sats, w.settlement_poll_count
              FROM in_flight_withdrawals w
              INNER JOIN in_flight_withdrawal_legs l
                  ON l.withdrawal_id = w.withdrawal_id
              WHERE l.exit_vault_op_id = ?1
-             ORDER BY w.created_at DESC
+             ORDER BY w.rowid DESC
              LIMIT 1",
             params![exit_vault_op_id],
             |row| {
@@ -387,8 +357,6 @@ pub fn find_withdrawal_by_exit_vault_op_id(
                     burn_token_id: row.get(8)?,
                     burn_amount_sats: row.get::<_, i64>(9).unwrap_or(0) as u64,
                     settlement_poll_count: row.get::<_, i64>(10).unwrap_or(0) as u32,
-                    created_at: row.get::<_, i64>(11)? as u64,
-                    updated_at: row.get::<_, i64>(12)? as u64,
                 })
             },
         )
@@ -402,7 +370,7 @@ mod tests {
     use serial_test::serial;
 
     fn init_test_db() {
-        unsafe { std::env::set_var("DSM_SDK_TEST_MODE", "1") };
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
     }
@@ -562,8 +530,6 @@ mod tests {
             exit_vault_op_id: Some("exit-op-1".to_string()),
             state: "pending".to_string(),
             proof_digest: None,
-            created_at: 100,
-            updated_at: 100,
         };
         upsert_withdrawal_leg(&leg).unwrap();
 
@@ -638,8 +604,6 @@ mod tests {
             exit_vault_op_id: Some("exit-op-abc".to_string()),
             state: "pending".to_string(),
             proof_digest: None,
-            created_at: 100,
-            updated_at: 100,
         };
         upsert_withdrawal_leg(&leg).unwrap();
 
@@ -677,8 +641,6 @@ mod tests {
             exit_vault_op_id: None,
             state: "pending".to_string(),
             proof_digest: None,
-            created_at: 100,
-            updated_at: 100,
         };
         upsert_withdrawal_leg(&leg).unwrap();
 
@@ -713,8 +675,6 @@ mod tests {
                 exit_vault_op_id: None,
                 state: "pending".to_string(),
                 proof_digest: None,
-                created_at: 100,
-                updated_at: 100,
             };
             upsert_withdrawal_leg(&leg).unwrap();
         }

@@ -21,10 +21,49 @@ TEMPLATE="${SCRIPT_DIR}/../config/production.toml"
 COMPOSE_SRC="${SCRIPT_DIR}/docker-compose.node.yml"
 OUT_DIR="${SCRIPT_DIR}/nodes"
 
+FORCE=0
+ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --force) FORCE=1 ;;
+        *) ARGS+=("$a") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 IP1 IP2 [IP3 ... IPN]"
+    echo "Usage: $0 [--force] IP1 IP2 [IP3 ... IPN]"
     echo "  Generates per-node deploy bundles for DSM storage nodes."
-    echo "  Minimum 2 nodes; recommended 6 for N=6 K=3 replication."
+    echo "  Minimum 2 nodes."
+    echo "  --force: overwrite an existing bundle directory (see the warning below)."
+    exit 1
+fi
+
+# THIS SCRIPT MINTS A NEW CA AND DELETES THE OLD ONE.
+#
+# The CA private key exists in exactly one place — ${OUT_DIR}/ca/ca.key. It is
+# not in git, and it cannot be reconstructed. (The public cert lives beside it
+# at ${OUT_DIR}/ca/ca.crt and is bundled into clients as the app asset
+# dsm_client/frontend/public/ca.crt. A second committed copy at scripts/ca.crt
+# was deleted 2026-09-12: it had drifted to a DIFFERENT CA with the same
+# subject, so the two disagreed silently about which fleet a client could
+# trust. Keep exactly one public cert in the tree.) Deleting it means the deployed fleet's certificates can never
+# be reissued or extended: every node must be redeployed with a new CA, and
+# every client CA bundle re-pushed, before anything can talk to anything.
+#
+# Running this to LOOK at the output would therefore destroy the running
+# fleet's deployment material. So an existing bundle directory is never
+# clobbered silently.
+if [ -e "${OUT_DIR}" ] && [ "${FORCE}" -ne 1 ]; then
+    echo "REFUSING: ${OUT_DIR} already exists."
+    echo
+    echo "  Regenerating replaces the CA (private key NOT recoverable — not in git),"
+    echo "  every per-node key, and any saved image tar in that directory."
+    echo "  The live fleet's certs chain to the CA that is there now."
+    echo
+    echo "  To inspect what would be generated, copy the directory aside first."
+    echo "  To genuinely re-issue the fleet's identity, re-run with --force and be"
+    echo "  ready to redeploy EVERY node and re-push the client CA bundle."
     exit 1
 fi
 
@@ -48,6 +87,22 @@ openssl req -new -x509 -days 3650 -key "${CA_DIR}/ca.key" \
 
 # Generate a random PostgreSQL password (shared across all nodes for simplicity)
 PG_PASS="$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
+
+# ----- The canonical storage set: PHASE 1 LEAVES IT UNSET -----
+# A set member is `(id, register_incarnation)`, and the incarnation is minted by
+# the node itself on first boot into its own database — never derivable from the
+# node id or its keys, because a node that kept its key but lost its register
+# must come back as a DIFFERENT member. This generator therefore cannot know the
+# member list, and inventing one would produce a fleet whose configured
+# incarnations no node actually holds; every node would refuse to start.
+#
+# So these bundles ship with `[storage_set]` commented out (each node serves the
+# storage contract and mirrors no set-mate until the set is written). Boot them, collect each node's logged
+# `register incarnation for node <id>: <Base32-Crockford>`, write the full member
+# list into every node config AND the client env config, then restart.
+echo "Storage set: NOT configured by this generator (phase 1)."
+echo "  Boot the fleet, collect each node's logged register incarnation, then"
+echo "  write [[storage_set.members]] into every node config and restart."
 
 # ----- Per-Node Bundles -----
 for i in $(seq 1 "${N}"); do
@@ -79,27 +134,17 @@ EXTEOF
     cp "${CA_DIR}/ca.crt" "${NODE_DIR}/certs/ca.crt"
     chmod 600 "${NODE_DIR}/certs/node.key"
 
-    # --- Build peer list (all nodes except self) ---
-    PEERS=""
-    for j in $(seq 1 "${N}"); do
-        if [ "${j}" -ne "${i}" ]; then
-            PEER_IP="${IPS[$((j - 1))]}"
-            if [ -n "${PEERS}" ]; then
-                PEERS="${PEERS}, "
-            fi
-            PEERS="${PEERS}\"https://${PEER_IP}:8080\""
-        fi
-    done
-
     # --- Node config from template ---
-    DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}"
+    # The database is the node's sibling container on the compose network,
+    # which serves no TLS; the URL says so rather than letting a client fall
+    # back to plaintext behind a TLS setting.
+    DB_URL="postgresql://postgres:5432/dsm_storage?user=dsm&password=${PG_PASS}&sslmode=disable"
     # Escape '&' in DB_URL so sed doesn't interpret it as backreference
     DB_URL_ESCAPED="${DB_URL//&/\\&}"
     sed -e "s|__NODE_ID__|${NODE_ID}|g" \
         -e "s|__LISTEN_ADDR__|0.0.0.0|g" \
         -e "s|__PORT__|8080|g" \
         -e "s|__DATABASE_URL__|${DB_URL_ESCAPED}|g" \
-        -e "s|peers = .*|peers = [${PEERS}]|g" \
         "${TEMPLATE}" > "${NODE_DIR}/config/node.toml"
 
     # --- .env for docker-compose ---
@@ -108,7 +153,6 @@ POSTGRES_DB=dsm_storage
 POSTGRES_USER=dsm
 POSTGRES_PASSWORD=${PG_PASS}
 DSM_PORT=8080
-DSM_METRICS_PORT=9090
 RUST_LOG=info
 ENVEOF
 

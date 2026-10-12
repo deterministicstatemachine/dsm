@@ -24,6 +24,7 @@ class BleEventRelayRobolectricTest {
     @Before
     fun setUp() {
         ctx = ApplicationProvider.getApplicationContext()
+        BleEventRelay.testResetBridgeReady()
         BleEventRelay.clearAll(ctx)
     }
 
@@ -42,15 +43,17 @@ class BleEventRelayRobolectricTest {
     }
 
     @Test
-    fun flushReplaysAndPrunesEvents() {
+    fun flushLeavesEventsWhenDeliveryFails() {
         for (i in 1..3) {
             val env = "event$i".toByteArray(Charsets.ISO_8859_1)
             BleEventRelay.testPersistDirect(ctx, env)
         }
         assertEquals(3, BleEventRelay.getPendingCount(ctx))
+        // No WebView exists in this process, so every delivery fails; a failed delivery
+        // leaves its row and the rows after it for the next flush instead of dropping them.
         BleEventRelay.markBridgeReady(ctx)
         BleEventRelay.flushPersisted(ctx)
-        assertEquals(0, BleEventRelay.getPendingCount(ctx))
+        assertEquals(3, BleEventRelay.getPendingCount(ctx))
     }
 
     @Test

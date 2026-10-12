@@ -16,7 +16,6 @@ export interface UXContextValue {
   notifyToast: (type: string, message?: string, opts?: { persistent?: boolean }) => void;
   clearToast: () => void;
   // BLE features state
-  bleFeaturesDisabled: boolean;
 }
 
 const defaultValue: UXContextValue = {
@@ -28,7 +27,6 @@ const defaultValue: UXContextValue = {
   globalToast: null,
   notifyToast: () => void 0,
   clearToast: () => void 0,
-  bleFeaturesDisabled: false,
 };
 
 const Ctx = createContext<UXContextValue>(defaultValue);
@@ -39,7 +37,6 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
 }) => {
   const [hideComplexity, setHideComplexity] = useState<boolean>(defaultHideComplexity);
   const [globalToast, setGlobalToast] = useState<{ type: string; message?: string; persistent?: boolean } | null>(null);
-  const [bleFeaturesDisabled, setBleFeaturesDisabled] = useState<boolean>(false);
   const nfcWriteActiveRef = useRef(false);
 
   // Toasts are auto-dismissed by GlobalToast (setTimeout, UI-only — not used in protocol logic).
@@ -57,23 +54,8 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   }, [setGlobalToast]);
 
   // BLE permission event listeners (standardized)
-  useBridgeEvent('ble.permission.error', ({ message }) => {
-    notifyToast('error', `Bluetooth permission error: ${message}`);
-  }, [notifyToast]);
-
-  useBridgeEvent('ble.permission.recovery.needed', () => {
-    notifyToast('warning', 'Bluetooth permissions are required for device-to-device transfers. Please grant permissions in settings.');
-  }, [notifyToast]);
-
-  useBridgeEvent('ble.features.disabled', () => {
-    setBleFeaturesDisabled(true);
-    notifyToast('error', 'Bluetooth features have been disabled due to repeated permission issues. Please restart the app and grant permissions.');
-  }, [notifyToast]);
-
-  // Recovery path: re-enable BLE features if permissions are restored
-  useBridgeEvent('ble.features.enabled', () => {
-    setBleFeaturesDisabled(false);
-    notifyToast('success', 'Bluetooth features re-enabled.');
+  useBridgeEvent('ble.permission.error', (detail) => {
+    notifyToast('error', `Bluetooth permission error: ${detail?.message ?? ''}`);
   }, [notifyToast]);
 
   // Global notification when a dBTC deposit auto-completes (visible on any screen)
@@ -86,7 +68,9 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     notifyToast('exit_completed');
   }, [notifyToast]);
 
-  // Global coin sound when the local wallet receives a positive settled credit.
+  // The coin sound follows a credit Rust reported: a completed deposit
+  // (wallet.creditReceived) or items the inbox poller processed
+  // (inbox.updated, below). Never a difference between two balance reads.
   useBridgeEvent('wallet.creditReceived', () => {
     playCoinSound();
   }, []);
@@ -126,9 +110,10 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
   }, [notifyToast]);
 
   // Global notification when new inbox items arrive from storage sync.
-  useBridgeEvent('inbox.updated', (detail?: { unreadCount?: number; newItems?: number }) => {
+  useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
+    playCoinSound();
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;
     void triggerAutoBackupOrToast('inbox_received', label);
   }, [notifyToast]);
@@ -153,20 +138,12 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     globalToast,
     notifyToast,
     clearToast,
-    bleFeaturesDisabled,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [hideComplexity, globalToast, bleFeaturesDisabled]);
+  }), [hideComplexity, globalToast]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 };
 
 export function useUX(): UXContextValue {
   return useContext(Ctx);
-}
-
-export function useUXTerms() {
-  return {
-    getScreenTitle: (key: string) => key,
-    getActionLabel: (key: string) => key,
-  };
 }

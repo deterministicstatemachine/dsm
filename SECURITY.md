@@ -62,7 +62,7 @@ In-scope for security reports:
 - Bilateral 3-phase commit protocol (Phase 1/2/3 ordering, abort safety).
 - Receipt acceptance pipeline (verify_stitched_receipt, SMT replace, EK cert chain).
 - Storage node trust boundaries (PaidK gate, signal hysteresis, registry update).
-- Bitcoin SPV verifier, HTLC unlock, dBTC bridge confirmation gate.
+- Bitcoin SPV verifier, HTLC unlock, dBTC confirmation gate.
 - Supply, accounting, double-spend, fork resolution, or state-transition invariants.
 - Recovery capsule (NFC ring, AEAD AAD format, nonce derivation, ring KDF).
 - Commitments layer (pre-commit, smart-commit, oracle binding).
@@ -89,6 +89,50 @@ Out of scope (please report via normal issue tracker, not via security email):
    reporter (unless you request anonymity).
 
 If you do not want to be credited, say so explicitly in your initial email.
+
+## Known Cryptographic Limitations
+
+Stated up front so that neither a reviewer nor an integrator has to discover
+them by reading the source.
+
+**The SPHINCS+ instantiation is custom and unaudited.** Since construction
+version 2 (2026-10-01) the scheme follows the FIPS 205 (SLH-DSA) structure:
+its algorithms, its 32-byte address with seven types cleared on every type
+change, FORS keys bound to the hypertree leaf that signs them, PRF over both
+`PK.seed` and `SK.seed`, and an `m`-byte message hash. The hash family is
+BLAKE3 (keyed and derive-key modes, one KDF context per role), not SHAKE or
+SHA-2. The structure gives a SPHINCS+-style proof the separation it assumes; it
+does **not** make the scheme FIPS 205 conformant or interoperable, no published
+known-answer vectors apply, and the BLAKE3 instantiation has not had a
+third-party cryptographic review. The frozen vectors in `crates/dsm-sphincs`
+are regression tripwires, not independent validation. That crate is the one
+implementation, linked by the host (`dsm::crypto::sphincs`) and the anchor
+firmware; signatures carry algorithm id `0x0002`.
+
+**Version 1 is retired (security pre-audit, 2026-10-01).** Version 1 gave
+every leaf of a bottom hypertree tree one FORS key, hashed WOTS+ public-key
+compression under the same addresses as hypertree nodes, left `PK.seed` out of
+PRF, and shared addresses between FORS leaves and the first internal level.
+Estimated from the standard FORS-reuse bound, the shared FORS key cost about 37
+bits on SPX256f and about 31 on SPX128f at `2^64` signatures, and was
+negligible at `2^30` or fewer. Version 2 replaced it as a clean cut: every key
+and signature changed, the same mnemonic now derives a different identity, and
+nothing signed under version 1's algorithm id `0x0001` is recognized. Devices
+and anchors must be re-provisioned.
+
+**Earlier, a FORS address collision (2026-08-03).** Two address fields shared
+a word, so all `k` FORS trees drew from one pool of `2^a` secrets. It was found
+by internal review and fixed then; version 2's address layout has since
+replaced the one it was fixed in. The defect was invisible to the test suite
+because the verifier reproduced the same address: **a sign/verify round trip
+cannot detect a defect that the signer and the verifier share.** The tests
+therefore record every hash call by its address and assert on that structure.
+
+**Signing is deterministic.** `opt_rand = PK.seed`, the FIPS 205 deterministic
+variant; there is no hedged mode. A signature is verified before it is
+released, which catches a fault in the hypertree computation, but deterministic
+signing still removes the hedge fresh randomness gives against fault-injection
+and side-channel attacks. Tracked as a hardening item for the anchor.
 
 ## Past Disclosures
 

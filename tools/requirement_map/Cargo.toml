@@ -1,0 +1,31 @@
+[package]
+name = "requirement_map"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "The DSM backend's function-level call graph, read from a SCIP index and content-hashed with BLAKE3, and the seals that lock each requirement finding to it"
+
+[[bin]]
+name = "requirement_map"
+path = "src/main.rs"
+
+[dependencies]
+dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
+scip = "0.10.0"
+protobuf = "3"
+# Token positions: where an item really begins and ends, and which names in
+# call position the index left unresolved.
+proc-macro2 = { version = "1", features = ["span-locations"] }
+# Rust's grammar: what a `cfg` attribute gates is the node it is written on,
+# read by a parser rather than guessed from tokens.
+syn = { version = "2", features = ["full", "visit"] }
+# The tokens of a node syn keeps unparsed (`Verbatim`), to read what they gate.
+quote = "1"
+
+[dev-dependencies]
+# The mutation cases (fixture/mutations.toml), read by the rule-coverage test.
+toml = "1.1.2"
+
+[lints]
+workspace = true

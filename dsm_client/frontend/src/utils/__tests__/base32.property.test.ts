@@ -4,11 +4,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {
   decodeBase32Crockford,
-  decodeBase32Crockford32,
   encodeBase32Crockford,
   encodeBase32Crockford32,
   normalizeBase32Crockford,
 } from "../textId";
+
+/** The 32-byte decode the tests below assert: the canonical decoder plus the length. */
+function decodeBase32Crockford32(s: string): Uint8Array {
+  const bytes = decodeBase32Crockford(s);
+  expect(bytes.length).toBe(32);
+  return bytes;
+}
 
 function randomBytes(n: number): Uint8Array {
   const u = new Uint8Array(n);

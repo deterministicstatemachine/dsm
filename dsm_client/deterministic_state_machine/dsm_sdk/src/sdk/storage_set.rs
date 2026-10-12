@@ -1,0 +1,479 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! Canonical storage-set identity and the local catalog that resolves it.
+//!
+//! A quorum argument ("2 of 3") is only meaningful over ONE stable set of
+//! DISTINCT members. URLs are not identity (a URL can change; two catalog
+//! entries can point at one physical node), and the local node list is not
+//! protocol identity (two devices can be configured differently). So:
+//!
+//! * a **`StorageSet`** is a validated, sorted list of distinct member
+//!   identities (the storage node's own configured `node.id`) with the
+//!   endpoint that currently reaches each one; its **id** is the canonical
+//!   digest of the member identities alone — never of endpoints;
+//! * a **`StorageSetCatalog`** is the device's local knowledge of sets. It
+//!   never chooses a set: an authenticated `storage_set_id` (from a vault's
+//!   signed birth anchor, or frozen on a publication artifact) is RESOLVED
+//!   through it, and an entry is usable only if re-encoding + re-hashing its
+//!   member ids reproduces that exact id. Otherwise the caller fails closed.
+//!   *The anchor chooses the set; configuration only resolves it into
+//!   endpoints.*
+//!
+//! Beta: the catalog holds exactly the one configured fleet, and that set is
+//! immutable for the lifetime of every vault born under it. Membership change
+//! is an explicit handover protocol (follow-up), not a config edit.
+//!
+//! "Distinct members" is executable, not administrative: member ids must be
+//! unique, endpoints must be injective within a set, and (see
+//! `storage_io::put_bytes_to_all_members`) an acceptance counts only when the
+//! node echoes the configured id the catalog says lives at that endpoint.
+
+use dsm::types::error::DsmError;
+
+/// One member of a storage set: its protocol identity, the register
+/// incarnation it is serving, and its current transport endpoint.
+///
+/// `endpoint` is transport metadata and is NOT hashed. The pair
+/// `(member_id, register_incarnation_id)` is: a member that lost and rebuilt
+/// its register is a different entry, so it resolves to a different set id
+/// and cannot serve a vault that committed the old one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageMember {
+    pub member_id: String,
+    pub register_incarnation_id: [u8; 32],
+    pub endpoint: String,
+}
+
+/// A validated storage set. Members are held sorted by `member_id` (byte
+/// order), unique, with injective endpoints; `id` is derived, never supplied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageSet {
+    id: [u8; 32],
+    members: Vec<StorageMember>,
+}
+
+/// Canonical storage-set id over member identities:
+/// `storage_set_id = H_dom(DSM/storage-set, CCB(S))`.
+///
+/// **Delegates to the CCB encoder rather than recomputing the bytes.** This
+/// function used to carry its own copy of the layout, and the storage node
+/// called it directly so the two agreed by sharing code — implementation
+/// monoculture, which holds only until a second implementation exists. The
+/// bytes now come from `dsm::ccb`, which is written from the object registry.
+///
+/// Validity conditions live in the encoder too: at least one member, no empty
+/// id, no duplicate. Duplicates are refused rather than collapsed, since
+/// collapsing would map two logical inputs onto one encoding.
+pub fn compute_storage_set_id(entries: &[(&str, [u8; 32])]) -> Result<[u8; 32], DsmError> {
+    let pairs: Vec<(&[u8], [u8; 32])> = entries
+        .iter()
+        .map(|(id, inc)| (id.as_bytes(), *inc))
+        .collect();
+    let members = dsm::ccb::StorageSetMembers::new(&pairs)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))?;
+    dsm::ccb::storage_set_id(&members)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))
+}
+
+/// This set's members as the CCB object a verifier re-derives an id from.
+///
+/// Handed to callers that must prove a resolved set IS the one an authority
+/// named — they recompute the id from these pairs rather than believing the
+/// catalog.
+pub fn as_ccb_members(set: &StorageSet) -> Result<dsm::ccb::StorageSetMembers, DsmError> {
+    let pairs: Vec<(&[u8], [u8; 32])> = set
+        .members()
+        .iter()
+        .map(|m| (m.member_id.as_bytes(), m.register_incarnation_id))
+        .collect();
+    dsm::ccb::StorageSetMembers::new(&pairs)
+        .map_err(|e| DsmError::invalid_operation(format!("storage set: {e}")))
+}
+
+impl StorageSet {
+    /// Build a set from members, validating distinctness on BOTH axes: unique
+    /// member ids (the identity the quorum counts) and injective endpoints
+    /// (so two catalog members cannot resolve to one physical node and yield
+    /// two "acceptances").
+    pub fn new(mut members: Vec<StorageMember>) -> Result<Self, DsmError> {
+        members.sort_by(|x, y| x.member_id.as_bytes().cmp(y.member_id.as_bytes()));
+        for m in &members {
+            if m.endpoint.trim().is_empty() {
+                return Err(DsmError::invalid_operation(format!(
+                    "storage set: member {:?} has an empty endpoint",
+                    m.member_id
+                )));
+            }
+        }
+        {
+            let mut endpoints: Vec<&str> = members.iter().map(|m| m.endpoint.as_str()).collect();
+            endpoints.sort_unstable();
+            if endpoints.windows(2).any(|w| w[0] == w[1]) {
+                return Err(DsmError::invalid_operation(
+                    "storage set: two members share one endpoint — a set's members must be \
+                     distinct physical nodes",
+                ));
+            }
+        }
+        let entries: Vec<(&str, [u8; 32])> = members
+            .iter()
+            .map(|m| (m.member_id.as_str(), m.register_incarnation_id))
+            .collect();
+        let id = compute_storage_set_id(&entries)?;
+        Ok(Self { id, members })
+    }
+
+    /// The canonical set id (a function of member ids only).
+    pub fn id(&self) -> [u8; 32] {
+        self.id
+    }
+
+    /// Members, sorted by member id.
+    pub fn members(&self) -> &[StorageMember] {
+        &self.members
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The ONE definition of quorum for this set: a strict majority of its
+    /// members (`crate::storage::client_db::publication::quorum_for`).
+    /// Publication quorum (delivery) and the settlement-slot register (the
+    /// one-shot claim) both count with this — birth activation depends on
+    /// publication reaching it, so it must not drift from the register's.
+    pub fn quorum(&self) -> u32 {
+        crate::storage::client_db::publication::quorum_for(self.members.len())
+    }
+
+    pub fn member(&self, member_id: &str) -> Option<&StorageMember> {
+        self.members.iter().find(|m| m.member_id == member_id)
+    }
+}
+
+/// The device's local knowledge of storage sets. Resolution is by
+/// re-derivation: an entry answers for an id only if hashing its own member
+/// ids reproduces that id exactly.
+#[derive(Debug, Clone, Default)]
+pub struct StorageSetCatalog {
+    sets: Vec<StorageSet>,
+}
+
+impl StorageSetCatalog {
+    pub fn new(sets: Vec<StorageSet>) -> Result<Self, DsmError> {
+        let mut ids: Vec<[u8; 32]> = sets.iter().map(|s| s.id()).collect();
+        ids.sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(DsmError::invalid_operation(
+                "storage set catalog: two entries have the same set id",
+            ));
+        }
+        Ok(Self { sets })
+    }
+
+    /// The catalog this device is configured with. Beta: exactly one set — the
+    /// configured fleet — built from the env config's `[[nodes]]` entries,
+    /// where `name` is the node's configured protocol identity (`node.id`) and
+    /// `endpoint` its transport address.
+    pub fn from_env_config() -> Result<Self, DsmError> {
+        Self::from_env(crate::network::NetworkConfigLoader::load_env_config()?)
+    }
+
+    /// The catalog a parsed env config states — the one [`Self::from_env_config`]
+    /// reads from the configured file, and the one the env config bundled into
+    /// the app states.
+    pub(crate) fn from_env(env: crate::network::EnvConfig) -> Result<Self, DsmError> {
+        let members: Vec<StorageMember> = env
+            .nodes
+            .into_iter()
+            .map(|n| {
+                // Fail closed: a member whose incarnation the config cannot
+                // state is a member no set id can be derived over. Decoding
+                // the wrong width is the same failure as omitting it.
+                let raw = crate::util::text_id::decode_base32_crockford(&n.register_incarnation)
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(format!(
+                            "storage set: member {:?} has a register_incarnation that is not \
+                             Base32-Crockford",
+                            n.name
+                        ))
+                    })?;
+                let register_incarnation_id: [u8; 32] = raw.try_into().map_err(|_| {
+                    DsmError::invalid_operation(format!(
+                        "storage set: member {:?} has a register_incarnation that is not 32 bytes",
+                        n.name
+                    ))
+                })?;
+                Ok(StorageMember {
+                    member_id: n.name,
+                    register_incarnation_id,
+                    endpoint: n.endpoint,
+                })
+            })
+            .collect::<Result<_, DsmError>>()?;
+        let set = StorageSet::new(members)?;
+        Self::new(vec![set])
+    }
+
+    /// Resolve an authenticated set id to a usable set, or `None` (the caller
+    /// fails closed — never falls back to "my fleet"). The match is by
+    /// re-hashing the entry's member ids, not by trusting a stored id.
+    pub fn resolve(&self, storage_set_id: &[u8; 32]) -> Option<&StorageSet> {
+        self.sets.iter().find(|s| {
+            let entries: Vec<(&str, [u8; 32])> = s
+                .members()
+                .iter()
+                .map(|m| (m.member_id.as_str(), m.register_incarnation_id))
+                .collect();
+            compute_storage_set_id(&entries).ok().as_ref() == Some(storage_set_id)
+        })
+    }
+
+    /// Beta convenience: the one configured set, when there is exactly one.
+    /// Producers (vault birth) use this to CHOOSE a set; consumers never do —
+    /// they resolve the set the vault was born under.
+    pub fn sole_set(&self) -> Option<&StorageSet> {
+        match self.sets.as_slice() {
+            [only] => Some(only),
+            _ => None,
+        }
+    }
+
+    pub fn sets(&self) -> &[StorageSet] {
+        &self.sets
+    }
+}
+
+/// Resolve the canonical register set for `network_id`, fail-closed, through
+/// the catalog (never `sole_set` — consumers RESOLVE).
+pub fn canonical_set(network_id: &[u8]) -> Result<StorageSet, DsmError> {
+    let profile = root_register_profile(network_id)?;
+    canonical_set_in(&profile, &StorageSetCatalog::from_env_config()?)
+}
+
+/// The network's pinned root-register profile, fail-closed.
+fn root_register_profile(
+    network_id: &[u8],
+) -> Result<dsm::economic::register::RootRegisterProfile, DsmError> {
+    dsm::economic::register::resolve_root_register_profile(network_id).map_err(|e| {
+        DsmError::storage(
+            format!("root register profile: {e}"),
+            None::<std::io::Error>,
+        )
+    })
+}
+
+/// The set of `catalog` that re-derives `profile`'s pinned id, or the
+/// fail-closed refusal.
+fn canonical_set_in(
+    profile: &dsm::economic::register::RootRegisterProfile,
+    catalog: &StorageSetCatalog,
+) -> Result<StorageSet, DsmError> {
+    // The set id is a function of `(member_id, register_incarnation_id)`
+    // pairs, so it cannot be asked for by name: the catalog offers candidates
+    // and `verify_candidate` refuses any that does not re-derive the pinned id.
+    // A member that rebuilt its register therefore stops resolving here
+    // rather than silently serving the register it used to.
+    catalog
+        .sets()
+        .iter()
+        .find(|s| {
+            as_ccb_members(s)
+                .ok()
+                .and_then(|m| profile.verify_candidate(&m).ok())
+                .is_some()
+        })
+        .cloned()
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the canonical register set is not resolvable from the local catalog — fail closed"
+                    .to_string(),
+                None::<std::io::Error>,
+            )
+        })
+}
+
+/// The endpoints of this device's committed network's pinned set, in member
+/// order: where its spool traffic goes.
+pub fn pinned_endpoints() -> Result<Vec<String>, DsmError> {
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    Ok(canonical_set(&network)?
+        .members()
+        .iter()
+        .map(|member| member.endpoint.clone())
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE PIN, RENDERED BACK TO WHAT THE NODES LOGGED. The byte values in
+    /// `dsm::economic::register` are the authority; this proves they are the
+    /// same values each provisioned member logged as
+    /// `register incarnation for node <id>: <Base32-Crockford>` at first boot,
+    /// so the pin cannot silently drift from what the fleet actually holds.
+    /// THE FLEET'S OWN DERIVATION, PINNED. Every provisioned member computed
+    /// this set id from its configured `[[storage_set.members]]` at restart and
+    /// logged `storage set configured: 5 members, id=<this>`. Core must
+    /// re-derive the same digest from the same pairs, or the pin and the fleet
+    /// name different registers.
+    #[test]
+    fn the_pinned_beta_set_id_is_the_one_every_provisioned_member_logged() {
+        let profile = dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
+            .expect("the beta network is provisioned");
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
+            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0",
+            "core's derivation must equal what all five provisioned members logged"
+        );
+    }
+
+    /// The env config the app bundles is what a default install reaches the
+    /// network with, so its `(member, incarnation)` pairs must be the pinned
+    /// beta set: a stale pair (a retired fleet, an incarnation from before a
+    /// reprovision) makes every read of the canonical set fail closed on a
+    /// fresh device, with nothing on screen but the intro.
+    #[test]
+    fn the_bundled_env_config_resolves_the_pinned_beta_set() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../frontend/public/dsm_env_config.toml"
+        );
+        let text = std::fs::read_to_string(path).expect("the bundled env config");
+        let env = crate::network::parse_env_config_toml(&text)
+            .expect("the bundled env config parses under the loader");
+        let catalog = StorageSetCatalog::from_env(env).expect("its members form one set");
+        let profile = root_register_profile(b"dsm-testnet").expect("the beta profile");
+        let set = canonical_set_in(&profile, &catalog)
+            .expect("the bundled env config resolves the pinned beta set");
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&set.id()),
+            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0"
+        );
+    }
+
+    #[test]
+    fn beta_root_register_pins_render_to_the_logged_values() {
+        let logged = [
+            (
+                "dsm-node-1",
+                "B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG",
+            ),
+            (
+                "dsm-node-2",
+                "QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20",
+            ),
+            (
+                "dsm-node-3",
+                "2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG",
+            ),
+            (
+                "dsm-node-4",
+                "S95VHW0YZ413DA4YX972ZA9XDA69FXF4KBCG2AHG89DA8PTY200G",
+            ),
+            (
+                "dsm-node-5",
+                "56VB5TY2G8QKVJNVFKJQX9N0GHJN6VEQ1KV9E88GX272V8G43RWG",
+            ),
+        ];
+        let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
+            .expect("beta network");
+        assert_eq!(pinned.len(), logged.len());
+        for (id, b32) in logged {
+            let (_, inc) = pinned
+                .iter()
+                .find(|(m, _)| *m == id.as_bytes())
+                .unwrap_or_else(|| panic!("{id} is pinned"));
+            assert_eq!(
+                crate::util::text_id::encode_base32_crockford(inc),
+                b32,
+                "{id}: the pinned bytes must render to what that node logged"
+            );
+        }
+    }
+
+    fn m(id: &str, ep: &str) -> StorageMember {
+        // A distinct incarnation per member id, so a test never accidentally
+        // asserts over a set whose entries collide.
+        let mut inc = [0u8; 32];
+        inc[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
+        inc[31] = 0xA7;
+        StorageMember {
+            member_id: id.to_string(),
+            register_incarnation_id: inc,
+            endpoint: ep.to_string(),
+        }
+    }
+
+    fn e(id: &str) -> (&str, [u8; 32]) {
+        let mut inc = [0u8; 32];
+        inc[..id.len().min(32)].copy_from_slice(&id.as_bytes()[..id.len().min(32)]);
+        inc[31] = 0xA7;
+        (id, inc)
+    }
+
+    #[test]
+    fn set_id_is_order_independent_and_length_prefixed() {
+        let a = compute_storage_set_id(&[e("n1"), e("n2"), e("n3")]).unwrap();
+        let b = compute_storage_set_id(&[e("n3"), e("n1"), e("n2")]).unwrap();
+        assert_eq!(a, b, "order-independent");
+        // Length-prefixing: ["ab","c"] and ["a","bc"] concatenate to the same
+        // bytes; they must NOT hash the same.
+        let x = compute_storage_set_id(&[e("ab"), e("c")]).unwrap();
+        let y = compute_storage_set_id(&[e("a"), e("bc")]).unwrap();
+        assert_ne!(x, y, "variable-length ids cannot be re-split");
+        assert!(
+            compute_storage_set_id(&[e("n1"), e("n1")]).is_err(),
+            "duplicate refused"
+        );
+        assert!(compute_storage_set_id(&[]).is_err(), "empty refused");
+        assert!(
+            compute_storage_set_id(&[e(""), e("n1")]).is_err(),
+            "empty id refused"
+        );
+    }
+
+    #[test]
+    fn set_refuses_duplicate_ids_and_shared_endpoints() {
+        assert!(StorageSet::new(vec![m("a", "http://x"), m("a", "http://y")]).is_err());
+        assert!(
+            StorageSet::new(vec![m("a", "http://x"), m("b", "http://x")]).is_err(),
+            "two members on one endpoint are not distinct nodes"
+        );
+        let ok = StorageSet::new(vec![m("b", "http://y"), m("a", "http://x")]).unwrap();
+        assert_eq!(ok.members()[0].member_id, "a", "sorted by member id");
+        assert_eq!(ok.quorum(), 2, "2 of 2 members");
+        let three = StorageSet::new(vec![
+            m("a", "http://x"),
+            m("b", "http://y"),
+            m("c", "http://z"),
+        ])
+        .unwrap();
+        assert_eq!(three.quorum(), 2, "2 of 3");
+    }
+
+    #[test]
+    fn catalog_resolves_only_by_rehash_and_never_falls_back() {
+        let s = StorageSet::new(vec![
+            m("a", "http://x"),
+            m("b", "http://y"),
+            m("c", "http://z"),
+        ])
+        .unwrap();
+        let cat = StorageSetCatalog::new(vec![s.clone()]).unwrap();
+        assert!(cat.resolve(&s.id()).is_some());
+        let foreign = compute_storage_set_id(&[e("c"), e("d"), e("e")]).unwrap();
+        assert!(
+            cat.resolve(&foreign).is_none(),
+            "an unknown set resolves to nothing"
+        );
+        assert!(cat.sole_set().is_some());
+        // Two entries with the same id are refused.
+        assert!(StorageSetCatalog::new(vec![s.clone(), s]).is_err());
+    }
+}

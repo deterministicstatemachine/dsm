@@ -133,13 +133,30 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     fn verify_transition(
         &self,
         _transition_digest: &[u8; 32],
-        _prev_root: &[u8; 32],
-        _next_root: &[u8; 32],
+        _prev_frontier: &[u8; 32],
+        _next_frontier: &[u8; 32],
     ) -> bool {
-        // The DSM relationship transition `h_i → h_{i+1}` (and its `σ^DSM`) is validated by the
-        // bilateral handler's existing checks that GATE this predicate: `rel_proof_parent`
-        // (h_n ∈ R_i) + `rel_proof_child` (h_{n+1} ∈ R_{i+1}) + the §C1 h_{n+1} recompute, and the
-        // accepted-frontier pin. The handler fails closed BEFORE calling accept if any fail.
+        // NOTE the arguments: the trait names them `prev_root`/`next_root`, but `accept_offline`
+        // passes `cert.prev_frontier` and `cert.next_frontier` (accept.rs:235-239) — anchor
+        // frontiers, not device roots. Both are already validated inside the predicate before this
+        // is reached: the accepted-frontier pin (check 2) and `h_{i+1} = H(h_i ‖ D)` inside
+        // `verify_cert_frontier_and_sigs` (checks 8-11). So there is nothing here left for this
+        // hook to re-check from its arguments.
+        //
+        // What Def. 12 step 12 actually asks for is `σ^DSM` over the transition plus the whole-state
+        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship path is not
+        // carried in the OfflineRelease — it rides in the stitched receipt. The bilateral handler
+        // verifies the receipt's state rules, together with the §C1 `h_{n+1}` recompute, and
+        // `accept_offline_release` refuses before running the predicate unless the cert's device
+        // roots equal the ones the handler verified (anchor_accept.rs:251-257).
+        //
+        // So step 12 is genuinely a no-op INSIDE the predicate, and its correctness rests on caller
+        // ordering rather than on anything this function can observe. That is a real gap between the
+        // seventeen-check predicate as written and the fifteen the code enforces, and closing it
+        // means carrying the relationship proofs in the release so the check can be self-contained
+        // — a wire change, not a patch to this function. Do not "fix" this by inventing an equality
+        // check over the arguments: they are frontiers, they are already checked, and comparing them
+        // to device roots type-checks while being meaningless.
         true
     }
 
@@ -148,9 +165,16 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     }
 
     fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
-        // Dormant in Stage 3: acceptance sets is_genesis=false and never calls this. First-transfer
-        // admission stays TOFU (`pin_admit_decision`). The real dual-identity upgrade cert is Stage 5.
-        true
+        // Dormant in Stage 3: acceptance sets is_genesis=false, so the predicate never reaches this.
+        // First-transfer admission stays TOFU (`pin_admit_decision`); the real dual-identity upgrade
+        // cert is Stage 5.
+        //
+        // FAILS CLOSED rather than returning true. Because the hook is unreachable today the two
+        // answers are behaviourally identical NOW, which is exactly why the choice matters: whoever
+        // first sets `is_genesis = true` inherits whatever this returns. `true` would silently admit
+        // every genesis release. `false` refuses them until the Stage 5 cert is implemented, which
+        // is a visible failure that names this function instead of a silent admission.
+        false
     }
 }
 
@@ -205,6 +229,45 @@ pub(crate) fn pin_admit_decision(
     PinAdmitDecision::NoChange
 }
 
+/// The anchor-state leaves a sender's offline-bearer step moves, DERIVED — never read — from its
+/// release: the counter's successor is `u_i + 1`, and the frontier's successor is
+/// `anchor_root_advance(h_i, D_{i+1})` with `D_{i+1}` recomputed from the release's transition
+/// under this receiver's own challenge `r_R`. Both leaves are under `bundle`, the one this
+/// receiver pins (or is admitting) for the sender. A release whose carried successor is not the
+/// derived one is refused. The release's signatures are checked by [`accept_offline_release`]
+/// before anything commits; these leaves are what the step's receipt must prove it moved.
+pub fn bearer_leaves_of_release(
+    offline_release: &[u8],
+    bundle: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Result<dsm::verification::receipt_verification::BearerLeaves, OfflineRecover> {
+    use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
+    if offline_release.is_empty() {
+        return Err(OfflineRecover::MissingRelease);
+    }
+    let rel = pb::OfflineRelease::decode(offline_release)
+        .map_err(|_| OfflineRecover::Malformed)?
+        .to_release()
+        .map_err(|_| OfflineRecover::Malformed)?;
+    let t = rel.transition.as_transition();
+    let next_counter = t
+        .anchor_counter
+        .checked_add(1)
+        .ok_or(OfflineRecover::Malformed)?;
+    let next_frontier =
+        anchor_root_advance(t.prev_root, &transition_digest(&t, receiver_challenge));
+    if t.next_anchor_counter != next_counter || *t.next_root != next_frontier {
+        return Err(OfflineRecover::Predicate(
+            AcceptError::TransitionProofInvalid,
+        ));
+    }
+    Ok(dsm::verification::receipt_verification::BearerLeaves {
+        bundle: *bundle,
+        anchor_before: anchor_state_leaf(bundle, t.prev_root, t.anchor_counter),
+        anchor_after: anchor_state_leaf(bundle, &next_frontier, next_counter),
+    })
+}
+
 /// The holder's successor frontier state, returned on acceptance so the receiver can ADOPT it
 /// (persist as the new accepted frontier) once the canonical commit succeeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,7 +308,7 @@ pub fn accept_offline_release(
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
 
     // Tie the cert's device roots to the roots the handler INDEPENDENTLY verified from the confirm
-    // (rel_proof_parent/child + §C1 recompute). The predicate checks Π against the CERT roots; if
+    // (the stitched receipt's relationship path + §C1 recompute). The predicate checks Π against the CERT roots; if
     // the cert roots were not the actual verified device roots, the sender could sign an arbitrary
     // parallel tree — reject before running the predicate.
     if rel.cert.sender_device_root_before != *expected_sender_device_root_before
@@ -354,6 +417,28 @@ mod tests {
             branch_proof: vec![],
         }
         .encode_to_vec()
+    }
+
+    /// The genesis upgrade-cert hook is unreachable today (`is_genesis` is hardcoded `false` at
+    /// every construction site), so this is the only way to observe what it answers. It must be
+    /// `false`.
+    ///
+    /// The point is precisely that the hook is dormant: whoever first sets `is_genesis = true`
+    /// inherits this answer. `true` would silently admit every genesis release; `false` refuses
+    /// them with a named error until the Stage 5 dual-identity cert exists.
+    #[test]
+    fn the_dormant_genesis_upgrade_cert_hook_fails_closed() {
+        let receiver = [7u8; 32];
+        let bundle = [9u8; 32];
+        let dsm = DsmStateVerifier {
+            receiver_device_id: &receiver,
+            bundle: &bundle,
+        };
+        assert!(
+            !dsm.verify_upgrade_cert(&bundle),
+            "verify_upgrade_cert returned true while dormant — the first caller to set \
+             is_genesis=true would admit genesis releases with no cert check at all"
+        );
     }
 
     #[test]

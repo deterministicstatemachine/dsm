@@ -1,160 +1,463 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! SoFi route handlers for AppRouterImpl.
-//!
-//! Handles `sofi.launch`.  Payload shape:
-//!
-//!   byte 0 = version (must be 1)
-//!   byte 1 = mode    (0 = local, 1 = posted)
-//!   byte 2 = type    (0 = vault, 1 = policy)
-//!   rest   = proto-encoded body:
-//!             type=0 → DlvInstantiateV1 (delegated to dlv.create)
-//!             type=1 → TokenPolicyV3    (delegated to tokens.publishPolicy)
-//!
-//! Per plan Part D.5 this handler owns ONLY header parse + routing; the
-//! actual state-machine work lives behind the two delegate routes so
-//! SoFi stays a composition layer with no parallel legacy path.  Posted
-//! mode additionally mirrors the resulting vault artifact via the DLV
-//! manager's `create_vault_post` so the storage-sync pipeline can pick
-//! it up after the core transition commits.
+
+//! SoFi routes (SoFi §27). The app reaches SoFi only through these. Each route
+//! decodes the user's intent, checks its shape, and hands it to its
+//! orchestration entry in `sdk::sofi_flow`; producers assemble, Core decides
+//! (§26). A route never interprets a storage read.
 
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppInvoke, AppResult};
 use super::app_router_impl::AppRouterImpl;
-use super::response_helpers::err;
+use super::response_helpers::{err, pack_envelope_ok};
+use crate::bridge::{AppInvoke, AppResult};
+use super::wallet_routes::{
+    format_base_units_for_display, parse_display_amount_to_base_units, token_of_commit,
+};
+use crate::sdk::sofi_flow::{
+    CloseIntent, CreateVaultIntent, FindRouteIntent, PositionOutcome, PositionState, RelayIntent,
+    Search, TradeIntent,
+};
+use dsm::sofi::validation::RouteShape;
 
-/// Extract the `value` field from an AppStateResponse buried in a framed
-/// Envelope v3 result payload.  Returns `None` for any decode failure or
-/// non-AppStateResponse payload.  Used by posted-mode mirroring.
-fn extract_app_state_response_value(data: &[u8]) -> Option<String> {
-    let payload = data.strip_prefix(&[0x03])?;
-    let env = dsm::envelope::from_canonical_bytes(payload).ok()?;
-    match env.payload? {
-        generated::envelope::Payload::AppStateResponse(asr) => asr.value,
-        _ => None,
+/// The most hops a route may have (`ROUTE_MAX_LEGS`, SoFi §31).
+const ROUTE_MAX_LEGS: usize = dsm::sofi::wire::ROUTE_MAX_LEGS;
+
+pub(super) fn d32(bytes: &[u8], what: &str, route: &str) -> Result<[u8; 32], String> {
+    <[u8; 32]>::try_from(bytes).map_err(|_| format!("{route}: {what} must be 32 bytes"))
+}
+
+/// An amount the user entered for `token`, in token units, as base units: the
+/// one parser, against the decimals of the token's committed policy.
+pub(super) fn entered(
+    text: &str,
+    token: &[u8; 32],
+    what: &str,
+    route: &str,
+) -> Result<u64, String> {
+    let (ticker, decimals) = token_of_commit(token).map_err(|e| format!("{route}: {what}: {e}"))?;
+    parse_display_amount_to_base_units(text, decimals)
+        .map_err(|e| format!("{route}: {what} {text:?} in {ticker}: {e}"))
+}
+
+/// Base units of `token`, rendered for display.
+pub(super) fn shown(amount: u64, token: &[u8; 32], route: &str) -> Result<String, String> {
+    let (.., decimals) = token_of_commit(token).map_err(|e| format!("{route}: {e}"))?;
+    Ok(format_base_units_for_display(amount, decimals))
+}
+
+pub(super) fn request<T: Message + Default>(i: &AppInvoke) -> Result<T, String> {
+    let arg_pack = generated::ArgPack::decode(&*i.args)
+        .map_err(|e| format!("{}: decode ArgPack failed: {e}", i.method))?;
+    T::decode(&*arg_pack.body).map_err(|e| format!("{}: decode request failed: {e}", i.method))
+}
+
+pub(super) fn position_response(outcome: PositionOutcome) -> AppResult {
+    let state = match outcome.state {
+        PositionState::Realized => generated::SofiPositionState::Realized,
+        PositionState::Void => generated::SofiPositionState::Void,
+        PositionState::Invalid => generated::SofiPositionState::Invalid,
+        PositionState::RetriesExhausted => generated::SofiPositionState::RetriesExhausted,
+    };
+    pack_envelope_ok(generated::envelope::Payload::SofiPositionResponse(
+        generated::SofiPositionResponse {
+            position: outcome.position,
+            state: state as i32,
+        },
+    ))
+}
+
+/// A trade or route's intent: the tokens it names and the amounts the user
+/// entered, parsed against each token's decimals.
+fn trade_intent(
+    vault_ids: Vec<[u8; 32]>,
+    token_in: &[u8],
+    token_out: &[u8],
+    amount_in: &str,
+    min_amount_out: &str,
+    route: &str,
+) -> Result<TradeIntent, String> {
+    let token_in = d32(token_in, "token_in_policy_commit", route)?;
+    let token_out = d32(token_out, "token_out_policy_commit", route)?;
+    if token_in == token_out {
+        return Err(format!("{route}: the two tokens must differ"));
     }
+    let amount_in = entered(amount_in, &token_in, "amount in", route)?;
+    if amount_in == 0 {
+        return Err(format!("{route}: amount in must be positive"));
+    }
+    Ok(TradeIntent {
+        vault_ids,
+        token_in_policy_commit: token_in,
+        token_out_policy_commit: token_out,
+        amount_in,
+        min_amount_out: entered(min_amount_out, &token_out, "minimum out", route)?,
+    })
 }
 
 impl AppRouterImpl {
-    /// Dispatch handler for `sofi.*` invoke routes.
     pub(crate) async fn handle_sofi_invoke(&self, i: AppInvoke) -> AppResult {
+        let network = match crate::sdk::economic_admission_flow::committed_network_id() {
+            Ok(n) => n,
+            Err(e) => return err(format!("{}: no committed network: {e}", i.method)),
+        };
+        // The network's pinned set (DSM Amendment A5): every SoFi cell and
+        // object lives on it.
+        let set = match crate::sdk::storage_set::canonical_set(&network) {
+            Ok(s) => s,
+            Err(e) => return err(format!("{}: no pinned storage set: {e}", i.method)),
+        };
         match i.method.as_str() {
-            "sofi.launch" => self.sofi_launch(i).await,
-            other => err(format!("unknown sofi invoke method: {other}")),
+            "sofi.createVault" => self.sofi_create_vault(&i, &set).await,
+            "sofi.findRoute" => self.sofi_find_route(&i, &set).await,
+            "sofi.trade" => self.sofi_trade(&i, &set).await,
+            "sofi.route" => self.sofi_route(&i, &set).await,
+            "sofi.close" => self.sofi_close(&i, &set).await,
+            "sofi.relay" => self.sofi_relay(&i, &set).await,
+            "sofi.resolve" => self.sofi_resolve(&set).await,
+            "sofi.vaults" => self.sofi_vaults(&set).await,
+            other => err(format!("unknown SoFi route: {other}")),
         }
     }
 
-    async fn sofi_launch(&self, i: AppInvoke) -> AppResult {
-        // Unwrap ArgPack if present; outer body is still header + proto payload.
-        let blob: Vec<u8> = if let Ok(pack) = generated::ArgPack::decode(&*i.args) {
-            if pack.codec != generated::Codec::Proto as i32 {
-                return err("sofi.launch: ArgPack.codec must be PROTO".into());
-            }
-            pack.body
-        } else {
-            i.args.clone()
+    async fn sofi_create_vault(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.createVault";
+        let req: generated::SofiCreateVaultRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
         };
-
-        if blob.len() < 3 {
-            return err("sofi.launch: payload must have at least 3-byte header".into());
-        }
-
-        let version = blob[0];
-        let mode = blob[1];
-        let typ = blob[2];
-
-        if version != 1 {
-            return err(format!(
-                "sofi.launch: unsupported version {version}, expected 1"
-            ));
-        }
-        if mode > 1 {
-            return err(format!(
-                "sofi.launch: invalid mode {mode}, expected 0 (local) or 1 (posted)"
-            ));
-        }
-
-        let payload = &blob[3..];
-        if payload.is_empty() {
-            return err("sofi.launch: empty payload after header".into());
-        }
-
-        match typ {
-            // ---- vault (type=0) ----
-            0 => {
-                // Pre-decode so a malformed body fails here with a targeted
-                // error rather than inside dlv.create.
-                if let Err(e) = generated::DlvInstantiateV1::decode(payload) {
-                    return err(format!("sofi.launch: decode DlvInstantiateV1 failed: {e}"));
+        let intent = match (|| -> Result<CreateVaultIntent, String> {
+            // The two tokens in the order the user named them, each reserve
+            // parsed against its own token. The pair a vault commits is ordered
+            // bytewise (§28): the order put here, never asked of the caller.
+            let first = d32(&req.token_a_policy_commit, "token_a_policy_commit", ROUTE)?;
+            let second = d32(&req.token_b_policy_commit, "token_b_policy_commit", ROUTE)?;
+            let first_reserve = entered(&req.reserve_a_entered, &first, "reserve A", ROUTE)?;
+            let second_reserve = entered(&req.reserve_b_entered, &second, "reserve B", ROUTE)?;
+            if first_reserve == 0 || second_reserve == 0 {
+                return Err(format!("{ROUTE}: both reserves must be positive"));
+            }
+            let ((a, reserve_a), (b, reserve_b)) = match first.cmp(&second) {
+                std::cmp::Ordering::Less => ((first, first_reserve), (second, second_reserve)),
+                std::cmp::Ordering::Greater => ((second, second_reserve), (first, first_reserve)),
+                std::cmp::Ordering::Equal => {
+                    return Err(format!("{ROUTE}: a pair is two different tokens"))
                 }
-
-                let argpack = generated::ArgPack {
-                    schema_hash: None,
-                    codec: generated::Codec::Proto as i32,
-                    body: payload.to_vec(),
-                };
-                let inner = AppInvoke {
-                    method: "dlv.create".to_string(),
-                    args: argpack.encode_to_vec(),
-                };
-                let resp = self.handle_dlv_invoke(inner).await;
-
-                if mode == 1 && resp.success {
-                    // Posted mode: mirror the vault artifact.  The vault_id
-                    // is carried back in the AppStateResponse from dlv.create
-                    // inside a framed Envelope v3 payload.
-                    if let Some(vid_b32) = extract_app_state_response_value(&resp.data) {
-                        self.mirror_vault_post_best_effort(&vid_b32).await;
+            };
+            Ok(CreateVaultIntent {
+                token_a_policy_commit: a,
+                token_b_policy_commit: b,
+                reserve_a,
+                reserve_b,
+                fee_bps: req.fee_bps,
+            })
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        if req.label.len() > crate::storage::client_db::sofi_vault_head::LABEL_MAX {
+            return err(format!(
+                "{ROUTE}: a vault label is at most {} bytes",
+                crate::storage::client_db::sofi_vault_head::LABEL_MAX
+            ));
+        }
+        match crate::sdk::sofi_flow::create_vault(&self.core_sdk, set, &intent).await {
+            Ok(done) => {
+                // The account's own name for the vault, kept with the vault it
+                // names; a vault created and not named is an error the caller
+                // sees, with the vault it created.
+                if !req.label.is_empty() {
+                    if let Err(e) = crate::storage::client_db::sofi_vault_head::put_label(
+                        &done.vault_id,
+                        &req.label,
+                    ) {
+                        return err(format!(
+                            "{ROUTE}: vault {} was created and its label was not kept: {e}",
+                            crate::util::text_id::encode_base32_crockford(&done.vault_id)
+                        ));
                     }
                 }
-
-                resp
+                pack_envelope_ok(generated::envelope::Payload::SofiVaultCreatedResponse(
+                    generated::SofiVaultCreatedResponse {
+                        vault_id: done.vault_id.to_vec(),
+                        position: done.position,
+                    },
+                ))
             }
-
-            // ---- policy (type=1) ----
-            1 => {
-                if let Err(e) = generated::TokenPolicyV3::decode(payload) {
-                    return err(format!("sofi.launch: decode TokenPolicyV3 failed: {e}"));
-                }
-                let inner = AppInvoke {
-                    method: "tokens.publishPolicy".to_string(),
-                    args: payload.to_vec(),
-                };
-                self.handle_token_invoke(inner).await
-            }
-
-            _ => err(format!(
-                "sofi.launch: unknown type byte {typ}, expected 0 (vault) or 1 (policy)"
-            )),
+            Err(e) => err(format!("{ROUTE}: {e}")),
         }
     }
 
-    /// Posted-mode vault mirroring.  Best-effort: failure here does not
-    /// fail the overall launch — the core transition has already committed
-    /// and the vault is addressable locally.  The actual network POST is
-    /// driven by the storage-sync pipeline reading from the DLV manager.
-    async fn mirror_vault_post_best_effort(&self, vault_id_b32: &str) {
-        let vid32 = match crate::util::text_id::decode_bytes32(vault_id_b32) {
-            Some(v) => v,
-            None => {
-                log::warn!(
-                    "[sofi.launch] posted-mode mirror skipped: invalid Base32 vault_id {vault_id_b32}"
-                );
-                return;
-            }
+    async fn sofi_find_route(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.findRoute";
+        let req: generated::SofiFindRouteRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
         };
-        let dlv_manager = self.bitcoin_tap.dlv_manager();
-        match dlv_manager
-            .create_vault_post(&vid32, "sofi-launch", None)
-            .await
-        {
-            Ok(_) => {
-                log::info!("[sofi.launch] posted-mode vault post prepared for {vault_id_b32}");
+        let intent = match (|| -> Result<FindRouteIntent, String> {
+            let token_in = d32(&req.token_in_policy_commit, "token_in_policy_commit", ROUTE)?;
+            let token_out = d32(
+                &req.token_out_policy_commit,
+                "token_out_policy_commit",
+                ROUTE,
+            )?;
+            if token_in == token_out {
+                return Err(format!("{ROUTE}: the two tokens must differ"));
             }
-            Err(e) => {
-                log::warn!("[sofi.launch] posted-mode mirror failed to build vault post: {e}");
+            let amount_in = entered(&req.amount_in_entered, &token_in, "amount in", ROUTE)?;
+            if amount_in == 0 {
+                return Err(format!("{ROUTE}: amount in must be positive"));
             }
+            Ok(FindRouteIntent {
+                token_in_policy_commit: token_in,
+                token_out_policy_commit: token_out,
+                amount_in,
+            })
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        let found = match crate::sdk::sofi_flow::find_route(&self.core_sdk, set, &intent).await {
+            Ok(found) => found,
+            Err(e) => return err(format!("{ROUTE}: {e}")),
+        };
+        let mut hops = Vec::with_capacity(found.hops.len());
+        for h in found.hops {
+            let (amount_in_display, amount_out_display) = match (
+                shown(h.amount_in, &h.token_in_policy_commit, ROUTE),
+                shown(h.amount_out, &h.token_out_policy_commit, ROUTE),
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return err(e),
+            };
+            hops.push(generated::SofiHopV1 {
+                vault_id: h.vault_id.to_vec(),
+                parent_root: h.parent_root.to_vec(),
+                token_in_policy_commit: h.token_in_policy_commit.to_vec(),
+                token_out_policy_commit: h.token_out_policy_commit.to_vec(),
+                amount_in: h.amount_in,
+                amount_out: h.amount_out,
+                amount_in_display,
+                amount_out_display,
+            });
+        }
+        let search = match found.search {
+            Search::Complete => generated::SofiSearch::Complete,
+            Search::Partial => generated::SofiSearch::Partial,
+        };
+        let mut response = generated::SofiFindRouteResponse {
+            hops,
+            search: search as i32,
+            ..Default::default()
+        };
+        if let Some(ends) = found.ends {
+            let (amount_in_display, amount_out_display) = match (
+                shown(ends.amount_in, &intent.token_in_policy_commit, ROUTE),
+                shown(ends.amount_out, &intent.token_out_policy_commit, ROUTE),
+            ) {
+                (Ok(a), Ok(b)) => (a, b),
+                (Err(e), _) | (_, Err(e)) => return err(e),
+            };
+            response.shape = match ends.shape {
+                RouteShape::Chain => generated::SofiRouteShape::Chain,
+                RouteShape::Split => generated::SofiRouteShape::Split,
+            } as i32;
+            response.amount_in = ends.amount_in;
+            response.amount_out = ends.amount_out;
+            response.amount_in_display = amount_in_display;
+            response.amount_out_display = amount_out_display;
+        }
+        pack_envelope_ok(generated::envelope::Payload::SofiFindRouteResponse(
+            response,
+        ))
+    }
+
+    async fn sofi_trade(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.trade";
+        let req: generated::SofiTradeRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let intent = match (|| -> Result<TradeIntent, String> {
+            let vault_id = d32(&req.vault_id, "vault_id", ROUTE)?;
+            trade_intent(
+                vec![vault_id],
+                &req.token_in_policy_commit,
+                &req.token_out_policy_commit,
+                &req.amount_in_entered,
+                &req.min_amount_out_entered,
+                ROUTE,
+            )
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match crate::sdk::sofi_flow::trade(&self.core_sdk, set, &intent).await {
+            Ok(outcome) => position_response(outcome),
+            Err(e) => err(format!("{ROUTE}: {e}")),
+        }
+    }
+
+    async fn sofi_route(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.route";
+        let req: generated::SofiRouteRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let intent = match (|| -> Result<TradeIntent, String> {
+            if req.vault_ids.is_empty() || req.vault_ids.len() > ROUTE_MAX_LEGS {
+                return Err(format!("{ROUTE}: a route has 1..={ROUTE_MAX_LEGS} hops"));
+            }
+            let mut vault_ids = Vec::with_capacity(req.vault_ids.len());
+            for v in &req.vault_ids {
+                let v = d32(v, "vault_id", ROUTE)?;
+                if vault_ids.contains(&v) {
+                    return Err(format!("{ROUTE}: a route's vaults must be distinct"));
+                }
+                vault_ids.push(v);
+            }
+            trade_intent(
+                vault_ids,
+                &req.token_in_policy_commit,
+                &req.token_out_policy_commit,
+                &req.amount_in_entered,
+                &req.min_amount_out_entered,
+                ROUTE,
+            )
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match crate::sdk::sofi_flow::trade(&self.core_sdk, set, &intent).await {
+            Ok(outcome) => position_response(outcome),
+            Err(e) => err(format!("{ROUTE}: {e}")),
+        }
+    }
+
+    async fn sofi_close(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.close";
+        let req: generated::SofiCloseRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let vault_id = match d32(&req.vault_id, "vault_id", ROUTE) {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match crate::sdk::sofi_flow::close(&self.core_sdk, set, &CloseIntent { vault_id }).await {
+            Ok(outcome) => position_response(outcome),
+            Err(e) => err(format!("{ROUTE}: {e}")),
+        }
+    }
+
+    async fn sofi_relay(
+        &self,
+        i: &AppInvoke,
+        set: &crate::sdk::storage_set::StorageSet,
+    ) -> AppResult {
+        const ROUTE: &str = "sofi.relay";
+        let req: generated::SofiRelayRequest = match request(i) {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let intent = match (|| -> Result<RelayIntent, String> {
+            Ok(RelayIntent {
+                trader_genesis: d32(&req.trader_genesis, "trader_genesis", ROUTE)?,
+                trader_device_id: d32(&req.trader_device_id, "trader_device_id", ROUTE)?,
+                position: req.position,
+            })
+        })() {
+            Ok(v) => v,
+            Err(e) => return err(e),
+        };
+        match crate::sdk::sofi_flow::relay(set, &intent).await {
+            Ok(done) => pack_envelope_ok(generated::envelope::Payload::SofiRelayResponse(
+                generated::SofiRelayResponse {
+                    cells_written: done.cells_written,
+                },
+            )),
+            Err(e) => err(format!("{ROUTE}: {e}")),
+        }
+    }
+
+    async fn sofi_vaults(&self, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+        const ROUTE: &str = "sofi.vaults";
+        let owned = match crate::sdk::sofi_flow::owned_vaults(&self.core_sdk, set).await {
+            Ok(owned) => owned,
+            Err(e) => return err(format!("{ROUTE}: {e}")),
+        };
+        let mut vaults = Vec::with_capacity(owned.len());
+        for v in owned {
+            let row = (|| -> Result<generated::SofiOwnedVaultV1, String> {
+                let (token_a_symbol, ..) = token_of_commit(&v.token_a_policy_commit)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+                let (token_b_symbol, ..) = token_of_commit(&v.token_b_policy_commit)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+                let status = match v.status {
+                    dsm::sofi::wire::VAULT_STATUS_ACTIVE => generated::SofiVaultStatus::Active,
+                    dsm::sofi::wire::VAULT_STATUS_RETIRED => generated::SofiVaultStatus::Retired,
+                    other => {
+                        return Err(format!(
+                            "{ROUTE}: vault status {other:#06x} is not declared"
+                        ))
+                    }
+                };
+                // The account's own name for the vault; a vault it never named
+                // is the wire's empty label.
+                let label: String = crate::storage::client_db::sofi_vault_head::label(&v.vault_id)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?
+                    .into_iter()
+                    .collect();
+                Ok(generated::SofiOwnedVaultV1 {
+                    vault_id: v.vault_id.to_vec(),
+                    token_a_policy_commit: v.token_a_policy_commit.to_vec(),
+                    token_b_policy_commit: v.token_b_policy_commit.to_vec(),
+                    token_a_symbol,
+                    token_b_symbol,
+                    reserve_a: v.reserve_a,
+                    reserve_b: v.reserve_b,
+                    reserve_a_display: shown(v.reserve_a, &v.token_a_policy_commit, ROUTE)?,
+                    reserve_b_display: shown(v.reserve_b, &v.token_b_policy_commit, ROUTE)?,
+                    fee_bps: v.fee_bps,
+                    generation: v.generation,
+                    status: status as i32,
+                    label,
+                })
+            })();
+            match row {
+                Ok(row) => vaults.push(row),
+                Err(e) => return err(e),
+            }
+        }
+        pack_envelope_ok(generated::envelope::Payload::SofiVaultsResponse(
+            generated::SofiVaultsResponse { vaults },
+        ))
+    }
+
+    async fn sofi_resolve(&self, set: &crate::sdk::storage_set::StorageSet) -> AppResult {
+        match crate::sdk::sofi_flow::resolve(&self.core_sdk, set).await {
+            Ok(outcome) => position_response(outcome),
+            Err(e) => err(format!("sofi.resolve: {e}")),
         }
     }
 }

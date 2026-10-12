@@ -4,229 +4,235 @@
 import * as pb from '../proto/dsm_app_pb';
 import {
   routerInvokeBin,
-  getTokenPolicyBytes as getTokenPolicyBytesBridge,
-  listCachedTokenPolicies,
+  routerQueryBin,
+  addTokenByAnchor as addTokenByAnchorBridge,
   publishTokenPolicyBytes as publishTokenPolicyBytesBridge,
 } from './WebViewBridge';
 import { encodeBase32Crockford, decodeBase32Crockford } from '../utils/textId';
 import { decodeFramedEnvelopeV3 } from './decoding';
 import { emitWalletRefresh } from './events';
+import { RustRefusal } from './NativeBoundaryBridge';
 
-export async function createToken(details: any): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
+/**
+ * Create a native DSM token.
+ *
+ * PURE TRANSPORT. Every protocol decision lives in Rust: it packs the
+ * canonical v3 policy blob, derives the content-addressed CPTA anchor,
+ * publishes it, and creates the token — all in one invoke. This layer must
+ * never pack policy bytes, compute an anchor, or validate protocol rules;
+ * doing so would put a second (and inevitably divergent) definition of the
+ * format outside the state machine.
+ *
+ * `details` carries the user's intent only.
+ */
+/**
+ * What a token is created with (SoFi §48–§51). The whole genesis supply is
+ * released to the creator at creation; there is no minting afterwards, and no
+ * unlimited supply.
+ */
+export interface TokenCreateDetails {
+  ticker: string;
+  alias: string;
+  decimals: number;
+  /** The whole supply, in whole token units, as typed: Rust parses and scales it. Fixed at creation. */
+  genesisSupply: string;
+  /** Whether holders may burn their own units. */
+  burnEnabled: boolean;
+  transferable: boolean;
+  threshold: number;
+  description?: string;
+  iconUrl?: string;
+  allowlistKind?: 'NONE' | 'INLINE';
+  allowlistData?: string;
+}
+
+/**
+ * What the user entered, as entered. Rust trims and uppercases the ticker and
+ * refuses what its rules refuse; nothing is filled in here for a value the
+ * caller did not give. The allowlist's device ids are Base32 at this display
+ * edge and bytes from here on.
+ */
+function createRequest(details: TokenCreateDetails): pb.TokenCreateRequest {
+  const listed = details.allowlistKind === 'INLINE' ? details.allowlistData : undefined;
+  const allowlist: Uint8Array[] = listed === undefined
+    ? []
+    : listed
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+        .map((s) => new Uint8Array(decodeBase32Crockford(s)));
+  return new pb.TokenCreateRequest({
+    ticker: details.ticker,
+    alias: details.alias,
+    decimals: details.decimals,
+    genesisSupplyEntered: details.genesisSupply,
+    burnEnabled: details.burnEnabled,
+    transferable: details.transferable,
+    threshold: details.threshold,
+    description: details.description,
+    iconUrl: details.iconUrl,
+    allowlistDeviceIds: allowlist,
+  });
+}
+
+/** A field `token.create` would refuse, named as the request names it, and why. */
+export interface TokenFieldRefusal {
+  field: string;
+  reason: string;
+}
+
+/**
+ * What `token.create` would refuse in `details`, field by field, as Rust
+ * checks them (`token.check`). Nothing is created. The wizard shows these
+ * beside the fields; it keeps no rules of its own.
+ */
+export async function checkToken(details: TokenCreateDetails): Promise<TokenFieldRefusal[]> {
+  const argPack = new pb.ArgPack({
+    codec: pb.Codec.PROTO,
+    body: new Uint8Array(createRequest(details).toBinary()),
+  });
+  const env = decodeFramedEnvelopeV3(await routerQueryBin('token.check', new Uint8Array(argPack.toBinary())));
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenCheckResponse') {
+    throw new Error(`Expected tokenCheckResponse, got ${env.payload.case}`);
+  }
+  return env.payload.value.refusals.map((r) => ({ field: r.field, reason: r.reason }));
+}
+
+/** A call Rust never answered, as distinct from Rust's refusal. */
+class Unanswered extends Error {
+  constructor(readonly lost: unknown) {
+    super(lost instanceof Error ? lost.message : String(lost));
+  }
+}
+
+/**
+ * Create a token. Rust's refusal comes back as a result that did not succeed,
+ * with Rust's reason. A call that does not come back throws: the creation may
+ * have committed while it ran, so the caller asks again with the identical
+ * request, which Rust answers from canonical state.
+ */
+export async function createToken(details: TokenCreateDetails): Promise<{ success: boolean; tokenId?: string; anchorBase32?: string; message?: string }> {
   try {
-    const ticker = String(details?.ticker || '').trim().toUpperCase();
-    const alias = String(details?.alias || '').trim();
-    const decimals = Number(details?.decimals ?? 0);
-    const maxSupplyStr = String(details?.maxSupply ?? '').trim();
-
-    if (!ticker || ticker.length < 2 || ticker.length > 8) {
-      throw new Error('createToken: ticker must be 2-8 uppercase chars');
-    }
-    if (!alias) throw new Error('createToken: alias required');
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) {
-      throw new Error('createToken: decimals must be 0..18');
-    }
-    if (!/^[0-9]+$/.test(maxSupplyStr)) {
-      throw new Error('createToken: maxSupply must be a positive integer string');
-    }
-
-    const enc = new TextEncoder();
-    const tickerBytes = enc.encode(ticker);
-    const aliasBytes = enc.encode(alias);
-
-    if (tickerBytes.length > 255) throw new Error('createToken: ticker too long');
-    if (aliasBytes.length > 65535) throw new Error('createToken: alias too long');
-
-    const maxSupply = BigInt(maxSupplyStr);
-    if (maxSupply < 0n) throw new Error('createToken: maxSupply must be >= 0');
-
-    const kindMap: Record<string, number> = { FUNGIBLE: 0, NFT: 1, SBT: 2 };
-    const kindByte = kindMap[String(details?.kind || 'FUNGIBLE')] ?? 0;
-    const unlimitedSupplyV2 = Boolean(details?.unlimitedSupply);
-    const mintBurnEnabled = Boolean(details?.mintBurnEnabled);
-    const transferable = Boolean(details?.transferable !== false);
-    const allowlistKind = String(details?.allowlistKind || 'NONE') === 'INLINE' ? 'INLINE' : 'NONE';
-    const mintBurnThreshold = Math.max(1, Math.min(255, Number(details?.mintBurnThreshold ?? 1)));
-    const descBytes   = enc.encode(String(details?.description || '').trim());
-    const iconBytes   = enc.encode(String(details?.iconUrl    || '').trim());
-    const allocStr    = String(details?.initialAlloc || '0').trim();
-    const allocBig    = /^[0-9]+$/.test(allocStr) ? BigInt(allocStr) : 0n;
-    const alDataStr   = allowlistKind === 'INLINE' ? String(details?.allowlistData || '').trim() : '';
-    const alDataBytes = enc.encode(alDataStr);
-
-    const flags =
-      (mintBurnEnabled          ? 0x01 : 0) |
-      (transferable             ? 0x02 : 0) |
-      (allowlistKind !== 'NONE' ? 0x04 : 0) |
-      (unlimitedSupplyV2        ? 0x08 : 0);
-
-    const maxSupplyBytes = new Uint8Array(16);
-    {
-      let tmp = maxSupply;
-      for (let i = 15; i >= 0; i--) {
-        maxSupplyBytes[i] = Number(tmp & 0xffn);
-        tmp >>= 8n;
-      }
-    }
-
-    const allocBytes = new Uint8Array(16);
-    {
-      let tmp2 = allocBig;
-      for (let i = 15; i >= 0; i--) {
-        allocBytes[i] = Number(tmp2 & 0xffn);
-        tmp2 >>= 8n;
-      }
-    }
-    const payloadSize = 1 + 1 + 1 + 1                        // ver + kind + flags + threshold
-      + 1 + tickerBytes.length                               // tickerLen + ticker
-      + 2 + aliasBytes.length                                // aliasLen(2B) + alias
-      + 1 + 16 + 16                                          // decimals + maxSupply + initialAlloc
-      + 2 + descBytes.length                                 // descLen(2B) + desc
-      + 2 + iconBytes.length                                 // iconLen(2B) + icon
-      + 1 + 2 + alDataBytes.length;                          // alKind + alDataLen(2B) + alData
-    const policyPayload = new Uint8Array(payloadSize);
-    let off = 0;
-    policyPayload[off++] = 2;
-    policyPayload[off++] = kindByte;
-    policyPayload[off++] = flags;
-    policyPayload[off++] = mintBurnThreshold;
-    policyPayload[off++] = tickerBytes.length & 0xff;
-    policyPayload.set(tickerBytes, off); off += tickerBytes.length;
-    policyPayload[off++] = (aliasBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = aliasBytes.length & 0xff;
-    policyPayload.set(aliasBytes, off); off += aliasBytes.length;
-    policyPayload[off++] = decimals & 0xff;
-    policyPayload.set(maxSupplyBytes, off); off += 16;
-    policyPayload.set(allocBytes, off); off += 16;
-    policyPayload[off++] = (descBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = descBytes.length & 0xff;
-    policyPayload.set(descBytes, off); off += descBytes.length;
-    policyPayload[off++] = (iconBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = iconBytes.length & 0xff;
-    policyPayload.set(iconBytes, off); off += iconBytes.length;
-    policyPayload[off++] = allowlistKind === 'INLINE' ? 1 : 0;
-    policyPayload[off++] = (alDataBytes.length >>> 8) & 0xff;
-    policyPayload[off++] = alDataBytes.length & 0xff;
-    policyPayload.set(alDataBytes, off);
-
-    const policy = new pb.TokenPolicyV3({ policyBytes: policyPayload as any });
-    const canonicalBytes = policy.toBinary();
-
-    const published = await publishTokenPolicyBytes(new Uint8Array(canonicalBytes));
-    const anchorBytes = published.anchorBytes;
-    if (!anchorBytes || anchorBytes.length !== 32) {
-      throw new Error('createToken: policy publish failed');
-    }
-
-    const req = new pb.TokenCreateRequest({
-      ticker,
-      alias,
-      decimals,
-      maxSupplyU128: maxSupplyBytes as any,
-      policyAnchor: anchorBytes as any,
-    } as any);
-
     const argPack = new pb.ArgPack({
-      codec: pb.Codec.PROTO as any,
-      body: new Uint8Array(req.toBinary()),
+      codec: pb.Codec.PROTO,
+      body: new Uint8Array(createRequest(details).toBinary()),
     });
 
-    const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary()));
-
-    // Canonical Envelope v3 decode (TokenCreateResponse now in Envelope payload oneof)
+    const resBytes = await routerInvokeBin('token.create', new Uint8Array(argPack.toBinary())).catch((e: unknown) => {
+      throw e instanceof RustRefusal ? e : new Unanswered(e);
+    });
     const env = decodeFramedEnvelopeV3(resBytes);
-    
+
     if (env.payload.case === 'error') {
       throw new Error(`Token creation failed: ${env.payload.value.message}`);
     }
-    
     if (env.payload.case !== 'tokenCreateResponse') {
       throw new Error(`Expected tokenCreateResponse, got ${env.payload.case}`);
     }
-    
+
     const resp = env.payload.value;
-    const anchorB32 = resp.policyAnchor?.length === 32
-      ? encodeBase32Crockford(resp.policyAnchor)
-      : published.anchorBase32;
-    const tokenId = resp.tokenId || undefined;
-    const success = Boolean(resp.success);
-    // Notify the wallet UI that a new token has been registered so
-    // `TokenManagementScreen` (and any other listener) can re-fetch
-    // its balances + metadata cache without the user having to pull-
-    // to-refresh.  Single canonical refresh event per
-    // `events.ts::DSM_WALLET_REFRESH_EVENT`.
-    if (success) {
-      try {
-        emitWalletRefresh({
-          source: 'token.create',
-          tokenId: tokenId ?? '',
-          anchorBase32: anchorB32 ?? '',
-        });
-      } catch (e) {
-        console.warn('createToken: emitWalletRefresh failed (non-fatal):', e);
-      }
+    if (!resp.success) {
+      return { success: false, message: resp.message };
     }
-    return {
-      success,
-      tokenId,
-      anchorBase32: anchorB32,
-      message: resp.message || undefined,
-    };
+    // Rust names the token it created; an answer without its id and anchor
+    // is refused, never shown as a token with none.
+    if (!resp.tokenId || resp.policyAnchor.length !== 32) {
+      throw new Error('STRICT: token.create answered success without the token id and its 32-byte anchor');
+    }
+    const anchorBase32 = encodeBase32Crockford(resp.policyAnchor);
+
+    // The token exists from here. The wallet re-fetches balances and metadata
+    // on this event; a listener's failure is logged, not reported as a failed
+    // creation.
+    try {
+      emitWalletRefresh({ source: 'token.create', tokenId: resp.tokenId, anchorBase32 });
+    } catch (e) {
+      console.warn('createToken: a wallet.refresh listener failed:', e);
+    }
+
+    return { success: true, tokenId: resp.tokenId, anchorBase32, message: resp.message };
   } catch (e) {
+    if (e instanceof Unanswered) throw e.lost;
     console.warn('createToken failed:', e);
     return { success: false, message: e instanceof Error ? e.message : String(e) };
   }
 }
 
-export async function importTokenPolicy(args: string | { anchorBase32: string }): Promise<{ success: boolean; error?: string }> {
+/**
+ * Add a token created on another device, by its CPTA anchor.
+ *
+ * PURE TRANSPORT. Rust fetches the published policy, re-derives the anchor
+ * from the bytes and requires it to match what was asked for, parses it, and
+ * registers the token locally. Nothing here interprets the policy.
+ *
+ * This is the step between "someone created a token" and "I can receive it":
+ * balances are keyed by policy commitment, so a device that has not added the
+ * CPTA has nowhere to put the token and no rules to enforce on it.
+ */
+/// Adopt a token from whatever the user supplied.
+///
+/// The TEXT is handed to Rust verbatim — a bare Base32 anchor or a
+/// `dsm:token/v1:` payload from a scan. Rust decides what a pasted string
+/// means, rejects a scanned payload whose ticker disagrees with the policy it
+/// fetches, and answers the token it registered: its id, its ticker and the
+/// anchor it re-derived from the policy bytes.
+export async function addTokenByAnchor(
+  args: string | { anchorBase32: string },
+): Promise<
+  | { success: true; tokenId: string; ticker: string; anchorBase32: string }
+  | { success: false; error: string }
+> {
   try {
-    const policyId = typeof args === 'string' ? args : args.anchorBase32;
-    const b32 = String(policyId || '').trim();
-    if (!b32) throw new Error('importTokenPolicy: anchor required');
-    const anchorBytes = new Uint8Array(decodeBase32Crockford(b32));
-    if (anchorBytes.length !== 32) throw new Error('importTokenPolicy: anchor must be 32 bytes');
+    const text = (typeof args === 'string' ? args : args.anchorBase32).trim();
+    if (!text) throw new Error('addTokenByAnchor: anchor required');
 
-    const policyBytes = await getTokenPolicyBytes(anchorBytes);
-    if (!policyBytes || policyBytes.length === 0) {
-      throw new Error('importTokenPolicy: empty policy bytes');
+    const env = decodeFramedEnvelopeV3(await addTokenByAnchorBridge(new TextEncoder().encode(text)));
+    if (env.payload.case === 'error') throw new Error(env.payload.value.message || 'add token failed');
+    if (env.payload.case !== 'tokenCreateResponse') {
+      throw new Error(`Expected tokenCreateResponse, got ${env.payload.case}`);
     }
-
-    return { success: true };
-  } catch (e: any) {
-    console.warn('importTokenPolicy failed:', e);
-    return { success: false, error: e.message || String(e) };
+    const r = env.payload.value;
+    if (!r.success) throw new Error(r.message || 'add token failed');
+    if (!r.tokenId || !r.ticker || r.policyAnchor.length !== 32) {
+      throw new Error('STRICT: tokens.addByAnchor answered success without the token id, its ticker and its 32-byte anchor');
+    }
+    const anchorBase32 = encodeBase32Crockford(r.policyAnchor);
+    emitWalletRefresh({ source: 'tokens.addByAnchor', tokenId: r.tokenId, anchorBase32 });
+    return { success: true, tokenId: r.tokenId, ticker: r.ticker, anchorBase32 };
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
   }
 }
 
-export async function listPolicies(): Promise<Array<{
-  policy_commit: Uint8Array;
-  policy_bytes: Uint8Array;
-  metadata?: { ticker: string; alias: string; decimals: number; maxSupply: string };
-}>> {
-  try {
-    const responseBytes = await listCachedTokenPolicies();
-    const env = decodeFramedEnvelopeV3(responseBytes);
-    if (env.payload.case === 'error') {
-      throw new Error(env.payload.value.message || `Error code ${env.payload.value.code}`);
-    }
-    if (env.payload.case !== 'tokenPolicyListResponse') {
-      throw new Error(`Expected tokenPolicyListResponse, got ${env.payload.case}`);
-    }
-    return (env.payload.value.policies ?? []).map((entry) => ({
-      policy_commit: entry.policyCommit instanceof Uint8Array ? entry.policyCommit : new Uint8Array(),
-      policy_bytes: entry.policyBytes instanceof Uint8Array ? entry.policyBytes : new Uint8Array(),
-      metadata: entry.ticker || entry.alias || entry.maxSupply || entry.decimals
-        ? {
-            ticker: entry.ticker || '',
-            alias: entry.alias || '',
-            decimals: Number(entry.decimals || 0),
-            maxSupply: entry.maxSupply || '0',
-          }
-        : undefined,
-    }));
-  } catch {
-    return [];
+/// The scannable adoption payload for a token this device holds.
+///
+/// Rust assembles the complete `dsm:token/v1:` URI so the framing has one
+/// implementation; this fetches it and the fields shown beside it.
+export async function tokenAdoptionQr(tokenIdOrTicker: string): Promise<{
+  uri: string;
+  ticker: string;
+  tokenId: string;
+  policyAnchorB32: string;
+  anchorFingerprint: string;
+}> {
+  const raw = await routerQueryBin(
+    'token.adoptionQr',
+    new TextEncoder().encode(tokenIdOrTicker.trim()),
+  );
+  const env = decodeFramedEnvelopeV3(raw);
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenAdoptionQrResponse') {
+    throw new Error(`Expected tokenAdoptionQrResponse, got ${env.payload.case}`);
   }
+  const r = env.payload.value;
+  return {
+    uri: r.uri,
+    ticker: r.ticker,
+    tokenId: r.tokenId,
+    policyAnchorB32: r.policyAnchorB32,
+    anchorFingerprint: r.anchorFingerprint,
+  };
 }
 
 export async function publishTokenPolicyBytes(policyBytes: Uint8Array): Promise<{ anchorBytes: Uint8Array; anchorBase32: string }> {
@@ -235,21 +241,18 @@ export async function publishTokenPolicyBytes(policyBytes: Uint8Array): Promise<
   return { anchorBytes, anchorBase32: encodeBase32Crockford(anchorBytes) };
 }
 
-export async function getTokenPolicyBytes(anchorBytes: Uint8Array): Promise<Uint8Array> {
-  if (!anchorBytes || anchorBytes.length !== 32) throw new Error('getTokenPolicyBytes: anchorBytes must be 32 bytes');
-  return getTokenPolicyBytesBridge(anchorBytes);
-}
-
 /**
- * Publish a CPTA token policy from a Base32 Crockford-encoded CanonicalPolicy proto.
- * Validates the payload as TokenPolicyV3, publishes to the storage node (or falls back
- * to a local content-addressed anchor), and returns the policy anchor ID.
+ * Publish a token policy: the Base32 Crockford of serialized TokenPolicyV3
+ * bytes, sent to Rust exactly as pasted. Rust refuses bytes Core's policy
+ * parser does not accept; its anchor is the BLAKE3 content hash of those
+ * bytes; it keeps the policy on this device and answers whether the network
+ * stored it.
  *
  * This is the entry point for the DevPolicyScreen "Publish Policy" action.
  */
 export async function publishTokenPolicy(input: {
   policyBase32: string;
-}): Promise<{ success: boolean; id?: string; error?: string }> {
+}): Promise<{ success: true; id: string } | { success: false; error: string }> {
   try {
     const b32 = typeof input?.policyBase32 === 'string' ? input.policyBase32.trim() : '';
     if (!b32) return { success: false, error: 'policy bytes required (base32)' };
@@ -257,13 +260,120 @@ export async function publishTokenPolicy(input: {
     const bytes = decodeBase32Crockford(b32);
     if (!bytes || bytes.length === 0) return { success: false, error: 'decoded policy bytes empty' };
 
-    // Validate payload is a TokenPolicyV3 proto; re-encode to canonical bytes.
-    const policy = pb.TokenPolicyV3.fromBinary(bytes);
-    const canonicalBytes = new Uint8Array(policy.toBinary());
-
-    const published = await publishTokenPolicyBytes(canonicalBytes);
+    // Exactly the bytes pasted: the anchor is their hash, so a re-encoding here
+    // would publish another policy's bytes under another anchor.
+    const published = await publishTokenPolicyBytes(new Uint8Array(bytes));
     return { success: true, id: published.anchorBase32 };
   } catch (e: any) {
     return { success: false, error: e?.message || 'Policy publish failed' };
   }
+}
+
+/// Drop a token's identity from this device.
+///
+/// A ticker names one token, so a device that has adopted one cannot adopt a
+/// different token with the same ticker. Without this there was no way out of
+/// that: a superseded token — one whose creator re-created it, producing a new
+/// policy anchor and therefore a new token id — blocked its own ticker
+/// forever.
+///
+/// The backend refuses while a balance is held, and refuses outright for
+/// protocol assets. Nothing recoverable is lost: the policy is
+/// content-addressed and adoption is online, so it can always be adopted again.
+export async function forgetToken(
+  tokenId: string,
+): Promise<{ success: boolean; message?: string }> {
+  const req = new pb.TokenForgetRequest({ tokenId: tokenId.trim() } as any);
+  const argPack = new pb.ArgPack({
+    codec: pb.Codec.PROTO as any,
+    body: new Uint8Array(req.toBinary()),
+  });
+  const env = decodeFramedEnvelopeV3(
+    await routerInvokeBin('token.forget', new Uint8Array(argPack.toBinary())),
+  );
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenForgetResponse') {
+    throw new Error(`Expected tokenForgetResponse, got ${env.payload.case}`);
+  }
+  const resp = env.payload.value;
+  return { success: resp.success, message: resp.message };
+}
+
+/**
+ * Burn supply the caller holds. The amount goes as the user typed it, in token
+ * units ("2.50"): Rust parses it against the token's committed decimals and
+ * refuses what it cannot read. Burn <= balance is enforced by the core
+ * conservation guard.
+ */
+export async function burnToken(args: { tokenId: string; amount: string; message?: string }): Promise<{ success: boolean; newBalance?: bigint; message?: string }> {
+  try {
+    const req = new pb.TokenBurnRequest({
+      tokenId: args.tokenId.trim(),
+      amountEntered: args.amount,
+      message: args.message ?? '',
+    } as any);
+    const argPack = new pb.ArgPack({
+      codec: pb.Codec.PROTO as any,
+      body: new Uint8Array(req.toBinary()),
+    });
+    const env = decodeFramedEnvelopeV3(
+      await routerInvokeBin('token.burn', new Uint8Array(argPack.toBinary())),
+    );
+    if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+    if (env.payload.case !== 'tokenBurnResponse') {
+      throw new Error(`Expected tokenBurnResponse, got ${env.payload.case}`);
+    }
+    const resp = env.payload.value;
+    if (resp.success) {
+      try {
+        emitWalletRefresh({ source: 'token.burn', tokenId: resp.tokenId, anchorBase32: '' });
+      } catch (e) {
+        console.warn('burnToken: emitWalletRefresh failed (non-fatal):', e);
+      }
+    }
+    return { success: Boolean(resp.success), newBalance: resp.newBalance, message: resp.message || undefined };
+  } catch (e) {
+    console.warn('burnToken failed:', e);
+    return { success: false, message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** The token-creation fee and this device's standing against it, as Rust reports them. */
+export type TokenCreationFee = {
+  /** The fee, in ERA base units. */
+  feeEra: bigint;
+  /** The ERA this device holds, in base units, from the head the fee is debited from. */
+  eraHeld: bigint;
+  /** The fee and the holding in ERA as people count it, rendered by Rust. */
+  feeDisplay: string;
+  heldDisplay: string;
+  /** Whether that pays the fee: the check token.create refuses on. */
+  feeCovered: boolean;
+};
+
+/**
+ * The token-creation fee, and whether this device can pay it, as Rust reports
+ * them.
+ *
+ * DISPLAY ONLY. Rust reads the same core constant the conservation guard
+ * validates against, and decides coverage with the check token.create refuses
+ * on, so neither can disagree with what happens at creation. A failed query is
+ * the failure, for the screen to show; it is not an absent fee.
+ */
+export async function getTokenCreationFee(): Promise<TokenCreationFee> {
+  const env = decodeFramedEnvelopeV3(
+    await routerQueryBin('tokens.getFeeSchedule', new Uint8Array()),
+  );
+  if (env.payload.case === 'error') throw new Error(env.payload.value.message);
+  if (env.payload.case !== 'tokenFeeScheduleResponse') {
+    throw new Error(`Expected tokenFeeScheduleResponse, got ${env.payload.case}`);
+  }
+  const r = env.payload.value;
+  return {
+    feeEra: r.tokenCreationEra,
+    eraHeld: r.eraHeld,
+    feeDisplay: r.tokenCreationEraDisplay,
+    heldDisplay: r.eraHeldDisplay,
+    feeCovered: r.feeCovered,
+  };
 }
