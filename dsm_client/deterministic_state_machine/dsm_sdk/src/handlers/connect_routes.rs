@@ -927,14 +927,12 @@ impl AppRouterImpl {
                 amount,
                 memo,
             } => {
-                let ticker = match super::wallet_routes::token_of_commit(policy_commit) {
-                    Ok((ticker, _)) => ticker,
-                    Err(e) => return Executed::failed(e),
-                };
+                // Paid in the token the grant names, by its commit: never by a
+                // ticker, which an application may give its own coin.
                 let sent = self
                     .process_online_transfer_logic(OnlineSendIntent {
                         to_device_id: session.app_device_id,
-                        token_id: ticker,
+                        policy_commit: *policy_commit,
                         amount: *amount,
                         memo: payment_memo(&session.session_id, seq, memo),
                     })

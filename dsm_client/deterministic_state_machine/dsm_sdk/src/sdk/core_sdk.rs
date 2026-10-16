@@ -2447,21 +2447,28 @@ impl CoreSDK {
         }
     }
 
+    /// Sync the balance projection of the token a transfer moved: the policy
+    /// its operation commits to, under that policy's own ticker. The ticker in
+    /// the transfer's terms is the sender's word and names no row (SoFi §47).
     fn sync_token_projection_best_effort(
         &self,
         local_b32: &str,
-        token_id: &[u8],
+        policy_commit: &[u8; 32],
         new_state: &State,
         context: &str,
     ) {
-        let token_id_str = String::from_utf8_lossy(token_id);
-        let canonical_token_id = token_id_str.trim();
-        if canonical_token_id.is_empty() {
-            log::error!(
-                "[{context}] CRITICAL: the operation names no token; no projection to sync"
-            );
-            return;
-        }
+        let canonical_token_id =
+            match crate::handlers::wallet_routes::token_of_commit(policy_commit) {
+                Ok((ticker, _)) => ticker,
+                Err(error) => {
+                    log::error!(
+                        "[{context}] CRITICAL: the token the transfer moved is not named here \
+                         ({error}); the projection is left for the repair sweep"
+                    );
+                    return;
+                }
+            };
+        let canonical_token_id = canonical_token_id.as_str();
 
         let existing_locked = match client_db::get_locked_balance(local_b32, canonical_token_id) {
             Ok(value) => value,
@@ -2474,20 +2481,10 @@ impl CoreSDK {
             }
         };
 
-        let policy_commit = match self.resolve_policy_commit_strict(token_id) {
-            Ok(commit) => commit,
-            Err(error) => {
-                log::error!(
-                    "[{context}] CRITICAL: failed to resolve policy commit for {canonical_token_id}: {error}"
-                );
-                return;
-            }
-        };
-
         if let Err(error) = client_db::sync_token_projection_from_state(
             local_b32,
             canonical_token_id,
-            &policy_commit,
+            policy_commit,
             new_state,
             existing_locked,
         ) {
@@ -2565,13 +2562,13 @@ impl CoreSDK {
                 ))
             }
         };
-        // The nonce and the token are read from terms that open the signed
-        // commitment, and from nothing else (pre-audit item 4).
+        // The nonce is read from terms that open the signed commitment, and
+        // from nothing else (pre-audit item 4); the token is the policy the
+        // operation commits to.
         terms.open(&op).map_err(|e| {
             DsmError::invalid_operation(format!("apply_incoming_transfer_full_state: {e}"))
         })?;
         let nonce = terms.nonce.clone();
-        let token_id = terms.token_id.clone();
         if nonce.is_empty() {
             return Err(DsmError::invalid_operation(
                 "apply_incoming_transfer_full_state: empty transfer nonce",
@@ -2882,7 +2879,7 @@ impl CoreSDK {
                 let local_b32 = crate::util::text_id::encode_base32_crockford(&local_arr);
                 self.sync_token_projection_best_effort(
                     &local_b32,
-                    &token_id,
+                    &signed_policy_commit,
                     &staged.state,
                     "apply_full_state",
                 );

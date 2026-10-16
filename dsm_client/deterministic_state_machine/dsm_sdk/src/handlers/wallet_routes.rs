@@ -64,27 +64,6 @@ fn event_type(stored: &str) -> Option<generated::TransactionType> {
     })
 }
 
-/// The stored type of a token or SoFi event's wire type; `None` for every
-/// other type.
-fn event_type_name(kind: generated::TransactionType) -> Option<&'static str> {
-    use crate::sdk::realized_records::Realized;
-    match kind {
-        generated::TransactionType::TxTypeTokenCreate => Some(Realized::TokenCreate.tx_type()),
-        generated::TransactionType::TxTypeVaultCreate => Some(Realized::VaultCreate.tx_type()),
-        generated::TransactionType::TxTypeSofiSetup => Some(Realized::Setup.tx_type()),
-        generated::TransactionType::TxTypeSofiTrade => Some(Realized::Trade.tx_type()),
-        generated::TransactionType::TxTypeSofiClose => Some(Realized::Close.tx_type()),
-        generated::TransactionType::TxTypeEscrowLock => Some(Realized::EscrowLock.tx_type()),
-        generated::TransactionType::TxTypeEscrowRelease => Some(Realized::EscrowRelease.tx_type()),
-        generated::TransactionType::TxTypeUnspecified
-        | generated::TransactionType::TxTypeFaucet
-        | generated::TransactionType::TxTypeBilateralOffline
-        | generated::TransactionType::TxTypeOnline
-        | generated::TransactionType::TxTypeDbtcMint
-        | generated::TransactionType::TxTypeDbtcBurn => None,
-    }
-}
-
 /// A token or SoFi event's history row (phone-rig rulings, 2026-10-01): every
 /// token it moved, signed, and the vault or token it is about. A row whose
 /// movements, ids or subject do not decode is corrupt, and an error.
@@ -106,18 +85,18 @@ fn event_transaction(
         .ok_or_else(|| corrupt("names no token movements".to_string()))?;
     let mut moves = Vec::new();
     for m in decode_moves(stored).map_err(corrupt)? {
-        let (token_id, ..) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
+        let (token_id, decimals) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
         let magnitude = i64::try_from(m.amount)
             .map_err(|e| corrupt(format!("a movement exceeds a signed amount: {e}")))?;
+        let amount_signed = match m.direction {
+            BalanceDirection::Credit => magnitude,
+            BalanceDirection::Debit => -magnitude,
+        };
         moves.push(generated::TokenMove {
             policy_commit: m.policy_commit.to_vec(),
             token_id,
-            amount_signed: match m.direction {
-                BalanceDirection::Credit => magnitude,
-                BalanceDirection::Debit => -magnitude,
-            },
-            // Filled at the encoding boundary by enrich_transaction_display.
-            display_amount: String::new(),
+            amount_signed,
+            display_amount: format_signed_base_units_for_display(amount_signed, decimals),
         });
     }
     let subject = match t.metadata.get(SUBJECT_KEY) {
@@ -186,33 +165,19 @@ pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> Strin
     }
 }
 
-/// Render a transaction's amount for display, from the token's own decimals.
+/// A transfer's amount rendered for display at `decimals`, the decimals of
+/// the token it moved.
 ///
-/// `amount` and `amount_signed` remain canonical base units; this only adds
-/// the string a UI prints. Amounts that predate signed accounting carry
+/// `amount` and `amount_signed` remain canonical base units; this is only the
+/// string a UI prints. Amounts that predate signed accounting carry
 /// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
 /// rendering every historical row as zero.
-pub fn enrich_transaction_display(tx: &mut generated::TransactionInfo) -> Result<(), String> {
-    // An event shows each token it moved, from that token's committed
-    // decimals; it has no single amount of its own.
-    if let Ok(kind) = generated::TransactionType::try_from(tx.tx_type) {
-        if event_type_name(kind).is_some() {
-            for m in tx.moves.iter_mut() {
-                let commit = <[u8; 32]>::try_from(m.policy_commit.as_slice())
-                    .map_err(|e| format!("a token movement's policy commit: {e}"))?;
-                let (.., decimals) = token_of_commit(&commit)?;
-                m.display_amount = format_signed_base_units_for_display(m.amount_signed, decimals);
-            }
-            return Ok(());
-        }
-    }
-    let decimals = token_decimals(&tx.token_id)?;
-    tx.display_amount = if tx.amount_signed != 0 {
-        format_signed_base_units_for_display(tx.amount_signed, decimals)
+pub fn transfer_display_amount(amount: u64, amount_signed: i64, decimals: u32) -> String {
+    if amount_signed != 0 {
+        format_signed_base_units_for_display(amount_signed, decimals)
     } else {
-        format_base_units_for_display(tx.amount, decimals)
-    };
-    Ok(())
+        format_base_units_for_display(amount, decimals)
+    }
 }
 
 /// The whole supply of a token that is a state object: it exists once.
@@ -797,12 +762,16 @@ impl AppRouterImpl {
                         let safe_id: String = format!("tx_{}", t.tx_hash);
 
                         // A row that keeps its signed operation shows its amount
-                        // from that operation — the same bytes its receipt badge
-                        // is checked against — and its token and memo from the
-                        // terms it keeps, once they open the operation. Only a
-                        // row with no operation (a faucet claim, a Bitcoin event)
-                        // shows its stored figures.
-                        let (amount, token_id, memo) = match t
+                        // and its token from that operation — the same bytes its
+                        // receipt badge is checked against — and its memo from
+                        // the terms it keeps, once they open the operation. The
+                        // token is named and rendered from the policy the
+                        // operation commits to: the ticker in the terms is the
+                        // sender's word, and two tokens may share one (SoFi
+                        // §47). Only a row with no operation (a faucet claim, a
+                        // Bitcoin event) shows its stored figures, which this
+                        // device wrote.
+                        let (amount, token_id, memo, decimals) = match t
                             .metadata
                             .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
                         {
@@ -838,7 +807,11 @@ impl AppRouterImpl {
                                     .map_err(|e| {
                                     format!("wallet.history: transaction {}: {e}", t.tx_id)
                                 })?;
-                                (terms.amount, terms.token_id, terms.memo)
+                                let (token, decimals) = token_of_commit(&terms.policy_commit)
+                                    .map_err(|e| {
+                                        format!("wallet.history: transaction {}: {e}", t.tx_id)
+                                    })?;
+                                (terms.amount, token, terms.memo, decimals)
                             }
                             None => {
                                 let token = t.metadata.get("token_id").ok_or_else(|| {
@@ -867,7 +840,10 @@ impl AppRouterImpl {
                                     }
                                     None => String::new(),
                                 };
-                                (t.amount, token, memo)
+                                let token = canonicalize_token_id(&token);
+                                let decimals = token_decimals(&token)
+                                    .map_err(|e| format!("wallet.history: {e}"))?;
+                                (t.amount, token, memo, decimals)
                             }
                         };
 
@@ -918,8 +894,11 @@ impl AppRouterImpl {
                         };
 
                         Ok(generated::TransactionInfo {
-                            // Filled at the encoding boundary by enrich_transaction_display.
-                            display_amount: String::new(),
+                            display_amount: transfer_display_amount(
+                                amount,
+                                amount_signed,
+                                decimals,
+                            ),
                             id: safe_id,
                             // Protocol/UI contract: device ids are binary 32-byte values.
                             // We store canonical base32 in SQLite for indexing, but must return bytes here.
@@ -937,7 +916,7 @@ impl AppRouterImpl {
                                 bytes32("sender device id", &t.from_device)?
                             },
                             to_device_id: bytes32("recipient device id", &t.to_device)?,
-                            token_id: canonicalize_token_id(&token_id),
+                            token_id,
                             amount,
                             // tx_hash is stored as canonical base32 text in SQLite.
                             tx_hash: bytes32("transaction hash", &t.tx_hash)?,
@@ -966,17 +945,6 @@ impl AppRouterImpl {
                     Ok(txs) => txs,
                     Err(e) => return err(e),
                 };
-
-                // Rendered at the encoding boundary, for the same reason
-                // balances are: a producer that builds a row without the
-                // display form is easy to add and impossible to notice, and
-                // the frontend has nothing to fall back on but a guess.
-                let mut txs = txs;
-                for tx in txs.iter_mut() {
-                    if let Err(e) = enrich_transaction_display(tx) {
-                        return err(format!("wallet.history: {e}"));
-                    }
-                }
                 let reply = generated::WalletHistoryResponse { transactions: txs };
                 // NEW: Return as Envelope.walletHistoryResponse (field 38)
                 pack_envelope_ok(generated::envelope::Payload::WalletHistoryResponse(reply))
@@ -1381,14 +1349,24 @@ impl AppRouterImpl {
                         }
                     };
 
-                // 2. Parse display amount into canonical base units in the backend.
-                // The token is named exactly: an omitted token is not ERA.
+                // 2. The token, named exactly: an omitted token is not ERA. The
+                // send form names it by ticker, so it is resolved to its policy
+                // commit once, here, and the send carries that commit from
+                // here on. The display amount is parsed into base units at the
+                // decimals of that commit's policy.
                 let token_id = smart_req.token_id.clone();
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let token_decimals = match token_decimals(&token_id) {
-                    Ok(d) => d,
+                let policy_commit = match self
+                    .core_sdk
+                    .resolve_policy_commit_strict(token_id.as_bytes())
+                {
+                    Ok(pc) => pc,
+                    Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                };
+                let token_decimals = match token_of_commit(&policy_commit) {
+                    Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),
                 };
                 let amount: u64 =
@@ -1401,7 +1379,7 @@ impl AppRouterImpl {
                 // the nonce and the signed operation are derived from here on.
                 self.process_online_transfer_logic(super::app_router_impl::OnlineSendIntent {
                     to_device_id,
-                    token_id,
+                    policy_commit,
                     amount,
                     memo: smart_req.memo,
                 })
@@ -2081,6 +2059,76 @@ mod history_tests {
             refused.contains("corrupt") && refused.contains("names a sender device"),
             "{refused}"
         );
+    }
+
+    /// A received transfer's terms carry a token label its sender chose; the
+    /// token it moved is the policy its signed operation commits to. History
+    /// names and renders the row from that commit, so a sender that labels
+    /// ERA "NOSUCH" neither breaks the history nor relabels the row.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_mislabelled_received_transfer_does_not_break_history() {
+        use dsm::types::operations::{Operation, TransactionMode, TransferTerms};
+        let device = crate::test_support::one_device::Device::start(0x75).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x76u8; 32]);
+        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let terms = TransferTerms::new(
+            b"NOSUCH".to_vec(),
+            dsm::crypto::rng::random_bytes(32),
+            TransactionMode::Unilateral,
+            "a label the sender chose".to_string(),
+        );
+        let unsigned = Operation::Transfer {
+            to_device_id: device.router.device_id_bytes.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(100),
+            policy_commit: era,
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let (_, sender_sk) =
+            dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");
+        let signature = dsm::crypto::sphincs::sphincs_sign(&sender_sk, &unsigned.to_bytes())
+            .expect("the sender signs");
+        let signed = unsigned.with_signature(signature);
+        // The row the receive path keeps for it: the signed operation, the
+        // terms that open it, and the sender's label beside them.
+        let row = TransactionRecord {
+            tx_id: "mislabelled".to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[0x77; 32]),
+            from_device: peer.clone(),
+            to_device: me.clone(),
+            amount: 100,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [
+                ("token_id".to_string(), b"NOSUCH".to_vec()),
+                (
+                    crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
+                    signed.to_bytes(),
+                ),
+                (
+                    crate::storage::client_db::HISTORY_TERMS_KEY.to_string(),
+                    terms.to_bytes(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        store_transaction(&row).expect("store the received row");
+        let reported = history_of(&device.router)
+            .await
+            .expect("a sender's label does not break the history");
+        assert_eq!(reported.transactions.len(), 1);
+        let received = &reported.transactions[0];
+        assert_eq!(received.token_id, "ERA", "named by the signed commit");
+        assert_eq!(received.amount_signed, 100, "incoming");
+        assert_eq!(received.display_amount, "1.00", "at ERA's decimals");
+        assert_eq!(received.memo, "a label the sender chose");
     }
 
     /// A history row is reported only as one of the types the wire names. A

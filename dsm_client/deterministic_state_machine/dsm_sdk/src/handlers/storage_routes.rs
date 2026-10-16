@@ -53,9 +53,10 @@ fn ensure_received_history(
     }
     let terms = crate::handlers::recipient_accept::transfer_terms(&v.signed_op, &v.terms)?;
     let mut meta: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
-    meta.insert("token_id".to_string(), terms.token_id.into_bytes());
     // The operation the receipt's tip binds, so the history can check the
-    // receipt again and read the figures from it, and the terms that open it.
+    // receipt again and read the figures from it — the token among them, as
+    // the policy the operation commits to — and the terms that open it. The
+    // ticker the sender wrote in the terms is not kept as the row's token.
     meta.insert(
         crate::storage::client_db::HISTORY_OPERATION_KEY.to_string(),
         v.signed_op.to_bytes(),

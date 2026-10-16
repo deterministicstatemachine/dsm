@@ -146,25 +146,30 @@ impl AppRouterImpl {
                                         &recognized.staged.sender,
                                     );
                                     let terms = &recognized.terms;
-                                    // The amount in the token's own decimals when
-                                    // they are known here; otherwise the exact
-                                    // base units, and why.
-                                    let amount =
-                                        match super::wallet_routes::token_decimals(&terms.token_id)
-                                        {
-                                            Ok(decimals) => format!(
-                                                "{} {}",
-                                                super::wallet_routes::format_base_units_for_display(
-                                                    terms.amount,
-                                                    decimals
-                                                ),
-                                                terms.token_id
+                                    // The token the signed operation commits to,
+                                    // named and in its own decimals when this
+                                    // device holds its policy; otherwise the
+                                    // exact base units of that commit, and why.
+                                    // The ticker in the terms is the sender's
+                                    // word and is not shown.
+                                    let amount = match super::wallet_routes::token_of_commit(
+                                        &terms.policy_commit,
+                                    ) {
+                                        Ok((ticker, decimals)) => format!(
+                                            "{} {ticker}",
+                                            super::wallet_routes::format_base_units_for_display(
+                                                terms.amount,
+                                                decimals
                                             ),
-                                            Err(e) => format!(
-                                                "{} base units of {} ({e})",
-                                                terms.amount, terms.token_id
-                                            ),
-                                        };
+                                        ),
+                                        Err(e) => format!(
+                                            "{} base units of {} ({e})",
+                                            terms.amount,
+                                            crate::util::text_id::encode_base32_crockford(
+                                                &terms.policy_commit
+                                            )
+                                        ),
+                                    };
                                     (format!("From: {sender} Amount: {amount}"), Some(sender))
                                 }
                             }
