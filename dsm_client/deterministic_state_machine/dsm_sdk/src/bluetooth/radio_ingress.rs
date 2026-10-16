@@ -4,11 +4,12 @@
 //!
 //! Bytes that arrive over BLE were written by whoever is in range: nothing on
 //! the link says who wrote them. They are taken as one of two things only — a
-//! `BleChunk` of a bilateral frame, which the frame coordinator reassembles,
-//! or a whole Envelope v3 (`0x03`-framed) whose payload is a bilateral frame —
-//! and both go to the bilateral transport, whose handlers check the frame
-//! against its session and the counterparty's keys. Pairing frames have their
-//! own entry (`processBleIdentityEnvelope`).
+//! `BleChunk` of a bilateral frame, which the frame coordinator reassembles
+//! and whose payload must be the frame its header names, or a whole Envelope
+//! v3 (`0x03`-framed) whose payload is a bilateral frame — and both go to the
+//! bilateral transport, whose handlers check the frame against its session and
+//! the counterparty's keys. Nothing a peer wrote is ever sent back to it as it
+//! came. Pairing frames have their own entry (`processBleIdentityEnvelope`).
 //!
 //! Nothing here reaches the local entry (`crate::ingress`), the Core bridge or
 //! the app router. Those run the wallet owner's requests, from the WebView and
@@ -18,7 +19,7 @@
 //! by the function they entered through, never by a flag carried beside them.
 
 use crate::bluetooth::bilateral_transport_adapter::{
-    BleTransportDelegate, TransportInboundMessage, TransportOutbound,
+    BilateralFrame, BleTransportDelegate, TransportInboundMessage, TransportOutbound,
 };
 use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, FrameIngressResult};
 use crate::generated as pb;
@@ -37,6 +38,13 @@ pub enum RadioRefusal {
     /// invoke, or any other payload the local entry runs.
     #[error("not a bilateral frame: {0}")]
     NotABilateralFrame(String),
+    /// A chunked frame whose payload is not the frame its header names. The
+    /// header's frame type is the sender's claim; the payload is what it is.
+    #[error("a {declared:?} frame carrying a {carried:?}")]
+    FrameMismatch {
+        declared: pb::BleFrameType,
+        carried: pb::BleFrameType,
+    },
 }
 
 /// What became of bytes a peer wrote over BLE that were not answered.
@@ -53,30 +61,43 @@ pub enum RadioError {
 
 /// The bilateral frame a whole envelope from the radio carries: the payloads
 /// a peer answers this device's bilateral steps with, and the one-op
-/// `bilateral.confirm` invoke. Anything else is refused.
+/// `bilateral.confirm` invoke. A proposal travels in chunks (its sender always
+/// chunks it), so a whole `bilateral.prepare` is not one of these. Anything
+/// else is refused.
 pub fn bilateral_frame_of(envelope: &pb::Envelope) -> Result<pb::BleFrameType, RadioRefusal> {
+    match BilateralFrame::of(envelope) {
+        Some(BilateralFrame::Prepare) | None => Err(refusal_of(envelope)),
+        Some(frame) => Ok(frame.frame_type()),
+    }
+}
+
+/// A reassembled chunked frame is taken only when its payload is the frame
+/// its header names. Refused otherwise: a payload that is not a canonical
+/// envelope, an envelope that is no bilateral frame, or a bilateral frame
+/// under another frame's type.
+fn chunked_frame_borne_out(declared: pb::BleFrameType, payload: &[u8]) -> Result<(), RadioRefusal> {
+    let envelope =
+        crate::envelope::from_canonical_bytes(payload).map_err(RadioRefusal::Undecodable)?;
+    let carried = match BilateralFrame::of(&envelope) {
+        Some(frame) => frame.frame_type(),
+        None => return Err(refusal_of(&envelope)),
+    };
+    if carried == declared {
+        Ok(())
+    } else {
+        Err(RadioRefusal::FrameMismatch { declared, carried })
+    }
+}
+
+/// Why an envelope that is no bilateral frame is refused, naming what it is.
+fn refusal_of(envelope: &pb::Envelope) -> RadioRefusal {
     match &envelope.payload {
-        Some(pb::envelope::Payload::BilateralPrepareResponse(_)) => {
-            Ok(pb::BleFrameType::BilateralPrepareResponse)
+        Some(pb::envelope::Payload::BleEvent(_)) => RadioRefusal::PlatformEvent,
+        Some(pb::envelope::Payload::UniversalTx(tx)) => {
+            RadioRefusal::NotABilateralFrame(describe_ops(&tx.ops))
         }
-        Some(pb::envelope::Payload::BilateralPrepareReject(_)) => {
-            Ok(pb::BleFrameType::BilateralPrepareReject)
-        }
-        Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
-            Ok(pb::BleFrameType::BilateralCommitResponse)
-        }
-        Some(pb::envelope::Payload::UniversalTx(tx)) => match tx.ops.as_slice() {
-            [pb::UniversalOp {
-                kind: Some(pb::universal_op::Kind::Invoke(invoke)),
-                ..
-            }] if invoke.method == "bilateral.confirm" => Ok(pb::BleFrameType::BilateralConfirm),
-            ops => Err(RadioRefusal::NotABilateralFrame(describe_ops(ops))),
-        },
-        Some(pb::envelope::Payload::BleEvent(_)) => Err(RadioRefusal::PlatformEvent),
-        Some(other) => Err(RadioRefusal::NotABilateralFrame(payload_name(other))),
-        None => Err(RadioRefusal::NotABilateralFrame(
-            "an envelope with no payload".to_string(),
-        )),
+        Some(other) => RadioRefusal::NotABilateralFrame(payload_name(other)),
+        None => RadioRefusal::NotABilateralFrame("an envelope with no payload".to_string()),
     }
 }
 
@@ -84,7 +105,8 @@ pub fn bilateral_frame_of(envelope: &pb::Envelope) -> Result<pb::BleFrameType, R
 ///
 /// `0x03`-framed bytes are a whole envelope and must carry a bilateral frame
 /// ([`bilateral_frame_of`]); anything else is a `BleChunk`, reassembled by
-/// `coordinator`. A whole frame goes to `bilateral`. `Ok(None)` is nothing to
+/// `coordinator`, whose payload must be the frame its header names. A whole
+/// frame goes to `bilateral`. `Ok(None)` is nothing to
 /// answer yet: a chunk of a frame still arriving, a transport acknowledgement,
 /// or a frame its handler answers later.
 pub async fn receive_from_radio<D: BleTransportDelegate + ?Sized>(
@@ -113,11 +135,15 @@ pub async fn receive_from_radio<D: BleTransportDelegate + ?Sized>(
             FrameIngressResult::NeedMoreChunks | FrameIngressResult::ProtocolControl(_) => {
                 return Ok(None)
             }
-            FrameIngressResult::MessageComplete { message } => TransportInboundMessage {
-                peer_address: peer_address.to_string(),
-                frame_type: message.frame_type,
-                payload: message.payload,
-            },
+            FrameIngressResult::MessageComplete { message } => {
+                chunked_frame_borne_out(message.frame_type, &message.payload)
+                    .map_err(RadioError::Refused)?;
+                TransportInboundMessage {
+                    peer_address: peer_address.to_string(),
+                    frame_type: message.frame_type,
+                    payload: message.payload,
+                }
+            }
         },
     };
     let outbound = bilateral
@@ -213,6 +239,58 @@ mod tests {
                 bytes,
             ))
         }
+
+        /// What this wallet does with `payload` a peer chunked under
+        /// `frame_type`, as the peer's own frame coordinator chunks it: the
+        /// answer to its last chunk.
+        fn receive_chunked(
+            &self,
+            frame_type: pb::BleFrameType,
+            payload: &[u8],
+        ) -> Result<Option<Vec<TransportOutbound>>, RadioError> {
+            let chunks = BleFrameCoordinator::new([0x51; 32])
+                .encode_message(frame_type, payload)
+                .expect("the peer chunks its frame");
+            let (last, earlier) = chunks.split_last().expect("a frame is at least one chunk");
+            for chunk in earlier {
+                assert!(
+                    matches!(self.receive(chunk), Ok(None)),
+                    "a chunk before the last was answered"
+                );
+            }
+            self.receive(last)
+        }
+
+        /// What the bilateral transport itself does with a frame, as any of
+        /// its callers hands it one.
+        fn transport(
+            &self,
+            frame_type: pb::BleFrameType,
+            payload: Vec<u8>,
+        ) -> Result<Vec<TransportOutbound>, DsmError> {
+            crate::runtime::get_runtime().block_on(self.bilateral.on_transport_message(
+                TransportInboundMessage {
+                    peer_address: PEER_ADDRESS.to_string(),
+                    frame_type,
+                    payload,
+                },
+            ))
+        }
+    }
+
+    /// A peer's envelope, canonical and unframed: what a chunk carries.
+    fn canonical(payload: pb::envelope::Payload) -> Vec<u8> {
+        crate::bluetooth::bilateral_envelope::build_envelope(&[0x51; 32], &[0x52; 32], payload)
+            .encode_to_vec()
+    }
+
+    /// A rejection of a proposal this wallet never made.
+    fn stray_reject() -> pb::envelope::Payload {
+        pb::envelope::Payload::BilateralPrepareReject(pb::BilateralPrepareReject {
+            commitment_hash: Some(pb::Hash32 { v: vec![0x63; 32] }),
+            rejector_device_id: vec![0x51; 32],
+            ..Default::default()
+        })
     }
 
     const PEER_ADDRESS: &str = "5A:3C:91:0E:77:D2";
@@ -423,5 +501,114 @@ mod tests {
             refusal(wallet.receive(&[0x03, 0x0a, 0x00])),
             RadioRefusal::Undecodable(_)
         ));
+    }
+
+    /// A peer cannot make the wallet send back bytes it chose: a chunked frame
+    /// of unspecified type carrying them is refused, and nothing answers it.
+    /// MUTATION CONTROL: dropping the chunked-frame check
+    /// (`chunked_frame_borne_out`) turns this red; dropping the transport's own
+    /// check as well sends the peer's bytes back to it, as the adapter did.
+    #[test]
+    #[serial]
+    fn a_peer_cannot_make_the_wallet_send_back_bytes_it_chose() {
+        let wallet = Wallet::new(0x61);
+        let chosen = b"bytes the peer wants the wallet to transmit".to_vec();
+
+        assert!(matches!(
+            refusal(wallet.receive_chunked(pb::BleFrameType::Unspecified, &chosen)),
+            RadioRefusal::Undecodable(_)
+        ));
+    }
+
+    /// A chunk header's frame type is the sender's claim: a bilateral frame
+    /// under another frame's type, or a router invoke under a bilateral frame
+    /// type, is refused for what its payload is.
+    /// MUTATION CONTROL: dropping `chunked_frame_borne_out` turns this red.
+    #[test]
+    #[serial]
+    fn a_chunked_frame_is_taken_only_as_what_its_payload_is() {
+        let wallet = Wallet::new(0x62);
+
+        assert_eq!(
+            refusal(wallet.receive_chunked(
+                pb::BleFrameType::BilateralCommitResponse,
+                &canonical(stray_reject()),
+            )),
+            RadioRefusal::FrameMismatch {
+                declared: pb::BleFrameType::BilateralCommitResponse,
+                carried: pb::BleFrameType::BilateralPrepareReject,
+            }
+        );
+        assert_eq!(
+            refusal(wallet.receive_chunked(
+                pb::BleFrameType::BilateralConfirm,
+                &canonical(invoke("wallet.sendSmart", Vec::new())),
+            )),
+            RadioRefusal::NotABilateralFrame("invoke wallet.sendSmart".to_string())
+        );
+    }
+
+    /// The check refuses what a chunk's payload does not bear out, not every
+    /// chunked frame: a rejection chunked as a rejection reaches the bilateral
+    /// handler, which refuses it for having no session.
+    #[test]
+    #[serial]
+    fn a_chunked_frame_borne_out_reaches_the_bilateral_handler() {
+        let wallet = Wallet::new(0x63);
+
+        match wallet.receive_chunked(
+            pb::BleFrameType::BilateralPrepareReject,
+            &canonical(stray_reject()),
+        ) {
+            Err(RadioError::Bilateral(e)) => assert!(
+                e.to_string()
+                    .contains("no session found for commitment hash"),
+                "{e}"
+            ),
+            other => panic!("the frame did not reach the bilateral handler: {other:?}"),
+        }
+    }
+
+    /// The bilateral transport sends nothing back for a frame its payload does
+    /// not bear out, whoever hands it the frame: each frame type the adapter
+    /// once passed through, given a payload that is not that frame, is an
+    /// error with no frame to send.
+    /// MUTATION CONTROL: restoring the adapter's pass-through turns this red
+    /// with the peer's own bytes as the frame to send back.
+    #[test]
+    #[serial]
+    fn the_bilateral_transport_never_sends_back_a_frame_it_was_handed() {
+        let wallet = Wallet::new(0x64);
+        let chosen = b"bytes the peer wants the wallet to transmit".to_vec();
+        let handed = [
+            (pb::BleFrameType::Unspecified, chosen.clone()),
+            (pb::BleFrameType::Unspecified, canonical(stray_reject())),
+            (
+                pb::BleFrameType::BilateralPrepareResponse,
+                canonical(stray_reject()),
+            ),
+            (pb::BleFrameType::BilateralPrepareReject, chosen.clone()),
+            (
+                pb::BleFrameType::BilateralConfirm,
+                canonical(invoke("wallet.sendSmart", Vec::new())),
+            ),
+            (
+                pb::BleFrameType::BilateralCommitResponse,
+                canonical(stray_reject()),
+            ),
+        ];
+
+        for (frame_type, payload) in handed {
+            match wallet.transport(frame_type, payload) {
+                Err(e) => {
+                    let said = e.to_string();
+                    assert!(
+                        said.contains("not a canonical envelope") || said.contains("not taken"),
+                        "{frame_type:?}: {said}"
+                    );
+                }
+                Ok(sent) => panic!("a {frame_type:?} frame was answered with {sent:?}"),
+            }
+        }
     }
 }

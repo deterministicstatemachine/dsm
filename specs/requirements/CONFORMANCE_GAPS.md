@@ -3144,6 +3144,34 @@ The most severe finding of the 2026-10-15 read-only security audit of main `f160
 
 **Fix:** commit `9e59e768` on `fix/ble-radio-cannot-reach-app-router`.
 
+### 6.85 The BLE transport sent a peer's frame back to it as it came (`fix/ble-transport-never-echoes-peer-frames`, follow-up to §6.84, 2026-10-16)
+
+Found while fixing §6.84.
+
+| Field | Record |
+|---|---|
+| Severity | Low |
+| Files | `dsm_sdk/src/bluetooth/bilateral_transport_adapter.rs` · `on_transport_message`, `BilateralFrame` (new), `frame_borne_out` (new); `dsm_sdk/src/bluetooth/radio_ingress.rs` · `chunked_frame_borne_out` (new), `RadioRefusal::FrameMismatch` (new) |
+| Exploit | `BilateralTransportAdapter::on_transport_message` "passed through" what it did not recognise. A `BilateralPrepareResponse`, `BilateralPrepareReject`, `BilateralConfirm` or `BilateralCommitResponse` frame whose payload was not that envelope, and every `Unspecified` frame, came back as an outbound frame carrying the peer's own payload. `processIncomingBleData` wrote it back over the link (an `Unspecified` frame needs no chunking and went raw), and `AndroidBleBridge::handle_characteristic_data` queued it as writes. A peer in range could make the wallet transmit bytes the peer chose. It reached no router route: the payload only went back to its sender. |
+| Violates | CLAUDE.md's no-stand-in rule: a frame the transport cannot take was answered as though it had been handled, where the truth is that it was refused. |
+| Closure condition | The adapter takes a frame only when its payload is the frame its type names, and refuses everything else without sending anything back, for every caller. The radio entry refuses a chunked frame whose payload does not bear out its header, with a typed `RadioRefusal`. |
+| Status | Closed. |
+
+**The change.**
+- **The transport.** `BilateralFrame` names the five frames the bilateral transport takes, each known by its payload: a prepare-response, prepare-reject or commit-response envelope, or a transaction of exactly one op invoking `bilateral.prepare` or `bilateral.confirm`. `on_transport_message` first requires the payload to be a canonical envelope that is the frame its type names (`frame_borne_out`), and refuses anything else with an error and no frame to send. The five pass-through branches are gone. So is the arm that answered a frame type the transport does not take with nothing at all; it is now an error too. The handlers are unchanged.
+- **The radio entry.** A reassembled chunked frame must bear out its header (`chunked_frame_borne_out`) before it reaches the transport. A bilateral frame under another frame's type is `RadioRefusal::FrameMismatch { declared, carried }`, an envelope that is no bilateral frame is `NotABilateralFrame` or `PlatformEvent`, and bytes that are not a canonical envelope are `Undecodable`. `bilateral_frame_of`, for whole envelopes, now reads `BilateralFrame` too and refuses exactly what it refused before. A whole `bilateral.prepare` is still refused, since a sender always chunks a proposal.
+- Nothing legitimate is refused. Every sender chunks a canonical envelope (`chunkEnvelopeForBle` strips the `0x03` frame byte, and the Rust senders encode canonical bytes), and every step handler already decoded strictly and parsed one op only.
+
+**Tests.** `dsm_sdk::bluetooth::radio_ingress::tests`, on the §6.84 wallet fixture:
+- `a_peer_cannot_make_the_wallet_send_back_bytes_it_chose`: a chunked `Unspecified` frame of the peer's own bytes is refused (`Undecodable`), and nothing answers it.
+- `a_chunked_frame_is_taken_only_as_what_its_payload_is`: a rejection chunked as a commit response is `FrameMismatch`, and a `wallet.sendSmart` invoke chunked as a confirm is `NotABilateralFrame`.
+- `the_bilateral_transport_never_sends_back_a_frame_it_was_handed`: each frame type the adapter passed through, handed straight to the adapter with a payload that is not that frame, is an error with no frame to send. This is what any caller of the adapter gets, `AndroidBleBridge` included.
+- `a_chunked_frame_borne_out_reaches_the_bilateral_handler`: a rejection chunked as a rejection reaches the handler, which refuses it for having no session. The check does not refuse every chunked frame.
+
+**Mutation controls (2026-10-16, restored byte for byte).**
+- The radio entry's check called with its result discarded. `a_peer_cannot_make_the_wallet_send_back_bytes_it_chose` and `a_chunked_frame_is_taken_only_as_what_its_payload_is` went red: the transport still refused the frames, but as a bilateral error rather than the typed refusal. Removing the call outright does not compile, because `deny(warnings)` refuses the then-unused check.
+- That, plus the adapter's pass-through restored (a frame not borne out answered with itself): the old behaviour. The two radio tests went red with the peer's own bytes as the frame sent back, and `the_bilateral_transport_never_sends_back_a_frame_it_was_handed` went red ("a Unspecified frame was answered with" those bytes).
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
