@@ -2071,11 +2071,22 @@ mod history_tests {
         use dsm::types::operations::{Operation, TransactionMode, TransferTerms};
         let device = crate::test_support::one_device::Device::start(0x75).await;
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
-        let peer = crate::util::text_id::encode_base32_crockford(&[0x76u8; 32]);
+        let peer_id = [0x76u8; 32];
+        let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
         let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        // The nonce the sender's send derives (§4.1), over the relationship.
+        let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &peer_id,
+            &device.router.device_id_bytes,
+        );
         let terms = TransferTerms::new(
             b"NOSUCH".to_vec(),
-            dsm::crypto::rng::random_bytes(32),
+            crate::handlers::app_router_impl::transfer_nonce(
+                &relationship,
+                100,
+                "NOSUCH",
+                &device.router.device_id_bytes,
+            ),
             TransactionMode::Unilateral,
             "a label the sender chose".to_string(),
         );
