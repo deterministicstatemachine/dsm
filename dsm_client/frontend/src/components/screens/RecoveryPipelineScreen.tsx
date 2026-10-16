@@ -18,6 +18,7 @@ import {
 } from '../../services/recovery/nfcRecoveryService';
 import { Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { useScreenGuard } from '../../hooks/useScreenGuard';
 
 type Phase = 'staged' | 'polling' | 'complete' | 'error' | 'none';
 
@@ -41,6 +42,9 @@ interface RecoveryPipelineScreenProps {
 }
 
 const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavigate }) => {
+  // Every step started here (tombstone, succession) is irreversible: no other
+  // app's window may sit over this screen.
+  useScreenGuard('confirm');
   const [phase, setPhase] = useState<Phase>('none');
   const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');

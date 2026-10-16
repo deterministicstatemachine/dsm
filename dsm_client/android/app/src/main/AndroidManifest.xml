@@ -49,6 +49,10 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
+    <!-- Android 12+: while a connect approval, a send or another irreversible confirmation is
+         shown, other apps' overlay windows are hidden (Window.setHideOverlayWindows). -->
+    <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS"/>
+
     <!-- Optional feature hints -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
@@ -56,6 +60,7 @@
     <application
         android:name="com.dsm.wallet.App"
         android:allowBackup="false"
+        android:taskAffinity=""
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"

@@ -31,6 +31,7 @@ import android.os.Message
 import android.util.Log
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -135,13 +136,13 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
     private var barFit = "edge"
     private var barInsetTop = 0
     private var barInsetBottom = 0
-    private lateinit var webView: WebView
+    private lateinit var webView: WalletWebView
     private var statusBarScrim: View? = null
     private lateinit var bridge: SinglePathWebViewBridge
     private lateinit var assetLoader: WebViewAssetLoader
     @Volatile private var dsmPort: WebMessagePortCompat? = null
     /** A connect code a link handed over (DSM Amendment A11), held until the page can take it. */
-    @Volatile private var pendingConnectLink: String? = null
+    @Volatile private var pendingConnectLink: ConnectLink? = null
     /** The connect link that opened the wallet from another app, until the player answers it. */
     @Volatile private var connectLinkOpened: String? = null
     @Volatile private var pendingJsPort: WebMessagePortCompat? = null
@@ -1261,7 +1262,7 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
                 FrameLayout.LayoutParams.MATCH_PARENT,
             )
         }
-        webView = WebView(this)
+        webView = WalletWebView(this)
         rootContainer.addView(
             webView,
             FrameLayout.LayoutParams(
@@ -1485,15 +1486,8 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         }
     }
 
-    private fun materializeEnvConfig(): File? {
-        val assetName = "dsm_env_config.toml"
-        val files = applicationContext.filesDir
-        val outFile = File(files, assetName)
-
-        // Materialize bundled assets that the SDK reads from filesDir.
-        // ca.crt is the storage fleet's CA, the one the bundled env config names.
-        materializeAssetIfBundled("ca.crt", files)
-
+    /** Debug builds: the first readable, non-empty developer override, or none. */
+    private fun debugEnvConfigOverride(files: File): File? {
         fun firstExisting(vararg candidates: File?): File? = candidates.firstOrNull { it != null && it.exists() }
 
         val overrideCandidates = mutableListOf<File?>()
@@ -1505,18 +1499,35 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
             overrideCandidates += File(dl, "dsm_env_config.toml")
         } catch (_: Throwable) {}
 
-        val override = firstExisting(*overrideCandidates.toTypedArray())
-        if (override != null) {
-            try {
-                if (override.exists() && override.canRead() && override.length() > 0L) {
-                    Log.i(tag, "Using developer override env config at ${override.absolutePath}")
-                    return override
-                } else {
-                    Log.w(tag, "Found override config at ${override.absolutePath} but it is not readable or empty; ignoring")
-                }
-            } catch (t: Throwable) {
-                Log.w(tag, "Found override config at ${override.absolutePath} but validation failed: ${t.message}; ignoring")
+        val override = firstExisting(*overrideCandidates.toTypedArray()) ?: return null
+        try {
+            if (override.exists() && override.canRead() && override.length() > 0L) {
+                Log.i(tag, "Using developer override env config at ${override.absolutePath}")
+                return override
+            } else {
+                Log.w(tag, "Found override config at ${override.absolutePath} but it is not readable or empty; ignoring")
             }
+        } catch (t: Throwable) {
+            Log.w(tag, "Found override config at ${override.absolutePath} but validation failed: ${t.message}; ignoring")
+        }
+        return null
+    }
+
+    private fun materializeEnvConfig(): File? {
+        val assetName = "dsm_env_config.toml"
+        val files = applicationContext.filesDir
+        val outFile = File(files, assetName)
+
+        // Materialize bundled assets that the SDK reads from filesDir.
+        // ca.crt is the storage fleet's CA, the one the bundled env config names.
+        materializeAssetIfBundled("ca.crt", files)
+
+        // A developer's override is honoured in debug builds only. A release build always uses
+        // the bundled config: the external files dir and Downloads are writable by other apps and
+        // by anyone holding the phone, and the storage nodes a wallet trusts are not theirs to name.
+        if (BuildConfig.DEBUG) {
+            val override = debugEnvConfigOverride(files)
+            if (override != null) return override
         }
 
         val maxAttempts = 3
@@ -1596,9 +1607,26 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         if (intent.action != Intent.ACTION_VIEW || data.scheme != "dsm") return
         val ssp = data.schemeSpecificPart ?: return
         if (!ssp.startsWith("connect/v1:")) return
-        pendingConnectLink = intent.dataString
-        connectLinkOpened = intent.dataString
+        val link = intent.dataString ?: return
+        pendingConnectLink = ConnectLink(linkSender(intent), link)
+        connectLinkOpened = link
         deliverConnectLink()
+    }
+
+    /** A connect link and the app Android named as having opened it (none: it named none). */
+    private class ConnectLink(val sender: String?, val text: String)
+
+    /**
+     * The package that opened the wallet with [intent], as Android recorded the launch. The
+     * referrer extras are the sender's own words about itself, so they are removed first and
+     * getReferrer() answers the launching package the system recorded. Called from onCreate and
+     * onNewIntent, while that launch is the current one.
+     */
+    private fun linkSender(intent: Intent): String? {
+        intent.removeExtra(Intent.EXTRA_REFERRER)
+        intent.removeExtra(Intent.EXTRA_REFERRER_NAME)
+        val referrer = referrer ?: return null
+        return if (referrer.scheme == "android-app") referrer.host else null
     }
 
     /**
@@ -1685,12 +1713,37 @@ class MainActivity : AppCompatActivity(), NfcAdapter.ReaderCallback {
         return opened != null && moveTaskToBack(isTaskRoot)
     }
 
-    /** Hand a held connect link to the page once its message port exists. */
+    /**
+     * Hand a held connect link to the page once its message port exists, as UTF-8
+     * "sender\nlink": the package Android named as the link's sender (empty when it named none;
+     * a package name holds no newline), then the link as it came.
+     */
     private fun deliverConnectLink() {
         val link = pendingConnectLink ?: return
         if (dsmPort == null) return
         pendingConnectLink = null
-        dispatchDsmEventOnUi("connect.link", link.toByteArray(Charsets.UTF_8))
+        val sender = link.sender ?: ""
+        dispatchDsmEventOnUi("connect.link", "$sender\n${link.text}".toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * What the page shows asks the window to guard (the page's `setScreenGuards`). While a
+     * recovery phrase is on screen or typed, no screenshot, recording or Recents thumbnail holds
+     * it (FLAG_SECURE, and from Android 13 no Recents screenshot at all) and the keyboard learns
+     * nothing from it. While an irreversible confirmation is on screen, other apps' overlay
+     * windows are hidden (Android 12+). Applied on the UI thread in the order the page asks.
+     */
+    fun setScreenGuards(guards: ScreenGuards) {
+        runOnUiThread {
+            if (guards.secret) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) setRecentsScreenshotEnabled(!guards.secret)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) window.setHideOverlayWindows(guards.confirm)
+            webView.applyGuards(guards)
+        }
     }
 
     private fun signalBridgeReady() {

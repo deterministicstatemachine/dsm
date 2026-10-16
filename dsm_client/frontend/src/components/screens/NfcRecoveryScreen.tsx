@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // NFC ring backup on the StateBoy frame: the backup status as Rust reports
-// it, first-time setup, arming a capsule, and writing it to the ring.
+// it, first-time setup, arming a capsule, and writing it to the ring. The
+// mnemonic is shown and typed here, so while the screen is up the phone takes
+// no screenshot of it and the keyboard learns nothing from it (useScreenGuard),
+// and the words are never offered to the clipboard.
 
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import * as EventBridge from '../../dsm/EventBridge';
@@ -18,7 +21,7 @@ import {
 import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { Notice, ScreenFrame, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
-import { copyText } from '../../utils/anchorDisplay';
+import { useScreenGuard } from '../../hooks/useScreenGuard';
 
 type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh' | 'writing';
 
@@ -45,6 +48,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const mountedRef = useRef(true);
+  useScreenGuard('secret');
 
   const status = read && 'status' in read ? read.status : null;
 
@@ -285,24 +289,16 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       {setupMode === 'generate' && generatedMnemonic && (
         <section className="sb-card sb-card--dark">
           <div className="sb-card__title">Write these words down</div>
-          <p className="sb-hint">They are required to rebuild or recover. Nothing else can.</p>
-          <div className="sb-field">
-            <textarea
-              className="sb-input sb-input--mono"
-              aria-label="Generated mnemonic"
-              value={generatedMnemonic}
-              readOnly
-              rows={4}
-            />
-          </div>
-          <div className="sb-actions" style={{ margin: 0 }}>
-            <button
-              type="button"
-              className="sb-btn"
-              onClick={() => { void copyText(generatedMnemonic).then((ok) => setStatusMsg(ok ? 'Copied to clipboard.' : 'Could not copy. Write the words down.')); }}
-            >
-              Copy
-            </button>
+          <p className="sb-hint">They are required to rebuild or recover. Nothing else can. Write them on paper: they are not copied anywhere.</p>
+          <ol className="sb-phrase sb-phrase--all" aria-label="Generated mnemonic">
+            {generatedMnemonic.trim().split(/\s+/).map((word, index) => (
+              <li key={index} className="sb-phrase__word">
+                <span className="sb-phrase__n">{index + 1}</span>
+                <span className="sb-phrase__w">{word}</span>
+              </li>
+            ))}
+          </ol>
+          <div className="sb-actions" style={{ marginTop: 8, marginBottom: 0 }}>
             <button
               type="button"
               className="sb-btn sb-btn--primary"
@@ -330,6 +326,9 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
               onChange={(e) => setMnemonicInput(e.target.value)}
               placeholder="word1 word2 word3 ..."
               rows={4}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
               spellCheck={false}
             />
           </div>

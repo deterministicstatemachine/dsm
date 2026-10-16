@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Inspect or recover from a ring, on the StateBoy frame: the mnemonic, the
 // tap, and the decrypted capsule as Rust inspected it, staged only on request.
+// The mnemonic is typed here, so while the screen is up the phone takes no
+// screenshot of it and the keyboard learns nothing from it (useScreenGuard).
 
 import React, { memo, useCallback, useEffect, useRef, useState } from 'react';
 import * as EventBridge from '../../dsm/EventBridge';
@@ -17,6 +19,7 @@ import {
 } from '../../services/recovery/nfcRecoveryService';
 import { Disclosure, Notice, ScreenFrame, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { useScreenGuard } from '../../hooks/useScreenGuard';
 
 type Step = 'mnemonic' | 'tap' | 'preview';
 
@@ -77,6 +80,7 @@ function describeComparison(
 }
 
 const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
+  useScreenGuard('secret');
   const [step, setStep] = useState<Step>('mnemonic');
   const [mnemonic, setMnemonic] = useState('');
   const [busy, setBusy] = useState(false);
@@ -273,6 +277,9 @@ const RecoveryScreen: React.FC<RecoveryScreenProps> = ({ onNavigate }) => {
               placeholder="word1 word2 word3 ..."
               rows={4}
               disabled={busy}
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
               spellCheck={false}
             />
           </div>
