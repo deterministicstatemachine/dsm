@@ -3140,7 +3140,9 @@ The most severe finding of the 2026-10-15 read-only security audit of main `f160
 - A refused envelope handed to `crate::ingress::dispatch_ingress` from a thread outside the runtime, as the JNI bridge called it, with the answer sent back to the peer. The five refusal tests went red. `a_radio_peer_cannot_set_the_wallet_lock` failed on "a peer's bytes set the wallet's lock": the peer's PIN was enrolled. The router ran `wallet.sendSmart`, which stopped only because the test device names no storage set, and it ran `balance.list` and both ops of the confirm-carrying transaction. The control and the undecodable test stayed green.
 - A first form of the mutation called the ingress inside the radio entry's own runtime context. The Core bridge's router adapter then panicked ("Cannot start a runtime from within a runtime"), so the router was reached but ran nothing. That mutant did not reproduce the bridge, which called the ingress synchronously from the JNI thread. The faithful form above is the record.
 
-**Suites.** `radio_ingress::tests` 7/0. Android unit tests for `com.dsm.wallet.bridge.ble.*` and `SinglePathWebViewBridgeFuzzTest`: 136/0. `cargo check --target aarch64-linux-android -p dsm_sdk --features jni,bluetooth`: no warnings.
+**Suites.** `radio_ingress::tests` 7/0. Android unit tests for `com.dsm.wallet.bridge.ble.*` and `SinglePathWebViewBridgeFuzzTest`: 136/0. `cargo check --target aarch64-linux-android -p dsm_sdk --features jni,bluetooth`: no warnings. Board at `9e59e768` (the CI command, `--release`): `dsm` 1723/0, `dsm_sdk` 1273/0 with 3 ignored that predate this change, the seven `radio_ingress` tests among them. `make lint`'s Rust half (toolchain consistency, `fmt --check`, `clippy --all-targets -D warnings`) exit 0; its frontend half did not run, since nothing in the frontend changed and the worktree has no `node_modules`.
+
+**Fix:** commit `9e59e768` on `fix/ble-radio-cannot-reach-app-router`.
 
 ## 7 Totals
 
