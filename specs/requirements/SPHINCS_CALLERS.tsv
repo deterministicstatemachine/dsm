@@ -337,8 +337,8 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	1
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	21	use dsm::crypto::sphincs::{sphincs_sign, sphincs_verify};
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	170	let intent_sig = sphincs_sign(&ak_sk, &cert_resync_signing_target(&joint, &ek_pk_a))?;
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	241	if !sphincs_verify(&initiator_ak, &target, &req.intent_sig).unwrap_or(false) {
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	280	let assert_sig = sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	343	if !sphincs_verify(&peer_ak, &target, &ack.assert_sig).unwrap_or(false) {
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	282	let assert_sig = sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	347	if !sphincs_verify(&peer_ak, &target, &ack.assert_sig).unwrap_or(false) {
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	774	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	778	signature: dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/faucet_flow_tests.rs	184	let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
