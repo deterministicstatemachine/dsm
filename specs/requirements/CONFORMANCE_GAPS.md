@@ -3172,6 +3172,10 @@ Found while fixing §6.84.
 - The radio entry's check called with its result discarded. `a_peer_cannot_make_the_wallet_send_back_bytes_it_chose` and `a_chunked_frame_is_taken_only_as_what_its_payload_is` went red: the transport still refused the frames, but as a bilateral error rather than the typed refusal. Removing the call outright does not compile, because `deny(warnings)` refuses the then-unused check.
 - That, plus the adapter's pass-through restored (a frame not borne out answered with itself): the old behaviour. The two radio tests went red with the peer's own bytes as the frame sent back, and `the_bilateral_transport_never_sends_back_a_frame_it_was_handed` went red ("a Unspecified frame was answered with" those bytes).
 
+**Suites.** Targeted: `dsm_sdk` `bluetooth::radio_ingress`, `bilateral_transport_adapter`, `android_ble_bridge` and `ble_frame_coordinator` 33/0, and `ble_smoke` 3/0 with 1 ignored that predates this change. Board at `2309fe1e` (the CI command, `--release`): `dsm` 1723/0, `dsm_sdk` 1277/0 with 3 ignored that predate this change. `make lint`'s Rust half exit 0. `cargo check --target aarch64-linux-android -p dsm_sdk --features jni,bluetooth`: no warnings.
+
+**Fix:** commit `2309fe1e` on `fix/ble-transport-never-echoes-peer-frames`, stacked on §6.84's branch.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
