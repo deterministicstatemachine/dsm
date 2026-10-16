@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use aes_gcm::aead::OsRng;
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::domain::TaggedHashDomain;
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     B32, EncapsulateDeterministic, EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
@@ -43,11 +44,21 @@ const SK_LEN: usize = 2400;
 const CT_LEN: usize = 1088;
 const SS_LEN: usize = 32;
 
-/// Enhanced KyberKeyPair with secure memory handling
-#[derive(Debug, Clone, ZeroizeOnDrop)]
+/// An ML-KEM-768 keypair. The secret key is wiped on drop, and `Debug` names
+/// the public key only, so formatting a keypair never prints the secret.
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct KyberKeyPair {
     pub public_key: Vec<u8>,
     pub secret_key: Vec<u8>,
+}
+
+impl core::fmt::Debug for KyberKeyPair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("KyberKeyPair")
+            .field("public_key", &self.public_key)
+            .field("secret_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl KyberKeyPair {
@@ -252,27 +263,41 @@ pub fn generate_kyber_keypair() -> Result<KyberKeyPair, DsmError> {
     }
     let mut rng = OsRng;
     let (decapsulation_key, encapsulation_key) = MlKem768::generate(&mut rng);
-
-    let pk_bytes = encapsulation_key.as_bytes().as_slice().to_vec();
-    let sk_bytes = decapsulation_key.as_bytes().as_slice().to_vec();
-
-    if pk_bytes.len() != PK_LEN || sk_bytes.len() != SK_LEN {
-        return Err(DsmError::crypto(
-            format!(
-                "Generated key sizes do not match expected values: pk={}, sk={}",
-                pk_bytes.len(),
-                sk_bytes.len()
-            ),
-            None::<std::io::Error>,
-        ));
-    }
+    let (public_key, secret_key) = encoded_keypair(&decapsulation_key, &encapsulation_key)?;
+    // Held in the keypair before the health check, so a failed check drops
+    // (and wipes) it.
+    let keypair = KyberKeyPair {
+        public_key,
+        secret_key,
+    };
 
     maybe_periodic_verify()?;
 
-    Ok(KyberKeyPair {
-        public_key: pk_bytes,
-        secret_key: sk_bytes,
-    })
+    Ok(keypair)
+}
+
+/// The encoded public and secret keys of a generated keypair. The encoding of
+/// the secret key is a full copy of it, so it is wiped once the bytes are
+/// taken, and the taken bytes are wiped too if the sizes are wrong.
+fn encoded_keypair(
+    decapsulation_key: &DecapsulationKey<MlKem768Params>,
+    encapsulation_key: &EncapsulationKey<MlKem768Params>,
+) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
+    let pk_bytes = encapsulation_key.as_bytes().as_slice().to_vec();
+    let mut sk_encoded = decapsulation_key.as_bytes();
+    let mut sk_bytes = sk_encoded.as_slice().to_vec();
+    sk_encoded.as_mut_slice().zeroize();
+
+    if pk_bytes.len() != PK_LEN || sk_bytes.len() != SK_LEN {
+        let sizes = format!(
+            "Generated key sizes do not match expected values: pk={}, sk={}",
+            pk_bytes.len(),
+            sk_bytes.len()
+        );
+        sk_bytes.zeroize();
+        return Err(DsmError::crypto(sizes, None::<std::io::Error>));
+    }
+    Ok((pk_bytes, sk_bytes))
 }
 
 /// Deterministic key generation: Blake3(context||entropy) -> 32B seed -> ml-kem generate_deterministic(d, z)
@@ -290,11 +315,14 @@ pub fn generate_kyber_keypair_from_entropy(
     let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_SEED);
     h.update(context.as_bytes());
     h.update(entropy);
-    let digest = h.finalize();
+    let mut digest = h.finalize();
+    h.zeroize();
 
-    let mut seed = [0u8; 32];
-    seed.copy_from_slice(digest.as_bytes());
-    generate_kyber_keypair_from_seed(&seed)
+    let mut seed: [u8; 32] = *digest.as_bytes();
+    digest.zeroize();
+    let kp = generate_kyber_keypair_from_seed(&seed);
+    seed.zeroize();
+    kp
 }
 
 /// The device's ML-KEM identity keypair from `Smaster` (key schedule KS1): the seed is
@@ -310,37 +338,60 @@ pub fn generate_kyber_identity_keypair(smaster: &[u8; 32]) -> Result<(Vec<u8>, V
 /// Deterministic key generation from a 32-byte seed: `d`, `z` = BLAKE3 of the seed under
 /// two domains, then ML-KEM-768 `generate_deterministic(d, z)`.
 pub fn generate_kyber_keypair_from_seed(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), DsmError> {
-    let d: B32 = {
-        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_D);
-        h.update(seed);
-        h.update(&0u64.to_le_bytes());
-        (*h.finalize().as_bytes()).into()
-    };
-    let z: B32 = {
-        let mut h = dsm_domain_hasher(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_Z);
-        h.update(seed);
-        h.update(&1u64.to_le_bytes());
-        (*h.finalize().as_bytes()).into()
-    };
+    let mut d = keygen_coin(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_D, seed, 0);
+    let mut z = keygen_coin(crate::common::domain_tags::TAG_DSM_ML_KEM_KEYGEN_Z, seed, 1);
     let (decapsulation_key, encapsulation_key) = MlKem768::generate_deterministic(&d, &z);
+    d.as_mut_slice().zeroize();
+    z.as_mut_slice().zeroize();
+    let (pk_bytes, mut sk_bytes) = encoded_keypair(&decapsulation_key, &encapsulation_key)?;
 
-    let pk_bytes = encapsulation_key.as_bytes().as_slice().to_vec();
-    let sk_bytes = decapsulation_key.as_bytes().as_slice().to_vec();
+    if let Err(unhealthy) = maybe_periodic_verify() {
+        sk_bytes.zeroize();
+        return Err(unhealthy);
+    }
 
-    if pk_bytes.len() != PK_LEN || sk_bytes.len() != SK_LEN {
-        return Err(DsmError::crypto(
+    Ok((pk_bytes, sk_bytes))
+}
+
+/// One ML-KEM key-generation coin, `BLAKE3(tag ‖ seed ‖ u64le(index))`. The
+/// hasher, which still buffers the seed, and the digest are wiped before the
+/// coin is returned; the caller wipes the coin.
+fn keygen_coin(tag: TaggedHashDomain<'_>, seed: &[u8; 32], index: u64) -> B32 {
+    let mut h = dsm_domain_hasher(tag);
+    h.update(seed);
+    h.update(&index.to_le_bytes());
+    let mut digest = h.finalize();
+    h.zeroize();
+    let coin = B32::from(*digest.as_bytes());
+    digest.zeroize();
+    coin
+}
+
+/// A peer's ML-KEM-768 encapsulation key, accepted only in its one encoding
+/// (FIPS 203 §7.2, the encapsulation-key input check): exactly `PK_LEN`
+/// bytes, and the key re-encodes to the very bytes it came in. Decoding
+/// reduces each 12-bit coefficient mod q, so a key holding a coefficient at or
+/// above q re-encodes to other bytes and is refused, rather than encapsulated
+/// to as some other key.
+fn peer_encapsulation_key(public_key: &[u8]) -> Result<EncapsulationKey<MlKem768Params>, DsmError> {
+    let pk_arr: &[u8; PK_LEN] = public_key.try_into().map_err(|e| {
+        DsmError::crypto(
             format!(
-                "Generated key sizes do not match expected values: pk={}, sk={}",
-                pk_bytes.len(),
-                sk_bytes.len()
+                "Invalid public key size: {} bytes (expected {PK_LEN}): {e}",
+                public_key.len()
             ),
+            None::<std::io::Error>,
+        )
+    })?;
+    let encapsulation_key = EncapsulationKey::<MlKem768Params>::from_bytes(pk_arr.into());
+    if encapsulation_key.as_bytes().as_slice() != public_key {
+        return Err(DsmError::crypto(
+            "ML-KEM encapsulation key is not canonical: a coefficient is not reduced mod q \
+             (FIPS 203 §7.2 modulus check)",
             None::<std::io::Error>,
         ));
     }
-
-    maybe_periodic_verify()?;
-
-    Ok((pk_bytes, sk_bytes))
+    Ok(encapsulation_key)
 }
 
 // ------------------ KEM ops ------------------
@@ -349,25 +400,7 @@ pub fn kyber_encapsulate(public_key: &[u8]) -> Result<(Vec<u8>, Vec<u8>), DsmErr
     if !KYBER_INITIALIZED.load(Ordering::SeqCst) {
         init_kyber()?;
     }
-    if public_key.len() != PK_LEN {
-        return Err(DsmError::crypto(
-            format!(
-                "Invalid public key size: {} bytes (expected {})",
-                public_key.len(),
-                PK_LEN
-            ),
-            None::<std::io::Error>,
-        ));
-    }
-
-    // Convert raw pk bytes → EncapsulationKey from encoded bytes
-    let pk_arr: &[u8; PK_LEN] = public_key.try_into().map_err(|_| {
-        DsmError::crypto(
-            "Public key must be exactly ML-KEM-768 length",
-            None::<std::io::Error>,
-        )
-    })?;
-    let encapsulation_key = EncapsulationKey::<MlKem768Params>::from_bytes(pk_arr.into());
+    let encapsulation_key = peer_encapsulation_key(public_key)?;
 
     // Encapsulate
     let mut rng = OsRng;
@@ -390,24 +423,7 @@ pub fn kyber_encapsulate_deterministic(
     if !KYBER_INITIALIZED.load(Ordering::SeqCst) {
         init_kyber()?;
     }
-    if public_key.len() != PK_LEN {
-        return Err(DsmError::crypto(
-            format!(
-                "Invalid public key size: {} bytes (expected {})",
-                public_key.len(),
-                PK_LEN
-            ),
-            None::<std::io::Error>,
-        ));
-    }
-
-    let pk_arr: &[u8; PK_LEN] = public_key.try_into().map_err(|_| {
-        DsmError::crypto(
-            "Public key must be exactly ML-KEM-768 length",
-            None::<std::io::Error>,
-        )
-    })?;
-    let encapsulation_key = EncapsulationKey::<MlKem768Params>::from_bytes(pk_arr.into());
+    let encapsulation_key = peer_encapsulation_key(public_key)?;
     let message = B32::try_from(message_seed.as_slice()).map_err(|_| {
         DsmError::crypto(
             "Deterministic Kyber seed must be exactly 32 bytes",
@@ -764,5 +780,45 @@ mod tests {
         assert_eq!(shared_secret1, shared_secret2);
         assert_eq!(ciphertext1, ciphertext2);
         assert_eq!(decapsulated, shared_secret1);
+    }
+
+    /// The first 12-bit coefficient of an encapsulation key's `t_hat`, set to
+    /// `value`: the low byte, then the low nibble of the next byte.
+    fn with_first_coefficient(public_key: &[u8], value: u16) -> Vec<u8> {
+        let mut pk = public_key.to_vec();
+        pk[0] = (value & 0xFF) as u8;
+        pk[1] = (pk[1] & 0xF0) | ((value >> 8) as u8 & 0x0F);
+        pk
+    }
+
+    /// FIPS 203 §7.2: a peer's encapsulation key is used only in its one
+    /// encoding. A coefficient of exactly q (3329) decodes to 0 and re-encodes
+    /// to other bytes, so the key is refused by both encapsulations; q − 1 is
+    /// a reduced coefficient and the key is used.
+    #[test]
+    fn an_encapsulation_key_with_an_unreduced_coefficient_is_refused() {
+        let keypair = generate_kyber_keypair().expect("keygen");
+        let reduced = with_first_coefficient(&keypair.public_key, 3328);
+        kyber_encapsulate(&reduced).expect("a reduced coefficient is a canonical key");
+
+        let unreduced = with_first_coefficient(&keypair.public_key, 3329);
+        let refused = kyber_encapsulate(&unreduced).expect_err("q is not a reduced coefficient");
+        assert!(refused.to_string().contains("not canonical"), "{refused}");
+        let refused = kyber_encapsulate_deterministic(&unreduced, &[9u8; 32])
+            .expect_err("the deterministic encapsulation checks the key too");
+        assert!(refused.to_string().contains("not canonical"), "{refused}");
+
+        let top = with_first_coefficient(&keypair.public_key, 0x0FFF);
+        kyber_encapsulate(&top).expect_err("the largest 12-bit value is not reduced");
+    }
+
+    /// Formatting a keypair names its public key and never its secret key.
+    #[test]
+    fn a_keypair_formats_without_its_secret_key() {
+        let keypair = generate_kyber_keypair().expect("keygen");
+        let shown = format!("{keypair:?}");
+        assert!(shown.contains("[REDACTED]"), "{shown}");
+        assert!(!shown.contains(&format!("{:?}", keypair.secret_key)));
+        assert!(shown.contains(&format!("{:?}", keypair.public_key)));
     }
 }

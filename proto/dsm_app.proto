@@ -2822,8 +2822,10 @@ message SealedEnvelopeV1 {
 // Each device writes its own entry, signed with its AK, to the keyed cell
 // H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
 // DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
-// keeps the entry whose AK hashes (with AttA) to the device id and whose
-// signature verifies, highest counter first (dsm::core::identity::directory).
+// keeps the entry whose AK hashes (with AttA) to the device id, whose
+// signature verifies and whose evidence proves, by P0-P6, its AK as the owner
+// authority of the device under its genesis (DSM Amendment A18), highest
+// counter first (dsm::core::identity::directory).
 message DeviceDirectoryEntryBodyV1 {
   bytes  genesis          = 1 [(dsm_fixed_len)=32];
   bytes  device_id        = 2 [(dsm_fixed_len)=32];
@@ -2831,6 +2833,12 @@ message DeviceDirectoryEntryBodyV1 {
   bytes  att_a            = 4 [(dsm_fixed_len)=32];
   bytes  kyber_public_key = 5 [(dsm_fixed_len)=1184];
   uint64 counter          = 6;
+  // DSM Amendment A18: the transition t the evidence's chain reaches, and the
+  // device's P0-P6 authority evidence (AuthorityEvidenceV1 bytes: the genesis
+  // parameters, the GRK delegation and device-tree transition chain to t, and
+  // the device's inclusion proof). Bounded by the directory cell's value budget.
+  bytes  authority_position = 7 [(dsm_fixed_len)=32];
+  bytes  authority_evidence = 8;
 }
 message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;

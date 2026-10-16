@@ -2337,38 +2337,52 @@ fn repair_contact_decision(
 #[cfg(test)]
 mod ak_trust_root_tests {
     use super::{decide_counterparty, repair_contact_decision, ContactRepair};
-    use crate::sdk::device_directory::DirectoryRead;
+    use crate::sdk::device_directory::{build_own_entry, DirectoryRead};
+    use crate::sdk::identity_presentation::OwnerIdentityInputs;
     use crate::storage::client_db::ContactRecord;
-    use dsm::core::identity::directory::{DirectoryEntry, DirectoryEntryBody, KYBER_PUBLIC_KEY_LEN};
-    use dsm::core::identity::genesis_v2::derive_devid;
-    use dsm::crypto::sphincs;
+    use dsm::core::identity::directory::{DirectoryEntry, KYBER_PUBLIC_KEY_LEN};
+    use dsm::core::identity::genesis_v2::genesis_authority_policy_hash;
+    use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
 
-    const GENESIS: [u8; 32] = [0x22; 32];
-    const ATT_A: [u8; 32] = [0x33; 32];
-
-    /// A device's own entry, signed by its AK: `(entry, AK public key)`.
+    /// A device's own entry, as the wallet builds it from its seed, P0–P6
+    /// evidence included (DSM Amendment A18): `(entry, AK public key)`.
     fn entry_of(kyber_byte: u8) -> (DirectoryEntry, Vec<u8>) {
-        let (pk, sk) = sphincs::generate_sphincs_keypair().expect("keypair");
-        let body = DirectoryEntryBody {
-            genesis: GENESIS,
-            device_id: derive_devid(&pk, &ATT_A),
-            ak_public_key: pk.clone(),
-            att_a: ATT_A,
-            kyber_public_key: vec![kyber_byte; KYBER_PUBLIC_KEY_LEN],
-            counter: 1,
-        };
-        let entry = DirectoryEntry::sign(body, &sk).expect("sign");
+        let wallet_seed = [kyber_byte; 64];
+        let inputs = OwnerIdentityInputs::beta(b"dsm-testnet");
+        let genesis = derive_genesis_v3_self_attested(
+            &wallet_seed,
+            inputs.network_id,
+            inputs.wallet_index,
+            inputs.device_slot,
+            inputs.genesis_version,
+            &genesis_authority_policy_hash(),
+        )
+        .expect("genesis");
+        let entry = build_own_entry(
+            &wallet_seed,
+            inputs,
+            &genesis.g,
+            vec![kyber_byte; KYBER_PUBLIC_KEY_LEN],
+            1,
+        )
+        .expect("own entry");
         entry.verify().expect("the entry proves itself");
-        (entry, pk)
+        (entry, genesis.ak_public.clone())
     }
 
-    /// Minimal contact row pinned to `ak` (the pairing-established AK).
-    fn pinned_contact(device_id: [u8; 32], ak: &[u8], kyber_public_key: Vec<u8>) -> ContactRecord {
+    /// Minimal contact row of `genesis` pinned to `ak` (the
+    /// pairing-established AK).
+    fn pinned_contact(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        ak: &[u8],
+        kyber_public_key: Vec<u8>,
+    ) -> ContactRecord {
         ContactRecord {
             contact_id: "peer".to_string(),
             device_id: device_id.to_vec(),
             alias: "peer".to_string(),
-            genesis_hash: GENESIS.to_vec(),
+            genesis_hash: genesis.to_vec(),
             public_key: ak.to_vec(),
             kyber_public_key,
             current_chain_tip: Some(vec![0x70; 32]),
@@ -2388,7 +2402,12 @@ mod ak_trust_root_tests {
     fn an_entry_for_another_ak_than_the_pinned_one_is_refused() {
         let (entry, ..) = entry_of(0x9A);
         let (.., pinned_ak) = entry_of(0x9B);
-        let contact = pinned_contact(entry.body.device_id, &pinned_ak, Vec::new());
+        let contact = pinned_contact(
+            entry.body.genesis,
+            entry.body.device_id,
+            &pinned_ak,
+            Vec::new(),
+        );
         assert!(repair_contact_decision(contact, &entry).is_err());
     }
 
@@ -2396,7 +2415,7 @@ mod ak_trust_root_tests {
     #[test]
     fn an_entry_naming_another_identity_is_refused() {
         let (entry, pk) = entry_of(0x9A);
-        let contact = pinned_contact([0x44; 32], &pk, Vec::new());
+        let contact = pinned_contact(entry.body.genesis, [0x44; 32], &pk, Vec::new());
         assert!(repair_contact_decision(contact, &entry).is_err());
     }
 
@@ -2405,7 +2424,7 @@ mod ak_trust_root_tests {
     #[test]
     fn the_pinned_devices_entry_refreshes_its_kyber_key_and_keeps_the_ak() {
         let (entry, pk) = entry_of(0x9A);
-        let contact = pinned_contact(entry.body.device_id, &pk, Vec::new());
+        let contact = pinned_contact(entry.body.genesis, entry.body.device_id, &pk, Vec::new());
         match repair_contact_decision(contact, &entry) {
             Ok(ContactRepair::Repaired(record)) => {
                 assert_eq!(record.kyber_public_key, entry.body.kyber_public_key);
@@ -2416,6 +2435,7 @@ mod ak_trust_root_tests {
             Err(e) => panic!("expected Repaired, got {e}"),
         }
         let current = pinned_contact(
+            entry.body.genesis,
             entry.body.device_id,
             &pk,
             entry.body.kyber_public_key.clone(),

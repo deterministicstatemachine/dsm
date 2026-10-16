@@ -18474,8 +18474,10 @@ export class SealedEnvelopeV1 extends Message<SealedEnvelopeV1> {
  * Each device writes its own entry, signed with its AK, to the keyed cell
  * H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
  * DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
- * keeps the entry whose AK hashes (with AttA) to the device id and whose
- * signature verifies, highest counter first (dsm::core::identity::directory).
+ * keeps the entry whose AK hashes (with AttA) to the device id, whose
+ * signature verifies and whose evidence proves, by P0-P6, its AK as the owner
+ * authority of the device under its genesis (DSM Amendment A18), highest
+ * counter first (dsm::core::identity::directory).
  *
  * @generated from message dsm.DeviceDirectoryEntryBodyV1
  */
@@ -18510,6 +18512,21 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
    */
   counter = protoInt64.zero;
 
+  /**
+   * DSM Amendment A18: the transition t the evidence's chain reaches, and the
+   * device's P0-P6 authority evidence (AuthorityEvidenceV1 bytes: the genesis
+   * parameters, the GRK delegation and device-tree transition chain to t, and
+   * the device's inclusion proof). Bounded by the directory cell's value budget.
+   *
+   * @generated from field: bytes authority_position = 7;
+   */
+  authorityPosition = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes authority_evidence = 8;
+   */
+  authorityEvidence = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DeviceDirectoryEntryBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18524,6 +18541,8 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
     { no: 4, name: "att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "authority_position", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryBodyV1 {

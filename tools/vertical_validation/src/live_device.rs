@@ -527,25 +527,41 @@ fn value_moved(
 
 /// One faucet claim on `head`'s self-loop: the protocol payout of ERA, as the
 /// release at `generation` (never 0, the reserve's genesis) of the network's
-/// reserve.
+/// reserve. Advanced as the wallet advances it, carrying its own `Prepared`
+/// economic admission; the head returned carries the admission `head` had.
 pub fn faucet_claim(head: &DeviceState, generation: u64) -> Result<DeviceState, DsmError> {
+    use dsm::economic::admission::{
+        dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
+    };
     let devid = head.devid();
-    head.advance(
-        compute_smt_key(&devid, &devid),
-        devid,
-        Operation::FaucetClaim {
-            reserve_id: era_reserve_id(b"dsm-testnet"),
-            generation,
-        },
-        &[BalanceDelta {
-            policy_commit: era_policy_commit(),
-            direction: BalanceDirection::Credit,
-            amount: ERA_FAUCET_PAYOUT,
-        }],
-        None,
-        None,
-    )
-    .map(|outcome| outcome.new_device_state)
+    let claim = Operation::FaucetClaim {
+        reserve_id: era_reserve_id(b"dsm-testnet"),
+        generation,
+    };
+    let prepared = PendingEconomicAdmission::prepared(
+        PendingAdmissionKind::DsmBacked,
+        1,
+        dsm::economic::tree::empty_economic_root(),
+        dsm_operation_digest(&claim.to_bytes()),
+    );
+    head.with_pending_economic_admission(Some(prepared))
+        .advance(
+            compute_smt_key(&devid, &devid),
+            devid,
+            claim,
+            &[BalanceDelta {
+                policy_commit: era_policy_commit(),
+                direction: BalanceDirection::Credit,
+                amount: ERA_FAUCET_PAYOUT,
+            }],
+            None,
+            None,
+        )
+        .map(|outcome| {
+            outcome
+                .new_device_state
+                .with_pending_economic_admission(head.pending_economic_admission().cloned())
+        })
 }
 
 /// The amount a transfer operation carries.
