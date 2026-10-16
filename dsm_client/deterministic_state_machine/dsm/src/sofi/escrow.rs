@@ -418,24 +418,49 @@ impl VerdictCellRead {
 pub enum EscrowCellRead {
     Signed(VerdictCellRead),
     Computed(super::computed::ComputedCellRead),
+    /// A Release against a computed vault that names a cell other than the
+    /// vault's `K_match`. Nothing is read for it: at a computed vault the
+    /// verdict facts hold at `K_match` and nothing else holds (SoFi
+    /// Amendment S22), and the release is Invalid
+    /// (`VerdictCellIsNotTheTerms`).
+    Unbound(UnboundCell),
 }
 
 impl EscrowCellRead {
     /// The cell a Release against the vault names: `K_verdict` or
-    /// `K_match`.
+    /// `K_match`, or the cell an unbound release names.
     pub fn key(&self) -> D32 {
         match self {
             Self::Signed(read) => read.key,
             Self::Computed(read) => read.key(),
+            Self::Unbound(cell) => cell.named,
         }
     }
 
-    /// Where a release naming `outcome` stands.
+    /// Where a release naming `outcome` stands. No verdict holds for an
+    /// unbound release, ever.
     pub fn standing_for(&self, outcome: &[u8]) -> VerdictStanding {
         match self {
             Self::Signed(read) => read.standing_for(outcome),
             Self::Computed(read) => read.standing_for(outcome),
+            Self::Unbound(..) => VerdictStanding::Unsettled,
         }
+    }
+}
+
+/// The cell a Release names when the computed terms of its vault bind it to
+/// another one. Built by [`UnboundCell::of`] from those terms and by nothing
+/// else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundCell {
+    named: D32,
+}
+
+impl UnboundCell {
+    /// `named` when it is not the `K_match` that `terms` derive; `None` when
+    /// it is.
+    pub fn of(terms: &super::wire::ComputedEscrowTerms, named: &D32) -> Option<Self> {
+        (super::computed::match_cell_of(terms) != *named).then_some(Self { named: *named })
     }
 }
 

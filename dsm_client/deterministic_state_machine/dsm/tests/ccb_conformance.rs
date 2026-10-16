@@ -698,3 +698,71 @@ fn a_populated_encumbrance_set_agrees_and_is_ordered_by_element_encoding() {
         "a set is its members, not the order they were handed over"
     );
 }
+
+/// Audit SA-46: the decoder refuses an encumbrance list or a member list
+/// that is not strictly ascending, as `decode_admission_manifest` refuses its
+/// provenance index, rather than sorting it into the set. Sorted, two byte
+/// strings would decode to one state, and only one of them is its encoding.
+#[test]
+fn a_permuted_encumbrance_or_member_list_is_refused_not_sorted() {
+    use dsm::ccb::{decode_vault_state, DecodeError};
+
+    let h0 = genesis_parent_commitment(&VAULT_ID);
+    let mk = |seq: u64| EncumbranceClaim {
+        parent_binding: h0,
+        claim_seq: seq,
+        amount: 10 * seq,
+        token: TOKEN_A,
+        purpose: 1,
+    };
+    let mut v = state(3, 10, 20, h0, None);
+    v.encumbrances = EncumbranceSet::new(vec![mk(1), mk(2)]).expect("distinct claims");
+    let canonical = v.encode().expect("encodes");
+    assert_eq!(decode_vault_state(&canonical), Ok(v.clone()));
+
+    let at = |needle: &[u8]| {
+        canonical
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("the element is in the encoding")
+    };
+    // Two adjacent elements of one length, exchanged in place.
+    let exchanged = |first: &[u8], second: &[u8]| {
+        assert_eq!(first.len(), second.len());
+        let (i, j) = (at(first), at(second));
+        assert_eq!(i + first.len(), j, "adjacent, in canonical order");
+        let mut bytes = canonical.clone();
+        bytes[i..i + first.len()].copy_from_slice(second);
+        bytes[j..j + second.len()].copy_from_slice(first);
+        bytes
+    };
+    let refused = |bytes: &[u8], what: &str| match decode_vault_state(bytes) {
+        Err(DecodeError::Invalid(why)) => assert!(why.contains(what), "{why}"),
+        other => panic!("{what}: decoded {other:?}"),
+    };
+
+    let mut claims = [mk(1).encode(), mk(2).encode()];
+    claims.sort();
+    refused(
+        &exchanged(&claims[0], &claims[1]),
+        "encumbrance claims must be strictly ascending",
+    );
+
+    let member = |id: &[u8], incarnation: [u8; 32]| {
+        let mut entry = (id.len() as u32).to_be_bytes().to_vec();
+        entry.extend_from_slice(id);
+        entry.extend_from_slice(&incarnation);
+        entry
+    };
+    let mut members: Vec<Vec<u8>> = MEMBERS.iter().map(|(id, inc)| member(id, *inc)).collect();
+    members.sort_by(|a, b| a[4..].cmp(&b[4..]));
+    refused(
+        &exchanged(&members[0], &members[1]),
+        "storage set members must be strictly ascending",
+    );
+    // A repeated member is refused the same way.
+    let mut repeated = canonical.clone();
+    let second = at(&members[1]);
+    repeated[second..second + members[0].len()].copy_from_slice(&members[0]);
+    refused(&repeated, "storage set members must be strictly ascending");
+}

@@ -1498,4 +1498,34 @@ mod tests {
         };
         assert_eq!(position.pair, PairStanding::Pending);
     }
+
+    /// Audit SA-48: an exercise of a three-hop route holding its keys final
+    /// is refuted by its own bytes, whatever else holds, and each of those
+    /// keys is skipped with nothing read about it: this release does not run
+    /// the route (`ROUTE_MAX_LEGS`, SoFi §19.4 rule 2, §31 stage 9), so the
+    /// route never holds a vault's key.
+    #[test]
+    fn a_route_past_the_beta_hop_cap_is_refuted_at_every_key_it_holds() {
+        let (_, r) = reads(3, &[0, 0, 0]);
+        let refutation = refuted_in_hand(&r.exercise).expect("refuted by its own bytes");
+        assert_eq!(refutation.refuted(), RefutedInHand::Route { legs: 3 });
+        for cell in &r.cells {
+            assert_eq!(
+                crate::sofi::resolution::skip_in_hand(
+                    refutation.refuted(),
+                    &cell.fact(),
+                    refutation.external_commitment()
+                ),
+                (
+                    AttemptClass::Skipped,
+                    Some(crate::sofi::resolution::SkipReason::RejectedFinalRoute(
+                        crate::sofi::resolution::ImpossibleArm::ValidationInvalid
+                    ))
+                )
+            );
+        }
+        // Two hops are run: the same fixture at the cap is not refuted.
+        let (_, two) = reads(2, &[0, 0]);
+        assert_eq!(refuted_in_hand(&two.exercise), None);
+    }
 }

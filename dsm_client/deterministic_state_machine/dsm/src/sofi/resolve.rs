@@ -44,7 +44,8 @@ use super::computed::{
     ComputedCells, MatchUnread, ProgramRegistry,
 };
 use super::escrow::{
-    verdict_completion, verdict_resolution, EscrowCellRead, VerdictCell, VerdictCellRead,
+    verdict_completion, verdict_resolution, EscrowCellRead, UnboundCell, VerdictCell,
+    VerdictCellRead,
 };
 use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
@@ -1006,7 +1007,10 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// computed terms, and otherwise the verdict cell the release names. A
     /// release against a vault that is not an accepted computed escrow vault
     /// reads the cell it names, as before: whatever it names, RouteValidation
-    /// decides whether it is that vault's.
+    /// decides whether it is that vault's. A release naming a cell other than
+    /// its computed vault's `K_match` reads nothing: nothing holds there for
+    /// that vault, and RouteValidation refutes it, so its key is skipped
+    /// rather than held unread.
     fn read_release_cells(
         &self,
         vault_id: &D32,
@@ -1023,9 +1027,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Err(failure @ VerifierFailure::Read(_)) => return Err(failure),
         };
         Ok(match computed {
-            Some(terms) => self
-                .read_computed_cells(&terms)?
-                .map(EscrowCellRead::Computed),
+            Some(terms) => match UnboundCell::of(&terms, verdict_cell) {
+                Some(unbound) => Ok(EscrowCellRead::Unbound(unbound)),
+                None => self
+                    .read_computed_cells(&terms)?
+                    .map(EscrowCellRead::Computed),
+            },
             None => match self.read_verdict_cell(verdict_cell)? {
                 Ok(read) => Ok(EscrowCellRead::Signed(read)),
                 Err(missing) => Err(NotEstablished::VerdictCell {

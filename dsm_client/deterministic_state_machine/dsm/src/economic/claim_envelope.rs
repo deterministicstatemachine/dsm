@@ -178,9 +178,10 @@ pub fn sign_economic_root_claim(
     .encode_to_vec())
 }
 
-/// Strictly decode an envelope, verify its signature under the body's own
-/// `claimant_public_key`, and require that key with the body's `AttA` to
-/// derive the device the claim names (DSM Amendment A10).
+/// Strictly decode an envelope, require the body's `claimant_public_key`
+/// with its `AttA` to derive the device the claim names (DSM Amendment A10),
+/// and verify its signature under that key. The derivation, a hash, is
+/// checked first, so a claim under any other key costs no verification.
 ///
 /// Refuses anything that does not re-encode to exactly the input bytes:
 /// unknown fields, duplicates and non-canonical encodings all fail that
@@ -218,16 +219,6 @@ pub fn decode_and_verify_economic_root_claim(
         return Err(ClaimEnvelopeError::Malformed("body_ccb is not canonical"));
     }
 
-    let digest = body.signing_digest().map_err(ClaimEnvelopeError::Encode)?;
-    let ok = crate::crypto::sphincs::sphincs_verify(
-        &body.claimant_public_key,
-        &digest,
-        &env.claimant_signature,
-    )
-    .map_err(|_| ClaimEnvelopeError::SignatureInvalid)?;
-    if !ok {
-        return Err(ClaimEnvelopeError::SignatureInvalid);
-    }
     // The claim proves its own authority for the cell it names: a key that
     // does not derive the named device signs nothing that names that device's
     // cell, however valid the signature.
@@ -237,6 +228,16 @@ pub fn decode_and_verify_economic_root_claim(
     ) != body.trader_devid
     {
         return Err(ClaimEnvelopeError::KeyIsNotTheNamedDevices);
+    }
+    let digest = body.signing_digest().map_err(ClaimEnvelopeError::Encode)?;
+    let ok = crate::crypto::sphincs::sphincs_verify(
+        &body.claimant_public_key,
+        &digest,
+        &env.claimant_signature,
+    )
+    .map_err(|_| ClaimEnvelopeError::SignatureInvalid)?;
+    if !ok {
+        return Err(ClaimEnvelopeError::SignatureInvalid);
     }
     Ok(VerifiedEconomicRootClaim {
         body,
@@ -602,6 +603,60 @@ mod tests {
         )
         .unwrap();
         assert!(crate::economic::register::root_claim_naming(&honest, &k_root).is_some());
+    }
+
+    /// Audit SA-25: a register value's key is checked against the device it
+    /// names, by hash, before its signature is verified. Each claim below
+    /// names the victim under another device's key and would also fail its
+    /// signature; the refusal names the derivation, so the SPHINCS+
+    /// verification never ran.
+    #[test]
+    fn a_claim_under_another_devices_key_is_refused_before_its_signature_is_verified() {
+        let victim = device([0xA7; 32]).unwrap();
+        let squatter = device([0x5A; 32]).unwrap();
+        // The signature is the last field of both framings.
+        let broken = |mut bytes: Vec<u8>| {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+            bytes
+        };
+        let squat = broken(
+            sign_economic_root_claim(
+                &root_body(victim.devid, &squatter, victim.att_a, 4),
+                &squatter.sk,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            decode_and_verify_economic_root_claim(&squat),
+            Err(ClaimEnvelopeError::KeyIsNotTheNamedDevices)
+        );
+        let squat = broken(conditional_signed_by(
+            conditional(victim.devid),
+            &squatter,
+            victim.att_a,
+        ));
+        assert_eq!(
+            decode_registered_economic_claim(&squat),
+            Err(ClaimEnvelopeError::ConditionalClaim(
+                crate::sofi::signature::SignatureError::NotTheNamedDevice {
+                    what: "SofiResolutionClaim"
+                }
+            ))
+        );
+        // Under the victim's own key the same broken signature is what
+        // refuses it.
+        let own = broken(
+            sign_economic_root_claim(
+                &root_body(victim.devid, &victim, victim.att_a, 4),
+                &victim.sk,
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            decode_and_verify_economic_root_claim(&own),
+            Err(ClaimEnvelopeError::SignatureInvalid)
+        );
     }
 
     /// THE ROOT IS NOT AVAILABLE, AND NOT GUESSED. Asking a conditional claim
