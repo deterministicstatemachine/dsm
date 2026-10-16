@@ -873,9 +873,7 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
         .expect("acquire")
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) => {
-            panic!("B's objects are in hand: {} missing", missing.len())
-        }
+        Acquired::Exhausted(_) => panic!("B's objects are in hand, so none is missing"),
     };
     let claim = {
         let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
@@ -901,9 +899,7 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
         .expect("acquire")
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) => {
-            panic!("the route's evidence is public: {} missing", missing.len())
-        }
+        Acquired::Exhausted(_) => panic!("the route's evidence is public, so none is missing"),
     };
     assert_eq!(
         dsm::sofi::validation::validate(&precommit, &preimage, &route_evidence),
