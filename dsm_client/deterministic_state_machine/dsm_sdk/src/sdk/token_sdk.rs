@@ -1245,14 +1245,31 @@ mod tests {
     async fn a_transfer_whose_terms_name_another_ticker_than_its_policy_is_refused() {
         let wallet = crate::sdk::wallet_sdk::WalletSDK::test_wallet().expect("wallet");
         let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let sender = wallet
+            .token_sdk
+            .core_sdk
+            .get_current_state()
+            .expect("state")
+            .device_info
+            .device_id;
+        let recipient =
+            <[u8; 32]>::try_from(dsm::crypto::rng::random_bytes(32).as_slice()).expect("32 bytes");
+        // The nonce a send derives (§4.1), over the relationship.
+        let relationship =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient);
         let terms = dsm::types::operations::TransferTerms::new(
             b"NOSUCH".to_vec(),
-            dsm::crypto::rng::random_bytes(32),
+            crate::handlers::app_router_impl::transfer_nonce(
+                &relationship,
+                1,
+                "NOSUCH",
+                &recipient,
+            ),
             TransactionMode::Unilateral,
             String::new(),
         );
         let op = Operation::Transfer {
-            to_device_id: dsm::crypto::rng::random_bytes(32),
+            to_device_id: recipient.to_vec(),
             amount: Balance::amount(1),
             policy_commit: era,
             terms_commitment: terms.commitment(),
