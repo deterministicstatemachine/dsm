@@ -3286,6 +3286,70 @@ The read's page bound (`for _ in 0..pages`) cannot fail alone: with an invalid p
 
 No requirement row changes status.
 
+### 6.87 A peer in radio range ran any app-router route on the wallet (`fix/ble-radio-cannot-reach-app-router`, security audit 2026-10-15)
+
+The most severe finding of the 2026-10-15 read-only security audit of main `f160d22c`. Three auditors (handlers and JNI, Android, client storage and BLE) each found the path, and the coordinating session confirmed every hop at the code. It was not exercised on a device.
+
+| Field | Record |
+|---|---|
+| Severity | Critical |
+| Files | `dsm_sdk/src/bluetooth/radio_ingress.rs` (new); `dsm_sdk/src/jni/unified_protobuf_bridge.rs` · `processIncomingBleData`, `process_envelope_v3` (was `process_envelope_v3_impl`), `requiresBleAck` (deleted); Android `ble/GattServerHost.kt` · `processCompletedPairingData`; `Unified.kt`, `UnifiedNativeApi.kt` |
+| Exploit | Nothing authenticates a BLE writer. TX_REQUEST and PAIRING are `PERMISSION_WRITE`, and in the client role the TX_RESPONSE notifications of any "DSM-" advertiser are read too. `processIncomingBleData` took `0x03`-framed bytes as a whole envelope and passed them to `process_envelope_v3_impl`. That intercepted a `BleEvent`, the bilateral response, reject and commit-response payloads and a first op `bilateral.confirm`, and sent everything else to `dispatch_envelope_via_ingress`. The ingress's only gate is `refuse_while_locked`, and the lock is off by default. `process_envelope_core` checks `version == 3`, and the Core bridge sends every `Query` op to `router.handle_query` and every `Invoke` op to `router.handle_invoke`: the full `AppRouterImpl`. A peer could run `wallet.sendSmart`, `contacts.addManual`, `connect.approve`, `session.configure_lock` and `recovery.*`, and read any query, whose answer came back over the link. A non-framed PAIRING write went to `processEnvelopeV3`, the same path. A peer's `BleEvent` was handled as a platform event: `DeviceDisconnected`, `CharacteristicWritten` naming an address of the peer's choosing, and `IdentityObserved` rewriting a contact's `ble_address` to the address the envelope named. |
+| Violates | The four-layer boundary the repository holds as a hard invariant: the owner's requests enter at the frontend and pass down, and no layer is skipped. No MR row states it, because the offline BLE subsystem is outside this round's specifications (MR-DSM-0006 records the boundary). |
+| Closure condition | A byte string from the radio cannot reach `crate::ingress`, the Core bridge or the app router. It is taken as a `BleChunk` of a bilateral frame or as a whole envelope carrying a bilateral frame, and either goes to the bilateral transport. Anything else is refused with a typed `RadioRefusal`, and so is a peer's `BleEvent`. The local entry and the radio entry are separate functions, so origin is structural, not a flag. |
+| Status | Closed. |
+
+**The change.**
+- **The radio entry.** `bluetooth::radio_ingress::receive_from_radio` is the one function the radio's bytes enter through, and it is host-compiled so it is tested on the host. Chunks go to the frame coordinator, as before. A whole envelope must decode strictly and carry a bilateral frame (`bilateral_frame_of`): a `BilateralPrepareResponse`, `BilateralPrepareReject` or `BilateralCommitResponse` payload, or a transaction of exactly one op invoking `bilateral.confirm`. These are the payloads the old code intercepted, and the confirm parser already takes one op only. Both kinds of frame go to the bilateral transport adapter. Anything else is `RadioRefusal::NotABilateralFrame`, naming each op's router method or path, or `PlatformEvent` for a `BleEvent`, or `Undecodable`. The module does not reach `crate::ingress`.
+- **JNI.** `processIncomingBleData` is a shim over the radio entry. A refusal is logged and returned to Kotlin as an error envelope, and nothing is written back to the peer. `process_envelope_v3`, behind the `processEnvelopeV3` export and the dBTC exports, is the local entry only: a `BleEvent` from this device's own layer, or the shared ingress. It has no bilateral intercepts, which only a peer's bytes ever needed.
+- **Android.** Every PAIRING write goes to `processBleIdentityEnvelope` with the GATT sender's address. That entry takes only a pairing frame (`IdentityObserved`, `PairingAccept`, `PairingConfirm`), strips an optional `0x03`, and refuses the rest. Every legitimate pairing write was already a framed pairing frame (`pairing_frame`). `requiresBleAck` lost its only caller and is deleted with its wrappers, its roots row and its intent row.
+- **Not done: encrypted-write characteristics.** TX_REQUEST and PAIRING stay `PERMISSION_WRITE`. The app bonds nowhere: there is no `createBond` and no bond-state handling, and DSM pairing is app-level. With `PERMISSION_WRITE_ENCRYPTED`, every first write on an unbonded link fails with insufficient encryption and makes the OS start bonding and show its pairing dialog, which the existing flow does not handle. A bond made by Just Works also authenticates no DSM identity. The authority is the Rust gate above and the signatures the bilateral and pairing handlers check.
+
+**Tests.** `dsm_sdk::bluetooth::radio_ingress::tests`, on a wallet made as wallet creation makes it, its router installed by the production install path (`install_full_app_router_self_config`) and its BLE transport built as `init_dsm_sdk` builds it:
+- `a_radio_peer_cannot_invoke_wallet_send_smart`, `a_radio_peer_cannot_set_the_wallet_lock`, `a_radio_peer_cannot_query_the_wallet`, `a_radio_peer_cannot_send_a_ble_platform_event`, `a_confirm_carrying_a_router_invoke_is_refused`: each written over the radio entry as a peer would write it, each refused with its typed refusal. After the lock attempt the wallet still has no lock.
+- `a_whole_bilateral_frame_reaches_the_bilateral_handler`: a whole `BilateralPrepareReject` reaches the bilateral handler, which refuses it for having no session. The gate does not refuse everything.
+- `undecodable_whole_bytes_are_refused`.
+
+**Mutation controls (2026-10-16, restored byte for byte).**
+- A refused envelope handed to `crate::ingress::dispatch_ingress` from a thread outside the runtime, as the JNI bridge called it, with the answer sent back to the peer. The five refusal tests went red. `a_radio_peer_cannot_set_the_wallet_lock` failed on "a peer's bytes set the wallet's lock": the peer's PIN was enrolled. The router ran `wallet.sendSmart`, which stopped only because the test device names no storage set, and it ran `balance.list` and both ops of the confirm-carrying transaction. The control and the undecodable test stayed green.
+- A first form of the mutation called the ingress inside the radio entry's own runtime context. The Core bridge's router adapter then panicked ("Cannot start a runtime from within a runtime"), so the router was reached but ran nothing. That mutant did not reproduce the bridge, which called the ingress synchronously from the JNI thread. The faithful form above is the record.
+
+**Suites.** `radio_ingress::tests` 7/0. Android unit tests for `com.dsm.wallet.bridge.ble.*` and `SinglePathWebViewBridgeFuzzTest`: 136/0. `cargo check --target aarch64-linux-android -p dsm_sdk --features jni,bluetooth`: no warnings. Board at `9e59e768` (the CI command, `--release`): `dsm` 1723/0, `dsm_sdk` 1273/0 with 3 ignored that predate this change, the seven `radio_ingress` tests among them. `make lint`'s Rust half (toolchain consistency, `fmt --check`, `clippy --all-targets -D warnings`) exit 0; its frontend half did not run, since nothing in the frontend changed and the worktree has no `node_modules`.
+
+**Fix:** commit `9e59e768` on `fix/ble-radio-cannot-reach-app-router`.
+
+### 6.88 The BLE transport sent a peer's frame back to it as it came (`fix/ble-transport-never-echoes-peer-frames`, follow-up to §6.87, 2026-10-16)
+
+Found while fixing §6.87.
+
+| Field | Record |
+|---|---|
+| Severity | Low |
+| Files | `dsm_sdk/src/bluetooth/bilateral_transport_adapter.rs` · `on_transport_message`, `BilateralFrame` (new), `frame_borne_out` (new); `dsm_sdk/src/bluetooth/radio_ingress.rs` · `chunked_frame_borne_out` (new), `RadioRefusal::FrameMismatch` (new) |
+| Exploit | `BilateralTransportAdapter::on_transport_message` "passed through" what it did not recognise. A `BilateralPrepareResponse`, `BilateralPrepareReject`, `BilateralConfirm` or `BilateralCommitResponse` frame whose payload was not that envelope, and every `Unspecified` frame, came back as an outbound frame carrying the peer's own payload. `processIncomingBleData` wrote it back over the link (an `Unspecified` frame needs no chunking and went raw), and `AndroidBleBridge::handle_characteristic_data` queued it as writes. A peer in range could make the wallet transmit bytes the peer chose. It reached no router route: the payload only went back to its sender. |
+| Violates | CLAUDE.md's no-stand-in rule: a frame the transport cannot take was answered as though it had been handled, where the truth is that it was refused. |
+| Closure condition | The adapter takes a frame only when its payload is the frame its type names, and refuses everything else without sending anything back, for every caller. The radio entry refuses a chunked frame whose payload does not bear out its header, with a typed `RadioRefusal`. |
+| Status | Closed. |
+
+**The change.**
+- **The transport.** `BilateralFrame` names the five frames the bilateral transport takes, each known by its payload: a prepare-response, prepare-reject or commit-response envelope, or a transaction of exactly one op invoking `bilateral.prepare` or `bilateral.confirm`. `on_transport_message` first requires the payload to be a canonical envelope that is the frame its type names (`frame_borne_out`), and refuses anything else with an error and no frame to send. The five pass-through branches are gone. So is the arm that answered a frame type the transport does not take with nothing at all; it is now an error too. The handlers are unchanged.
+- **The radio entry.** A reassembled chunked frame must bear out its header (`chunked_frame_borne_out`) before it reaches the transport. A bilateral frame under another frame's type is `RadioRefusal::FrameMismatch { declared, carried }`, an envelope that is no bilateral frame is `NotABilateralFrame` or `PlatformEvent`, and bytes that are not a canonical envelope are `Undecodable`. `bilateral_frame_of`, for whole envelopes, now reads `BilateralFrame` too and refuses exactly what it refused before. A whole `bilateral.prepare` is still refused, since a sender always chunks a proposal.
+- Nothing legitimate is refused. Every sender chunks a canonical envelope (`chunkEnvelopeForBle` strips the `0x03` frame byte, and the Rust senders encode canonical bytes), and every step handler already decoded strictly and parsed one op only.
+
+**Tests.** `dsm_sdk::bluetooth::radio_ingress::tests`, on the §6.87 wallet fixture:
+- `a_peer_cannot_make_the_wallet_send_back_bytes_it_chose`: a chunked `Unspecified` frame of the peer's own bytes is refused (`Undecodable`), and nothing answers it.
+- `a_chunked_frame_is_taken_only_as_what_its_payload_is`: a rejection chunked as a commit response is `FrameMismatch`, and a `wallet.sendSmart` invoke chunked as a confirm is `NotABilateralFrame`.
+- `the_bilateral_transport_never_sends_back_a_frame_it_was_handed`: each frame type the adapter passed through, handed straight to the adapter with a payload that is not that frame, is an error with no frame to send. This is what any caller of the adapter gets, `AndroidBleBridge` included.
+- `a_chunked_frame_borne_out_reaches_the_bilateral_handler`: a rejection chunked as a rejection reaches the handler, which refuses it for having no session. The check does not refuse every chunked frame.
+
+**Mutation controls (2026-10-16, restored byte for byte).**
+- The radio entry's check called with its result discarded. `a_peer_cannot_make_the_wallet_send_back_bytes_it_chose` and `a_chunked_frame_is_taken_only_as_what_its_payload_is` went red: the transport still refused the frames, but as a bilateral error rather than the typed refusal. Removing the call outright does not compile, because `deny(warnings)` refuses the then-unused check.
+- That, plus the adapter's pass-through restored (a frame not borne out answered with itself): the old behaviour. The two radio tests went red with the peer's own bytes as the frame sent back, and `the_bilateral_transport_never_sends_back_a_frame_it_was_handed` went red ("a Unspecified frame was answered with" those bytes).
+
+**Suites.** Targeted: `dsm_sdk` `bluetooth::radio_ingress`, `bilateral_transport_adapter`, `android_ble_bridge` and `ble_frame_coordinator` 33/0, and `ble_smoke` 3/0 with 1 ignored that predates this change. Board at `2309fe1e` (the CI command, `--release`): `dsm` 1723/0, `dsm_sdk` 1277/0 with 3 ignored that predate this change. `make lint`'s Rust half exit 0. `cargo check --target aarch64-linux-android -p dsm_sdk --features jni,bluetooth`: no warnings.
+
+**Fix:** commit `2309fe1e` on `fix/ble-transport-never-echoes-peer-frames`, stacked on §6.87's branch.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

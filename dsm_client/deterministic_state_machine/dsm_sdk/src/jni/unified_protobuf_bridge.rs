@@ -15,7 +15,9 @@
 //! - `dispatchIngress(jbyteArray) -> jbyteArray`
 //!   Shared semantic router/envelope boundary for queries and invokes.
 //! - `processEnvelopeV3(jbyteArray) -> jbyteArray`
-//!   Generic Envelope v3 processing (BLE messages, bilateral protocol).
+//!   Envelope v3 processing for an envelope your own app layer built. Never
+//!   hand it a peer's bytes: BLE writes enter at `processIncomingBleData` and
+//!   `processBleIdentityEnvelope`.
 //!
 //! ## Wire Format
 //!
@@ -59,8 +61,6 @@ use crate::jni::bilateral_poll::{
 };
 // Symbols used only on the Android BLE path (moved during the domain-tags / jni-state refactor;
 // these `use`s restore the android+bluetooth build, which had not been recompiled since).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-use crate::bluetooth::bilateral_transport_adapter::BleTransportDelegate;
 use crate::bluetooth::frame_classify::{
     ble_frame_needs_chunking, detect_ble_frame_type_from_bytes, strip_envelope_v3_framing,
 };
@@ -804,24 +804,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isErrorEnvelo
 Strict Envelope v3 processing (JNI export)
 ============================================================================= */
 
-/// Wrapper used by diagnostics and pairing call sites.
-#[inline]
-fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
-    process_envelope_v3_impl(req, None)
-}
-
-/// Process a v3 envelope with optional BLE device address context.
+/// The local envelope entry: an Envelope v3 this device's own app layer built
+/// (Kotlin, or the JNI exports that build one). A `BleEvent` is this device's
+/// BLE stack reporting what happened to it and is handled here; every other
+/// envelope goes through the shared ingress, so the semantic path is the same
+/// for Android JNI and iOS FFI.
 ///
-/// Routes bilateral response/reject payloads to the BLE coordinator (instead of
-/// the core bridge which rejects them with error 409). The `device_address`
-/// parameter enables session routing for bilateral messages received as complete
-/// 0x03 envelopes rather than BLE chunks.
-fn process_envelope_v3_impl(
-    req: &[u8],
-    device_address: Option<&str>,
-) -> Result<Vec<u8>, IngressShimError> {
-    // Intercept BleEvent.identity_observed at SDK layer before forwarding to core.
-    // Core returns an error for BleEvent payloads ("handled at bridge level").
+/// Never a peer's bytes. Those enter at `processIncomingBleData`
+/// (`crate::bluetooth::radio_ingress`), which hands a bilateral frame to the
+/// bilateral transport and refuses everything else, and at
+/// `processBleIdentityEnvelope` for pairing frames.
+fn process_envelope_v3(req: &[u8]) -> Result<Vec<u8>, IngressShimError> {
     let raw = if req.first() == Some(&0x03) {
         &req[1..]
     } else {
@@ -845,73 +838,8 @@ fn process_envelope_v3_impl(
                 )),
             };
         }
-
-        // Intercept bilateral response/reject envelopes — route to BLE coordinator
-        // instead of core bridge (which rejects them with error 409).
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
-        {
-            let bilateral_frame_type = match &env.payload {
-                Some(pb::envelope::Payload::BilateralPrepareResponse(_)) => {
-                    Some(pb::BleFrameType::BilateralPrepareResponse)
-                }
-                Some(pb::envelope::Payload::BilateralPrepareReject(_)) => {
-                    Some(pb::BleFrameType::BilateralPrepareReject)
-                }
-                Some(pb::envelope::Payload::BilateralCommitResponse(_)) => {
-                    Some(pb::BleFrameType::BilateralCommitResponse)
-                }
-                Some(pb::envelope::Payload::UniversalTx(tx)) => {
-                    // Detect bilateral.confirm invoke for 3-step protocol
-                    tx.ops.first().and_then(|op| {
-                        if let Some(pb::universal_op::Kind::Invoke(inv)) = op.kind.as_ref() {
-                            if inv.method == "bilateral.confirm" {
-                                return Some(pb::BleFrameType::BilateralConfirm);
-                            }
-                        }
-                        None
-                    })
-                }
-                _ => None,
-            };
-            if let Some(frame_type) = bilateral_frame_type {
-                log::info!(
-                    "process_envelope_v3: intercepting bilateral {:?} via BLE coordinator",
-                    frame_type
-                );
-                let adapter = crate::runtime::get_runtime()
-                    .block_on(crate::bridge::get_ble_transport_adapter())
-                    .map_err(|e| {
-                        IngressShimError::new(
-                            helpers::JniErrorCode::NotReady as u32,
-                            format!("BLE transport adapter not ready: {e}"),
-                        )
-                    })?;
-                let result = crate::runtime::get_runtime()
-                    .block_on(adapter.on_transport_message(
-                        crate::bluetooth::TransportInboundMessage {
-                            peer_address: device_address.unwrap_or_default().to_string(),
-                            frame_type,
-                            payload: raw.to_vec(),
-                        },
-                    ))
-                    .map_err(|e| {
-                        IngressShimError::new(
-                            helpers::JniErrorCode::ProcessingFailed as u32,
-                            format!("bilateral via envelope: {e}"),
-                        )
-                    })?;
-                return Ok(result
-                    .into_iter()
-                    .next()
-                    .map(|outbound| outbound.payload)
-                    .unwrap_or_default());
-            }
-        }
     }
 
-    // All platform-specific intercepts are above this line.
-    // Route the final dispatch through the shared ingress so that the semantic
-    // path is identical for Android JNI and iOS FFI.
     dispatch_envelope_via_ingress(raw).map_err(|error| {
         IngressShimError::new(
             error.code,
@@ -1051,10 +979,9 @@ pub(crate) fn handle_ble_identity_observed_from_envelope(
     }
 }
 
-/// UnifiedNativeApi JNI entry for processEnvelopeV3.
-/// Delegates to the internal `process_envelope_v3()` helper.
-/// Kotlin BLE layer (GattServerHost, GattClientSession, BleCoordinator) calls
-/// Unified.processEnvelopeV3() which routes here.
+/// UnifiedNativeApi JNI entry for processEnvelopeV3: the local envelope entry
+/// (`process_envelope_v3`). The BLE layer never calls it: a peer's bytes go to
+/// `processIncomingBleData` and `processBleIdentityEnvelope`.
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3(
     mut env: JNIEnv<'_>,
@@ -1538,42 +1465,16 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_detectEnvelop
     )
 }
 
-/// Returns `true` if `payload_bytes` is a framed Envelope v3 (`0x03` prefix),
-/// meaning the BLE write expects a protocol acknowledgment before the transaction
-/// is marked complete. Kotlin MUST NOT inspect `payload[0]` directly.
-#[no_mangle]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_requiresBleAck(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    payload_bytes: jni::sys::jbyteArray,
-) -> jni::sys::jboolean {
-    crate::jni::bridge_utils::jni_catch_unwind_jboolean(
-        "requiresBleAck",
-        std::panic::AssertUnwindSafe(|| {
-            let env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return 0,
-            };
-            let jba = unsafe { jba_from(payload_bytes) };
-            match env.convert_byte_array(&jba) {
-                Ok(bytes) => {
-                    if bytes.first() == Some(&0x03) {
-                        1
-                    } else {
-                        0
-                    }
-                }
-                Err(_) => 0,
-            }
-        }),
-    )
-}
-
-/// Unified BLE incoming data router — Kotlin MUST call this instead of inspecting
-/// `data[0]` to decide routing. Returns a serialized `BleIncomingDataResponse`
-/// (not Envelope v3 framed) whose `response_chunks` field contains zero or more
-/// pre-chunked byte arrays to write back verbatim over the BLE characteristic.
+/// The radio's entry: bytes a peer wrote over BLE (a TX_REQUEST write, or a
+/// TX_RESPONSE notification), from `device_address`. Kotlin MUST call this
+/// instead of inspecting `data[0]` to decide routing. The bytes go to
+/// `crate::bluetooth::radio_ingress`, which hands a bilateral frame to the
+/// bilateral transport and refuses everything else — never the local entry,
+/// the Core bridge or the app router. Returns a serialized
+/// `BleIncomingDataResponse` (not Envelope v3 framed) whose `response_chunks`
+/// field contains zero or more pre-chunked byte arrays to write back verbatim
+/// over the BLE characteristic, or an error envelope naming why the bytes were
+/// refused.
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomingBleData(
@@ -1615,21 +1516,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
             }
         };
 
-        if bytes.is_empty() {
-            let out = crate::generated::BleIncomingDataResponse::default();
-            let encoded = prost::Message::encode_to_vec(&out);
-            return env
-                .byte_array_from_slice(&encoded)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw());
-        }
-
-        // Data routing: 0x03 prefix = complete Envelope v3; anything else = BLE chunk.
-        let is_chunk = bytes.first() != Some(&0x03);
-        let maybe_response: Option<Vec<crate::bluetooth::TransportOutbound>> = if is_chunk {
-            let coord = match crate::runtime::get_runtime()
-                .block_on(crate::bridge::get_ble_coordinator())
-            {
+        let coord =
+            match crate::runtime::get_runtime().block_on(crate::bridge::get_ble_coordinator()) {
                 Ok(c) => c,
                 Err(e) => {
                     return error_byte_array(
@@ -1640,72 +1528,45 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                     .into_raw();
                 }
             };
-            let adapter = match crate::runtime::get_runtime()
-                .block_on(crate::bridge::get_ble_transport_adapter())
-            {
-                Ok(adapter) => adapter,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::NotReady as u32,
-                        &format!("processIncomingBleData: BLE transport adapter not ready: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-            let inbound_result: Result<
-                Option<Vec<crate::bluetooth::TransportOutbound>>,
-                dsm::types::error::DsmError,
-            > = crate::runtime::get_runtime().block_on(async {
-                match coord.ingest_chunk(&bytes).await? {
-                    crate::bluetooth::FrameIngressResult::NeedMoreChunks => {
-                        Ok::<
-                            Option<Vec<crate::bluetooth::TransportOutbound>>,
-                            dsm::types::error::DsmError,
-                        >(None)
-                    }
-                    crate::bluetooth::FrameIngressResult::ProtocolControl(_) => {
-                        Ok::<
-                            Option<Vec<crate::bluetooth::TransportOutbound>>,
-                            dsm::types::error::DsmError,
-                        >(None)
-                    }
-                    crate::bluetooth::FrameIngressResult::MessageComplete { message } => {
-                        let outbound = adapter
-                            .on_transport_message(crate::bluetooth::TransportInboundMessage {
-                                peer_address: addr.clone(),
-                                frame_type: message.frame_type,
-                                payload: message.payload,
-                            })
-                            .await?;
-                        if outbound.is_empty() {
-                            Ok(None)
-                        } else {
-                            Ok(Some(outbound))
-                        }
-                    }
-                }
-            });
-            match inbound_result {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!(
-                        "processIncomingBleData: bilateral handler error for {}: {} — response lost (chunks=0 to Kotlin)",
-                        addr, e
-                    );
-                    None
-                }
+        let adapter = match crate::runtime::get_runtime()
+            .block_on(crate::bridge::get_ble_transport_adapter())
+        {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::NotReady as u32,
+                    &format!("processIncomingBleData: BLE transport adapter not ready: {e}"),
+                )
+                .into_raw();
             }
-        } else {
-            process_envelope_v3_impl(&bytes, Some(&addr))
-                .ok()
-                .filter(|b| !b.is_empty())
-                .map(|payload| {
-                    vec![crate::bluetooth::TransportOutbound::new(
-                        ble_frame_type_from_i32(detect_ble_frame_type_from_bytes(&payload)),
-                        payload,
-                    )]
-                })
+        };
+        let received = crate::runtime::get_runtime().block_on(
+            crate::bluetooth::radio_ingress::receive_from_radio(
+                &coord,
+                adapter.as_ref(),
+                &addr,
+                &bytes,
+            ),
+        );
+        let maybe_response: Option<Vec<crate::bluetooth::TransportOutbound>> = match received {
+            Ok(outbound) => outbound,
+            Err(crate::bluetooth::radio_ingress::RadioError::Refused(refusal)) => {
+                log::error!("processIncomingBleData: refused bytes from {addr}: {refusal}");
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::InvalidInput as u32,
+                    &format!("processIncomingBleData: {refusal}"),
+                )
+                .into_raw();
+            }
+            Err(crate::bluetooth::radio_ingress::RadioError::Bilateral(e)) => {
+                log::error!(
+                    "processIncomingBleData: bilateral handler error for {}: {} — response lost (chunks=0 to Kotlin)",
+                    addr, e
+                );
+                None
+            }
         };
 
         let mut response_chunks: Vec<Vec<u8>> = Vec::new();

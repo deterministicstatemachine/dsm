@@ -72,9 +72,7 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray?
     @Keep @JvmStatic external fun isBleCoordinatorReady(): Boolean
     @Keep @JvmStatic external fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int
-    /** Returns true if payload is a framed Envelope v3 that expects a BLE protocol ACK. */
-    @Keep @JvmStatic external fun requiresBleAck(payloadBytes: ByteArray): Boolean
-    /** Unified BLE incoming data router. Returns serialized BleIncomingDataResponse. */
+    /** The radio's entry: bytes a peer wrote over BLE. Returns serialized BleIncomingDataResponse. */
     @Keep @JvmStatic external fun processIncomingBleData(deviceAddress: String, data: ByteArray): ByteArray
     /** Extract response_chunks from a BleIncomingDataResponse proto. */
     @Keep @JvmStatic external fun bleDataResponseExtractChunks(responseProto: ByteArray): Array<ByteArray>

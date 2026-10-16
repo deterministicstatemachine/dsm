@@ -1125,20 +1125,16 @@ class GattServerHost(private val context: Context) {
                 com.dsm.wallet.bridge.Unified.isBleAddressPaired(deviceAddress)
             } catch (_: Throwable) { false }
 
-            if (data.isNotEmpty() && com.dsm.wallet.bridge.Unified.requiresBleAck(data)) {
-                // Framed envelope — route through typed JNI with the GATT sender
-                // address so Rust can update the correct BLE address.
-                val response = com.dsm.wallet.bridge.Unified.processBleIdentityEnvelope(data, deviceAddress)
-                Log.d("GattServerHost", "BLE identity envelope processed from $deviceAddress: ${response.size} bytes")
+            // Every pairing write is a peer's bytes: it goes to the typed pairing
+            // entry with the GATT sender address, which takes only a pairing frame
+            // and refuses anything else. A peer's bytes never reach the local
+            // envelope entry.
+            val response = com.dsm.wallet.bridge.Unified.processBleIdentityEnvelope(data, deviceAddress)
+            Log.d("GattServerHost", "BLE identity envelope processed from $deviceAddress: ${response.size} bytes")
 
-                if (response.isNotEmpty()) {
-                    // Non-empty = BlePairingAccept (identity propose was processed).
-                    sendPairingAckIndication(deviceAddress, response)
-                }
-            } else {
-                // Other pairing data — forward to generic envelope handler
-                val response = com.dsm.wallet.bridge.Unified.processEnvelopeV3(data)
-                Log.d("GattServerHost", "Pairing envelope processed from $deviceAddress: ${response.size} bytes")
+            if (response.isNotEmpty()) {
+                // Non-empty = BlePairingAccept (identity propose was processed).
+                sendPairingAckIndication(deviceAddress, response)
             }
 
             // Query Rust for pairing state AFTER processing. If it transitioned
