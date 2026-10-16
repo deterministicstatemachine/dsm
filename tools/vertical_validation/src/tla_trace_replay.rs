@@ -341,7 +341,8 @@ impl DsmImplementationHarness {
             activated_devices: cloned_set_var(initial, "activatedDevices"),
             activation_counts,
             activation_identities: BTreeMap::new(),
-            djte_state: SourceDlvState::new(shard_depth, source_remaining.max(0) as u64),
+            djte_state: SourceDlvState::new(shard_depth, source_remaining.max(0) as u64)
+                .map_err(|e| anyhow::anyhow!("DJTE source state: {e}"))?,
             djte_seed: int_var(initial, "djteSeed").unwrap_or(0),
             phase: int_var(initial, "phase").unwrap_or(0),
             step: int_var(initial, "step").unwrap_or(0),

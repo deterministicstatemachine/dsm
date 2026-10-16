@@ -64,6 +64,9 @@ fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
     }
 }
 
+/// The protocol's token-creation fee, in ERA base units (SoFi Amendment S18).
+const FEE: u64 = dsm::core::token::TOKEN_CREATION_FEE_ERA;
+
 fn create_token(initial_supply: u64, fee_amount: u64) -> Operation {
     Operation::CreateToken {
         token_id: b"NEW".to_vec(),
@@ -207,10 +210,10 @@ fn a_faucet_claim_round_trips_on_the_builder() {
 /// write set to build.
 #[test]
 fn a_zero_supply_creation_has_no_write_set() {
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     assert_eq!(
         build_write_set(
-            &create_token(0, 500),
+            &create_token(0, FEE),
             &G,
             &DEV,
             &econ_op_id(),
@@ -228,9 +231,9 @@ fn a_zero_supply_creation_has_no_write_set() {
 /// inserted from zero (Amendment S8). Built and verified from the one table.
 #[test]
 fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
-    let (tree, balances) = funded_tree(era(), 500);
+    let (tree, balances) = funded_tree(era(), FEE);
     let witness = round_trip(
-        &create_token(1_000, 500),
+        &create_token(1_000, FEE),
         tree,
         balances,
         &CreditSourceFacts::GenesisRelease,
@@ -259,15 +262,24 @@ fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
         }
         other => panic!("expected the release credit, got {other:?}"),
     }
-    // Without a fee, the release and the record.
-    let (tree, balances) = funded_tree(era(), 500);
-    let witness = round_trip(
-        &create_token(1_000, 0),
-        tree,
-        balances,
-        &CreditSourceFacts::GenesisRelease,
-    );
-    assert_eq!(witness.mutations.len(), 2);
+    // The fee is the protocol's (SoFi Amendment S18): a creation naming any
+    // other, none included, has no write set to build.
+    for fee in [0, FEE - 1, FEE + 1] {
+        let (mut tree, balances) = funded_tree(era(), FEE + 1);
+        assert_eq!(
+            build_write_set(
+                &create_token(1_000, fee),
+                &G,
+                &DEV,
+                &econ_op_id(),
+                &EconomicPreState::new(&balances, P_CREATE),
+                &mut tree,
+                &CreditSourceFacts::GenesisRelease,
+            )
+            .expect_err("only the protocol fee"),
+            WriteSetError::CreationFeeNotTheProtocols { fee_amount: fee }
+        );
+    }
 }
 
 /// Amendment S8: a token is created once on its creator's lineage. A tree
@@ -275,14 +287,14 @@ fn a_token_creation_is_its_fee_debit_and_its_genesis_release() {
 /// same token.
 #[test]
 fn a_token_is_created_once_on_its_creators_lineage() {
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     let record = EconomicLeafState::TokenCreation(EconomicTokenCreationState {
         policy_commit: [0x77; 32],
     });
     tree.insert(record.leaf_key(&G, &DEV), record.leaf_value().unwrap());
     assert!(matches!(
         build_write_set(
-            &create_token(1_000, 500),
+            &create_token(1_000, FEE),
             &G,
             &DEV,
             &econ_op_id(),
@@ -298,9 +310,9 @@ fn a_token_is_created_once_on_its_creators_lineage() {
 /// for a creation of another supply or another fee, it is refused.
 #[test]
 fn a_creation_witness_of_another_supply_or_fee_is_refused() {
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     let pre = tree.root();
-    let op = create_token(1_000, 500);
+    let op = create_token(1_000, FEE);
     let built = build_write_set(
         &op,
         &G,
@@ -316,24 +328,28 @@ fn a_creation_witness_of_another_supply_or_fee_is_refused() {
         verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE),
         Ok(())
     );
-    for other in [create_token(999, 500), create_token(1_000, 400)] {
-        assert!(
-            matches!(
-                verify_operation_write_set(&other, &G, &DEV, &witness, P_CREATE),
-                Err(WriteSetError::WrongWriteSet { .. })
-            ),
-            "{other:?}"
-        );
-    }
+    let other_supply = create_token(999, FEE);
+    assert!(
+        matches!(
+            verify_operation_write_set(&other_supply, &G, &DEV, &witness, P_CREATE),
+            Err(WriteSetError::WrongWriteSet { .. })
+        ),
+        "{other_supply:?}"
+    );
+    // Another fee is not a creation at all (SoFi Amendment S18).
+    assert_eq!(
+        verify_operation_write_set(&create_token(1_000, 400), &G, &DEV, &witness, P_CREATE),
+        Err(WriteSetError::CreationFeeNotTheProtocols { fee_amount: 400 })
+    );
 }
 
 /// A creation witness without its creation record is not the creation's
 /// effect: the record is what makes a second creation unbuildable.
 #[test]
 fn a_creation_witness_without_its_record_is_refused() {
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     let pre = tree.root();
-    let op = create_token(1_000, 500);
+    let op = create_token(1_000, FEE);
     let built = build_write_set(
         &op,
         &G,
@@ -380,10 +396,10 @@ fn a_creation_witness_without_its_record_is_refused() {
 /// operation's effect offered for it.
 #[test]
 fn a_token_creation_is_funded_only_by_its_genesis_release() {
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     assert_eq!(
         build_write_set(
-            &create_token(1_000, 500),
+            &create_token(1_000, FEE),
             &G,
             &DEV,
             &econ_op_id(),
@@ -394,7 +410,7 @@ fn a_token_creation_is_funded_only_by_its_genesis_release() {
         .expect_err("a credit with no source is not fundable"),
         WriteSetError::FactsDoNotMatchOperation
     );
-    let (mut tree, balances) = funded_tree(era(), 500);
+    let (mut tree, balances) = funded_tree(era(), FEE);
     let pre = tree.root();
     let burned = build_write_set(
         &burn(500, era()),
@@ -408,7 +424,7 @@ fn a_token_creation_is_funded_only_by_its_genesis_release() {
     .unwrap();
     let burn_witness = witness_for(pre, burned, &burn(500, era()));
     assert!(matches!(
-        verify_operation_write_set(&create_token(1_000, 500), &G, &DEV, &burn_witness, P_CREATE),
+        verify_operation_write_set(&create_token(1_000, FEE), &G, &DEV, &burn_witness, P_CREATE),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
 }

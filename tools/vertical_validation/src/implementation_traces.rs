@@ -570,7 +570,8 @@ fn trace_djte_repeated_emission_alignment(
 
     let initial = SourceDlvState::new_with_schedule(
         EmissionSchedule::new(initial_supply, 2, 64, 2, 1).expect("trace emission schedule"),
-    );
+    )
+    .expect("trace emission state");
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
@@ -1752,7 +1753,7 @@ fn build_djte_transition(
     JoinActivationProof,
     EmissionReceipt,
 ) {
-    let prev = SourceDlvState::new(2, initial_supply);
+    let prev = SourceDlvState::new(2, initial_supply).expect("trace emission state");
 
     let jap = build_test_jap(0x7A, 0x09);
     let (next, receipt) = apply_djte_transition(&prev, &jap, emission_amount);

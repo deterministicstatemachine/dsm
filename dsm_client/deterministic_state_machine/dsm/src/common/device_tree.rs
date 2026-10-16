@@ -52,22 +52,29 @@ pub struct DevTreeProof {
 
 impl DevTreeProof {
     /// Verify inclusion of `dev_id` under `expected_root` using the proof.
+    ///
+    /// A proof states one direction per sibling: `path_bits` and `siblings`
+    /// have the same length, or the proof proves nothing. A direction is never
+    /// assumed for a level the proof does not state.
     pub fn verify(&self, dev_id: &[u8; 32], expected_root: &[u8; 32]) -> bool {
-        // Start from the leaf hash
+        self.path_bits.len() == self.siblings.len() && &self.root_for(dev_id) == expected_root
+    }
+
+    /// The root this proof's siblings and directions lead `dev_id` to, one
+    /// level per (sibling, direction) pair, leaf level first.
+    fn root_for(&self, dev_id: &[u8; 32]) -> [u8; 32] {
         let mut acc = hash_leaf(dev_id);
-        // Iterate levels
-        let it: Box<dyn Iterator<Item = (usize, &[u8; 32])>> = if self.leaf_to_root {
-            Box::new(self.siblings.iter().enumerate())
+        let siblings: Box<dyn Iterator<Item = &[u8; 32]>> = if self.leaf_to_root {
+            Box::new(self.siblings.iter())
         } else {
-            Box::new(self.siblings.iter().rev().enumerate())
+            Box::new(self.siblings.iter().rev())
         };
-        for (i, sib) in it {
-            let bit = self.path_bits.get(i).copied().unwrap_or(false);
-            // bit=false => current acc is left, sib is right; bit=true => acc is right
-            let (l, r) = if !bit { (&acc, sib) } else { (sib, &acc) };
+        for (sib, &right) in siblings.zip(self.path_bits.iter()) {
+            // A clear bit: the running hash is the left child; a set bit: the right.
+            let (l, r) = if right { (sib, &acc) } else { (&acc, sib) };
             acc = hash_node(l, r);
         }
-        &acc == expected_root
+        acc
     }
 
     /// Encode this proof as the canonical [`crate::types::proto::DeviceInclusionProofV1`]
@@ -138,7 +145,12 @@ impl DevTreeProof {
         let num_siblings = u32::from_le_bytes(num_siblings_bytes) as usize;
         offset += 4;
 
-        let leaf_to_root = data[offset] != 0;
+        // One byte, 0 or 1: any other value would be a second encoding of
+        // the same proof.
+        let leaf_to_root = match data[offset] {
+            flag @ (0 | 1) => flag == 1,
+            _ => return None,
+        };
         offset += 1;
 
         let mut path_bits_len_bytes = [0u8; 4];
@@ -146,12 +158,23 @@ impl DevTreeProof {
         let path_bits_len = u32::from_le_bytes(path_bits_len_bytes) as usize;
         offset += 4;
 
+        // One direction per sibling, exactly.
+        if path_bits_len != num_siblings {
+            return None;
+        }
         let packed_len = path_bits_len.div_ceil(8);
         if offset + packed_len > data.len() {
             return None;
         }
         let packed_bits = &data[offset..offset + packed_len];
         offset += packed_len;
+        // The bits past `path_bits_len` in the last packed byte are zero, so
+        // the packing has one encoding.
+        if !path_bits_len.is_multiple_of(8)
+            && packed_bits[packed_len - 1] >> (path_bits_len % 8) != 0
+        {
+            return None;
+        }
 
         let mut path_bits = Vec::with_capacity(path_bits_len);
         for i in 0..path_bits_len {
@@ -327,6 +350,71 @@ mod tests {
         assert!(
             DevTreeProof::from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00])
                 .is_none()
+        );
+    }
+
+    /// A proof states a direction for every sibling. A missing direction used
+    /// to default to "left", so the leftmost leaf's proof with its last
+    /// direction dropped still verified.
+    #[test]
+    fn a_proof_missing_a_direction_proves_nothing() {
+        let tree = DeviceTree::new((1u8..=4).map(|b| [b; 32]).collect());
+        let leftmost = tree.leaves()[0];
+        let proof = tree.proof(&leftmost).expect("in the tree");
+        assert!(proof.verify(&leftmost, &tree.root()));
+        assert!(proof.path_bits.iter().all(|right| !right));
+
+        let mut short = proof.clone();
+        short.path_bits.pop();
+        assert!(!short.verify(&leftmost, &tree.root()));
+        let mut long = proof.clone();
+        long.path_bits.push(proof.path_bits[0]);
+        assert!(!long.verify(&leftmost, &tree.root()));
+    }
+
+    /// A proof's bytes are the one encoding its fields give: one direction per
+    /// sibling, zero padding bits after the last direction, and an order flag
+    /// of 0 or 1. Layout: `[siblings u32][flag u8][directions u32][packed][siblings]`.
+    #[test]
+    fn a_proof_encoding_other_than_its_canonical_one_is_refused() {
+        // Five leaves: three levels, so three directions in one packed byte.
+        let tree = DeviceTree::new((1u8..=5).map(|b| [b; 32]).collect());
+        let leaf = tree.leaves()[4];
+        let proof = tree.proof(&leaf).expect("in the tree");
+        assert_eq!(proof.path_bits.len(), 3);
+        let bytes = proof.to_bytes();
+        let decoded = DevTreeProof::from_bytes(&bytes).expect("the canonical encoding");
+        assert!(decoded.verify(&leaf, &tree.root()));
+
+        let mut flag = bytes.clone();
+        flag[4] = 2;
+        assert!(
+            DevTreeProof::from_bytes(&flag).is_none(),
+            "an order flag of 2"
+        );
+
+        let mut padding = bytes.clone();
+        padding[9] |= 0x80;
+        assert!(
+            DevTreeProof::from_bytes(&padding).is_none(),
+            "a set padding bit"
+        );
+
+        let mut fewer = bytes.clone();
+        fewer[5..9].copy_from_slice(&2u32.to_le_bytes());
+        assert!(
+            DevTreeProof::from_bytes(&fewer).is_none(),
+            "two directions, three siblings"
+        );
+
+        // Only the direction count refuses this one: the packing and the
+        // sibling bytes are otherwise well formed.
+        let mut more = bytes.clone();
+        more[0..4].copy_from_slice(&4u32.to_le_bytes());
+        more.extend_from_slice(&[0x77u8; 32]);
+        assert!(
+            DevTreeProof::from_bytes(&more).is_none(),
+            "three directions, four siblings"
         );
     }
 

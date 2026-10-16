@@ -4,26 +4,36 @@
 //! 2026-09-23).
 //!
 //! A device writes its own entry — its genesis, its device id, its authority
-//! key AK, its birth attestation AttA, its Kyber key and a counter — signed
-//! with AK, to a keyed cell every member of the set holds. A node stores every
-//! entry it is given and checks nothing: it has no authority over whose entry
-//! is whose. A sender reads the cell and keeps the entry that proves itself:
+//! key AK, its birth attestation AttA, its Kyber key, a counter and its P0–P6
+//! authority evidence at a transition it names — signed with AK, to a keyed
+//! cell every member of the set holds. A node stores every entry it is given
+//! and checks nothing: it has no authority over whose entry is whose. A sender
+//! reads the cell and keeps the entry that proves itself:
 //!
 //! 1. `DevID = H("DSM/devid" ‖ AK ‖ AttA)` equals the device id the entry names,
 //!    so the AK is the one the device id commits;
 //! 2. the signature verifies under that AK;
-//! 3. among entries that pass, the highest counter wins, so a device can
+//! 3. P0–P6, run on the entry's evidence at the transition it names with
+//!    nothing fetched, prove that AK as the owner authority of the device
+//!    under the genesis the entry names (DSM Amendment A18): the genesis
+//!    recomputes from its parameters and commits the GRK, the delegation and
+//!    transition chain authenticates under it, and the device is a leaf of
+//!    the tree at that transition;
+//! 4. among entries that pass, the highest counter wins, so a device can
 //!    update its own entry.
 //!
 //! Knowing a device id is not enough to write a valid entry for it: that takes
-//! an AK hashing to the id and a signature by it. A squatter's junk fails the
-//! check and is ignored, and no one can lock a device out.
+//! an AK hashing to the id and a signature by it. Naming a genesis is not
+//! enough to be one of its devices: only that genesis's GRK delegates its
+//! tree. A squatter's junk fails the check and is ignored, and no one can lock
+//! a device out.
 
 use prost::Message;
 
 use crate::common::domain_tags::{TAG_DSM_DEVICE_DIRECTORY_ENTRY, TAG_DSM_DEVICE_DIRECTORY_KEY};
 use crate::core::identity::genesis_v2::derive_devid;
 use crate::crypto::blake3::dsm_domain_hasher;
+use crate::economic::authority_evidence::verify_authority_evidence;
 use crate::crypto::sphincs;
 use crate::types::proto;
 
@@ -54,6 +64,14 @@ pub struct DirectoryEntryBody {
     pub kyber_public_key: Vec<u8>,
     /// Higher replaces lower. Only the device can sign one.
     pub counter: u64,
+    /// The transition `t` the evidence's chain reaches: the position P0–P6
+    /// prove the device's authority at (descent at `t`, not currency).
+    pub authority_position: [u8; 32],
+    /// The device's P0–P6 authority evidence, the exact bytes of an
+    /// `AuthorityEvidenceV1`: the genesis parameters, the GRK delegation and
+    /// device-tree transition chain to `authority_position`, and the device's
+    /// inclusion proof under that transition's tree root.
+    pub authority_evidence: Vec<u8>,
 }
 
 impl DirectoryEntryBody {
@@ -65,6 +83,8 @@ impl DirectoryEntryBody {
             att_a: self.att_a.to_vec(),
             kyber_public_key: self.kyber_public_key.clone(),
             counter: self.counter,
+            authority_position: self.authority_position.to_vec(),
+            authority_evidence: self.authority_evidence.clone(),
         }
     }
 
@@ -95,6 +115,9 @@ pub enum DirectoryError {
     NotThisDevicesKey,
     /// The signature does not verify under the entry's AK.
     SignatureDoesNotVerify,
+    /// The evidence does not prove, by P0–P6, the entry's AK as the owner
+    /// authority of its device under the genesis it names: why.
+    GenesisNotProven(String),
 }
 
 impl core::fmt::Display for DirectoryError {
@@ -104,6 +127,10 @@ impl core::fmt::Display for DirectoryError {
             Self::KeyLength => write!(f, "directory entry key has the wrong length"),
             Self::NotThisDevicesKey => write!(f, "directory entry's AK is not the device's"),
             Self::SignatureDoesNotVerify => write!(f, "directory entry signature does not verify"),
+            Self::GenesisNotProven(why) => write!(
+                f,
+                "directory entry's evidence does not prove the device under its genesis: {why}"
+            ),
         }
     }
 }
@@ -152,13 +179,26 @@ impl DirectoryEntry {
                 att_a: d32(&b.att_a)?,
                 kyber_public_key: b.kyber_public_key,
                 counter: b.counter,
+                authority_position: d32(&b.authority_position)?,
+                authority_evidence: b.authority_evidence,
             },
             signature: p.signature,
         })
     }
 
+    /// Whether the entry's signature verifies under the AK it names.
+    fn signature_verifies(&self) -> Result<(), DirectoryError> {
+        let b = &self.body;
+        match sphincs::sphincs_verify(&b.ak_public_key, &b.signing_digest(), &self.signature) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(..) => Err(DirectoryError::SignatureDoesNotVerify),
+        }
+    }
+
     /// Whether the entry proves itself: its AK is the one its device id
-    /// commits, and its signature verifies under that AK.
+    /// commits, its signature verifies under that AK, and its evidence proves
+    /// that AK, by P0–P6, as the owner authority of the device under the
+    /// genesis the entry names (DSM Amendment A18).
     pub fn verify(&self) -> Result<(), DirectoryError> {
         let b = &self.body;
         if b.ak_public_key.len() != AK_PUBLIC_KEY_LEN
@@ -169,10 +209,20 @@ impl DirectoryEntry {
         if derive_devid(&b.ak_public_key, &b.att_a) != b.device_id {
             return Err(DirectoryError::NotThisDevicesKey);
         }
-        match sphincs::sphincs_verify(&b.ak_public_key, &b.signing_digest(), &self.signature) {
-            Ok(true) => Ok(()),
-            Ok(false) | Err(..) => Err(DirectoryError::SignatureDoesNotVerify),
+        self.signature_verifies()?;
+        let proven = verify_authority_evidence(
+            &b.authority_evidence,
+            &b.genesis,
+            &b.device_id,
+            &b.authority_position,
+        )
+        .map_err(|e| DirectoryError::GenesisNotProven(e.to_string()))?;
+        if proven.proven_ak != b.ak_public_key {
+            return Err(DirectoryError::GenesisNotProven(
+                "the evidence proves another key than the entry's AK".to_string(),
+            ));
         }
+        Ok(())
     }
 }
 
@@ -214,43 +264,124 @@ pub fn select_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ccb::{
+        delegation_genesis_sentinel, role, sigalg, transition_genesis_sentinel,
+        DeviceTreeRootTransition, GenesisParamsV3, RootProgressionDelegation,
+    };
+    use crate::common::device_tree::DeviceTree;
+    use crate::core::identity::genesis_v2::{derive_atta, genesis_authority_policy_hash};
+    use crate::core::identity::genesis_v3::derive_genesis_v3_self_attested;
 
-    fn device(seed: u8) -> (Vec<u8>, Vec<u8>, [u8; 32], [u8; 32]) {
-        let (pk, sk) =
-            sphincs::generate_keypair_from_seed(sphincs::SphincsVariant::SPX256f, &[seed; 32])
-                .map(|kp| (kp.public_key.clone(), kp.secret_key.clone()))
-                .expect("keypair");
-        let att_a = [seed.wrapping_add(1); 32];
-        let device_id = derive_devid(&pk, &att_a);
-        (pk, sk, att_a, device_id)
-    }
+    const NETWORK: &[u8] = b"dsm-testnet";
 
-    fn body(pk: &[u8], att_a: [u8; 32], device_id: [u8; 32], counter: u64) -> DirectoryEntryBody {
-        DirectoryEntryBody {
-            genesis: [9u8; 32],
-            device_id,
-            ak_public_key: pk.to_vec(),
+    /// A real identity from wallet seed `[seed; 64]` and its own entry body at
+    /// `counter`, with the P0–P6 evidence a wallet publishes: the GRK
+    /// delegates root progression to the AK (`D_0`), the AK installs the
+    /// single-device tree (`T_0`), and the device's leaf is proved under it.
+    /// Returns the body and the AK secret key.
+    fn identity(seed: u8, counter: u64) -> (DirectoryEntryBody, Vec<u8>) {
+        let wallet_seed = [seed; 64];
+        let genesis = derive_genesis_v3_self_attested(
+            &wallet_seed,
+            NETWORK,
+            0,
+            0,
+            3,
+            &genesis_authority_policy_hash(),
+        )
+        .expect("genesis");
+        let params = GenesisParamsV3::new(
+            genesis.genesis_nonce,
+            NETWORK,
+            3,
+            sigalg::SPHINCS_PLUS_SPX256F,
+            &genesis.grk_public,
+        )
+        .expect("params");
+        let d0 = RootProgressionDelegation {
+            genesis_id: genesis.g,
+            role: role::DEVICE_TREE_ROOT_PROGRESSION,
+            role_version: role::BETA_ROLE_VERSION,
+            delegated_alg_id: sigalg::SPHINCS_PLUS_SPX256F,
+            delegated_pk: genesis.ak_public.clone(),
+            delegation_number: 0,
+            parent_delegation_digest: delegation_genesis_sentinel(),
+            activation_transition_digest: transition_genesis_sentinel(),
+        };
+        let d0_signature = sphincs::sphincs_sign(
+            &genesis.grk_secret,
+            &d0.signing_digest().expect("D_0 digest"),
+        )
+        .expect("GRK signs D_0");
+        let tree = DeviceTree::single(genesis.devid);
+        let t0 = DeviceTreeRootTransition {
+            genesis_id: genesis.g,
+            predecessor_transition_digest: transition_genesis_sentinel(),
+            new_root: tree.root(),
+            version_number: 0,
+            delegation_digest: d0.digest().expect("D_0"),
+        };
+        let t0_signature =
+            sphincs::sphincs_sign(&genesis.ak_secret, &t0.signing_digest()).expect("AK signs T_0");
+        let att_a = derive_atta(&wallet_seed, &genesis.g, 0);
+        let evidence = proto::AuthorityEvidenceV1 {
+            genesis_params_ccb: params.encode().expect("params"),
+            delegations: vec![proto::SignedAuthorityObjectV1 {
+                ccb: d0.encode().expect("D_0"),
+                signature: d0_signature,
+            }],
+            transitions: vec![proto::SignedAuthorityObjectV1 {
+                ccb: t0.encode(),
+                signature: t0_signature,
+            }],
+            inclusion_proof: tree.proof(&genesis.devid).expect("own leaf").to_bytes(),
+            ak_public_key: genesis.ak_public.clone(),
+            atta: att_a.to_vec(),
+        };
+        let body = DirectoryEntryBody {
+            genesis: genesis.g,
+            device_id: genesis.devid,
+            ak_public_key: genesis.ak_public.clone(),
             att_a,
             kyber_public_key: vec![counter as u8; KYBER_PUBLIC_KEY_LEN],
             counter,
-        }
+            authority_position: t0.digest(),
+            authority_evidence: evidence.encode_to_vec(),
+        };
+        (body, genesis.ak_secret.clone())
     }
 
     #[test]
     fn the_devices_own_entry_is_chosen_and_a_squatters_is_ignored() {
-        let (pk, sk, att_a, id) = device(1);
-        let own = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk).unwrap();
+        let (body, sk) = identity(1, 1);
+        let (g, id) = (body.genesis, body.device_id);
+        let own = DirectoryEntry::sign(body.clone(), &sk).unwrap();
         assert_eq!(own.verify(), Ok(()));
+        // Evidence included, an entry is a value a node's cell takes.
+        assert!(own.encode().len() <= crate::route_chain::MAX_VALUE_LEN);
 
-        // A squatter knows the device id, and even the AK and AttA, but signs
-        // with its own key: the signature does not verify.
-        let squatter = device(2);
-        let squat = DirectoryEntry::sign(body(&pk, att_a, id, 99), &squatter.1).unwrap();
+        // A squatter knows the device id, and even the AK, AttA and evidence,
+        // but signs with its own key: the signature does not verify.
+        let (squatter, squatter_sk) = identity(2, 99);
+        let squat = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                counter: 99,
+                ..body.clone()
+            },
+            &squatter_sk,
+        )
+        .unwrap();
         assert_eq!(squat.verify(), Err(DirectoryError::SignatureDoesNotVerify));
 
         // A squatter with its own AK cannot make it hash to this device id.
-        let (spk, ssk, satt, ..) = device(3);
-        let foreign = DirectoryEntry::sign(body(&spk, satt, id, 99), &ssk).unwrap();
+        let foreign = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                device_id: id,
+                ..squatter
+            },
+            &squatter_sk,
+        )
+        .unwrap();
         assert_eq!(foreign.verify(), Err(DirectoryError::NotThisDevicesKey));
 
         let values = [
@@ -259,35 +390,113 @@ mod tests {
             b"junk".to_vec(),
             own.encode(),
         ];
-        let chosen = select_entry(&[9u8; 32], &id, values.iter().map(Vec::as_slice));
+        let chosen = select_entry(&g, &id, values.iter().map(Vec::as_slice));
         assert_eq!(chosen, Some(own));
+    }
+
+    /// DSM Amendment A18. A device names another account's genesis beside
+    /// its own key, AttA and evidence, at that account's cell: everything it
+    /// signs is its own, so the genesis it names is its one lie. P0–P6 recompute
+    /// the evidence's genesis, which is the device's own, so the entry does
+    /// not prove itself and the reader never takes the device for one of the
+    /// account's.
+    ///
+    /// MUTATION CONTROL: delete the evidence check in `verify` and the entry
+    /// claiming the other account is chosen.
+    #[test]
+    fn naming_another_accounts_genesis_is_not_membership_in_it() {
+        let (victim, ..) = identity(7, 1);
+        let (intruder, intruder_sk) = identity(8, 1);
+        let claim = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                genesis: victim.genesis,
+                ..intruder.clone()
+            },
+            &intruder_sk,
+        )
+        .unwrap();
+        assert!(
+            matches!(claim.verify(), Err(DirectoryError::GenesisNotProven(..))),
+            "{:?}",
+            claim.verify()
+        );
+        let values = [claim.encode()];
+        assert_eq!(
+            select_entry(
+                &victim.genesis,
+                &intruder.device_id,
+                values.iter().map(Vec::as_slice)
+            ),
+            None
+        );
+    }
+
+    /// The evidence must prove the entry's own AK: another identity's
+    /// evidence, or evidence named at a transition its chain does not reach,
+    /// proves nothing for this entry.
+    #[test]
+    fn evidence_for_another_identity_or_position_proves_nothing() {
+        let (body, sk) = identity(9, 1);
+        let (other, ..) = identity(10, 1);
+        let borrowed = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                authority_evidence: other.authority_evidence.clone(),
+                authority_position: other.authority_position,
+                ..body.clone()
+            },
+            &sk,
+        )
+        .unwrap();
+        assert!(matches!(
+            borrowed.verify(),
+            Err(DirectoryError::GenesisNotProven(..))
+        ));
+        let elsewhere = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                authority_position: [0x5Au8; 32],
+                ..body
+            },
+            &sk,
+        )
+        .unwrap();
+        assert!(matches!(
+            elsewhere.verify(),
+            Err(DirectoryError::GenesisNotProven(..))
+        ));
     }
 
     #[test]
     fn a_higher_counter_replaces_a_lower_one() {
-        let (pk, sk, att_a, id) = device(4);
-        let first = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk).unwrap();
-        let second = DirectoryEntry::sign(body(&pk, att_a, id, 2), &sk).unwrap();
+        let (first_body, sk) = identity(4, 1);
+        let (g, id) = (first_body.genesis, first_body.device_id);
+        let first = DirectoryEntry::sign(first_body.clone(), &sk).unwrap();
+        let second = DirectoryEntry::sign(
+            DirectoryEntryBody {
+                counter: 2,
+                ..first_body
+            },
+            &sk,
+        )
+        .unwrap();
         let values = [second.encode(), first.encode()];
-        let chosen = select_entry(&[9u8; 32], &id, values.iter().map(Vec::as_slice)).unwrap();
+        let chosen = select_entry(&g, &id, values.iter().map(Vec::as_slice)).unwrap();
         assert_eq!(chosen.body.counter, 2);
     }
 
     #[test]
     fn an_entry_for_another_device_or_genesis_is_not_chosen() {
-        let (pk, sk, att_a, id) = device(5);
-        let entry = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk).unwrap();
+        let (body, sk) = identity(5, 1);
+        let (g, id) = (body.genesis, body.device_id);
+        let entry = DirectoryEntry::sign(body, &sk).unwrap();
         let bytes = [entry.encode()];
         assert!(select_entry(&[8u8; 32], &id, bytes.iter().map(Vec::as_slice)).is_none());
-        assert!(select_entry(&[9u8; 32], &[0u8; 32], bytes.iter().map(Vec::as_slice)).is_none());
+        assert!(select_entry(&g, &[0x6Bu8; 32], bytes.iter().map(Vec::as_slice)).is_none());
     }
 
     #[test]
     fn only_the_canonical_encoding_decodes() {
-        let (pk, sk, att_a, id) = device(6);
-        let mut bytes = DirectoryEntry::sign(body(&pk, att_a, id, 1), &sk)
-            .unwrap()
-            .encode();
+        let (body, sk) = identity(6, 1);
+        let mut bytes = DirectoryEntry::sign(body, &sk).unwrap().encode();
         bytes.extend_from_slice(&[0x10, 0x01]); // a repeated field appended
         assert!(matches!(
             DirectoryEntry::decode(&bytes),

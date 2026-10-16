@@ -829,8 +829,8 @@ TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1            
 TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
 TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
 TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
-The wallet's session-key derivation (§19.10), constant in SDK/sdk/computed_flow.rs.
-TAG_SESSION_KEY                             DSM/escrow/session-key/v1                 the HKDF salt of a match session key
+The wallet's session-key derivation (§19.10, Amendment S27), constant in CORE/common/domain_tags.
+TAG_DSM_ESCROW_SESSION_KEY_V2               DSM/escrow/session-key/v2                 the Expand label of a match session key under the wallet root
 
 
 <!-- spec-section: SOFI-014-2 -->
@@ -1625,10 +1625,16 @@ The value that counts at `K_match` is the first object at its leader that is rec
 
 A session key is the authority of everything its side does in a match: its ready, its Withdraw and every head it signs. Core reads only the public halves the table commits. How a key is made and kept is the wallet's obligation, and every wallet meets it the same way.
 
-- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce: `k = HKDF(salt = DSM/escrow/session-key/v1 ∥ 0x00; ikm = wallet seed; info = genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
+- **Derivation.** A wallet derives its session key for a match from its own wallet seed, its own genesis and the match's 32-byte nonce, under the wallet root of the DSM key schedule like every other secret the wallet derives (Amendment S27): `PRK_w = Extract(salt = DSM/kdf/wallet-root/v1 ∥ 0x00; ikm = wallet seed)` and `k = Expand(PRK_w; info = DSM/escrow/session-key/v2 ∥ 0x00 ∥ genesis ∥ match_nonce)`, 32 bytes of HKDF over BLAKE3 (RFC 5869, HMAC-BLAKE3). The domain is in the Expand `info`, never in the Extract salt, and `genesis` and `match_nonce` are 32 bytes each, so the `info` determines both. The key pair is the SPHINCS+ key pair (§14.3) whose deterministic key generation takes `k` as its entropy. The nonce is the one the setup carries; the program reads it, and DSM never does.
 - **The secret stays in the wallet.** The wallet answers with the public half only. The secret half is derived when it is used, from the seed the wallet holds while unlocked, and is never stored, exported or shown. A locked wallet derives nothing and signs nothing.
 - **One key per match.** Two matches with different nonces have different keys, and a key signs only for the match whose setup names it. A wallet locks a stake only when the setup's session key for its side is exactly the one it derives for the setup's nonce.
 - **Restoring.** The derivation reads nothing but the seed, the genesis and the nonce, so a wallet restored from its seed derives the same key and can still ready, withdraw, play or settle a match it staked in.
+
+> **Amendment S27 (owner, 2026-10-16) — a match session key is a key-schedule Expand.** From the security audit of 2026-10-15 (finding SA-37): the session key was the one wallet secret whose domain sat in an Extract salt over the wallet seed, beside the key schedule's single wallet-root Extract, so the seed had two Extracts under two public salts where the schedule has one. Owner's words, 2026-10-16: "You can do the spec amendments."
+>
+> - **One wallet root.** `PRK_w = Extract(DSM/kdf/wallet-root/v1 ∥ 0x00; wallet seed)` is the wallet seed's one Extract. A session key is an Expand under it, `k = Expand(PRK_w; DSM/escrow/session-key/v2 ∥ 0x00 ∥ genesis ∥ match_nonce)`, beside the genesis nonce, the GRK seed, `AttA`, the device seed, `s0`, the SDK entropy and the two recovery keys.
+> - **A new label.** The label is `DSM/escrow/session-key/v2`; nothing is ever derived under `DSM/escrow/session-key/v1` again. A session key from before this amendment is not carried over (DSM beta does not migrate).
+> - **Unchanged.** The key pair from `k`, one key per match, the secret staying in the wallet, and restoring from the seed are as above.
 
 **The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
 

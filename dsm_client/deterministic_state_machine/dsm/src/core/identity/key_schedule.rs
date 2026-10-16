@@ -18,6 +18,7 @@
 //!   sdk_entropy     = Expand(PRK_w, "DSM/sdk-entropy/v3"            0x00 DevID G)
 //!   recovery_aead   = Expand(PRK_w, "DSM/recovery-aead/v2"          0x00)
 //!   recovery_auth   = Expand(PRK_w, "DSM/recovery-authority/v2"     0x00)
+//!   session_seed    = Expand(PRK_w, "DSM/escrow/session-key/v2"     0x00 G match_nonce)
 //! PRK_d  = Extract("DSM/kdf/device-root/v1" 0x00, device_seed)
 //!   AK_seed         = Expand(PRK_d, "DSM/device-ak/v3"              0x00 aph)
 //! PRK_s0 = Extract("DSM/kdf/s0-root/v1" 0x00, s0)
@@ -51,10 +52,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::common::domain_tags::{
     TAG_DSM_ATTA_V3, TAG_DSM_CHAIN_HEAD_AT_REST_V3, TAG_DSM_DEVICE_AK_V3, TAG_DSM_DEVICE_SEED_V3,
-    TAG_DSM_GENESIS_NONCE_V3, TAG_DSM_GENESIS_ROOT_AUTHORITY_V2, TAG_DSM_KDF_DEVICE_ROOT_V1,
-    TAG_DSM_KDF_S0_ROOT_V1, TAG_DSM_KDF_WALLET_ROOT_V1, TAG_DSM_ML_KEM_IDENTITY_V1,
-    TAG_DSM_RECOVERY_AEAD_V2, TAG_DSM_RECOVERY_AUTHORITY_V2, TAG_DSM_S0_V3, TAG_DSM_SDK_ENTROPY_V3,
-    TAG_DSM_SMASTER_V3,
+    TAG_DSM_ESCROW_SESSION_KEY_V2, TAG_DSM_GENESIS_NONCE_V3, TAG_DSM_GENESIS_ROOT_AUTHORITY_V2,
+    TAG_DSM_KDF_DEVICE_ROOT_V1, TAG_DSM_KDF_S0_ROOT_V1, TAG_DSM_KDF_WALLET_ROOT_V1,
+    TAG_DSM_ML_KEM_IDENTITY_V1, TAG_DSM_RECOVERY_AEAD_V2, TAG_DSM_RECOVERY_AUTHORITY_V2,
+    TAG_DSM_S0_V3, TAG_DSM_SDK_ENTROPY_V3, TAG_DSM_SMASTER_V3,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::crypto::hkdf;
@@ -181,6 +182,14 @@ pub fn recovery_authority_seed(prk_w: &Prk) -> [u8; 32] {
     expand32(prk_w, TAG_DSM_RECOVERY_AUTHORITY_V2, &[])
 }
 
+/// A match session key's seed (SoFi §19.10, Amendment S27): an Expand under
+/// the wallet root beside the others, from the wallet's genesis and the
+/// match's nonce. The session key pair is the SPHINCS+ key pair generated
+/// from it. `G` and the nonce are 32 bytes each, so `info` determines both.
+pub fn escrow_session_seed(prk_w: &Prk, g: &[u8; 32], match_nonce: &[u8; 32]) -> [u8; 32] {
+    expand32(prk_w, TAG_DSM_ESCROW_SESSION_KEY_V2, &[g, match_nonce])
+}
+
 /// AK seed, under the device seed's Extract.
 pub fn ak_seed(device_seed: &[u8; 32], aph: &[u8; 32]) -> [u8; 32] {
     expand32(&device_prk(device_seed), TAG_DSM_DEVICE_AK_V3, &[aph])
@@ -218,6 +227,7 @@ mod tests {
     const G: [u8; 32] = [0x47; 32];
     const DEVID: [u8; 32] = [0x44; 32];
     const APH: [u8; 32] = [0x11; 32];
+    const MATCH_NONCE: [u8; 32] = [0x4e; 32];
 
     /// Every `info` label is distinct and NUL-free, so `info` strings of
     /// different labels never coincide.
@@ -235,6 +245,7 @@ mod tests {
             TAG_DSM_DEVICE_AK_V3,
             TAG_DSM_SMASTER_V3,
             TAG_DSM_CHAIN_HEAD_AT_REST_V3,
+            TAG_DSM_ESCROW_SESSION_KEY_V2,
         ];
         for (i, a) in labels.iter().enumerate() {
             assert!(!a.source_bytes().contains(&0u8));
@@ -285,7 +296,8 @@ mod tests {
     /// Deterministic test vectors for every node of KS1, computed by the independent
     /// reference implementation `scripts/ks1_reference.py` (wallet seed `0x5a`*64,
     /// network `dsm-beta`, index 0, version 3, slot 0, `G` = `0x47`*32,
-    /// `DevID` = `0x44`*32, `aph` = `0x11`*32). Changing any of them changes
+    /// `DevID` = `0x44`*32, `aph` = `0x11`*32, match nonce `0x4e`*32), and
+    /// recomputed by the Lean model (`KeyScheduleChecks.lean`). Changing any of them changes
     /// every identity: bump the schedule, never edit a vector to match.
     #[test]
     fn ks1_test_vectors() {
@@ -306,15 +318,19 @@ mod tests {
             ("smaster", hex(&sm)),
             ("at_rest_key", hex(&at_rest_key(&s, &G, &DEVID))),
             ("ml_kem_seed", hex(&ml_kem_seed(&sm))),
+            (
+                "escrow_session_seed",
+                hex(&escrow_session_seed(&w, &G, &MATCH_NONCE)),
+            ),
         ];
-        let want: [(&str, &str); 12] = KS1_VECTORS;
+        let want: [(&str, &str); 13] = KS1_VECTORS;
         for ((n, g), (wn, wv)) in got.iter().zip(want.iter()) {
             assert_eq!(n, wn);
             assert_eq!(g, wv, "KS1 vector {n}");
         }
     }
 
-    const KS1_VECTORS: [(&str, &str); 12] = [
+    const KS1_VECTORS: [(&str, &str); 13] = [
         (
             "genesis_nonce",
             "5e76000aee25c41c1a01de1a46837ae66eab039bfb056a57073a0cd25f859768",
@@ -362,6 +378,10 @@ mod tests {
         (
             "ml_kem_seed",
             "978325675bbfaee26c23901f843b9bb03ab281f4fc50ed24a287fb5c78ebed0f",
+        ),
+        (
+            "escrow_session_seed",
+            "7ff7cd6e42869983b9efad16204a09b2ba09df4468f37d8945665316578db5aa",
         ),
     ];
 }
