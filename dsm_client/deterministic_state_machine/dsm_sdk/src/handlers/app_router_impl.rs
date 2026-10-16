@@ -57,11 +57,14 @@ use super::response_helpers::{pack_envelope_ok, err};
 
 /// What a sender asks for when it pays a contact online. Everything else —
 /// the sender (this device), the relationship tip, the nonce, the signed
-/// operation — the SDK derives.
+/// operation, the token's ticker — the SDK derives.
 #[derive(Debug, Clone)]
 pub(crate) struct OnlineSendIntent {
     pub to_device_id: [u8; 32],
-    pub token_id: String,
+    /// The token, by its identity: its policy commit (SoFi §47). A ticker is
+    /// display only and two tokens may share one, so a send is never named by
+    /// one.
+    pub policy_commit: [u8; 32],
     pub amount: u64,
     pub memo: String,
 }
@@ -461,16 +464,27 @@ impl AppRouterImpl {
         }
     }
 
-    /// Send an online transfer: this device pays `intent.amount` of
-    /// `intent.token_id` to `intent.to_device_id`. The sender is this device;
-    /// the relationship tip, the nonce and the signed operation are derived
-    /// here, never supplied.
+    /// Send an online transfer: this device pays `intent.amount` of the token
+    /// committed to by `intent.policy_commit` to `intent.to_device_id`. The
+    /// sender is this device; the relationship tip, the nonce, the signed
+    /// operation and the token's ticker are derived here, never supplied.
     pub(crate) async fn process_online_transfer_logic(
         &self,
         intent: OnlineSendIntent,
     ) -> AppResult {
         let from_device_id = self.device_id_bytes;
         let to_device_id = intent.to_device_id;
+        // §9.5: the signed transfer binds the policy the send names. Its ticker
+        // is read from that commit — the builtin's, or this device's registry
+        // entry for it — and labels the terms and the local records only; it
+        // is never resolved back to a commit, which would name ERA for any
+        // token called "ERA" (SoFi §47). A commit this device holds no policy
+        // for is refused here, before anything is read from the network.
+        let policy_commit = intent.policy_commit;
+        let token_id = match super::wallet_routes::token_of_commit(&policy_commit) {
+            Ok((ticker, _)) => ticker,
+            Err(e) => return err(format!("wallet.send: {e}")),
+        };
         let to_device_id_str = crate::util::text_id::encode_base32_crockford(&to_device_id);
         // The network's pinned set: the recipient's directory entry is read
         // there, and the send is delivered there.
@@ -744,12 +758,6 @@ impl AppRouterImpl {
             }
         }
 
-        // A transfer names its token exactly; an omitted token is not ERA, and a
-        // ticker is not case-folded into one it does not spell.
-        let token_id = intent.token_id.clone();
-        if token_id.is_empty() {
-            return err("wallet.send: the request names no token".to_string());
-        }
         if contact_record.public_key.is_empty() {
             return err(
                 "wallet.send: recipient contact is missing a canonical public key".to_string(),
@@ -771,16 +779,6 @@ impl AppRouterImpl {
         // Sign the canonical Operation bytes (signature field cleared) so the
         // state machine and inbox verifier use the same preimage.
         // =====================================================================
-        // §9.5: bind the token's canonical policy_commit into the signed transfer.
-        // Resolve from the local source-of-truth installed policy; fail closed if
-        // the token's policy is not installed (no peer-supplied fallback).
-        let policy_commit = match self
-            .core_sdk
-            .resolve_policy_commit_strict(token_id.as_bytes())
-        {
-            Ok(pc) => pc,
-            Err(e) => return err(format!("wallet.send: policy_commit resolve failed: {e}")),
-        };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(intent.amount),

@@ -30,7 +30,7 @@ use generated::envelope::Payload;
 use prost::Message;
 use serial_test::serial;
 
-use super::node_e2e_tests::{args, balance, create_token, era, invoke, payload};
+use super::node_e2e_tests::{adopt, args, balance, create_token, era, invoke, payload};
 use crate::bridge::{AppQuery, AppRouter as _};
 use crate::test_support::two_device::{Pair, TestDevice};
 use crate::util::text_id::{decode_base32_crockford, encode_base32_crockford};
@@ -255,6 +255,11 @@ async fn offer(
 /// B previews and approves the code; A takes the accept the relay kept. The
 /// session id.
 async fn connect(p: &Pair, relay: &ForwardRelay, code: &str) -> [u8; 32] {
+    connect_to_coin(p, relay, code, "WILD").await
+}
+
+/// [`connect`], for a game whose coin is `ticker`.
+async fn connect_to_coin(p: &Pair, relay: &ForwardRelay, code: &str, ticker: &str) -> [u8; 32] {
     let previewed = query(
         &p.b,
         "connect.preview",
@@ -272,7 +277,7 @@ async fn connect(p: &Pair, relay: &ForwardRelay, code: &str) -> [u8; 32] {
         preview
             .scope_lines
             .iter()
-            .any(|l| l.contains("10 WILD a time")),
+            .any(|l| l.contains(&format!("10 {ticker} a time"))),
         "{:?}",
         preview.scope_lines
     );
@@ -547,6 +552,56 @@ async fn a_relay_replaying_every_request_runs_nothing_twice() {
     let replayed = sync_and_deliver(&p, &relay).await;
     assert_eq!(balance(&p.b, &wild), 17, "no payment ran again");
     assert_eq!(replayed.sessions[0].last_error, "");
+}
+
+/// A coin's identity is its policy commit, and its ticker is display only
+/// (SoFi §47): an application may name its coin "ERA". A payment under the
+/// grant pays in the coin the grant names, so the wallet's ERA never moves
+/// for it, whatever the coin is called, and the request is not carried out
+/// while the wallet holds none of the coin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_app_coin_named_era_never_pays_out_the_wallets_era() {
+    let p = Pair::boot(500, 200).await;
+    let named_era = create_token(&p.a, "ERA", 1_000_000).await;
+    assert_ne!(named_era, era(), "the app's coin is not ERA");
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &named_era).await;
+    let session = connect_to_coin(&p, &relay, &made.code, "ERA").await;
+    // The wallet adopts the coin: its registry names it "ERA".
+    adopt(&p.b, &named_era).await;
+    let wallet_era = balance(&p.b, &era());
+    let app_era = balance(&p.a, &era());
+    assert!(wallet_era > 0, "the wallet holds ERA to lose");
+
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: named_era.to_vec(),
+            amount: 3,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    sync_and_deliver(&p, &relay).await;
+    settle(&p).await;
+
+    assert_eq!(
+        balance(&p.b, &era()),
+        wallet_era,
+        "the wallet's ERA did not move"
+    );
+    assert_eq!(balance(&p.a, &era()), app_era, "the app was paid no ERA");
+    assert_eq!(balance(&p.b, &named_era), 0);
+    let entry = wallet_log(&p.b, &session, pay).await;
+    assert_ne!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "a payment in a coin the wallet holds none of is not carried out: {}",
+        entry.detail
+    );
 }
 
 /// A wallet's answer is never evidence. An answer saying "paid" with no

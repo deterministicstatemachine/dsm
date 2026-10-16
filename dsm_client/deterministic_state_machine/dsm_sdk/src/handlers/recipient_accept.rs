@@ -56,29 +56,31 @@ impl VerifiedTransfer {
     }
 }
 
-/// What a transfer moves and says: its amount from its SIGNED operation, its
-/// token and memo from the terms that open the operation's commitment.
+/// What a transfer moves and says: its amount and its token from its SIGNED
+/// operation, its memo from the terms that open the operation's commitment.
+///
+/// The token is the policy the operation commits to. The ticker the terms
+/// carry is the sender's word: a ticker is display only and two tokens may
+/// share one (SoFi §47), so it is not kept here, and whoever shows the token
+/// names it from the commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferTerms {
     pub amount: u64,
-    /// The token, named by its id: as text when the id bytes are text, in
-    /// Base32 when they are binary.
-    pub token_id: String,
+    pub policy_commit: [u8; 32],
     pub memo: String,
 }
 
 impl TransferTerms {
-    /// The terms a signed transfer's amount and its opened terms state.
+    /// The terms a signed transfer's amount and policy commit and its opened
+    /// terms state.
     pub(crate) fn of(
         amount: &dsm::types::token_types::Balance,
+        policy_commit: &[u8; 32],
         opened: &dsm::types::operations::TransferTerms,
     ) -> Self {
         Self {
             amount: amount.value(),
-            token_id: match String::from_utf8(opened.token_id.clone()) {
-                Ok(text) => text,
-                Err(binary) => crate::util::text_id::encode_base32_crockford(binary.as_bytes()),
-            },
+            policy_commit: *policy_commit,
             memo: opened.memo.clone(),
         }
     }
@@ -93,7 +95,11 @@ pub(crate) fn transfer_terms(
 ) -> Result<TransferTerms, String> {
     opened.open(op).map_err(|e| e.to_string())?;
     match op {
-        Operation::Transfer { amount, .. } => Ok(TransferTerms::of(amount, opened)),
+        Operation::Transfer {
+            amount,
+            policy_commit,
+            ..
+        } => Ok(TransferTerms::of(amount, policy_commit, opened)),
         other => Err(format!(
             "the signed operation is a {}, not a transfer",
             other.get_operation_type()
