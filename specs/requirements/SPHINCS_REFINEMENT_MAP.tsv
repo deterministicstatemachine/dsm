@@ -86,7 +86,7 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	202	precommit_sign
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	217	fulfillment_signing_digest	domainInput + opaque CCB; unproved CCB refinement	68f73b32f99648205dec063362f75479f8de997e
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	250	resolution_claim_signing_digest	WrapperInjective.lean: resolution_claim_signing_injective (claim CCB, alg, key, AttA)	68f73b32f99648205dec063362f75479f8de997e
 dsm_client/deterministic_state_machine/dsm/src/economic/claim.rs	243	signing_digest	root claim canonical signing digest; unproved	ccbdd539736fde2955f218de0a258681bb076929
-dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	166	sign_economic_root_claim	claim auth + key binding; unproved	fbee505369d0854e3874e15bf89fc1a3a1f7c472
+dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	166	sign_economic_root_claim	claim auth + key binding; unproved	69803e0954101d03268d8c3c8b734fe4adde510e
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	72	substrate_signing_digest	substrate-bound digest; unproved	2044d5bba745f4c77676bfd63ea0c5cff005ca75
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2218	signing_bytes	operation-specific canonical signing bytes; unproved	0feab922b9a69d621f1edda30bfe8055b94e7698
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	466	relationship_finalized_signing_target	finalized relationship digest; unproved	094a1954db4057a4943e4947ae64c64526542ee9
@@ -97,9 +97,9 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	46	signing_digest	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	51	sign_own	AK sphincs_sign on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	60	verify	sphincs_verify on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	adc276ecc5cda273c5ae04c6719a995ff5c9e633
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	adc276ecc5cda273c5ae04c6719a995ff5c9e633
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	adc276ecc5cda273c5ae04c6719a995ff5c9e633
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	b921d6df14c282807aaa2bc2bd27a59185d85243
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	b921d6df14c282807aaa2bc2bd27a59185d85243
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	b921d6df14c282807aaa2bc2bd27a59185d85243
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	e1869050a708c6184bbfe0c9e9d24485ff0a038f
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	ec9f14def64cbc800f2989b56ca571a8108c67b1
 crates/dsm-anchor-pico/src/main.rs	1	module boundary	unproved	fb0687d62f305afa7651ddf9cae981350853d91b

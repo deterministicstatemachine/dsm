@@ -165,8 +165,11 @@ impl RecoveryActivationSeal {
 /// counterparty's posted state proves the cross-relationship succession (retire
 /// `(A_old,C)`, establish `(A_new,C)` carrying forward the old frontier — old-chain
 /// forward-ancestry from the capsule floor + carry-forward commitment + inclusion of
-/// both tips in its posted root); and `evidence_root` commits exactly the verified
-/// outcomes.
+/// both tips in its posted root); the seal's `tombstone_proposal_digest` and
+/// `final_receipt_roll` are the hash and the roll of the tombstone every
+/// counterparty's evidence carries; and `evidence_root` commits exactly the
+/// verified outcomes. Nothing given here bears on `final_per_device_smt_root`,
+/// which is bound into the seal and not checked.
 pub fn validate_recovery_activation(
     seal: &RecoveryActivationSeal,
     gate_set: &BTreeSet<[u8; 32]>,
@@ -209,6 +212,19 @@ pub fn validate_recovery_activation(
         if ev.a_old != seal.old_device_id || ev.a_new != seal.new_device_id {
             return Err(DsmError::verification(
                 "activation: evidence does not bind the old→new device under recovery",
+            ));
+        }
+        // The seal names the tombstone this evidence carries, which `verify`
+        // authenticates under the recovery authority, and its final receipt
+        // roll is the roll that tombstone signs (Roll⋆).
+        if ev.tombstone.tombstone_hash.as_slice() != seal.tombstone_proposal_digest {
+            return Err(DsmError::verification(
+                "activation: the seal names another tombstone than the evidence carries",
+            ));
+        }
+        if ev.tombstone.old_rollup_hash.as_slice() != seal.final_receipt_roll {
+            return Err(DsmError::verification(
+                "activation: final_receipt_roll is not the roll the tombstone signs",
             ));
         }
         let tip = ev.verify(recovery_authority_pubkey)?;

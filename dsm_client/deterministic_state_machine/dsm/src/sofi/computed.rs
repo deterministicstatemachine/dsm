@@ -2562,4 +2562,29 @@ mod tests {
             Some(vec![ComputedRefusal::MatchNotEnded])
         );
     }
+
+    /// Audit SA-24, SoFi Amendment S22: a Release against a computed vault
+    /// that names any cell but the vault's `K_match` is unbound — nothing
+    /// holds there for that vault, for any outcome — and the vault's own
+    /// `K_match` is never unbound.
+    #[test]
+    fn a_release_naming_another_cell_than_k_match_is_unbound() {
+        use crate::sofi::escrow::{EscrowCellRead, UnboundCell};
+        let m = the_match();
+        let terms = m.terms(([0x0A; 32], [0x0B; 32]));
+        assert_eq!(UnboundCell::of(&terms, &match_cell_of(&terms)), None);
+        for named in [start_cell_key(&m.key()), [0xCE; 32]] {
+            let read = EscrowCellRead::Unbound(
+                UnboundCell::of(&terms, &named).expect("another cell than K_match"),
+            );
+            assert_eq!(read.key(), named, "bound to the cell the release names");
+            for outcome in [
+                COMPUTED_LABEL_A_WINS,
+                COMPUTED_LABEL_B_WINS,
+                COMPUTED_LABEL_VOID,
+            ] {
+                assert_eq!(read.standing_for(outcome), VerdictStanding::Unsettled);
+            }
+        }
+    }
 }
