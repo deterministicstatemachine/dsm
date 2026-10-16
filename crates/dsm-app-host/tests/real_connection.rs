@@ -1277,6 +1277,9 @@ async fn connect_over_the_real_relay() {
         other => panic!("connect.pending answered {other:?}"),
     }
 
+    // Every process is stopped before its directory goes: a connected
+    // account's listener keeps writing to its store while it runs.
+    rival.stop().await;
     game.stop().await;
     wallet.stop().await;
     if let Err(e) = std::fs::remove_dir_all(&root) {
