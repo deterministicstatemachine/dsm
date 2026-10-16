@@ -10,9 +10,19 @@ keeps no record of who was emailed, and logs no address.
 ## What it checks
 
 - The request is the canonical encoding of a `ReceiptEmailRequestV1`.
-- Every field is within its bound and free of control characters; the email is an address.
+- Every field is within its bound and free of control characters; the email is a bare address
+  (`user@domain.tld`: no display name, nothing before or after it), and the receipt is sent to
+  exactly that address.
 - The sender device's AK signature over `H(DSM/receipt-email ‖ request with an empty signature)` verifies.
-- The sending device and the receiving address are each under their rate.
+- The sending device and the receiving address are each under their rate. A device is counted by
+  the key its request is signed under (the device id is not bound by anything the request
+  carries); an address is counted case-insensitively and without a `+` subaddress, so spellings
+  of one inbox share its rate.
+
+It works on at most 64 requests at once (one more is answered `503`), answers each within 30 s
+(`408` after), and closes a connection that has not sent a request's headers within 10 s. It logs
+why a receipt was not sent by the mail server's status code alone: the server's own text often
+quotes the address.
 
 Open: the signature proves a device asked, not that the device is in the
 network's directory. The service does not read the directory yet.

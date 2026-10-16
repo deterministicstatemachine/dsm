@@ -28140,8 +28140,11 @@ export class BleConnectionFailed extends Message<BleConnectionFailed> {
 
 /**
  * ── keyed cells and indexes (storage contract Part II) ──────────────────────
- * Everything a member holds at a key, in arrival order. An empty list is an
- * asserted absence. The member decodes none of the values.
+ * One page of what a member holds at a key, in arrival order (storage spec
+ * §6): the entries from the arrival index the read names, at most the
+ * cell-value cap of value bytes and MAX_CELL_PAGE_ENTRIES entries, and always
+ * the first of them. An empty page read from index 1 is an asserted absence.
+ * The member decodes none of the values.
  *
  * @generated from message dsm.CellValuesV1
  */
@@ -28158,6 +28161,14 @@ export class CellValuesV1 extends Message<CellValuesV1> {
    */
   records: ArrivalRecordV1[] = [];
 
+  /**
+   * The arrival index the next page starts at; 0 when this page reaches the
+   * last entry the member holds.
+   *
+   * @generated from field: uint64 next = 3;
+   */
+  next = protoInt64.zero;
+
   constructor(data?: PartialMessage<CellValuesV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28168,6 +28179,7 @@ export class CellValuesV1 extends Message<CellValuesV1> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 2, name: "records", kind: "message", T: ArrivalRecordV1, repeated: true },
+    { no: 3, name: "next", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellValuesV1 {

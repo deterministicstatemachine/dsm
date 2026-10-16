@@ -22,12 +22,14 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # Builds and runs every test instrumented. It runs build scripts and tests
+  # from every dependency, so it holds no token that can mint an identity:
+  # the reports leave it as an artifact, and `upload` alone sends them on.
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     services:
       postgres:
         image: postgres:16
@@ -93,6 +95,34 @@ jobs:
         run: |
           node scripts/aggregate_coverage.mjs
 
+      - name: Upload coverage summary artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-summary
+          path: |
+            coverage/aggregate.json
+            coverage/rust.lcov
+            dsm_client/frontend/coverage/lcov.info
+
+  # Sends the reports to Codecov under the repository's OIDC identity. The
+  # only job that can mint that identity runs no code from the repository or
+  # its dependencies: it checks the repository out for Codecov's file map and
+  # uploads the reports the coverage job left.
+  upload:
+    name: Upload coverage
+    runs-on: ubuntu-latest
+    needs: [coverage]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download coverage summary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-summary
+
       - name: Upload Rust coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
@@ -110,13 +140,3 @@ jobs:
           name: frontend-coverage
           fail_ci_if_error: true
           use_oidc: true
-
-      - name: Upload coverage summary artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: coverage-summary
-          path: |
-            coverage/aggregate.json
-            coverage/rust.lcov
-            dsm_client/frontend/coverage/lcov.info
-

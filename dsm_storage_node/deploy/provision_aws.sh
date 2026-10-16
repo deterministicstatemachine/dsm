@@ -12,10 +12,14 @@
 #   4. Docker installed locally (for building the image)
 #
 # Usage:
-#   ./provision_aws.sh --ssh-key ~/.ssh/id_ed25519
+#   ./provision_aws.sh --ssh-key ~/.ssh/id_ed25519 --ssh-cidr 1.2.3.4/32
+#
+# Terraform shows its plan and asks before it applies anything: the nodes'
+# databases live on their instances, so no apply goes through unread.
 #
 # Options:
 #   --ssh-key PATH        SSH private key path (required)
+#   --ssh-cidr CIDR       the one CIDR block allowed SSH (required, e.g. your IP/32)
 #   --ssh-pub-key PATH    SSH public key path (default: ${ssh-key}.pub)
 #   --skip-terraform       Skip Terraform, use existing instances
 #   --skip-build           Skip Docker image build
@@ -26,6 +30,7 @@ TERRAFORM_DIR="${SCRIPT_DIR}/../terraform/aws"
 
 SSH_KEY=""
 SSH_PUB_KEY=""
+SSH_CIDR=""
 SKIP_TF=false
 SKIP_BUILD=false
 
@@ -34,17 +39,19 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ssh-key) SSH_KEY="$2"; shift 2 ;;
         --ssh-pub-key) SSH_PUB_KEY="$2"; shift 2 ;;
+        --ssh-cidr) SSH_CIDR="$2"; shift 2 ;;
         --skip-terraform) SKIP_TF=true; shift ;;
         --skip-build) SKIP_BUILD=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
 
-if [ -z "${SSH_KEY}" ]; then
-    echo "Usage: $0 --ssh-key ~/.ssh/id_ed25519 [options]"
+if [ -z "${SSH_KEY}" ] || { [ "${SKIP_TF}" = false ] && [ -z "${SSH_CIDR}" ]; }; then
+    echo "Usage: $0 --ssh-key ~/.ssh/id_ed25519 --ssh-cidr 1.2.3.4/32 [options]"
     echo ""
     echo "Options:"
     echo "  --ssh-key PATH        SSH private key path (required)"
+    echo "  --ssh-cidr CIDR       the one CIDR block allowed SSH (required unless --skip-terraform)"
     echo "  --ssh-pub-key PATH    SSH public key path (default: \${ssh-key}.pub)"
     echo "  --skip-terraform       Skip Terraform provisioning"
     echo "  --skip-build           Skip Docker image build"
@@ -79,8 +86,9 @@ if [ "${SKIP_TF}" = false ]; then
 
     terraform init -input=false
 
-    terraform apply -input=false -auto-approve \
-        -var="ssh_public_key=${PUB_KEY_CONTENT}"
+    terraform apply \
+        -var="ssh_public_key=${PUB_KEY_CONTENT}" \
+        -var="allowed_ssh_cidr=${SSH_CIDR}"
 
     cd "${SCRIPT_DIR}"
 else

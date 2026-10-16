@@ -7,12 +7,20 @@
 #   docker compose -f docker-compose.node.yml up -d
 #
 # Each service's log is rotated: at most five files of 50 MB, so a client
-# that makes a node log cannot fill its disk.
+# that makes a node log cannot fill its disk. Each service's memory and
+# process count are bounded too, so neither can starve the other or the host:
+# a node that outgrows its memory is restarted, and its database with it
+# keeps every acknowledged byte (synchronous commit, storage spec §3). The
+# defaults fit a 2 GB host; set DSM_NODE_MEM_LIMIT / DSM_PG_MEM_LIMIT in
+# .env for a larger one.
 
 services:
   postgres:
     image: postgres:15-alpine
     restart: unless-stopped
+    mem_limit: ${DSM_PG_MEM_LIMIT:-640m}
+    # One process per connection, and the node's pool holds at most 32.
+    pids_limit: 256
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-dsm_storage}
       POSTGRES_USER: ${POSTGRES_USER:-dsm}
@@ -35,6 +43,9 @@ services:
   storage-node:
     image: dsm-storage-node:latest
     restart: unless-stopped
+    mem_limit: ${DSM_NODE_MEM_LIMIT:-896m}
+    # The runtime's worker threads and its blocking pool (at most 512).
+    pids_limit: 1024
     depends_on:
       postgres:
         condition: service_healthy

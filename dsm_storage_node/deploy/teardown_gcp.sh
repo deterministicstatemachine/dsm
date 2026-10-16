@@ -16,6 +16,23 @@ done
 
 [ -z "${GCP_PROJECT}" ] && echo "Usage: $0 --ssh-key KEY --gcp-project ID [--force]" && exit 1
 
+# The nodes' instances carry `prevent_destroy` (their PostgreSQL databases
+# live on them; terraform/gcp/modules/region/main.tf), and Terraform
+# refuses any destroy that would remove one. Checked before anything is
+# stopped, so a refused teardown leaves every node serving.
+if grep -q 'prevent_destroy = true' "${TERRAFORM_DIR}/modules/region/main.tf"; then
+    echo "REFUSING: the storage node instances are protected by prevent_destroy."
+    echo
+    echo "  Each node's database lives on its instance; destroying it destroys"
+    echo "  every byte that node acknowledged. To retire the fleet deliberately:"
+    echo "    1. hand over or back up every node's database;"
+    echo "    2. remove the lifecycle prevent_destroy line from"
+    echo "       ${TERRAFORM_DIR}/modules/region/main.tf;"
+    echo "    3. run this script again (Terraform shows the plan and asks first)."
+    exit 1
+fi
+
+
 echo "==> [1/2] Stopping containers..."
 if [ "${FORCE}" = false ] && [ -n "${SSH_KEY}" ]; then
     cd "${TERRAFORM_DIR}"
@@ -31,5 +48,8 @@ fi
 echo "==> [2/2] Destroying GCP infrastructure..."
 cd "${TERRAFORM_DIR}"
 [ ! -f "terraform.tfstate" ] && echo "No state found." && exit 0
-terraform destroy -auto-approve -var="gcp_project=${GCP_PROJECT}" -var="ssh_public_key=teardown"
+# Terraform validates every variable even to destroy; the key and CIDR are
+# never applied. It shows what it will destroy and asks first.
+terraform destroy -var="gcp_project=${GCP_PROJECT}" -var="ssh_public_key=teardown" \
+    -var="allowed_ssh_cidr=127.0.0.1/32"
 echo "Teardown complete."

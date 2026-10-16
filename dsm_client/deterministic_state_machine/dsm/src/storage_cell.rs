@@ -153,6 +153,19 @@ pub const MAX_MEMBER_ID_LEN: usize = 128;
 /// exactly this many siblings, one per bit of the leaf key.
 pub const CELL_TREE_DEPTH: usize = 256;
 
+// ── Cell reads, a page at a time (storage spec §6) ─────────────────────────
+
+/// The most value bytes one page of a cell read holds: the cell-value cap, the
+/// largest entry a member takes at a key ([`crate::route_chain::MAX_ENTRY_BYTES`]).
+/// A page always holds the first entry it is read from, so no entry a member
+/// took is ever left out of every page.
+pub const CELL_PAGE_VALUE_BYTES: usize = crate::route_chain::MAX_ENTRY_BYTES;
+
+/// The most entries one page of a cell read holds, whatever their size: with
+/// each entry's arrival record, a page of the smallest entries stays within a
+/// few times [`CELL_PAGE_VALUE_BYTES`].
+pub const MAX_CELL_PAGE_ENTRIES: usize = 256;
+
 /// A member's ByteCommit for cycle `t`: which member, which cycle, the SMT
 /// root over its cells' latest committed entries, the bytes it holds, and the
 /// digest of its previous ByteCommit. Unsigned: a verifier checks the chain

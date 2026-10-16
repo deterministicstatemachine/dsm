@@ -71,6 +71,7 @@ clock_allow_globs=(
   --glob '!**/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_session.rs'      # BLE session freshness / expiry bookkeeping
   --glob '!**/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs'   # BLE runtime retry / stale-session handling
   --glob '!**/android/app/src/main/java/com/dsm/wallet/bridge/ble/BleCoordinator.kt'      # Android BLE scan throttling / connect readiness
+  --glob '!**/dsm_storage_node/src/liveness.rs'                           # node connection/IO liveness only (storage spec §1 rule 4, owner 2026-10-16); names no protocol module (tests/no_clock_reads.rs)
 )
 
 json_patterns='\bserde_json::|\bJSON\.parse\b|\bJSON\.stringify\b|\.toJSON\(|\bfrom_json\b|\bto_json\b'

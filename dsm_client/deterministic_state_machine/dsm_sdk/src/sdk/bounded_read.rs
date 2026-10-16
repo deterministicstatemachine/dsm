@@ -376,6 +376,7 @@ mod tests {
         let cell = proto::CellValuesV1 {
             values: vec![vec![0x76]; 3],
             records: vec![proto::ArrivalRecordV1::default(); 2],
+            next: 0,
         };
         let counts = element_counts(&cell.encode_to_vec()).expect("counts");
         assert_eq!(counts.into_iter().collect::<Vec<_>>(), vec![(1, 3), (2, 2)]);
@@ -407,6 +408,7 @@ mod tests {
         let mut cut = proto::CellValuesV1 {
             values: vec![vec![0x76; 10]],
             records: Vec::new(),
+            next: 0,
         }
         .encode_to_vec();
         cut.truncate(5);
@@ -442,6 +444,7 @@ mod tests {
         let empties = proto::CellValuesV1 {
             values: vec![Vec::new(); 400],
             records: Vec::new(),
+            next: 0,
         }
         .encode_to_vec();
         assert!(empties.len() <= BUDGET.bytes);
@@ -452,6 +455,7 @@ mod tests {
         let carried = proto::CellValuesV1 {
             values: vec![vec![0x76; 98]; 8],
             records: Vec::new(),
+            next: 0,
         }
         .encode_to_vec();
         assert!(carried.len() <= BUDGET.bytes);

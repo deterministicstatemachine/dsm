@@ -142,6 +142,47 @@ async fn put_cell(
     Ok(octets(record.to_proto().encode_to_vec()))
 }
 
+/// The entries a batch body carries at most: every top-level field 1 it
+/// holds, counted from the wire before anything is decoded. An entry the
+/// decoder would build is one of these, so a count within the limit bounds
+/// what decoding allocates. Counting walks the framing alone and allocates
+/// nothing: a body of empty entries (two bytes each) would otherwise decode
+/// into a struct of three vectors per two bytes before it could be refused.
+fn batch_entry_count(mut body: &[u8]) -> Result<usize, StatusCode> {
+    use prost::encoding::{decode_key, skip_field, DecodeContext};
+    let mut entries = 0usize;
+    while !body.is_empty() {
+        let (tag, wire_type) = decode_key(&mut body).map_err(|e| {
+            log::info!("cells put: the batch's framing does not decode: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+        if tag == 1 {
+            entries += 1;
+            if entries > MAX_BATCH_ENTRIES {
+                return Ok(entries);
+            }
+        }
+        skip_field(wire_type, tag, &mut body, DecodeContext::default()).map_err(|e| {
+            log::info!("cells put: the batch's framing does not decode: {e}");
+            StatusCode::BAD_REQUEST
+        })?;
+    }
+    Ok(entries)
+}
+
+/// A batch body as a `CellPutsV1` of 1 to [`MAX_BATCH_ENTRIES`] entries,
+/// refused by its entry count before any entry is decoded.
+pub fn decode_batch(body: &[u8]) -> Result<dsm::types::proto::CellPutsV1, StatusCode> {
+    let count = batch_entry_count(body)?;
+    if count == 0 || count > MAX_BATCH_ENTRIES {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    dsm::types::proto::CellPutsV1::decode(body).map_err(|e| {
+        log::info!("cells put: the batch does not decode: {e}");
+        StatusCode::BAD_REQUEST
+    })
+}
+
 /// Keep every entry's body at its key, after anything already there, in ONE
 /// local transaction: all of them or none of them. The shape of each entry
 /// is checked before anything is written, so a malformed batch is a `400`
@@ -150,11 +191,7 @@ async fn put_cells(
     Extension(state): Extension<Arc<AppState>>,
     body: Bytes,
 ) -> Result<Response, StatusCode> {
-    let batch = dsm::types::proto::CellPutsV1::decode(body.as_ref())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if batch.entries.is_empty() || batch.entries.len() > MAX_BATCH_ENTRIES {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let batch = decode_batch(body.as_ref())?;
     let mut entries = Vec::with_capacity(batch.entries.len());
     for entry in batch.entries {
         if entry.value.is_empty() {
@@ -183,25 +220,51 @@ async fn put_cells(
     ))
 }
 
-/// Everything held at the key, in arrival order.
+/// `from=<arrival index>`, optional: where a cell read starts, the first
+/// entry when it names none. Arrival indexes start at 1.
+fn cell_query(raw: Option<&str>) -> Result<u64, StatusCode> {
+    let mut from = 1u64;
+    for pair in raw.map_or("", |q| q).split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("from", v)) => {
+                from = v.parse().map_err(|e| {
+                    log::info!("cell get: from={v} is not an arrival index: {e}");
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            _ => return Err(StatusCode::BAD_REQUEST),
+        }
+    }
+    if from == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(from)
+}
+
+/// One page of what is held at the key, in arrival order, from the arrival
+/// index the read names (storage spec §6): the page names where the next one
+/// starts, or that it reaches the last entry held.
 async fn get_cell(
     Extension(state): Extension<Arc<AppState>>,
     Path(key): Path<String>,
     headers: HeaderMap,
+    RawQuery(raw): RawQuery,
 ) -> Result<Response, StatusCode> {
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
-    let entries = crate::db::get_cell_entries(&state.db_pool, &ns, &key)
+    let from = cell_query(raw.as_deref())?;
+    let held = crate::db::get_cell_page(&state.db_pool, &ns, &key, from)
         .await
         .map_err(|e| {
             log::error!("cell get: DB read failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let mut page = dsm::types::proto::CellValuesV1 {
-        values: Vec::with_capacity(entries.len()),
-        records: Vec::with_capacity(entries.len()),
+        values: Vec::with_capacity(held.entries.len()),
+        records: Vec::with_capacity(held.entries.len()),
+        next: held.next,
     };
-    for (value, index, running_hash) in entries {
+    for (value, index, running_hash) in held.entries {
         page.values.push(value);
         page.records
             .push(arrival_record(&state, ns.clone(), &key, index, running_hash)?.to_proto());

@@ -24,7 +24,10 @@ resource "aws_key_pair" "dsm" {
   }
 }
 
-# Ubuntu 22.04 LTS AMI (per-region — AMI IDs differ by region)
+# Ubuntu 22.04 LTS AMI (per-region — AMI IDs differ by region). A new node
+# starts on the newest image; a running node keeps the image it was created
+# from (see `lifecycle` on the instance), because a node's PostgreSQL lives on
+# its root volume and replacing the instance would replace its database.
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -89,7 +92,16 @@ resource "aws_security_group" "dsm_storage" {
   }
 }
 
-# N storage node instances in this region
+# N storage node instances in this region.
+#
+# Each node's PostgreSQL — every byte it ever acknowledged — lives on its root
+# volume, and a node never loses stored bytes (storage spec §3). So:
+# - a newer AMI or edited bootstrap never replaces a running node
+#   (`ignore_changes`), and nothing in this module can destroy one
+#   (`prevent_destroy`: a plan that would is refused, and retiring a node is a
+#   deliberate edit after its handover, storage spec §12.5);
+# - its root volume outlives the instance if the instance is ever terminated
+#   (`delete_on_termination = false`), and is encrypted at rest.
 resource "aws_instance" "dsm_node" {
   count = var.node_count
 
@@ -98,12 +110,28 @@ resource "aws_instance" "dsm_node" {
   key_name               = aws_key_pair.dsm.key_name
   vpc_security_group_ids = [aws_security_group.dsm_storage.id]
 
-  user_data = file("${path.module}/../../user_data.sh")
+  # The one node bootstrap, shared with the GCP module (Docker on Ubuntu,
+  # then /opt/dsm-storage/.bootstrap-done, which provision_aws.sh waits for).
+  user_data = file("${path.module}/../../../gcp/user_data.sh")
 
   root_block_device {
     volume_size           = var.volume_size_gb
     volume_type           = "gp3"
-    delete_on_termination = true
+    delete_on_termination = false
+    encrypted             = true
+  }
+
+  # Instance metadata only by IMDSv2 session token, reachable from the host
+  # alone: a request a container or a forwarded request makes never reaches it.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
+  lifecycle {
+    ignore_changes  = [ami, user_data]
+    prevent_destroy = true
   }
 
   tags = {
