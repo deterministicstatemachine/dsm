@@ -3361,12 +3361,12 @@ Found while fixing §6.87.
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 325 | 136 | 97 | 41 | 0 | 33 | 18 |
+| DSM high-level (MR-DSM) | 327 | 138 | 97 | 41 | 0 | 33 | 18 |
 | SoFi (MR-SOFI) | 420 | 289 | 91 | 19 | 4 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 65 | 18 | 56 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1049** | **499** | **207** | **117** | **4** | **68** | **154** |
+| **All** | **1051** | **501** | **207** | **117** | **4** | **68** | **154** |
 
 ## 8 Per-requirement results
 
@@ -3699,6 +3699,8 @@ Found while fixing §6.87.
 | MR-DSM-0323 | Met | `dsm_sdk::handlers::identity_routes::contact_card` | `dsm_sdk::handlers::identity_routes::tests::the_contact_code_carries_what_the_owners_card_shares` | DSM Amendment A17 (§6.83). |
 | MR-DSM-0324 | Met | `dsm_sdk::sdk::email_receipts::build_request`; `dsm_receipt_service::check` | `dsm_sdk::sdk::email_receipts::tests::a_request_is_signed_by_the_device_and_names_the_contacts_email`; `dsm_sdk::sdk::email_receipts::tests::a_contact_without_an_email_gets_no_receipt` | DSM Amendment A17 (§6.83). The service's own tests are in its crate. Consent is the page's (`SimpleReceipts`). |
 | MR-DSM-0325 | Met | `dsm_receipt_service::render`; `dsm_receipt_service::RateLimiter` | `dsm_receipt_service::tests::the_receipt_says_who_paid_what_and_escapes_markup` | DSM Amendment A17 (§6.83). |
+| MR-DSM-0326 | Met | `dsm::core::identity::directory::DirectoryEntry::verify`; `dsm_sdk::sdk::device_directory::build_own_entry` | `dsm::core::identity::directory::tests::evidence_for_another_identity_or_position_proves_nothing` | DSM Amendment A18 (§6.84, SA-43): the entry carries the authority evidence for the genesis it names. |
+| MR-DSM-0327 | Met | `dsm::core::identity::directory::DirectoryEntry::verify`; `dsm::core::identity::directory::select_entry` | `dsm::core::identity::directory::tests::naming_another_accounts_genesis_is_not_membership_in_it` | DSM Amendment A18 (§6.84, SA-43): a reader keeps an entry only when P0–P6 on its evidence prove AK the owner authority of DevID under G. |
 
 ### 8.2 SoFi settlement specification
 
