@@ -10,7 +10,7 @@
 
 use serial_test::serial;
 
-use crate::bridge::{AppQuery, AppRouter};
+use crate::bridge::{AppInvoke, AppQuery, AppRouter};
 use crate::economic_fixtures;
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::storage::client_db::token_registry;
@@ -90,9 +90,9 @@ async fn an_adopted_zero_balance_token_carries_its_decimals() {
     p.b.enter();
     let adopted =
         p.b.router()
-            .query(AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&anchor).into_bytes(),
+            .invoke(AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&anchor).into_bytes(),
             })
             .await;
     assert!(adopted.success, "{:?}", adopted.error_message);

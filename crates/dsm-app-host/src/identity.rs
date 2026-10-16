@@ -70,6 +70,20 @@ fn query(method: &str, args: Vec<u8>) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("{method}: {e}"))
 }
 
+/// A route that changes state, through the ingress as the app sends it.
+fn invoke(method: &str, args: Vec<u8>) -> Result<Vec<u8>, String> {
+    let request = pb::IngressRequest {
+        operation: Some(pb::ingress_request::Operation::RouterInvoke(
+            pb::RouterInvokeOp {
+                method: method.to_string(),
+                args,
+            },
+        )),
+    };
+    crate::dispatch::ok_bytes(dsm_sdk::ingress::dispatch_ingress(request))
+        .map_err(|e| format!("{method}: {e}"))
+}
+
 /// An account created before: unlocked from the operator's mnemonic, as a
 /// phone's mnemonic unlock derives its wallet seed, then its identity
 /// context restored. The SDK's at-rest seal is not what unlocks it: off
@@ -117,7 +131,7 @@ pub fn ensure_identity(args: &Args) -> Result<Account, String> {
         .map_err(|e| format!("{}: {e}", path.display()))?;
     file.write_all(mnemonic.as_bytes())
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let created = query(
+    let created = invoke(
         "system.createGenesisV2",
         crate::dispatch::arg_pack(pb::WalletCreateGenesisV2Request { mnemonic }.encode_to_vec()),
     )?;

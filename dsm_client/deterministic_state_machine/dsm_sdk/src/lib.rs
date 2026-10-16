@@ -324,8 +324,10 @@ pub(crate) fn derive_production_entropy(
 }
 
 /// The session-cached BIP39 wallet seed (unlocked via the mnemonic). Fails closed when the
-/// wallet is locked — the SDK context cannot be brought up without it.
-pub(crate) fn fetch_wallet_seed() -> Result<Vec<u8>, dsm::types::error::DsmError> {
+/// wallet is locked — the SDK context cannot be brought up without it. The copy is zeroized
+/// when the caller drops it.
+pub(crate) fn fetch_wallet_seed() -> Result<zeroize::Zeroizing<Vec<u8>>, dsm::types::error::DsmError>
+{
     crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
         dsm::types::error::DsmError::invalid_parameter(
             "wallet seed unavailable; unlock the wallet (mnemonic) before SDK context",

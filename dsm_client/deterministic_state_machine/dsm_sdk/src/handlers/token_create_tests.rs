@@ -413,9 +413,9 @@ async fn a_created_token_is_sent_after_its_creator_restarts() {
     p.b.enter();
     let adopted =
         p.b.router()
-            .query(crate::bridge::AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            .invoke(crate::bridge::AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
             })
             .await;
     assert!(

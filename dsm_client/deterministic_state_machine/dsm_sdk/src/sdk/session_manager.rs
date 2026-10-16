@@ -289,7 +289,10 @@ impl SessionManager {
     }
 
     /// Bring the lock configuration and state in from the stored settings. A
-    /// setting never stored keeps the manager's own.
+    /// setting never stored keeps the manager's own. A lock engaged in memory
+    /// stays engaged whatever the stored flag says: a lock whose write failed
+    /// is not undone by the flag it could not replace. Only an unlock opens
+    /// it, and an unlock takes effect only once it is stored.
     pub fn sync_lock_config_from_app_state(&mut self) -> Result<(), dsm::types::error::DsmError> {
         let lock_on_pause = Self::pref_bool(LOCK_ON_PAUSE_KEY, self.lock_on_pause)?;
         self.load_lock(lock_on_pause)?;
@@ -304,7 +307,7 @@ impl SessionManager {
             };
         }
         let persisted_locked = Self::pref_bool(LOCK_LOCKED_KEY, self.lock_locked)?;
-        self.lock_locked = self.lock_enabled && persisted_locked;
+        self.lock_locked = self.lock_enabled && (self.lock_locked || persisted_locked);
         Ok(())
     }
 
@@ -524,24 +527,36 @@ pub fn app_in_foreground() -> bool {
     mgr.hardware.app_foreground
 }
 
-/// Refuse `what` while the session is locked (S-LOCK). The lock's settings
-/// are brought in first, so a process that has not read them yet reads them
-/// now, and an enabled lock starts locked. Before the store exists there is
-/// no wallet, and so no lock: nothing is set up for one to keep closed.
-pub fn refuse_while_locked(what: &str) -> Result<(), String> {
+/// What the session lock says while it is engaged (S-LOCK).
+pub const LOCKED: &str = "the wallet is locked";
+
+/// [`LOCKED`] while the session is locked, `None` while it is open. The
+/// lock's settings are brought in first, so a process that has not read them
+/// yet reads them now, and an enabled lock starts locked. Before the store
+/// exists there is no wallet, and so no lock: nothing is set up for one to
+/// keep closed.
+pub fn lock_holds() -> Result<Option<&'static str>, String> {
     if crate::storage_utils::get_storage_base_dir().is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let mut mgr = match SESSION_MANAGER.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
     mgr.sync_lock_config_from_app_state()
-        .map_err(|e| format!("{what}: the session lock settings: {e}"))?;
+        .map_err(|e| format!("the session lock settings: {e}"))?;
     if mgr.lock_locked {
-        return Err(format!("{what}: the wallet is locked; open it first"));
+        return Ok(Some(LOCKED));
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Refuse `what` while the session is locked (S-LOCK).
+pub fn refuse_while_locked(what: &str) -> Result<(), String> {
+    match lock_holds().map_err(|e| format!("{what}: {e}"))? {
+        Some(locked) => Err(format!("{what}: {locked}; open it first")),
+        None => Ok(()),
+    }
 }
 
 pub fn get_session_snapshot_bytes() -> Result<Vec<u8>, String> {
@@ -923,6 +938,48 @@ mod tests {
             .sync_lock_config_from_app_state()
             .expect("lock settings");
         assert!(restarted.lock_locked);
+    }
+
+    /// A lock whose write fails still locks (SA-49): the stale "unlocked" the
+    /// store still holds does not open the wallet at the next sync, and only
+    /// the PIN opens it.
+    #[test]
+    #[serial_test::serial]
+    fn a_lock_whose_write_fails_stays_engaged_through_the_next_sync() {
+        let mut mgr = wallet_with_seed(&crate::economic_fixtures::test_mnemonic(0x34));
+        mgr.enable_lock("pin", "1357", mgr.lock_on_pause)
+            .expect("enabled");
+        assert!(!mgr.lock_locked, "the lock is set up on an open wallet");
+        let stored_locked = |mgr: &SessionManager| {
+            SessionManager::pref_bool(LOCK_LOCKED_KEY, mgr.lock_locked).expect("the stored flag")
+        };
+        assert!(!stored_locked(&mgr), "the open wallet is stored open");
+
+        // The state file's temp path is a directory: the next write fails.
+        let blocker = crate::storage_utils::get_storage_base_dir()
+            .expect("the test storage dir")
+            .join("dsm_app_state.pb.tmp");
+        std::fs::create_dir(&blocker).expect("block the state write");
+        let written = mgr.lock_now();
+        let synced = mgr.sync_lock_config_from_app_state();
+        let still_locked = mgr.lock_locked;
+        std::fs::remove_dir(&blocker).expect("unblock the state write");
+
+        let refused = written.expect_err("the failed write is reported");
+        assert!(refused.to_string().contains("AppState: write"), "{refused}");
+        assert!(
+            !stored_locked(&mgr),
+            "the store still holds the stale unlocked flag"
+        );
+        synced.expect("the sync reads the settings");
+        assert!(still_locked, "the stale flag does not open the wallet");
+        assert_eq!(
+            mgr.try_unlock("0000").expect("tried"),
+            Tried::Wrong { left: 2 }
+        );
+        assert!(mgr.lock_locked);
+        assert_eq!(mgr.try_unlock("1357").expect("tried"), Tried::Opened);
+        assert!(!mgr.lock_locked);
     }
 
     #[test]

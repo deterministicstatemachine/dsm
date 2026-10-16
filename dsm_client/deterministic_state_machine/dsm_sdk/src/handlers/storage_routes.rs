@@ -6,7 +6,7 @@
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
 use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
@@ -1804,12 +1804,7 @@ impl AppRouterImpl {
             ..Default::default()
         };
 
-        let result = self
-            .handle_storage_query(AppQuery {
-                path: "storage.sync".to_string(),
-                params: pack.encode_to_vec(),
-            })
-            .await;
+        let result = self.storage_sync_route(&pack.encode_to_vec()).await;
 
         if !result.success {
             return Err(result
@@ -1826,7 +1821,7 @@ impl AppRouterImpl {
         }
     }
 
-    /// Dispatch handler for the `storage.status` and `storage.sync` query routes.
+    /// Dispatch handler for the `storage.status` query route.
     pub(crate) async fn handle_storage_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             "storage.status" => {
@@ -1844,35 +1839,45 @@ impl AppRouterImpl {
                 }
             }
 
-            // -------- storage.sync (QueryOp) --------
-            "storage.sync" => {
-                let request = match decode_storage_sync_request(&q.params) {
-                    Ok(request) => request,
-                    Err(e) => return err(e),
-                };
-                let response = match self.storage_sync(request).await {
-                    Ok(report) => generated::StorageSyncResponse {
-                        success: true,
-                        pulled: report.pulled,
-                        processed: report.processed,
-                        pushed: report.pushed,
-                        errors: report.errors,
-                        more_pending: report.more_pending,
-                    },
-                    Err(failure) => generated::StorageSyncResponse {
-                        success: false,
-                        pulled: failure.report.pulled,
-                        processed: failure.report.processed,
-                        pushed: failure.report.pushed,
-                        errors: failure.report.errors,
-                        more_pending: failure.report.more_pending,
-                    },
-                };
-                pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
-            }
-
             other => err(format!("unknown storage query: {other}")),
         }
+    }
+
+    /// Dispatch handler for the `storage.sync` invoke route: it pulls the
+    /// inbox, applies what it pulled and pushes what is owed, so it changes
+    /// state and is never a query.
+    pub(crate) async fn handle_storage_invoke(&self, i: AppInvoke) -> AppResult {
+        match i.method.as_str() {
+            "storage.sync" => self.storage_sync_route(&i.args).await,
+            other => err(format!("unknown storage invoke: {other}")),
+        }
+    }
+
+    /// `storage.sync`, its `StorageSyncRequest` in a PROTO `ArgPack`.
+    async fn storage_sync_route(&self, args: &[u8]) -> AppResult {
+        let request = match decode_storage_sync_request(args) {
+            Ok(request) => request,
+            Err(e) => return err(e),
+        };
+        let response = match self.storage_sync(request).await {
+            Ok(report) => generated::StorageSyncResponse {
+                success: true,
+                pulled: report.pulled,
+                processed: report.processed,
+                pushed: report.pushed,
+                errors: report.errors,
+                more_pending: report.more_pending,
+            },
+            Err(failure) => generated::StorageSyncResponse {
+                success: false,
+                pulled: failure.report.pulled,
+                processed: failure.report.processed,
+                pushed: failure.report.pushed,
+                errors: failure.report.errors,
+                more_pending: failure.report.more_pending,
+            },
+        };
+        pack_envelope_ok(generated::envelope::Payload::StorageSyncResponse(response))
     }
 }
 

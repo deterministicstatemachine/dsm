@@ -1270,3 +1270,217 @@ async fn an_unreachable_application_is_told_of_its_disconnect_at_the_next_sync()
         generated::ConnectSessionStatus::Disconnected as i32
     );
 }
+
+/// The wallet's PIN lock, engaged on the process's session as the lock
+/// screen engages it, and taken off again when the test ends, a failing one
+/// included, so no lock outlives the test that set it.
+struct WalletLock {
+    pin: &'static str,
+}
+
+impl WalletLock {
+    fn session() -> std::sync::MutexGuard<'static, crate::sdk::session_manager::SessionManager> {
+        crate::sdk::session_manager::SESSION_MANAGER
+            .lock()
+            .expect("the session manager")
+    }
+
+    /// Enroll `pin` on the open wallet and lock it.
+    fn engage(pin: &'static str) -> Self {
+        let mut session = Self::session();
+        *session = crate::sdk::session_manager::SessionManager::default();
+        session
+            .sync_lock_config_from_app_state()
+            .expect("the lock settings");
+        let on_pause = session.lock_on_pause;
+        session.enable_lock("pin", pin, on_pause).expect("enrolled");
+        session.lock_now().expect("locked");
+        Self { pin }
+    }
+
+    fn open(&self) {
+        let tried = Self::session().try_unlock(self.pin).expect("tried");
+        assert_eq!(tried, crate::sdk::app_lock::Tried::Opened);
+    }
+
+    /// Lock the open wallet again.
+    fn close(&self) {
+        Self::session().lock_now().expect("locked");
+    }
+}
+
+impl Drop for WalletLock {
+    fn drop(&mut self) {
+        let mut session = match crate::sdk::session_manager::SESSION_MANAGER.lock() {
+            Ok(session) => session,
+            Err(e) => {
+                log::warn!("the test's lock was not taken off: {e}");
+                return;
+            }
+        };
+        if let Err(e) = session.try_unlock(self.pin) {
+            log::warn!("the test's lock did not open: {e}");
+        }
+        let on_pause = session.lock_on_pause;
+        if let Err(e) = session.disable_lock(on_pause) {
+            log::warn!("the test's lock was not taken off: {e}");
+        }
+    }
+}
+
+/// How many requests wait for the player on `b`.
+async fn waiting_for_the_player(b: &TestDevice) -> usize {
+    let listed = query(b, "connect.pending", Vec::new()).await;
+    let Reply::Pending(list) = reply(&listed) else {
+        panic!("connect.pending answered another reply");
+    };
+    list.pending.len()
+}
+
+/// The wallet lock stops a connected application's requests too (owner
+/// ruling 2026-10-15, SA-18), whoever asks: here the router's own calls,
+/// which never pass the ingress's lock, as the listener makes them. While
+/// the wallet is locked a request outside the grant is not even queued for
+/// the player or answered "waiting", a payment the player approved is not
+/// carried out, and a granted payment does not run. Each waits, and runs
+/// once the wallet opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_granted_payment_does_not_run_while_the_wallet_is_locked() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 50).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+    let pay = |amount: u64| {
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount,
+            memo: String::new(),
+        })
+    };
+
+    p.b.enter();
+    let lock = WalletLock::engage("2468");
+    // Above the grant's 10 a time: it needs the player.
+    let outside = request(&p.a, &relay, &session, pay(15)).await;
+    let granted = request(&p.a, &relay, &session, pay(3)).await;
+    let synced = invoke(&p.b, "connect.sync", Vec::new()).await;
+    let Reply::Sessions(held) = reply(&synced) else {
+        panic!("connect.sync answered another reply");
+    };
+    assert!(
+        held.sessions[0].last_error.contains("the wallet is locked"),
+        "{}",
+        held.sessions[0].last_error
+    );
+    assert!(
+        relay.held().responses.is_empty(),
+        "the application is told nothing while the wallet is locked"
+    );
+    assert_eq!(
+        waiting_for_the_player(&p.b).await,
+        0,
+        "nothing is queued for the player"
+    );
+
+    // Open: the request outside the grant waits for the player.
+    lock.open();
+    sync_and_deliver(&p, &relay).await;
+    assert_eq!(waiting_for_the_player(&p.b).await, 1);
+
+    // The player's approval, sent while the wallet is locked again, is kept
+    // and not carried out.
+    lock.close();
+    let approved = invoke(
+        &p.b,
+        "connect.respond",
+        args(&generated::ConnectRespondRequestV1 {
+            session_id: session.to_vec(),
+            seq: outside,
+            decision: generated::ConnectDecision::Approve as i32,
+        }),
+    )
+    .await;
+    let Reply::Decided(decided) = reply(&approved) else {
+        panic!("connect.respond answered another reply");
+    };
+    assert!(
+        decided.line.contains("the wallet is locked"),
+        "{}",
+        decided.line
+    );
+    assert_eq!(balance(&p.b, &wild), 50, "no payment ran while locked");
+
+    // Open: the approved payment, then the granted one.
+    lock.open();
+    sync_and_deliver(&p, &relay).await;
+    carried_out(&p.b, &session, outside).await;
+    settle(&p).await;
+    sync_clean(&p, &relay).await;
+    carried_out(&p.b, &session, granted).await;
+    assert_eq!(balance(&p.b, &wild), 50 - 15 - 3);
+}
+
+/// A payment whose debit committed counts against its grant whatever became
+/// of its delivery (SA-19). With the fleet below quorum the send commits the
+/// debit and holds its admission for resume, so nothing is delivered yet;
+/// the debit stands (§16.6), and the grant's lifetime total is charged for it
+/// as for any payment carried out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_committed_payment_counts_against_the_grant_whatever_its_delivery() {
+    let mut p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 10,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    let down = crate::economic_fixtures::members_to_break_quorum();
+    p.nodes.take_down(&down).await;
+    let synced = invoke(&p.b, "connect.sync", Vec::new()).await;
+    p.nodes.bring_up(&down).await;
+    reply(&synced);
+
+    assert_eq!(balance(&p.b, &wild), 10, "the committed debit stands");
+    let entry = wallet_log(&p.b, &session, pay).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "a committed debit is a payment made: {}",
+        entry.detail
+    );
+    assert!(
+        entry
+            .detail
+            .contains("its delivery is still being carried forward"),
+        "the payment was committed, not delivered: {}",
+        entry.detail
+    );
+    p.b.enter();
+    let spent = crate::storage::client_db::connect::spent_all(&session).expect("the grant's spend");
+    assert_eq!(
+        spent,
+        vec![(wild, 10)],
+        "the committed debit counts against the grant"
+    );
+}

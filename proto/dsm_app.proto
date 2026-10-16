@@ -3189,9 +3189,11 @@ message PersistedRelationshipState {
 message ReceiptGuardSnapshotProto { uint64 capacity = 1; repeated uint64 sequence = 2; }
 message PersistedOfflineState { uint32 version = 1; repeated PersistedRelationshipState relationships = 2; ReceiptGuardSnapshotProto guard_snapshot = 3; }
 message ChainTip { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; uint64 height = 2; Hash32 head_hash = 3; }
-message RecoveryTombstoneRequest { Hash32 global_root = 1; uint64 counter = 2; Hash32 rollup_hash = 3; bytes device_entropy = 4 [(dsm_max_len)=4096]; bytes environment_data = 5 [(dsm_max_len)=4096]; }
+// A recovery receipt is signed with the cached recovery authority key; no
+// request carries a key (field 5 of the tombstone, 3 of the succession).
+message RecoveryTombstoneRequest { Hash32 global_root = 1; uint64 counter = 2; Hash32 rollup_hash = 3; bytes device_entropy = 4 [(dsm_max_len)=4096]; reserved 5; reserved "environment_data"; }
 message RecoveryTombstoneResponse{ bool success = 1; Hash32 tombstone_hash = 2; bytes tombstone_receipt = 3 [(dsm_max_len)=4096]; }
-message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entropy = 2 [(dsm_max_len)=4096]; bytes environment_data = 3 [(dsm_max_len)=4096]; }
+message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entropy = 2 [(dsm_max_len)=4096]; reserved 3; reserved "environment_data"; }
 message RecoverySuccessionResponse{ bool success = 1; Hash32 succession_hash = 2; bytes succession_receipt = 3 [(dsm_max_len)=4096]; Hash32 new_genesis_hash = 4; }
 message RecoveryResumeRequest  { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; Hash32 last_head_hash = 2; uint64 last_height = 3; }
 message RecoveryResumeResponse { bool success = 1; Hash32 new_transaction_hash = 2; bytes transaction_receipt = 3 [(dsm_max_len)=4096]; }

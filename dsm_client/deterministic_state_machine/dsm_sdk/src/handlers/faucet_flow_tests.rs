@@ -17,7 +17,7 @@ use dsm::economic::native_reserve::{
     NativeReserveState, SuccessorCell, WalkStop, ERA_RESERVE_GENESIS_SUPPLY,
 };
 
-use crate::bridge::{AppQuery, AppRouter};
+use crate::bridge::{AppInvoke, AppQuery, AppRouter};
 use crate::economic_fixtures::{whole_era, NETWORK};
 use crate::generated;
 use crate::sdk::faucet_claim_flow::claim_era_faucet;
@@ -919,9 +919,9 @@ async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
     hold_the_first_claim(&d).await;
     let restarted = crate::economic_fixtures::restart_router(&d.fleet);
     let answered = restarted
-        .query(AppQuery {
-            path: "storage.sync".to_string(),
-            params: proto::ArgPack {
+        .invoke(AppInvoke {
+            method: "storage.sync".to_string(),
+            args: proto::ArgPack {
                 codec: proto::Codec::Proto as i32,
                 body: crate::sdk::inbox_poller::poll_sync_request().encode_to_vec(),
                 schema_hash: None,
