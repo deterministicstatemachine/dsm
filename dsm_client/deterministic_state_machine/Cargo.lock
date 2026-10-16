@@ -1249,6 +1249,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "subtle",
+ "syn 2.0.117",
  "tempfile",
  "test-log",
  "thiserror 2.0.18",

@@ -459,8 +459,18 @@ pub struct B0xSDK {
     /// ADR 0003 A-side evidence halves decoded by the most recent retrieve,
     /// drained by [`Self::take_evidence_artifacts`].
     pending_evidence_artifacts: Vec<EvidenceArtifact>,
-    /// Cert-resync control messages decoded on retrieve: (method, framed body).
-    pending_cert_resync: Vec<(String, Vec<u8>)>,
+    /// Cert-resync control messages decoded on retrieve.
+    pending_cert_resync: Vec<CertResyncMessage>,
+}
+
+/// One cert-resync control message as a retrieve read it: its method, its
+/// framed body, and the content key of the copy it came in, by which a
+/// message that never will be taken is passed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CertResyncMessage {
+    pub method: String,
+    pub body: Vec<u8>,
+    pub copy_key: String,
 }
 
 /// Explicit invoke method that marks an ADR 0003 A-side evidence artifact. The
@@ -1224,7 +1234,7 @@ impl B0xSDK {
     }
 
     /// Drain cert-resync control messages decoded by the most recent retrieve.
-    pub fn take_cert_resync_messages(&mut self) -> Vec<(String, Vec<u8>)> {
+    pub fn take_cert_resync_messages(&mut self) -> Vec<CertResyncMessage> {
         std::mem::take(&mut self.pending_cert_resync)
     }
 
@@ -2734,7 +2744,11 @@ impl B0xSDK {
                     method,
                     body.len()
                 );
-                self.pending_cert_resync.push((method, body));
+                self.pending_cert_resync.push(CertResyncMessage {
+                    method,
+                    body,
+                    copy_key,
+                });
                 continue;
             }
             if let Some(body) = Self::decode_countersign_b(&env) {

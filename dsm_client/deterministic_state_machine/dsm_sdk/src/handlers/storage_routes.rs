@@ -2049,6 +2049,30 @@ fn take_in_copy(
     }
 }
 
+/// Act on what became of one cert-resync message read at `address`. One its
+/// own bytes say never will be taken is passed over by its content, so it is
+/// not read and refused again on every sync; one that could not be taken now
+/// is read again.
+fn take_in_cert_resync(
+    outcome: Result<(), super::cert_resync_flow::CertResyncRefusal>,
+    address: &str,
+    message: &crate::sdk::b0x_sdk::CertResyncMessage,
+    taken: &mut CopiesTaken,
+    errors: &mut Vec<String>,
+) {
+    use super::cert_resync_flow::CertResyncRefusal;
+    match outcome {
+        Ok(()) => {}
+        Err(CertResyncRefusal::NotRecognized(e)) => {
+            errors.push(format!("cert resync {}: {e}; passed over", message.method));
+            taken.pass_over(address, &message.copy_key);
+        }
+        Err(CertResyncRefusal::Failed(e)) => {
+            errors.push(format!("cert resync {}: {e}", message.method));
+        }
+    }
+}
+
 /// Whether a durable row was found, for a message: present, absent, or why it
 /// could not be read.
 fn presence<T, E: std::fmt::Display>(read: &Result<Option<T>, E>) -> String {
@@ -2215,16 +2239,21 @@ impl AppRouterImpl {
                     &mut report,
                 );
             }
-            for (method, body) in route_sdk.take_cert_resync_messages() {
-                let outcome = if method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD {
-                    self.handle_cert_resync_request(&body, storage_endpoints.to_vec())
-                        .await
-                } else {
-                    self.handle_cert_resync_ack(&body).await
-                };
-                if let Err(e) = outcome {
-                    report.errors.push(format!("cert resync {method}: {e}"));
-                }
+            for message in route_sdk.take_cert_resync_messages() {
+                let outcome =
+                    if message.method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD {
+                        self.handle_cert_resync_request(&message.body, storage_endpoints.to_vec())
+                            .await
+                    } else {
+                        self.handle_cert_resync_ack(&message.body).await
+                    };
+                take_in_cert_resync(
+                    outcome,
+                    &tagged.address,
+                    &message,
+                    &mut taken,
+                    &mut report.errors,
+                );
             }
             self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
                 .await;
@@ -2676,6 +2705,54 @@ fn member_status(
 #[cfg(test)]
 mod tests {
     use super::{finalize_from_countersign_delta, CountersignOutcome};
+
+    /// SA-53. A cert-resync message whose own bytes say it never will be
+    /// taken — a body that does not decode, a cosignature that does not
+    /// verify — is passed over by its content; it used to be read again, and
+    /// refused (or, before its framing was checked, panicked on) on every
+    /// sync. One that could not be taken now is read again.
+    /// MUTATION CONTROL: not passing over the unrecognized message turns this
+    /// red.
+    #[test]
+    fn an_unrecognized_cert_resync_message_is_passed_over() {
+        use super::super::cert_resync_flow::CertResyncRefusal;
+        use super::{take_in_cert_resync, CopiesTaken};
+        use dsm::types::error::DsmError;
+        let message = |copy_key: &str| crate::sdk::b0x_sdk::CertResyncMessage {
+            method: crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD.to_string(),
+            body: vec![0x01, 0x02],
+            copy_key: copy_key.to_string(),
+        };
+        let mut taken = CopiesTaken::default();
+        let mut errors = Vec::new();
+
+        take_in_cert_resync(
+            Err(CertResyncRefusal::NotRecognized(DsmError::invalid_operation(
+                "cert resync request: malformed body",
+            ))),
+            "ROUTE",
+            &message("JUNK"),
+            &mut taken,
+            &mut errors,
+        );
+        take_in_cert_resync(
+            Err(CertResyncRefusal::Failed(DsmError::invalid_operation(
+                "no matching pending resync",
+            ))),
+            "ROUTE",
+            &message("LATER"),
+            &mut taken,
+            &mut errors,
+        );
+        take_in_cert_resync(Ok(()), "ROUTE", &message("TAKEN"), &mut taken, &mut errors);
+
+        assert_eq!(
+            taken.pass_over.get("ROUTE").cloned(),
+            Some(vec!["JUNK".to_string()])
+        );
+        assert!(taken.consume.is_empty());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
     use super::resolve_trusted_sender_ak;
     use crate::sdk::b0x_sdk::CountersignDelta;
     use crate::storage::client_db;

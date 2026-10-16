@@ -128,7 +128,7 @@ pub async fn receive_from_radio<D: BleTransportDelegate + ?Sized>(
             }
         }
         Some(_) => match coordinator
-            .ingest_chunk(bytes)
+            .ingest_chunk(peer_address, bytes)
             .await
             .map_err(RadioError::Bilateral)?
         {

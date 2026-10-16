@@ -3520,11 +3520,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearPendingR
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) {
-    if let Err(e) = crate::storage::client_db::recovery::clear_pending_recovery_capsule() {
-        log::warn!("[NFC_BACKUP] Failed to clear pending capsule marker: {e}");
-    } else {
-        log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write");
-    }
+    crate::jni::bridge_utils::jni_catch_unwind_void(
+        "clearPendingRecoveryCapsule",
+        std::panic::AssertUnwindSafe(|| {
+            match crate::storage::client_db::recovery::clear_pending_recovery_capsule() {
+                Ok(()) => {
+                    log::info!("[NFC_BACKUP] Pending capsule cleared after successful NFC write")
+                }
+                Err(e) => log::error!("[NFC_BACKUP] Failed to clear pending capsule marker: {e}"),
+            }
+        }),
+    );
 }
 
 /// Derive a 4-byte NFC hardware password from device identity.
@@ -3536,5 +3542,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_maybeRefreshN
     _env: jni::sys::JNIEnv,
     _clazz: jni::sys::jclass,
 ) {
-    crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
+    crate::jni::bridge_utils::jni_catch_unwind_void(
+        "maybeRefreshNfcCapsule",
+        std::panic::AssertUnwindSafe(crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule),
+    );
 }

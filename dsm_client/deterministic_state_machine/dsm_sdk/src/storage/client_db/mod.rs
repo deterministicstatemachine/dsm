@@ -1660,21 +1660,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_bitcoin_accounts_active
             ON bitcoin_accounts(active);
 
-        CREATE TABLE IF NOT EXISTS ble_reassembly_state(
-            frame_commitment  BLOB NOT NULL,
+        -- A frame's chunks were kept by its commitment alone, the first chunk
+        -- per index winning: a peer could poison another's frame. They are
+        -- kept by the link they arrived on now; the old rows were transient.
+        DROP TABLE IF EXISTS ble_reassembly_state;
+        CREATE TABLE IF NOT EXISTS ble_reassembly_chunks(
+            peer_link         TEXT NOT NULL,
+            frame_commitment  BLOB NOT NULL CHECK (length(frame_commitment) = 32),
             chunk_index       INTEGER NOT NULL,
             frame_type        INTEGER NOT NULL,
             total_chunks      INTEGER NOT NULL,
             payload_len       INTEGER NOT NULL,
             chunk_data        BLOB NOT NULL,
             checksum          INTEGER NOT NULL,
-            counterparty_id   BLOB,
-            PRIMARY KEY (frame_commitment, chunk_index)
+            PRIMARY KEY (peer_link, frame_commitment, chunk_index)
         );
-        CREATE INDEX IF NOT EXISTS idx_ble_reassembly_frame
-            ON ble_reassembly_state(frame_commitment);
-        CREATE INDEX IF NOT EXISTS idx_ble_reassembly_counterparty
-            ON ble_reassembly_state(counterparty_id) WHERE counterparty_id IS NOT NULL;
 
         CREATE TABLE IF NOT EXISTS in_flight_withdrawals(
             withdrawal_id    TEXT PRIMARY KEY,
@@ -2794,6 +2794,78 @@ mod tests {
             ],
         )
         .expect("seed outbox row");
+    }
+
+    /// SA-12. A gate holds for a send in every status but the settled ones,
+    /// including `economic_admission_pending` — the status `wallet.send`
+    /// commits a send in while its admission is held. Read as an orphan, that
+    /// live send's gate would be deleted, and a BLE step on the same parent
+    /// could fork the relationship. Every status the table holds is checked,
+    /// so a status added later is decided here too.
+    /// MUTATION CONTROL: counting the five delivery statuses only (the old
+    /// list) clears the held send's gate and turns this red.
+    #[test]
+    #[serial]
+    fn a_gate_holds_for_a_send_in_every_status_but_a_settled_one() {
+        use crate::storage::client_db::sender_outbox::{OUTBOX_SETTLED_STATUSES, OUTBOX_STATUSES};
+        let local = [0xE0u8; 32];
+        let device_id = [0xEDu8; 32];
+        let parent = [0x70u8; 32];
+        let next = [0x71u8; 32];
+        for (tag, status) in (0x20u8..).zip(OUTBOX_STATUSES) {
+            crate::economic_fixtures::use_test_storage_dir();
+            reset_database_for_tests();
+            init_database().expect("init db");
+            seed_contact_for_chain_tip_tests(device_id, next, "BleCapable", [0x70u8; 32]);
+            store_pending_online_outbox(&device_id, "held_msg", &parent, &next)
+                .expect("insert gate");
+            seed_outbox_row_for(local, device_id, (parent, next), status, tag);
+
+            let outcome =
+                clear_stale_pending_online_gate(&device_id).expect("decision must not error");
+            let gate_left = get_pending_online_outbox(&device_id).expect("load");
+            if OUTBOX_SETTLED_STATUSES.contains(&status) {
+                assert_eq!(outcome, StaleGateOutcome::Cleared, "{status}");
+                assert!(gate_left.is_none(), "{status}: a settled send's gate is cleared");
+            } else {
+                assert_eq!(outcome, StaleGateOutcome::StillPending, "{status}");
+                assert!(gate_left.is_some(), "{status}: a live send's gate was deleted");
+            }
+        }
+    }
+
+    /// The status list the gate is decided over is the table's: every status
+    /// the `sender_outbox` CHECK admits is in [`OUTBOX_STATUSES`], and nothing
+    /// else is, so a status the table gains cannot go unclassified.
+    #[test]
+    #[serial]
+    fn the_outbox_status_list_is_the_tables() {
+        use crate::storage::client_db::sender_outbox::OUTBOX_STATUSES;
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        init_database().expect("init db");
+        let binding = get_connection().expect("conn");
+        let conn = binding.lock().expect("lock");
+        let ddl: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sender_outbox'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("the sender_outbox table");
+        let check = ddl
+            .split_once("CHECK (status IN (")
+            .and_then(|(_, rest)| rest.split_once("))"))
+            .map(|(listed, _)| listed)
+            .expect("the status CHECK");
+        let mut listed: Vec<&str> = check
+            .split(',')
+            .map(|status| status.trim().trim_matches('\''))
+            .collect();
+        let mut known = OUTBOX_STATUSES.to_vec();
+        listed.sort_unstable();
+        known.sort_unstable();
+        assert_eq!(listed, known);
     }
 
     /// The gate is read and deleted in ONE transaction: a gate replaced by a

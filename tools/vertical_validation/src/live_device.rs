@@ -152,7 +152,7 @@ impl std::fmt::Display for Decision {
             Decision::Accepted(verified) => write!(
                 f,
                 "accepted, successor {}",
-                dsm::utils::text_id::encode_base32_crockford(&verified.successor_tip)
+                dsm::utils::text_id::encode_base32_crockford(&verified.successor_tip())
             ),
             Decision::StaleTip => write!(f, "refused: a stale tip"),
             Decision::Unconsidered(answer) => write!(f, "prepare answered {answer:?}"),
@@ -486,14 +486,14 @@ pub fn commit(
     receiver.install(received);
     receiver
         .shared_tips
-        .insert(sender.devid, verified.successor_tip);
+        .insert(sender.devid, verified.successor_tip());
     receiver
         .peer_ek_heads
         .insert(sender.devid, step.ek.0.clone());
     sender.install(step.sender_outcome);
     sender
         .shared_tips
-        .insert(receiver.devid, verified.successor_tip);
+        .insert(receiver.devid, verified.successor_tip());
     sender.own_ek_heads.insert(receiver.devid, step.ek);
     Ok(())
 }

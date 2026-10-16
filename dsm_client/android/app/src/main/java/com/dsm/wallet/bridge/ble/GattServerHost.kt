@@ -54,25 +54,16 @@ class GattServerHost(private val context: Context) {
      * 200-chunk confirm envelope the OS receive buffer overruns long
      * before the GATT thread drains and chunks 11+ are silently dropped.
      *
-     * Decouple by enqueueing the raw bytes onto an unbounded per-device
+     * Decouple by enqueueing the raw bytes onto a bounded per-device
      * channel; a single dedicated consumer coroutine drains it FIFO and
      * does the synchronous Rust call off the GATT thread. Per-device
      * channels preserve reassembly ordering without serializing across
-     * unrelated peers.
+     * unrelated peers. A device's pipeline ends when it disconnects.
      */
-    private val inboundChunkPipelines = ConcurrentHashMap<String, Channel<ByteArray>>()
-
-    private fun inboundChannelFor(deviceAddress: String): Channel<ByteArray> {
-        return inboundChunkPipelines.computeIfAbsent(deviceAddress) {
-            val channel = Channel<ByteArray>(Channel.UNLIMITED)
-            txResponseScope.launch {
-                for (data in channel) {
-                    processCompletedTxDataInline(deviceAddress, data)
-                }
-            }
-            channel
-        }
-    }
+    private val inboundChunks = InboundChunkPipelines(
+        txResponseScope,
+        INBOUND_CHUNK_QUEUE_CAPACITY,
+    ) { deviceAddress, data -> processCompletedTxDataInline(deviceAddress, data) }
 
     private val gattServer = AtomicReference<BluetoothGattServer?>(null)
     private val servicesReady = AtomicBoolean(false)
@@ -103,6 +94,12 @@ class GattServerHost(private val context: Context) {
         private const val MAX_WRITE_BUFFER_SIZE = 65536
         /** Android GATT max attribute value size for notifications/indications. */
         private const val MAX_GATT_ATTRIBUTE_VALUE_BYTES = 512
+        /**
+         * Chunks one device may have queued for processing: a whole bearer
+         * confirm (a few hundred chunks) arriving faster than it is processed
+         * fits, with room.
+         */
+        private const val INBOUND_CHUNK_QUEUE_CAPACITY = 1024
     }
 
     // GATT server callback
@@ -122,6 +119,7 @@ class GattServerHost(private val context: Context) {
                 peer.clearServerState()
                 pendingTxWriteBuffers.remove(deviceAddress)
                 pendingPairingWriteBuffers.remove(deviceAddress)
+                inboundChunks.close(deviceAddress)
                 Log.i("GattServerHost", "GATT server client disconnected: $deviceAddress")
                 carried?.let { com.dsm.wallet.bridge.UnifiedBleEvents.onLinkDown(it.deviceId, deviceAddress) }
             }
@@ -367,6 +365,7 @@ class GattServerHost(private val context: Context) {
         serviceReadyDeferred = null
         pendingTxWriteBuffers.clear()
         pendingPairingWriteBuffers.clear()
+        inboundChunks.closeAll()
         Log.i("GattServerHost", "GATT server stopped")
     }
 
@@ -934,14 +933,11 @@ class GattServerHost(private val context: Context) {
         // hand-off the Rust JNI call (~30 ms per chunk) blocks the BLE
         // stack's ATT-callback dispatcher and chunks 11+ of a long
         // confirm envelope get silently dropped on the receiver side.
-        val channel = inboundChannelFor(deviceAddress)
-        val sent = channel.trySend(data).isSuccess
-        if (!sent) {
+        if (!inboundChunks.offer(deviceAddress, data)) {
             Log.w(
                 "GattServerHost",
-                "Inbound chunk channel rejected ${data.size} bytes from $deviceAddress; falling back to inline processing"
+                "Inbound chunk queue for $deviceAddress is full; ${data.size} bytes not taken (its frame is sent again)"
             )
-            processCompletedTxDataInline(deviceAddress, data)
         }
     }
 

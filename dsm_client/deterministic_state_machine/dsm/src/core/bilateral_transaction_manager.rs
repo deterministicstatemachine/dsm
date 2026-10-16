@@ -192,10 +192,8 @@ pub fn set_anchor_state_leaf_value(
     Ok(proof.to_bytes())
 }
 
-/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
-/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
-/// The bytes a party's signature over the step `commitment_hash` covers: the
-/// proposer's σ_A and the receiver's acceptance σ_B alike.
+/// The bytes the proposer's signature σ_A over the step `commitment_hash`
+/// covers.
 pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(19 + 32);
     msg.extend_from_slice(b"DSM/bilateral-sign\0");
@@ -203,6 +201,32 @@ pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     msg
 }
 
+/// The bytes the receiver's acceptance σ_B covers: the step `commitment_hash`
+/// and the challenge `r_R` the step's release must answer. The challenge is
+/// under σ_B so that a relay cannot substitute it: the proposer takes only
+/// the challenge its receiver signed, and so stages and commits its anchor
+/// transition only toward a challenge the receiver will accept.
+pub fn bilateral_accept_sign_message(
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(21 + 32 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-accept\0");
+    msg.extend_from_slice(commitment_hash);
+    msg.extend_from_slice(receiver_challenge);
+    msg
+}
+
+/// The receiver's acceptance of a step, as the proposer holds it: σ_B and
+/// the challenge σ_B binds ([`bilateral_accept_sign_message`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiverAcceptance<'a> {
+    pub signature: &'a [u8],
+    pub receiver_challenge: &'a [u8; 32],
+}
+
+/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
+/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
 pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operation) -> bool {
     use crate::types::operations::{AuthorityMode, Operation};
     matches!(
@@ -450,6 +474,25 @@ impl BilateralTransactionManager {
         Ok(sig)
     }
 
+    /// The receiver's acceptance σ_B of the step `commitment_hash`, binding
+    /// the challenge `receiver_challenge` its release must answer
+    /// ([`bilateral_accept_sign_message`]).
+    pub fn sign_acceptance(
+        &self,
+        commitment_hash: &[u8; 32],
+        receiver_challenge: &[u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        self.signature_keypair
+            .sign(&bilateral_accept_sign_message(
+                commitment_hash,
+                receiver_challenge,
+            ))
+            .map_err(|e| {
+                error!("[BTM] sign_acceptance: failed to sign: {}", e);
+                e
+            })
+    }
+
     /// The bytes a refusal of the proposal `commitment_hash` signs: the
     /// proposal, the device refusing it and its reason.
     fn rejection_message(
@@ -622,9 +665,9 @@ impl BilateralTransactionManager {
         &self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
     ) -> Result<(), DsmError> {
-        if receiver_acceptance_proof.is_empty() {
+        if acceptance.signature.is_empty() {
             return Err(DsmError::InvalidOperation(
                 "receiver acceptance proof required".into(),
             ));
@@ -638,8 +681,8 @@ impl BilateralTransactionManager {
             .clone();
 
         let valid = SignatureKeyPair::verify_raw(
-            &bilateral_sign_message(pre_commitment_hash),
-            receiver_acceptance_proof,
+            &bilateral_accept_sign_message(pre_commitment_hash, acceptance.receiver_challenge),
+            acceptance.signature,
             &counterparty_pubkey,
         )
         .map_err(|e| {
@@ -691,7 +734,7 @@ impl BilateralTransactionManager {
         &mut self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
         sender_deltas: Vec<BalanceDelta>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
@@ -705,11 +748,7 @@ impl BilateralTransactionManager {
                 DsmError::InvalidOperation("pre-commitment not found or expired".into())
             })?
             .clone();
-        self.verify_receiver_acceptance_proof(
-            remote_device_id,
-            pre_commitment_hash,
-            receiver_acceptance_proof,
-        )?;
+        self.verify_receiver_acceptance_proof(remote_device_id, pre_commitment_hash, acceptance)?;
         let mut anchor = self
             .relationships
             .get(remote_device_id)
