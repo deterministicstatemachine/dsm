@@ -748,7 +748,7 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
     use dsm::sofi::{derive, resolution::WalkOutcome};
 
     let p = Pair::boot(100, 100).await;
-    let setup = setup(&p, [0x35; 32], &teams(&p).await);
+    let setup = setup(&p, rand::random(), &teams(&p).await);
     let a_start = balance(&p.a, &era());
     let stake = whole_era(25);
     let a = lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
@@ -873,7 +873,9 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
         .expect("acquire")
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) => panic!("B's objects are in hand: {missing:?}"),
+        Acquired::Exhausted(missing) => {
+            panic!("B's objects are in hand: {} missing", missing.len())
+        }
     };
     let claim = {
         let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
@@ -899,7 +901,9 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
         .expect("acquire")
     {
         Acquired::Complete(evidence) => evidence,
-        Acquired::Exhausted(missing) => panic!("the route's evidence is public: {missing:?}"),
+        Acquired::Exhausted(missing) => {
+            panic!("the route's evidence is public: {} missing", missing.len())
+        }
     };
     assert_eq!(
         dsm::sofi::validation::validate(&precommit, &preimage, &route_evidence),

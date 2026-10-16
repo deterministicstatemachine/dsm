@@ -482,7 +482,7 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
     let code = offer(&r, &relay, &creatures).await;
     let sid_a = connect(&r, &p.a, &relay, &code).await;
     let sid_b = connect(&r, &p.b, &relay, &code).await;
-    let nonce = [0x42; 32];
+    let nonce: [u8; 32] = rand::random();
     let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
         Answer::DuelSessionKey(k) => k.session_public_key,
         other => panic!("the wallet answered {other:?}"),
