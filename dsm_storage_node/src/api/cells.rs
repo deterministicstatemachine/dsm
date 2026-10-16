@@ -47,7 +47,8 @@ const MAX_NAMESPACE_BYTES: usize = 128;
 const MAX_CELL_VALUE_BYTES: usize = dsm::route_chain::MAX_ENTRY_BYTES;
 /// Keys one batch put may take in one transaction. A position is two.
 const MAX_BATCH_ENTRIES: usize = 16;
-const MAX_INDEX_PAGE: i64 = 256;
+/// [`dsm::storage_object::MAX_INDEX_PAGE`], as the query's integer.
+const MAX_INDEX_PAGE: i64 = dsm::storage_object::MAX_INDEX_PAGE as i64;
 
 pub fn create_router(state: Arc<AppState>) -> Router<()> {
     Router::new()

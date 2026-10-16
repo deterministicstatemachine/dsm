@@ -324,6 +324,30 @@ mod tests {
         assert_eq!(stored(&a, &reads), StoredFact::Unavailable);
     }
 
+    /// A member's namespace answer outside the `DSM/` and `DJTE.` families is
+    /// a malformed answer, passed over like any other: it once reached the
+    /// hasher and panicked the reader, so one member could stop every read
+    /// that asked it. Three honest members beside it are still `Stored`.
+    #[test]
+    fn a_namespace_outside_the_domain_families_is_passed_over() {
+        let o = b"the object";
+        let a = addr_of(o);
+        let unprefixed = ObjectRead::Bytes {
+            namespace: b"x".to_vec(),
+            payload: o.to_vec(),
+        };
+        let reads = [
+            unprefixed.clone(),
+            bytes(o),
+            unprefixed.clone(),
+            bytes(o),
+            bytes(o),
+        ];
+        assert_eq!(stored(&a, &reads), StoredFact::Stored(o.to_vec()));
+        let reads = [unprefixed.clone(), unprefixed.clone(), unprefixed];
+        assert_eq!(stored(&a, &reads), StoredFact::Unavailable);
+    }
+
     /// `two_members_is_not_stored` (Lean): the threshold is three, exactly.
     #[test]
     fn two_members_is_not_stored() {

@@ -14,10 +14,11 @@ use axum::{
 use prost::Message;
 
 use crate::AppState;
+use dsm::spool::MAX_ENVELOPE_BYTES;
 use dsm::utils::text_id;
 
-const MAX_ENVELOPE_BYTES: usize = 128 * 1024; // 128 KiB (normalized)
-const MAX_BATCH_RETRIEVE: i64 = 64;
+/// [`dsm::spool::MAX_BATCH_RETRIEVE`], as the query's integer.
+const MAX_BATCH_RETRIEVE: i64 = dsm::spool::MAX_BATCH_RETRIEVE as i64;
 
 /// How long the deployed node holds a wait before answering that nothing
 /// landed ([`crate::AppLimits::wait_bound`]): under the idle cut-off of

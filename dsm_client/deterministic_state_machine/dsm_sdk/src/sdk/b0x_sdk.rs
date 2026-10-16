@@ -16,9 +16,11 @@
 //! so every member and every retry gets the same bytes. No wall clocks, no
 //! JSON, no hex in protocol logic.
 
+use dsm::spool::{MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES};
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation;
 
+use crate::sdk::bounded_read::{self, Bound};
 use crate::sdk::core_sdk::CoreSDK;
 use crate::util::text_id;
 // blake3 usage: all calls go through dsm::crypto::blake3::dsm_domain_hasher() for domain separation
@@ -616,6 +618,41 @@ pub(crate) const MEMBER_WAIT_BOUND: std::time::Duration = std::time::Duration::f
 /// that has not answered by then did not answer.
 const WAIT_TRANSPORT_SLACK: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The most one spool page holds: [`MAX_BATCH_RETRIEVE`] envelopes of
+/// [`MAX_ENVELOPE_BYTES`], every position at its largest.
+fn spool_page_limit() -> usize {
+    static LIMIT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+        let page = |envelopes| {
+            dsm::types::proto::SequencedBatchEnvelope {
+                envelopes,
+                next_seq: u64::MAX,
+            }
+            .encoded_len()
+        };
+        let empty = page(Vec::new());
+        let one = page(vec![dsm::types::proto::SequencedEnvelope {
+            envelope: vec![u8::MAX; MAX_ENVELOPE_BYTES],
+            seq_num: u64::MAX,
+        }]);
+        empty + MAX_BATCH_RETRIEVE * (one - empty)
+    });
+    *LIMIT
+}
+
+/// One spool page a member answered: read within the most a page holds
+/// ([`spool_page_limit`]), and refused before it is decoded when it lists
+/// more envelopes than a page holds.
+async fn spool_page(
+    response: reqwest::Response,
+) -> Result<dsm::types::proto::SequencedBatchEnvelope, String> {
+    let bytes = bounded_read::read(response, Bound::Limit(spool_page_limit()))
+        .await
+        .map_err(|e| format!("reading the page: {e}"))?;
+    bounded_read::at_most(&bytes, 1, MAX_BATCH_RETRIEVE).map_err(|e| format!("the page: {e}"))?;
+    dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_slice())
+        .map_err(|e| format!("SequencedBatchEnvelope decode failed: {e}"))
+}
+
 /// What a member answered a wait on this device's spools.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WaitAnswer {
@@ -646,6 +683,11 @@ pub(crate) async fn wait_on_member(
             })
             .collect(),
     };
+    // The member names spools among those asked about, each once.
+    let ready_limit = dsm::types::proto::B0xWaitResponse {
+        ready: request.marks.iter().map(|m| m.address.clone()).collect(),
+    }
+    .encoded_len();
     let url = format!("{}/api/v2/b0x/wait", endpoint.trim_end_matches('/'));
     let resp = client
         .post(&url)
@@ -676,13 +718,15 @@ pub(crate) async fn wait_on_member(
             None::<std::io::Error>,
         ));
     }
-    let bytes = resp.bytes().await.map_err(|e| {
-        DsmError::network(
-            format!("b0x wait answer from {endpoint}: {e}"),
-            None::<std::io::Error>,
-        )
-    })?;
-    let answer = dsm::types::proto::B0xWaitResponse::decode(bytes.as_ref()).map_err(|e| {
+    let bytes = bounded_read::read(resp, Bound::Limit(ready_limit))
+        .await
+        .map_err(|e| {
+            DsmError::network(
+                format!("b0x wait answer from {endpoint}: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+    let answer = dsm::types::proto::B0xWaitResponse::decode(bytes.as_slice()).map_err(|e| {
         DsmError::network(
             format!("b0x wait answer from {endpoint} does not decode: {e}"),
             None::<std::io::Error>,
@@ -2216,20 +2260,19 @@ impl B0xSDK {
                 Ok(())
             }
             Ok(r) => {
+                // The refusal is its status. Its body is not read: a node
+                // answers a refusal with none, and a member's text is not
+                // carried into this device's errors.
                 let status = r.status();
-                let body = match r.text().await {
-                    Ok(text) => text,
-                    Err(e) => format!("(body unreadable: {e})"),
-                };
-                warn!("Submit failed {} via {}: {}", status, endpoint, body);
+                warn!("Submit failed {} via {}", status, endpoint);
                 self.circuit_breaker.mark_node_failed(endpoint).await;
                 if !Self::is_retryable_error(status) {
                     return Err(Refused::Final(DsmError::network(
-                        format!("Submit failed {status} via {endpoint}: {body}"),
+                        format!("Submit failed {status} via {endpoint}"),
                         None::<std::io::Error>,
                     )));
                 }
-                Err(Refused::Retryable(format!("{status}: {body}")))
+                Err(Refused::Retryable(status.to_string()))
             }
             Err(e) => {
                 warn!("HTTP error via {}: {}", endpoint, e);
@@ -2462,28 +2505,16 @@ impl B0xSDK {
                         ended: PagesEnded::End,
                     });
                 }
-                Ok(r) if r.status().is_success() => {
-                    let bytes = match r.bytes().await {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!("b0x retrieve read failed from {}: {}", epc, e);
-                            return Ok(MemberPages {
-                                pages,
-                                ended: PagesEnded::Failed,
-                            });
-                        }
-                    };
-                    match dsm::types::proto::SequencedBatchEnvelope::decode(bytes.as_ref()) {
-                        Ok(b) => b,
-                        Err(e) => {
-                            warn!("SequencedBatchEnvelope decode failed from {}: {}", epc, e);
-                            return Ok(MemberPages {
-                                pages,
-                                ended: PagesEnded::Failed,
-                            });
-                        }
+                Ok(r) if r.status().is_success() => match spool_page(r).await {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        warn!("b0x retrieve from {}: {}", epc, e);
+                        return Ok(MemberPages {
+                            pages,
+                            ended: PagesEnded::Failed,
+                        });
                     }
-                }
+                },
                 Ok(r) => {
                     warn!("b0x retrieve from {} answered HTTP {}", epc, r.status());
                     return Ok(MemberPages {
@@ -4246,6 +4277,113 @@ mod tests {
         assert!(
             sdk.envelope_to_b0x_entry(legacy, &copy_key).is_none(),
             "a legacy full-receipt reply is not a transfer"
+        );
+    }
+}
+
+/// A member's spool answers are read within what an honest member answers
+/// (storage spec §4: a member may be hostile, and must not be able to stop or
+/// exhaust a device that reads from it).
+#[cfg(test)]
+mod member_answer_bounds {
+    use super::{spool_page, spool_page_limit, wait_on_member, WaitAnswer};
+    use crate::sdk::bounded_read::{answering_once, endless};
+    use dsm::spool::{MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES};
+    use dsm::types::proto;
+    use prost::Message;
+
+    const PATIENCE: std::time::Duration = std::time::Duration::from_secs(20);
+
+    async fn answer(status: u16, body: axum::body::Body) -> reqwest::Response {
+        crate::sdk::tls_transport_sdk::ensure_rustls_crypto_provider();
+        reqwest::Client::new()
+            .get(answering_once(status, body).await)
+            .send()
+            .await
+            .expect("an answer")
+    }
+
+    fn page(envelopes: usize, envelope_len: usize) -> proto::SequencedBatchEnvelope {
+        proto::SequencedBatchEnvelope {
+            envelopes: vec![
+                proto::SequencedEnvelope {
+                    envelope: vec![0x65; envelope_len],
+                    seq_num: u64::MAX,
+                };
+                envelopes
+            ],
+            next_seq: u64::MAX,
+        }
+    }
+
+    /// The page limit is the largest page a member holds, to the byte: a full
+    /// page of the largest envelopes.
+    #[test]
+    fn the_spool_page_limit_is_the_largest_page() {
+        assert_eq!(
+            page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES).encoded_len(),
+            spool_page_limit()
+        );
+    }
+
+    /// A spool page is read within the largest page: one that never ends is
+    /// refused at the limit rather than read until the transport gives up,
+    /// and one within it that lists more envelopes than a page holds (each
+    /// costing the decoder a structure) is refused before it is decoded. A
+    /// full page of the largest envelopes is the page.
+    #[tokio::test]
+    async fn a_spool_page_past_what_a_page_holds_is_refused() {
+        let refused = tokio::time::timeout(PATIENCE, async {
+            spool_page(answer(200, endless()).await).await
+        })
+        .await
+        .expect("an endless page is refused, not waited out");
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|why| why.contains("longer than")),
+            "{refused:?}"
+        );
+
+        let listed = page(MAX_BATCH_RETRIEVE + 1, 0).encode_to_vec();
+        let refused = spool_page(answer(200, listed.into()).await).await;
+        assert!(
+            refused.as_ref().is_err_and(|why| why.contains("elements")),
+            "{refused:?}"
+        );
+
+        let full = page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES);
+        let read = spool_page(answer(200, full.encode_to_vec().into()).await).await;
+        assert_eq!(read, Ok(full));
+    }
+
+    /// A wait's answer names spools among those asked about, each once; one
+    /// longer than that is refused unread. An answer naming every spool asked
+    /// about is read.
+    #[tokio::test]
+    async fn a_wait_answer_past_the_spools_asked_about_is_refused() {
+        let marks = vec![("A".repeat(52), 1u64), ("B".repeat(52), 7u64)];
+        let client = reqwest::Client::new();
+        let named = |n: usize| {
+            proto::B0xWaitResponse {
+                ready: ["A".repeat(52), "B".repeat(52), "C".repeat(52)][..n].to_vec(),
+            }
+            .encode_to_vec()
+        };
+        let refused =
+            wait_on_member(&client, &answering_once(200, named(3).into()).await, &marks).await;
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("longer than")),
+            "{refused:?}"
+        );
+        let ready = wait_on_member(&client, &answering_once(200, named(2).into()).await, &marks)
+            .await
+            .expect("an answer naming the spools asked about");
+        assert_eq!(
+            ready,
+            WaitAnswer::Ready(vec!["A".repeat(52), "B".repeat(52)])
         );
     }
 }
