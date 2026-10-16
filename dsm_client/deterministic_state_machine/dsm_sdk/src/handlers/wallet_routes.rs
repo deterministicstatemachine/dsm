@@ -847,11 +847,20 @@ impl AppRouterImpl {
                             }
                         };
 
-                        // Compute signed amount: positive if incoming, negative if outgoing
-                        let amount_signed: i64 = if t.to_device == my_device_id_str {
-                            amount as i64 // incoming: positive
+                        // The signed amount: positive incoming, negative outgoing.
+                        // One the signed field cannot hold is refused by name,
+                        // never wrapped into another amount or direction.
+                        let magnitude = i64::try_from(amount).map_err(|e| {
+                            format!(
+                                "wallet.history: transaction {}'s amount {amount} exceeds a \
+                                 signed amount: {e}",
+                                t.tx_id
+                            )
+                        })?;
+                        let amount_signed = if t.to_device == my_device_id_str {
+                            magnitude
                         } else {
-                            -(amount as i64) // outgoing: negative
+                            -magnitude
                         };
 
                         // Determine recipient/sender for UI display - resolve aliases
@@ -2173,6 +2182,50 @@ mod history_tests {
             .expect_err("a row of an unnamed type is refused");
         assert!(
             refused.contains("unnamed") && refused.contains("unilateral_send"),
+            "{refused}"
+        );
+    }
+
+    /// A transfer amount the signed history field cannot hold is refused by
+    /// name (SA-52), never negated past the signed range into another amount
+    /// or the other direction.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn history_refuses_an_amount_beyond_the_signed_range() {
+        let device = crate::test_support::one_device::Device::start(0x73).await;
+        let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
+        let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);
+        let sent = |id: &str, amount: u64, hash: u8| TransactionRecord {
+            tx_id: id.to_string(),
+            tx_hash: crate::util::text_id::encode_base32_crockford(&[hash; 32]),
+            from_device: me.clone(),
+            to_device: peer.clone(),
+            amount,
+            tx_type: "online".to_string(),
+            status: "confirmed".to_string(),
+            commitment_hash: None,
+            proof_data: None,
+            metadata: [("token_id".to_string(), b"ERA".to_vec())]
+                .into_iter()
+                .collect(),
+        };
+        let largest = u64::try_from(i64::MAX).expect("i64::MAX is a u64");
+
+        store_transaction(&sent("largest", largest, 0x63)).expect("store the row");
+        let reported = history_of(&device.router).await.expect("the history");
+        assert_eq!(reported.transactions.len(), 1);
+        assert_eq!(
+            reported.transactions[0].amount_signed,
+            -i64::MAX,
+            "outgoing"
+        );
+
+        store_transaction(&sent("beyond", largest + 6, 0x64)).expect("store the row");
+        let refused = history_of(&device.router)
+            .await
+            .expect_err("an amount beyond the signed range is refused");
+        assert!(
+            refused.contains("beyond") && refused.contains("exceeds a signed amount"),
             "{refused}"
         );
     }

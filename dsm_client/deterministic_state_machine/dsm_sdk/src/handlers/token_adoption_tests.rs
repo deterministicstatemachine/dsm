@@ -24,9 +24,9 @@ use crate::test_support::two_device::{Pair, TestDevice};
 /// `dsm:token/v1:` payload. Decoding it is Rust's job.
 async fn adopt(router: &AppRouterImpl, text: &str) -> AppResult {
     router
-        .query(AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: text.as_bytes().to_vec(),
+        .invoke(AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: text.as_bytes().to_vec(),
         })
         .await
 }
@@ -269,7 +269,8 @@ async fn a_protocol_asset_is_never_adopted_by_its_anchor() {
 
 /// EVERY token query route is reachable through the production dispatcher:
 /// the failure where a handler arm exists but the dispatch table does not name
-/// it has happened twice.
+/// it has happened twice. `tokens.addByAnchor` writes the registry, so it is
+/// an invoke; its own check answering below shows the invoke reaches it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn every_token_query_route_is_reachable_through_the_dispatcher() {
@@ -278,7 +279,6 @@ async fn every_token_query_route_is_reachable_through_the_dispatcher() {
         "tokens.getPolicy",
         "tokens.listCachedPolicies",
         "tokens.getFeeSchedule",
-        "tokens.addByAnchor",
         "token.adoptionQr",
     ] {
         let res = d

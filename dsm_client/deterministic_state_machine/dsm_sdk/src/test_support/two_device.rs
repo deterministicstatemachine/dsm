@@ -27,7 +27,7 @@
 //! would sync whichever device is entered at times of its own. This harness
 //! proves protocol SEQUENCING, not concurrency.
 
-use crate::bridge::{AppInvoke, AppQuery, AppRouter};
+use crate::bridge::{AppInvoke, AppRouter};
 use crate::economic_fixtures::{self, FleetGuard};
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::sdk::app_state::AppState;
@@ -308,9 +308,9 @@ impl TestDevice {
         .encode_to_vec();
         let answered = self
             .router()
-            .query(AppQuery {
-                path: "storage.sync".to_string(),
-                params,
+            .invoke(AppInvoke {
+                method: "storage.sync".to_string(),
+                args: params,
             })
             .await;
         assert!(

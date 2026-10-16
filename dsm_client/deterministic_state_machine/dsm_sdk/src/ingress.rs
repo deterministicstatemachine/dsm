@@ -832,30 +832,41 @@ mod tests {
         );
     }
 
+    /// A preferences request as the WebView sends it: `prefs.get` reads and
+    /// is a `RouterQuery`, `prefs.set` writes and is a `RouterInvoke`.
+    fn pref_request(path: &str, key: &str, value: &str) -> IngressRequest {
+        let args = pb::ArgPack {
+            codec: pb::Codec::Proto as i32,
+            body: pb::AppStateRequest {
+                key: key.to_string(),
+                operation: String::new(),
+                value: value.to_string(),
+            }
+            .encode_to_vec(),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let method = path.to_string();
+        let operation = match path {
+            "prefs.set" => {
+                ingress_request::Operation::RouterInvoke(pb::RouterInvokeOp { method, args })
+            }
+            _ => ingress_request::Operation::RouterQuery(pb::RouterQueryOp { method, args }),
+        };
+        IngressRequest {
+            operation: Some(operation),
+        }
+    }
+
     /// The device's router answers through the ingress byte for byte: a
-    /// preference set and read back through `RouterQuery`.
+    /// preference set through `RouterInvoke` and read back through
+    /// `RouterQuery`.
     #[test]
     #[serial]
     fn a_router_query_answer_passes_through_unchanged() {
         device_with_router(0x44);
-        let pref = |path: &str, value: &str| {
-            dispatch_ingress(IngressRequest {
-                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                    method: path.to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: "ingress.test".to_string(),
-                            operation: String::new(),
-                            value: value.to_string(),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                })),
-            })
-        };
+        let pref =
+            |path: &str, value: &str| dispatch_ingress(pref_request(path, "ingress.test", value));
         expect_ok_bytes(pref("prefs.set", "through the ingress"));
         let answer = expect_ok_bytes(pref("prefs.get", ""));
         let envelope = crate::handlers::response_helpers::decode_local_envelope(&answer)
@@ -1024,24 +1035,8 @@ mod tests {
     #[serial]
     fn the_preferences_route_refuses_the_app_locks_settings() {
         device_with_router(0x4A);
-        let pref = |path: &str, key: &str, value: &str| {
-            dispatch_ingress(IngressRequest {
-                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
-                    method: path.to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: key.to_string(),
-                            operation: String::new(),
-                            value: value.to_string(),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                })),
-            })
-        };
+        let pref =
+            |path: &str, key: &str, value: &str| dispatch_ingress(pref_request(path, key, value));
         for key in crate::sdk::app_lock::OWNED_KEYS {
             for (path, value) in [("prefs.get", ""), ("prefs.set", "open")] {
                 let refused = expect_error(pref(path, key, value));
@@ -1054,6 +1049,89 @@ mod tests {
         }
         expect_ok_bytes(pref("prefs.set", "lock_prompt_dismissed", "never"));
         expect_ok_bytes(pref("prefs.get", "lock_prompt_dismissed", ""));
+    }
+
+    /// A route that changes state is an invoke, never a query (SA-22). Sent
+    /// as a `RouterQuery` each is refused by name and nothing runs; sent as a
+    /// `RouterInvoke` it reaches its own route, which reads its own request (a
+    /// malformed one here, so nothing is written either way).
+    #[test]
+    #[serial]
+    fn the_routes_that_change_state_are_invokes_never_queries() {
+        device_with_router(0x4C);
+        for route in [
+            "system.createGenesisV2",
+            "prefs.set",
+            "storage.sync",
+            "tokens.addByAnchor",
+        ] {
+            let asked = expect_error(dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterQuery(pb::RouterQueryOp {
+                    method: route.to_string(),
+                    args: vec![0xFF],
+                })),
+            }));
+            assert!(
+                asked
+                    .message
+                    .contains(&format!("unknown query path: {route}")),
+                "{route} is not a query: {}",
+                asked.message
+            );
+            let invoked = expect_error(dispatch_ingress(IngressRequest {
+                operation: Some(ingress_request::Operation::RouterInvoke(
+                    pb::RouterInvokeOp {
+                        method: route.to_string(),
+                        args: vec![0xFF],
+                    },
+                )),
+            }));
+            assert!(
+                !invoked.message.contains("unknown invoke method"),
+                "{route} is an invoke: {}",
+                invoked.message
+            );
+        }
+    }
+
+    /// `recovery.enable` reports a first capsule it could not make, never
+    /// success (SA-52): here the capsule table is gone, so its write fails.
+    #[test]
+    #[serial]
+    fn enabling_backup_reports_a_first_capsule_it_could_not_make() {
+        device_with_router(0x4D);
+        crate::storage::client_db::recovery::ensure_recovery_tables().expect("the tables");
+        crate::storage::client_db::get_connection()
+            .expect("the database")
+            .lock()
+            .expect("the connection")
+            .execute_batch("DROP TABLE recovery_capsules")
+            .expect("lose the capsule table");
+        let enabled = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: "recovery.enable".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: "recovery.enable".to_string(),
+                            operation: String::new(),
+                            value: economic_fixtures::test_mnemonic(0x4D),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        });
+        crate::storage::client_db::recovery::ensure_recovery_tables().expect("the tables back");
+        let refused = expect_error(enabled);
+        assert!(
+            refused.message.contains("first capsule was not made"),
+            "{}",
+            refused.message
+        );
     }
 
     /// While the session is locked the ingress runs nothing the app asks but

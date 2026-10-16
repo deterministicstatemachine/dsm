@@ -20949,6 +20949,9 @@ export class ChainTip extends Message<ChainTip> {
 }
 
 /**
+ * A recovery receipt is signed with the cached recovery authority key; no
+ * request carries a key (field 5 of the tombstone, 3 of the succession).
+ *
  * @generated from message dsm.RecoveryTombstoneRequest
  */
 export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> {
@@ -20972,11 +20975,6 @@ export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> 
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes environment_data = 5;
-   */
-  environmentData = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RecoveryTombstoneRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20989,7 +20987,6 @@ export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> 
     { no: 2, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "rollup_hash", kind: "message", T: Hash32 },
     { no: 4, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "environment_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryTombstoneRequest {
@@ -21072,11 +21069,6 @@ export class RecoverySuccessionRequest extends Message<RecoverySuccessionRequest
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes environment_data = 3;
-   */
-  environmentData = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RecoverySuccessionRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21087,7 +21079,6 @@ export class RecoverySuccessionRequest extends Message<RecoverySuccessionRequest
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "tombstone_hash", kind: "message", T: Hash32 },
     { no: 2, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "environment_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoverySuccessionRequest {

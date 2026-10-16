@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use crate::bridge::install_app_router as install_sdk_app_router;
 use crate::handlers::{
-    handle_create_genesis_v2_query, handle_generate_mnemonic_query, install_app_router_adapter,
+    handle_create_genesis_v2, handle_generate_mnemonic_query, install_app_router_adapter,
     AppRouterImpl, BiImpl,
 };
 
@@ -376,14 +376,13 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
         #[async_trait::async_trait]
         impl crate::bridge::AppRouter for MinimalBootstrapRouter {
+            // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
+            // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
+            // wallet seed + establishes the identity — after which a re-init installs the full
+            // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
             async fn query(&self, q: AppQuery) -> AppResult {
                 match q.path.as_str() {
-                    // Pre-genesis wallet CREATION is the bootstrap itself and must be allowed here:
-                    // generateMnemonic is pure (OsRng -> BIP39), and createGenesisV2 derives the
-                    // wallet seed + establishes the identity — after which a re-init installs the full
-                    // router. Without these, a fresh device can never create a wallet (chicken-and-egg).
                     "system.generateMnemonic" => handle_generate_mnemonic_query(),
-                    "system.createGenesisV2" => handle_create_genesis_v2_query(q),
                     _ => AppResult {
                         success: false,
                         data: Vec::new(),
@@ -396,13 +395,16 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             }
 
             async fn invoke(&self, i: AppInvoke) -> AppResult {
-                AppResult {
-                    success: false,
-                    data: Vec::new(),
-                    error_message: Some(format!(
-                        "MinimalBootstrapRouter: invoke '{}' requires genesis",
-                        i.method
-                    )),
+                match i.method.as_str() {
+                    "system.createGenesisV2" => handle_create_genesis_v2(&i.args),
+                    _ => AppResult {
+                        success: false,
+                        data: Vec::new(),
+                        error_message: Some(format!(
+                            "MinimalBootstrapRouter: invoke '{}' requires genesis",
+                            i.method
+                        )),
+                    },
                 }
             }
 

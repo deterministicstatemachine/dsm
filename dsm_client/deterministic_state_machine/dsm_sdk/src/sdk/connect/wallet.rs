@@ -8,7 +8,8 @@
 //! The listener only asks the installed app router for `connect.sync`, the
 //! same route a screen may call: every request is decided against its grant
 //! and carried out by the router's own production routes, exactly as if the
-//! player had started it by hand.
+//! player had started it by hand. While the wallet is locked nothing is
+//! carried out; requests wait for it to open.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -397,6 +398,22 @@ pub fn resume_listener() -> Result<(), String> {
 async fn listen() {
     log::info!("[connect] listener started");
     loop {
+        // The router is invoked here, not through the ingress, so the lock is
+        // read here: while the wallet is locked no request is fetched or run
+        // (SA-18). `connect.sync` holds every request back while it is locked
+        // too; this keeps the listener from cycling the relay meanwhile.
+        match crate::sdk::session_manager::lock_holds() {
+            Ok(None) => {}
+            Ok(Some(..)) => {
+                tokio::time::sleep(RETRY_AFTER).await;
+                continue;
+            }
+            Err(e) => {
+                log::warn!("[connect] the session lock could not be read: {e}");
+                tokio::time::sleep(RETRY_AFTER).await;
+                continue;
+            }
+        }
         let Some(router) = crate::bridge::app_router() else {
             tokio::time::sleep(RETRY_AFTER).await;
             continue;

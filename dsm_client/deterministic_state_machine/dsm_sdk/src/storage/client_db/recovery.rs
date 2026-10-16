@@ -642,29 +642,6 @@ pub fn resume_tip_diverges_from_floor(
     Ok(false)
 }
 
-/// Store an encrypted recovery key blob (device-bound encryption).
-pub fn store_encrypted_recovery_key(blob: &[u8]) -> Result<()> {
-    set_recovery_pref("encrypted_recovery_key", blob)
-}
-
-/// Load the encrypted recovery key blob.
-pub fn load_encrypted_recovery_key() -> Result<Option<Vec<u8>>> {
-    get_recovery_pref("encrypted_recovery_key")
-}
-
-/// Delete the persisted encrypted recovery key.
-pub fn delete_encrypted_recovery_key() -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    conn.execute(
-        "DELETE FROM recovery_prefs WHERE key = ?1",
-        params!["encrypted_recovery_key"],
-    )?;
-    Ok(())
-}
-
 /// Store the hardware-sealed wallet-seed bundle (the Genesis v2 root-secret input,
 /// one-way BIP39-derived from the paper mnemonic — never the mnemonic itself). The
 /// sealing key is the Android Keystore (hardware-backed) on device; the blob here is
@@ -876,22 +853,13 @@ pub fn get_unsynced_counterparties() -> Result<Vec<[u8; 32]>> {
     Ok(result)
 }
 
-/// Check if ALL counterparties have synced the tombstone.
-/// Returns true only when every entry has synced=1.
-/// Returns true if the table is empty (no counterparties to sync).
+/// Whether every counterparty the recovered capsule named has acknowledged
+/// the tombstone: at least one is tracked and none is pending. An empty
+/// table is a gate never set up, not one every counterparty passed: recovery
+/// resumes nothing it did not track (SA-20).
 pub fn all_counterparties_synced() -> Result<bool> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let unsynced_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM recovery_sync_status WHERE synced = 0",
-        [],
-        |row| row.get(0),
-    )?;
-
-    Ok(unsynced_count == 0)
+    let (synced, total) = get_sync_progress()?;
+    Ok(total > 0 && synced == total)
 }
 
 /// Get sync progress: (synced_count, total_count).

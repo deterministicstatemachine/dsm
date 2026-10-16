@@ -4,7 +4,7 @@
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
 
@@ -31,7 +31,7 @@ fn not_the_locks(key: &str, route: &str) -> Result<(), String> {
 }
 
 impl AppRouterImpl {
-    /// Dispatch handler for all `prefs.*` query routes.
+    /// Dispatch handler for the `prefs.get` query route.
     pub(crate) async fn handle_prefs_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
             // -------- prefs.get (QueryOp) --------
@@ -52,9 +52,15 @@ impl AppRouterImpl {
                 ))
             }
 
-            // -------- prefs.set (QueryOp) --------
+            _ => err(format!("unknown prefs query: {}", q.path)),
+        }
+    }
+
+    /// Dispatch handler for the `prefs.set` invoke route.
+    pub(crate) async fn handle_prefs_invoke(&self, i: AppInvoke) -> AppResult {
+        match i.method.as_str() {
             "prefs.set" => {
-                let req = match decode_request(&q.params, "prefs.set") {
+                let req = match decode_request(&i.args, "prefs.set") {
                     Ok(req) => req,
                     Err(e) => return err(e),
                 };
@@ -71,8 +77,7 @@ impl AppRouterImpl {
                     },
                 ))
             }
-
-            _ => err(format!("unknown prefs query: {}", q.path)),
+            _ => err(format!("unknown prefs invoke: {}", i.method)),
         }
     }
 }
