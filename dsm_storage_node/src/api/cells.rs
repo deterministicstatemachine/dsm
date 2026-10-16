@@ -224,7 +224,11 @@ async fn put_cells(
 /// entry when it names none. Arrival indexes start at 1.
 fn cell_query(raw: Option<&str>) -> Result<u64, StatusCode> {
     let mut from = 1u64;
-    for pair in raw.map_or("", |q| q).split('&').filter(|p| !p.is_empty()) {
+    for pair in raw
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .filter(|p| !p.is_empty())
+    {
         match pair.split_once('=') {
             Some(("from", v)) => {
                 from = v.parse().map_err(|e| {

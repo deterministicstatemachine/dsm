@@ -2249,7 +2249,10 @@ mod tests {
                     let (page, reads) = (page.clone(), reads.clone());
                     async move {
                         reads.fetch_add(1, Ordering::SeqCst);
-                        let from = query.get("from").copied().map_or(1, |from| from);
+                        // The client names the arrival index on every read.
+                        let Some(&from) = query.get("from") else {
+                            panic!("a cell read names the arrival index it starts at");
+                        };
                         page(from).encode_to_vec()
                     }
                 },
