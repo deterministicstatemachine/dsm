@@ -349,20 +349,32 @@ pub(crate) fn vault_state_at(c: &mut Cursor<'_>) -> Result<VaultStateV2, DecodeE
     // 9 FeePolicy.
     let fee_policy = fee_policy_at(c)?;
 
-    // 10 EncumbranceSet — elements rebuilt and re-validated; duplicate or
-    // misordered input is refused by the constructor, not repaired.
+    // 10 EncumbranceSet — elements rebuilt and re-validated. The set's
+    // canonical order is ascending by each claim's encoding; input that is
+    // not strictly ascending, a duplicate included, is refused, never sorted
+    // into shape: those bytes are not the encoding of any set.
     c.envelope(class::ENCUMBRANCE_SET, EncumbranceSet::SCHEMA)?;
     let claim_count = c.u32()?;
-    let mut claims = Vec::new();
+    let mut claims: Vec<EncumbranceClaim> = Vec::new();
     for _ in 0..claim_count {
         c.envelope(class::ENCUMBRANCE_CLAIM, EncumbranceClaim::SCHEMA)?;
-        claims.push(EncumbranceClaim {
+        let claim = EncumbranceClaim {
             parent_binding: c.digest32()?,
             claim_seq: c.u64()?,
             amount: c.u64()?,
             token: c.digest32()?,
             purpose: c.u16()?,
-        });
+        };
+        if let Some(last) = claims.last() {
+            if last.encode() >= claim.encode() {
+                return Err(DecodeError::Invalid(
+                    "encumbrance claims must be strictly ascending by their encoding — \
+                     non-canonical bytes are refused, never canonicalized"
+                        .to_string(),
+                ));
+            }
+        }
+        claims.push(claim);
     }
     let encumbrances = EncumbranceSet::new(claims).map_err(invalid)?;
 
@@ -380,13 +392,23 @@ pub(crate) fn vault_state_at(c: &mut Cursor<'_>) -> Result<VaultStateV2, DecodeE
     let parent_state_commitment = c.digest32()?; // 12
     let owner_authority_transition_digest = c.digest32()?; // 13
 
-    // 14 StorageSet.
+    // 14 StorageSet. Members are strictly ascending by member id, refused
+    // otherwise as the encumbrance claims are.
     c.envelope(class::STORAGE_SET, StorageSetMembers::SCHEMA)?;
     let member_count = c.u32()?;
     let mut entries: Vec<(Vec<u8>, [u8; 32])> = Vec::new();
     for _ in 0..member_count {
         let len = c.u32()? as usize;
         let member_id = c.take(len)?.to_vec();
+        if let Some((last, _)) = entries.last() {
+            if *last >= member_id {
+                return Err(DecodeError::Invalid(
+                    "storage set members must be strictly ascending by member id — \
+                     non-canonical bytes are refused, never canonicalized"
+                        .to_string(),
+                ));
+            }
+        }
         // The incarnation is part of the entry, not a trailing array: a
         // truncated stream fails here rather than producing a set whose
         // members have lost their incarnations.

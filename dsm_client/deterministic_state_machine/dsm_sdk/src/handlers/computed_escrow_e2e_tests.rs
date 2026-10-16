@@ -732,6 +732,218 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     assert_eq!(balance(&p.b, &era()), m.b_start);
 }
 
+/// Audit SA-24, SoFi Amendment S22: a Release of a computed vault that names
+/// another cell than the vault's `K_match` is Invalid, so the key it lands
+/// at first is skipped, not held: no verdict ever holds at the cell it
+/// names for that vault. B, set up with A's vault, writes a Release of it
+/// on `b-wins` naming the match's start cell at the vault's first key after
+/// A voided the match. A's walk skips that key, and A collects its stake at
+/// the next one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
+    use dsm::sofi::resolve::{AcceptedGeneses, Acquired, ExerciseObjects, WALK_BUDGET};
+    use dsm::sofi::validation::{Invalid, Refusal, VaultTerms};
+    use dsm::sofi::wire::{AttemptEntry, TraderFulfillmentBody, COMPUTED_LABEL_B_WINS};
+    use dsm::sofi::{derive, resolution::WalkOutcome};
+
+    let p = Pair::boot(100, 100).await;
+    let setup = setup(&p, [0x35; 32], &teams(&p).await);
+    let a_start = balance(&p.a, &era());
+    let stake = whole_era(25);
+    let a = lock(&p.a, &p.b, &setup, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock");
+    lock(&p.b, &p.a, &setup, MatchSide::B, stake, Some(a.vault_id))
+        .await
+        .expect("B's lock");
+    ready(&p.a, &a.match_cell, None).await;
+    p.a.enter();
+    let withdrawn = computed_flow::withdraw(&p.a.router().core_sdk, &set(), &a.match_cell)
+        .await
+        .expect("A withdraws");
+    assert_eq!(withdrawn.final_outcome(), Some(b"void".to_vec()));
+
+    // B's Release of A's vault, drafted as a release is and naming the
+    // match's start cell, exercised at the vault's first key.
+    let set = set();
+    let accepted = AcceptedGeneses::default();
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    crate::sdk::sofi_flow::set_up_with(core, &set, &[a.vault_id], &accepted)
+        .await
+        .expect("B sets up with A's vault");
+    let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+    let ctx = standing
+        .context(&set, &accepted)
+        .expect("B as the verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&a.vault_id).expect("A's vault's chain");
+    let (vault, ..) = crate::sdk::sofi_flow::head_of(&set, &verifier, &a.vault_id, chain)
+        .await
+        .expect("A's vault at its head");
+    let VaultTerms::Computed(terms) = &vault.terms else {
+        panic!("A's vault is a computed escrow vault")
+    };
+    let start_cell = computed::start_cell_key(&computed::match_cell_of(terms));
+    let setup_ref = crate::sdk::sofi_flow::own_setup_ref(
+        &set,
+        &standing.genesis,
+        &standing.device_id,
+        &a.vault_id,
+    )
+    .await
+    .expect("B's setup with A's vault");
+    let base = crate::sdk::sofi_flow::relationship_base(&standing, &a.vault_id)
+        .expect("B's relationship with A's vault");
+    let retired =
+        dsm::sofi::validation::retire_vault_post(&vault.state).expect("the vault retires");
+    let dlv = crate::sdk::sofi_flow::vault_core(&standing, &vault, &retired, base).expect("V°");
+    let trader = crate::sdk::sofi_flow::trader_core(
+        &standing,
+        &[(*terms.token(), vault.state.reserve_a, 0)],
+        &[(a.vault_id, base)],
+    )
+    .expect("T°");
+    let public_key = crate::sdk::signing_authority::current_public_key().expect("B's key");
+    let trader_ctx = crate::sdk::sofi_flow::context(&standing, &set, &public_key, trader)
+        .expect("B's trader context");
+    let draft = crate::sdk::sofi_sdk::draft_release(
+        crate::sdk::sofi_sdk::ReleaseNames {
+            vault_id: a.vault_id,
+            parent_root: vault.root,
+            setup_ref,
+            verdict_cell: start_cell,
+            outcome: COMPUTED_LABEL_B_WINS.to_vec(),
+            amount: vault.state.reserve_a,
+        },
+        dlv,
+        &trader_ctx,
+        &standing.local,
+    )
+    .expect("a release draft");
+    let precommit = draft.precommit().clone();
+    let preimage = draft.preimage().clone();
+    let precommit_signature =
+        crate::sdk::sofi_flow::sign(&derive::precommit_signing_digest(&precommit))
+            .expect("B signs P");
+    let shadows: Vec<D32> = derive::canonical_legs(&preimage)
+        .expect("the legs P(E) derives")
+        .iter()
+        .map(|leg| leg.shadow_core)
+        .collect();
+    let mut witnesses: Vec<D32> =
+        dsm::sofi::conformance::derive_policy_fulfillments(&precommit, &shadows)
+            .expect("the canonical witnesses")
+            .iter()
+            .map(derive::policy_fulfillment_id)
+            .collect();
+    witnesses.sort();
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let fulfillment = TraderFulfillmentBody::new(
+        derive::precommit_id(&precommit),
+        witnesses,
+        vec![AttemptEntry {
+            vault_id: a.vault_id,
+            attempt: 0,
+        }],
+        dsm::sofi::wire::next_position(precommit.position()).expect("B's next position"),
+        precommit.signature_alg(),
+        precommit.claimant_public_key(),
+        att_a,
+    )
+    .expect("F");
+    let fulfillment_signature =
+        crate::sdk::sofi_flow::sign(&derive::fulfillment_signing_digest(&fulfillment))
+            .expect("B signs F");
+    let mut own = crate::sdk::sofi_advance::own_closure_objects(&set, &precommit, &preimage)
+        .await
+        .expect("B's closure objects");
+    own.extend(draft.carried());
+    let objects = ExerciseObjects {
+        precommit: &precommit,
+        precommit_signature: &precommit_signature,
+        preimage: &preimage,
+        fulfillment: &fulfillment,
+        fulfillment_signature: &fulfillment_signature,
+        own_objects: &own,
+    };
+    let evidence = match verifier
+        .acquire_conformance_evidence(&objects)
+        .expect("acquire")
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) => panic!("B's objects are in hand: {missing:?}"),
+    };
+    let claim = {
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+        dsm::sofi::signature::sign_resolution_claim(
+            derive::resolution_claim(&precommit, &fulfillment),
+            fulfillment.signature_alg(),
+            &pk,
+            att_a,
+            &sk,
+        )
+        .expect("B signs its own C_q")
+        .encode()
+    };
+    let exercise = dsm::sofi::exercise::exercise_from_objects(&objects, &claim, &evidence)
+        .expect("B's exercise");
+    let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
+        .expect("one operation's exercise");
+    // Nothing in its own bytes refutes it; the cell it names is its one
+    // defect, and RouteValidation names it.
+    assert_eq!(dsm::sofi::facts::refuted_in_hand(&recognized), None);
+    let route_evidence = match verifier
+        .acquire_evidence(&precommit, &preimage, &own)
+        .expect("acquire")
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) => panic!("the route's evidence is public: {missing:?}"),
+    };
+    assert_eq!(
+        dsm::sofi::validation::validate(&precommit, &preimage, &route_evidence),
+        Err(Refusal::Invalid(Invalid::VerdictCellIsNotTheTerms))
+    );
+    let written = crate::sdk::sofi_exercise::write_exercise(&set, &exercise, &recognized)
+        .await
+        .expect("any party may write an exercise");
+    assert!(written.iter().all(|leg| leg.reached_leader), "{written:?}");
+    let held = verifier
+        .read_attempt_cell(&a.vault_id, &vault.root, 0)
+        .expect("read")
+        .expect("decided");
+    assert_eq!(
+        held.fact(),
+        dsm::route_chain::CellFact::Held {
+            id: *recognized.external_commitment(),
+            state: dsm::route_chain::ChainState::Final,
+        },
+        "B's release holds the vault's first key, final"
+    );
+
+    // A's walk skips that key: the release can never realize.
+    p.a.enter();
+    let standing_a = crate::sdk::sofi_flow::standing(&p.a.router().core_sdk).expect("A's standing");
+    let ctx_a = standing_a
+        .context(&set, &accepted)
+        .expect("A as the verifier");
+    let verifier_a = ctx_a.verifier();
+    let chains = std::collections::BTreeMap::from([(
+        a.vault_id,
+        verifier_a.chain(&a.vault_id).expect("A's vault's chain"),
+    )]);
+    let walked = verifier_a
+        .walk_parent(&chains, &a.vault_id, &vault.root, 0, WALK_BUDGET)
+        .expect("the walk");
+    assert_eq!(walked.not_established, None);
+    assert_eq!(walked.outcome, WalkOutcome::Unresolved { attempt: 1 });
+
+    // And A takes its stake back at the next key.
+    collect(&p.a, &a.vault_id).await;
+    assert_eq!(balance(&p.a, &era()), a_start);
+}
+
 /// A wallet locks a stake only in a setup whose teams are the creatures as
 /// their issuers last published them, and only fielding creatures it holds:
 /// a modded state, a creature it does not hold, a creature of a token that is
