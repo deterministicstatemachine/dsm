@@ -28,6 +28,7 @@ pub mod app;
 pub mod code;
 pub mod grant;
 pub mod holdings;
+pub mod operations;
 pub mod pinned_tls;
 pub mod signed;
 pub mod wager;

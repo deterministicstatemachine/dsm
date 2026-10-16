@@ -429,11 +429,153 @@ pub struct LogRow {
 const UNSENT: &str = "unsent";
 const SENT: &str = "sent";
 
+/// Add `amount` to what the grant of `session_id` has spent of `policy_commit`.
+fn add_spend(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &[u8; 32],
+    policy_commit: &[u8; 32],
+    amount: u64,
+) -> Result<()> {
+    let before: Option<i64> = tx
+        .query_row(
+            "SELECT spent FROM connect_spent WHERE session_id = ?1 AND policy_commit = ?2",
+            params![session_id.as_slice(), policy_commit.as_slice()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let before = match before {
+        Some(v) => u64::try_from(v).map_err(|e| anyhow!("a negative spend is stored: {e}"))?,
+        None => 0,
+    };
+    let after = before
+        .checked_add(amount)
+        .ok_or_else(|| anyhow!("the grant's spend overflows"))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO connect_spent(session_id, policy_commit, spent) \
+         VALUES (?1, ?2, ?3)",
+        params![
+            session_id.as_slice(),
+            policy_commit.as_slice(),
+            i64_of(after)?
+        ],
+    )?;
+    Ok(())
+}
+
+/// How many operations request `seq` of `session_id` committed.
+fn operations_bound(tx: &rusqlite::Connection, session_id: &[u8; 32], seq: i64) -> Result<i64> {
+    Ok(tx.query_row(
+        "SELECT COUNT(*) FROM connect_operations WHERE session_id = ?1 AND seq = ?2",
+        params![session_id.as_slice(), seq],
+        |r| r.get(0),
+    )?)
+}
+
+/// Bind the advance being committed in `tx`, whose chain tip is
+/// `chain_tip`, to request `seq` of `session_id` (SA-60): the request's next
+/// operation and, with its first, the spend its grant counts for it. Written
+/// in the advance's own transaction, so a debit is never durable without the
+/// request it answers, nor the request's spend without its debit.
+pub fn bind_operation_with_conn(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &[u8; 32],
+    seq: u64,
+    chain_tip: &[u8; 32],
+    spend: Option<([u8; 32], u64)>,
+) -> Result<()> {
+    let seq = i64_of(seq)?;
+    let ordinal = operations_bound(tx, session_id, seq)?;
+    tx.execute(
+        "INSERT INTO connect_operations(session_id, seq, ordinal, chain_tip) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![session_id.as_slice(), seq, ordinal, chain_tip.as_slice()],
+    )?;
+    if let (0, Some((policy_commit, amount))) = (ordinal, spend) {
+        add_spend(tx, session_id, &policy_commit, amount)?;
+    }
+    Ok(())
+}
+
+/// The chain tips of the operations request `seq` of `session_id`
+/// committed, in the order it committed them.
+pub fn bound_operations(session_id: &[u8; 32], seq: u64) -> Result<Vec<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let mut stmt = conn.prepare(
+        "SELECT chain_tip FROM connect_operations WHERE session_id = ?1 AND seq = ?2 \
+         ORDER BY ordinal",
+    )?;
+    let rows = stmt
+        .query_map(params![session_id.as_slice(), i64_of(seq)?], |r| {
+            column_32(r, 0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Whose a computed match nonce is (SA-59).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceHolder {
+    /// The session asking: newly bound to it, or bound to it before.
+    This,
+    /// Another application's session.
+    Another,
+}
+
+/// Bind `match_nonce` to `session_id` unless it is bound already, and say
+/// whose it is.
+pub fn claim_duel_nonce(session_id: &[u8; 32], match_nonce: &[u8; 32]) -> Result<NonceHolder> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let tx = conn.transaction()?;
+    let held: Option<[u8; 32]> = tx
+        .query_row(
+            "SELECT session_id FROM connect_duel_nonces WHERE match_nonce = ?1",
+            params![match_nonce.as_slice()],
+            |r| column_32(r, 0),
+        )
+        .optional()?;
+    let holder = match held {
+        Some(holder) if &holder == session_id => NonceHolder::This,
+        Some(..) => NonceHolder::Another,
+        None => {
+            tx.execute(
+                "INSERT INTO connect_duel_nonces(match_nonce, session_id) VALUES (?1, ?2)",
+                params![match_nonce.as_slice(), session_id.as_slice()],
+            )?;
+            NonceHolder::This
+        }
+    };
+    tx.commit()?;
+    Ok(holder)
+}
+
+/// The session `match_nonce` is bound to, if any.
+pub fn duel_nonce_session(match_nonce: &[u8; 32]) -> Result<Option<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT session_id FROM connect_duel_nonces WHERE match_nonce = ?1",
+            params![match_nonce.as_slice()],
+            |r| column_32(r, 0),
+        )
+        .optional()?)
+}
+
 /// Record that `seq` of `session_id` was processed: it becomes the replay
-/// guard, its spend (if it was carried out under the grant) is counted, it
-/// leaves the pending list, and its log row is written, all at once. A `seq`
-/// that is not the next one after the guard is refused: nothing is processed
-/// twice and nothing is skipped.
+/// guard, it leaves the pending list, and its log row is written, all at
+/// once. Its `spend` (if it was carried out under the grant) is counted here
+/// only when it committed no operation: one that did was counted with its
+/// first operation ([`bind_operation_with_conn`]). A `seq` that is not the
+/// next one after the guard is refused: nothing is processed twice and
+/// nothing is skipped.
 pub fn record_processed(
     session_id: &[u8; 32],
     spend: Option<([u8; 32], u64)>,
@@ -464,30 +606,8 @@ pub fn record_processed(
         "UPDATE connect_sessions SET last_seq = ?2 WHERE session_id = ?1",
         params![session_id.as_slice(), seq],
     )?;
-    if let Some((policy_commit, amount)) = spend {
-        let before: Option<i64> = tx
-            .query_row(
-                "SELECT spent FROM connect_spent WHERE session_id = ?1 AND policy_commit = ?2",
-                params![session_id.as_slice(), policy_commit.as_slice()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        let before = match before {
-            Some(v) => u64::try_from(v).map_err(|e| anyhow!("a negative spend is stored: {e}"))?,
-            None => 0,
-        };
-        let after = before
-            .checked_add(amount)
-            .ok_or_else(|| anyhow!("the grant's spend overflows"))?;
-        tx.execute(
-            "INSERT OR REPLACE INTO connect_spent(session_id, policy_commit, spent) \
-             VALUES (?1, ?2, ?3)",
-            params![
-                session_id.as_slice(),
-                policy_commit.as_slice(),
-                i64_of(after)?
-            ],
-        )?;
+    if let (0, Some((policy_commit, amount))) = (operations_bound(&tx, session_id, seq)?, spend) {
+        add_spend(&tx, session_id, &policy_commit, amount)?;
     }
     tx.execute(
         "DELETE FROM connect_pending WHERE session_id = ?1 AND seq = ?2",

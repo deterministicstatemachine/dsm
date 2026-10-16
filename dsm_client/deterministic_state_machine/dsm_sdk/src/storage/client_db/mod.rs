@@ -1007,6 +1007,23 @@ fn create_schema(conn: &Connection) -> Result<()> {
             delivery    TEXT NOT NULL CHECK (delivery IN ('unsent', 'sent')),
             PRIMARY KEY (session_id, seq)
         );
+        -- Each advance a request committed, recorded in the advance's own
+        -- transaction: the request is bound to it and never carried out
+        -- again (SA-60).
+        CREATE TABLE IF NOT EXISTS connect_operations(
+            session_id  BLOB NOT NULL,
+            seq         INTEGER NOT NULL,
+            ordinal     INTEGER NOT NULL,
+            chain_tip   BLOB NOT NULL CHECK (length(chain_tip) = 32),
+            PRIMARY KEY (session_id, seq, ordinal)
+        );
+        -- The application session a computed match nonce belongs to: only it
+        -- asks for the match's session key, stakes in it and drives it
+        -- (SA-59).
+        CREATE TABLE IF NOT EXISTS connect_duel_nonces(
+            match_nonce  BLOB PRIMARY KEY CHECK (length(match_nonce) = 32),
+            session_id   BLOB NOT NULL
+        );
         -- DSM Connect, an application account's side (connect.rs).
         CREATE TABLE IF NOT EXISTS connect_app_offers(
             offer_digest  BLOB PRIMARY KEY,

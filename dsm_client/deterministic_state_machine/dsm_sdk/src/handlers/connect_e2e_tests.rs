@@ -1484,3 +1484,87 @@ async fn a_committed_payment_counts_against_the_grant_whatever_its_delivery() {
         "the committed debit counts against the grant"
     );
 }
+
+/// One signed request moves value once and counts once against its grant,
+/// whatever stops it from being recorded as processed (SA-60). Here the
+/// write that records it fails after the payment committed: a trigger the
+/// test installs on the wallet's log refuses the row. The payment was bound
+/// to the request in its own transaction, so the next sync records it as
+/// carried out and pays nothing again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_request_whose_record_failed_after_it_paid_is_never_paid_again() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 3,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    let wallet_db = |sql: &str| {
+        p.b.enter();
+        crate::storage::client_db::get_connection()
+            .expect("the wallet's database")
+            .lock()
+            .expect("the connection")
+            .execute_batch(sql)
+            .expect("the wallet's database answers");
+    };
+    wallet_db(&format!(
+        "CREATE TRIGGER the_record_fails BEFORE INSERT ON connect_log WHEN NEW.seq = {pay} \
+         BEGIN SELECT RAISE(ABORT, 'the record write failed'); END;"
+    ));
+    let synced = invoke(&p.b, "connect.sync", Vec::new()).await;
+    wallet_db("DROP TRIGGER the_record_fails");
+    let Reply::Sessions(failed) = reply(&synced) else {
+        panic!("connect.sync answered another reply");
+    };
+    assert!(
+        failed.sessions[0]
+            .last_error
+            .contains("the record write failed"),
+        "{}",
+        failed.sessions[0].last_error
+    );
+    assert_eq!(balance(&p.b, &wild), 17, "the payment committed");
+    p.b.enter();
+    let counted = || crate::storage::client_db::connect::spent_all(&session).expect("the spend");
+    assert_eq!(counted(), vec![(wild, 3)], "counted with the payment");
+
+    settle(&p).await;
+    sync_clean(&p, &relay).await;
+    assert_eq!(balance(&p.b, &wild), 17, "nothing was paid again");
+    let entry = wallet_log(&p.b, &session, pay).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "{}",
+        entry.detail
+    );
+    assert!(
+        entry.detail.contains("it is not carried out again"),
+        "{}",
+        entry.detail
+    );
+    p.b.enter();
+    assert_eq!(counted(), vec![(wild, 3)], "counted once");
+    assert_eq!(
+        balance(&p.a, &wild),
+        1_000_000 - 20 + 3,
+        "the game was paid once"
+    );
+}

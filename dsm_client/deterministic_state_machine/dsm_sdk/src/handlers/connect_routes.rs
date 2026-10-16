@@ -175,20 +175,16 @@ fn held_by_lock() -> Result<Option<String>, String> {
         .map(|locked| format!("{locked}; it runs once the wallet is opened")))
 }
 
-/// Why `request` cannot be carried out yet, if it cannot. Nothing runs while
-/// the wallet is locked. A payment waits while its relationship with the
-/// application catches up; a holdings proof, an escrow request, a quote and a
-/// swap wait while this device is still admitting its latest position (SoFi
-/// builds no route on a pending one). None is a refusal: the request stays
-/// queued, unanswered and unspent.
+/// Why `request` cannot be carried out yet, if it cannot. A payment waits
+/// while its relationship with the application catches up; a holdings proof,
+/// an escrow request, a quote and a swap wait while this device is still
+/// admitting its latest position (SoFi builds no route on a pending one).
+/// None is a refusal: the request stays queued, unanswered and unspent.
 fn waits(
     core: &crate::sdk::core_sdk::CoreSDK,
     session: &store::WalletSession,
     request: &Request,
 ) -> Result<Option<String>, String> {
-    if let Some(locked) = held_by_lock()? {
-        return Ok(Some(locked));
-    }
     match request {
         Request::Pay { .. } => Ok(payment_waits(&session.app_device_id)
             .map(|why| format!("the relationship with the application is settling: {why}"))),
@@ -230,6 +226,68 @@ fn shared_contacts() -> Result<generated::ConnectContactsResultV1, String> {
 
 /// This device as a player of a match: the identity a branch pays and the
 /// key it decides a cancel with.
+/// Bind `match_nonce` to `session`'s application, or check it is bound to
+/// it already: one application's computed match is never another's (SA-59).
+fn claim_duel_nonce(session: &store::WalletSession, match_nonce: &[u8; 32]) -> Result<(), String> {
+    match store::claim_duel_nonce(&session.session_id, match_nonce)
+        .map_err(|e| format!("the match's application: {e}"))?
+    {
+        store::NonceHolder::This => Ok(()),
+        store::NonceHolder::Another => Err(format!(
+            "match nonce {} belongs to another application's match",
+            short(match_nonce)
+        )),
+    }
+}
+
+/// That the computed match at `match_cell` is one this wallet staked in
+/// through `session`'s application (SA-59).
+fn match_of_session(session: &store::WalletSession, match_cell: &[u8; 32]) -> Result<(), String> {
+    let kept = crate::storage::client_db::duel_matches::get_match(match_cell)
+        .map_err(|e| format!("the kept matches: {e}"))?
+        .ok_or_else(|| format!("this wallet staked in no match at {}", short(match_cell)))?;
+    let read = crate::sdk::outcome_programs::read_setup(&kept.setup)
+        .map_err(|e| format!("the kept match {}: {e}", short(match_cell)))?;
+    match store::duel_nonce_session(&read.match_nonce)
+        .map_err(|e| format!("the match's application: {e}"))?
+    {
+        Some(holder) if holder == session.session_id => Ok(()),
+        _ => Err(format!(
+            "match {} was not staked through this application",
+            short(match_cell)
+        )),
+    }
+}
+
+/// Whether `request`, when it names a computed match, names one of
+/// `session`'s application (SA-59). A session key or a lock claims the
+/// match's nonce for the session unless another holds it; every later step
+/// needs the match staked through this session. A collection is checked
+/// vault by vault where its vaults are read ([`AppRouterImpl::duel_collect`]).
+fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<(), String> {
+    match request {
+        Request::DuelSessionKey { match_nonce } => claim_duel_nonce(session, match_nonce),
+        Request::DuelLock(lock) => {
+            let read = crate::sdk::outcome_programs::read_setup(&lock.setup)
+                .map_err(|e| format!("locking the stake: {e}"))?;
+            claim_duel_nonce(session, &read.match_nonce)
+        }
+        Request::DuelReady { match_cell, .. }
+        | Request::DuelWithdraw { match_cell }
+        | Request::DuelSign { match_cell, .. }
+        | Request::DuelSettle { match_cell, .. } => match_of_session(session, match_cell),
+        Request::AcceptIssued { .. }
+        | Request::Pay { .. }
+        | Request::Quote { .. }
+        | Request::Swap { .. }
+        | Request::Holdings { .. }
+        | Request::Contacts
+        | Request::EscrowLock(..)
+        | Request::EscrowRelease { .. }
+        | Request::DuelCollect { .. } => Ok(()),
+    }
+}
+
 fn own_player(core: &crate::sdk::core_sdk::CoreSDK) -> Result<Player, String> {
     let me = crate::sdk::escrow_flow::party(core)
         .map_err(|e| format!("this device as an escrow party: {e}"))?;
@@ -714,18 +772,38 @@ impl AppRouterImpl {
         held: &store::PendingRow,
     ) -> Result<Approved, String> {
         let (request_body, request) = read_request(&held.request, session)?;
-        if let Some(why) = waits(&self.core_sdk, session, &request)? {
-            store::approve_pending(&session.session_id, request_body.seq)
-                .map_err(|e| e.to_string())?;
-            return Ok(Approved::Waits(why));
+        let seq = request_body.seq;
+        let keep = |why: String| {
+            store::approve_pending(&session.session_id, seq)
+                .map(|()| Approved::Waits(why))
+                .map_err(|e| e.to_string())
+        };
+        // Nothing runs while the wallet is locked: the approval is kept.
+        if let Some(locked) = held_by_lock()? {
+            return keep(locked);
         }
         let summary = describe_request(&request);
-        let executed = self.execute(session, request_body.seq, &request).await;
+        if let Some(committed) = self.finish_committed(session, seq, &summary)? {
+            return Ok(Approved::Done(
+                generated::ConnectOutcome::CarriedOut,
+                committed,
+            ));
+        }
+        if let Some(why) = waits(&self.core_sdk, session, &request)? {
+            return keep(why);
+        }
+        // Approved by hand, outside the grant: what it commits is bound to
+        // it, and counts nothing against the grant.
+        let executed = crate::sdk::connect::operations::carrying_out(
+            session.session_id,
+            seq,
+            None,
+            self.execute(session, seq, &request),
+        )
+        .await;
         let outcome = executed.outcome;
         let reason = executed.reason.clone();
-        // Approved by hand, outside the grant: it never counts against the
-        // grant's totals.
-        self.finish(session, request_body.seq, summary, executed, None)?;
+        self.finish(session, seq, summary, executed, None)?;
         Ok(Approved::Done(outcome, reason))
     }
 
@@ -834,6 +912,9 @@ impl AppRouterImpl {
             return Ok(Flow::NotYet(format!("request {seq} waits: {locked}")));
         }
         let summary = describe_request(&request);
+        if self.finish_committed(session, seq, &summary)?.is_some() {
+            return Ok(Flow::Processed);
+        }
         let scopes = granted_scopes(&session.accept_body)?;
         let spent: BTreeMap<[u8; 32], u64> = store::spent_all(&session.session_id)
             .map_err(|e| e.to_string())?
@@ -862,7 +943,15 @@ impl AppRouterImpl {
                 if let Some(why) = waits(&self.core_sdk, session, &request)? {
                     return Ok(Flow::NotYet(format!("request {seq} waits: {why}")));
                 }
-                let executed = self.execute(session, seq, &request).await;
+                // What it commits is bound to it, with its spend, in the
+                // commit's own transaction.
+                let executed = crate::sdk::connect::operations::carrying_out(
+                    session.session_id,
+                    seq,
+                    spend,
+                    self.execute(session, seq, &request),
+                )
+                .await;
                 let spend = executed.spend(spend);
                 self.finish(session, seq, summary, executed, spend)?;
                 Ok(Flow::Processed)
@@ -895,6 +984,37 @@ impl AppRouterImpl {
                 Ok(Flow::Waiting)
             }
         }
+    }
+
+    /// Record request `seq` as carried out when it committed operations
+    /// before it could be recorded (a failed write, a crash between the two):
+    /// it is never carried out again, and its spend was counted with its
+    /// first operation (SA-60). What it says, when it did; `None` when it
+    /// committed nothing.
+    fn finish_committed(
+        &self,
+        session: &store::WalletSession,
+        seq: u64,
+        summary: &str,
+    ) -> Result<Option<String>, String> {
+        let committed =
+            store::bound_operations(&session.session_id, seq).map_err(|e| e.to_string())?;
+        let Some(last) = committed.last() else {
+            return Ok(None);
+        };
+        let said = format!(
+            "carried out before it could be recorded ({} operation(s) committed, the last \
+             at {}); it is not carried out again",
+            committed.len(),
+            short(last)
+        );
+        let executed = Executed {
+            outcome: generated::ConnectOutcome::CarriedOut,
+            reason: said.clone(),
+            result: None,
+        };
+        self.finish(session, seq, summary.to_string(), executed, None)?;
+        Ok(Some(said))
     }
 
     /// Record `seq` as processed with its signed answer and `spend` counted
@@ -936,6 +1056,9 @@ impl AppRouterImpl {
         seq: u64,
         request: &Request,
     ) -> Executed {
+        if let Err(why) = duel_belongs_to(session, request) {
+            return Executed::failed(why);
+        }
         match request {
             Request::AcceptIssued { anchor } => {
                 if let Err(e) = self.root_anchor(anchor).await {
@@ -1147,7 +1270,7 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(e),
                 }
             }
-            Request::DuelCollect { vault_ids } => self.duel_collect(vault_ids).await,
+            Request::DuelCollect { vault_ids } => self.duel_collect(session, vault_ids).await,
         }
     }
 
@@ -1194,8 +1317,13 @@ impl AppRouterImpl {
     /// by `computed_flow::release`, which builds a release only once the
     /// match's outcome is final on a branch that pays this wallet. Every
     /// vault is checked first to be a stake in a match this wallet locked a
-    /// stake in itself; any other is no business of the application.
-    async fn duel_collect(&self, vault_ids: &[[u8; 32]]) -> Executed {
+    /// stake in itself, through this application; any other is no business of
+    /// the application.
+    async fn duel_collect(
+        &self,
+        session: &store::WalletSession,
+        vault_ids: &[[u8; 32]],
+    ) -> Executed {
         let checked = async {
             let set = own_set()?;
             for vault_id in vault_ids {
@@ -1210,6 +1338,7 @@ impl AppRouterImpl {
                         short(vault_id)
                     ));
                 }
+                match_of_session(session, &held.verdict_cell)?;
             }
             Ok::<_, String>(set)
         };
