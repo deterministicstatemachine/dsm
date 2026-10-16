@@ -290,6 +290,11 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
     out
 }
 
+/// The fewest bytes one encoded relationship tip takes: its key, chain tip and
+/// counterparty (32 each), its value-capability byte, and its entropy's
+/// 4-byte length (the entropy itself may be empty).
+const MIN_ENCODED_TIP_BYTES: usize = 32 + 32 + 32 + 1 + 4;
+
 /// Decode a [`DeviceState`] from bytes produced by [`encode_device_state`].
 ///
 /// Returns the decoded state and the stored `smt_root` sanity-check value;
@@ -333,6 +338,16 @@ pub fn decode_device_state(
     }
 
     let tip_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("tip count: {e}"))?;
+    // The count is the stored row's. Each tip it names takes at least
+    // MIN_ENCODED_TIP_BYTES of what follows, so a count the remaining bytes
+    // cannot hold is a corrupt row, refused before anything is allocated for
+    // it (a reservation sized by the count aborted the process at startup).
+    if tip_count > cursor.len() / MIN_ENCODED_TIP_BYTES {
+        return Err(anyhow!(
+            "device_state tip count {tip_count} exceeds what its {} remaining bytes hold",
+            cursor.len()
+        ));
+    }
     let mut tips_in_order: Vec<([u8; 32], RelChainTip)> = Vec::with_capacity(tip_count);
     for _ in 0..tip_count {
         let rk: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("tip rk: {e}"))?;
@@ -1072,6 +1087,35 @@ mod tests {
         let mut oob = bytes;
         oob[vc] = 9;
         assert!(decode_device_state(&oob, None).is_err());
+    }
+
+    /// SA-55. The tip count is the stored row's. A count the remaining bytes
+    /// cannot hold is a corrupt row, refused before anything is reserved for
+    /// it: a reservation sized by a count of u32::MAX tips aborted the process
+    /// at startup, before any error could be reported.
+    /// MUTATION CONTROL: reserving by the stored count unchecked (the old
+    /// decode) aborts or reports another error here, and turns this red.
+    #[test]
+    fn a_stored_tip_count_the_bytes_cannot_hold_is_refused_before_allocation() {
+        let (_, _rel_key, head) = head_with_state_less_tip();
+        let bytes = encode_device_state(&head);
+        // version, genesis, devid, the 64-byte public key with its length,
+        // smt_root, the absent-anchor flag and an empty balance count: then
+        // the tip count.
+        let tip_count_at = 1 + 32 + 32 + (4 + 64) + 32 + 1 + 4;
+        assert_eq!(
+            bytes[tip_count_at..tip_count_at + 4],
+            u32::try_from(head.relationship_keys().len())
+                .expect("a small count")
+                .to_le_bytes(),
+            "the encoding holds the head's tip count here"
+        );
+        decode_device_state(&bytes, None).expect("the honest row decodes");
+
+        let mut hostile = bytes;
+        hostile[tip_count_at..tip_count_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let err = decode_device_state(&hostile, None).expect_err("refused");
+        assert!(err.to_string().contains("tip count"), "{err}");
     }
 
     fn head_with_state_less_tip() -> ([u8; 32], [u8; 32], DeviceState) {

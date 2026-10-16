@@ -87,6 +87,27 @@ fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
 }
 
+/// Why `operation` may not move value out of this device now, if it may not:
+/// identity recovery is in progress (spec R3), or the operation's egress
+/// asset is held `LockedRecovery` until its own verified frontier reconciles
+/// (spec §0.4 P5). Fail-closed: an unreadable state refuses. An operation
+/// that moves no value out is never refused here.
+///
+/// The canonical advance checks this under the state-machine lock, atomic
+/// with its commit. A flow with an irreversible step before that commit — a
+/// BLE prepare, an anchor's COMMIT — checks it before that step too, so a
+/// refusal comes before anything is spent.
+pub(crate) fn value_egress_refusal(
+    operation: &dsm::types::operations::Operation,
+) -> Option<String> {
+    if !operation.is_value_egress() {
+        return None;
+    }
+    crate::storage::client_db::recovery::value_egress_block_reason()
+        .map(str::to_string)
+        .or_else(|| crate::storage::client_db::recovery::asset_egress_block_reason(operation))
+}
+
 #[derive(Clone, PartialEq, ::prost::Message)]
 struct TokenRegistryUpdateList {
     #[prost(message, repeated, tag = "1")]
@@ -1427,19 +1448,8 @@ impl CoreSDK {
         // the decision is atomic with the commit + capsule-currency bump below.
         // This closes the check-before-lock TOCTOU where two concurrent egress
         // ops could both pass before either marked the capsule dirty.
-        if is_egress {
-            if let Some(reason) = crate::storage::client_db::recovery::value_egress_block_reason() {
-                return Err(DsmError::invalid_operation(reason));
-            }
-            // P5 per-asset bearer gate (spec §0.4): in ADDITION to the identity-level gate
-            // above, a recovered bearer asset stays LockedRecovery until its OWN verified
-            // frontier reconciles — this persists AFTER recovery activation and is keyed by
-            // the operation's egress asset. Fail-closed (unreadable/locked → refuse).
-            if let Some(reason) =
-                crate::storage::client_db::recovery::asset_egress_block_reason(&operation)
-            {
-                return Err(DsmError::invalid_operation(reason));
-            }
+        if let Some(reason) = value_egress_refusal(&operation) {
+            return Err(DsmError::invalid_operation(reason));
         }
 
         // Enforce the token's committed policy on the operation that will

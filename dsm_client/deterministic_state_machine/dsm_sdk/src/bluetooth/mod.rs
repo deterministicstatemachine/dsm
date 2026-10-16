@@ -8,6 +8,7 @@
 
 pub mod anchor_accept;
 pub mod android_ble_bridge;
+pub mod awaited_contacts;
 pub mod bilateral_ble_handler;
 pub mod bilateral_envelope;
 pub mod bilateral_session;

@@ -181,7 +181,8 @@ pub struct BilateralSessionRecord {
 }
 
 /// Persisted BLE chunk for durable reassembly across connection drops.
-/// Stored in `ble_reassembly_state` table, keyed by (frame_commitment, chunk_index).
+/// Stored in the `ble_reassembly_chunks` table, keyed by
+/// (peer_link, frame_commitment, chunk_index).
 #[derive(Debug, Clone)]
 pub struct PersistedChunk {
     pub chunk_index: u16,
@@ -195,6 +196,9 @@ pub struct PersistedChunk {
 /// Parameters for persisting a BLE chunk.
 #[derive(Debug, Clone)]
 pub struct ChunkPersistenceParams<'a> {
+    /// The link the chunk arrived on: the peer's BLE address as the radio
+    /// reported it.
+    pub peer_link: &'a str,
     pub frame_commitment: &'a [u8; 32],
     pub chunk_index: u16,
     pub frame_type: i32,
@@ -202,5 +206,4 @@ pub struct ChunkPersistenceParams<'a> {
     pub payload_len: u32,
     pub chunk_data: &'a [u8],
     pub checksum: u32,
-    pub counterparty_id: Option<&'a [u8; 32]>,
 }

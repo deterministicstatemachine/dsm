@@ -143,6 +143,17 @@ fn stored_contact_tip(
     read.map_err(|e| DsmError::storage(format!("relationship tip: {e}"), None::<std::io::Error>))
 }
 
+/// The phases a signed rejection ends: a proposal still awaiting its answer,
+/// or — on the receiver — a proposal not yet confirmed. Past the confirm the
+/// step may have committed: a rejection then contradicts the rejector's own
+/// signatures and ends nothing.
+const REJECTABLE_PHASES: [BilateralPhase; 4] = [
+    BilateralPhase::Preparing,
+    BilateralPhase::Prepared,
+    BilateralPhase::PendingUserAction,
+    BilateralPhase::Accepted,
+];
+
 /// The per-step EK a local side signed a receipt with, for the caller to
 /// install as the local cert-chain head once the step's durability allows.
 struct SignedStepKey {
@@ -441,6 +452,20 @@ impl BilateralBleHandler {
         sessions.get(commitment_hash).map(|s| s.phase.clone())
     }
 
+    /// Persist `session` only while its stored phase is one of `from`: the
+    /// phase this write was decided on. A phase another path moved in the
+    /// meantime is not overwritten (a cancellation and a confirm, a rejection
+    /// and a commit, each decided on the phase before the other's write).
+    async fn persist_session_from(
+        &self,
+        session: &BilateralBleSession,
+        from: &[BilateralPhase],
+    ) -> Result<(), DsmError> {
+        let from: Vec<&str> = from.iter().map(phase_to_str).collect();
+        crate::storage::client_db::store_bilateral_session_from(&session.to_record()?, &from)
+            .map_err(|e| DsmError::invalid_operation(format!("Failed to persist session: {e}")))
+    }
+
     /// Persist a session to SQLite storage
     async fn persist_session(&self, session: &BilateralBleSession) -> Result<(), DsmError> {
         store_bilateral_session(&session.to_record()?).map_err(|e| {
@@ -458,18 +483,6 @@ impl BilateralBleHandler {
         &self,
         counterparty_device_id: &[u8; 32],
     ) -> usize {
-        // Sweep any orphaned BLE reassembly chunks for this counterparty.
-        // Terminal phase (Committed/Rejected/Failed) means no more chunks will
-        // arrive for this session — any persisted chunks are stale.
-        if let Err(e) =
-            crate::storage::client_db::delete_chunks_by_counterparty(counterparty_device_id)
-        {
-            warn!(
-                "[BLE_HANDLER] Failed to sweep BLE reassembly chunks for counterparty: {}",
-                e
-            );
-        }
-
         let records = match get_all_bilateral_sessions() {
             Ok(list) => list,
             Err(e) => {
@@ -689,6 +702,14 @@ impl BilateralBleHandler {
                 "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
                  online-tier transfer uses the network transport",
             ));
+        }
+        // The recovery egress gate, before anything is proposed. The canonical
+        // commit checks it again under its lock, but a bearer step's anchor
+        // spends a counter step long before that commit.
+        if let Some(reason) = crate::sdk::core_sdk::value_egress_refusal(&operation) {
+            return Err(DsmError::invalid_operation(format!(
+                "bilateral prepare refused: {reason}"
+            )));
         }
 
         // Through the proposer's door: the step in flight is read and the new
@@ -1479,12 +1500,8 @@ impl BilateralBleHandler {
         // The sender's genesis is the one its contact pins, not one the wire names.
         let counterparty_genesis_hash = Some(sender_genesis);
 
-        // Track session as PendingUserAction (NOT auto-accepted)
-        let commit_signature = {
-            let m = self.bilateral_tx_manager.read().await;
-            m.sign_commitment(&origin_commitment_hash)?
-        };
-
+        // Track session as PendingUserAction (NOT auto-accepted). σ_B is made
+        // when the user accepts: it signs the challenge issued then.
         let session = BilateralBleSession {
             commitment_hash: origin_commitment_hash,
             local_commitment_hash: Some(our_pre_commitment.bilateral_commitment_hash),
@@ -1492,7 +1509,7 @@ impl BilateralBleHandler {
             counterparty_genesis_hash,
             operation,
             phase: BilateralPhase::PendingUserAction, // Awaiting user accept/reject
-            local_signature: Some(commit_signature),
+            local_signature: None,
             counterparty_signature: None,
             sender_ble_address: sender_ble_address.clone(),
             stitched_receipt_bytes: None,
@@ -1625,6 +1642,13 @@ impl BilateralBleHandler {
         let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
             .try_into()
             .map_err(|_| DsmError::invalid_operation("random_bytes(32) wrong length"))?;
+        // σ_B: the acceptance of the step and of the challenge it issues, so
+        // the proposer stages its release only toward this challenge.
+        let acceptance_signature = self
+            .bilateral_tx_manager
+            .read()
+            .await
+            .sign_acceptance(&origin_commitment_hash, &receiver_challenge)?;
 
         // Detached ML-KEM identity binding (ADR 0002), as on the request path. Without it there
         // is no response to send.
@@ -1635,11 +1659,7 @@ impl BilateralBleHandler {
             commitment_hash: Some(generated::Hash32 {
                 v: origin_commitment_hash.to_vec(),
             }),
-            local_signature: session.local_signature.clone().ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "the receiver's session holds no signature over the commitment",
-                )
-            })?,
+            local_signature: acceptance_signature.clone(),
             counterparty_state_hash: Some(generated::Hash32 {
                 v: shared_chain_tip.to_vec(),
             }),
@@ -1673,9 +1693,11 @@ impl BilateralBleHandler {
         // and the challenge the confirm's release must bind.
         let mut accepted = session.clone();
         accepted.phase = BilateralPhase::Accepted;
+        accepted.local_signature = Some(acceptance_signature);
         accepted.receiver_challenge = Some(receiver_challenge);
         accepted.owed_frame = Some(buffer.clone());
-        self.persist_session(&accepted).await?;
+        self.persist_session_from(&accepted, &[BilateralPhase::PendingUserAction])
+            .await?;
         self.sessions
             .sessions
             .lock()
@@ -1764,7 +1786,8 @@ impl BilateralBleHandler {
         let mut rejected = session;
         rejected.phase = BilateralPhase::Rejected;
         rejected.owed_frame = Some(rejection.clone());
-        self.persist_session(&rejected).await?;
+        self.persist_session_from(&rejected, &[BilateralPhase::PendingUserAction])
+            .await?;
         let pending_key = rejected
             .local_commitment_hash
             .unwrap_or(origin_commitment_hash);
@@ -1881,8 +1904,7 @@ impl BilateralBleHandler {
             terms,
         })
         .await?;
-        // No pruning here: it also sweeps the contact's BLE reassembly
-        // chunks, and another step with the contact is in flight.
+        // No pruning here: another step with the contact is in flight.
         self.emit_event(&generated::BilateralEventNotification {
             // Rendered in emit_event, the one boundary all emitters cross.
             display_amount: None,
@@ -1936,7 +1958,13 @@ impl BilateralBleHandler {
         let mut cancelled = session;
         cancelled.phase = BilateralPhase::Rejected;
         cancelled.owed_frame = Some(cancellation.clone());
-        self.persist_session(&cancelled).await?;
+        // Under the stored phase the cancellation was decided on: a confirm
+        // that went out meanwhile is not overwritten, and nothing is ended.
+        self.persist_session_from(
+            &cancelled,
+            &[BilateralPhase::Preparing, BilateralPhase::Prepared],
+        )
+        .await?;
         let counterparty_device_id = cancelled.counterparty_device_id;
         self.sessions
             .sessions
@@ -2013,17 +2041,7 @@ impl BilateralBleHandler {
                     "the rejection is not from the device the proposal went to",
                 ));
             }
-            // A proposal still awaiting its answer, or — on the receiver — a
-            // proposal not yet confirmed. Past the confirm the step may have
-            // committed: a rejection then contradicts the rejector's own
-            // signatures and ends nothing.
-            if !matches!(
-                session.phase,
-                BilateralPhase::Preparing
-                    | BilateralPhase::Prepared
-                    | BilateralPhase::PendingUserAction
-                    | BilateralPhase::Accepted
-            ) {
+            if !REJECTABLE_PHASES.contains(&session.phase) {
                 return Err(DsmError::invalid_operation(
                     "a rejection ends only a step that has not been confirmed",
                 ));
@@ -2039,7 +2057,10 @@ impl BilateralBleHandler {
             &reject.rejector_signature,
         )?;
 
-        self.persist_session(&rejected_session).await?;
+        // Written only from a phase a rejection may end: a confirm or commit
+        // made while the rejection was being verified is not overwritten.
+        self.persist_session_from(&rejected_session, &REJECTABLE_PHASES)
+            .await?;
         if let Some(session) = self
             .sessions
             .sessions
@@ -2272,7 +2293,7 @@ impl BilateralBleHandler {
             }
             let mut accepted = session.clone();
             accepted.counterparty_signature = Some(acceptance.signature);
-            accepted.receiver_challenge = acceptance.receiver_challenge;
+            accepted.receiver_challenge = Some(acceptance.receiver_challenge);
             accepted.phase = BilateralPhase::Accepted;
             accepted
         };
@@ -2586,6 +2607,28 @@ impl BilateralBleHandler {
                             "offline-bearer: simulation produced no anchor-state proofs (fail closed)",
                         )
                     })?;
+                // The anchor's COMMIT below spends a counter step: the
+                // recovery egress gate is checked before it, not only at the
+                // step's commit after the ack. Staging changed nothing on the
+                // appliance, so a refusal here leaves nothing to cancel.
+                if let Some(reason) = crate::sdk::core_sdk::value_egress_refusal(&session.operation)
+                {
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline-bearer release refused before the anchor commits: {reason}"
+                    )));
+                }
+                // A proposal cancelled while its confirm was being built is
+                // not released: the confirm's own write would refuse it after
+                // the counter step was spent.
+                crate::storage::client_db::require_bilateral_session_phase(
+                    &commitment_hash,
+                    &[phase_to_str(&BilateralPhase::Prepared)],
+                )
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!(
+                        "offline-bearer release refused before the anchor commits: {e}"
+                    ))
+                })?;
                 match router.release_offline_bearer(
                     staged,
                     *r_r,
@@ -2729,8 +2772,14 @@ impl BilateralBleHandler {
                 signed_key.used_root_ak,
             )
             .map_err(storage)?;
-            crate::storage::client_db::store_bilateral_session_with_conn(&tx, &record)
-                .map_err(storage)?;
+            // From the phase the prepare left: a cancellation written while
+            // the confirm was built ends the step, and the confirm is not sent.
+            crate::storage::client_db::store_bilateral_session_from_with_conn(
+                &tx,
+                &record,
+                &[phase_to_str(&BilateralPhase::Prepared)],
+            )
+            .map_err(storage)?;
             tx.commit()
                 .map_err(|e| DsmError::storage(e.to_string(), None::<std::io::Error>))
         });
@@ -3120,7 +3169,8 @@ impl BilateralBleHandler {
             session.counter_signed_receipt = Some(counter_signed_receipt.to_vec());
             session
         };
-        self.persist_session(&with_receipt).await?;
+        self.persist_session_from(&with_receipt, &[BilateralPhase::ConfirmPending])
+            .await?;
         self.sessions
             .sessions
             .lock()
@@ -3336,13 +3386,10 @@ impl BilateralBleHandler {
                 kyber_public_key: &sender_contact.kyber_public_key,
             },
         )?;
-        let dsm::bilateral::offline::VerifiedConfirm {
-            receipt,
-            successor_tip: new_chain_tip,
-        } = verified;
+        let new_chain_tip = verified.successor_tip();
         // The sender's outbound EK chain has moved to this key; the step's
         // commit mirrors it so the next step chains from it.
-        let verified_a_side_ek_pk: Vec<u8> = receipt.ek_pk_a.clone();
+        let verified_a_side_ek_pk: Vec<u8> = verified.receipt().ek_pk_a.clone();
 
         // Offline-bearer acceptance (OFFLINE_BEARER_REQUIRED transfers only). Canonical predicate:
         // the v2 Software-Authority / Hardware-Identity `accept_offline` via `anchor_accept` —
@@ -3387,12 +3434,6 @@ impl BilateralBleHandler {
                      prepare response that issues it was never recorded",
                 )
             })?;
-            // The sender's device roots as the receipt states them, verified above against the
-            // one relationship path (r_A authenticates h_n; the same siblings folded with h_{n+1}
-            // are r'_A). The predicate ties the release cert's roots to exactly these, so a cert
-            // signed over a parallel tree is rejected.
-            let sender_smt_root: [u8; 32] = receipt.child_root;
-            let sender_smt_root_before: [u8; 32] = receipt.parent_root;
             // Receiver-admit fold: on the FIRST bearer transfer from this ALREADY-VERIFIED contact,
             // admit (pin) the sender's disclosed fused anchor — bound to THIS confirm's disclosure +
             // release + commitment, never standalone and never from a release alone. Existing-pin
@@ -3426,15 +3467,16 @@ impl BilateralBleHandler {
                         None::<std::io::Error>,
                     )
                 })?;
+            // The predicate runs against the confirm Core verified: the release's device roots
+            // and anchor leaves must be the ones its receipt proves.
             let adopted = crate::bluetooth::anchor_accept::accept_offline_release(
+                &verified,
                 &confirm_request.offline_release,
                 pinned.as_ref(),
                 accepted_root.as_ref().map(|(r, _)| r),
                 &self.device_id,
                 &expected_receiver_challenge,
                 &policy_hash,
-                &sender_smt_root_before,
-                &sender_smt_root,
             )
             .map_err(|r| r.into_dsm_error())?;
             // Persisted AFTER the canonical commit below succeeds (deferred, like
@@ -3642,7 +3684,7 @@ impl BilateralBleHandler {
                 [
                     crate::sdk::economic_admission_flow::EkStep::of_sender(
                         &counterparty_device_id,
-                        &receipt,
+                        verified.receipt(),
                     ),
                     crate::sdk::economic_admission_flow::EkStep::of_receiver(
                         &self.device_id,
@@ -3650,8 +3692,12 @@ impl BilateralBleHandler {
                     ),
                 ],
             )?;
-            crate::storage::client_db::delete_bilateral_session_with_conn(tx, &commitment_hash)
-                .map_err(|e| storage("the session's end", e))?;
+            crate::storage::client_db::delete_bilateral_session_from_with_conn(
+                tx,
+                &commitment_hash,
+                &[phase_to_str(&BilateralPhase::Accepted)],
+            )
+            .map_err(|e| storage("the session's end", e))?;
             Ok(())
         };
         router
@@ -3858,7 +3904,7 @@ impl BilateralBleHandler {
         // Get session info before locking manager
         let (
             counterparty_device_id,
-            counterparty_sig,
+            counterparty_acceptance,
             session_operation,
             own_receipt,
             counter_signed_receipt,
@@ -3877,13 +3923,12 @@ impl BilateralBleHandler {
                 }
             };
 
-            let sig = match &sess.counterparty_signature {
-                Some(s) => s.clone(),
-                None => {
-                    return Err(DsmError::invalid_operation(
-                        "the session holds no counterparty acceptance",
-                    ))
-                }
+            let (Some(sig), Some(challenge)) =
+                (&sess.counterparty_signature, sess.receiver_challenge)
+            else {
+                return Err(DsmError::invalid_operation(
+                    "the session holds no counterparty acceptance and the challenge it signed",
+                ));
             };
             // The receiver's counter-signed receipt (kept from the verified
             // ack) is this step's proof, and the sender's own receipt carries
@@ -3901,7 +3946,7 @@ impl BilateralBleHandler {
 
             (
                 sess.counterparty_device_id,
-                sig,
+                (sig.clone(), challenge),
                 sess.operation.clone(),
                 own.clone(),
                 counter.clone(),
@@ -3963,7 +4008,10 @@ impl BilateralBleHandler {
                 .prepare_bilateral_advance(
                     &counterparty_device_id,
                     commitment_hash,
-                    &counterparty_sig,
+                    dsm::core::bilateral_transaction_manager::ReceiverAcceptance {
+                        signature: &counterparty_acceptance.0,
+                        receiver_challenge: &counterparty_acceptance.1,
+                    },
                     Vec::new(),
                     session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
                     session_offline_spend, // bearer→allocation: the SAME allocation debit the confirm-build sim used
@@ -4167,8 +4215,12 @@ impl BilateralBleHandler {
                     ),
                 ],
             )?;
-            crate::storage::client_db::delete_bilateral_session_with_conn(tx, commitment_hash)
-                .map_err(|e| storage("the session's end", e))
+            crate::storage::client_db::delete_bilateral_session_from_with_conn(
+                tx,
+                commitment_hash,
+                &[phase_to_str(&BilateralPhase::ConfirmPending)],
+            )
+            .map_err(|e| storage("the session's end", e))
         };
         let outcome = match router.execute_on_relationship_for_bilateral(
             prepared.rel_key,
@@ -4866,13 +4918,18 @@ mod tests {
         };
         let pending = [0xA6u8; 32];
         let answered = [0xA7u8; 32];
-        handler
-            .test_insert_session(session(pending, BilateralPhase::Prepared))
-            .await;
         // Answered: the proposer confirmed it (its receiver may have committed).
-        handler
-            .test_insert_session(session(answered, BilateralPhase::ConfirmPending))
-            .await;
+        // Each session is stored before it is held, as the handler holds one.
+        for held in [
+            session(pending, BilateralPhase::Prepared),
+            session(answered, BilateralPhase::ConfirmPending),
+        ] {
+            handler
+                .persist_session(&held)
+                .await
+                .expect("store the session");
+            handler.test_insert_session(held).await;
+        }
 
         let rejection = |commitment_hash: [u8; 32], rejector: [u8; 32], signature: Vec<u8>| {
             let reject = generated::BilateralPrepareReject {
@@ -5313,7 +5370,8 @@ mod tests {
             sender_ble_address: None,
             stitched_receipt_bytes: Some(vec![4u8; 8]),
             counter_signed_receipt: Some(vec![4u8; 8]),
-            receiver_challenge: None,
+            // A confirmed step holds the challenge its acceptance signed.
+            receiver_challenge: Some([3u8; 32]),
             anchor_leaf: None,
             sent_child_root: None,
             offline_spend: Some(dsm::types::device_state::OfflineSpend {

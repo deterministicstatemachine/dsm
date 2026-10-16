@@ -1507,12 +1507,20 @@ fn trace_keypair(side: ([u8; 32], [u8; 32])) -> Result<SignatureKeyPair, String>
 
 /// The receiver's acceptance proof σ_B, exactly what
 /// `BilateralTransactionManager::verify_receiver_acceptance_proof` checks:
-/// a signature over `"DSM/bilateral-sign\0" || commitment_hash`.
-fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(22 + 32);
-    msg.extend_from_slice(b"DSM/bilateral-sign\0");
-    msg.extend_from_slice(commitment_hash);
-    kp.sign(&msg).expect("receiver acceptance signature")
+/// a signature over the step's commitment and the challenge the receiver
+/// issues with it (`bilateral_accept_sign_message`).
+fn receiver_acceptance_sig(
+    kp: &SignatureKeyPair,
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    kp.sign(
+        &dsm::core::bilateral_transaction_manager::bilateral_accept_sign_message(
+            commitment_hash,
+            receiver_challenge,
+        ),
+    )
+    .expect("receiver acceptance signature")
 }
 
 /// One side of a bilateral trace pair: the sender's manager over its tip
@@ -1648,11 +1656,22 @@ async fn trace_commit_prepared(
 ) -> Result<TraceCommit, String> {
     use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
     use dsm::core::chain_tip_store::ChainTipStore;
+    // The receiver's challenge, drawn as the receiver draws it.
+    let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+        .try_into()
+        .map_err(|e| format!("the receiver challenge is not 32 bytes: {e:?}"))?;
     let prepared = manager
         .prepare_bilateral_advance(
             remote_device_id,
             pre_commitment_hash,
-            &receiver_acceptance_sig(remote_kp, pre_commitment_hash),
+            dsm::core::bilateral_transaction_manager::ReceiverAcceptance {
+                signature: &receiver_acceptance_sig(
+                    remote_kp,
+                    pre_commitment_hash,
+                    &receiver_challenge,
+                ),
+                receiver_challenge: &receiver_challenge,
+            },
             vec![BalanceDelta {
                 policy_commit: era_policy_commit(),
                 direction: BalanceDirection::Debit,

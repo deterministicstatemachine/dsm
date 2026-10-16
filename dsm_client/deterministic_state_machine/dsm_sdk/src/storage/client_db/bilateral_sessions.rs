@@ -62,6 +62,76 @@ pub fn store_bilateral_session(session: &BilateralSessionRecord) -> Result<()> {
     Ok(())
 }
 
+/// Store `session` only while its step's stored phase is one of `from`, in
+/// one transaction: the read of the phase and the write are one
+/// compare-and-set. A write decided on a phase that another path has since
+/// moved — a cancellation racing a confirm, a rejection racing a commit — is
+/// refused, and the phase stored stays as that path left it.
+pub fn store_bilateral_session_from(session: &BilateralSessionRecord, from: &[&str]) -> Result<()> {
+    let binding = get_db_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("Database lock poisoned: {e}"))?;
+    let tx = conn.transaction()?;
+    store_bilateral_session_from_with_conn(&tx, session, from)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`store_bilateral_session_from`] inside `conn`, the transaction the
+/// session's step state commits in.
+pub fn store_bilateral_session_from_with_conn(
+    conn: &rusqlite::Connection,
+    session: &BilateralSessionRecord,
+    from: &[&str],
+) -> Result<()> {
+    require_stored_phase(conn, &session.commitment_hash, from)?;
+    store_bilateral_session_with_conn(conn, session)
+}
+
+/// End the step `commitment_hash`'s session inside `conn` only while its
+/// stored phase is one of `from`.
+pub fn delete_bilateral_session_from_with_conn(
+    conn: &rusqlite::Connection,
+    commitment_hash: &[u8],
+    from: &[&str],
+) -> Result<()> {
+    require_stored_phase(conn, commitment_hash, from)?;
+    delete_bilateral_session_with_conn(conn, commitment_hash)
+}
+
+/// Whether the step `commitment_hash`'s stored phase is still one of `from`:
+/// an error names the phase it moved to, or that no session is stored.
+pub fn require_bilateral_session_phase(commitment_hash: &[u8], from: &[&str]) -> Result<()> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("Database lock poisoned: {e}"))?;
+    require_stored_phase(&conn, commitment_hash, from)
+}
+
+fn require_stored_phase(
+    conn: &rusqlite::Connection,
+    commitment_hash: &[u8],
+    from: &[&str],
+) -> Result<()> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT phase FROM bilateral_sessions WHERE commitment_hash = ?1",
+            params![commitment_hash],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match stored {
+        Some(phase) if from.contains(&phase.as_str()) => Ok(()),
+        Some(phase) => Err(anyhow!(
+            "the step's session moved to {phase} (this write expected one of {from:?}); it is \
+             not overwritten"
+        )),
+        None => Err(anyhow!("the step's session is not stored")),
+    }
+}
+
 /// Store or update a bilateral session inside `conn`, the transaction the
 /// session's step state commits in. A commit input once written is kept: an
 /// update that does not carry it leaves it as it was.
