@@ -45,6 +45,10 @@ const READ_METHODS = new Set([
   'phoneContactPhoto',
   // Opens the share sheet with the text the user chose to share; writes nothing.
   'shareText',
+  // Guards the phone's window while a phrase or a confirmation is shown; writes nothing.
+  'setScreenGuards',
+  // Names the build (debug or release); writes nothing.
+  'buildType',
 ]);
 
 /** The preferences the tour's shell lessons change: how the app looks and sounds, and the skin's switches. */

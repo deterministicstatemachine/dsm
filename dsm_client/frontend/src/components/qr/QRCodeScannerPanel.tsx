@@ -13,6 +13,7 @@ import type { ContactCard } from '../../dsm/types';
 import type { PersonProfile } from '../../domain/types';
 import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
 import { bytesToDisplay } from '../../contexts/contacts/utils';
+import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 import { Notice } from '../common/ScreenFrame';
 import logger from '../../utils/logger';
@@ -37,7 +38,7 @@ function messageOf(e: unknown): string {
 
 export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): React.JSX.Element {
   const { eraTokenSrc = 'images/logos/era_token_gb.gif' } = props;
-  const { addContact } = useContacts();
+  const { addContact, contacts } = useContacts();
   const [phase, setPhase] = useState<ScanPhase>({ status: 'idle' });
   const [initializing, setInitializing] = useState(false);
   const [aliasInput, setAliasInput] = useState<string>('');
@@ -143,6 +144,10 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
 
   // While the found-contact card is up, B puts it away and A adds.
   const promptOpen = phase.status === 'prompt';
+  // The contacts that already go by the alias this device is about to get.
+  const namesakes = phase.status === 'prompt'
+    ? contactsNamed(contacts, aliasInput, bytesToDisplay(phase.card.deviceId))
+    : [];
   useBackButton(promptOpen, dismissPrompt);
   useConfirmButton(promptOpen, () => { void onConfirmAdd(); });
 
@@ -271,7 +276,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
             <div className="sb-popover__body">
               <div className="sb-kv">
                 <span className="sb-kv__k">Device</span>
-                <span className="sb-kv__v sb-kv__v--mono">{bytesToDisplay(phase.card.deviceId).slice(0, 16)}…</span>
+                <span className="sb-kv__v sb-kv__v--mono">{deviceFingerprint(phase.card.deviceId)}</span>
               </div>
               <div className="sb-kv">
                 <span className="sb-kv__k">Genesis</span>
@@ -288,6 +293,12 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
                   onChange={e => setAliasInput(e.target.value)}
                 />
               </div>
+              {namesakes.length > 0 ? (
+                <Notice kind="error">
+                  You already have a contact named {aliasInput.trim()} ({namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
+                  Give this device a name you can tell apart.
+                </Notice>
+              ) : null}
               {phase.profile.email.length > 0 ? (
                 <div className="sb-kv"><span className="sb-kv__k">Email</span><span className="sb-kv__v">{phase.profile.email}</span></div>
               ) : null}

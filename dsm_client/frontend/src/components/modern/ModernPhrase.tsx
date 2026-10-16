@@ -2,11 +2,13 @@
 // A new wallet's recovery phrase in the Modern skin: the same steps as the
 // Game Boy's (runtime/recoveryPhraseStore): the words a page at a time to
 // write down, then a few picked back out before the wallet is created from
-// the phrase. The phrase stays in memory and is never logged.
+// the phrase. The phrase stays in memory and is never logged, and while this
+// screen is up the phone takes no screenshot of it (useScreenGuard).
 
 import React from 'react';
 import { CHECKED_WORDS, cryptoDraw, pageCount, pageWords, PHRASE_PAGE_SIZE } from '../../onboarding/recoveryPhrase';
 import { recoveryPhraseStore, useRecoveryPhraseStore } from '../../runtime/recoveryPhraseStore';
+import { useScreenGuard } from '../../hooks/useScreenGuard';
 import logger from '../../utils/logger';
 
 const STEPS = ['Write down', 'Check', 'Create'] as const;
@@ -25,6 +27,7 @@ function Steps({ at }: { at: number }): React.JSX.Element {
 
 export default function ModernPhrase({ onCancel, onAnswer }: { onCancel: () => void; onAnswer: (word: string) => Promise<void> }): React.JSX.Element {
   const stage = useRecoveryPhraseStore();
+  useScreenGuard('secret');
 
   if (stage.status === 'complete' || stage.words.length === 0) {
     return (

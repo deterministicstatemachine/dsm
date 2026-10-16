@@ -2,7 +2,9 @@
 // The Modern skin's Send page: who, how much, a note, review, send. The send
 // is the one both skins make (domain/sendTransfer). When the sender has email
 // receipts on and the person has an email, a receipt follows; the send never
-// waits on it or depends on it.
+// waits on it or depends on it. The review names the device paid by its
+// fingerprint beside the person's name, and says when another contact goes by
+// the same name: a name is what the person chose, the device is who is paid.
 
 import React, { useMemo, useState } from 'react';
 import { useWallet } from '../../contexts/WalletContext';
@@ -14,6 +16,8 @@ import UnderConstructionModal from '../UnderConstructionModal';
 import { Avatar, Icon, PageTitle, Sheet, mainBalance, personName, sendable } from './parts';
 import { modernNav } from './modernNav';
 import type { DomainContact } from '../../domain/types';
+import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
+import { ScreenGuard } from '../common/ScreenGuard';
 
 const QUICK = ['10', '50', '100', '200'];
 
@@ -40,6 +44,8 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
   const [stage, setStage] = useState<Stage>({ kind: 'form' });
 
   const contact: DomainContact | null = contacts.find((c) => c.deviceId === recipient) ?? null;
+  // Other contacts who go by the same name as the one paid.
+  const namesakes = contact !== null ? contactsNamed(contacts, personName(contact), contact.deviceId) : [];
   const token = tokens.find((b) => b.tokenId === tokenId) ?? (tokens.length > 0 ? tokens[0] : null);
   const amountOk = /^\d+(\.\d+)?$/.test(amount.trim()) && Number(amount) > 0;
   // What still stands between the form and a review, said rather than shown
@@ -192,8 +198,16 @@ export default function ModernSend({ to, tokenId: asked }: { to: string | null; 
 
       {stage.kind === 'review' && contact !== null && token !== null ? (
         <Sheet label="Review send" onClose={() => setStage({ kind: 'form' })}>
+          <ScreenGuard kind="confirm" />
           <h2>Send {amount.trim()} {token.symbol}?</h2>
           <p>To <strong>{personName(contact)}</strong>{note.length > 0 ? ` · “${note}”` : ''}</p>
+          <p data-testid="send-review-device">Device <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{deviceFingerprint(contact.deviceId)}</strong></p>
+          {namesakes.length > 0 ? (
+            <div className="s-notice s-error" role="alert">
+              Also named {personName(contact)}: {namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}.
+              Check the device above is the person you mean.
+            </div>
+          ) : null}
           {runtime.receiptsEmail === 'on' && contact.profile?.email ? <p>A receipt will be emailed to {contact.profile.email}.</p> : null}
           <div className="s-stack">
             <button type="button" className="s-btn s-btn-primary" onClick={send}><Icon name="send" /> Send now</button>

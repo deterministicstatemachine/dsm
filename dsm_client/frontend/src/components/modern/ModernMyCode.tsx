@@ -2,15 +2,19 @@
 // Your DSM contact code in the Modern skin: the QR for someone to scan, the
 // whole code written out underneath for them to paste, and Copy and Share.
 // Receive, My Card and Add Contact all show it, since being added starts here.
+// Under it, this device's fingerprint: the one a sender's review shows beside
+// your name, for the two of you to compare.
 
 import React, { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import { getContactCode } from '../../dsm/contacts';
+import { getDeviceIdBinBridgeAsync } from '../../dsm/WebViewBridge';
+import { deviceFingerprint } from '../../domain/displayName';
 import { shareText } from '../../dsm/WebViewBridge/phoneContacts';
 import { copyText } from '../../utils/anchorDisplay';
 import { Icon } from './parts';
 
-type Code = { kind: 'reading' } | { kind: 'read'; code: string; qr: string } | { kind: 'failed'; message: string };
+type Code = { kind: 'reading' } | { kind: 'read'; code: string; qr: string; device: string } | { kind: 'failed'; message: string };
 
 function messageOf(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -26,9 +30,13 @@ export default function ModernMyCode({ heading }: { heading: string }): React.JS
     let live = 'yes';
     setCode({ kind: 'reading' });
     getContactCode()
-      .then(async (text) => ({ text, qr: await QRCode.toDataURL(text, { errorCorrectionLevel: 'M', margin: 1, width: 440 }) }))
+      .then(async (text) => ({
+        text,
+        qr: await QRCode.toDataURL(text, { errorCorrectionLevel: 'M', margin: 1, width: 440 }),
+        device: deviceFingerprint(await getDeviceIdBinBridgeAsync()),
+      }))
       .then(
-        ({ text, qr }) => { if (live === 'yes') setCode({ kind: 'read', code: text, qr }); },
+        ({ text, qr, device }) => { if (live === 'yes') setCode({ kind: 'read', code: text, qr, device }); },
         (e: unknown) => { if (live === 'yes') setCode({ kind: 'failed', message: messageOf(e) }); },
       );
     return () => { live = 'no'; };
@@ -63,6 +71,9 @@ export default function ModernMyCode({ heading }: { heading: string }): React.JS
             value={code.code}
             onClick={(e) => e.currentTarget.select()}
           />
+          <p className="s-hint" data-testid="my-device-fingerprint" style={{ textAlign: 'center', marginTop: 10 }}>
+            Your device <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{code.device}</strong>: a sender sees it beside your name.
+          </p>
           <div className="s-actions" style={{ marginTop: 12, marginBottom: 0 }}>
             <button type="button" className="s-btn s-btn-primary s-btn-small" style={{ width: '100%' }} onClick={() => share(code.code)}>
               <Icon name="share" /> Share

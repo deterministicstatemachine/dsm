@@ -12,6 +12,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import { useFx } from './fx/FxProvider';
 import { getPendingBilateralListStrictBridge } from '../dsm/WebViewBridge';
 import { decodeOfflinePendingList } from '../domain/bilateral';
+import { ScreenGuard } from './common/ScreenGuard';
 
 interface BilateralTransferDialogProps {
   /** Optional: limit to specific contact alias */
@@ -213,6 +214,8 @@ export const BilateralTransferDialog: React.FC<BilateralTransferDialogProps> = (
     <div className="bilateral-transfer-overlay">
       {incomingTransfer && (
         <div className="bilateral-transfer-dialog">
+          {/* Accepting is irreversible: no other app's window may sit over it. */}
+          <ScreenGuard kind="confirm" />
           <div className="bilateral-transfer-header">
             <h3>Incoming Offline Transfer</h3>
           </div>
