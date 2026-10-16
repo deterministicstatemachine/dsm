@@ -93,6 +93,7 @@ pub mod prelude;
 pub mod recovery;
 pub mod shared_lineage; // shared lineages: discovery without authority (DSM A15, SoFi S23)
 pub mod sofi; // SoFi v8 wire registry and pure derivations (dark)
+pub mod spool; // the b0x spool's limits (storage spec §8)
 pub mod storage;
 pub mod types;
 pub mod utils;

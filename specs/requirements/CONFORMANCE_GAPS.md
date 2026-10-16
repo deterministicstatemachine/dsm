@@ -3112,6 +3112,53 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 |---|---|---|---|
 | MR-DSM-0322 to MR-DSM-0325 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
 
+### 6.84 One storage member could stop or exhaust every reader that asked it (`fix/storage-member-cannot-deny-reads`, security audit of `f160d22c`, 2026-10-15)
+
+**The findings.** A member is untrusted (storage spec §4), yet one hostile member could deny service to every wallet that read from it, whatever the other members held:
+
+- *A panic on its namespace.* An object read took the member's `x-namespace` answer as a domain. `TaggedHashDomain::try_new` refused only an empty or NUL-bearing one, and `dsm_domain_hasher` asserted the `DSM/` or `DJTE.` prefix, so `x-namespace: x` panicked the read (`SetClient::fetch_verified`, `sofi::storage::counts`).
+- *An index read that never ended.* `SetClient::read_index` stopped only on a short page or once it held enough addresses. A member that answered every page full, with entries that were not addresses, kept it going for ever under the `join_all` every locator resolution waits on. A member that answered the same page again had its addresses read as more of its index.
+- *Unbounded answers.* Every SDK read of another party's answer, whether a member, an application relay or the receipt service, was `bytes().await`, bounded only by its timeout. The relay put whole refusal bodies into error strings. No client refused redirects, so a `307` could move a request to plain HTTP.
+
+**Fixed.**
+- `TaggedHashDomain` refuses a domain outside `DSM/` and `DJTE.` when it is built (`DomainError::Unprefixed`; a compile error for `from_static`), so a member's namespace answer is refused where it is read. The hasher's asserts are gone, and the node's `validate_namespace` uses the type's check. Owner, 2026-10-15: `DJTE.` stays representable, as the join-triggered emissions family that goes with those emissions.
+- `MemberClient::index` reads a member's index for at most as many pages as the budget's addresses fill. A page longer than a page, an entry that is not an address, or a sequence that does not move past the last is the member not answering (`None`), and nothing it sent before is taken for its index.
+- `sdk::bounded_read` reads every answer body within a bound fixed before it arrives. The announced length is checked before any byte is read, and the bound again as the body streams. A refused answer is refused whole. Each kind with a protocol limit is read within the largest honest answer of that kind, derived from the kind's constants:
+  - object payloads, from `storage_object::MAX_IMMUTABLE_PAYLOAD_BYTES`;
+  - index pages, from `storage_object::MAX_INDEX_PAGE`;
+  - spool pages, from `spool::MAX_BATCH_RETRIEVE` × `spool::MAX_ENVELOPE_BYTES`, with the envelope count checked before decoding;
+  - ByteCommits and cell proofs, from the member id and `storage_cell::CELL_TREE_DEPTH`;
+  - arrival records, a put's address, and a wait's ready list, from what was sent;
+  - relay offers and the receipt result, from the proto's `dsm_max_len`.
+- The node-private constants named above moved into `dsm` so the node and the reader share one definition.
+- Refusal bodies are not read. The member, relay and receipt-service clients follow no redirect.
+
+**Open (owner ruling, 2026-10-15).** Three answers are not paged, so the protocol bounds none of them: a cell's values (§6), a mirror's ByteCommits for one member and cycle (§14), and a relay's request batch (A11). Each is read within this device's own byte budget and, before decoding, its allocation budget (`CELL_VALUES_BUDGET`, `MIRRORED_BUDGET`, `REQUESTS_BUDGET`). These are resource limits, not validity rules. An answer past one is refused as unread (`bounded_read::Refused::OverByteBudget` / `OverAllocationBudget`), never taken as absent, truncated or invalid. This leaves a liveness limit: while an honest answer is larger than its budget, that read is not available from that member. Paging those three answers is protocol work for its own change.
+
+**Tests.** Each hostile member is served at its own address, with a certificate from a CA the real member client trusts alone (`test_support::nodes::TestCa`).
+- `dsm_sdk::sdk::storage_node_sdk::tests`: `a_member_namespace_outside_the_domain_families_is_passed_over`, `an_index_member_whose_pages_hold_no_addresses_is_passed_over`, `an_index_member_whose_pages_do_not_advance_is_passed_over`, `an_index_page_longer_than_a_page_is_passed_over`, `an_index_read_ends_at_its_budget_however_long_the_index`, `an_object_answer_past_the_largest_object_is_refused_unread`, `a_member_redirect_is_not_followed`, `a_cell_answer_past_this_devices_budget_is_refused_unread`, `the_budgets_hold_an_answer_of_the_smallest_honest_elements`, `every_limit_holds_the_largest_honest_answer`.
+- `dsm_sdk::sdk::bounded_read::tests`: all eight.
+- `dsm_sdk::sdk::b0x_sdk::member_answer_bounds`: all three.
+- `dsm_sdk::sdk::connect::pinned_tls::tests`: `a_relay_answer_past_its_bound_is_refused_unread`, `a_relay_redirect_is_not_followed`, `a_relay_refusal_is_its_status_alone`, `the_requests_budget_holds_a_batch_of_signed_requests`, `the_offer_limit_holds_the_longest_offer`.
+- `dsm::crypto::domain::tests::an_unprefixed_domain_is_rejected` and `dsm::sofi::storage::tests::a_namespace_outside_the_domain_families_is_passed_over`.
+- `dsm` runs no doctests (`doctest = false`), so the `compile_fail` example for `from_static` documents the refusal without exercising it. A one-off probe confirmed it: an unprefixed literal is `error[E0080]` at compile time.
+
+**Mutations.** Each was observed red on its named test:
+- the type's prefix check removed (`an_unprefixed_domain_is_rejected`);
+- `main`'s behaviour restored, with no prefix check and the hasher's assert (both namespace tests panic, "domain tag must start with …, got: "x"");
+- an entry that is not an address skipped rather than refused (`Some([])` for the hostile member);
+- a non-advancing sequence let through (its page read again as more addresses);
+- a page longer than a page let through;
+- the announced-length check, the streaming check and the allocation check each disabled (the reader waits out a held or endless answer, or decodes 2M empty values);
+- the spool page's envelope count unchecked;
+- an object read unbounded;
+- each client's redirect policy removed (the plain-HTTP object is fetched);
+- a relay refusal's body read into its error.
+
+The read's page bound (`for _ in 0..pages`) cannot fail alone: with an invalid page refused, every page that does not end the read adds a full page of addresses, so the address budget ends it at the same page. The bound makes the termination structural.
+
+No requirement row changes status.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

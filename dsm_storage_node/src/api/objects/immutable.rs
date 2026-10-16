@@ -43,13 +43,8 @@ use axum::{
 use std::sync::Arc;
 
 use crate::AppState;
-use dsm::crypto::domain::TaggedHashDomain;
-use dsm::storage_object::immutable_addr;
-
-/// Payload cap. Generously above the largest canonical object in the
-/// registry (an SPX256f signature is ~49.9 KiB); rejects DoS-sized bodies
-/// before any hashing.
-const MAX_IMMUTABLE_PAYLOAD_BYTES: usize = 1024 * 1024;
+use dsm::crypto::domain::{DomainError, TaggedHashDomain};
+use dsm::storage_object::{immutable_addr, MAX_IMMUTABLE_PAYLOAD_BYTES};
 
 /// Namespace tag cap — tags are short ASCII domain strings.
 const MAX_NAMESPACE_BYTES: usize = 128;
@@ -66,17 +61,17 @@ pub fn create_write_router() -> Router<()> {
 
 /// Validate a caller-supplied namespace tag into a domain the hasher accepts.
 ///
-/// The rules mirror `dsm_domain_hasher`'s contract exactly, checked here so a
-/// bad tag is a 400 rather than a panic: non-empty, NUL-free, `DSM/`- or
-/// `DJTE.`-prefixed, and bounded. Pure, so directly unit-testable.
+/// Bounded here; non-empty, NUL-free and `DSM/`- or `DJTE.`-prefixed by
+/// [`TaggedHashDomain::try_new`], so a bad tag is a 400. Pure, so directly
+/// unit-testable.
 pub(crate) fn validate_namespace(raw: &[u8]) -> Result<TaggedHashDomain<'_>, &'static str> {
     if raw.is_empty() || raw.len() > MAX_NAMESPACE_BYTES {
         return Err("namespace must be 1..=128 bytes");
     }
-    if !(raw.starts_with(b"DSM/") || raw.starts_with(b"DJTE.")) {
-        return Err("namespace must start with DSM/ or DJTE.");
-    }
-    TaggedHashDomain::try_new(raw).map_err(|_| "namespace must not contain NUL")
+    TaggedHashDomain::try_new(raw).map_err(|e| match e {
+        DomainError::InvalidDomain => "namespace must not contain NUL",
+        DomainError::Unprefixed => "namespace must start with DSM/ or DJTE.",
+    })
 }
 
 async fn put_immutable(
