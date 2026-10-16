@@ -2881,6 +2881,14 @@ mod tests {
     use serial_test::serial;
     use std::collections::HashMap;
 
+    /// `collect_tagged_inbox_addresses` reads each contact's pending online
+    /// outbox and the retained split-transfer routes from the device database.
+    fn init_test_db() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
     /// The addresses `collect_tagged_inbox_addresses` names, in its order.
     fn inbox_addresses(
         genesis: [u8; 32],
@@ -2895,7 +2903,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn inbox_addresses_returns_empty_when_no_contacts() {
+        init_test_db();
         let genesis = [0x44u8; 32];
         let device = [0x55u8; 32];
 
@@ -2906,7 +2916,9 @@ mod tests {
 
     /// A contact's inbox route is derived from its stored relationship tip.
     #[test]
+    #[serial]
     fn inbox_addresses_route_each_contact_by_its_stored_tip() {
+        init_test_db();
         let genesis = [0x66u8; 32];
         let device = [0x77u8; 32];
         let stored_tip = [0x5Au8; 32];
@@ -3051,7 +3063,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn inbox_addresses_includes_sender_first_online_route() {
+        init_test_db();
         let alice_device = [0x11u8; 32];
         let alice_genesis = [0x22u8; 32];
         let bob_device = [0x33u8; 32];
@@ -3096,7 +3110,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_tagged_includes_previous_tip_address() {
+        init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
         let current_tip = [0xCCu8; 32];
@@ -3132,7 +3148,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_tagged_skips_previous_when_same_as_current() {
+        init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
         let tip = [0xCCu8; 32];
@@ -3161,7 +3179,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn collect_tagged_no_previous_when_null() {
+        init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
 
@@ -3189,7 +3209,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn inbox_addresses_returns_all_addresses() {
+        init_test_db();
         let genesis = [0xAAu8; 32];
         let device = [0xBBu8; 32];
 
