@@ -1335,6 +1335,7 @@ dependencies = [
  "deadpool-postgres",
  "dsm",
  "futures",
+ "http-body",
  "hyper-util",
  "log",
  "proc-macro2",

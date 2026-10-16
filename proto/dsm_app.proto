@@ -4584,12 +4584,18 @@ message BleConnectionFailed {
 }
 
 // ── keyed cells and indexes (storage contract Part II) ──────────────────────
-// Everything a member holds at a key, in arrival order. An empty list is an
-// asserted absence. The member decodes none of the values.
+// One page of what a member holds at a key, in arrival order (storage spec
+// §6): the entries from the arrival index the read names, at most the
+// cell-value cap of value bytes and MAX_CELL_PAGE_ENTRIES entries, and always
+// the first of them. An empty page read from index 1 is an asserted absence.
+// The member decodes none of the values.
 message CellValuesV1 {
   repeated bytes values = 1 [(dsm_max_len)=327680];
   // One arrival record per value, in the same order (storage spec §14).
   repeated ArrivalRecordV1 records = 2;
+  // The arrival index the next page starts at; 0 when this page reaches the
+  // last entry the member holds.
+  uint64 next = 3;
 }
 
 // Arrival record of one keyed-cell entry (storage spec §6, §14): the member,

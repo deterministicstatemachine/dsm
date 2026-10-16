@@ -350,6 +350,8 @@ async fn async_main() -> Result<()> {
         )?),
         h2_ping_every: dsm_storage_node::H2_PING_EVERY,
         h2_ping_answer: dsm_storage_node::H2_PING_ANSWER,
+        idle: dsm_storage_node::CONNECTION_IDLE,
+        write_stall: dsm_storage_node::WRITE_STALL,
         max_open: server_config.max_open_connections,
     };
     dsm_storage_node::node_server(

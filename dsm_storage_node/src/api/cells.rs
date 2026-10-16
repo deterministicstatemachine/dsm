@@ -220,25 +220,51 @@ async fn put_cells(
     ))
 }
 
-/// Everything held at the key, in arrival order.
+/// `from=<arrival index>`, optional: where a cell read starts, the first
+/// entry when it names none. Arrival indexes start at 1.
+fn cell_query(raw: Option<&str>) -> Result<u64, StatusCode> {
+    let mut from = 1u64;
+    for pair in raw.map_or("", |q| q).split('&').filter(|p| !p.is_empty()) {
+        match pair.split_once('=') {
+            Some(("from", v)) => {
+                from = v.parse().map_err(|e| {
+                    log::info!("cell get: from={v} is not an arrival index: {e}");
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            _ => return Err(StatusCode::BAD_REQUEST),
+        }
+    }
+    if from == 0 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(from)
+}
+
+/// One page of what is held at the key, in arrival order, from the arrival
+/// index the read names (storage spec §6): the page names where the next one
+/// starts, or that it reaches the last entry held.
 async fn get_cell(
     Extension(state): Extension<Arc<AppState>>,
     Path(key): Path<String>,
     headers: HeaderMap,
+    RawQuery(raw): RawQuery,
 ) -> Result<Response, StatusCode> {
     let ns = namespace(&headers)?;
     let key = digest32(&key)?;
-    let entries = crate::db::get_cell_entries(&state.db_pool, &ns, &key)
+    let from = cell_query(raw.as_deref())?;
+    let held = crate::db::get_cell_page(&state.db_pool, &ns, &key, from)
         .await
         .map_err(|e| {
             log::error!("cell get: DB read failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
     let mut page = dsm::types::proto::CellValuesV1 {
-        values: Vec::with_capacity(entries.len()),
-        records: Vec::with_capacity(entries.len()),
+        values: Vec::with_capacity(held.entries.len()),
+        records: Vec::with_capacity(held.entries.len()),
+        next: held.next,
     };
-    for (value, index, running_hash) in entries {
+    for (value, index, running_hash) in held.entries {
         page.values.push(value);
         page.records
             .push(arrival_record(&state, ns.clone(), &key, index, running_hash)?.to_proto());

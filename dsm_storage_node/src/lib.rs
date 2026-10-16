@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub mod api;
 pub mod db;
+pub mod liveness;
 pub mod set_client;
 
 #[derive(Clone)]
@@ -380,6 +381,15 @@ pub const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
 pub const H2_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
 pub const H2_PING_ANSWER: std::time::Duration = std::time::Duration::from_secs(20);
 
+/// How long a connection may hold no request before the node closes it
+/// ([`liveness`]): longer than a device's wait on its spools
+/// ([`api::transport::b0x::MAX_WAIT`]), which is a request in flight.
+pub const CONNECTION_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a response's write may make no progress before the node ends its
+/// connection ([`liveness`]).
+pub const WRITE_STALL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The bounds every connection the node accepts is held to.
 #[derive(Debug, Clone, Copy)]
 pub struct ConnectionBounds {
@@ -389,6 +399,11 @@ pub struct ConnectionBounds {
     /// How often an HTTP/2 peer is pinged, and how long its answer may take.
     pub h2_ping_every: std::time::Duration,
     pub h2_ping_answer: std::time::Duration,
+    /// How long a connection may hold no request in flight
+    /// ([`CONNECTION_IDLE`]).
+    pub idle: std::time::Duration,
+    /// How long a response's write may make no progress ([`WRITE_STALL`]).
+    pub write_stall: std::time::Duration,
     /// Connections held open at once. One more is closed as soon as it is
     /// accepted, before its TLS handshake.
     pub max_open: usize,
@@ -416,108 +431,19 @@ pub fn bound_connections(
         .keep_alive_timeout(bounds.h2_ping_answer);
 }
 
-/// Holds at most [`ConnectionBounds::max_open`] connections open at once.
-/// It runs before the TLS handshake, so a connection over the bound costs
-/// the node an accept and nothing more: it is closed at once, and its client
-/// meets what it meets at a node that is unavailable.
-#[derive(Clone)]
-pub struct ConnectionCap {
-    open: Arc<tokio::sync::Semaphore>,
-}
-
-impl ConnectionCap {
-    pub fn new(max_open: usize) -> Self {
-        Self {
-            open: Arc::new(tokio::sync::Semaphore::new(max_open)),
-        }
-    }
-}
-
-impl<I, S> axum_server::accept::Accept<I, S> for ConnectionCap {
-    type Stream = Counted<I>;
-    type Service = S;
-    type Future = std::future::Ready<std::io::Result<(Counted<I>, S)>>;
-
-    fn accept(&self, stream: I, service: S) -> Self::Future {
-        std::future::ready(match self.open.clone().try_acquire_owned() {
-            Ok(open) => Ok((
-                Counted {
-                    stream,
-                    _open: open,
-                },
-                service,
-            )),
-            Err(full) => Err(std::io::Error::other(format!(
-                "the node holds as many connections as it may: {full}"
-            ))),
-        })
-    }
-}
-
-/// A connection counted against [`ConnectionCap`] for as long as it is open.
-pub struct Counted<S> {
-    stream: S,
-    _open: tokio::sync::OwnedSemaphorePermit,
-}
-
-impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Counted<S> {
-    fn poll_read(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
-    }
-}
-
-impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<S> {
-    fn poll_write(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
-    }
-
-    fn poll_write_vectored(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-        bufs: &[std::io::IoSlice<'_>],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.get_mut().stream).poll_write_vectored(cx, bufs)
-    }
-
-    fn is_write_vectored(&self) -> bool {
-        self.stream.is_write_vectored()
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
-    }
-}
-
 /// The node's TLS server on `server`'s listener, every connection held to
-/// `bounds`: counted against the connection cap from the moment it is
-/// accepted, then TLS, then the connection bounds. The binary serves through
-/// exactly this, and so do tests that stand up its listener.
+/// `bounds`: counted against the connection cap and its liveness bounds from
+/// the moment it is accepted ([`liveness::LiveConnections`]), then TLS, then
+/// the connection bounds. The binary serves through exactly this, and so do
+/// tests that stand up its listener.
 pub fn node_server<A: axum_server::Address>(
     server: axum_server::Server<A>,
     tls: axum_server::tls_rustls::RustlsConfig,
     bounds: &ConnectionBounds,
-) -> axum_server::Server<A, axum_server::tls_rustls::RustlsAcceptor<ConnectionCap>> {
+) -> axum_server::Server<A, axum_server::tls_rustls::RustlsAcceptor<liveness::LiveConnections>> {
     let mut server = server.acceptor(
         axum_server::tls_rustls::RustlsAcceptor::new(tls)
-            .acceptor(ConnectionCap::new(bounds.max_open)),
+            .acceptor(liveness::LiveConnections::new(bounds)),
     );
     bound_connections(server.http_builder(), bounds);
     server
@@ -568,7 +494,9 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
             limits.wait_bound,
         ))
         // Every route's body, the wait's included: a body that stops arriving
-        // is cut off after BODY_IDLE.
+        // is cut off after BODY_IDLE, and one that trickles in more slowly
+        // than liveness::BODY_MIN_RATE once its grace has passed.
+        .layer(crate::liveness::MinRateLayer)
         .layer(RequestBodyTimeoutLayer::new(BODY_IDLE))
         .layer(TraceLayer::new_for_http())
         .layer(crate::node_identity_echo_layer(

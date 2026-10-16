@@ -98,7 +98,7 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/api/v2/health` | GET | Liveness |
-| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; every value held there, in arrival order |
+| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; what is held there, in arrival order, a page at a time (`?from=<arrival index>`; each page names the next) |
 | `/api/v2/cells` | POST | Keep values at several keys |
 | `/api/v2/index/{locator}` | POST, GET | Append a content address; read the index in append order |
 | `/api/v2/immutable/put` | POST | Write-once object; the node computes the address |

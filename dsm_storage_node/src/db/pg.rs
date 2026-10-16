@@ -852,22 +852,51 @@ pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Resul
         .collect())
 }
 
-/// Everything held for `(namespace, key)`, in arrival order, each with its
-/// `(index, running hash)`.
-pub async fn get_cell_entries(
+/// One entry held at a key: its value, arrival index and running hash.
+pub type CellEntry = (Vec<u8>, u64, [u8; 32]);
+
+/// One page of a cell read (storage spec §6): the entries from the arrival
+/// index read from on, and the arrival index the next page starts at, or 0
+/// when this page reaches the last entry held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellPage {
+    pub entries: Vec<CellEntry>,
+    pub next: u64,
+}
+
+/// The page of `(namespace, key)` read from arrival index `from`: the entries
+/// from `from` on, in arrival order, for at most
+/// [`dsm::storage_cell::CELL_PAGE_VALUE_BYTES`] of values and
+/// [`dsm::storage_cell::MAX_CELL_PAGE_ENTRIES`] entries, and always the first
+/// of them. Only that many rows are read, so a key holding any number of
+/// entries costs one page of them.
+pub async fn get_cell_page(
     pool: &Pool,
     namespace: &[u8],
     key: &[u8],
-) -> Result<Vec<(Vec<u8>, u64, [u8; 32])>> {
+    from: u64,
+) -> Result<CellPage> {
+    let from = i64::try_from(from)?;
+    let most_bytes = i64::try_from(dsm::storage_cell::CELL_PAGE_VALUE_BYTES)?;
+    let most_entries = i64::try_from(dsm::storage_cell::MAX_CELL_PAGE_ENTRIES)?;
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT value, arrival_index, running_hash FROM cells
-             WHERE namespace = $1 AND cell_key = $2 ORDER BY seq ASC",
-            &[&namespace, &key],
+            "SELECT value, arrival_index, running_hash FROM (
+               SELECT value, arrival_index, running_hash,
+                      SUM(octet_length(value)) OVER (ORDER BY arrival_index) AS through,
+                      ROW_NUMBER() OVER (ORDER BY arrival_index) AS nth
+               FROM (SELECT value, arrival_index, running_hash FROM cells
+                     WHERE namespace = $1 AND cell_key = $2 AND arrival_index >= $3
+                     ORDER BY arrival_index LIMIT $5) first_rows
+             ) page
+             WHERE through <= $4 OR nth = 1
+             ORDER BY arrival_index",
+            &[&namespace, &key, &from, &most_bytes, &most_entries],
         )
         .await?;
-    rows.iter()
+    let entries = rows
+        .iter()
         .map(|r| {
             let i: i64 = r.get(1);
             let h: Vec<u8> = r.get(2);
@@ -877,7 +906,36 @@ pub async fn get_cell_entries(
                 .map_err(|_| anyhow::anyhow!("stored running hash is not 32 bytes"))?;
             Ok((r.get::<_, Vec<u8>>(0), u64::try_from(i)?, h))
         })
-        .collect()
+        .collect::<Result<Vec<CellEntry>>>()?;
+    let Some((_, last, _)) = entries.last() else {
+        return Ok(CellPage { entries, next: 0 });
+    };
+    let more: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM cells
+               WHERE namespace = $1 AND cell_key = $2 AND arrival_index > $3)",
+            &[&namespace, &key, &i64::try_from(*last)?],
+        )
+        .await?
+        .get(0);
+    let next = if more { last + 1 } else { 0 };
+    Ok(CellPage { entries, next })
+}
+
+/// Everything held for `(namespace, key)`, in arrival order, each with its
+/// `(index, running hash)`: every page, read one after another as a reader
+/// reads them.
+pub async fn get_cell_entries(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<CellEntry>> {
+    let mut entries = Vec::new();
+    let mut from = 1;
+    loop {
+        let page = get_cell_page(pool, namespace, key, from).await?;
+        entries.extend(page.entries);
+        if page.next == 0 {
+            return Ok(entries);
+        }
+        from = page.next;
+    }
 }
 
 // ── ByteCommits (storage spec §14) ─────────────────────────────────────────
