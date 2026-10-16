@@ -138,9 +138,17 @@ mod tests {
 
         let mut slots = slots.into_iter();
         let first = slots.next().expect("a slot");
-        assert_eq!(first.take(), Some(0x00), "the found contact takes its entry");
+        assert_eq!(
+            first.take(),
+            Some(0x00),
+            "the found contact takes its entry"
+        );
         drop(slots.next());
-        assert_eq!(awaited.len(), MAX_AWAITED_CONTACTS - 2, "ended waits free their slots");
+        assert_eq!(
+            awaited.len(),
+            MAX_AWAITED_CONTACTS - 2,
+            "ended waits free their slots"
+        );
         let again = awaited.begin([0xEE; 32], 0xEE).expect("room again");
         assert_eq!(again.device_id(), [0xEE; 32]);
         drop(again);

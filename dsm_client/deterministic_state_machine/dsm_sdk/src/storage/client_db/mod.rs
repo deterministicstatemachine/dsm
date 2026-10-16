@@ -2826,10 +2826,16 @@ mod tests {
             let gate_left = get_pending_online_outbox(&device_id).expect("load");
             if OUTBOX_SETTLED_STATUSES.contains(&status) {
                 assert_eq!(outcome, StaleGateOutcome::Cleared, "{status}");
-                assert!(gate_left.is_none(), "{status}: a settled send's gate is cleared");
+                assert!(
+                    gate_left.is_none(),
+                    "{status}: a settled send's gate is cleared"
+                );
             } else {
                 assert_eq!(outcome, StaleGateOutcome::StillPending, "{status}");
-                assert!(gate_left.is_some(), "{status}: a live send's gate was deleted");
+                assert!(
+                    gate_left.is_some(),
+                    "{status}: a live send's gate was deleted"
+                );
             }
         }
     }

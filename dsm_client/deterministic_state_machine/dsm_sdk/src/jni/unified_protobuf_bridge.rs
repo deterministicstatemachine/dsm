@@ -3544,6 +3544,8 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_maybeRefreshN
 ) {
     crate::jni::bridge_utils::jni_catch_unwind_void(
         "maybeRefreshNfcCapsule",
-        std::panic::AssertUnwindSafe(crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule),
+        std::panic::AssertUnwindSafe(
+            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule,
+        ),
     );
 }

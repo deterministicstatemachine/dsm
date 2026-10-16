@@ -156,19 +156,21 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // transition is that consumption when its frontiers, at the release's counter and its
         // successor under the pinned bundle, are exactly those two leaves. The digest is bound
         // through the successor frontier, `H(h_i ‖ D)`, which checks 7-11 tie to the transition.
-        self.anchor_counter.checked_add(1).is_some_and(|next_counter| {
-            self.verified.bundle == *self.bundle
-                && anchor_core::root_advance::anchor_state_leaf(
-                    self.bundle,
-                    prev_frontier,
-                    self.anchor_counter,
-                ) == self.verified.anchor_before
-                && anchor_core::root_advance::anchor_state_leaf(
-                    self.bundle,
-                    next_frontier,
-                    next_counter,
-                ) == self.verified.anchor_after
-        })
+        self.anchor_counter
+            .checked_add(1)
+            .is_some_and(|next_counter| {
+                self.verified.bundle == *self.bundle
+                    && anchor_core::root_advance::anchor_state_leaf(
+                        self.bundle,
+                        prev_frontier,
+                        self.anchor_counter,
+                    ) == self.verified.anchor_before
+                    && anchor_core::root_advance::anchor_state_leaf(
+                        self.bundle,
+                        next_frontier,
+                        next_counter,
+                    ) == self.verified.anchor_after
+            })
     }
 
     fn delivers_to_receiver(&self, _transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool {
@@ -440,13 +442,34 @@ mod tests {
             .verify_transition(&digest, prev, next)
         };
 
-        assert!(check(&bundle, counter, &prev, &next), "the step's own transition");
-        assert!(!check(&bundle, counter, &next, &prev), "the frontiers reversed");
-        assert!(!check(&bundle, counter, &prev, &prev), "another successor frontier");
-        assert!(!check(&bundle, counter, &next, &next), "another prior frontier");
-        assert!(!check(&bundle, counter + 1, &prev, &next), "another counter");
-        assert!(!check(&[0x0Cu8; 32], counter, &prev, &next), "another bundle");
-        assert!(!check(&bundle, u64::MAX, &prev, &next), "a counter with no successor");
+        assert!(
+            check(&bundle, counter, &prev, &next),
+            "the step's own transition"
+        );
+        assert!(
+            !check(&bundle, counter, &next, &prev),
+            "the frontiers reversed"
+        );
+        assert!(
+            !check(&bundle, counter, &prev, &prev),
+            "another successor frontier"
+        );
+        assert!(
+            !check(&bundle, counter, &next, &next),
+            "another prior frontier"
+        );
+        assert!(
+            !check(&bundle, counter + 1, &prev, &next),
+            "another counter"
+        );
+        assert!(
+            !check(&[0x0Cu8; 32], counter, &prev, &next),
+            "another bundle"
+        );
+        assert!(
+            !check(&bundle, u64::MAX, &prev, &next),
+            "a counter with no successor"
+        );
     }
 
     /// A release that is absent, or does not decode and validate, is refused before anything

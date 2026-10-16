@@ -1102,7 +1102,9 @@ fn observe_gatt_identity_inner(
                 .map_err(|e| format!("device id: {e}"))?;
             let slot = GATT_IDENTITY_WAITS
                 .begin(device_id, ())
-                .map_err(|refused| format!("contact missing in SQLite, not waited for: {refused}"))?;
+                .map_err(|refused| {
+                    format!("contact missing in SQLite, not waited for: {refused}")
+                })?;
             let rt = crate::runtime::get_runtime();
             let waited = rt.block_on(async {
                 let start = std::time::Instant::now();

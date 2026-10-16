@@ -2733,9 +2733,9 @@ mod tests {
         let mut errors = Vec::new();
 
         take_in_cert_resync(
-            Err(CertResyncRefusal::NotRecognized(DsmError::invalid_operation(
-                "cert resync request: malformed body",
-            ))),
+            Err(CertResyncRefusal::NotRecognized(
+                DsmError::invalid_operation("cert resync request: malformed body"),
+            )),
             "ROUTE",
             &message("JUNK"),
             &mut taken,

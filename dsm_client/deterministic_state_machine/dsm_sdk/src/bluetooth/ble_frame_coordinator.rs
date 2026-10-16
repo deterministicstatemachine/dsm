@@ -755,7 +755,10 @@ impl BleFrameCoordinator {
         };
         let (shape, seq) = chunk_shape(header, chunk.data.len())?;
         let storage = |what: &str, e: anyhow::Error| {
-            DsmError::storage(format!("BLE reassembly: {what}: {e}"), None::<std::io::Error>)
+            DsmError::storage(
+                format!("BLE reassembly: {what}: {e}"),
+                None::<std::io::Error>,
+            )
         };
 
         let mut buffers = self.pending_reassembly.lock().await;
@@ -881,8 +884,7 @@ impl BleFrameCoordinator {
         // Deduplicate: a chunk already held (from hydration or a retransmit)
         // is not taken twice. A chunk is persisted when it is taken, so the
         // rows kept for a link are only those of its frames in reassembly.
-        if let std::collections::hash_map::Entry::Vacant(slot) = buffer.received_chunks.entry(seq)
-        {
+        if let std::collections::hash_map::Entry::Vacant(slot) = buffer.received_chunks.entry(seq) {
             crate::storage::client_db::persist_ble_chunk(ChunkPersistenceParams {
                 peer_link: &key.link,
                 frame_commitment: &key.commitment,
@@ -1021,8 +1023,14 @@ mod tests {
 
     fn commitment_of(chunk: &[u8]) -> [u8; 32] {
         let decoded = crate::generated::BleChunk::decode(chunk).expect("a chunk");
-        <[u8; 32]>::try_from(decoded.header.expect("a header").frame_commitment.as_slice())
-            .expect("32 bytes")
+        <[u8; 32]>::try_from(
+            decoded
+                .header
+                .expect("a header")
+                .frame_commitment
+                .as_slice(),
+        )
+        .expect("32 bytes")
     }
 
     async fn feed(
@@ -1055,10 +1063,17 @@ mod tests {
             let chunks = coord
                 .encode_message(BleFrameType::BilateralPrepare, &honest)
                 .expect("chunks");
-            let poison = bent_chunk(&chunks[0], |_| {}, |data| data.iter_mut().for_each(|b| *b ^= 0x5A));
+            let poison = bent_chunk(
+                &chunks[0],
+                |_| {},
+                |data| data.iter_mut().for_each(|b| *b ^= 0x5A),
+            );
 
             assert_eq!(
-                coord.ingest_chunk(LINK_B, &poison).await.expect("taken on B"),
+                coord
+                    .ingest_chunk(LINK_B, &poison)
+                    .await
+                    .expect("taken on B"),
                 FrameIngressResult::NeedMoreChunks
             );
             match feed(&coord, LINK_A, &chunks).await.expect("A's frame") {
@@ -1101,15 +1116,24 @@ mod tests {
             let refused = feed(&coord, LINK_A, &poisoned)
                 .await
                 .expect_err("a frame that does not hash to its commitment");
-            assert!(refused.to_string().contains("frame integrity check failed"), "{refused}");
             assert!(
-                crate::storage::client_db::load_persisted_chunks(LINK_A, &commitment_of(&chunks[0]))
-                    .expect("rows")
-                    .is_empty(),
+                refused.to_string().contains("frame integrity check failed"),
+                "{refused}"
+            );
+            assert!(
+                crate::storage::client_db::load_persisted_chunks(
+                    LINK_A,
+                    &commitment_of(&chunks[0])
+                )
+                .expect("rows")
+                .is_empty(),
                 "the failed frame's persisted chunks went with it"
             );
 
-            match feed(&coord, LINK_A, &chunks).await.expect("the retransmission") {
+            match feed(&coord, LINK_A, &chunks)
+                .await
+                .expect("the retransmission")
+            {
                 FrameIngressResult::MessageComplete { message } => {
                     assert_eq!(message.payload, honest);
                 }
@@ -1157,9 +1181,10 @@ mod tests {
                         &chunks[0],
                         |h| {
                             h.payload_len = u32::try_from(MAX_BLE_FRAME_BYTES + 1).expect("u32");
-                            h.total_chunks =
-                                u32::try_from((MAX_BLE_FRAME_BYTES + 1).div_ceil(MAX_BLE_CHUNK_SIZE))
-                                    .expect("u32");
+                            h.total_chunks = u32::try_from(
+                                (MAX_BLE_FRAME_BYTES + 1).div_ceil(MAX_BLE_CHUNK_SIZE),
+                            )
+                            .expect("u32");
                         },
                         |_| {},
                     ),
@@ -1177,10 +1202,7 @@ mod tests {
                 ),
             ];
             for (what, chunk, why) in cases {
-                let refused = coord
-                    .ingest_chunk(LINK_A, &chunk)
-                    .await
-                    .expect_err(what);
+                let refused = coord.ingest_chunk(LINK_A, &chunk).await.expect_err(what);
                 assert!(refused.to_string().contains(why), "{what}: {refused}");
             }
             assert!(
@@ -1206,7 +1228,10 @@ mod tests {
         let rt = Runtime::new().expect("runtime");
         rt.block_on(async {
             let unfinished = coord
-                .encode_message(BleFrameType::BilateralPrepare, &payload(0x40, 2 * MAX_BLE_CHUNK_SIZE))
+                .encode_message(
+                    BleFrameType::BilateralPrepare,
+                    &payload(0x40, 2 * MAX_BLE_CHUNK_SIZE),
+                )
                 .expect("chunks");
             let commitment = commitment_of(&unfinished[0]);
             coord
@@ -1229,14 +1254,22 @@ mod tests {
             let next = coord
                 .encode_message(BleFrameType::BilateralPrepare, &payload(0x41, 9))
                 .expect("chunks");
-            coord.ingest_chunk(LINK_A, &next[0]).await.expect("another frame");
+            coord
+                .ingest_chunk(LINK_A, &next[0])
+                .await
+                .expect("another frame");
             assert!(
                 crate::storage::client_db::load_persisted_chunks(LINK_B, &commitment)
                     .expect("rows")
                     .is_empty(),
                 "the expired frame's persisted chunks are swept with it"
             );
-            assert!(!coord.pending_reassembly.lock().await.keys().any(|k| k.link == LINK_B));
+            assert!(!coord
+                .pending_reassembly
+                .lock()
+                .await
+                .keys()
+                .any(|k| k.link == LINK_B));
         });
     }
 
@@ -1253,12 +1286,18 @@ mod tests {
         rt.block_on(async {
             let first_chunk = |seed: u8| {
                 coord
-                    .encode_message(BleFrameType::BilateralPrepare, &payload(seed, 2 * MAX_BLE_CHUNK_SIZE))
+                    .encode_message(
+                        BleFrameType::BilateralPrepare,
+                        &payload(seed, 2 * MAX_BLE_CHUNK_SIZE),
+                    )
                     .expect("chunks")
                     .remove(0)
             };
             let honest = first_chunk(0x50);
-            coord.ingest_chunk(LINK_A, &honest).await.expect("A's frame");
+            coord
+                .ingest_chunk(LINK_A, &honest)
+                .await
+                .expect("A's frame");
             let flood: Vec<Vec<u8>> = (0..=MAX_PENDING_FRAMES_PER_LINK)
                 .map(|i| first_chunk(0x60 + u8::try_from(i).expect("small")))
                 .collect();

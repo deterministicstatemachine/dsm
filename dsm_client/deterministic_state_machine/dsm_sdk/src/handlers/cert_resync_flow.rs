@@ -239,7 +239,9 @@ impl super::app_router_impl::AppRouterImpl {
         );
         let target = cert_resync_signing_target(&joint, &req.initiator_ek_pubkey);
         if !sphincs_verify(&initiator_ak, &target, &req.intent_sig).unwrap_or(false) {
-            return not_recognized("cert resync request: initiator cosignature failed verification");
+            return not_recognized(
+                "cert resync request: initiator cosignature failed verification",
+            );
         }
 
         // We must be HEALTHY on this relationship: our own Local head present and a
@@ -324,10 +326,12 @@ impl super::app_router_impl::AppRouterImpl {
             DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>)
         })?;
         if state != RESYNC_PENDING || epoch != ack.epoch {
-            return Err(CertResyncRefusal::Failed(DsmError::invalid_operation(format!(
+            return Err(CertResyncRefusal::Failed(DsmError::invalid_operation(
+                format!(
                 "cert resync ack: no matching pending resync (state={state} epoch={epoch} ack={})",
                 ack.epoch
-            ))));
+            ),
+            )));
         }
 
         let (_peer_device, _peer_genesis, peer_ak) =

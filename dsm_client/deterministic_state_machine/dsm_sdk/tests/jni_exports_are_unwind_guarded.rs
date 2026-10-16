@@ -14,7 +14,8 @@ use syn::{Expr, Item, ItemFn, Stmt};
 
 /// The JNI export Bitcoin work owns: Bitcoin is outside this round, and its
 /// export is left as it stands.
-const OUTSIDE_THIS_ROUND: [&str; 1] = ["Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress"];
+const OUTSIDE_THIS_ROUND: [&str; 1] =
+    ["Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress"];
 
 /// Whether `expr` is a call of a panic guard, directly or as what a `match`
 /// decides on.
@@ -65,20 +66,23 @@ fn first_work(export: &ItemFn) -> Option<&Expr> {
 /// MUTATION CONTROL: taking either export's work out of its guard turns
 /// this red.
 #[test]
-fn every_java_export_runs_its_work_inside_the_unwind_guard() {
+fn every_java_export_runs_its_work_inside_the_unwind_guard(
+) -> Result<(), Box<dyn std::error::Error>> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/jni");
-    let mut sources: Vec<_> = std::fs::read_dir(&dir)
-        .expect("the JNI sources")
-        .map(|entry| entry.expect("a JNI source").path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
-        .collect();
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "rs") {
+            sources.push(path);
+        }
+    }
     sources.sort();
 
     let mut exports = Vec::new();
     let mut unguarded = Vec::new();
     for path in sources {
-        let text = std::fs::read_to_string(&path).expect("read a JNI source");
-        let file = syn::parse_file(&text).expect("a JNI source parses");
+        let text = std::fs::read_to_string(&path)?;
+        let file = syn::parse_file(&text)?;
         for item in &file.items {
             let Item::Fn(export) = item else { continue };
             let name = export.sig.ident.to_string();
@@ -104,5 +108,11 @@ fn every_java_export_runs_its_work_inside_the_unwind_guard() {
     ] {
         assert!(exports.iter().any(|e| e == named), "{named} is not found");
     }
-    assert_eq!(unguarded, OUTSIDE_THIS_ROUND, "of {} exports", exports.len());
+    assert_eq!(
+        unguarded,
+        OUTSIDE_THIS_ROUND,
+        "of {} exports",
+        exports.len()
+    );
+    Ok(())
 }

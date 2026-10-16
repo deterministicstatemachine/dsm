@@ -272,8 +272,14 @@ mod tests {
         persist_ble_chunk(make_chunk_params(LINK, &fc, 0, b"honest")).unwrap();
         persist_ble_chunk(make_chunk_params(other, &fc, 0, b"poison")).unwrap();
 
-        assert_eq!(load_persisted_chunks(LINK, &fc).unwrap()[0].chunk_data, b"honest");
-        assert_eq!(load_persisted_chunks(other, &fc).unwrap()[0].chunk_data, b"poison");
+        assert_eq!(
+            load_persisted_chunks(LINK, &fc).unwrap()[0].chunk_data,
+            b"honest"
+        );
+        assert_eq!(
+            load_persisted_chunks(other, &fc).unwrap()[0].chunk_data,
+            b"poison"
+        );
 
         delete_frame_chunks(other, &fc).unwrap();
         assert_eq!(count(other, &fc), 0);

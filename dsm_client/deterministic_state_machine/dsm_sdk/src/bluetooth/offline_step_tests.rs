@@ -2100,7 +2100,9 @@ async fn a_recovering_device_neither_proposes_nor_releases_an_offline_spend() {
         .await
         .expect_err("no release while recovering");
     assert!(
-        refused.to_string().contains("refused before the anchor commits"),
+        refused
+            .to_string()
+            .contains("refused before the anchor commits"),
         "{refused}"
     );
     let after = appliance.clone().status().expect("the chip's status");
@@ -2244,7 +2246,10 @@ async fn a_confirm_does_not_overwrite_a_cancellation_made_meanwhile() {
         .handle_prepare_response(&response)
         .await
         .expect_err("the cancellation was written first");
-    assert!(refused.to_string().contains("moved to rejected"), "{refused}");
+    assert!(
+        refused.to_string().contains("moved to rejected"),
+        "{refused}"
+    );
     assert_eq!(stored_phase(&commitment), "rejected");
 }
 
@@ -2383,8 +2388,9 @@ async fn an_offline_release_is_accepted_only_against_the_confirm_core_verified()
         accept(&request.offline_release, Some(&other_bundle)),
         Err(OfflineRecover::NotTheStepsSpend)
     ));
-    let mut bent = anchor_core::proto::pb::OfflineRelease::decode(request.offline_release.as_slice())
-        .expect("the release decodes");
+    let mut bent =
+        anchor_core::proto::pb::OfflineRelease::decode(request.offline_release.as_slice())
+            .expect("the release decodes");
     bent.cert
         .as_mut()
         .expect("the release's certificate")
