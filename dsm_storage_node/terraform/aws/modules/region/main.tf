@@ -110,7 +110,9 @@ resource "aws_instance" "dsm_node" {
   key_name               = aws_key_pair.dsm.key_name
   vpc_security_group_ids = [aws_security_group.dsm_storage.id]
 
-  user_data = file("${path.module}/../../user_data.sh")
+  # The one node bootstrap, shared with the GCP module (Docker on Ubuntu,
+  # then /opt/dsm-storage/.bootstrap-done, which provision_aws.sh waits for).
+  user_data = file("${path.module}/../../../gcp/user_data.sh")
 
   root_block_device {
     volume_size           = var.volume_size_gb
