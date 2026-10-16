@@ -21,9 +21,13 @@ variable "ssh_public_key" {
 }
 
 variable "allowed_ssh_cidr" {
-  description = "CIDR block allowed SSH access. Restrict to your IP for security (e.g. 1.2.3.4/32)."
+  description = "The one CIDR block allowed SSH access, e.g. 1.2.3.4/32. No default: SSH open to everyone is never assumed."
   type        = string
-  default     = "0.0.0.0/0"
+
+  validation {
+    condition     = can(cidrhost(var.allowed_ssh_cidr, 0)) && !contains(["0.0.0.0/0", "::/0"], var.allowed_ssh_cidr)
+    error_message = "allowed_ssh_cidr must be a CIDR block narrower than the whole internet (e.g. 1.2.3.4/32)."
+  }
 }
 
 variable "project_tag" {

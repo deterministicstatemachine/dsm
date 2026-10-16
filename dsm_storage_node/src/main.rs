@@ -35,6 +35,8 @@ struct ServerConfig {
     bind_addr: SocketAddr,
     node_id: String,
     concurrency_limit: usize,
+    /// `[network] max_open_connections`: connections held open at once.
+    max_open_connections: usize,
     tls_cert_path: String,
     tls_key_path: String,
     /// The storage set's CA certificate: the one anchor this node pins its
@@ -82,6 +84,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         .build()?;
 
     let concurrency_limit = optional_positive(&settings, "network.max_connections", 256)?;
+    let max_open_connections = optional_positive(&settings, "network.max_open_connections", 4096)?;
     let body_limit_bytes = optional_positive(&settings, "http.body_limit_bytes", 1_048_576)?;
     let request_timeout_secs = optional_positive(&settings, "http.request_timeout_secs", 60)?;
     let header_read_timeout_secs =
@@ -166,6 +169,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         bind_addr,
         node_id,
         concurrency_limit,
+        max_open_connections,
         tls_cert_path,
         tls_key_path,
         set_ca_path,
@@ -340,15 +344,23 @@ async fn async_main() -> Result<()> {
         RustlsConfig::from_pem_file(&server_config.tls_cert_path, &server_config.tls_key_path)
             .await
             .context("failed to load TLS certificates")?;
-    let mut server = axum_server::bind_rustls(server_config.bind_addr, tls_config).handle(handle);
-    dsm_storage_node::bound_connections(
-        server.http_builder(),
-        std::time::Duration::from_secs(u64::try_from(server_config.header_read_timeout_secs)?),
-    );
-    server
-        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await
-        .context("storage node TLS server error")?;
+    let bounds = dsm_storage_node::ConnectionBounds {
+        header_read: std::time::Duration::from_secs(u64::try_from(
+            server_config.header_read_timeout_secs,
+        )?),
+        h2_ping_every: dsm_storage_node::H2_PING_EVERY,
+        h2_ping_answer: dsm_storage_node::H2_PING_ANSWER,
+        max_open: server_config.max_open_connections,
+    };
+    dsm_storage_node::node_server(
+        axum_server::bind(server_config.bind_addr),
+        tls_config,
+        &bounds,
+    )
+    .handle(handle)
+    .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+    .await
+    .context("storage node TLS server error")?;
 
     Ok(())
 }
@@ -437,6 +449,7 @@ url = "postgresql://127.0.0.1:5432/node"
     fn a_limit_of_the_wrong_type_or_out_of_range_is_refused_by_name() {
         let whole = load(WHOLE_CONFIG).expect("the whole config loads");
         assert_eq!(whole.concurrency_limit, 256);
+        assert_eq!(whole.max_open_connections, 4096);
         assert_eq!(whole.body_limit_bytes, 1_048_576);
         assert_eq!(whole.request_timeout_secs, 60);
         assert_eq!(whole.header_read_timeout_secs, 10);
@@ -444,6 +457,10 @@ url = "postgresql://127.0.0.1:5432/node"
         let with = |extra: &str| format!("{WHOLE_CONFIG}\n{extra}\n");
         let set = load(&with("[http]\nbody_limit_bytes = 4096")).expect("a stated limit loads");
         assert_eq!(set.body_limit_bytes, 4096);
+        let set =
+            load(&WHOLE_CONFIG.replace("port = 8443", "port = 8443\nmax_open_connections = 64"))
+                .expect("a stated connection bound loads");
+        assert_eq!(set.max_open_connections, 64);
         for (extra, key) in [
             (
                 "[http]\nbody_limit_bytes = \"lots\"",

@@ -596,8 +596,9 @@ pub async fn get_immutable_object(
 // ===================== b0x inbox spool =====================
 
 /// Append `envelope` to the spool under `device_id` at the next position,
-/// durably, refusing and deduplicating nothing (storage spec §8).
-pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<()> {
+/// durably, refusing and deduplicating nothing (storage spec §8), and return
+/// that position.
+pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<i64> {
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     // Serialize seq_num assignment per spool key to avoid MAX+1 races.
@@ -610,12 +611,13 @@ pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Resu
              VALUES ($1, $2, COALESCE(
                (SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1),
                1
-             ))",
+             ))
+             RETURNING seq_num",
         )
         .await?;
-    tx.execute(&stmt, &[&device_id, &envelope]).await?;
+    let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
     tx.commit().await?;
-    Ok(())
+    Ok(seq_num)
 }
 
 /// Every envelope in a spool from a sequence number on, in order, limited.
@@ -1096,10 +1098,13 @@ pub async fn get_own_bytecommit(
 /// key)`'s latest entry as of that cycle. `None` if the cycle does not exist
 /// or the cell had no entry committed by then.
 ///
-/// A cycle's leaf set never changes once it closes, so its tree is built
-/// once: a tree `committed` keeps for the cycle's ByteCommit answers, and a
-/// cycle whose tree is not kept (an old one, or any after a restart) is
-/// built from the store and kept.
+/// The cell's own row is read first, so a cell the cycle does not commit is
+/// answered from that one row, and never makes the node read or build
+/// anything over its other cells. A cycle's leaf set never changes once it
+/// closes, so its tree is built once: a tree `committed` keeps for the
+/// cycle's ByteCommit answers, and a cycle whose tree is not kept (an old
+/// one, or any after a restart) is built from the store and kept, one build
+/// at a time ([`CommittedCells`]).
 pub async fn cell_commit_proof(
     pool: &Pool,
     committed: &CommittedCells,
@@ -1107,26 +1112,26 @@ pub async fn cell_commit_proof(
     key: &[u8; 32],
     cycle: u64,
 ) -> Result<Option<dsm::storage_cell::CellCommitProof>> {
-    let mut client = pool.get().await?;
-    let tx = client.build_transaction().read_only(true).start().await?;
     let cycle_i64 = i64::try_from(cycle)?;
-    let Some(digest) = tx
-        .query_opt(
-            "SELECT digest FROM own_bytecommits WHERE cycle_index = $1",
-            &[&cycle_i64],
-        )
-        .await?
-    else {
-        return Ok(None);
-    };
-    let digest: [u8; 32] = digest
-        .get::<_, Vec<u8>>(0)
-        .as_slice()
-        .try_into()
-        .map_err(|e| anyhow!("stored ByteCommit digest is not 32 bytes: {e}"))?;
-    if let Some(tree) = committed.tree_at(cycle, &digest) {
-        // The cell's latest entry as of the cycle: the row the whole read
-        // below finds for it.
+    let (digest, (index, running_hash)) = {
+        let mut client = pool.get().await?;
+        let tx = client.build_transaction().read_only(true).start().await?;
+        let Some(digest) = tx
+            .query_opt(
+                "SELECT digest FROM own_bytecommits WHERE cycle_index = $1",
+                &[&cycle_i64],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let digest: [u8; 32] = digest
+            .get::<_, Vec<u8>>(0)
+            .as_slice()
+            .try_into()
+            .map_err(|e| anyhow!("stored ByteCommit digest is not 32 bytes: {e}"))?;
+        // The cell's latest entry as of the cycle: the leaf the cycle's tree
+        // holds for it.
         let latest = tx
             .query_opt(
                 "SELECT namespace, cell_key, arrival_index, running_hash FROM cells
@@ -1138,42 +1143,36 @@ pub async fn cell_commit_proof(
             .map(|r| row_to_leaf(&r))
             .transpose()?;
         tx.commit().await?;
-        return Ok(latest.and_then(|(_, _, index, running_hash)| {
-            dsm::storage_cell::CellCommitProof::from_tree(
-                &tree,
-                namespace,
-                key,
-                index,
-                running_hash,
-            )
-        }));
+        let Some((_, _, index, running_hash)) = latest else {
+            return Ok(None);
+        };
+        (digest, (index, running_hash))
+    };
+    let proof_from = |tree: &dsm::merkle::sparse_merkle_tree::SparseMerkleTree| {
+        dsm::storage_cell::CellCommitProof::from_tree(tree, namespace, key, index, running_hash)
+    };
+    if let Some(tree) = committed.tree_at(cycle, &digest) {
+        return Ok(proof_from(&tree));
     }
-    let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
-    tx.commit().await?;
-    let Some((_, _, index, running_hash)) = leaves
-        .iter()
-        .find(|(n, k, _, _)| n.as_slice() == namespace && k == key)
-        .cloned()
-    else {
-        return Ok(None);
+    let _building = committed.hold_tree_build().await;
+    // The build this proof waited behind may have been for its cycle.
+    if let Some(tree) = committed.tree_at(cycle, &digest) {
+        return Ok(proof_from(&tree));
+    }
+    let leaves = {
+        let mut client = pool.get().await?;
+        let tx = client.transaction().await?;
+        let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
+        tx.commit().await?;
+        leaves
     };
     // The tree is built over every cell the node holds: CPU work, kept off
     // the threads that serve requests.
-    let (namespace, key) = (namespace.to_vec(), *key);
-    let (tree, proof) = tokio::task::spawn_blocking(move || {
-        let tree = dsm::storage_cell::cell_tree(
-            leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
-        );
-        let proof = dsm::storage_cell::CellCommitProof::from_tree(
-            &tree,
-            &namespace,
-            &key,
-            index,
-            running_hash,
-        );
-        (tree, proof)
+    let tree = tokio::task::spawn_blocking(move || {
+        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)))
     })
     .await?;
+    let proof = proof_from(&tree);
     committed.keep(cycle, digest, Arc::new(tree));
     Ok(proof)
 }

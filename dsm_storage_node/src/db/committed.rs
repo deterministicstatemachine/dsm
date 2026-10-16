@@ -49,6 +49,9 @@ pub struct CommittedCells {
     /// guards the leaf set as of the last cycle this process saw close, when
     /// it holds one.
     pub(crate) closer: tokio::sync::Mutex<Option<CommittedLeaves>>,
+    /// Held while a proof builds the tree of a cycle that is not kept
+    /// ([`CommittedCells::hold_tree_build`]).
+    tree_build: tokio::sync::Mutex<()>,
     /// Recently closed cycles' trees, by cycle, each with the digest of the
     /// ByteCommit whose root it is.
     trees: Mutex<KeptTrees>,
@@ -72,6 +75,7 @@ impl CommittedCells {
     pub fn bounded(kept_cycles: usize, kept_leaves: usize) -> Self {
         Self {
             closer: tokio::sync::Mutex::new(None),
+            tree_build: tokio::sync::Mutex::new(()),
             trees: Mutex::new(BTreeMap::new()),
             kept_cycles,
             kept_leaves,
@@ -98,6 +102,15 @@ impl CommittedCells {
         {
             trees.pop_first();
         }
+    }
+
+    /// Hold the node's one tree build: a proof whose cycle's tree is not kept
+    /// builds it while it holds this, so one tree over the store's every cell
+    /// is built at a time, however many proofs ask. A proof waits here holding
+    /// no database connection, and finds the tree kept when the build it
+    /// waited behind was for its cycle.
+    pub async fn hold_tree_build(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.tree_build.lock().await
     }
 
     /// The cycles whose trees are kept, oldest first.

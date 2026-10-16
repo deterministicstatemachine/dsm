@@ -135,6 +135,9 @@ struct Host {
     dir: PathBuf,
     starts: u32,
     ingress: String,
+    /// `Bearer <secret>` for the running process: the secret its launch wrote
+    /// to its data directory, read as the application reads it.
+    authorization: String,
     child: Option<tokio::process::Child>,
     http: reqwest::Client,
 }
@@ -162,6 +165,7 @@ impl Host {
             dir: root.to_path_buf(),
             starts: 0,
             ingress: format!("http://127.0.0.1:{game}"),
+            authorization: String::new(),
             child: None,
             http: reqwest::Client::new(),
         }
@@ -204,6 +208,7 @@ impl Host {
         };
         self.child = Some(child);
         let probe = format!("{}/activity/0", self.ingress);
+        let token = self.dir.join(self.name).join("ingress-token");
         let deadline = tokio::time::Instant::now() + STEP;
         loop {
             let Some(child) = self.child.as_mut() else {
@@ -216,10 +221,28 @@ impl Host {
                 Ok(None) => {}
                 Err(e) => panic!("{}: the process's state: {e}", self.name),
             }
-            let why = match self.http.get(&probe).send().await {
-                Ok(answer) if answer.status().is_success() => return,
-                Ok(answer) => format!("its ingress answered {}", answer.status()),
-                Err(e) => format!("its ingress: {e}"),
+            // The secret is this launch's once the ingress answers: the
+            // process writes it before it listens.
+            let why = match std::fs::read_to_string(&token) {
+                Err(e) => format!("its ingress secret {}: {e}", token.display()),
+                Ok(secret) => {
+                    let authorization = format!("Bearer {secret}");
+                    match self
+                        .http
+                        .get(&probe)
+                        .header("authorization", &authorization)
+                        .send()
+                        .await
+                    {
+                        Ok(answer) if answer.status().is_success() => {
+                            self.authorization = authorization;
+                            self.a_call_without_the_secret_is_refused().await;
+                            return;
+                        }
+                        Ok(answer) => format!("its ingress answered {}", answer.status()),
+                        Err(e) => format!("its ingress: {e}"),
+                    }
+                }
             };
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -229,6 +252,37 @@ impl Host {
                 path.display()
             );
             tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    /// The running process's ingress refuses a call that does not carry its
+    /// secret, and one that does but names another host, before any route.
+    async fn a_call_without_the_secret_is_refused(&self) {
+        let probe = format!("{}/activity/0", self.ingress);
+        for (authorization, host, refused) in [
+            (None, None, reqwest::StatusCode::UNAUTHORIZED),
+            (
+                Some(self.authorization.as_str()),
+                Some("rebound.example"),
+                reqwest::StatusCode::FORBIDDEN,
+            ),
+        ] {
+            let mut call = self.http.get(&probe);
+            if let Some(authorization) = authorization {
+                call = call.header("authorization", authorization);
+            }
+            if let Some(host) = host {
+                call = call.header("host", host);
+            }
+            match call.send().await {
+                Ok(answer) => assert_eq!(
+                    answer.status(),
+                    refused,
+                    "{}: a call without its secret, or to another host",
+                    self.name
+                ),
+                Err(e) => panic!("{}: its ingress: {e}", self.name),
+            }
         }
     }
 
@@ -247,6 +301,7 @@ impl Host {
         let answer = match self
             .http
             .get(format!("{}/activity/0", self.ingress))
+            .header("authorization", &self.authorization)
             .send()
             .await
         {
@@ -288,6 +343,7 @@ impl Host {
         let answer = self
             .http
             .post(format!("{}/ingress", self.ingress))
+            .header("authorization", &self.authorization)
             .header("content-type", "application/x-protobuf")
             .body(request.encode_to_vec())
             .send()

@@ -21,20 +21,6 @@ resource "google_compute_firewall" "dsm_api" {
   target_tags   = ["dsm-storage-node"]
 }
 
-resource "google_compute_firewall" "dsm_metrics" {
-  name    = "${var.project_tag}-allow-metrics-${var.region}"
-  network = "default"
-  project = var.gcp_project
-
-  allow {
-    protocol = "tcp"
-    ports    = ["9090"]
-  }
-
-  source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["dsm-storage-node"]
-}
-
 resource "google_compute_firewall" "dsm_ssh" {
   name    = "${var.project_tag}-allow-ssh-${var.region}"
   network = "default"
@@ -49,6 +35,12 @@ resource "google_compute_firewall" "dsm_ssh" {
   target_tags   = ["dsm-storage-node"]
 }
 
+# Each node's PostgreSQL — every byte it ever acknowledged — lives on its boot
+# disk, and a node never loses stored bytes (storage spec §3). An edited
+# bootstrap never replaces a running node (`ignore_changes`), and nothing in
+# this module can destroy one (`prevent_destroy`: a plan that would is
+# refused, and retiring a node is a deliberate edit after its handover,
+# storage spec §12.5).
 resource "google_compute_instance" "dsm_node" {
   count        = var.node_count
   name         = "dsm-storage-node-${var.global_node_offset + count.index + 1}"
@@ -81,5 +73,10 @@ resource "google_compute_instance" "dsm_node" {
     role     = "storage-node"
     node-idx = tostring(var.global_node_offset + count.index + 1)
     region   = var.region
+  }
+
+  lifecycle {
+    ignore_changes  = [metadata_startup_script]
+    prevent_destroy = true
   }
 }

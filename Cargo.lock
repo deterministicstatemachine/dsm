@@ -1198,6 +1198,7 @@ dependencies = [
  "dsm_storage_node",
  "env_logger",
  "futures",
+ "hyper-util",
  "log",
  "prost 0.14.4",
  "rcgen",
@@ -1205,6 +1206,8 @@ dependencies = [
  "rustls",
  "serial_test",
  "tokio",
+ "tower",
+ "tower-http",
 ]
 
 [[package]]
@@ -1212,13 +1215,16 @@ name = "dsm-receipt-service"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "axum-server",
  "dsm",
  "env_logger",
+ "hyper-util",
  "lettre",
  "log",
  "prost 0.14.4",
  "reqwest",
  "tokio",
+ "tower-http",
 ]
 
 [[package]]

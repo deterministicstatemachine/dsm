@@ -18,8 +18,10 @@ crates/dsm-anchor-secure-monitor/src/tropic.rs	125	if dsm_sphincs::verify(PART_V
 crates/dsm-app-host/src/activity.rs	433	signature_bytes: dsm::crypto::sphincs::signature_bytes(
 crates/dsm-app-host/src/activity.rs	434	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 crates/dsm-receipt-service/src/lib.rs	126	match dsm::crypto::sphincs::sphincs_verify(
-crates/dsm-receipt-service/tests/receipt_flow.rs	144	r.signature = dsm::crypto::sphincs::sphincs_sign(secret_key, &signing_digest(&r))
-crates/dsm-receipt-service/tests/receipt_flow.rs	150	dsm::crypto::sphincs::generate_sphincs_keypair().map_err(|e| format!("keys: {e}"))
+crates/dsm-receipt-service/tests/no_address_in_logs.rs	119	let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair()
+crates/dsm-receipt-service/tests/no_address_in_logs.rs	133	request.signature = dsm::crypto::sphincs::sphincs_sign(&sk, &signing_digest(&request))
+crates/dsm-receipt-service/tests/receipt_flow.rs	159	r.signature = dsm::crypto::sphincs::sphincs_sign(secret_key, &signing_digest(&r))
+crates/dsm-receipt-service/tests/receipt_flow.rs	165	dsm::crypto::sphincs::generate_sphincs_keypair().map_err(|e| format!("keys: {e}"))
 crates/dsm-sphincs/src/lib.rs	106	pub enum SphincsVariant {
 crates/dsm-sphincs/src/lib.rs	157	fn param_set(v: SphincsVariant) -> Params {
 crates/dsm-sphincs/src/lib.rs	160	SphincsVariant::SPX128s => (16, 63, 7, 12, 14),

@@ -2,10 +2,12 @@
 //! What one client can hold on a node, and for how long. A request in flight
 //! counts once against one limit for the whole node, whichever route it is
 //! on; a request is answered within the node's request time, its body
-//! included; a closer waiting its turn holds no database connection; and a
-//! connection that never finishes sending a request's headers is closed. Each
-//! test holds the resource the way a hostile client would and checks what
-//! everyone else still gets.
+//! included, and a body that stops arriving frees its slot well before that;
+//! a closer waiting its turn holds no database connection; a connection that
+//! never finishes sending a request's headers is closed, and so is an HTTP/2
+//! connection whose peer stops answering pings; and the node holds no more
+//! connections open than its bound. Each test holds the resource the way a
+//! hostile client would and checks what everyone else still gets.
 
 mod common;
 
@@ -32,6 +34,17 @@ fn limits(concurrency_limit: usize, request_timeout: Duration) -> AppLimits {
         concurrency_limit,
         request_timeout,
         wait_bound: dsm_storage_node::api::transport::b0x::MAX_WAIT,
+    }
+}
+
+/// The deployed node's connection bounds, holding at most `max_open`
+/// connections.
+fn bounds(max_open: usize) -> dsm_storage_node::ConnectionBounds {
+    dsm_storage_node::ConnectionBounds {
+        header_read: Duration::from_secs(10),
+        h2_ping_every: dsm_storage_node::H2_PING_EVERY,
+        h2_ping_answer: dsm_storage_node::H2_PING_ANSWER,
+        max_open,
     }
 }
 
@@ -177,7 +190,13 @@ fn a_connection_that_never_finishes_its_headers_is_closed() {
         let listener = common::ok_or_panic(listener.into_std(), "the listener");
         let mut server = common::ok_or_panic(axum_server::from_tcp(listener), "a server");
         let header_time = Duration::from_secs(1);
-        dsm_storage_node::bound_connections(server.http_builder(), header_time);
+        dsm_storage_node::bound_connections(
+            server.http_builder(),
+            &dsm_storage_node::ConnectionBounds {
+                header_read: header_time,
+                ..bounds(16)
+            },
+        );
         tokio::spawn(server.serve(app.into_make_service()));
 
         let mut socket =
@@ -262,6 +281,149 @@ fn a_held_wait_takes_no_slot_and_outlasts_the_request_time() {
         assert!(
             started.elapsed() >= Duration::from_millis(2_500),
             "the wait was cut short of its bound"
+        );
+    });
+}
+
+/// A request whose body starts and then stops arriving is cut off once the
+/// body has been idle for [`dsm_storage_node::BODY_IDLE`], long before the
+/// node's request time: its slot is free again for everyone else.
+#[test]
+fn a_body_that_stops_arriving_is_cut_off_before_the_request_time() {
+    use futures::SinkExt;
+    common::runtime().block_on(async {
+        let app = node("rl_body_idle", limits(256, Duration::from_secs(600))).await;
+        let (mut sender, held) = held_submission();
+        common::ok_or_panic(
+            sender
+                .send(Ok(Bytes::from_static(b"the first bytes")))
+                .await,
+            "the body's first bytes",
+        );
+        let started = std::time::Instant::now();
+        let within = dsm_storage_node::BODY_IDLE + Duration::from_secs(10);
+        let answer = match tokio::time::timeout(within, app.oneshot(held)).await {
+            Ok(answer) => common::ok_or_panic(answer, "the app answers"),
+            Err(elapsed) => panic!("a body that stopped arriving held its slot: {elapsed}"),
+        };
+        assert_eq!(answer.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            started.elapsed() >= dsm_storage_node::BODY_IDLE.mul_f32(0.9),
+            "the body was cut off after {:?}, before it was idle for {:?}",
+            started.elapsed(),
+            dsm_storage_node::BODY_IDLE
+        );
+        drop(sender);
+    });
+}
+
+/// The node holds at most its bound of connections open: with room for two
+/// and two held (opened and never sent a byte), a third is closed as soon as
+/// it is accepted; once one of the two ends, a new connection is held again.
+/// The node's own TLS server is started, as the binary starts it.
+#[test]
+fn a_node_holds_no_more_connections_than_its_bound() {
+    use tokio::io::AsyncReadExt;
+    common::runtime().block_on(async {
+        let app = node("rl_cap", limits(256, Duration::from_secs(60))).await;
+        let listener =
+            common::ok_or_panic(tokio::net::TcpListener::bind("127.0.0.1:0").await, "bind");
+        let address = common::ok_or_panic(listener.local_addr(), "address");
+        let listener = common::ok_or_panic(listener.into_std(), "the listener");
+        let server = dsm_storage_node::node_server(
+            common::ok_or_panic(axum_server::from_tcp(listener), "a server"),
+            common::node_tls().await,
+            &bounds(2),
+        );
+        tokio::spawn(server.serve(app.into_make_service()));
+        let connect = move || async move {
+            common::ok_or_panic(tokio::net::TcpStream::connect(address).await, "connect")
+        };
+
+        let mut held = vec![connect().await, connect().await];
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut third = connect().await;
+        let mut rest = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(3), third.read_to_end(&mut rest)).await {
+            Ok(Ok(_)) => assert!(rest.is_empty(), "the node answered a connection over its bound"),
+            Ok(Err(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ),
+                "the connection over the bound ended in an error that is not the node closing it: {e}"
+            ),
+            Err(elapsed) => panic!("a connection over the node's bound was held open: {elapsed}"),
+        }
+
+        drop(held.pop());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut fourth = connect().await;
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(1), fourth.read(&mut byte)).await {
+            Err(_held_open) => {}
+            Ok(read) => {
+                panic!("a connection within the bound, once one ended, was not held: {read:?}")
+            }
+        }
+        drop(held);
+    });
+}
+
+/// An HTTP/2 connection whose peer stops answering the node's pings is
+/// closed once a ping goes unanswered, instead of being held for as long as
+/// the peer keeps the socket open. The peer here opens HTTP/2 and then never
+/// writes again. The bounds are set on the connection builder, the same one
+/// the node's TLS listener uses.
+#[test]
+fn an_http2_peer_that_stops_answering_pings_is_closed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    common::runtime().block_on(async {
+        let app = node("rl_h2_ping", limits(256, Duration::from_secs(60))).await;
+        let listener =
+            common::ok_or_panic(tokio::net::TcpListener::bind("127.0.0.1:0").await, "bind");
+        let address = common::ok_or_panic(listener.local_addr(), "address");
+        let listener = common::ok_or_panic(listener.into_std(), "the listener");
+        let mut server = common::ok_or_panic(axum_server::from_tcp(listener), "a server");
+        let ping = Duration::from_secs(1);
+        dsm_storage_node::bound_connections(
+            server.http_builder(),
+            &dsm_storage_node::ConnectionBounds {
+                h2_ping_every: ping,
+                h2_ping_answer: ping,
+                ..bounds(16)
+            },
+        );
+        tokio::spawn(server.serve(app.into_make_service()));
+
+        let mut socket =
+            common::ok_or_panic(tokio::net::TcpStream::connect(address).await, "connect");
+        // The HTTP/2 connection preface and an empty SETTINGS frame; nothing
+        // after it, not even the acknowledgements HTTP/2 asks for.
+        let mut opening = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+        opening.extend_from_slice(&[0, 0, 0, 0x04, 0, 0, 0, 0, 0]);
+        common::ok_or_panic(socket.write_all(&opening).await, "open HTTP/2");
+        let opened = std::time::Instant::now();
+        let mut rest = Vec::new();
+        let read =
+            tokio::time::timeout(Duration::from_secs(15), socket.read_to_end(&mut rest)).await;
+        let held = opened.elapsed();
+        match read {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ),
+                "the connection ended in an error that is not the node closing it: {e}"
+            ),
+            Err(elapsed) => {
+                panic!("an HTTP/2 peer that answers no ping was held open: {elapsed}")
+            }
+        }
+        assert!(
+            held >= ping.mul_f32(0.9),
+            "the connection ended after {held:?}, before a ping could go unanswered"
         );
     });
 }

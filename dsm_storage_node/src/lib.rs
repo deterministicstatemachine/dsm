@@ -111,15 +111,30 @@ impl NodeStorageSet {
     /// Attach each set-mate's configured endpoint. A node mirrors every node
     /// it shares the set with (storage spec §14), so every member other than
     /// `own_node_id` needs one. Refuses a missing endpoint, an endpoint for an
-    /// id that is not a member, and a member named twice.
+    /// id that is not a member, a member named twice, and an endpoint that is
+    /// not an `https://` origin: a mirrored ByteCommit is kept on the word of
+    /// the node that answered, so the answer must come from the node the
+    /// set's CA names, never from whoever sits on the path to it (storage
+    /// spec §14, mirror provenance; §22.8).
     pub fn with_endpoints(
         mut self,
         own_node_id: &str,
         endpoints: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
-        for (i, (member, _)) in endpoints.iter().enumerate() {
+        for (i, (member, endpoint)) in endpoints.iter().enumerate() {
             if !self.members.iter().any(|(m, _)| m == member) {
                 anyhow::bail!("storage_set endpoint names {member:?}, which is not a member");
+            }
+            let url = reqwest::Url::parse(endpoint).map_err(|e| {
+                anyhow::anyhow!(
+                    "storage_set endpoint {endpoint:?} for {member:?} is not a URL: {e}"
+                )
+            })?;
+            if url.scheme() != "https" || url.host_str().is_none() {
+                anyhow::bail!(
+                    "storage_set endpoint {endpoint:?} for {member:?} is not an https:// origin: \
+                     a set-mate is reached over TLS to the certificate the set's CA issued it"
+                );
             }
             if endpoints[..i].iter().any(|(m, _)| m == member) {
                 anyhow::bail!("storage_set names an endpoint for {member:?} twice");
@@ -242,6 +257,35 @@ mod storage_set_tests {
         assert!(NodeStorageSet::new(members(), "n1", [0xC1; 32]).is_ok());
     }
 
+    /// A set-mate is reached only over TLS to the certificate the set's CA
+    /// issued it: an endpoint that is cleartext, or not a URL, is refused at
+    /// startup, and an https origin is taken.
+    #[test]
+    fn a_set_mate_endpoint_that_is_not_https_is_refused() {
+        let set = || NodeStorageSet::new(members(), "n1", [0xC1; 32]).unwrap();
+        let endpoints = |n2: &str| {
+            vec![
+                ("n2".to_string(), n2.to_string()),
+                ("n3".to_string(), "https://10.0.0.3:8080".to_string()),
+            ]
+        };
+        for refused in [
+            "http://10.0.0.2:8080",
+            "10.0.0.2:8080",
+            "https://",
+            "ftp://10.0.0.2",
+        ] {
+            let err = set()
+                .with_endpoints("n1", endpoints(refused))
+                .expect_err("a set-mate endpoint that is not an https origin");
+            assert!(err.to_string().contains(refused), "{err}");
+        }
+        let taken = set()
+            .with_endpoints("n1", endpoints("https://10.0.0.2:8080"))
+            .unwrap();
+        assert_eq!(taken.member_endpoints().count(), 2);
+    }
+
     #[test]
     fn a_set_that_does_not_name_this_node_is_refused() {
         let err = NodeStorageSet::new(members(), "n4", [0xC4; 32])
@@ -321,20 +365,162 @@ async fn health(state: std::sync::Arc<AppState>) -> (axum::http::StatusCode, &'s
     }
 }
 
+/// How long a request's body may go without a byte arriving before the node
+/// stops reading it and answers. A client that starts a body and then sends
+/// nothing frees the request's slot under [`AppLimits::concurrency_limit`]
+/// after this, instead of after the whole request time. A transport bound,
+/// as an unreachable node is: no protocol fact depends on it (storage spec
+/// §1 rule 4).
+pub const BODY_IDLE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How often the node pings an HTTP/2 connection's peer, and how long it
+/// waits for the answer before it closes the connection. A peer that has gone
+/// away, or that stopped reading, no longer holds its connection. Transport
+/// bounds only (storage spec §1 rule 4).
+pub const H2_PING_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
+pub const H2_PING_ANSWER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The bounds every connection the node accepts is held to.
+#[derive(Debug, Clone, Copy)]
+pub struct ConnectionBounds {
+    /// How long a connection has to send a request's headers, the next
+    /// request's included once it has answered one.
+    pub header_read: std::time::Duration,
+    /// How often an HTTP/2 peer is pinged, and how long its answer may take.
+    pub h2_ping_every: std::time::Duration,
+    pub h2_ping_answer: std::time::Duration,
+    /// Connections held open at once. One more is closed as soon as it is
+    /// accepted, before its TLS handshake.
+    pub max_open: usize,
+}
+
 /// Bound every connection the node accepts before a request on it reaches
 /// the app: a client that opens a connection and never finishes sending a
 /// request's headers is cut off after `header_read`, instead of holding the
-/// connection open for as long as it likes. The server is given a timer for
-/// this, as the HTTP library needs one to keep any bound; without it the
-/// bound is never kept. A transport bound only (storage spec §1 rule 4).
+/// connection open for as long as it likes, and an HTTP/2 peer that stops
+/// answering pings is cut off too. The server is given a timer for this, as
+/// the HTTP library needs one to keep any bound; without it the bound is
+/// never kept. Transport bounds only (storage spec §1 rule 4).
 pub fn bound_connections(
     builder: &mut hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>,
-    header_read: std::time::Duration,
+    bounds: &ConnectionBounds,
 ) {
     builder
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
-        .header_read_timeout(header_read);
+        .header_read_timeout(bounds.header_read);
+    builder
+        .http2()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(bounds.h2_ping_every)
+        .keep_alive_timeout(bounds.h2_ping_answer);
+}
+
+/// Holds at most [`ConnectionBounds::max_open`] connections open at once.
+/// It runs before the TLS handshake, so a connection over the bound costs
+/// the node an accept and nothing more: it is closed at once, and its client
+/// meets what it meets at a node that is unavailable.
+#[derive(Clone)]
+pub struct ConnectionCap {
+    open: Arc<tokio::sync::Semaphore>,
+}
+
+impl ConnectionCap {
+    pub fn new(max_open: usize) -> Self {
+        Self {
+            open: Arc::new(tokio::sync::Semaphore::new(max_open)),
+        }
+    }
+}
+
+impl<I, S> axum_server::accept::Accept<I, S> for ConnectionCap {
+    type Stream = Counted<I>;
+    type Service = S;
+    type Future = std::future::Ready<std::io::Result<(Counted<I>, S)>>;
+
+    fn accept(&self, stream: I, service: S) -> Self::Future {
+        std::future::ready(match self.open.clone().try_acquire_owned() {
+            Ok(open) => Ok((
+                Counted {
+                    stream,
+                    _open: open,
+                },
+                service,
+            )),
+            Err(full) => Err(std::io::Error::other(format!(
+                "the node holds as many connections as it may: {full}"
+            ))),
+        })
+    }
+}
+
+/// A connection counted against [`ConnectionCap`] for as long as it is open.
+pub struct Counted<S> {
+    stream: S,
+    _open: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Counted<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Counted<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+    }
+}
+
+/// The node's TLS server on `server`'s listener, every connection held to
+/// `bounds`: counted against the connection cap from the moment it is
+/// accepted, then TLS, then the connection bounds. The binary serves through
+/// exactly this, and so do tests that stand up its listener.
+pub fn node_server<A: axum_server::Address>(
+    server: axum_server::Server<A>,
+    tls: axum_server::tls_rustls::RustlsConfig,
+    bounds: &ConnectionBounds,
+) -> axum_server::Server<A, axum_server::tls_rustls::RustlsAcceptor<ConnectionCap>> {
+    let mut server = server.acceptor(
+        axum_server::tls_rustls::RustlsAcceptor::new(tls)
+            .acceptor(ConnectionCap::new(bounds.max_open)),
+    );
+    bound_connections(server.http_builder(), bounds);
+    server
 }
 
 /// The binary serves exactly this, and so do tests that stand up real nodes,
@@ -343,7 +529,11 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
     use axum::routing::get;
     use axum::Router;
     use tower::limit::GlobalConcurrencyLimitLayer;
-    use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer, trace::TraceLayer};
+    use tower_http::{
+        limit::RequestBodyLimitLayer,
+        timeout::{RequestBodyTimeoutLayer, TimeoutLayer},
+        trace::TraceLayer,
+    };
 
     Router::new()
         .route(
@@ -377,6 +567,9 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
             state.clone(),
             limits.wait_bound,
         ))
+        // Every route's body, the wait's included: a body that stops arriving
+        // is cut off after BODY_IDLE.
+        .layer(RequestBodyTimeoutLayer::new(BODY_IDLE))
         .layer(TraceLayer::new_for_http())
         .layer(crate::node_identity_echo_layer(
             state.member_id_header.clone(),
