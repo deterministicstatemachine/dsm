@@ -693,6 +693,9 @@ impl CoreSDK {
                 },
             )?;
         }
+        // A connected application's request this task is carrying out is
+        // bound to the advance in this same transaction (SA-60).
+        crate::sdk::connect::operations::bind_in_tx(&tx, outcome)?;
         // §16.6: caller-injected full-state-consumption work (nonce consumption +
         // canonical apply record for the incoming-transfer apply). Same tx — an
         // Err here rolls back the state persistence too.
