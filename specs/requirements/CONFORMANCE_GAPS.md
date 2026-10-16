@@ -3112,6 +3112,107 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 |---|---|---|---|
 | MR-DSM-0322 to MR-DSM-0325 | — | Met | Built (above); tests in `VERIFICATION_MATRIX.md`. |
 
+### 6.84 Security audit of `main` at f160d22c: what it found that this file did not hold (`docs/security-audit-2026-10-15-findings`, 2026-10-15)
+
+**The audit.** A read-only audit of `origin/main` at f160d22c, in ten areas: crypto, the core state machine, SoFi, economic/vault/recovery, SDK flows, SDK handlers and JNI, SDK storage and BLE, the storage node and its deployment, Android and the frontend, and the hardware anchor with Wildstate. dBTC was left out (owner, 2026-10-15: it is being replaced). Every finding comes from reading code; none was run on a device. **Confirmed** means a second reader re-read the cited code and agrees; **reported** means one reader. Gaps this file already held are not repeated, except where the audit found something new about them (below the tables).
+
+**Owner rulings, 2026-10-15.**
+- The wallet lock stops a connected application's requests too (SA-18).
+- SA-02 and SA-03 go to a design discussion. Their rows are unchanged until it decides.
+- Record the rest here and fix them.
+
+**Critical and high.**
+
+| Id | Where | What is wrong | Read | Status |
+|---|---|---|---|---|
+| SA-01 | `GattServerHost.kt` (TX_REQUEST, PAIRING); `jni/unified_protobuf_bridge.rs` `process_envelope_v3_impl` → `dispatch_envelope_via_ingress`; `ingress.rs` `dispatch_ingress`; `dsm/core/bridge.rs` `handle_envelope_universal` | Any BLE central can write an Envelope v3. Its `UniversalTx` Invoke or Query runs on the whole AppRouter, e.g. `contacts.addManual` for itself, then `wallet.sendSmart` to itself. The characteristics take unencrypted writes. The envelope check is `version == 3`. The only gate is the app lock, which is off by default. Forged `BleEvent` envelopes from the radio are taken as platform events. The client role's TX_RESPONSE path reaches the same entry. | confirmed (three readers found it) | Open; fix in progress |
+| SA-02 | `economic/peer_lineage.rs` `parent_named_by` / `authenticated_root` | From position 2 on, the parent root is the claim's own `witness.pre_economic_root`, and position − 1 is never read. A fresh identity computes a tree with any balance, publishes one claim on it, and a receiver meeting it for the first time credits value that never existed. Fork detection catches two claims, not one fabricated one. A14's boundary (exposure at reconciliation) costs a throwaway identity nothing. This is the attack §6.68 closed before A14. | confirmed (mechanism) | Open; owner design |
+| SA-03 | `sofi/frontier/mod.rs` `authenticate_frontier_owner`; `sofi/resolution.rs` `VaultChain::from_baseline`; SDK `vault_baseline.rs` `adopt_one` | Only the owner's signature authenticates a baseline (S24/S26). Its root, generation and history root are never tied to genesis or to consumption. A hostile owner, for instance a Connect application's vault, can sign invented reserves. A wallet then trades against them and pays real `token_in`, and peers walking from genesis cannot validate the result. | reported | Open; owner design |
+| SA-04 | `handlers/connect_routes.rs` `Request::Pay`; `wallet_routes.rs` `token_of_commit`; `core_sdk.rs` `resolve_policy_commit_strict`; `token_routes.rs` `tokens.addByAnchor`; `economic/token_policy.rs` | Pay maps the grant's commit to a ticker, sends by ticker, and the ticker resolves to a built-in first. Adoption checks ticker conflicts against the registry only, which holds no built-ins. A connected app's token named "ERA" therefore pays out real ERA under a cap shown in its own decimals. (The balance-row display collision is already recorded; the send is not.) | confirmed | Open; fix in progress |
+| SA-05 | `crates/dsm-anchor-secure-monitor/src/anchor_glue.rs` `ChipIdentity::derive`; `crates/dsm-anchor-pico` `secure-boot` feature | The σ^host SPHINCS+ seed is derived from `stpub` and `chip_id`, both public. The monitor has no sealed path at all. The Pico's sealed path sits behind `secure-boot`, which is off by default, while the banner says `hw=production`. Anyone who reads those two values can sign as the host. | confirmed | Open; needs OTP provisioning |
+| SA-06 | `crates/dsm-anchor-secure-monitor/src/main.rs` (response copy) | Responses are clamped to the 4 KiB mailbox and still return `SG_OK`. EMIT carries a 17,088-byte SPX128f signature, so the two-image build truncates every EMIT after COMMIT has burned a counter step. | confirmed | Open |
+| SA-07 | `crypto/blake3.rs` `dsm_domain_hasher` via `sofi/storage.rs` `counts` and `storage_node_sdk.rs` `fetch_verified`; `storage_node_sdk.rs` `read_index`; every SDK `response.bytes()` | A single hostile member can deny every read: a namespace header without `DSM/` reaches an `assert!` (a panic); `read_index` never ends on full pages of malformed addresses; no response body is capped; redirects are followed to `http://`. | confirmed | Open; fix in progress |
+| SA-08 | `dsm_storage_node/src/api/cells.rs` `put_cells`; `db/pg.rs` `cell_commit_proof` | Without authentication: the batch put decodes the whole 1 MiB body before its 16-entry check (about 38 MB per request, 256 in flight), and the proof route loads every cell leaf of the cycle before checking that the key is among them. | confirmed | Open; fix in progress |
+| SA-09 | `dsm_storage_node/terraform/aws/modules/region/main.tf`; `deploy/provision_aws.sh` | The AMI is `most_recent` with no `ignore_changes` or `prevent_destroy`, the root disk is deleted on termination and holds Postgres, and the apply is `-auto-approve`. The next apply after a new AMI destroys all six nodes' databases. | reported | Open; fix in progress |
+| SA-10 | `bluetooth/bilateral_ble_handler.rs` (stage, simulate, finalize); `core_sdk.rs` stage-time leaf rewrite; `wallet.unloadOffline` | The offline allocation is checked, not reserved, and the one-step-in-flight rule is per counterparty. Two concurrent bearer sends from one allocation both verify at their receivers, and so does an unload between confirm and ack. Next to S-BEARER. | reported | Open |
+
+**Medium.**
+
+| Id | Where | What is wrong | Read | Status |
+|---|---|---|---|---|
+| SA-11 | `dsm/bilateral/offline.rs` `decide_confirm` | The receiver adopts `h_{n+1}` from the confirm's unsigned `pre_entropy` and never compares it with the signed receipt's `transition_entropy`. A tampered frame leaves the two sides on different tips until an online reconcile. | confirmed | Open |
+| SA-12 | `client_db/online_outbox.rs` stale-gate count | It counts five outbox statuses but not `economic_admission_pending`, which `wallet.send` writes. A live send's gate reads as an orphan and is deleted, and a BLE step on the same parent can fork the relationship. | confirmed | Open |
+| SA-13 | `bluetooth/ble_frame_coordinator.rs`; `client_db/ble_chunk_buffer.rs` | Chunks are keyed by the frame commitment only, the first chunk per index wins, and the per-chunk checksum is unkeyed. `reassemble()?` returns before the persisted chunks are deleted. A poisoned chunk is re-hydrated on every retransmission, so the frame never completes. | confirmed | Open |
+| SA-14 | `dsm/bilateral/offline.rs` `decide_prepare_response` | `receiver_challenge` is not under σ_B. A relay that substitutes it wedges the transfer after the chip's COMMIT has burned a step, and the sender cannot cancel past the confirm. | reported | Open |
+| SA-15 | `bilateral_ble_handler.rs` `admit_anchor_disclosure`; `anchor_accept.rs` | Of the first-transfer disclosure, only the bundle is bound by the receipt. A relay can substitute pk_chip, pk_host and anchor_id, and the pin is written before the release is accepted. Extends S-TOFU. | reported | Open |
+| SA-16 | `ble_frame_coordinator.rs`; `client_db/ble_chunk_buffer.rs` | Persisted chunks carry `counterparty_id = None`, and the only sweep runs at startup above 50 frames. An unauthenticated writer grows the database until restart. | reported | Open |
+| SA-17 | `sdk/recovery_sdk.rs` `device_wrapping_key` | K_R, the NFC capsule key, is wrapped at rest under a key derived from `device_id ‖ genesis_hash`, both public, with `unwrap_or_default` on the genesis. | confirmed | Open |
+| SA-18 | `sdk/connect/wallet.rs` `listen` | The connect listener calls `router.invoke("connect.sync")` directly, so the lock gate in `ingress.rs` never runs. Granted Pay, Swap, Escrow and Duel requests are carried out while the wallet is locked. | confirmed | Open; owner ruling: the lock stops them |
+| SA-19 | `connect_routes.rs` `Executed::spend`, Pay | A debit that committed but whose delivery is "unknown" is recorded as failed, so the grant's lifetime total is not charged. | reported | Open |
+| SA-20 | `handlers/recovery_routes.rs` resume gate; `client_db/recovery.rs` `all_counterparties_synced` | The tombstone-acknowledgement gate passes on a read error or an empty table, and `completeResume` clears the table unchecked. | reported | Open |
+| SA-21 | `handlers/recovery_impl.rs` `resume_all_contacts` | It reports success after per-contact failures and deletes the staged tips of the failed contacts. | reported | Open |
+| SA-22 | `app_router_impl.rs` query table; frontend `rigDebug.ts` | `system.createGenesisV2`, `prefs.set`, `storage.sync` and `tokens.addByAnchor` are registered as queries but change state. `window.__dsmRigQuery` is installed in production. | reported | Open; frontend part in progress |
+| SA-23 | `recipient_dispatch.rs`, `recipient_accept.rs`, `storage_routes.rs`, `wallet_routes.rs` history | On the online receive path, a received transfer's token label is the sender's and is never tied to the credited policy commit. One unknown label makes `wallet.history` fail for good. | reported | Open; fix in progress |
+| SA-24 | `sofi/facts.rs` `establish_ground`; `sofi/resolve.rs` `read_release_cells` | A computed-escrow Release whose `verdict_cell` is not `K_match` is "not established" rather than Invalid, so it holds the vault's key for good. Same effect as 12h; different cause. | reported | Open |
+| SA-25 | `economic/claim_envelope.rs`; `peer_lineage.rs` `probed` | A full SPHINCS+ verify runs before the cheap `derive_devid` check, over an unbounded number of candidates at `K_root(p)`. Junk writes stall a victim's payments. | reported | Open |
+| SA-26 | `crates/dsm-android-anchor/src/usb_appliance.rs`; `anchor_accept.rs` | Nothing binds a wallet to one anchor or checks the TROPIC01 certificate chain. The pin comes from whatever answers STATUS, `verify_upgrade_cert` returns false, and `is_genesis` is false. Partly S-TOFU. | reported | Open |
+| SA-27 | `crates/dsm-anchor-hw-verifier/src/provisioner.rs` | No one verifies the birth cage, and its deny list omits ECC key erase, generate and store. | reported | Open |
+| SA-28 | `core_sdk.rs` staging; `dsm-anchor-core` `appliance.rs`; `usb_appliance.rs` | A Committed record is never re-emitted: `resolve_prepared_on_reattach` has no caller, and a `counter_update` error maps to `CounterExhausted`. One USB timeout blocks offline sends until a power cycle. | reported | Open |
+| SA-29 | `dsm_storage_node/src/lib.rs`, `main.rs`, `api/transport/b0x.rs` | Several unauthenticated ways to exhaust the node: no idle body timeout (256 slow bodies hold every slot); the response body is written outside the permit and the timeout; no h2 idle bound or connection cap; 4096 unauthenticated b0x waiters, each submit waking a DB read per waiter. | reported | Open; fix in progress |
+| SA-30 | `crates/dsm-receipt-service` | The rate limit keys on an unbound device id and on the raw email string, while delivery parses it with lettre, which accepts `Name <a@b.c>` and trailing junk. Spoofed "X paid you" mail is unlimited. | reported | Open; fix in progress |
+| SA-31 | `crates/dsm-app-host` `/ingress` | It accepts any router method with no token, Origin or Host check, and binds wherever told. A browser page on the host can POST `wallet.sendSmart`. | reported | Open; fix in progress |
+| SA-32 | `.github/workflows/release.yml`; terraform `variables.tf` | Every release job has `contents: write`. SSH defaults to 0.0.0.0/0; IMDSv1 stays on; EBS is unencrypted. | reported | Open; fix in progress |
+| SA-33 | `MainActivity.kt`; `NfcRecoveryScreen.tsx`; phrase inputs | There is no `FLAG_SECURE` anywhere, Copy puts the 24 words on the clipboard, and phrase fields are learning inputs. | reported | Open; fix in progress |
+| SA-34 | `MainActivity.kt`; `AppsScreen.tsx` | There is no tapjacking protection on approvals, and a `dsm:connect` link's approval shows no referrer. | reported | Open; fix in progress |
+| SA-35 | `GattServerHost.kt` identity characteristic; BLE frames | The open identity read gives any scanner the permanent device id. Frames have no confidentiality, so a transfer's terms, including the salt meant to keep them out of public objects, travel in the clear. Extends C2. | reported | Open |
+
+**Low.**
+
+| Id | Where | What is wrong | Status |
+|---|---|---|---|
+| SA-36 | `crypto/signatures.rs`, `crypto/kyber.rs`, `core/bilateral_transaction_manager.rs` | A derived `Debug` prints SPHINCS+ and ML-KEM secret keys if one is ever formatted. `ml-kem` is used without zeroize, and seeds and HKDF buffers are not wiped. | Open |
+| SA-37 | `sdk/computed_flow.rs` `session_keypair` | The domain sits in the HKDF Extract salt, against KS1's rule that it lives in the Expand info. | Open |
+| SA-38 | `crypto/kyber.rs`; `common/device_tree.rs`; `merkle/sparse_merkle_tree.rs` | ML-KEM encapsulation keys are not checked for canonical encoding. Device-tree proofs take directions from `path_bits` with unchecked padding. `has_value` accepts any non-zero byte. One object, many encodings. | Open |
+| SA-39 | `types/device_state.rs` `validate_conservation`; `economic/write_set.rs` | `CreateToken.fee_amount` is not pinned to `TOKEN_CREATION_FEE_ERA`, so 0 is accepted. | Open |
+| SA-40 | `types/device_state.rs` `advance`; `economic/native_reserve.rs` | Contrary to its docs, `advance` accepts a FaucetClaim with no pending admission, and nothing caps claims per identity (an owner call). | Open |
+| SA-41 | `types/operations.rs` decoder | Tags 6, 7, 8, 9, 18, 20 and 32 accept a missing trailing signature field, so one operation has two encodings. | Open |
+| SA-42 | `economic/classifier.rs` vs `bilateral_transaction_manager.rs` | `classify` treats any `authority_policy: Some(_)` as offline-bearer; `operation_requires_offline_bearer` requires `OfflineBearerRequired`. | Open |
+| SA-43 | `types/device_state.rs` `advance`; `core/contact_manager.rs`; `core/identity/directory.rs` | `advance` never checks `rel_key` against the two device ids. `add_verified_contact` replaces silently and accepts the device's own id. A directory entry's genesis is self-asserted. | Open |
+| SA-44 | `core/bilateral_transaction_manager.rs` | One tag, `TAG_BILATERAL_SESSION`, separates both h_0 and the precommit hash. | Open |
+| SA-45 | `types/device_state.rs` offline cash; `emissions/mod.rs`; `types/state_types.rs` | Unchecked `sequence + 1`. `1usize << shard_depth` is unbounded (no production caller). `State::compute_hash` is unframed (compat view only). | Open |
+| SA-46 | `ccb/decode.rs` | Permuted encumbrance and member lists are sorted, not refused, unlike `decode_admission_manifest`. | Open |
+| SA-47 | `recovery/tombstone.rs` | The tombstone hash concatenates variable-length fields with no length prefixes, and the seal's root fields are not checked. | Open |
+| SA-48 | `sofi/admission.rs` | `ROUTE_MAX_LEGS = 2` is enforced by the builder only; verifiers accept about 15 legs. | Open |
+| SA-49 | `sdk/session_manager.rs` | A lock whose write fails is undone by the stale stored flag on the next sync. | Open |
+| SA-50 | `sdk/recovery_sdk.rs`; `sdk/email_receipts.rs` | `mnemonic_digest` is raw BLAKE3, the seed and SK copies are not zeroized, and the receipt email goes to an address the contact chose. | Open |
+| SA-51 | `jni/unified_protobuf_bridge.rs`; `jni/ble_events.rs` | `clearPendingRecoveryCapsule` and `maybeRefreshNfcCapsule` have no `catch_unwind`. `PENDING_IDENTITIES` is unbounded, with a polling task per spoofed id, and a GATT identity read blocks up to 15 s. Pairing messages take `device_id` from the payload. | Open |
+| SA-52 | `recovery_routes.rs` `recovery.enable`; `recovery_impl.rs`; `wallet_routes.rs` history | `recovery.enable` reports success after the first capsule fails. Recovery routes take the signing key in the request. `-(amount as i64)` overflows. | Open |
+| SA-53 | `client_db/cert_resync.rs` `take_bytes` | `*off + n` overflows on armeabi-v7a, so a cert-resync message panics on every sync. | Open |
+| SA-54 | `bilateral_ble_handler.rs` | The recovery egress gate runs only at finalize, after the chip's COMMIT and the confirm. Phase writes are last-writer-wins. `anchor_accept::verify_transition` returns true. | Open |
+| SA-55 | `client_db/sender_outbox.rs`; `client_db/bcr.rs`; `GattServerHost.kt` | A tampered row panics at startup (`copy_from_slice`; `with_capacity` from a stored count). The GATT chunk pipeline is an unbounded channel per address, never removed. | Open |
+| SA-56 | `MainActivity.kt`, `QrScannerActivity.kt`, `BridgePreferencesHandler.kt`, `LocalPicoUsb.kt`, manifest, backup rules, send review | Release builds honour env-config overrides from external storage. Scanned QR text is logged. Page script can set any preference, including identity pointers. Peer-chosen names can impersonate contacts. USB falls back to any CDC device. Task affinity is the default. Backup rules cover one domain. | Open; fix in progress |
+| SA-57 | `crates/dsm-anchor-secure-monitor` linker scripts; `dsm-anchor-pico`; `usb_appliance.rs`; `crates/wildstate-duel-wasm` | The measurement window is a fixed 64 KiB, unrelated to the NS image. There is no frame resync, and Android never checks `resp.op`. `tropic01` is an unpinned path dependency outside the repo. The bench adopt path re-inits the counter on any error. Firmware secrets are not wiped. The WASM `outcome` does not check the tiebreak seed. | Open |
+| SA-58 | storage node `bytecommit` close; receipt limiter; `deploy/generate_node_configs.sh`; `release.yml` | Alternating put and close inflates cycles. The receipt limiter never evicts, and its warning can log the address. The config script echoes the Postgres password. Release build jobs read a version from a job they do not need, so asset names lose it and `SHA256SUMS` never verifies. | Open; fix in progress |
+
+**Known, extended.**
+- §6.36 part I (the Pico re-enrols on every boot). After a replug, `recover()` adopts the live counter but keeps the genesis frontier, and the SDK reconciles its device-head leaf to STATUS. The Pico then signs a second successor from the already-consumed h_0.
+- 12g (a defeated route strands its other legs). `facts.rs` forces `parent_consumed_elsewhere` false at attempt 0, so the escape the row relies on never fires, for any pair of vaults, not only a self-owned one.
+
+**Held up under the audit.**
+- SPHINCS+ against FIPS 205.
+- SMT and batch-fold directions from the key.
+- `spool_seal`.
+- No SQL built from values anywhere.
+- One-transaction writes across `client_db`.
+- The node's immutable store and mirror trust.
+- The WebView's navigation and CSP.
+- The TrustZone entry point.
+- Wildstate's integer-only engine.
+
+| Row | Was | Now | Why |
+|---|---|---|---|
+| — | — | — | No requirement row changes here. Rows move as each fix lands, and SA-02's rows (MR-DSM-0304 to MR-DSM-0309) after the owner's design decision. |
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
