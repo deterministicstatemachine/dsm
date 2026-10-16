@@ -35,7 +35,9 @@ use dsm::types::proto as generated;
 use generated::connect_reply_v1::Reply;
 use prost::Message;
 
-use super::app_router_impl::{resolve_counterparty_via_transport, AppRouterImpl, OnlineSendIntent};
+use super::app_router_impl::{
+    resolve_counterparty_via_transport, AppRouterImpl, OnlineSendIntent, OnlineSent,
+};
 use super::response_helpers::{err, pack_envelope_ok};
 use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use crate::sdk::connect::grant::{
@@ -105,6 +107,16 @@ impl Executed {
         }
     }
 
+    /// A payment whose debit is committed and whose delivery is not yet
+    /// done: it was made, and the sweep carries it forward (§16.6).
+    fn paid_undelivered(why: impl std::fmt::Display) -> Self {
+        Self {
+            outcome: generated::ConnectOutcome::CarriedOut,
+            reason: format!("paid; its delivery is still being carried forward: {why}"),
+            result: None,
+        }
+    }
+
     /// What a request carried out under its grant counts against it: its
     /// spend, only when it was carried out.
     fn spend(&self, spend: Option<([u8; 32], u64)>) -> Option<([u8; 32], u64)> {
@@ -154,16 +166,29 @@ fn connected(sid: &[u8; 32]) -> Result<store::WalletSession, String> {
         .ok_or_else(|| "the application was disconnected".to_string())
 }
 
-/// Why `request` cannot be carried out yet, if it cannot. A payment waits
-/// while its relationship with the application catches up; a holdings proof,
-/// an escrow request, a quote and a swap wait while this device is still
-/// admitting its latest position (SoFi builds no route on a pending one).
-/// None is a refusal: the request stays queued, unanswered and unspent.
+/// Why no request may be carried out now, if none may: the wallet is locked
+/// (owner ruling 2026-10-15, SA-18). Whoever asks for `connect.sync` — the
+/// listener, a screen through the ingress — nothing runs on an application's
+/// behalf while the player could not run it by hand.
+fn held_by_lock() -> Result<Option<String>, String> {
+    Ok(crate::sdk::session_manager::lock_holds()?
+        .map(|locked| format!("{locked}; it runs once the wallet is opened")))
+}
+
+/// Why `request` cannot be carried out yet, if it cannot. Nothing runs while
+/// the wallet is locked. A payment waits while its relationship with the
+/// application catches up; a holdings proof, an escrow request, a quote and a
+/// swap wait while this device is still admitting its latest position (SoFi
+/// builds no route on a pending one). None is a refusal: the request stays
+/// queued, unanswered and unspent.
 fn waits(
     core: &crate::sdk::core_sdk::CoreSDK,
     session: &store::WalletSession,
     request: &Request,
 ) -> Result<Option<String>, String> {
+    if let Some(locked) = held_by_lock()? {
+        return Ok(Some(locked));
+    }
     match request {
         Request::Pay { .. } => Ok(payment_waits(&session.app_device_id)
             .map(|why| format!("the relationship with the application is settling: {why}"))),
@@ -469,11 +494,11 @@ impl AppRouterImpl {
     /// Root `anchor` through `tokens.addByAnchor`: the policy is fetched,
     /// re-hashed to the anchor and adopted into this device's state.
     async fn root_anchor(&self, anchor: &[u8; 32]) -> Result<(), String> {
-        let rooted = crate::bridge::AppRouter::query(
+        let rooted = crate::bridge::AppRouter::invoke(
             self,
-            AppQuery {
-                path: "tokens.addByAnchor".into(),
-                params: crate::util::text_id::encode_base32_crockford(anchor).into_bytes(),
+            AppInvoke {
+                method: "tokens.addByAnchor".into(),
+                args: crate::util::text_id::encode_base32_crockford(anchor).into_bytes(),
             },
         )
         .await;
@@ -802,6 +827,12 @@ impl AppRouterImpl {
                 session.last_seq + 1
             ));
         }
+        // While the wallet is locked a request is not even read against its
+        // grant: it stays on the relay, unanswered, and the first sync after
+        // the wallet opens processes it.
+        if let Some(locked) = held_by_lock()? {
+            return Ok(Flow::NotYet(format!("request {seq} waits: {locked}")));
+        }
         let summary = describe_request(&request);
         let scopes = granted_scopes(&session.accept_body)?;
         let spent: BTreeMap<[u8; 32], u64> = store::spent_all(&session.session_id)
@@ -930,19 +961,28 @@ impl AppRouterImpl {
                 // Paid in the token the grant names, by its commit: never by a
                 // ticker, which an application may give its own coin.
                 let sent = self
-                    .process_online_transfer_logic(OnlineSendIntent {
+                    .send_online(OnlineSendIntent {
                         to_device_id: session.app_device_id,
                         policy_commit: *policy_commit,
                         amount: *amount,
                         memo: payment_memo(&session.session_id, seq, memo),
                     })
                     .await;
-                match (sent.success, sent.error_message) {
-                    (ok, _) if ok => Executed::carried_out(None),
-                    (_, Some(why)) => Executed::failed(why),
-                    (_, None) => {
-                        Executed::failed("wallet.sendSmart refused it and said nothing more")
-                    }
+                match sent {
+                    // A committed debit is paid, delivered or not: it stands
+                    // and the sweep carries it forward (§16.6), so it counts
+                    // against the grant (SA-19).
+                    OnlineSent::Debited(answer) => match (answer.success, answer.error_message) {
+                        (ok, _) if ok => Executed::carried_out(None),
+                        (_, Some(why)) => Executed::paid_undelivered(why),
+                        (_, None) => Executed::paid_undelivered("the send said nothing more"),
+                    },
+                    OnlineSent::NotDebited(answer) => match answer.error_message {
+                        Some(why) => Executed::failed(why),
+                        None => {
+                            Executed::failed("wallet.sendSmart refused it and said nothing more")
+                        }
+                    },
                 }
             }
             Request::Quote {
@@ -1599,12 +1639,12 @@ impl AppRouterImpl {
                 } else {
                     // Take in whatever the storage nodes hold for this
                     // account first: the transfer may be waiting there.
-                    let synced = crate::bridge::AppRouter::query(
+                    let synced = crate::bridge::AppRouter::invoke(
                         self,
-                        AppQuery {
-                            path: "storage.sync".into(),
+                        AppInvoke {
+                            method: "storage.sync".into(),
                             // The sync the inbox poller makes.
-                            params: generated::ArgPack {
+                            args: generated::ArgPack {
                                 codec: generated::Codec::Proto as i32,
                                 body: crate::sdk::inbox_poller::poll_sync_request().encode_to_vec(),
                                 ..Default::default()

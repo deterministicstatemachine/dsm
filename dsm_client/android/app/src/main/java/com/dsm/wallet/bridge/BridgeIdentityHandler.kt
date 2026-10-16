@@ -13,6 +13,7 @@ import dsm.types.proto.IngressRequest
 import dsm.types.proto.IngressResponse
 import dsm.types.proto.ResultPack
 import dsm.types.proto.RestoreIdentityContextOp
+import dsm.types.proto.RouterInvokeOp
 import dsm.types.proto.RouterQueryOp
 import dsm.types.proto.StartupRequest
 import dsm.types.proto.StartupResponse
@@ -59,15 +60,34 @@ internal object BridgeIdentityHandler {
     }
 
     /** Dispatch a router query through the native ingress boundary, returning the raw ok-bytes. */
-    private fun routerQuery(method: String, argPackBytes: ByteArray): ByteArray {
-        val ingressRequest = IngressRequest.newBuilder()
-            .setRouterQuery(
-                RouterQueryOp.newBuilder()
-                    .setMethod(method)
-                    .setArgs(ByteString.copyFrom(argPackBytes))
-                    .build()
-            )
-            .build()
+    private fun routerQuery(method: String, argPackBytes: ByteArray): ByteArray =
+        dispatchRouter(
+            method,
+            IngressRequest.newBuilder()
+                .setRouterQuery(
+                    RouterQueryOp.newBuilder()
+                        .setMethod(method)
+                        .setArgs(ByteString.copyFrom(argPackBytes))
+                        .build()
+                )
+                .build()
+        )
+
+    /** Dispatch a router invoke (a route that changes state) through the native ingress boundary. */
+    private fun routerInvoke(method: String, argPackBytes: ByteArray): ByteArray =
+        dispatchRouter(
+            method,
+            IngressRequest.newBuilder()
+                .setRouterInvoke(
+                    RouterInvokeOp.newBuilder()
+                        .setMethod(method)
+                        .setArgs(ByteString.copyFrom(argPackBytes))
+                        .build()
+                )
+                .build()
+        )
+
+    private fun dispatchRouter(method: String, ingressRequest: IngressRequest): ByteArray {
         val ingressResponse =
             IngressResponse.parseFrom(Unified.dispatchIngress(ingressRequest.toByteArray()))
         return when (ingressResponse.resultCase) {
@@ -178,7 +198,7 @@ internal object BridgeIdentityHandler {
                 .setCodec(Codec.CODEC_PROTO)
                 .setBody(ByteString.copyFrom(req.toByteArray()))
                 .build()
-            val envelopeBytes = routerQuery("system.createGenesisV2", arg.toByteArray())
+            val envelopeBytes = routerInvoke("system.createGenesisV2", arg.toByteArray())
 
             val errorCode = getFramedErrorEnvelopeCode(envelopeBytes)
             if (errorCode != 0) {

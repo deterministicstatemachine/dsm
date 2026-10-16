@@ -78,9 +78,9 @@ async fn a_receiver_that_never_added_the_token_is_not_credited_until_it_adopts()
     let root_before = p.b.router().core_sdk.device_head().expect("B head").root();
     let adopted =
         p.b.router()
-            .query(crate::bridge::AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            .invoke(crate::bridge::AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
             })
             .await;
     assert!(

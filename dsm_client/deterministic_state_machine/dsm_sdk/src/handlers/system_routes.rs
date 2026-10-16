@@ -4,7 +4,7 @@
 use dsm::types::proto as generated;
 use prost::Message;
 
-use crate::bridge::{AppQuery, AppResult};
+use crate::bridge::{AppInvoke, AppQuery, AppResult};
 use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, pack_bytes_ok, err};
 
@@ -22,8 +22,8 @@ pub(crate) fn handle_generate_mnemonic_query() -> AppResult {
 /// cache it in the unlocked session, then run `create_genesis_v3_self_attested` and install the
 /// resulting GenesisState. Nothing is persisted but public values (no s0, no Smaster). Fails
 /// closed if the wallet seed cannot be derived/cached.
-pub(crate) fn handle_create_genesis_v2_query(q: AppQuery) -> AppResult {
-    let pack = match generated::ArgPack::decode(&*q.params) {
+pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
+    let pack = match generated::ArgPack::decode(args) {
         Ok(p) => p,
         Err(e) => return err(format!("decode ArgPack failed: {e}")),
     };
@@ -394,13 +394,20 @@ pub(crate) fn install_wallet_genesis(
 }
 
 impl AppRouterImpl {
-    /// Dispatch handler for `system.*` query routes.
+    /// Dispatch handler for the `system.generateMnemonic` query route.
     pub(crate) async fn handle_system_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
-            // -------- canonical mnemonic-rooted Genesis v2 (QueryOp) --------
             "system.generateMnemonic" => handle_generate_mnemonic_query(),
-            "system.createGenesisV2" => handle_create_genesis_v2_query(q),
             _ => err(format!("unknown system query: {}", q.path)),
+        }
+    }
+
+    /// Dispatch handler for the `system.createGenesisV2` invoke route: it
+    /// creates and installs this device's identity.
+    pub(crate) async fn handle_system_invoke(&self, i: AppInvoke) -> AppResult {
+        match i.method.as_str() {
+            "system.createGenesisV2" => handle_create_genesis_v2(&i.args),
+            _ => err(format!("unknown system invoke: {}", i.method)),
         }
     }
 }
@@ -436,15 +443,14 @@ mod tests {
     }
 
     fn create_wallet(body: Vec<u8>) -> AppResult {
-        handle_create_genesis_v2_query(AppQuery {
-            path: "system.createGenesisV2".to_string(),
-            params: generated::ArgPack {
+        handle_create_genesis_v2(
+            &generated::ArgPack {
                 codec: generated::Codec::Proto as i32,
                 body,
                 ..Default::default()
             }
             .encode_to_vec(),
-        })
+        )
     }
 
     /// A wallet created in the running app listens at once: wallet creation
@@ -454,7 +460,7 @@ mod tests {
     /// 2026-10-04).
     ///
     /// MUTATION CONTROL: without the poller start in
-    /// `handle_create_genesis_v2_query` no poller runs after the wallet is
+    /// `handle_create_genesis_v2` no poller runs after the wallet is
     /// created, and this test goes red.
     #[test]
     #[serial_test::serial]

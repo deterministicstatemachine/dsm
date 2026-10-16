@@ -18,6 +18,7 @@ use dsm::recovery::capsule::{
     decrypt_capsule_with_key, derive_recovery_key, derive_recovery_authority_seed,
 };
 use dsm::types::error::DsmError;
+use zeroize::Zeroizing;
 
 /// The number of words of a DSM wallet mnemonic: 24, i.e. 256 bits of entropy.
 pub const WALLET_MNEMONIC_WORDS: usize = 24;
@@ -43,30 +44,40 @@ pub fn wallet_seed_from_mnemonic(phrase: &str) -> Result<[u8; 64], DsmError> {
     Ok(parse_wallet_mnemonic(phrase)?.to_seed(""))
 }
 
-/// In-memory cached recovery key (key schedule KS1: an Expand of the wallet-root Extract).
-/// Also persisted to SQLite encrypted by a device-bound key so it survives app restarts.
-static RECOVERY_KEY: Mutex<Option<[u8; 32]>> = Mutex::new(None);
+/// In-memory cached recovery key K_R (key schedule KS1: an Expand of the wallet-root Extract).
+/// Never stored: after a restart it is derived again from the wallet seed, which the seed
+/// vault seals at rest ([`RecoverySDK::cache_key_from_wallet_seed`]). Zeroized when replaced
+/// or cleared.
+static RECOVERY_KEY: Mutex<Option<Zeroizing<[u8; 32]>>> = Mutex::new(None);
 
 /// In-memory cached recovery authority SPHINCS+ keypair (public, secret).
 /// Derived from the wallet root via a separate KS1 Expand label (`DSM/recovery-authority/v2`).
 /// Used to sign tombstone and succession receipts during device recovery.
-/// Never persisted to disk — cleared alongside the encryption key.
-static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Vec<u8>)>> = Mutex::new(None);
+/// Never persisted to disk — cleared alongside the encryption key. The secret key is zeroized
+/// when replaced or cleared.
+static RECOVERY_AUTHORITY_KEYPAIR: Mutex<Option<(Vec<u8>, Zeroizing<Vec<u8>>)>> = Mutex::new(None);
 
 /// In-memory cached BIP39 wallet seed (`mnemonic.to_seed("")`). The canonical Genesis v2
 /// root-secret input — `wallet_seed -> s0 -> Smaster -> {device signing key, per-step EK,
 /// ML-KEM coins}` are re-derived from it on demand via the wallet/recovery unlock path.
-/// NEVER persisted; populated at unlock alongside the recovery key, cleared with it.
-static WALLET_SEED_CACHE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
+/// NEVER persisted; populated at unlock alongside the recovery key, cleared with it, and
+/// zeroized when replaced or cleared.
+static WALLET_SEED_CACHE: Mutex<Option<Zeroizing<Vec<u8>>>> = Mutex::new(None);
 
 /// Digest of the last mnemonic [`RecoverySDK::generate_mnemonic`] produced in this process.
 /// A NEW identity may be created only from that phrase: a 24-word phrase typed in proves
 /// nothing about its entropy, while one drawn here from the OS CSPRNG has 256 bits.
 static GENERATED_MNEMONIC: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
+/// `DSM/generated-mnemonic/v1`: the domain of [`GENERATED_MNEMONIC`]'s digest.
+const TAG_GENERATED_MNEMONIC: dsm::crypto::domain::TaggedHashDomain<'static> =
+    dsm::tagged_domain!(b"DSM/generated-mnemonic/v1");
+
+/// The digest a generated mnemonic is remembered by: its words, single-spaced, under
+/// [`TAG_GENERATED_MNEMONIC`]. The joined phrase is zeroized once hashed.
 fn mnemonic_digest(phrase: &str) -> [u8; 32] {
-    let words: Vec<&str> = phrase.split_whitespace().collect();
-    *blake3::hash(words.join(" ").as_bytes()).as_bytes()
+    let words = Zeroizing::new(phrase.split_whitespace().collect::<Vec<&str>>().join(" "));
+    dsm::crypto::blake3::domain_hash_bytes(TAG_GENERATED_MNEMONIC, words.as_bytes())
 }
 
 /// SDK for DSM recovery operations
@@ -286,10 +297,8 @@ impl RecoverySDK {
     /// # Returns
     /// Tuple of (capsule_index, encrypted capsule bytes serialized for NFC)
     pub fn create_capsule_from_current_state(mnemonic: &str) -> Result<(u64, Vec<u8>), DsmError> {
-        let mut seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let key = derive_recovery_key(&seed);
-        zeroize::Zeroize::zeroize(&mut seed);
-        let key = key?;
+        let seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
+        let key = Zeroizing::new(derive_recovery_key(seed.as_slice())?);
         Self::create_capsule_from_current_state_with_key(&key)
     }
 
@@ -370,7 +379,8 @@ impl RecoverySDK {
     /// The cached BIP39 wallet seed (the Genesis v2 root-secret input), if the mnemonic
     /// has been unlocked this session via [`Self::derive_and_cache_key`]. `None` otherwise —
     /// callers that need it (device-key re-derivation, per-step EK/ML-KEM) MUST fail closed.
-    pub fn get_cached_wallet_seed() -> Option<Vec<u8>> {
+    /// The copy returned is zeroized when the caller drops it.
+    pub fn get_cached_wallet_seed() -> Option<Zeroizing<Vec<u8>>> {
         WALLET_SEED_CACHE.lock().ok().and_then(|g| g.clone())
     }
 
@@ -383,14 +393,13 @@ impl RecoverySDK {
     ///                 K_A  = Expand(PRK_w, "DSM/recovery-authority/v2")
     ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
     ///
-    /// Both the encryption key and the authority keypair are cached in memory.
+    /// Both the encryption key and the authority keypair are cached in memory; every
+    /// intermediate secret is zeroized when it goes out of scope.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
-        let mut wallet_seed = wallet_seed_from_mnemonic(mnemonic)?;
-        let key = derive_recovery_key(&wallet_seed);
-        let authority_seed = derive_recovery_authority_seed(&wallet_seed);
-        zeroize::Zeroize::zeroize(&mut wallet_seed);
-        let key = key?;
-        let authority_seed = authority_seed?;
+        let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
+        let key = Zeroizing::new(derive_recovery_key(wallet_seed.as_slice())?);
+        let authority_seed =
+            Zeroizing::new(derive_recovery_authority_seed(wallet_seed.as_slice())?);
         {
             let mut guard = RECOVERY_KEY
                 .lock()
@@ -405,27 +414,19 @@ impl RecoverySDK {
         // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
         // never reversible to it; the mnemonic itself is never persisted.
         {
-            let seed = wallet_seed_from_mnemonic(mnemonic)?;
-            {
-                let mut guard = WALLET_SEED_CACHE
-                    .lock()
-                    .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
-                *guard = Some(seed.to_vec());
-            }
-            // Seal the seed at rest (non-fatal: the session is already usable; failure only
-            // means the next cold start will require the mnemonic again).
-            if let Err(e) = Self::persist_wallet_seed(&seed) {
-                log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
-            }
+            let mut guard = WALLET_SEED_CACHE
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Wallet seed mutex poisoned".into()))?;
+            *guard = Some(Zeroizing::new(wallet_seed.to_vec()));
+        }
+        // Seal the seed at rest (non-fatal: the session is already usable; failure only
+        // means the next cold start will require the mnemonic again).
+        if let Err(e) = Self::persist_wallet_seed(wallet_seed.as_slice()) {
+            log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
         }
 
-        // Persist the key encrypted by a device-bound wrapping key so it
-        // survives app restarts without requiring the mnemonic again.
-        if let Err(e) = Self::persist_recovery_key(&key) {
-            log::warn!("[RECOVERY_SDK] Failed to persist recovery key (non-fatal): {e}");
-        }
-
-        // Derive and cache the recovery authority SPHINCS+ keypair.
+        // Derive and cache the recovery authority SPHINCS+ keypair. The key pair zeroizes
+        // itself on drop; the cache keeps its own zeroizing copy of the secret key.
         let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
             dsm::crypto::sphincs::SphincsVariant::SPX256f,
             &authority_seed,
@@ -435,29 +436,24 @@ impl RecoverySDK {
             let mut guard = RECOVERY_AUTHORITY_KEYPAIR.lock().map_err(|_| {
                 DsmError::InvalidState("Recovery authority keypair mutex poisoned".into())
             })?;
-            *guard = Some((keypair.public_key.clone(), keypair.secret_key.clone()));
+            *guard = Some((
+                keypair.public_key.clone(),
+                Zeroizing::new(keypair.secret_key.clone()),
+            ));
         }
         log::info!("[RECOVERY_SDK] Cached recovery encryption key and authority keypair");
         Ok(())
     }
 
-    /// Clear the cached recovery key and authority keypair from memory and storage.
+    /// Clear the cached recovery key and authority keypair from memory (each is zeroized as
+    /// it is dropped), and the sealed wallet seed from storage.
     pub fn clear_cached_key() {
         if let Ok(mut guard) = RECOVERY_KEY.lock() {
-            if let Some(ref mut k) = *guard {
-                k.iter_mut().for_each(|b| *b = 0);
-            }
             *guard = None;
         }
         if let Ok(mut guard) = RECOVERY_AUTHORITY_KEYPAIR.lock() {
-            if let Some((ref mut pk, ref mut sk)) = *guard {
-                pk.iter_mut().for_each(|b| *b = 0);
-                sk.iter_mut().for_each(|b| *b = 0);
-            }
             *guard = None;
         }
-        // Also wipe the persisted encrypted blob.
-        let _ = crate::storage::client_db::recovery::delete_encrypted_recovery_key();
         // Full wipe (logout / mnemonic change): drop the in-memory seed and the sealed
         // bundle. (Temporary lock uses `clear_wallet_seed_cache`, which keeps the blob.)
         Self::clear_wallet_seed_cache();
@@ -469,9 +465,10 @@ impl RecoverySDK {
         RECOVERY_KEY.lock().map(|g| g.is_some()).unwrap_or(false)
     }
 
-    /// Get the cached recovery authority keypair (public_key, secret_key).
-    /// Returns `None` if no mnemonic has been cached yet.
-    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Vec<u8>)> {
+    /// Get the cached recovery authority keypair (public_key, secret_key); the secret key's
+    /// copy is zeroized when the caller drops it. Returns `None` if no mnemonic has been
+    /// cached yet.
+    pub fn get_cached_authority_keypair() -> Option<(Vec<u8>, Zeroizing<Vec<u8>>)> {
         RECOVERY_AUTHORITY_KEYPAIR
             .lock()
             .ok()
@@ -1238,18 +1235,6 @@ impl RecoverySDK {
         Ok(receipt.content_id())
     }
 
-    /// Derive a device-bound wrapping key from device_id + genesis_hash.
-    /// Used to encrypt the recovery key before persisting to SQLite.
-    fn device_wrapping_key() -> Result<[u8; 32], DsmError> {
-        let device_id = crate::sdk::app_state::AppState::get_device_id()
-            .ok_or_else(|| DsmError::InvalidState("Device ID not available".into()))?;
-        let genesis_hash = crate::sdk::app_state::AppState::get_genesis_hash().unwrap_or_default();
-        let mut hasher = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist\0");
-        hasher.update(&device_id);
-        hasher.update(&genesis_hash);
-        Ok(*hasher.finalize().as_bytes())
-    }
-
     /// Seal the BIP39 wallet seed at rest via the hardware-backed seed vault so the
     /// signer can be rebuilt on cold start without the mnemonic. The seed is a one-way
     /// derivation from the paper mnemonic (never the mnemonic, never reversible to it).
@@ -1281,7 +1266,7 @@ impl RecoverySDK {
                 )))
             }
         };
-        let seed = crate::sdk::seed_vault::open(&blob)?;
+        let seed = Zeroizing::new(crate::sdk::seed_vault::open(&blob)?);
         {
             let mut guard = WALLET_SEED_CACHE
                 .lock()
@@ -1297,102 +1282,26 @@ impl RecoverySDK {
     /// next auth-gated unlock).
     pub fn clear_wallet_seed_cache() {
         if let Ok(mut guard) = WALLET_SEED_CACHE.lock() {
-            if let Some(ref mut s) = *guard {
-                s.iter_mut().for_each(|b| *b = 0);
-            }
             *guard = None;
         }
     }
 
-    /// Encrypt the recovery key with a device-bound wrapping key and store in SQLite.
-    /// Format: nonce (24 bytes) || ciphertext+tag.
-    fn persist_recovery_key(key: &[u8; 32]) -> Result<(), DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        // Nonce derived from wrapping key AND plaintext — safe even if the
-        // mnemonic (and therefore key) changes between persist calls.
-        let nonce_hash = {
-            let mut h = dsm::crypto::blake3::Hasher::new_derive_key("DSM/recovery-persist-nonce\0");
-            h.update(&wrapping_key);
-            h.update(key);
-            h.finalize()
-        };
-        let nonce = XNonce::from_slice(&nonce_hash.as_bytes()[..24]);
-
-        let ciphertext = cipher
-            .encrypt(nonce, key.as_ref())
-            .map_err(|e| DsmError::InvalidState(format!("recovery key encryption: {e}")))?;
-
-        // Store nonce || ciphertext so decrypt doesn't need to re-derive from plaintext.
-        let mut blob = Vec::with_capacity(24 + ciphertext.len());
-        blob.extend_from_slice(nonce.as_slice());
-        blob.extend_from_slice(&ciphertext);
-
-        crate::storage::client_db::recovery::store_encrypted_recovery_key(&blob)
-            .map_err(|e| DsmError::InvalidState(format!("persist encrypted key: {e}")))?;
-
-        log::info!(
-            "[RECOVERY_SDK] Recovery key persisted (encrypted, {} bytes)",
-            blob.len()
-        );
+    /// Derive K_R again (KS1 `recovery_aead`) from the wallet seed the session holds —
+    /// after a restart, the seed the seed vault unsealed — and cache it. K_R is never
+    /// stored: it is only ever this derivation of the sealed seed, so its secrecy is the
+    /// seed's (SA-17).
+    fn cache_key_from_wallet_seed() -> Result<(), DsmError> {
+        let seed = Self::get_cached_wallet_seed().ok_or_else(|| {
+            DsmError::InvalidState(
+                "the wallet seed is not unlocked: the NFC backup key derives from it".into(),
+            )
+        })?;
+        let key = Zeroizing::new(derive_recovery_key(&seed)?);
+        let mut guard = RECOVERY_KEY
+            .lock()
+            .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+        *guard = Some(key);
         Ok(())
-    }
-
-    /// Load the persisted encrypted recovery key, decrypt it, and cache in memory.
-    /// Returns Ok(true) if loaded, Ok(false) if no persisted key exists.
-    fn load_persisted_recovery_key() -> Result<bool, DsmError> {
-        use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
-        use chacha20poly1305::aead::Aead;
-
-        let blob = match crate::storage::client_db::recovery::load_encrypted_recovery_key() {
-            Ok(Some(b)) => b,
-            Ok(None) => return Ok(false),
-            Err(e) => {
-                return Err(DsmError::InvalidState(format!(
-                    "load encrypted recovery key: {e}"
-                )))
-            }
-        };
-
-        if blob.len() < 24 {
-            return Err(DsmError::InvalidState(format!(
-                "persisted key blob too short: {} bytes",
-                blob.len()
-            )));
-        }
-
-        let nonce = XNonce::from_slice(&blob[..24]);
-        let ciphertext = &blob[24..];
-
-        let wrapping_key = Self::device_wrapping_key()?;
-        let cipher = XChaCha20Poly1305::new_from_slice(&wrapping_key)
-            .map_err(|e| DsmError::InvalidState(format!("wrapping cipher init: {e}")))?;
-
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| DsmError::InvalidState(format!("recovery key decryption: {e}")))?;
-
-        if plaintext.len() != 32 {
-            return Err(DsmError::InvalidState(format!(
-                "decrypted key wrong length: {} (expected 32)",
-                plaintext.len()
-            )));
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&plaintext);
-        {
-            let mut guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            *guard = Some(key);
-        }
-        Ok(true)
     }
 
     /// Decrypt an encrypted capsule using the in-memory cached recovery key.
@@ -1405,11 +1314,13 @@ impl RecoverySDK {
             let guard = RECOVERY_KEY
                 .lock()
                 .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
+            guard
+                .clone()
+                .ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
         };
 
         let encrypted = EncryptedCapsule::from_bytes(capsule_bytes)?;
-        decrypt_capsule_with_key(&encrypted, &key)
+        decrypt_capsule_with_key(&encrypted, &key[..])
     }
 
     /// Decode this device's persisted recovery state into a [`RecoveryActivationContext`]
@@ -2012,31 +1923,17 @@ impl RecoverySDK {
     /// Refresh the pending NFC capsule if backup is enabled and a key is available.
     ///
     /// Called by the transport layer (Kotlin) after every state-mutating operation.
-    /// If the in-memory key was lost (app restart), this auto-loads the persisted
-    /// encrypted key from SQLite before creating the capsule.
+    /// If the in-memory key was lost (app restart), K_R is derived again from the
+    /// wallet seed the session holds before the capsule is created.
     pub fn maybe_refresh_nfc_capsule() {
         if !Self::is_nfc_backup_enabled() {
             return;
         }
 
-        // Auto-load persisted key if the in-memory cache was lost (app restart).
         if !Self::has_cached_key() {
-            log::info!("[NFC_BACKUP] No cached key — attempting to load persisted key");
-            match Self::load_persisted_recovery_key() {
-                Ok(true) => {
-                    log::info!("[NFC_BACKUP] Persisted key loaded successfully");
-                }
-                Ok(false) => {
-                    log::warn!(
-                        "[NFC_BACKUP] No persisted key found — capsule refresh skipped. \
-                         User must re-enter mnemonic via Settings."
-                    );
-                    return;
-                }
-                Err(e) => {
-                    log::warn!("[NFC_BACKUP] Failed to load persisted key: {e}");
-                    return;
-                }
+            if let Err(e) = Self::cache_key_from_wallet_seed() {
+                log::warn!("[NFC_BACKUP] capsule refresh skipped: {e}");
+                return;
             }
         }
 
@@ -2061,7 +1958,9 @@ impl RecoverySDK {
             let guard = RECOVERY_KEY
                 .lock()
                 .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            guard.ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
+            guard
+                .clone()
+                .ok_or_else(|| DsmError::InvalidState("No cached recovery key".into()))?
         };
         Self::create_capsule_from_current_state_with_key(&key)
     }
@@ -2398,6 +2297,50 @@ mod tests {
             RecoverySDK::get_cached_authority_keypair().expect("the cached recovery authority");
         assert_eq!(cached_pk, authority.public_key);
         RecoverySDK::clear_wallet_seed_cache();
+    }
+
+    /// The NFC backup key K_R is the KS1 `recovery_aead` derivation of the unlocked wallet
+    /// seed and nothing else (SA-17): a session that lost it (a restart) derives the same key
+    /// again from the seed the vault unsealed, and one whose seed is locked derives none. It
+    /// is never stored under anything public.
+    #[test]
+    #[serial_test::serial]
+    fn the_nfc_backup_key_is_derived_from_the_unlocked_seed_alone() {
+        let phrase = crate::economic_fixtures::test_mnemonic(0x5A);
+        RecoverySDK::derive_and_cache_key(&phrase).expect("unlock");
+        let seed = Zeroizing::new(wallet_seed_from_mnemonic(&phrase).expect("the wallet seed"));
+        let expected = derive_recovery_key(seed.as_slice()).expect("K_R");
+        let cached = || RECOVERY_KEY.lock().expect("the key slot").clone();
+        assert_eq!(cached().as_deref(), Some(&expected));
+
+        // A restart: the key is gone from memory; the seed is unsealed again.
+        *RECOVERY_KEY.lock().expect("the key slot") = None;
+        RecoverySDK::cache_key_from_wallet_seed().expect("derived again");
+        assert_eq!(cached().as_deref(), Some(&expected));
+
+        // A locked wallet holds no seed, and so no key is derived.
+        *RECOVERY_KEY.lock().expect("the key slot") = None;
+        RecoverySDK::clear_wallet_seed_cache();
+        let refused = RecoverySDK::cache_key_from_wallet_seed().expect_err("no seed, no key");
+        assert!(refused.to_string().contains("not unlocked"), "{refused}");
+        assert!(!RecoverySDK::has_cached_key());
+    }
+
+    /// The digest a generated phrase is remembered by is BLAKE3 under its own registered
+    /// domain, `DSM/generated-mnemonic/v1` (SA-50), and spacing does not change it.
+    #[test]
+    fn a_generated_phrase_is_remembered_under_its_own_domain() {
+        let phrase = crate::economic_fixtures::test_mnemonic(0x5B);
+        let spaced = format!("  {}  ", phrase.replace(' ', "   "));
+        assert_eq!(
+            TAG_GENERATED_MNEMONIC.source_bytes(),
+            b"DSM/generated-mnemonic/v1"
+        );
+        assert_eq!(
+            mnemonic_digest(&phrase),
+            dsm::crypto::blake3::domain_hash_bytes(TAG_GENERATED_MNEMONIC, phrase.as_bytes())
+        );
+        assert_eq!(mnemonic_digest(&spaced), mnemonic_digest(&phrase));
     }
 
     /// A valid 24-word phrase the wallet did not generate cannot create a wallet: the
