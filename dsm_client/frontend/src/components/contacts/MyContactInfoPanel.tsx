@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // path: src/components/contacts/MyContactInfoPanel.tsx
-// MyContactInfoPanel — this device's contact code, as Rust renders it, and its QR.
+// MyContactInfoPanel — this device's contact code, as Rust renders it, and its QR,
+// and this device's fingerprint: the one a sender's confirmation shows beside
+// your name, for the two of you to compare.
 
 import React, { useEffect, useState, useCallback } from 'react';
 import QRCode from 'qrcode';
@@ -8,6 +10,8 @@ import QRCode from 'qrcode';
 import { AudioManager } from '../../utils/audio';
 import logger from '../../utils/logger';
 import { getContactCode } from '../../dsm/contacts';
+import { getDeviceIdBinBridgeAsync } from '../../dsm/WebViewBridge';
+import { deviceFingerprint } from '../../domain/displayName';
 import { copyText } from '../../utils/anchorDisplay';
 import { Notice } from '../common/ScreenFrame';
 
@@ -21,6 +25,7 @@ export default function MyContactInfoPanel(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState<boolean | null>(null);
+  const [device, setDevice] = useState<string | null>(null);
   const [qrSize, setQrSize] = useState<number>(() =>
     qrSideFor(typeof window !== 'undefined' ? window.innerWidth : 320),
   );
@@ -51,6 +56,17 @@ export default function MyContactInfoPanel(): React.JSX.Element {
     })();
     return () => { cancelled = true; };
   }, [contactCode]); // Retry if contactCode is reset to empty
+
+  // This device's fingerprint, once the code is read.
+  useEffect(() => {
+    if (!contactCode) return undefined;
+    let live = 'yes';
+    getDeviceIdBinBridgeAsync().then(
+      (id) => { if (live === 'yes') setDevice(deviceFingerprint(id)); },
+      (e: unknown) => logger.warn('[MyContactInfoPanel] the device id was not read:', e),
+    );
+    return () => { live = 'no'; };
+  }, [contactCode]);
 
   // Render the QR when the code or size changes
   useEffect(() => {
@@ -121,6 +137,9 @@ export default function MyContactInfoPanel(): React.JSX.Element {
         </div>
         <div className="sb-hero__label" style={{ marginTop: 8 }}>Scan this code to add me as a contact</div>
         <div className="sb-hero__sub">Encoding: dsm:contact/v3</div>
+        {device !== null ? (
+          <div className="sb-hero__sub" data-testid="my-device-fingerprint">Your device {device}: a sender sees it beside your name.</div>
+        ) : null}
       </section>
 
       {copied === true && <Notice kind="success" role="status" onClose={() => setCopied(null)}>Copied contact code</Notice>}

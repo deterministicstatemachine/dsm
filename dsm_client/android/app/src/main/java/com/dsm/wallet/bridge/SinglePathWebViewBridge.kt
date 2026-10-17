@@ -287,6 +287,22 @@ class SinglePathWebViewBridge(private val context: Context) {
                     ByteArray(0)
                 }
 
+                // What the page shows asks the window to guard: one byte of ScreenGuards bits,
+                // 1 while a recovery phrase is on screen or typed, 2 while an irreversible
+                // confirmation is on screen. Answers nothing.
+                "setScreenGuards" -> {
+                    val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
+                        ?: throw IllegalStateException("setScreenGuards: no active activity")
+                    act.setScreenGuards(com.dsm.wallet.ui.ScreenGuards.parse(payload))
+                    ByteArray(0)
+                }
+
+                // The build this is, as UTF-8: "debug" or "release" (BuildConfig.BUILD_TYPE).
+                // The page installs its rig-only hooks in a debug build alone.
+                "buildType" -> {
+                    com.dsm.wallet.BuildConfig.BUILD_TYPE.toByteArray(Charsets.UTF_8)
+                }
+
                 "shareDiagnosticsReport" -> {
                     val act = com.dsm.wallet.ui.MainActivity.getActiveInstance()
                         ?: throw IllegalStateException("shareDiagnosticsReport: no active activity")

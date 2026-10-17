@@ -570,7 +570,8 @@ fn trace_djte_repeated_emission_alignment(
 
     let initial = SourceDlvState::new_with_schedule(
         EmissionSchedule::new(initial_supply, 2, 64, 2, 1).expect("trace emission schedule"),
-    );
+    )
+    .expect("trace emission state");
 
     let jap_a = build_test_jap(0x7A, 0x09);
     let (after_first, receipt_a) = apply_djte_transition(&initial, &jap_a, emission_amount);
@@ -1506,12 +1507,20 @@ fn trace_keypair(side: ([u8; 32], [u8; 32])) -> Result<SignatureKeyPair, String>
 
 /// The receiver's acceptance proof σ_B, exactly what
 /// `BilateralTransactionManager::verify_receiver_acceptance_proof` checks:
-/// a signature over `"DSM/bilateral-sign\0" || commitment_hash`.
-fn receiver_acceptance_sig(kp: &SignatureKeyPair, commitment_hash: &[u8; 32]) -> Vec<u8> {
-    let mut msg = Vec::with_capacity(22 + 32);
-    msg.extend_from_slice(b"DSM/bilateral-sign\0");
-    msg.extend_from_slice(commitment_hash);
-    kp.sign(&msg).expect("receiver acceptance signature")
+/// a signature over the step's commitment and the challenge the receiver
+/// issues with it (`bilateral_accept_sign_message`).
+fn receiver_acceptance_sig(
+    kp: &SignatureKeyPair,
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    kp.sign(
+        &dsm::core::bilateral_transaction_manager::bilateral_accept_sign_message(
+            commitment_hash,
+            receiver_challenge,
+        ),
+    )
+    .expect("receiver acceptance signature")
 }
 
 /// One side of a bilateral trace pair: the sender's manager over its tip
@@ -1647,11 +1656,22 @@ async fn trace_commit_prepared(
 ) -> Result<TraceCommit, String> {
     use dsm::core::bilateral_transaction_manager::{compute_precommit, compute_successor_tip};
     use dsm::core::chain_tip_store::ChainTipStore;
+    // The receiver's challenge, drawn as the receiver draws it.
+    let receiver_challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+        .try_into()
+        .map_err(|e| format!("the receiver challenge is not 32 bytes: {e:?}"))?;
     let prepared = manager
         .prepare_bilateral_advance(
             remote_device_id,
             pre_commitment_hash,
-            &receiver_acceptance_sig(remote_kp, pre_commitment_hash),
+            dsm::core::bilateral_transaction_manager::ReceiverAcceptance {
+                signature: &receiver_acceptance_sig(
+                    remote_kp,
+                    pre_commitment_hash,
+                    &receiver_challenge,
+                ),
+                receiver_challenge: &receiver_challenge,
+            },
             vec![BalanceDelta {
                 policy_commit: era_policy_commit(),
                 direction: BalanceDirection::Debit,
@@ -1752,7 +1772,7 @@ fn build_djte_transition(
     JoinActivationProof,
     EmissionReceipt,
 ) {
-    let prev = SourceDlvState::new(2, initial_supply);
+    let prev = SourceDlvState::new(2, initial_supply).expect("trace emission state");
 
     let jap = build_test_jap(0x7A, 0x09);
     let (next, receipt) = apply_djte_transition(&prev, &jap, emission_amount);

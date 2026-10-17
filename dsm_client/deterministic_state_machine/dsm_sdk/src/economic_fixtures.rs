@@ -191,7 +191,7 @@ pub struct TestIdentity {
     pub ak_public_key: Vec<u8>,
     pub smt_root: [u8; 32],
     /// The BIP39 wallet seed the mnemonic unlocks.
-    pub wallet_seed: Vec<u8>,
+    pub wallet_seed: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl TestIdentity {

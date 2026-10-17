@@ -830,6 +830,13 @@ ciphertext (Amendment A7).
 Identity and recovery. Genesis anchoring, device-tree indexing, and recovery capsules, all stored as
 bytes under derived keys.
 
+> **Amendment A18 (owner, 2026-10-16) — a device's directory entry proves the genesis it names.** From the security audit of 2026-10-15 (finding SA-43): a directory entry named its genesis on the device's own word, so any device could present itself as a device of any account, another person's included. Owner's words, 2026-10-16: "You can do the spec amendments"; the same day the owner chose that each entry carries its P0–P6 evidence.
+>
+> - **The directory.** A device's entries live in one keyed cell, `H(DSM/device-directory-key/v1 ‖ 0x00 ‖ G ‖ DevID)`, on every member of the set. The device writes its own entry. A node stores every entry it is given and checks nothing.
+> - **The entry.** It names the genesis `G`, the device's `DevID`, its signing key `AK`, its attestation digest `AttA`, its Kyber key and a counter, and it carries its authority evidence: the genesis parameters, the GRK's delegation and the device-tree transition chain to a transition `t` the entry names, and the device's inclusion proof under the tree root `t` installs. The device signs the entry with `AK`.
+> - **What a reader keeps.** An entry proves itself when `DevID = H(DSM/devid ‖ AK ‖ AttA)`, its signature verifies under `AK`, and P0–P6, run on its evidence at `t` with nothing fetched, prove `AK` as the owner authority of `DevID` under `G`: `G` recomputes from the parameters and so commits the GRK, the chain authenticates under the GRK, and `DevID` is a leaf of the tree at `t`. Among the entries that prove themselves the highest counter wins. Anything else is ignored.
+> - **What that proves.** That the device belongs to the account `G` at `t`: descent, not currency. Naming a genesis is not membership in it, because only that genesis's GRK delegates its tree.
+
 The node’s own commitments. Each cycle a node emits an unsigned ByteCommit: a Sparse Merkle
 root over what it holds, linked to the previous cycle’s digest, stored as an ordinary object under a
 deterministic address and mirrored by peers. Capacity is regulated against it, and an operator exits

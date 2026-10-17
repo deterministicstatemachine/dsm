@@ -92,6 +92,10 @@ pub const TAG_DSM_RECOVERY_AEAD_V2: TaggedHashDomain<'static> =
 /// The recovery-authority SPHINCS+ seed: `Expand(PRK_w, "DSM/recovery-authority/v2" ‖ 0x00)`.
 pub const TAG_DSM_RECOVERY_AUTHORITY_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-authority/v2");
+/// A match session key's seed (SoFi §19.10, Amendment S27):
+/// `Expand(PRK_w, "DSM/escrow/session-key/v2" ‖ 0x00 ‖ G ‖ match_nonce)`.
+pub const TAG_DSM_ESCROW_SESSION_KEY_V2: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/escrow/session-key/v2");
 /// The ML-KEM identity seed, keyed by Smaster like the per-step EK seeds:
 /// `keyed-BLAKE3(Smaster, "DSM/ml-kem-identity/v1" ‖ 0x00 ‖ "ML-KEM-768")`.
 pub const TAG_DSM_ML_KEM_IDENTITY_V1: TaggedHashDomain<'static> =

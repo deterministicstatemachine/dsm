@@ -2,7 +2,9 @@
 // Adding someone in the Modern skin: scan (or paste) their DSM code, then say
 // who they are by picking them from the phone's contacts, or keep the name
 // their card gives. Your own code is shown too, for them to add you. Rust reads the code and adds the contact; the details go
-// with it (DSM Amendment A17).
+// with it (DSM Amendment A17). The name a card gives is its owner's own choice:
+// the device's fingerprint stands beside it, and a name a contact already has
+// is said to be taken.
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useContacts } from '../../contexts/ContactsContext';
@@ -12,6 +14,8 @@ import { startNativeQrScannerViaRouter } from '../../dsm/WebViewBridge';
 import type { ContactCard } from '../../dsm/types';
 import type { PersonProfile } from '../../domain/types';
 import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
+import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
+import { encodeBase32Crockford } from '../../utils/textId';
 import { Avatar, Icon, PageTitle } from './parts';
 import { modernNav } from './modernNav';
 import ModernMyCode from './ModernMyCode';
@@ -28,7 +32,7 @@ function messageOf(e: unknown): string {
 }
 
 export default function ModernAddContact(): React.JSX.Element {
-  const { addContact } = useContacts();
+  const { addContact, contacts } = useContacts();
   const [step, setStep] = useState<Step>({ kind: 'code' });
   const [pasted, setPasted] = useState('');
   const [problem, setProblem] = useState<string | null>(null);
@@ -93,6 +97,11 @@ export default function ModernAddContact(): React.JSX.Element {
     );
   };
 
+  // The contacts that already go by the name this person is about to get.
+  const taken = step.kind === 'who' || step.kind === 'adding'
+    ? contactsNamed(contacts, step.profile.name, encodeBase32Crockford(step.card.deviceId))
+    : [];
+
   return (
     <>
       <PageTitle title="Add Contact" onBack={() => modernNav.back()} />
@@ -124,7 +133,16 @@ export default function ModernAddContact(): React.JSX.Element {
             <div className="s-row-title" style={{ marginTop: 10 }}>{step.profile.name.length > 0 ? step.profile.name : 'Who is this?'}</div>
             {step.profile.email.length > 0 ? <div className="s-row-sub">{step.profile.email}</div> : null}
             {step.profile.phone.length > 0 ? <div className="s-row-sub">{step.profile.phone}</div> : null}
+            <div className="s-row-sub" data-testid="add-contact-device">
+              Device <strong style={{ fontFamily: 'ui-monospace, monospace' }}>{deviceFingerprint(step.card.deviceId)}</strong>
+            </div>
           </section>
+          {taken.length > 0 ? (
+            <div className="s-notice s-error" role="alert">
+              You already have a contact named {step.profile.name} ({taken.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
+              This code is device {deviceFingerprint(step.card.deviceId)}. Give this person a name you can tell apart.
+            </div>
+          ) : null}
           <div className="s-stack">
             <button type="button" className="s-btn s-btn-quiet" disabled={step.kind === 'adding'} onClick={() => pick(step.card, step.profile)}>
               <Icon name="people" /> Pick from phone contacts

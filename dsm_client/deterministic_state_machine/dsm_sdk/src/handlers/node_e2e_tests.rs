@@ -379,9 +379,9 @@ async fn sync_with_budget(d: &TestDevice, limit: u32) -> generated::StorageSyncR
     .encode_to_vec();
     let answered = d
         .router()
-        .query(AppQuery {
-            path: "storage.sync".to_string(),
-            params,
+        .invoke(AppInvoke {
+            method: "storage.sync".to_string(),
+            args: params,
         })
         .await;
     assert!(
@@ -777,9 +777,9 @@ pub(super) async fn adopt(d: &TestDevice, token: &[u8; 32]) {
     d.enter();
     let adopted = d
         .router()
-        .query(crate::bridge::AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: crate::util::text_id::encode_base32_crockford(token).into_bytes(),
+        .invoke(crate::bridge::AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: crate::util::text_id::encode_base32_crockford(token).into_bytes(),
         })
         .await;
     assert!(

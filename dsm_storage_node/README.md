@@ -98,7 +98,7 @@ Every route is protobuf or raw bytes; `/api/v2/health` answers plain `ok`.
 | Endpoint | Method | Purpose |
 | --- | --- | --- |
 | `/api/v2/health` | GET | Liveness |
-| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; every value held there, in arrival order |
+| `/api/v2/cell/{key}` | POST, GET | Keep a value at a key; what is held there, in arrival order, a page at a time (`?from=<arrival index>`; each page names the next) |
 | `/api/v2/cells` | POST | Keep values at several keys |
 | `/api/v2/index/{locator}` | POST, GET | Append a content address; read the index in append order |
 | `/api/v2/immutable/put` | POST | Write-once object; the node computes the address |
@@ -229,9 +229,13 @@ ssh-keygen -t ed25519 -f ~/.ssh/dsm-deploy -N ""
 ```bash
 cd dsm_storage_node
 
-# Full deploy (Terraform + Docker build + push to 6 nodes)
-bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy
+# Full deploy (Terraform + Docker build + push to 6 nodes). --ssh-cidr is the
+# one CIDR block allowed SSH; there is no default and 0.0.0.0/0 is refused.
+bash deploy/provision_aws.sh --ssh-key ~/.ssh/dsm-deploy --ssh-cidr <your IP>/32
 ```
+
+Terraform shows its plan and asks before it applies anything: each node's
+database lives on its instance.
 
 This single command:
 
@@ -264,7 +268,7 @@ Total time: ~30-45 minutes (bulk is the Rust release build).
 Each node runs:
   ┌─────────────────────────────┐
   │  Docker Compose             │
-  │  ├── storage-node (Rust)    │  port 8080 (API), 9090 (metrics)
+  │  ├── storage-node (Rust)    │  port 8080 (API)
   │  └── postgres:15-alpine     │  internal only
   └─────────────────────────────┘
 ```
@@ -296,7 +300,9 @@ ssh -i ~/.ssh/dsm-deploy ubuntu@<NODE_IP>
 ssh -i ~/.ssh/dsm-deploy ubuntu@<NODE_IP> \
   "cd /opt/dsm-storage && docker compose -f docker-compose.node.yml logs -f storage-node"
 
-# Tear down (stop billing)
+# Tear down (stop billing). Refused while the node instances carry
+# prevent_destroy (terraform/aws/modules/region/main.tf): hand over or back up
+# every node's database, remove that line deliberately, then run it.
 bash deploy/teardown_aws.sh --ssh-key ~/.ssh/dsm-deploy
 ```
 
@@ -319,7 +325,7 @@ Edit these module blocks to change regions or distribution.
 | `instance_type`    | `t3.small`    | EC2 instance type                         |
 | `volume_size_gb`   | `20`          | Root EBS volume (GB)                      |
 | `ssh_public_key`   | _(required)_  | SSH public key content                    |
-| `allowed_ssh_cidr` | `0.0.0.0/0`   | CIDR for SSH access (restrict to your IP) |
+| `allowed_ssh_cidr` | _(required)_  | The one CIDR allowed SSH; 0.0.0.0/0 refused |
 | `project_tag`      | `dsm-storage` | AWS resource tag for cost tracking        |
 
 ### Cloud File Structure
@@ -338,14 +344,13 @@ dsm_storage_node/
 │   ├── docker-compose.node.yml   # Per-node compose file
 │   └── nodes/                    # Generated bundles (gitignored)
 └── terraform/
-    ├── main.tf                   # 3 region providers + module calls
-    ├── variables.tf              # Instance type, SSH key, etc.
-    ├── outputs.tf                # Node IPs, helper commands
-    ├── user_data.sh              # EC2 bootstrap (Docker CE install)
-    └── modules/region/           # Per-region Terraform module
-        ├── main.tf
-        ├── variables.tf
-        └── outputs.tf
+    ├── aws/                      # 3 region providers + module calls
+    │   ├── main.tf, variables.tf, outputs.tf
+    │   └── modules/region/       # Per-region Terraform module
+    └── gcp/                      # The beta fleet: 5 nodes in us-central1
+        ├── main.tf, variables.tf, outputs.tf
+        ├── user_data.sh          # Node bootstrap (Docker CE), used by both clouds
+        └── modules/region/
 ```
 
 ### Cloud Troubleshooting
@@ -365,9 +370,10 @@ sleep 30 && bash deploy/check_nodes.sh <IPs>
 ### Security Notes
 
 - TLS certificates are self-signed, generated fresh per deployment
-- SSH is key-based only; restrict `allowed_ssh_cidr` to your IP for production
-- Security groups allow only ports 8080 (API), 9090 (metrics), 22 (SSH)
-- PostgreSQL is internal-only (Docker bridge network), random 32-char password
+- SSH is key-based only, from the one `allowed_ssh_cidr` block (required, never 0.0.0.0/0)
+- Security groups and firewall rules allow only ports 8080 (API) and 22 (SSH)
+- Node instances carry `prevent_destroy` and keep their disks if deleted; AWS root volumes are encrypted and instance metadata takes IMDSv2 tokens only
+- PostgreSQL is internal-only (Docker bridge network), random 32-char password, written at mode 0600 and never printed
 - No secrets are committed to the repository
 
 ## License

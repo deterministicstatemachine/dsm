@@ -61,6 +61,26 @@ pub const OUTBOX_GC_PENDING: &str = "gc_pending";
 /// Transport GC done. Terminal.
 pub const OUTBOX_COMPLETE: &str = "complete";
 
+/// Every status a `sender_outbox` row can hold: the table's `CHECK` lists
+/// exactly these.
+pub const OUTBOX_STATUSES: [&str; 8] = [
+    OUTBOX_ECONOMIC_ADMISSION_PENDING,
+    OUTBOX_PENDING_SUBMIT,
+    OUTBOX_SUBMITTING,
+    OUTBOX_SUBMITTED,
+    OUTBOX_SUBMISSION_UNCERTAIN,
+    OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
+    OUTBOX_GC_PENDING,
+    OUTBOX_COMPLETE,
+];
+
+/// The statuses of a send already final for its peer: its gate released by
+/// the post-quorum checkpoint sweep. Every other status — a send held for its
+/// admission, unsent, in flight, uncertain or awaiting its checkpoint, and any
+/// status added later — is a send the peer has not been made final for, so it
+/// holds the relationship's online gate. This is the one list that decides it.
+pub const OUTBOX_SETTLED_STATUSES: [&str; 2] = [OUTBOX_GC_PENDING, OUTBOX_COMPLETE];
+
 /// Which artifact of a proposal a row in `sender_outbox_artifacts` holds.
 ///
 /// The role is not decoration: it is part of the content address (ADR 0003), so
@@ -410,19 +430,16 @@ pub fn load_sender_outbox_artifacts(
                 proposal_nonce.as_slice()
             ],
             |row| {
-                let to32 = |v: Vec<u8>| -> [u8; 32] {
-                    let mut out = [0u8; 32];
-                    out.copy_from_slice(&v);
-                    out
-                };
+                // A stored id of another length is a corrupt row: refused as
+                // an error, never copied into a 32-byte id (which panicked).
                 Ok((
-                    to32(row.get::<_, Vec<u8>>(0)?),
-                    to32(row.get::<_, Vec<u8>>(1)?),
-                    to32(row.get::<_, Vec<u8>>(2)?),
+                    super::column_32(row, 0)?,
+                    super::column_32(row, 1)?,
+                    super::column_32(row, 2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
-                    to32(row.get::<_, Vec<u8>>(6)?),
+                    super::column_32(row, 6)?,
                     row.get::<_, Option<String>>(7)?,
                 ))
             },
@@ -1941,6 +1958,56 @@ mod tests {
             arts[0].envelope_bytes, original.envelope_bytes,
             "the stored artifact must not be replaced by a colliding one"
         );
+    }
+
+    /// SA-55. A stored artifact whose 32-byte id is another length is a
+    /// corrupt row: loading it is an error the caller sees, where it used to
+    /// panic (every replay and every startup sweep read it again).
+    /// MUTATION CONTROL: copying the column into a 32-byte id unchecked
+    /// panics here and turns this red.
+    #[test]
+    #[serial]
+    fn a_stored_artifact_id_of_another_length_is_an_error_not_a_panic() {
+        init_test_db();
+        let (rel, parent, nonce) = ([0xD1u8; 32], [0xD2u8; 32], [0xD3u8; 32]);
+        {
+            let binding = get_connection().expect("conn");
+            let conn = binding.lock().expect("lock");
+            conn.execute(
+                "INSERT INTO sender_outbox (relationship_key, canonical_parent, canonical_child, \
+                 commitment, projection_parent, projection_target, routing_address, submission_id, \
+                 envelope_bytes, proposal_nonce, local_expected_prev, is_first_ek_step, status, \
+                 message_ids) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'R', 'SID-CORRUPT', X'00', ?7, \
+                 NULL, 1, ?8, NULL)",
+                params![
+                    rel.as_slice(),
+                    parent.as_slice(),
+                    vec![0xD4u8; 32],
+                    vec![0xD5u8; 32],
+                    vec![0xD6u8; 32],
+                    vec![0xD7u8; 32],
+                    nonce.as_slice(),
+                    OUTBOX_PENDING_SUBMIT,
+                ],
+            )
+            .expect("an outbox row");
+            conn.execute(
+                "INSERT INTO sender_outbox_artifacts (relationship_key, canonical_parent, \
+                 proposal_nonce, role, submission_id, envelope_bytes, content_digest, \
+                 routing_address) VALUES (?1, ?2, ?3, 'evidence_a', 'ART-CORRUPT', X'01', ?4, NULL)",
+                params![
+                    rel.as_slice(),
+                    parent.as_slice(),
+                    nonce.as_slice(),
+                    vec![0x5Bu8; 31],
+                ],
+            )
+            .expect("an artifact row with a 31-byte digest");
+        }
+
+        let err = load_sender_outbox_artifacts(&rel, &parent, &nonce)
+            .expect_err("a 31-byte id is refused");
+        assert!(err.to_string().contains("31 bytes, not 32"), "{err}");
     }
 
     /// ADR 0003, the first dangerous invariant of the split:

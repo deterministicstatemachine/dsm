@@ -226,8 +226,18 @@ pub fn verify_fulfillment(
 /// Amendment S20): its signature verifies under the key it carries, over a
 /// digest that commits that key and the carried `AttA`, and the key with that
 /// `AttA` derives the device the claim names. Decided from the bytes in hand;
-/// nothing is fetched.
+/// nothing is fetched. The derivation, a hash, is checked before the
+/// signature, so a claim under any other key costs no verification.
 pub fn verify_resolution_claim(signed: &SignedSofiResolutionClaim) -> Result<(), SignatureError> {
+    if crate::core::identity::genesis_v2::derive_devid(
+        signed.claimant_public_key(),
+        signed.claimant_att_a(),
+    ) != signed.claim().device_id
+    {
+        return Err(SignatureError::NotTheNamedDevice {
+            what: "SofiResolutionClaim",
+        });
+    }
     verify_bytes(
         "SofiResolutionClaim",
         signed.signature_alg(),
@@ -239,17 +249,7 @@ pub fn verify_resolution_claim(signed: &SignedSofiResolutionClaim) -> Result<(),
             signed.claimant_att_a(),
         ),
         signed.signature(),
-    )?;
-    if crate::core::identity::genesis_v2::derive_devid(
-        signed.claimant_public_key(),
-        signed.claimant_att_a(),
-    ) != signed.claim().device_id
-    {
-        return Err(SignatureError::NotTheNamedDevice {
-            what: "SofiResolutionClaim",
-        });
-    }
-    Ok(())
+    )
 }
 
 /// Sign `C_q` as the trader device it names. Refused when the key and `AttA`

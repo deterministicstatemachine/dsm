@@ -35,7 +35,18 @@ use crate::storage::client_db::types::ChunkPersistenceParams;
 /// Using 400 gives ~460 total, safely under 514 with headroom.
 /// A 29KB SPHINCS+ signature fits in ~75 chunks (~30s) vs 168 at 180 bytes.
 const MAX_BLE_CHUNK_SIZE: usize = 400;
+/// The most frames in reassembly on this device at once.
 const MAX_PENDING_REASSEMBLY: usize = 256;
+/// The most frames one link may have in reassembly at once. A peer sends one
+/// step's frames at a time; past this, the link's own oldest frame goes, never
+/// another link's.
+const MAX_PENDING_FRAMES_PER_LINK: usize = 4;
+/// The largest frame this coordinator reassembles: a client-side budget for
+/// one frame's bytes, not a protocol count. The largest frame the bilateral
+/// protocol sends over BLE — a bearer confirm, with its stitched receipt (at
+/// most 128 KiB, `dsm::bilateral::offline::MAX_STITCHED_RECEIPT_BYTES`), its
+/// SPHINCS+ signatures and its offline release — is well inside it.
+pub const MAX_BLE_FRAME_BYTES: usize = 1024 * 1024;
 
 /// Render a short, human-readable identifier for logs.
 /// Uses Crockford Base32 via the centralized `text_id` helper.
@@ -211,13 +222,6 @@ pub enum BleTransportFrame {
     Ack(BleTransportAck),
 }
 
-/// Chunk record used only within this module (reassembly queue).
-#[derive(Debug, Clone)]
-pub struct BleChunkMeta {
-    pub header: BleFrameHeader,
-    pub data: Vec<u8>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BleTransportMessage {
     pub frame_type: BleFrameType,
@@ -236,63 +240,129 @@ pub enum FrameIngressResult {
     ProtocolControl(FrameControlMessage),
 }
 
+/// A frame in reassembly: the link its chunks arrive on and its commitment.
+/// Nothing on the link says who wrote the bytes, so a frame is the link's
+/// own: chunks written on one link never join, displace or poison a frame
+/// arriving on another, whatever commitment they name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FrameKey {
+    link: String,
+    commitment: [u8; 32],
+}
+
+/// What a chunk's header says about its whole frame. Every chunk of a frame
+/// says the same; one that says otherwise is not a chunk of that frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameShape {
+    frame_type: i32,
+    total_chunks: u16,
+    payload_len: u32,
+}
+
+/// The shape of the frame a chunk belongs to and the chunk's index in it,
+/// as the header claims them, checked against each other and the chunk's
+/// data: the frame is non-empty and within [`MAX_BLE_FRAME_BYTES`], its chunk
+/// count is the one its length makes at [`MAX_BLE_CHUNK_SIZE`] (how
+/// [`BleFrameCoordinator::encode_message`] cuts it), the index is one of its
+/// chunks, and the data is exactly that chunk's length.
+fn chunk_shape(header: &BleFrameHeader, data_len: usize) -> Result<(FrameShape, u16), DsmError> {
+    let payload_len = header.payload_len as usize;
+    if payload_len == 0 || payload_len > MAX_BLE_FRAME_BYTES {
+        return Err(DsmError::invalid_operation(format!(
+            "BLE frame length {payload_len} is outside 1..={MAX_BLE_FRAME_BYTES} bytes"
+        )));
+    }
+    let total = payload_len.div_ceil(MAX_BLE_CHUNK_SIZE);
+    if header.total_chunks as usize != total {
+        return Err(DsmError::invalid_operation(format!(
+            "BLE chunk count {} is not the {total} a {payload_len}-byte frame is cut into",
+            header.total_chunks
+        )));
+    }
+    let index = header.chunk_index as usize;
+    if index >= total {
+        return Err(DsmError::invalid_operation(format!(
+            "BLE chunk index {index} is not one of the frame's {total} chunks"
+        )));
+    }
+    let expected_len = if index + 1 == total {
+        payload_len - index * MAX_BLE_CHUNK_SIZE
+    } else {
+        MAX_BLE_CHUNK_SIZE
+    };
+    if data_len != expected_len {
+        return Err(DsmError::invalid_operation(format!(
+            "BLE chunk {index} holds {data_len} bytes, not the {expected_len} its frame cuts"
+        )));
+    }
+    let as_u16 = |n: usize, what: &str| {
+        u16::try_from(n)
+            .map_err(|e| DsmError::invalid_operation(format!("BLE chunk {what} {n}: {e}")))
+    };
+    Ok((
+        FrameShape {
+            frame_type: header.frame_type,
+            total_chunks: as_u16(total, "count")?,
+            payload_len: header.payload_len,
+        },
+        as_u16(index, "index")?,
+    ))
+}
+
 /// Reassembly buffer for multi-chunk frames.
 ///
 /// Transport-only timing: `created_at` is used for idle expiry and stale-session
 /// recovery (rules.instructions.md §36). It never enters protocol semantics.
 #[derive(Debug)]
-pub struct ReassemblyBuffer {
-    pub frame_commitment: [u8; 32],
-    pub frame_type: BleFrameType,
-    pub total_chunks: u16,
-    pub received_chunks: HashMap<u16, BleChunkMeta>,
-    pub expected_size: u32,
+struct ReassemblyBuffer {
+    frame_commitment: [u8; 32],
+    frame_type: BleFrameType,
+    shape: FrameShape,
+    received_chunks: HashMap<u16, Vec<u8>>,
     /// Transport-only: wall-clock instant when this buffer was created.
     /// Used for reassembly timeout enforcement and LRU eviction.
-    pub created_at: Instant,
+    created_at: Instant,
 }
 
 impl ReassemblyBuffer {
-    pub fn new(header: &BleFrameHeader, commitment: &[u8; 32]) -> Self {
+    fn new(frame_type: BleFrameType, shape: FrameShape, commitment: &[u8; 32]) -> Self {
         Self {
             frame_commitment: *commitment,
-            frame_type: BleFrameType::try_from(header.frame_type)
-                .unwrap_or(BleFrameType::Unspecified),
-            total_chunks: header.total_chunks as u16,
+            frame_type,
+            shape,
             received_chunks: HashMap::new(),
-            expected_size: header.payload_len,
             created_at: Instant::now(),
         }
     }
 
-    pub fn insert_chunk(&mut self, seq: u16, meta: BleChunkMeta) {
-        self.received_chunks.insert(seq, meta);
+    fn is_complete(&self) -> bool {
+        self.received_chunks.len() == usize::from(self.shape.total_chunks)
     }
 
-    pub fn is_complete(&self) -> bool {
-        self.received_chunks.len() == self.total_chunks as usize
+    /// How long a frame of this many chunks may take to arrive. Large
+    /// bilateral confirm envelopes need more time over BLE than small frames.
+    fn timeout(&self) -> Duration {
+        match self.shape.total_chunks {
+            0..=10 => Duration::from_secs(10),
+            11..=100 => Duration::from_secs(30),
+            _ => Duration::from_secs(60),
+        }
     }
 
     /// Reassemble all chunks into the original payload, then verify frame-level
     /// BLAKE3 integrity against `frame_commitment`.
-    pub fn reassemble(self) -> Result<Vec<u8>, DsmError> {
-        // Bound the pre-allocation to what the chunks could actually hold
-        // (`total_chunks * MAX_BLE_CHUNK_SIZE`). `expected_size` is the
-        // peer-supplied `payload_len` (u32, up to ~4 GiB); allocating on it
-        // directly let a single small chunk with a huge declared `payload_len`
-        // trigger a multi-gigabyte allocation before the integrity/size checks
-        // ran. The exact length is still validated below, so capping the
-        // capacity hint cannot affect correctness.
-        let capacity_cap = (self.total_chunks as usize).saturating_mul(MAX_BLE_CHUNK_SIZE);
-        let mut result = Vec::with_capacity((self.expected_size as usize).min(capacity_cap));
-        for i in 0..self.total_chunks {
-            if let Some(meta) = self.received_chunks.get(&i) {
-                result.extend_from_slice(&meta.data);
-            } else {
-                return Err(DsmError::invalid_operation(format!("missing chunk {i}")));
-            }
+    fn reassemble(self) -> Result<Vec<u8>, DsmError> {
+        // Every chunk's length was checked against the shape on the way in, so
+        // the frame's length is the shape's, within MAX_BLE_FRAME_BYTES.
+        let mut result = Vec::with_capacity(self.shape.payload_len as usize);
+        for i in 0..self.shape.total_chunks {
+            let data = self
+                .received_chunks
+                .get(&i)
+                .ok_or_else(|| DsmError::invalid_operation(format!("missing chunk {i}")))?;
+            result.extend_from_slice(data);
         }
-        if result.len() != self.expected_size as usize {
+        if result.len() != self.shape.payload_len as usize {
             return Err(DsmError::invalid_operation("reassembled size mismatch"));
         }
 
@@ -318,15 +388,16 @@ impl ReassemblyBuffer {
 
 /// Fixed-size LRU dedup table for fully reassembled frames.
 ///
-/// After a frame is reassembled, its commitment is inserted here.  If the same
-/// commitment appears again within `TTL_SECS` (e.g. peer retransmitted the
-/// entire chunk set), the duplicate is dropped before it reaches the bilateral
-/// handler.  This prevents the "Duplicate prepare request" log from firing.
+/// After a frame is reassembled, its link and commitment are inserted here.
+/// If the same frame appears again on the same link within `TTL_SECS` (e.g.
+/// peer retransmitted the entire chunk set), the duplicate is dropped before
+/// it reaches the bilateral handler. The same bytes on another link are that
+/// link's frame, answered on that link.
 ///
 /// Capacity is bounded at `DEDUP_TABLE_SIZE` entries — oldest entry is evicted
 /// when full, so memory usage is O(1).
 struct DeduplicationTable {
-    entries: Vec<([u8; 32], Instant)>,
+    entries: Vec<(FrameKey, Instant)>,
     capacity: usize,
 }
 
@@ -340,9 +411,9 @@ impl DeduplicationTable {
         }
     }
 
-    /// Returns `true` if the commitment was already seen within the TTL window.
-    /// Otherwise inserts it and returns `false`.
-    fn is_duplicate(&mut self, commitment: &[u8; 32]) -> bool {
+    /// Whether the frame was already seen within the TTL window. A first
+    /// sighting is recorded.
+    fn sight(&mut self, key: &FrameKey) -> Sighting {
         let now = Instant::now();
 
         // Evict expired entries
@@ -350,8 +421,8 @@ impl DeduplicationTable {
             .retain(|(_, ts)| now.duration_since(*ts).as_secs() < Self::TTL_SECS);
 
         // Check for existing entry
-        if self.entries.iter().any(|(c, _)| c == commitment) {
-            return true;
+        if self.entries.iter().any(|(seen, _)| seen == key) {
+            return Sighting::Repeat;
         }
 
         // Evict oldest if at capacity
@@ -359,14 +430,21 @@ impl DeduplicationTable {
             self.entries.remove(0);
         }
 
-        self.entries.push((*commitment, now));
-        false
+        self.entries.push((key.clone(), now));
+        Sighting::First
     }
+}
+
+/// Whether a reassembled frame was seen before on its link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sighting {
+    First,
+    Repeat,
 }
 
 /// BLE frame coordinator: handles chunking, reassembly, and bilateral flow dispatch.
 pub struct BleFrameCoordinator {
-    pending_reassembly: Arc<Mutex<HashMap<[u8; 32], ReassemblyBuffer>>>,
+    pending_reassembly: Arc<Mutex<HashMap<FrameKey, ReassemblyBuffer>>>,
     dedup_table: Arc<Mutex<DeduplicationTable>>,
     device_id: [u8; 32],
 }
@@ -564,14 +642,15 @@ impl BleFrameCoordinator {
         *hasher.finalize().as_bytes()
     }
 
-    /// Extract the 32-byte frame commitment from a BleFrameHeader.
-    fn extract_frame_commitment(header: &BleFrameHeader) -> [u8; 32] {
-        if header.frame_commitment.len() != 32 {
-            return [0u8; 32];
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&header.frame_commitment);
-        key
+    /// The 32-byte frame commitment a BleFrameHeader names. Any other length
+    /// is not a frame this coordinator reassembles.
+    fn frame_commitment_of(header: &BleFrameHeader) -> Result<[u8; 32], DsmError> {
+        <[u8; 32]>::try_from(header.frame_commitment.as_slice()).map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "BLE frame commitment is {} bytes, not 32: {e}",
+                header.frame_commitment.len()
+            ))
+        })
     }
 
     /// Given an opaque protobuf payload and a frame type, chunk it into BLE-sized
@@ -639,8 +718,20 @@ impl BleFrameCoordinator {
         self.encode_message(message_type, payload)
     }
 
-    /// Handle a single BLE chunk (protobuf bytes for `BleChunk`) and return transport ingress state.
-    pub async fn ingest_chunk(&self, chunk_bytes: &[u8]) -> Result<FrameIngressResult, DsmError> {
+    /// Handle a single BLE chunk (protobuf bytes for `BleChunk`) written on
+    /// `peer_link` — the peer's BLE address as the radio reported it — and
+    /// return transport ingress state.
+    ///
+    /// A chunk joins only the frame its link is sending under the commitment
+    /// it names, and only when its header holds against itself and that
+    /// frame ([`chunk_shape`]). A frame that fails its integrity check is
+    /// dropped whole, with its persisted chunks, so the peer's retransmission
+    /// starts clean; so is a frame whose buffer expires or is evicted.
+    pub async fn ingest_chunk(
+        &self,
+        peer_link: &str,
+        chunk_bytes: &[u8],
+    ) -> Result<FrameIngressResult, DsmError> {
         let chunk = crate::generated::BleChunk::decode(chunk_bytes).map_err(|e| {
             DsmError::serialization_error("BleChunk", "protobuf", Some(e.to_string()), Some(e))
         })?;
@@ -658,177 +749,185 @@ impl BleFrameCoordinator {
             return Err(DsmError::invalid_operation("BLE chunk checksum mismatch"));
         }
 
-        let frame_commitment = Self::extract_frame_commitment(header);
-        let seq = header.chunk_index as u16;
-
-        // Persist chunk to SQLite immediately after checksum validation (sovereign persistence).
-        // INSERT OR IGNORE makes this idempotent — duplicate chunks are silently skipped.
-        if let Err(e) = crate::storage::client_db::persist_ble_chunk(ChunkPersistenceParams {
-            frame_commitment: &frame_commitment,
-            chunk_index: seq,
-            frame_type: header.frame_type,
-            total_chunks: header.total_chunks as u16,
-            payload_len: header.payload_len,
-            chunk_data: &chunk.data,
-            checksum: header.checksum,
-            counterparty_id: None, // counterparty_id resolved at session level during cleanup
-        }) {
-            warn!("Chunk persistence failed (non-fatal): {}", e);
-        }
+        let key = FrameKey {
+            link: peer_link.to_string(),
+            commitment: Self::frame_commitment_of(header)?,
+        };
+        let (shape, seq) = chunk_shape(header, chunk.data.len())?;
+        let storage = |what: &str, e: anyhow::Error| {
+            DsmError::storage(
+                format!("BLE reassembly: {what}: {e}"),
+                None::<std::io::Error>,
+            )
+        };
 
         let mut buffers = self.pending_reassembly.lock().await;
 
         // P0.1: Sweep expired reassembly buffers before processing new chunk.
         // Transport-only timing (rules.instructions.md §36: "idle expiry, stale-session recovery").
-        // Timeout scales with frame size: large bilateral confirm envelopes
-        // (262 chunks / 47KB) need more time over BLE than small frames.
+        // An expired frame goes whole: its buffer and the chunks persisted for
+        // it, so what an unanswered writer sends does not outlive its frame.
         let now = Instant::now();
-        let expired: Vec<[u8; 32]> = buffers
+        let expired: Vec<FrameKey> = buffers
             .iter()
-            .filter(|(_, buf)| {
-                let timeout = match buf.total_chunks {
-                    0..=10 => Duration::from_secs(10),
-                    11..=100 => Duration::from_secs(30),
-                    _ => Duration::from_secs(60),
-                };
-                now.duration_since(buf.created_at) > timeout
-            })
+            .filter(|(_, buf)| now.duration_since(buf.created_at) > buf.timeout())
             .map(|(k, buf)| {
                 warn!(
-                    "BLE reassembly timeout: frame {} expired ({}/{} chunks received)",
-                    short_id(&k[..8]),
+                    "BLE reassembly timeout: frame {} on {} expired ({}/{} chunks received)",
+                    short_id(&k.commitment[..8]),
+                    k.link,
                     buf.received_chunks.len(),
-                    buf.total_chunks
+                    buf.shape.total_chunks
                 );
-                *k
+                k.clone()
             })
             .collect();
-        for key in &expired {
-            // Evict in-memory buffer to free RAM, but preserve persisted
-            // chunks in SQLite. When the next chunk arrives for this frame,
-            // auto-hydration (line 635) will reload them and resume
-            // reassembly. Persisted chunks are cleaned up after successful
-            // reassembly (line 734) or by the periodic stale-frame sweep.
-            buffers.remove(key);
+        for expired_key in &expired {
+            Self::drop_frame(&mut buffers, expired_key).map_err(|e| storage("expiry", e))?;
         }
 
-        if !buffers.contains_key(&frame_commitment) {
-            // Try hydrating from SQLite before creating a fresh buffer.
-            // This is the auto-resume path: if we have persisted chunks from
-            // a previous connection attempt, load them into memory.
-            let persisted = crate::storage::client_db::load_persisted_chunks(&frame_commitment)
-                .unwrap_or_default();
-
-            // P1.4: LRU eviction — evict the oldest buffer by created_at, not arbitrary insertion order.
-            if buffers.len() >= MAX_PENDING_REASSEMBLY {
-                let oldest_key = buffers
+        if !buffers.contains_key(&key) {
+            // A link has at most MAX_PENDING_FRAMES_PER_LINK frames arriving,
+            // and the device MAX_PENDING_REASSEMBLY: past either, the oldest
+            // frame of that link, or of all links, makes room.
+            let link_oldest = buffers
+                .iter()
+                .filter(|(k, _)| k.link == key.link)
+                .min_by_key(|(_, buf)| buf.created_at)
+                .map(|(k, _)| k.clone());
+            let link_frames = buffers.keys().filter(|k| k.link == key.link).count();
+            let evict = if link_frames >= MAX_PENDING_FRAMES_PER_LINK {
+                link_oldest
+            } else if buffers.len() >= MAX_PENDING_REASSEMBLY {
+                buffers
                     .iter()
                     .min_by_key(|(_, buf)| buf.created_at)
-                    .map(|(k, _)| *k);
-                if let Some(key) = oldest_key {
-                    if let Some(evicted) = buffers.get(&key) {
-                        warn!(
-                            "BLE reassembly buffer full; evicting oldest frame {} ({}/{} chunks)",
-                            short_id(&key[..8]),
-                            evicted.received_chunks.len(),
-                            evicted.total_chunks
-                        );
-                    }
-                    buffers.remove(&key);
-                    let _ = crate::storage::client_db::delete_frame_chunks(&key);
-                }
+                    .map(|(k, _)| k.clone())
+            } else {
+                None
+            };
+            if let Some(evicted) = evict {
+                warn!(
+                    "BLE reassembly full; evicting frame {} on {}",
+                    short_id(&evicted.commitment[..8]),
+                    evicted.link
+                );
+                Self::drop_frame(&mut buffers, &evicted).map_err(|e| storage("eviction", e))?;
             }
 
-            let mut buffer = ReassemblyBuffer::new(header, &frame_commitment);
+            // The auto-resume path: chunks persisted for this frame on this
+            // link by an earlier connection or process are hydrated, each
+            // held to the checks a fresh chunk is.
+            let mut buffer = ReassemblyBuffer::new(frame_type, shape, &key.commitment);
+            let persisted =
+                crate::storage::client_db::load_persisted_chunks(&key.link, &key.commitment)
+                    .map_err(|e| storage("hydration", e))?;
             if !persisted.is_empty() {
                 info!(
                     "Auto-hydrating {} persisted chunks for frame {}",
                     persisted.len(),
-                    short_id(&frame_commitment[..8])
+                    short_id(&key.commitment[..8])
                 );
-                for pc in persisted {
-                    // P0.3: Revalidate checksum on hydration — catch SQLite corruption.
-                    let recomputed = Self::checksum32(&pc.chunk_data);
-                    if recomputed != pc.checksum {
-                        warn!(
-                            "Hydration checksum mismatch for frame {} chunk {} (expected {}, got {}) — skipping corrupt chunk",
-                            short_id(&frame_commitment[..8]),
-                            pc.chunk_index,
-                            pc.checksum,
-                            recomputed
-                        );
-                        // Delete corrupt chunk from SQLite so it gets retransmitted
-                        let _ = crate::storage::client_db::delete_single_chunk(
-                            &frame_commitment,
-                            pc.chunk_index,
-                        );
-                        continue;
+            }
+            for pc in persisted {
+                let restored_header = BleFrameHeader {
+                    frame_type: pc.frame_type,
+                    chunk_index: u32::from(pc.chunk_index),
+                    total_chunks: u32::from(pc.total_chunks),
+                    payload_len: pc.payload_len,
+                    checksum: pc.checksum,
+                    frame_commitment: key.commitment.to_vec(),
+                };
+                // P0.3: Revalidate on hydration — catch SQLite corruption.
+                let refusal = match chunk_shape(&restored_header, pc.chunk_data.len()) {
+                    Err(e) => Some(e.to_string()),
+                    Ok(_) if Self::checksum32(&pc.chunk_data) != pc.checksum => {
+                        Some("its checksum does not hold".to_string())
                     }
-
-                    // Reconstruct minimal header from persisted fields
-                    let restored_header = BleFrameHeader {
-                        frame_type: pc.frame_type,
-                        chunk_index: pc.chunk_index as u32,
-                        total_chunks: pc.total_chunks as u32,
-                        payload_len: pc.payload_len,
-                        checksum: pc.checksum,
-                        frame_commitment: frame_commitment.to_vec(),
-                    };
-                    buffer.insert_chunk(
-                        pc.chunk_index,
-                        BleChunkMeta {
-                            header: restored_header,
-                            data: pc.chunk_data,
-                        },
-                    );
+                    Ok((restored, index)) if restored != shape || index != pc.chunk_index => {
+                        Some("it describes another frame".to_string())
+                    }
+                    Ok(_) => None,
+                };
+                match refusal {
+                    None => {
+                        buffer.received_chunks.insert(pc.chunk_index, pc.chunk_data);
+                    }
+                    Some(why) => {
+                        warn!(
+                            "Hydrated chunk {} of frame {} is deleted so it is retransmitted: {why}",
+                            pc.chunk_index,
+                            short_id(&key.commitment[..8]),
+                        );
+                        crate::storage::client_db::delete_single_chunk(
+                            &key.link,
+                            &key.commitment,
+                            pc.chunk_index,
+                        )
+                        .map_err(|e| storage("a corrupt hydrated chunk", e))?;
+                    }
                 }
             }
-            buffers.insert(frame_commitment, buffer);
+            buffers.insert(key.clone(), buffer);
         }
 
         let buffer = buffers
-            .get_mut(&frame_commitment)
+            .get_mut(&key)
             .ok_or_else(|| DsmError::invalid_operation("missing reassembly buffer"))?;
+        if buffer.shape != shape {
+            return Err(DsmError::invalid_operation(format!(
+                "BLE chunk {seq} describes another frame than the one arriving under its \
+                 commitment on this link"
+            )));
+        }
 
-        // Deduplicate: skip if we already have this chunk (from hydration or retransmit)
-        if !buffer.received_chunks.contains_key(&seq) {
-            let meta = BleChunkMeta {
-                header: header.clone(),
-                data: chunk.data,
-            };
-            buffer.insert_chunk(seq, meta);
+        // Deduplicate: a chunk already held (from hydration or a retransmit)
+        // is not taken twice. A chunk is persisted when it is taken, so the
+        // rows kept for a link are only those of its frames in reassembly.
+        if let std::collections::hash_map::Entry::Vacant(slot) = buffer.received_chunks.entry(seq) {
+            crate::storage::client_db::persist_ble_chunk(ChunkPersistenceParams {
+                peer_link: &key.link,
+                frame_commitment: &key.commitment,
+                chunk_index: seq,
+                frame_type: header.frame_type,
+                total_chunks: shape.total_chunks,
+                payload_len: shape.payload_len,
+                chunk_data: &chunk.data,
+                checksum: header.checksum,
+            })
+            .map_err(|e| storage("persisting a chunk", e))?;
+            slot.insert(chunk.data);
         }
 
         if !buffer.is_complete() {
             debug!(
                 "BLE reassembly in progress: {}/{} chunks for frame {}",
                 buffer.received_chunks.len(),
-                buffer.total_chunks,
-                short_id(&frame_commitment[..8])
+                buffer.shape.total_chunks,
+                short_id(&key.commitment[..8])
             );
             return Ok(FrameIngressResult::NeedMoreChunks);
         }
 
         let buffer = buffers
-            .remove(&frame_commitment)
+            .remove(&key)
             .ok_or_else(|| DsmError::invalid_operation("buffer disappeared during reassembly"))?;
+        // Whether or not the frame holds, its persisted chunks go with it: a
+        // frame that fails its check is not hydrated again on the next
+        // retransmission, which then starts clean.
+        crate::storage::client_db::delete_frame_chunks(&key.link, &key.commitment)
+            .map_err(|e| storage("the completed frame's chunks", e))?;
         let payload = buffer.reassemble()?;
 
-        // Cleanup persisted chunks after successful reassembly
-        let _ = crate::storage::client_db::delete_frame_chunks(&frame_commitment);
-
-        // Transport-level dedup: if the same frame_commitment was already
-        // dispatched (e.g. peer retransmitted the entire chunk set), drop it
+        // Transport-level dedup: if the same frame was already dispatched from
+        // this link (e.g. peer retransmitted the entire chunk set), drop it
         // before it reaches the bilateral handler.
-        {
-            let mut dedup = self.dedup_table.lock().await;
-            if dedup.is_duplicate(&frame_commitment) {
-                warn!(
-                    "Transport dedup: dropping reassembled duplicate frame {}",
-                    short_id(&frame_commitment[..8])
-                );
-                return Ok(FrameIngressResult::NeedMoreChunks); // silently drop
-            }
+        if self.dedup_table.lock().await.sight(&key) == Sighting::Repeat {
+            warn!(
+                "Transport dedup: dropping reassembled duplicate frame {}",
+                short_id(&key.commitment[..8])
+            );
+            return Ok(FrameIngressResult::NeedMoreChunks);
         }
 
         Ok(FrameIngressResult::MessageComplete {
@@ -837,6 +936,15 @@ impl BleFrameCoordinator {
                 payload,
             },
         })
+    }
+
+    /// Drop the frame `key` whole: its buffer and every chunk persisted for it.
+    fn drop_frame(
+        buffers: &mut HashMap<FrameKey, ReassemblyBuffer>,
+        key: &FrameKey,
+    ) -> anyhow::Result<()> {
+        buffers.remove(key);
+        crate::storage::client_db::delete_frame_chunks(&key.link, &key.commitment)
     }
 
     /// Convenience: prepare and chunk an Envelope for a bilateral prepare request.
@@ -882,8 +990,344 @@ mod tests {
         BleFrameCoordinator::new(dev_id)
     }
 
+    const LINK_A: &str = "AA:AA:AA:AA:AA:01";
+    const LINK_B: &str = "BB:BB:BB:BB:BB:02";
+
+    fn init_test_db() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+    }
+
+    /// A payload of `len` bytes no other test frame shares.
+    fn payload(seed: u8, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| seed.wrapping_add((i % 251) as u8))
+            .collect()
+    }
+
+    /// `chunk` re-encoded with its header changed by `bend` and its data by
+    /// `data`, the checksum recomputed: a chunk whose checksum holds.
+    fn bent_chunk(
+        chunk: &[u8],
+        bend: impl Fn(&mut BleFrameHeader),
+        data: impl Fn(&mut Vec<u8>),
+    ) -> Vec<u8> {
+        let mut decoded = crate::generated::BleChunk::decode(chunk).expect("a chunk");
+        data(&mut decoded.data);
+        let header = decoded.header.as_mut().expect("a header");
+        bend(header);
+        header.checksum = BleFrameCoordinator::checksum32(&decoded.data);
+        decoded.encode_to_vec()
+    }
+
+    fn commitment_of(chunk: &[u8]) -> [u8; 32] {
+        let decoded = crate::generated::BleChunk::decode(chunk).expect("a chunk");
+        <[u8; 32]>::try_from(
+            decoded
+                .header
+                .expect("a header")
+                .frame_commitment
+                .as_slice(),
+        )
+        .expect("32 bytes")
+    }
+
+    async fn feed(
+        coord: &BleFrameCoordinator,
+        link: &str,
+        chunks: &[Vec<u8>],
+    ) -> Result<FrameIngressResult, DsmError> {
+        let mut last = FrameIngressResult::NeedMoreChunks;
+        for chunk in chunks {
+            last = coord.ingest_chunk(link, chunk).await?;
+        }
+        Ok(last)
+    }
+
+    /// SA-13. A peer in range writes a chunk naming an honest peer's frame
+    /// commitment, first, on its own link. Frames were keyed by commitment
+    /// alone and the first chunk per index won, so the honest frame failed
+    /// its check on every retransmission. A frame is its link's now: the
+    /// honest frame completes, and the writer's chunk stays its own link's.
+    /// MUTATION CONTROL: keying reassembly by the commitment alone turns
+    /// this red.
     #[test]
+    #[serial_test::serial]
+    fn a_chunk_written_on_another_link_cannot_poison_a_frame() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let honest = payload(0x10, 3 * MAX_BLE_CHUNK_SIZE - 7);
+            let chunks = coord
+                .encode_message(BleFrameType::BilateralPrepare, &honest)
+                .expect("chunks");
+            let poison = bent_chunk(
+                &chunks[0],
+                |_| {},
+                |data| data.iter_mut().for_each(|b| *b ^= 0x5A),
+            );
+
+            assert_eq!(
+                coord
+                    .ingest_chunk(LINK_B, &poison)
+                    .await
+                    .expect("taken on B"),
+                FrameIngressResult::NeedMoreChunks
+            );
+            match feed(&coord, LINK_A, &chunks).await.expect("A's frame") {
+                FrameIngressResult::MessageComplete { message } => {
+                    assert_eq!(message.payload, honest);
+                }
+                other => panic!("A's frame did not complete: {other:?}"),
+            }
+            assert_eq!(
+                crate::storage::client_db::load_persisted_chunks(LINK_B, &commitment_of(&poison))
+                    .expect("B's rows")
+                    .len(),
+                1,
+                "the writer's chunk is kept for its own link only"
+            );
+        });
+    }
+
+    /// SA-13. A frame whose chunks do not reassemble to its commitment is
+    /// dropped whole — its buffer and its persisted chunks — so the peer's
+    /// retransmission starts clean. The persisted chunks used to outlive the
+    /// failed check (`reassemble()?` returned first) and were hydrated into
+    /// every retransmission, which failed again.
+    /// MUTATION CONTROL: deleting the persisted chunks only after a frame
+    /// holds turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_frame_that_fails_its_check_is_dropped_whole_and_its_retransmission_completes() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let honest = payload(0x20, 2 * MAX_BLE_CHUNK_SIZE + 11);
+            let chunks = coord
+                .encode_message(BleFrameType::BilateralConfirm, &honest)
+                .expect("chunks");
+            let mut poisoned = chunks.clone();
+            poisoned[0] = bent_chunk(&chunks[0], |_| {}, |data| data[0] ^= 0x01);
+
+            let refused = feed(&coord, LINK_A, &poisoned)
+                .await
+                .expect_err("a frame that does not hash to its commitment");
+            assert!(
+                refused.to_string().contains("frame integrity check failed"),
+                "{refused}"
+            );
+            assert!(
+                crate::storage::client_db::load_persisted_chunks(
+                    LINK_A,
+                    &commitment_of(&chunks[0])
+                )
+                .expect("rows")
+                .is_empty(),
+                "the failed frame's persisted chunks went with it"
+            );
+
+            match feed(&coord, LINK_A, &chunks)
+                .await
+                .expect("the retransmission")
+            {
+                FrameIngressResult::MessageComplete { message } => {
+                    assert_eq!(message.payload, honest);
+                }
+                other => panic!("the retransmission did not complete: {other:?}"),
+            }
+        });
+    }
+
+    /// SA-13. A chunk's header is the writer's. An index outside its frame, a
+    /// chunk count its length does not make, a frame over the budget, data of
+    /// another length than its chunk, or a commitment that is not 32 bytes is
+    /// refused before anything is buffered or persisted.
+    /// MUTATION CONTROL: dropping the index bound turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_chunk_whose_header_does_not_hold_is_refused_before_it_is_kept() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let honest = payload(0x30, 2 * MAX_BLE_CHUNK_SIZE);
+            let chunks = coord
+                .encode_message(BleFrameType::BilateralPrepare, &honest)
+                .expect("chunks");
+            let commitment = commitment_of(&chunks[0]);
+            let cases: [(&str, Vec<u8>, &str); 6] = [
+                (
+                    "an index past the frame",
+                    bent_chunk(&chunks[1], |h| h.chunk_index = 2, |_| {}),
+                    "is not one of the frame's",
+                ),
+                (
+                    "an index past a chunk index",
+                    bent_chunk(&chunks[1], |h| h.chunk_index = u32::MAX, |_| {}),
+                    "is not one of the frame's",
+                ),
+                (
+                    "a chunk count the length does not make",
+                    bent_chunk(&chunks[0], |h| h.total_chunks = 9, |_| {}),
+                    "is not the 2 a",
+                ),
+                (
+                    "a frame over the budget",
+                    bent_chunk(
+                        &chunks[0],
+                        |h| {
+                            h.payload_len = u32::try_from(MAX_BLE_FRAME_BYTES + 1).expect("u32");
+                            h.total_chunks = u32::try_from(
+                                (MAX_BLE_FRAME_BYTES + 1).div_ceil(MAX_BLE_CHUNK_SIZE),
+                            )
+                            .expect("u32");
+                        },
+                        |_| {},
+                    ),
+                    "is outside",
+                ),
+                (
+                    "data of another length",
+                    bent_chunk(&chunks[0], |_| {}, |data| data.truncate(17)),
+                    "not the 400 its frame cuts",
+                ),
+                (
+                    "a short commitment",
+                    bent_chunk(&chunks[0], |h| h.frame_commitment.truncate(31), |_| {}),
+                    "not 32",
+                ),
+            ];
+            for (what, chunk, why) in cases {
+                let refused = coord.ingest_chunk(LINK_A, &chunk).await.expect_err(what);
+                assert!(refused.to_string().contains(why), "{what}: {refused}");
+            }
+            assert!(
+                crate::storage::client_db::load_persisted_chunks(LINK_A, &commitment)
+                    .expect("rows")
+                    .is_empty(),
+                "a refused chunk is never persisted"
+            );
+            assert!(coord.pending_reassembly.lock().await.is_empty());
+        });
+    }
+
+    /// SA-16. A frame whose buffer expires takes its persisted chunks with
+    /// it. They used to stay (carrying no counterparty, swept only at a
+    /// startup over fifty frames), so a writer that never finished a frame
+    /// grew the database until the next restart.
+    /// MUTATION CONTROL: expiring the buffer alone turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn an_expired_frame_takes_its_persisted_chunks_with_it() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let unfinished = coord
+                .encode_message(
+                    BleFrameType::BilateralPrepare,
+                    &payload(0x40, 2 * MAX_BLE_CHUNK_SIZE),
+                )
+                .expect("chunks");
+            let commitment = commitment_of(&unfinished[0]);
+            coord
+                .ingest_chunk(LINK_B, &unfinished[0])
+                .await
+                .expect("the first chunk");
+            assert_eq!(
+                crate::storage::client_db::load_persisted_chunks(LINK_B, &commitment)
+                    .expect("rows")
+                    .len(),
+                1
+            );
+            // The frame's time runs out.
+            for buffer in coord.pending_reassembly.lock().await.values_mut() {
+                buffer.created_at = Instant::now()
+                    .checked_sub(buffer.timeout() + Duration::from_secs(1))
+                    .expect("an instant in the past");
+            }
+
+            let next = coord
+                .encode_message(BleFrameType::BilateralPrepare, &payload(0x41, 9))
+                .expect("chunks");
+            coord
+                .ingest_chunk(LINK_A, &next[0])
+                .await
+                .expect("another frame");
+            assert!(
+                crate::storage::client_db::load_persisted_chunks(LINK_B, &commitment)
+                    .expect("rows")
+                    .is_empty(),
+                "the expired frame's persisted chunks are swept with it"
+            );
+            assert!(!coord
+                .pending_reassembly
+                .lock()
+                .await
+                .keys()
+                .any(|k| k.link == LINK_B));
+        });
+    }
+
+    /// SA-16. One link holds at most MAX_PENDING_FRAMES_PER_LINK frames in
+    /// reassembly: past that, its own oldest frame goes, with its persisted
+    /// chunks, and another link's frame stays however old it is.
+    /// MUTATION CONTROL: evicting the oldest frame of any link turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_link_past_its_frame_bound_evicts_its_own_oldest_frame() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let first_chunk = |seed: u8| {
+                coord
+                    .encode_message(
+                        BleFrameType::BilateralPrepare,
+                        &payload(seed, 2 * MAX_BLE_CHUNK_SIZE),
+                    )
+                    .expect("chunks")
+                    .remove(0)
+            };
+            let honest = first_chunk(0x50);
+            coord
+                .ingest_chunk(LINK_A, &honest)
+                .await
+                .expect("A's frame");
+            let flood: Vec<Vec<u8>> = (0..=MAX_PENDING_FRAMES_PER_LINK)
+                .map(|i| first_chunk(0x60 + u8::try_from(i).expect("small")))
+                .collect();
+            for chunk in &flood {
+                coord.ingest_chunk(LINK_B, chunk).await.expect("B's frame");
+            }
+
+            let pending = coord.pending_reassembly.lock().await;
+            assert_eq!(
+                pending.keys().filter(|k| k.link == LINK_B).count(),
+                MAX_PENDING_FRAMES_PER_LINK
+            );
+            assert!(
+                pending.keys().any(|k| k.link == LINK_A),
+                "another link's frame was evicted"
+            );
+            drop(pending);
+            assert!(
+                crate::storage::client_db::load_persisted_chunks(LINK_B, &commitment_of(&flood[0]))
+                    .expect("rows")
+                    .is_empty(),
+                "the evicted frame's persisted chunks went with it"
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_ingest_chunk_with_modern_frame() {
+        init_test_db();
         let coord = test_coordinator();
         let rt = Runtime::new().expect("runtime");
 
@@ -917,7 +1361,7 @@ mod tests {
 
             // Handle the chunk - should pass through to normal processing
             let result = coord
-                .ingest_chunk(&chunk_bytes)
+                .ingest_chunk(LINK_A, &chunk_bytes)
                 .await
                 .expect("ingest modern frame");
             match result {

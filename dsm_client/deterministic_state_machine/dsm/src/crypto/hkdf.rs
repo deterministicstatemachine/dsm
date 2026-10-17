@@ -2,8 +2,9 @@
 
 //! HKDF (RFC 5869) over BLAKE3.
 //!
-//! The KDF of the Genesis v2/v3 key tree (`genesis_v2::kdf32`): the domain
-//! tag is the salt, the secret the IKM, the bound context the info.
+//! The KDF of key schedule KS1 (`core::identity::key_schedule`): each root
+//! secret has one Extract under a fixed protocol salt, and every derivation
+//! is an Expand whose `info` carries its domain label and its context.
 //!
 //! The HMAC primitive is constructed per RFC 2104 with BLAKE3 as the
 //! underlying hash function (BLAKE3 internal block size 64 bytes,
@@ -16,15 +17,22 @@ const BLAKE3_OUTPUT_SIZE: usize = 32;
 const HMAC_IPAD: u8 = 0x36;
 const HMAC_OPAD: u8 = 0x5c;
 
+use zeroize::Zeroize;
+
 /// HMAC-BLAKE3 per RFC 2104.  Output is 32 bytes.  Keys longer than the
 /// block size are pre-hashed; shorter keys are zero-padded.
+///
+/// Every intermediate is key material: the condensed key block, both pads,
+/// the two hasher states (each still buffers its pad) and the inner digest.
+/// All of them are wiped before the MAC is returned.
 fn hmac_blake3(key: &[u8], message: &[u8]) -> [u8; 32] {
     // Step 1: condense key to a single block.  If key > block size,
     // hash it; otherwise zero-pad.
     let mut block_key = [0u8; BLAKE3_BLOCK_SIZE];
     if key.len() > BLAKE3_BLOCK_SIZE {
-        let h = ::blake3::hash(key);
+        let mut h = ::blake3::hash(key);
         block_key[..BLAKE3_OUTPUT_SIZE].copy_from_slice(h.as_bytes());
+        h.zeroize();
     } else {
         block_key[..key.len()].copy_from_slice(key);
     }
@@ -36,19 +44,26 @@ fn hmac_blake3(key: &[u8], message: &[u8]) -> [u8; 32] {
         ipad[i] = block_key[i] ^ HMAC_IPAD;
         opad[i] = block_key[i] ^ HMAC_OPAD;
     }
+    block_key.zeroize();
 
     // Step 3: inner hash = BLAKE3(ipad || message).
     let mut inner = ::blake3::Hasher::new();
     inner.update(&ipad);
     inner.update(message);
-    let inner_digest = inner.finalize();
+    let mut inner_digest = inner.finalize();
+    inner.zeroize();
+    ipad.zeroize();
 
     // Step 4: outer hash = BLAKE3(opad || inner_digest).
     let mut outer = ::blake3::Hasher::new();
     outer.update(&opad);
     outer.update(inner_digest.as_bytes());
-    let mut out = [0u8; BLAKE3_OUTPUT_SIZE];
-    out.copy_from_slice(outer.finalize().as_bytes());
+    let mut outer_digest = outer.finalize();
+    outer.zeroize();
+    opad.zeroize();
+    inner_digest.zeroize();
+    let out: [u8; BLAKE3_OUTPUT_SIZE] = *outer_digest.as_bytes();
+    outer_digest.zeroize();
     out
 }
 
@@ -73,7 +88,12 @@ pub fn expand(prk: &[u8; 32], info: &[u8], length: usize) -> Vec<u8> {
         255 * BLAKE3_OUTPUT_SIZE,
     );
 
-    let mut okm = Vec::with_capacity(length);
+    // `okm` is allocated at its full block length up front, so it never
+    // reallocates and leaves no unwiped copy of earlier blocks behind; the
+    // bytes past `length` are wiped before it is cut to size. Each block
+    // `T(i)` is key material, so the chaining copy and every HMAC input that
+    // carries it are wiped too.
+    let mut okm = Vec::with_capacity(n * BLAKE3_OUTPUT_SIZE);
     let mut prev: [u8; BLAKE3_OUTPUT_SIZE] = [0u8; BLAKE3_OUTPUT_SIZE];
     let mut prev_len = 0usize;
 
@@ -83,11 +103,14 @@ pub fn expand(prk: &[u8; 32], info: &[u8], length: usize) -> Vec<u8> {
         buf.extend_from_slice(info);
         buf.push(i as u8);
         let t = hmac_blake3(prk, &buf);
+        buf.zeroize();
         okm.extend_from_slice(&t);
         prev = t;
         prev_len = BLAKE3_OUTPUT_SIZE;
     }
+    prev.zeroize();
 
+    okm[length..].zeroize();
     okm.truncate(length);
     okm
 }
@@ -100,14 +123,8 @@ pub fn expand32(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
     buf.extend_from_slice(info);
     buf.push(1u8);
     let t = hmac_blake3(prk, &buf);
-    zeroize::Zeroize::zeroize(&mut buf);
+    buf.zeroize();
     t
-}
-
-/// Convenience: combined Extract + Expand returning `length` bytes.
-pub fn extract_and_expand(salt: &[u8], ikm: &[u8], info: &[u8], length: usize) -> Vec<u8> {
-    let prk = extract(salt, ikm);
-    expand(&prk, info, length)
 }
 
 #[cfg(test)]
@@ -217,17 +234,6 @@ mod tests {
         let first = &okm[..32];
         let second = &okm[32..];
         assert_ne!(first, second, "T(1) and T(2) must differ");
-    }
-
-    #[test]
-    fn extract_and_expand_matches_separate_calls() {
-        let salt = b"DSM/dev\0";
-        let ikm = b"some-ikm";
-        let info = b"DSM/sphincs-plus-seed\0";
-        let combined = extract_and_expand(salt, ikm, info, 32);
-        let prk = extract(salt, ikm);
-        let separate = expand(&prk, info, 32);
-        assert_eq!(combined, separate);
     }
 
     #[test]

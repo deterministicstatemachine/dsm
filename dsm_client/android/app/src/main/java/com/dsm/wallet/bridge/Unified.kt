@@ -114,6 +114,11 @@ object Unified {
         UnifiedNativeApi.getTransportHeadersV3Status()
     @Keep @JvmStatic fun getTransportHeadersV3(): ByteArray =
         UnifiedNativeApi.getTransportHeadersV3()
+    /**
+     * The local envelope entry: an Envelope v3 this device's own app layer built.
+     * Never a peer's bytes — those go to processIncomingBleData (TX writes and
+     * notifications) or processBleIdentityEnvelope (pairing writes).
+     */
     @Keep @JvmStatic fun processEnvelopeV3(envelope: ByteArray): ByteArray =
         UnifiedNativeApi.processEnvelopeV3(envelope)
     /**
@@ -312,16 +317,10 @@ object Unified {
         UnifiedNativeApi.detectEnvelopeFrameType(envelopeBytes)
 
     /**
-     * Returns true if the payload is a framed Envelope v3 (0x03 prefix) that expects
-     * a protocol acknowledgment before the BLE transaction is marked complete.
-     * Kotlin MUST NOT inspect payload[0] — call this instead.
-     */
-    @Keep @JvmStatic fun requiresBleAck(payloadBytes: ByteArray): Boolean =
-        UnifiedNativeApi.requiresBleAck(payloadBytes)
-
-    /**
-     * Unified BLE incoming data router. Returns a serialized BleIncomingDataResponse
-     * (not Envelope v3 framed) containing pre-chunked response bytes to write back.
+     * The radio's entry: bytes a peer wrote over BLE (a TX_REQUEST write or a
+     * TX_RESPONSE notification). Rust takes a bilateral frame and refuses anything
+     * else. Returns a serialized BleIncomingDataResponse (not Envelope v3 framed)
+     * containing pre-chunked response bytes to write back.
      * Kotlin MUST NOT inspect data[0] or branch on frame type — call this instead.
      */
     @Keep @JvmStatic fun processIncomingBleData(deviceAddress: String, data: ByteArray): ByteArray =

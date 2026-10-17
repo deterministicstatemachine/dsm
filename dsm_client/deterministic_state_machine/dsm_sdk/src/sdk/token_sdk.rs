@@ -1150,10 +1150,15 @@ impl TokenSDK {
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient_devid);
         let token_id = token_id.to_string();
-        if self.resolve_policy_commit_strict(&token_id)? != signed_policy_commit {
+        // The terms' ticker must be the signed policy's own, read from that
+        // commit. Resolving the ticker to a commit instead would name ERA for
+        // any token called "ERA" (SoFi §47: two tokens may share a ticker).
+        let (named, _) = crate::handlers::wallet_routes::token_of_commit(&signed_policy_commit)
+            .map_err(DsmError::invalid_operation)?;
+        if named != token_id {
             return Err(DsmError::invalid_operation(format!(
-                "the transfer's terms name {token_id}, whose policy is not the one its \
-                 operation commits to"
+                "the transfer's terms name {token_id}, but the policy its operation commits to \
+                 is {named}"
             )));
         }
         let deltas = [dsm::types::device_state::BalanceDelta {
@@ -1231,6 +1236,63 @@ mod tests {
         operations::Operation,
         state_types::{DeviceInfo, State, StateParams},
     };
+
+    /// A transfer's terms name its token only as the signed policy's own
+    /// ticker, read from that commit: terms naming another ticker are refused
+    /// before anything is debited. The ticker is never resolved to a commit.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_transfer_whose_terms_name_another_ticker_than_its_policy_is_refused() {
+        let wallet = crate::sdk::wallet_sdk::WalletSDK::test_wallet().expect("wallet");
+        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let sender = wallet
+            .token_sdk
+            .core_sdk
+            .get_current_state()
+            .expect("state")
+            .device_info
+            .device_id;
+        let recipient =
+            <[u8; 32]>::try_from(dsm::crypto::rng::random_bytes(32).as_slice()).expect("32 bytes");
+        // The nonce a send derives (§4.1), over the relationship.
+        let relationship =
+            dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, &recipient);
+        let terms = dsm::types::operations::TransferTerms::new(
+            b"NOSUCH".to_vec(),
+            crate::handlers::app_router_impl::transfer_nonce(
+                &relationship,
+                1,
+                "NOSUCH",
+                &recipient,
+            ),
+            TransactionMode::Unilateral,
+            String::new(),
+        );
+        let op = Operation::Transfer {
+            to_device_id: recipient.to_vec(),
+            amount: Balance::amount(1),
+            policy_commit: era,
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        };
+        let refused = wallet
+            .token_sdk
+            .execute_transfer_op_staged_with_admission(
+                op,
+                "NOSUCH",
+                |_| Ok(()),
+                |_, _, _| Ok(()),
+                None,
+            )
+            .expect_err("terms naming another ticker than the signed policy's are refused");
+        assert!(
+            refused.to_string().contains(
+                "the transfer's terms name NOSUCH, but the policy its operation commits to is ERA"
+            ),
+            "{refused}"
+        );
+    }
 
     /// Whether a token exists is answered only by a complete read of the
     /// archive: an archive that does not load is an error, never "no such

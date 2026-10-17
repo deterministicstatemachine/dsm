@@ -87,7 +87,15 @@ impl ShardCountSmt {
         // Walk from the shard leaf up to root, incrementing each node.
         let mut current_prefix = shard_index;
         for depth in (0..=self.shard_depth).rev() {
-            let heap_index = (1u64 << depth) + current_prefix;
+            let heap_index = 1u64
+                .checked_shl(u32::from(depth))
+                .and_then(|base| base.checked_add(current_prefix))
+                .ok_or_else(|| {
+                    DsmError::Verification(format!(
+                        "DJTE shard {shard_index} at depth {} is outside the u64 heap",
+                        self.shard_depth
+                    ))
+                })?;
             let new_count = self.get_count(heap_index).saturating_add(1);
             self.counts.insert(heap_index, new_count);
             current_prefix >>= 1;

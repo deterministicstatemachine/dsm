@@ -15,8 +15,15 @@ pub const TAG_ENTITY_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM
 pub const TAG_DEVICE_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/device-id");
 pub const TAG_DSM_NODE_ID: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/node-id");
 pub const TAG_DSM_BYTECOMMIT: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/bytecommit");
+/// A relationship's `h_0`: `H(tag ‖ G_lo ‖ DevID_lo ‖ G_hi ‖ DevID_hi)`. Only
+/// `h_0`; the step precommitment has its own tag, `TAG_BILATERAL_PRECOMMIT`.
 pub const TAG_BILATERAL_SESSION: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/bilateral-session");
+/// A bilateral step precommitment: `H(tag ‖ lp(h_n) ‖ lp(op))`. Separate from
+/// `h_0`'s tag, so a precommitment and a relationship's first tip can never
+/// be the same hash of differently framed bytes.
+pub const TAG_BILATERAL_PRECOMMIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/bilateral-precommit/v1");
 pub const TAG_SMT_KEY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/smt-key");
 pub const TAG_TIP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tip");
 pub const TAG_STATE_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/state-hash");
@@ -138,6 +145,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_NODE_ID,
     TAG_DSM_BYTECOMMIT,
     TAG_BILATERAL_SESSION,
+    TAG_BILATERAL_PRECOMMIT,
     TAG_SMT_KEY,
     TAG_TIP,
     TAG_STATE_HASH,

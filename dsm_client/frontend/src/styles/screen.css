@@ -1148,6 +1148,14 @@ label.sb-btn.is-disabled { opacity: 0.45; pointer-events: none; }
   margin: 0;
   padding: 0;
   list-style: none;
+  /* The words cannot be selected, so the page offers no Copy for them. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Every word of a phrase at once (the ring backup), read across each row. */
+.sb-phrase--all {
+  grid-template-rows: none;
+  grid-auto-flow: row;
 }
 .sb-phrase__word {
   display: flex;

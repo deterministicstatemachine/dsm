@@ -23,7 +23,10 @@ use crate::sdk::storage_set::StorageSet;
 /// Build and sign this device's own entry. Everything is re-derived from the
 /// wallet seed, as the anchor presentation is: nothing identity-bearing is
 /// persisted. `expected_g` is the stored genesis id; a re-derivation that does
-/// not land on it describes another identity and is refused.
+/// not land on it describes another identity and is refused. The entry carries
+/// the device's P0–P6 authority evidence and the transition it reaches, so a
+/// reader can prove the device belongs to the genesis it names (DSM Amendment
+/// A18).
 pub fn build_own_entry(
     wallet_seed: &[u8],
     inputs: OwnerIdentityInputs<'_>,
@@ -45,6 +48,12 @@ pub fn build_own_entry(
             "device directory: the re-derived genesis is not this device's stored genesis",
         ));
     }
+    let (authority_evidence, authority_position) =
+        crate::sdk::identity_presentation::build_authority_evidence(
+            wallet_seed,
+            inputs,
+            expected_g,
+        )?;
     let body = DirectoryEntryBody {
         genesis: genesis.g,
         device_id: genesis.devid,
@@ -52,6 +61,8 @@ pub fn build_own_entry(
         att_a: derive_atta(wallet_seed, &genesis.g, inputs.device_slot),
         kyber_public_key,
         counter,
+        authority_position,
+        authority_evidence,
     };
     let entry = DirectoryEntry::sign(body, &genesis.ak_secret)?;
     entry

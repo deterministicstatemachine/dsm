@@ -57,13 +57,34 @@ use super::response_helpers::{pack_envelope_ok, err};
 
 /// What a sender asks for when it pays a contact online. Everything else —
 /// the sender (this device), the relationship tip, the nonce, the signed
-/// operation — the SDK derives.
+/// operation, the token's ticker — the SDK derives.
 #[derive(Debug, Clone)]
 pub(crate) struct OnlineSendIntent {
     pub to_device_id: [u8; 32],
-    pub token_id: String,
+    /// The token, by its identity: its policy commit (SoFi §47). A ticker is
+    /// display only and two tokens may share one, so a send is never named by
+    /// one.
+    pub policy_commit: [u8; 32],
     pub amount: u64,
     pub memo: String,
+}
+
+/// What an online send did with the sender's balance, and its answer.
+pub(crate) enum OnlineSent {
+    /// Nothing was committed: no debit, nothing to deliver.
+    NotDebited(AppResult),
+    /// The debit is committed. It stands whatever the answer says: success,
+    /// or why its admission is held or its delivery is unknown, both of which
+    /// the reconciliation sweep carries forward (§16.6).
+    Debited(AppResult),
+}
+
+impl OnlineSent {
+    pub(crate) fn answer(self) -> AppResult {
+        match self {
+            Self::NotDebited(answer) | Self::Debited(answer) => answer,
+        }
+    }
 }
 
 /// §4.1: a transfer's nonce, "fresh entropy e", derived by the SDK and never
@@ -461,26 +482,52 @@ impl AppRouterImpl {
         }
     }
 
-    /// Send an online transfer: this device pays `intent.amount` of
-    /// `intent.token_id` to `intent.to_device_id`. The sender is this device;
-    /// the relationship tip, the nonce and the signed operation are derived
-    /// here, never supplied.
+    /// [`Self::send_online`], answered as the route answers it.
     pub(crate) async fn process_online_transfer_logic(
         &self,
         intent: OnlineSendIntent,
     ) -> AppResult {
+        self.send_online(intent).await.answer()
+    }
+
+    /// Send an online transfer: this device pays `intent.amount` of the token
+    /// committed to by `intent.policy_commit` to `intent.to_device_id`. The
+    /// sender is this device; the relationship tip, the nonce, the signed
+    /// operation and the token's ticker are derived here, never supplied.
+    /// Whether the debit was committed is part of the answer: once it is, it
+    /// stands whatever becomes of its delivery (§16.6 forward-only).
+    pub(crate) async fn send_online(&self, intent: OnlineSendIntent) -> OnlineSent {
         let from_device_id = self.device_id_bytes;
         let to_device_id = intent.to_device_id;
+        // §9.5: the signed transfer binds the policy the send names. Its ticker
+        // is read from that commit — the builtin's, or this device's registry
+        // entry for it — and labels the terms and the local records only; it
+        // is never resolved back to a commit, which would name ERA for any
+        // token called "ERA" (SoFi §47). A commit this device holds no policy
+        // for is refused here, before anything is read from the network.
+        let policy_commit = intent.policy_commit;
+        let token_id = match super::wallet_routes::token_of_commit(&policy_commit) {
+            Ok((ticker, _)) => ticker,
+            Err(e) => return OnlineSent::NotDebited(err(format!("wallet.send: {e}"))),
+        };
         let to_device_id_str = crate::util::text_id::encode_base32_crockford(&to_device_id);
         // The network's pinned set: the recipient's directory entry is read
         // there, and the send is delivered there.
         let network = match crate::sdk::economic_admission_flow::committed_network_id() {
             Ok(network) => network,
-            Err(e) => return err(format!("wallet.send: no committed network: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: no committed network: {e}"
+                )))
+            }
         };
         let spool_set = match crate::sdk::storage_set::canonical_set(&network) {
             Ok(set) => set,
-            Err(e) => return err(format!("wallet.send: no pinned storage set: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: no pinned storage set: {e}"
+                )))
+            }
         };
         let storage_endpoints: Vec<String> = spool_set
             .members()
@@ -503,25 +550,25 @@ impl AppRouterImpl {
         {
             Some(genesis) => genesis,
             None => {
-                return err(
+                return OnlineSent::NotDebited(err(
                     "wallet.send: local genesis unavailable for canonical relationship routing"
                         .to_string(),
-                )
+                ))
             }
         };
         let contact_record =
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
                 Ok(Some(contact)) => contact,
                 Ok(None) => {
-                    return err(
+                    return OnlineSent::NotDebited(err(
                         "wallet.send: recipient must be an added contact before online send"
                             .to_string(),
-                    )
+                    ))
                 }
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: failed to load recipient contact: {e}"
-                    ))
+                    )))
                 }
             };
         // The recipient's own directory entry: the AK pinned at pairing must be
@@ -529,7 +576,9 @@ impl AppRouterImpl {
         // for.
         let Ok(recipient_genesis) = <[u8; 32]>::try_from(contact_record.genesis_hash.as_slice())
         else {
-            return err("wallet.send: the recipient contact's genesis is not 32 bytes".into());
+            return OnlineSent::NotDebited(err(
+                "wallet.send: the recipient contact's genesis is not 32 bytes".into(),
+            ));
         };
         match crate::sdk::device_directory::read_entry(
             &spool_set,
@@ -543,20 +592,20 @@ impl AppRouterImpl {
                     .repair_contact_identity_from_directory(contact_record, &read.entry)
                     .await
                 {
-                    return err(format!("wallet.send: {e}"));
+                    return OnlineSent::NotDebited(err(format!("wallet.send: {e}")));
                 }
             }
             Ok(None) => {
-                return err(
+                return OnlineSent::NotDebited(err(
                     "wallet.send: no directory entry of the recipient proves itself on the set \
                      yet"
                     .into(),
-                )
+                ))
             }
             Err(e) => {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "wallet.send: the recipient's directory entry could not be read ({e})"
-                ));
+                )));
             }
         }
         let preflight_sync = generated::StorageSyncRequest {
@@ -575,9 +624,9 @@ impl AppRouterImpl {
                 }
             }
             Err(e) => {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "wallet.send: failed to refresh relationship state before send: {e}"
-                ));
+                )));
             }
         }
         // The finality barrier a send meets most often is seconds from clearing:
@@ -592,9 +641,9 @@ impl AppRouterImpl {
                 Ok(awaiting) if awaiting => {}
                 Ok(_) => break,
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: the acceptance finality state is unreadable: {e}"
-                    ))
+                    )))
                 }
             }
             let waited = cert_wait_started.elapsed();
@@ -615,9 +664,9 @@ impl AppRouterImpl {
                 Ok(awaiting) if awaiting => {}
                 Ok(_) => break,
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: the acceptance finality state is unreadable: {e}"
-                    ))
+                    )))
                 }
             }
             match self
@@ -634,9 +683,9 @@ impl AppRouterImpl {
                     }
                 }
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: failed to sync for the recipient's finality certificate: {e}"
-                    ));
+                    )));
                 }
             }
         }
@@ -644,20 +693,20 @@ impl AppRouterImpl {
             match crate::storage::client_db::get_contact_by_device_id(&to_device_id) {
                 Ok(Some(contact)) => contact,
                 Ok(None) => {
-                    return err(
+                    return OnlineSent::NotDebited(err(
                         "wallet.send: recipient relationship disappeared during send".to_string(),
-                    )
+                    ))
                 }
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: failed to reload recipient relationship state: {e}"
-                    ))
+                    )))
                 }
             };
 
         let chain_tip_arr: [u8; 32] = match contact_relationship_tip(&contact_record) {
             Ok(tip) => tip,
-            Err(e) => return err(format!("wallet.send: {e}")),
+            Err(e) => return OnlineSent::NotDebited(err(format!("wallet.send: {e}"))),
         };
 
         // =====================================================================
@@ -678,7 +727,7 @@ impl AppRouterImpl {
                 "[wallet.send] ❌ CRITICAL BUG: to_device_id == chain_tip! Frontend is passing chain_tip as recipient. First8={}",
                 dsm::core::utility::labeling::hash_to_short_id(&to_device_id)
             );
-            return err("wallet.send: to_device_id matches chain_tip - UI bug detected. Must use recipient's device_id, not chain_tip.".into());
+            return OnlineSent::NotDebited(err("wallet.send: to_device_id matches chain_tip - UI bug detected. Must use recipient's device_id, not chain_tip.".into()));
         }
 
         log::info!(
@@ -709,51 +758,59 @@ impl AppRouterImpl {
             crate::storage::client_db::CertChainSide::Local,
         ) {
             Ok(head) => head.is_some(),
-            Err(e) => return err(format!("wallet.send: cert-chain head read failed: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: cert-chain head read failed: {e}"
+                )))
+            }
         };
         let pending_head_present =
             match crate::storage::client_db::pending_local_head_exists(&resync_rel_key) {
                 Ok(present) => present,
-                Err(e) => return err(format!("wallet.send: pending cert-head read failed: {e}")),
+                Err(e) => {
+                    return OnlineSent::NotDebited(err(format!(
+                        "wallet.send: pending cert-head read failed: {e}"
+                    )))
+                }
             };
         let had_prior_send =
             match crate::storage::client_db::relationship_had_prior_send(&resync_rel_key) {
                 Ok(sent) => sent,
-                Err(e) => return err(format!("wallet.send: prior-send read failed: {e}")),
+                Err(e) => {
+                    return OnlineSent::NotDebited(err(format!(
+                        "wallet.send: prior-send read failed: {e}"
+                    )))
+                }
             };
         if !local_head_present && !pending_head_present && had_prior_send {
             if let Err(e) = crate::storage::client_db::mark_cert_resync_required(&resync_rel_key) {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "wallet.send: the lost cert-chain head could not be recorded: {e}"
-                ));
+                )));
             }
         }
         match crate::storage::client_db::cert_resync_blocks_send(&resync_rel_key) {
             Ok(true) => {
-                return err(
+                return OnlineSent::NotDebited(err(
                     "wallet.send: this relationship needs a cert-chain resync before sending \
                      (per-step-EK head was lost); an ordinary send is blocked until the \
                      jointly-authorized resync finalizes"
                         .to_string(),
-                )
+                ))
             }
             Ok(false) => {}
             Err(e) => {
                 // Fail closed: if we cannot read the resync state, do not send.
-                return err(format!("wallet.send: cert-resync gate check failed: {e}"));
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: cert-resync gate check failed: {e}"
+                )));
             }
         }
 
-        // A transfer names its token exactly; an omitted token is not ERA, and a
-        // ticker is not case-folded into one it does not spell.
-        let token_id = intent.token_id.clone();
-        if token_id.is_empty() {
-            return err("wallet.send: the request names no token".to_string());
-        }
         if contact_record.public_key.is_empty() {
-            return err(
+            return OnlineSent::NotDebited(err(
                 "wallet.send: recipient contact is missing a canonical public key".to_string(),
-            );
+            ));
         }
 
         let nonce = transfer_nonce(&chain_tip_arr, intent.amount, &token_id, &to_device_id);
@@ -771,16 +828,6 @@ impl AppRouterImpl {
         // Sign the canonical Operation bytes (signature field cleared) so the
         // state machine and inbox verifier use the same preimage.
         // =====================================================================
-        // §9.5: bind the token's canonical policy_commit into the signed transfer.
-        // Resolve from the local source-of-truth installed policy; fail closed if
-        // the token's policy is not installed (no peer-supplied fallback).
-        let policy_commit = match self
-            .core_sdk
-            .resolve_policy_commit_strict(token_id.as_bytes())
-        {
-            Ok(pc) => pc,
-            Err(e) => return err(format!("wallet.send: policy_commit resolve failed: {e}")),
-        };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(intent.amount),
@@ -812,7 +859,11 @@ impl AppRouterImpl {
                 );
                 sig
             }
-            Err(e) => return err(format!("wallet.send: canonical signing failed: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: canonical signing failed: {e}"
+                )))
+            }
         };
 
         // §4.3#1 Defensive: Sender self-verifies signature after signing.
@@ -823,9 +874,9 @@ impl AppRouterImpl {
             let sender_pk = match crate::sdk::signing_authority::current_public_key() {
                 Ok(pk) => pk,
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: cannot retrieve signing authority public key for self-verify: {e}"
-                    ));
+                    )));
                 }
             };
             match dsm::crypto::sphincs::sphincs_verify(
@@ -837,15 +888,15 @@ impl AppRouterImpl {
                     log::info!("[wallet.send] §4.3#1 Sender self-verify: signature OK");
                 }
                 Ok(false) => {
-                    return err(
+                    return OnlineSent::NotDebited(err(
                         "wallet.send: SPHINCS+ self-verification FAILED — signature is invalid, aborting"
                             .to_string(),
-                    );
+                    ));
                 }
                 Err(e) => {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: SPHINCS+ self-verification error: {e}"
-                    ));
+                    )));
                 }
             }
         }
@@ -861,7 +912,9 @@ impl AppRouterImpl {
                 vec![],
                 &format!("online-{}", &to_device_id_str[..8]),
             ) {
-                return err(format!("Failed to add recipient to device book: {e}"));
+                return OnlineSent::NotDebited(err(format!(
+                    "Failed to add recipient to device book: {e}"
+                )));
             }
         }
 
@@ -869,13 +922,18 @@ impl AppRouterImpl {
         let to_device_id_bytes =
             match crate::util::text_id::decode_base32_crockford(&to_device_id_str) {
                 Some(bytes) => bytes,
-                None => return err(format!("Invalid base32 device ID: {}", to_device_id_str)),
+                None => {
+                    return OnlineSent::NotDebited(err(format!(
+                        "Invalid base32 device ID: {}",
+                        to_device_id_str
+                    )))
+                }
             };
         if to_device_id_bytes.len() != 32 {
-            return err(format!(
+            return OnlineSent::NotDebited(err(format!(
                 "Device ID must decode to 32 bytes, got {}",
                 to_device_id_bytes.len()
-            ));
+            )));
         }
 
         if self
@@ -899,27 +957,27 @@ impl AppRouterImpl {
                 match crate::util::text_id::decode_base32_crockford(&initial_state_hash) {
                     Some(bytes) => bytes,
                     None => {
-                        return err(format!(
+                        return OnlineSent::NotDebited(err(format!(
                             "Invalid base32 initial state hash: {}",
                             initial_state_hash
-                        ))
+                        )))
                     }
                 }
             };
             if !initial_state_hash_bytes.is_empty() && initial_state_hash_bytes.len() != 32 {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "Initial state hash must decode to 32 bytes or be empty, got {}",
                     initial_state_hash_bytes.len()
-                ));
+                )));
             }
 
             if let Err(e) = self
                 .wallet
                 .initialize_bilateral_chain(&to_device_id_str, &initial_state_hash_bytes)
             {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "Failed to initialize bilateral chain for recipient: {e}"
-                ));
+                )));
             }
         }
 
@@ -948,13 +1006,15 @@ impl AppRouterImpl {
             .await
         {
             Ok(tx) => tx,
-            Err(e) => return err(format!("create_transaction failed: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!("create_transaction failed: {e}")))
+            }
         };
 
         // Sign the WalletTransaction (local wallet-level signature for record keeping)
         let signed_tx = match self.wallet.sign_transaction(&unsigned_tx) {
             Ok(tx) => tx,
-            Err(e) => return err(format!("sign_transaction failed: {e}")),
+            Err(e) => return OnlineSent::NotDebited(err(format!("sign_transaction failed: {e}"))),
         };
 
         // Build the final signed Operation from the SAME signing_op that was used for
@@ -969,9 +1029,9 @@ impl AppRouterImpl {
         // also performs cold-start archive restore and projects the balance
         // cache; only its return value was rollback bookkeeping.
         if let Err(e) = self.ensure_authoritative_wallet_state("wallet.send") {
-            return err(format!(
+            return OnlineSent::NotDebited(err(format!(
                 "wallet.send: failed to prepare authoritative state before send: {e}"
-            ));
+            )));
         }
 
         // One step at a time on the relationship, whichever process: the online
@@ -992,10 +1052,10 @@ impl AppRouterImpl {
         ) {
             Some(guard) => guard,
             None => {
-                return err(
+                return OnlineSent::NotDebited(err(
                     "wallet.send: relationship already has a pending online transition; retry after sync"
                         .to_string(),
-                )
+                ))
             }
         };
 
@@ -1013,10 +1073,10 @@ impl AppRouterImpl {
                 &to_device_id,
             );
         if !send_status.send_ready {
-            return err(format!(
+            return OnlineSent::NotDebited(err(format!(
                 "wallet.send: relationship is not send-ready: {}",
                 crate::handlers::relationship_status::status_message(&send_status)
-            ));
+            )));
         }
         drop(door);
 
@@ -1032,15 +1092,15 @@ impl AppRouterImpl {
                         .err()
                         .map(|e| format!("; marking the contact for reconciliation failed: {e}"))
                         .unwrap_or_default();
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "wallet.send: ParentConsumed - relationship tip changed before send; online \
                      reconciliation required{marked}"
-                ));
+                )));
             }
             Err(e) => {
-                return err(format!(
+                return OnlineSent::NotDebited(err(format!(
                     "wallet.send: failed to validate relationship parent tip: {e}"
-                ));
+                )));
             }
         }
 
@@ -1052,7 +1112,9 @@ impl AppRouterImpl {
         // assembled: the debit registers before anything is deliverable.
         let econ_network = match crate::sdk::economic_admission_flow::committed_network_id() {
             Ok(n) => n,
-            Err(e) => return err(format!("wallet.send: committed network: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!("wallet.send: committed network: {e}")))
+            }
         };
         {
             let pending = self
@@ -1067,25 +1129,31 @@ impl AppRouterImpl {
                 )
                 .await
                 {
-                    return err(format!(
+                    return OnlineSent::NotDebited(err(format!(
                         "wallet.send: a pending economic admission could not be finished — \
                          retry once storage is reachable: {e}"
-                    ));
+                    )));
                 }
             }
         }
         let econ_set = match crate::sdk::storage_set::canonical_set(&econ_network) {
             Ok(s) => s,
-            Err(e) => return err(format!("wallet.send: canonical register set: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: canonical register set: {e}"
+                )))
+            }
         };
         let econ_validated =
             match crate::sdk::economic_admission_flow::validated_root_or_activate(&self.core_sdk) {
                 Ok(v) => v,
-                Err(e) => return err(format!("wallet.send: economic root: {e}")),
+                Err(e) => {
+                    return OnlineSent::NotDebited(err(format!("wallet.send: economic root: {e}")))
+                }
             };
         let (econ_genesis, econ_devid) = match self.core_sdk.device_head() {
             Some(h) => (h.genesis_digest(), h.devid()),
-            None => return err("wallet.send: no device head".to_string()),
+            None => return OnlineSent::NotDebited(err("wallet.send: no device head".to_string())),
         };
         // Pre-balances come from R_econ ITSELF, never the head snapshot: the
         // head can hold credits no admission backs yet (a received transfer
@@ -1095,14 +1163,18 @@ impl AppRouterImpl {
             match crate::sdk::economic_admission_flow::producer_tree_and_pre_state(&econ_validated)
             {
                 Ok((t, b)) => (std::cell::RefCell::new(t), b),
-                Err(e) => return err(format!("wallet.send: economic tree: {e}")),
+                Err(e) => {
+                    return OnlineSent::NotDebited(err(format!("wallet.send: economic tree: {e}")))
+                }
             };
         let econ_authority = match crate::sdk::economic_admission_flow::authority_material(
             &econ_network,
             &econ_genesis,
         ) {
             Ok(a) => a,
-            Err(e) => return err(format!("wallet.send: authority evidence: {e}")),
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!("wallet.send: authority evidence: {e}")))
+            }
         };
         let econ_target_position = econ_validated.economic_position() + 1;
         let admission_op = signed_op.clone();
@@ -1788,7 +1860,9 @@ impl AppRouterImpl {
                 // no durable state to unwind and nothing became deliverable.
                 let failure_class = self.classify_local_state_update_failure(&e);
                 log::error!("[wallet.send] staged send FAILED class={failure_class}: {e}");
-                return err(format!("wallet.send: local state update failed: {e}"));
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: local state update failed: {e}"
+                )));
             }
         };
 
@@ -1808,14 +1882,16 @@ impl AppRouterImpl {
         let pending_admission = match accepted_admission {
             Some(p) => p,
             None => {
-                return err(
+                return OnlineSent::Debited(err(
                     "wallet.send: advance committed without an accepted admission".to_string(),
-                )
+                ))
             }
         };
         let econ_parts_final = match admission_parts.into_inner() {
             Some(p) => p,
-            None => return err("wallet.send: admission parts missing".to_string()),
+            None => {
+                return OnlineSent::Debited(err("wallet.send: admission parts missing".to_string()))
+            }
         };
         if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
             &self.core_sdk,
@@ -1830,10 +1906,10 @@ impl AppRouterImpl {
         )
         .await
         {
-            return err(format!(
+            return OnlineSent::Debited(err(format!(
                 "wallet.send: debit committed; economic admission is HELD for resume and \
                  nothing was delivered: {e}"
-            ));
+            )));
         }
 
         let mut b0x_succeeded = false;
@@ -1859,11 +1935,11 @@ impl AppRouterImpl {
             &outbox_record.proposal_nonce,
             crate::storage::client_db::OUTBOX_SUBMITTING,
         ) {
-            return err(format!(
+            return OnlineSent::Debited(err(format!(
                 "wallet.send: debit committed; the outbox row could not be marked \
                  submitting, so nothing was sent and the transfer is retained for the \
                  reconciliation sweep: {e}"
-            ));
+            )));
         }
 
         // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
@@ -1982,11 +2058,11 @@ impl AppRouterImpl {
                 "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
                  outbox; reconciling forward (a timeout is not proof of non-delivery)"
             );
-            return err(
+            return OnlineSent::Debited(err(
                 "wallet.send: delivery outcome unknown — the transfer is retained and will be \
                  retried automatically. Funds are not lost; do not resend."
                     .to_string(),
-            );
+            ));
         }
         if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
             &outbox_record.relationship_key,
@@ -2083,8 +2159,8 @@ impl AppRouterImpl {
             new_balance,
         };
         // NEW: Return as Envelope.onlineTransferResponse (field 40)
-        pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
-            response,
+        OnlineSent::Debited(pack_envelope_ok(
+            generated::envelope::Payload::OnlineTransferResponse(response),
         ))
     }
 }
@@ -2261,38 +2337,52 @@ fn repair_contact_decision(
 #[cfg(test)]
 mod ak_trust_root_tests {
     use super::{decide_counterparty, repair_contact_decision, ContactRepair};
-    use crate::sdk::device_directory::DirectoryRead;
+    use crate::sdk::device_directory::{build_own_entry, DirectoryRead};
+    use crate::sdk::identity_presentation::OwnerIdentityInputs;
     use crate::storage::client_db::ContactRecord;
-    use dsm::core::identity::directory::{DirectoryEntry, DirectoryEntryBody, KYBER_PUBLIC_KEY_LEN};
-    use dsm::core::identity::genesis_v2::derive_devid;
-    use dsm::crypto::sphincs;
+    use dsm::core::identity::directory::{DirectoryEntry, KYBER_PUBLIC_KEY_LEN};
+    use dsm::core::identity::genesis_v2::genesis_authority_policy_hash;
+    use dsm::core::identity::genesis_v3::derive_genesis_v3_self_attested;
 
-    const GENESIS: [u8; 32] = [0x22; 32];
-    const ATT_A: [u8; 32] = [0x33; 32];
-
-    /// A device's own entry, signed by its AK: `(entry, AK public key)`.
+    /// A device's own entry, as the wallet builds it from its seed, P0–P6
+    /// evidence included (DSM Amendment A18): `(entry, AK public key)`.
     fn entry_of(kyber_byte: u8) -> (DirectoryEntry, Vec<u8>) {
-        let (pk, sk) = sphincs::generate_sphincs_keypair().expect("keypair");
-        let body = DirectoryEntryBody {
-            genesis: GENESIS,
-            device_id: derive_devid(&pk, &ATT_A),
-            ak_public_key: pk.clone(),
-            att_a: ATT_A,
-            kyber_public_key: vec![kyber_byte; KYBER_PUBLIC_KEY_LEN],
-            counter: 1,
-        };
-        let entry = DirectoryEntry::sign(body, &sk).expect("sign");
+        let wallet_seed = [kyber_byte; 64];
+        let inputs = OwnerIdentityInputs::beta(b"dsm-testnet");
+        let genesis = derive_genesis_v3_self_attested(
+            &wallet_seed,
+            inputs.network_id,
+            inputs.wallet_index,
+            inputs.device_slot,
+            inputs.genesis_version,
+            &genesis_authority_policy_hash(),
+        )
+        .expect("genesis");
+        let entry = build_own_entry(
+            &wallet_seed,
+            inputs,
+            &genesis.g,
+            vec![kyber_byte; KYBER_PUBLIC_KEY_LEN],
+            1,
+        )
+        .expect("own entry");
         entry.verify().expect("the entry proves itself");
-        (entry, pk)
+        (entry, genesis.ak_public.clone())
     }
 
-    /// Minimal contact row pinned to `ak` (the pairing-established AK).
-    fn pinned_contact(device_id: [u8; 32], ak: &[u8], kyber_public_key: Vec<u8>) -> ContactRecord {
+    /// Minimal contact row of `genesis` pinned to `ak` (the
+    /// pairing-established AK).
+    fn pinned_contact(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        ak: &[u8],
+        kyber_public_key: Vec<u8>,
+    ) -> ContactRecord {
         ContactRecord {
             contact_id: "peer".to_string(),
             device_id: device_id.to_vec(),
             alias: "peer".to_string(),
-            genesis_hash: GENESIS.to_vec(),
+            genesis_hash: genesis.to_vec(),
             public_key: ak.to_vec(),
             kyber_public_key,
             current_chain_tip: Some(vec![0x70; 32]),
@@ -2312,7 +2402,12 @@ mod ak_trust_root_tests {
     fn an_entry_for_another_ak_than_the_pinned_one_is_refused() {
         let (entry, ..) = entry_of(0x9A);
         let (.., pinned_ak) = entry_of(0x9B);
-        let contact = pinned_contact(entry.body.device_id, &pinned_ak, Vec::new());
+        let contact = pinned_contact(
+            entry.body.genesis,
+            entry.body.device_id,
+            &pinned_ak,
+            Vec::new(),
+        );
         assert!(repair_contact_decision(contact, &entry).is_err());
     }
 
@@ -2320,7 +2415,7 @@ mod ak_trust_root_tests {
     #[test]
     fn an_entry_naming_another_identity_is_refused() {
         let (entry, pk) = entry_of(0x9A);
-        let contact = pinned_contact([0x44; 32], &pk, Vec::new());
+        let contact = pinned_contact(entry.body.genesis, [0x44; 32], &pk, Vec::new());
         assert!(repair_contact_decision(contact, &entry).is_err());
     }
 
@@ -2329,7 +2424,7 @@ mod ak_trust_root_tests {
     #[test]
     fn the_pinned_devices_entry_refreshes_its_kyber_key_and_keeps_the_ak() {
         let (entry, pk) = entry_of(0x9A);
-        let contact = pinned_contact(entry.body.device_id, &pk, Vec::new());
+        let contact = pinned_contact(entry.body.genesis, entry.body.device_id, &pk, Vec::new());
         match repair_contact_decision(contact, &entry) {
             Ok(ContactRepair::Repaired(record)) => {
                 assert_eq!(record.kyber_public_key, entry.body.kyber_public_key);
@@ -2340,6 +2435,7 @@ mod ak_trust_root_tests {
             Err(e) => panic!("expected Repaired, got {e}"),
         }
         let current = pinned_contact(
+            entry.body.genesis,
             entry.body.device_id,
             &pk,
             entry.body.kyber_public_key.clone(),
@@ -2532,10 +2628,8 @@ impl AppRouter for AppRouterImpl {
 
         match q.path.as_str() {
             // State/sys routes
-            // System routes: the canonical mnemonic-rooted genesis
-            "system.generateMnemonic" | "system.createGenesisV2" => {
-                self.handle_system_query(q).await
-            }
+            // System routes: the mnemonic the canonical genesis is rooted in
+            "system.generateMnemonic" => self.handle_system_query(q).await,
             // Identity routes
             "identity.transport_headers_v3" | "identity.contact_code" => {
                 self.handle_identity_query(q).await
@@ -2557,13 +2651,13 @@ impl AppRouter for AppRouterImpl {
             | "connect.app.sessions"
             | "connect.app.offerOf" => self.handle_connect_query(q).await,
             // Prefs routes
-            "prefs.get" | "prefs.set" => self.handle_prefs_query(q).await,
+            "prefs.get" => self.handle_prefs_query(q).await,
             // Inbox routes
             "inbox.pull" => self.handle_inbox_query(q).await,
             // Bilateral routes
             "bilateral.pending_list" => self.handle_bilateral_query(q).await,
             // Storage routes
-            "storage.status" | "storage.sync" => self.handle_storage_query(q).await,
+            "storage.status" => self.handle_storage_query(q).await,
             // Objects an account published under a topic of its own.
             "authored.read" => self.handle_authored_query(q).await,
             // Diagnostics routes
@@ -2572,7 +2666,6 @@ impl AppRouter for AppRouterImpl {
             | "token.check"
             | "tokens.listCachedPolicies"
             | "tokens.getFeeSchedule"
-            | "tokens.addByAnchor"
             | "token.adoptionQr" => self.handle_token_query(q).await,
             // Debug routes
             // Session routes
@@ -2595,6 +2688,8 @@ impl AppRouter for AppRouterImpl {
         self.ensure_bitcoin_tap_restored().await;
 
         match i.method.as_str() {
+            // The canonical mnemonic-rooted genesis: creates this device's identity.
+            "system.createGenesisV2" => self.handle_system_invoke(i).await,
             // Wallet invoke routes
             "wallet.sendSmart" | "wallet.sendOffline" => self.handle_wallet_invoke(i).await,
             // Offline-cash load/unload (two-regime money model)
@@ -2618,9 +2713,15 @@ impl AppRouter for AppRouterImpl {
             | "connect.app.respond"
             | "connect.app.status" => self.handle_connect_invoke(i).await,
             // Token
-            "token.create" | "token.forget" | "token.burn" | "tokens.publishPolicy" => {
-                self.handle_token_invoke(i).await
-            }
+            "token.create"
+            | "token.forget"
+            | "token.burn"
+            | "tokens.publishPolicy"
+            | "tokens.addByAnchor" => self.handle_token_invoke(i).await,
+            // Preferences
+            "prefs.set" => self.handle_prefs_invoke(i).await,
+            // Pull the inbox, apply it and push what is owed.
+            "storage.sync" => self.handle_storage_invoke(i).await,
             // SoFi (SoFi §27): the only way the app reaches SoFi.
             "sofi.createVault" | "sofi.findRoute" | "sofi.trade" | "sofi.route" | "sofi.close"
             | "sofi.relay" | "sofi.resolve" | "sofi.vaults" => self.handle_sofi_invoke(i).await,

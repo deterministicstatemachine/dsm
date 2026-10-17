@@ -414,6 +414,8 @@ mod tests {
             &ka.secret_key,
         )
         .expect("s");
+        let tombstone_proposal_digest =
+            <[u8; 32]>::try_from(tombstone.tombstone_hash.as_slice()).expect("a 32-byte hash");
 
         let old_rel_key = compute_smt_key(&A_OLD, &c);
         let new_rel_key = compute_smt_key(&A_NEW, &c);
@@ -500,9 +502,10 @@ mod tests {
             tombstone,
             succession,
             recovery_intent_digest: [0x11; 32],
-            tombstone_proposal_digest: [0x12; 32],
+            tombstone_proposal_digest,
             final_per_device_smt_root: [0x13; 32],
-            final_receipt_roll: [0x14; 32],
+            // The roll the tombstone signs, as the recovery flow binds it.
+            final_receipt_roll: [0x02; 32],
         };
         (inputs, ka.public_key.clone())
     }
@@ -584,5 +587,37 @@ mod tests {
         let out = assemble_recovery_activation(&inputs, &ka_pub).expect("assembles with union");
         assert_eq!(out.gate_set, BTreeSet::from([c1, c2]));
         assert_eq!(out.evidence.len(), 2);
+    }
+
+    /// Audit SA-47: the seal's tombstone digest and final receipt roll are the
+    /// hash and the roll (`Roll⋆`) of the tombstone the evidence carries,
+    /// which the evidence authenticates under the recovery authority. A seal
+    /// naming any other is refused.
+    #[test]
+    fn a_seal_naming_another_tombstone_or_roll_is_refused() {
+        let c = [0xC1; 32];
+        let (inputs, ka_pub) = fixture_one(c, 0x55);
+        let out = assemble_recovery_activation(&inputs, &ka_pub).expect("assembles");
+        let refusal = |seal: &RecoveryActivationSeal| {
+            validate_recovery_activation(seal, &out.gate_set, &out.evidence, &ka_pub)
+                .expect_err("the seal is refused")
+                .to_string()
+        };
+
+        let mut other_roll = out.seal.clone();
+        other_roll.final_receipt_roll[0] ^= 0x01;
+        let why = refusal(&other_roll);
+        assert!(
+            why.contains("final_receipt_roll is not the roll the tombstone signs"),
+            "{why}"
+        );
+
+        let mut other_tombstone = out.seal.clone();
+        other_tombstone.tombstone_proposal_digest[0] ^= 0x01;
+        let why = refusal(&other_tombstone);
+        assert!(
+            why.contains("names another tombstone than the evidence carries"),
+            "{why}"
+        );
     }
 }

@@ -251,18 +251,32 @@ fn step(
 }
 
 /// `sender`'s first step toward `receiver`: an online transfer of `amount`
-/// ERA, drawn from the sender's first faucet payout at the Core layer.
+/// ERA, drawn from the sender's first faucet payout at the Core layer. The
+/// claim is advanced as the wallet advances it, carrying its own `Prepared`
+/// admission; the head that results carries none, as once the admission
+/// completed.
 pub fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> Step {
+    use dsm::economic::admission::{
+        dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
+    };
     let me = sender.device_id();
+    let claim = Operation::FaucetClaim {
+        reserve_id: dsm::economic::native_reserve::era_reserve_id(BETA_NETWORK_ID),
+        generation: 1,
+    };
+    let prepared = PendingEconomicAdmission::prepared(
+        PendingAdmissionKind::DsmBacked,
+        1,
+        dsm::economic::tree::empty_economic_root(),
+        dsm_operation_digest(&claim.to_bytes()),
+    );
     let head = sender
         .head()
+        .with_pending_economic_admission(Some(prepared))
         .advance(
             compute_smt_key(&me, &me),
             me,
-            Operation::FaucetClaim {
-                reserve_id: dsm::economic::native_reserve::era_reserve_id(BETA_NETWORK_ID),
-                generation: 1,
-            },
+            claim,
             &[BalanceDelta {
                 policy_commit: era_policy_commit(),
                 direction: BalanceDirection::Credit,
@@ -273,6 +287,7 @@ pub fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> Step {
         )
         .expect("the faucet payout")
         .new_device_state
+        .with_pending_economic_admission(None)
         .establish_relationship(receiver.device_id())
         .expect("the relationship is established");
     let h_n = head

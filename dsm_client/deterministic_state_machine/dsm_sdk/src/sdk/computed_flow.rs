@@ -60,10 +60,6 @@ use crate::storage::client_db::duel_matches::{self as store, Advance, DuelEntryR
 
 type D32 = [u8; 32];
 
-/// `DSM/escrow/session-key/v1`: the HKDF salt of a match session key.
-const TAG_SESSION_KEY: dsm::crypto::domain::TaggedHashDomain<'static> =
-    dsm::tagged_domain!(b"DSM/escrow/session-key/v1");
-
 fn side_byte(side: MatchSide) -> u8 {
     side.byte()
 }
@@ -80,26 +76,38 @@ fn short(id: &D32) -> String {
 // ── the session key ─────────────────────────────────────────────────────────
 
 /// This wallet's session key for the match whose setup carries
-/// `match_nonce`: `HKDF(salt = DSM/escrow/session-key/v1 ‖ 0x00, ikm = wallet
-/// seed, info = genesis ‖ match_nonce)`, expanded into a SPHINCS+ key pair.
-/// Derived from the seed the wallet holds while unlocked, so it fails closed
-/// when the wallet is locked, and it never leaves the wallet: only its public
-/// half is ever returned.
+/// `match_nonce` (SoFi §19.10, Amendment S27): the seed is an Expand under the
+/// key schedule's wallet root, `Expand(PRK_w, DSM/escrow/session-key/v2 ‖
+/// 0x00 ‖ genesis ‖ match_nonce)`, and the key pair is the SPHINCS+ key pair
+/// generated from it. Derived from the seed the wallet holds while unlocked,
+/// so it fails closed when the wallet is locked, and it never leaves the
+/// wallet: only its public half is ever returned. The copy of the wallet seed
+/// and the derived seed are wiped once the key pair is made; the wallet-root
+/// key wipes itself.
 pub(crate) fn session_keypair(match_nonce: &D32) -> Result<SignatureKeyPair, DsmError> {
+    use dsm::core::identity::key_schedule::{escrow_session_seed, wallet_prk};
+    use zeroize::Zeroizing;
     let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
         .ok_or_else(|| DsmError::InvalidState("no genesis for a session key".into()))?;
-    let wallet_seed =
+    let genesis: D32 = genesis.as_slice().try_into().map_err(|e| {
+        DsmError::InvalidState(format!(
+            "the stored genesis is {} bytes, not 32: {e}",
+            genesis.len()
+        ))
+    })?;
+    let wallet_seed = Zeroizing::new(
         crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().ok_or_else(|| {
             DsmError::InvalidState(
                 "wallet seed unavailable for a session key (wallet locked)".into(),
             )
-        })?;
-    let mut salt = TAG_SESSION_KEY.source_bytes().to_vec();
-    salt.push(0);
-    let mut info = genesis;
-    info.extend(match_nonce);
-    let seed = dsm::crypto::hkdf::extract_and_expand(&salt, &wallet_seed, &info, 32);
-    SignatureKeyPair::generate_from_entropy(&seed)
+        })?,
+    );
+    let seed = Zeroizing::new(escrow_session_seed(
+        &wallet_prk(&wallet_seed),
+        &genesis,
+        match_nonce,
+    ));
+    SignatureKeyPair::generate_from_entropy(seed.as_slice())
 }
 
 /// This wallet's session public key for the match nonce: what the setup
@@ -1230,4 +1238,42 @@ pub async fn release(
         outcome
     };
     crate::sdk::escrow_flow::exercise_release(core, set, vault_id, outcome).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::two_device::TestDevice;
+    use dsm::core::identity::key_schedule::{escrow_session_seed, wallet_prk};
+    use serial_test::serial;
+
+    /// SoFi Amendment S27: a wallet's session key for a match is the SPHINCS+
+    /// key pair generated from the KS1 Expand under its wallet root, from its
+    /// own genesis and the match's nonce. Another nonce is another key.
+    ///
+    /// MUTATION CONTROL: derive the seed with the tag as the Extract salt
+    /// again and this goes red.
+    #[test]
+    #[serial]
+    fn a_session_key_is_the_wallet_roots_expand_for_the_match() {
+        let device = TestDevice::create("session-key", 0x5E);
+        device.enter();
+        let nonce = [0x4e; 32];
+        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+            .expect("the unlocked wallet seed");
+        let expected = SignatureKeyPair::generate_from_entropy(&escrow_session_seed(
+            &wallet_prk(&wallet_seed),
+            &device.genesis,
+            &nonce,
+        ))
+        .expect("the session key pair");
+        assert_eq!(
+            session_public_key(&nonce).expect("a session key"),
+            expected.public_key()
+        );
+        assert_ne!(
+            session_public_key(&[0x4f; 32]).expect("another match's key"),
+            expected.public_key()
+        );
+    }
 }

@@ -333,33 +333,48 @@ impl State {
     /// adjacency via `prev_state_hash` (§2.1 eq. 1). Per-transition entropy
     /// (§11 eq. 14) makes state identity unique even when field values
     /// round-trip.
+    ///
+    /// The preimage is framed: every variable-length field carries its length
+    /// (`u64` LE), the optional ciphertext a presence byte and the balances
+    /// their count, so no two different states hash the same byte stream
+    /// (moving bytes between the entropy and the ciphertext, or between a
+    /// ticker and its balance, changes the stream).
     pub fn compute_hash(&self) -> Result<[u8; 32], DsmError> {
+        fn framed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+            hasher.update(&(bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
         let mut hasher = dsm_domain_hasher(TAG_STATE_HASH);
 
         // Core state properties in deterministic order. No counter.
         hasher.update(&self.prev_state_hash);
-        hasher.update(&self.entropy);
+        framed(&mut hasher, &self.entropy);
 
         // Optional fields
-        if let Some(enc) = &self.encapsulated_entropy {
-            hasher.update(enc);
+        match &self.encapsulated_entropy {
+            Some(enc) => {
+                hasher.update(&[1u8]);
+                framed(&mut hasher, enc);
+            }
+            None => {
+                hasher.update(&[0u8]);
+            }
         }
 
         // Deterministic serialization of operation (canonical bytes)
-        let op_bytes = self.operation.to_bytes();
-        hasher.update(&op_bytes);
+        framed(&mut hasher, &self.operation.to_bytes());
 
         // Include device info
         hasher.update(&self.device_info.device_id);
-        hasher.update(&self.device_info.public_key);
+        framed(&mut hasher, &self.device_info.public_key);
 
         // Token balances must be sorted for deterministic ordering
         let mut sorted_balances: Vec<(&String, &Balance)> = self.token_balances.iter().collect();
         sorted_balances.sort_by_key(|(k, _)| *k);
+        hasher.update(&(sorted_balances.len() as u64).to_le_bytes());
         for (token_id, balance) in sorted_balances {
-            hasher.update(token_id.as_bytes());
-            let balance_bytes = balance.to_le_bytes();
-            hasher.update(&balance_bytes);
+            framed(&mut hasher, token_id.as_bytes());
+            framed(&mut hasher, &balance.to_le_bytes());
         }
 
         Ok(*hasher.finalize().as_bytes())
@@ -755,6 +770,26 @@ mod tests {
     }
 
     // ── State hash varies with different inputs ─────────────────────
+
+    /// The preimage is framed. Unframed, moving the last entropy byte into an
+    /// otherwise empty ciphertext left the hashed byte stream unchanged, so
+    /// two different states had one hash.
+    #[test]
+    fn a_byte_moved_between_entropy_and_ciphertext_changes_the_state_hash() {
+        let mut a = State::new(StateParams::new(
+            vec![0x01, 0x02],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        a.encapsulated_entropy = None;
+        let mut b = State::new(StateParams::new(
+            vec![0x01],
+            Operation::Noop,
+            test_device_info(),
+        ));
+        b.encapsulated_entropy = Some(vec![0x02]);
+        assert_ne!(a.compute_hash().unwrap(), b.compute_hash().unwrap());
+    }
 
     #[test]
     fn state_hash_varies_with_entropy() {

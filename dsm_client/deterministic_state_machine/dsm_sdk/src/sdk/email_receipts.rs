@@ -27,6 +27,18 @@ const MAX_MEMO: usize = 256;
 const MAX_REFERENCE: usize = 64;
 const MAX_TIME_TEXT: usize = 64;
 
+/// The proto's `dsm_max_len` for where the service says the receipt went
+/// (`ReceiptEmailResultV1.sent_to_masked`).
+const MAX_SENT_TO_MASKED: usize = 256;
+
+/// The most the service's result holds.
+fn result_limit() -> usize {
+    pb::ReceiptEmailResultV1 {
+        sent_to_masked: "x".repeat(MAX_SENT_TO_MASKED),
+    }
+    .encoded_len()
+}
+
 /// The 32 bytes the sender's signature signs: the request with its signature
 /// field empty, under the receipt-email domain.
 pub fn signing_digest(request: &pb::ReceiptEmailRequestV1) -> [u8; 32] {
@@ -126,8 +138,12 @@ pub async fn post(
     if !url.starts_with("https://") {
         return Err(format!("the receipt service is not an https:// URL: {url}"));
     }
+    // A redirect is not followed: the service is the https:// URL the network
+    // names, and a redirect could carry the signed request elsewhere, over
+    // plain HTTP.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("HTTP client init: {e}"))?;
     let response = client
@@ -138,17 +154,17 @@ pub async fn post(
         .await
         .map_err(|e| format!("the receipt service did not answer: {e}"))?;
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| format!("the receipt service's answer was not read: {e}"))?;
+    // A refusal is its status; its body is not read.
     if !status.is_success() {
-        return Err(format!(
-            "the receipt service refused it ({status}): {}",
-            String::from_utf8_lossy(&body)
-        ));
+        return Err(format!("the receipt service refused it ({status})"));
     }
-    pb::ReceiptEmailResultV1::decode(body.as_ref())
+    let body = crate::sdk::bounded_read::read(
+        response,
+        crate::sdk::bounded_read::Bound::Limit(result_limit()),
+    )
+    .await
+    .map_err(|e| format!("the receipt service's answer was not read: {e}"))?;
+    pb::ReceiptEmailResultV1::decode(body.as_slice())
         .map_err(|e| format!("the receipt service answered no result: {e}"))
 }
 

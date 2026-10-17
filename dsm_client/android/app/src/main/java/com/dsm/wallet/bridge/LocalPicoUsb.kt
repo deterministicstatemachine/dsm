@@ -24,7 +24,8 @@ import android.util.Log
  *     return JUST the body (Rust decodes it). Any failure -> empty ByteArray -> Rust fails closed to
  *     online recovery. No key material passes through here.
  *
- * Bench tuning points (validate on the phone): the Pico VID/PID match, the CDC-data interface +
+ * Only the DSM Anchor itself is opened: the device whose descriptor carries the anchor firmware's
+ * vendor and product id. Bench tuning points (validate on the phone): the CDC-data interface +
  * bulk-endpoint discovery, USB permission (grant via requestPermission or the attach intent-filter),
  * and the read timeout. Mirrors the desktop bench `examples/shared/usb.rs::transceive`, in Kotlin.
  */
@@ -32,10 +33,12 @@ object LocalPicoUsb {
     private const val TAG = "LocalPicoUsb"
     private const val USB_PERMISSION_ACTION = "com.dsm.wallet.USB_PERMISSION"
 
-    // The DSM Anchor firmware sets its own CDC-ACM USB descriptor: vendor id 0x1209 (pid.codes
-    // community VID), product id 0xD5A1, product string "DSM Anchor" — NOT the bare RP2350 VID
-    // 0x2E8A. Matched first by VID; the CDC-data interface scan below is the fallback.
-    private const val DSM_ANCHOR_VENDOR_ID = 0x1209
+    // The DSM Anchor firmware sets its own CDC-ACM USB descriptor (crates/dsm-anchor-pico
+    // `UsbVidPid(0x1209, 0xd5a1)`): vendor id 0x1209 (pid.codes community VID), product id 0xD5A1,
+    // product string "DSM Anchor" — NOT the bare RP2350 VID 0x2E8A. Both ids must match: any other
+    // CDC device on the OTG port (a serial adapter, another board) is never opened.
+    internal const val DSM_ANCHOR_VENDOR_ID = 0x1209
+    internal const val DSM_ANCHOR_PRODUCT_ID = 0xD5A1
     private const val WRITE_TIMEOUT_MS = 2000
     private const val READ_TIMEOUT_MS = 500
     private const val CONTROL_TIMEOUT_MS = 1000
@@ -159,9 +162,8 @@ object LocalPicoUsb {
         val ctx = appContext ?: error("LocalPicoUsb.init(context) not called")
         val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
 
-        val device = usb.deviceList.values.firstOrNull { it.vendorId == DSM_ANCHOR_VENDOR_ID }
-            ?: usb.deviceList.values.firstOrNull { hasCdcDataInterface(it) }
-            ?: error("no Pico USB device found")
+        val device = usb.deviceList.values.firstOrNull { isDsmAnchor(it.vendorId, it.productId) }
+            ?: error("no DSM Anchor on USB (vendor 0x1209, product 0xD5A1)")
         Log.i(TAG, "USB device detected: vid=${device.vendorId} pid=${device.productId} ${device.productName}")
 
         if (!usb.hasPermission(device)) {
@@ -254,12 +256,9 @@ object LocalPicoUsb {
         Log.i(TAG, "drained $discarded boot/banner bytes before first transaction ($polls polls)")
     }
 
-    private fun hasCdcDataInterface(device: UsbDevice): Boolean {
-        for (i in 0 until device.interfaceCount) {
-            if (device.getInterface(i).interfaceClass == UsbConstants.USB_CLASS_CDC_DATA) return true
-        }
-        return false
-    }
+    /** The DSM Anchor's descriptor: its vendor id and its product id, both. */
+    internal fun isDsmAnchor(vendorId: Int, productId: Int): Boolean =
+        vendorId == DSM_ANCHOR_VENDOR_ID && productId == DSM_ANCHOR_PRODUCT_ID
 
     /** The CDC-data interface (class 0x0A) with a bulk IN + bulk OUT endpoint. */
     private fun findBulkEndpoints(device: UsbDevice): Triple<UsbInterface, UsbEndpoint, UsbEndpoint>? {

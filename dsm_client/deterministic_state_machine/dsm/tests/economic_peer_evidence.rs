@@ -145,16 +145,30 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
     use dsm::core::bilateral_transaction_manager::compute_smt_key;
     use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
 
+    use dsm::economic::admission::{
+        dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
+    };
+
+    // The claim is advanced as the wallet advances it, carrying its own
+    // prepared admission; the head after it carries none.
+    let claim = Operation::FaucetClaim {
+        reserve_id: dsm::economic::native_reserve::era_reserve_id(
+            dsm::economic::register::BETA_NETWORK_ID,
+        ),
+        generation: 1,
+    };
+    let prepared = PendingEconomicAdmission::prepared(
+        PendingAdmissionKind::DsmBacked,
+        1,
+        dsm::economic::tree::empty_economic_root(),
+        dsm_operation_digest(&claim.to_bytes()),
+    );
     let funded = DeviceState::new(G_SENDER, DEV_SENDER, ak_pk.to_vec())
+        .with_pending_economic_admission(Some(prepared))
         .advance(
             compute_smt_key(&DEV_SENDER, &DEV_SENDER),
             DEV_SENDER,
-            Operation::FaucetClaim {
-                reserve_id: dsm::economic::native_reserve::era_reserve_id(
-                    dsm::economic::register::BETA_NETWORK_ID,
-                ),
-                generation: 1,
-            },
+            claim,
             &[BalanceDelta {
                 policy_commit: era(),
                 direction: BalanceDirection::Credit,
@@ -165,6 +179,7 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
         )
         .unwrap()
         .new_device_state
+        .with_pending_economic_admission(None)
         .establish_relationship(DEV_RECIP)
         .unwrap();
     let outcome = funded

@@ -173,6 +173,9 @@ axum-server = { version = "0.8", features = ["tls-rustls"] } # serves it over TL
 # through the REAL origins (faucet admission, authorized issuance, admitted
 # transfer), never by writing it onto a head.
 dsm_sdk = { path = ".", features = ["test-utils"] }
+# Parses the JNI sources for the structural test that every export runs its
+# work inside the unwind guard (the exports compile only for Android).
+syn = { version = "2", features = ["full"] }
 # The software TROPIC01's resident key in the host test appliance
 # (`test_support::appliance`): the chip signs sigma^chip with Ed25519, which the
 # receiver verifies through `dsm::crypto::classical_verify`. Tests only.

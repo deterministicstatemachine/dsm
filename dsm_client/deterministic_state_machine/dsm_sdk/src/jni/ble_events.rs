@@ -13,8 +13,9 @@ use jni::JNIEnv;
 use pb::{BleDeviceInfo, BleEvent};
 use prost::Message;
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use crate::bluetooth::awaited_contacts::{
+    AwaitSlot, AwaitedContacts, CONTACT_AWAIT_LIMIT, CONTACT_AWAIT_POLL, MAX_AWAITED_CONTACTS,
+};
 use once_cell::sync::Lazy;
 
 /// Convert raw JNIEnv pointer to safe wrapper.
@@ -421,9 +422,16 @@ struct PendingIdentity {
     buffered_at: std::time::Instant,
 }
 
-/// Pending identities awaiting contact insertion. Keyed by device_id.
-static PENDING_IDENTITIES: Lazy<Mutex<HashMap<[u8; 32], PendingIdentity>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+/// Identities written to the PAIRING characteristic awaiting their contact's
+/// insertion, keyed by device_id: bounded, one wait (and one polling task)
+/// per device id.
+static PENDING_IDENTITIES: Lazy<AwaitedContacts<PendingIdentity>> =
+    Lazy::new(|| AwaitedContacts::new(MAX_AWAITED_CONTACTS));
+
+/// GATT identity reads waiting, on the caller's thread, for their contact's
+/// insertion: bounded, so a peer cannot hold more than this many callers.
+static GATT_IDENTITY_WAITS: Lazy<AwaitedContacts<()>> =
+    Lazy::new(|| AwaitedContacts::new(MAX_AWAITED_CONTACTS));
 
 /// Process a BLE identity envelope received on the PAIRING characteristic.
 ///
@@ -663,16 +671,13 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processBleIde
                 "processBleIdentityEnvelope: contact not in SQLite for {:02x}{:02x}... — buffering for async retry",
                 device_id[0], device_id[1]
             );
-                    match PENDING_IDENTITIES.lock() {
-                        Ok(mut map) => {
-                            map.insert(device_id, pending);
-                        }
-                        Err(e) => {
-                            log::error!("processBleIdentityEnvelope: PENDING_IDENTITIES mutex poisoned: {e}");
-                            return empty(&mut env);
-                        }
+                    match PENDING_IDENTITIES.begin(device_id, pending) {
+                        Ok(slot) => spawn_pending_identity_retry(slot),
+                        Err(refused) => log::error!(
+                            "processBleIdentityEnvelope: identity for {:02x}{:02x}... not buffered: {refused}",
+                            device_id[0], device_id[1]
+                        ),
                     }
-                    spawn_pending_identity_retry(device_id);
                 }
                 Err(e) => {
                     log::error!(
@@ -781,43 +786,31 @@ pub(crate) fn build_ble_event_envelope(ble_event: BleEvent) -> Result<Vec<u8>, S
     Ok(buf)
 }
 
-/// Spawn an async tokio task that polls SQLite every 500ms for up to 15s,
-/// waiting for the contact to appear. When found, runs the full identity
-/// processing pipeline and delivers the ACK via JNI callback.
-fn spawn_pending_identity_retry(device_id: [u8; 32]) {
+/// Spawn an async tokio task that polls SQLite every `CONTACT_AWAIT_POLL` for
+/// up to `CONTACT_AWAIT_LIMIT`, waiting for the contact to appear. When found,
+/// runs the full identity processing pipeline and delivers the ACK via JNI
+/// callback. The wait's slot ends with the task, however it ends.
+fn spawn_pending_identity_retry(slot: AwaitSlot<PendingIdentity>) {
     let rt = crate::runtime::get_runtime();
     rt.spawn(async move {
-        let max_wait = std::time::Duration::from_secs(15);
-        let poll_interval = std::time::Duration::from_millis(500);
+        let device_id = slot.device_id();
         let start = std::time::Instant::now();
 
         loop {
-            tokio::time::sleep(poll_interval).await;
+            tokio::time::sleep(CONTACT_AWAIT_POLL).await;
 
-            if start.elapsed() > max_wait {
+            if start.elapsed() > CONTACT_AWAIT_LIMIT {
                 log::error!(
                     "spawn_pending_identity_retry: timeout ({:.1}s) waiting for contact {:02x}{:02x}...",
-                    max_wait.as_secs_f64(),
+                    CONTACT_AWAIT_LIMIT.as_secs_f64(),
                     device_id[0], device_id[1]
                 );
-                if let Ok(mut map) = PENDING_IDENTITIES.lock() {
-                    map.remove(&device_id);
-                } else {
-                    log::error!("spawn_pending_identity_retry: PENDING_IDENTITIES mutex poisoned during timeout cleanup");
-                }
                 return;
             }
 
             match crate::storage::client_db::get_contact_by_device_id(&device_id) {
                 Ok(Some(contact)) => {
-                    let pending = match PENDING_IDENTITIES.lock() {
-                        Ok(mut map) => map.remove(&device_id),
-                        Err(e) => {
-                            log::error!("spawn_pending_identity_retry: PENDING_IDENTITIES mutex poisoned: {e}");
-                            return;
-                        }
-                    };
-                    if let Some(p) = pending {
+                    if let Some(p) = slot.take() {
                         log::info!(
                             "spawn_pending_identity_retry: contact found for {:02x}{:02x}... after {:.1}s",
                             device_id[0], device_id[1], p.buffered_at.elapsed().as_secs_f64()
@@ -832,11 +825,6 @@ fn spawn_pending_identity_retry(device_id: [u8; 32]) {
                         "spawn_pending_identity_retry: SQLite error for {:02x}{:02x}...: {}",
                         device_id[0], device_id[1], e
                     );
-                    if let Ok(mut map) = PENDING_IDENTITIES.lock() {
-                        map.remove(&device_id);
-                    } else {
-                        log::error!("spawn_pending_identity_retry: PENDING_IDENTITIES mutex poisoned during error cleanup");
-                    }
                     return;
                 }
             }
@@ -1105,21 +1093,34 @@ fn observe_gatt_identity_inner(
             );
         }
         Ok(false) => {
+            // This blocks the caller's thread while the contact is added: at
+            // most MAX_AWAITED_CONTACTS reads wait at once, one per device.
+            let device_id: [u8; 32] = char_value
+                .device_id
+                .as_slice()
+                .try_into()
+                .map_err(|e| format!("device id: {e}"))?;
+            let slot = GATT_IDENTITY_WAITS
+                .begin(device_id, ())
+                .map_err(|refused| {
+                    format!("contact missing in SQLite, not waited for: {refused}")
+                })?;
             let rt = crate::runtime::get_runtime();
-            let device_id_poll = char_value.device_id.clone();
-            let found = rt.block_on(async {
-                for _ in 0..30u32 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    match crate::storage::client_db::has_contact_for_device_id(&device_id_poll) {
-                        Ok(true) => return true,
-                        Ok(false) => continue,
-                        Err(_) => return false,
+            let waited = rt.block_on(async {
+                let start = std::time::Instant::now();
+                while start.elapsed() < CONTACT_AWAIT_LIMIT {
+                    tokio::time::sleep(CONTACT_AWAIT_POLL).await;
+                    if crate::storage::client_db::has_contact_for_device_id(&device_id)? {
+                        return Ok(Some(()));
                     }
                 }
-                false
+                Ok::<_, anyhow::Error>(None)
             });
-            if !found {
-                return Err("contact missing in SQLite".to_string());
+            drop(slot);
+            match waited {
+                Ok(Some(())) => {}
+                Ok(None) => return Err("contact missing in SQLite".to_string()),
+                Err(e) => return Err(format!("SQLite query error while waiting: {e}")),
             }
             log::info!(
                 "GATT identity read: contact appeared in SQLite during retry window for {:02x}{:02x}...",

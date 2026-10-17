@@ -596,8 +596,9 @@ pub async fn get_immutable_object(
 // ===================== b0x inbox spool =====================
 
 /// Append `envelope` to the spool under `device_id` at the next position,
-/// durably, refusing and deduplicating nothing (storage spec §8).
-pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<()> {
+/// durably, refusing and deduplicating nothing (storage spec §8), and return
+/// that position.
+pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Result<i64> {
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
     // Serialize seq_num assignment per spool key to avoid MAX+1 races.
@@ -610,12 +611,13 @@ pub async fn spool_insert(pool: &Pool, device_id: &str, envelope: &[u8]) -> Resu
              VALUES ($1, $2, COALESCE(
                (SELECT MAX(seq_num) + 1 FROM inbox_spool WHERE device_id = $1),
                1
-             ))",
+             ))
+             RETURNING seq_num",
         )
         .await?;
-    tx.execute(&stmt, &[&device_id, &envelope]).await?;
+    let seq_num: i64 = tx.query_one(&stmt, &[&device_id, &envelope]).await?.get(0);
     tx.commit().await?;
-    Ok(())
+    Ok(seq_num)
 }
 
 /// Every envelope in a spool from a sequence number on, in order, limited.
@@ -850,22 +852,51 @@ pub async fn get_cell_values(pool: &Pool, namespace: &[u8], key: &[u8]) -> Resul
         .collect())
 }
 
-/// Everything held for `(namespace, key)`, in arrival order, each with its
-/// `(index, running hash)`.
-pub async fn get_cell_entries(
+/// One entry held at a key: its value, arrival index and running hash.
+pub type CellEntry = (Vec<u8>, u64, [u8; 32]);
+
+/// One page of a cell read (storage spec §6): the entries from the arrival
+/// index read from on, and the arrival index the next page starts at, or 0
+/// when this page reaches the last entry held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CellPage {
+    pub entries: Vec<CellEntry>,
+    pub next: u64,
+}
+
+/// The page of `(namespace, key)` read from arrival index `from`: the entries
+/// from `from` on, in arrival order, for at most
+/// [`dsm::storage_cell::CELL_PAGE_VALUE_BYTES`] of values and
+/// [`dsm::storage_cell::MAX_CELL_PAGE_ENTRIES`] entries, and always the first
+/// of them. Only that many rows are read, so a key holding any number of
+/// entries costs one page of them.
+pub async fn get_cell_page(
     pool: &Pool,
     namespace: &[u8],
     key: &[u8],
-) -> Result<Vec<(Vec<u8>, u64, [u8; 32])>> {
+    from: u64,
+) -> Result<CellPage> {
+    let from = i64::try_from(from)?;
+    let most_bytes = i64::try_from(dsm::storage_cell::CELL_PAGE_VALUE_BYTES)?;
+    let most_entries = i64::try_from(dsm::storage_cell::MAX_CELL_PAGE_ENTRIES)?;
     let client = pool.get().await?;
     let rows = client
         .query(
-            "SELECT value, arrival_index, running_hash FROM cells
-             WHERE namespace = $1 AND cell_key = $2 ORDER BY seq ASC",
-            &[&namespace, &key],
+            "SELECT value, arrival_index, running_hash FROM (
+               SELECT value, arrival_index, running_hash,
+                      SUM(octet_length(value)) OVER (ORDER BY arrival_index) AS through,
+                      ROW_NUMBER() OVER (ORDER BY arrival_index) AS nth
+               FROM (SELECT value, arrival_index, running_hash FROM cells
+                     WHERE namespace = $1 AND cell_key = $2 AND arrival_index >= $3
+                     ORDER BY arrival_index LIMIT $5) first_rows
+             ) page
+             WHERE through <= $4 OR nth = 1
+             ORDER BY arrival_index",
+            &[&namespace, &key, &from, &most_bytes, &most_entries],
         )
         .await?;
-    rows.iter()
+    let entries = rows
+        .iter()
         .map(|r| {
             let i: i64 = r.get(1);
             let h: Vec<u8> = r.get(2);
@@ -875,7 +906,36 @@ pub async fn get_cell_entries(
                 .map_err(|_| anyhow::anyhow!("stored running hash is not 32 bytes"))?;
             Ok((r.get::<_, Vec<u8>>(0), u64::try_from(i)?, h))
         })
-        .collect()
+        .collect::<Result<Vec<CellEntry>>>()?;
+    let Some((_, last, _)) = entries.last() else {
+        return Ok(CellPage { entries, next: 0 });
+    };
+    let more: bool = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM cells
+               WHERE namespace = $1 AND cell_key = $2 AND arrival_index > $3)",
+            &[&namespace, &key, &i64::try_from(*last)?],
+        )
+        .await?
+        .get(0);
+    let next = if more { last + 1 } else { 0 };
+    Ok(CellPage { entries, next })
+}
+
+/// Everything held for `(namespace, key)`, in arrival order, each with its
+/// `(index, running hash)`: every page, read one after another as a reader
+/// reads them.
+pub async fn get_cell_entries(pool: &Pool, namespace: &[u8], key: &[u8]) -> Result<Vec<CellEntry>> {
+    let mut entries = Vec::new();
+    let mut from = 1;
+    loop {
+        let page = get_cell_page(pool, namespace, key, from).await?;
+        entries.extend(page.entries);
+        if page.next == 0 {
+            return Ok(entries);
+        }
+        from = page.next;
+    }
 }
 
 // ── ByteCommits (storage spec §14) ─────────────────────────────────────────
@@ -1096,10 +1156,13 @@ pub async fn get_own_bytecommit(
 /// key)`'s latest entry as of that cycle. `None` if the cycle does not exist
 /// or the cell had no entry committed by then.
 ///
-/// A cycle's leaf set never changes once it closes, so its tree is built
-/// once: a tree `committed` keeps for the cycle's ByteCommit answers, and a
-/// cycle whose tree is not kept (an old one, or any after a restart) is
-/// built from the store and kept.
+/// The cell's own row is read first, so a cell the cycle does not commit is
+/// answered from that one row, and never makes the node read or build
+/// anything over its other cells. A cycle's leaf set never changes once it
+/// closes, so its tree is built once: a tree `committed` keeps for the
+/// cycle's ByteCommit answers, and a cycle whose tree is not kept (an old
+/// one, or any after a restart) is built from the store and kept, one build
+/// at a time ([`CommittedCells`]).
 pub async fn cell_commit_proof(
     pool: &Pool,
     committed: &CommittedCells,
@@ -1107,26 +1170,26 @@ pub async fn cell_commit_proof(
     key: &[u8; 32],
     cycle: u64,
 ) -> Result<Option<dsm::storage_cell::CellCommitProof>> {
-    let mut client = pool.get().await?;
-    let tx = client.build_transaction().read_only(true).start().await?;
     let cycle_i64 = i64::try_from(cycle)?;
-    let Some(digest) = tx
-        .query_opt(
-            "SELECT digest FROM own_bytecommits WHERE cycle_index = $1",
-            &[&cycle_i64],
-        )
-        .await?
-    else {
-        return Ok(None);
-    };
-    let digest: [u8; 32] = digest
-        .get::<_, Vec<u8>>(0)
-        .as_slice()
-        .try_into()
-        .map_err(|e| anyhow!("stored ByteCommit digest is not 32 bytes: {e}"))?;
-    if let Some(tree) = committed.tree_at(cycle, &digest) {
-        // The cell's latest entry as of the cycle: the row the whole read
-        // below finds for it.
+    let (digest, (index, running_hash)) = {
+        let mut client = pool.get().await?;
+        let tx = client.build_transaction().read_only(true).start().await?;
+        let Some(digest) = tx
+            .query_opt(
+                "SELECT digest FROM own_bytecommits WHERE cycle_index = $1",
+                &[&cycle_i64],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let digest: [u8; 32] = digest
+            .get::<_, Vec<u8>>(0)
+            .as_slice()
+            .try_into()
+            .map_err(|e| anyhow!("stored ByteCommit digest is not 32 bytes: {e}"))?;
+        // The cell's latest entry as of the cycle: the leaf the cycle's tree
+        // holds for it.
         let latest = tx
             .query_opt(
                 "SELECT namespace, cell_key, arrival_index, running_hash FROM cells
@@ -1138,42 +1201,36 @@ pub async fn cell_commit_proof(
             .map(|r| row_to_leaf(&r))
             .transpose()?;
         tx.commit().await?;
-        return Ok(latest.and_then(|(_, _, index, running_hash)| {
-            dsm::storage_cell::CellCommitProof::from_tree(
-                &tree,
-                namespace,
-                key,
-                index,
-                running_hash,
-            )
-        }));
+        let Some((_, _, index, running_hash)) = latest else {
+            return Ok(None);
+        };
+        (digest, (index, running_hash))
+    };
+    let proof_from = |tree: &dsm::merkle::sparse_merkle_tree::SparseMerkleTree| {
+        dsm::storage_cell::CellCommitProof::from_tree(tree, namespace, key, index, running_hash)
+    };
+    if let Some(tree) = committed.tree_at(cycle, &digest) {
+        return Ok(proof_from(&tree));
     }
-    let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
-    tx.commit().await?;
-    let Some((_, _, index, running_hash)) = leaves
-        .iter()
-        .find(|(n, k, _, _)| n.as_slice() == namespace && k == key)
-        .cloned()
-    else {
-        return Ok(None);
+    let _building = committed.hold_tree_build().await;
+    // The build this proof waited behind may have been for its cycle.
+    if let Some(tree) = committed.tree_at(cycle, &digest) {
+        return Ok(proof_from(&tree));
+    }
+    let leaves = {
+        let mut client = pool.get().await?;
+        let tx = client.transaction().await?;
+        let leaves = cell_leaves_tx(&tx, cycle_i64).await?;
+        tx.commit().await?;
+        leaves
     };
     // The tree is built over every cell the node holds: CPU work, kept off
     // the threads that serve requests.
-    let (namespace, key) = (namespace.to_vec(), *key);
-    let (tree, proof) = tokio::task::spawn_blocking(move || {
-        let tree = dsm::storage_cell::cell_tree(
-            leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)),
-        );
-        let proof = dsm::storage_cell::CellCommitProof::from_tree(
-            &tree,
-            &namespace,
-            &key,
-            index,
-            running_hash,
-        );
-        (tree, proof)
+    let tree = tokio::task::spawn_blocking(move || {
+        dsm::storage_cell::cell_tree(leaves.iter().map(|(n, k, i, h)| (n.as_slice(), k, *i, h)))
     })
     .await?;
+    let proof = proof_from(&tree);
     committed.keep(cycle, digest, Arc::new(tree));
     Ok(proof)
 }

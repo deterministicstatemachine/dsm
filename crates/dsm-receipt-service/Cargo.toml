@@ -9,6 +9,9 @@ description = "The DSM receipt service (DSM Amendment A17): emails a plain recei
 dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }
 prost = "0.14"
 axum = "0.8"
+axum-server = "0.8"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
+tower-http = { version = "0.6", features = ["timeout"] }
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls", "hostname"] }
 log = "0.4"

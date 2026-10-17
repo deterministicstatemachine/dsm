@@ -60,7 +60,7 @@ MUST and MUST NOT state requirements an implementation cannot relax. SHOULD stat
 1. A node MUST hold no key and MUST sign nothing.
 2. A node MUST NOT validate a protocol rule, evaluate a guard, compute a balance, compute a leader, compare one value with another, or decide whether a transition is valid.
 3. Economic and protocol payloads MUST be opaque to the node apart from content addressing. The node MUST NOT vary what it stores by what a payload would parse as.
-4. No protocol-relevant path in the node MAY read a clock. Ordering inside the node uses logical ticks.
+4. No protocol-relevant path in the node MAY read a clock. Ordering inside the node uses logical ticks. Transport liveness is not a protocol path: the node MAY use timers to bound how long a connection may sit with no request in flight, how slowly a request body may arrive, and how long a response may wait to be written, and to close the connection or answer the request that passes such a bound (Owner decision, 2026-10-16). No such timer decides validity, ordering, finality, retention or what is stored, and a connection or request it ends changes nothing, as an unreachable node changes nothing.
 5. Inter-node gossip is state synchronisation only. There is no leader election, no Raft, no Paxos, and no vote between nodes.
 
 **Rule — the layer test (Imported: SoFi §2.2)**
@@ -126,7 +126,7 @@ A storage fact is either established from the reads in hand or not established, 
 **Rule (Imported: SoFi §8, §12; DSM §11)**
 
 1. Put at a key stores the bytes a writer sends for that key after everything already held there.
-2. Get returns everything held at the key, in the order it arrived, or that it holds none.
+2. Get returns what is held at the key in the order it arrived, a page at a time (Owner decision, 2026-10-16). A get names the arrival index it reads from, the first entry when it names none. Its page holds the entries from that index on, in arrival order, for at most the cell-value cap (the largest entry a member takes at a key) in value bytes and at most a fixed number of entries, and always at least the first of them, so no entry is left out of every page. The page names the arrival index the next page starts at, or that it reaches the last entry held. Reading every page returns everything held at the key, or that it holds none.
 3. No member refuses, replaces or compares anything held at a key, except that a node MAY refuse a write addressed to an account that has not met the spend-gate (§16, §17). There is no write authorization: a signed object carries its signer's authority, and a derived object is recomputed by whoever reads it.
 4. Any party MAY carry bytes to members not yet reached.
 5. A put to a keyed cell returns the entry's **arrival record**: the member id, the key, the entry's per-key arrival index, and the member's running hash for that key after the entry (§14). The record is bytes, not a signature. It becomes checkable when the member's ByteCommit that commits it closes (Owner decision, 2026-09-22).
@@ -456,7 +456,7 @@ Each keyed-cell entry is committed with its per-key arrival index and the member
 
 1. **Entry digest.** `d_i = H_dom(DSM/storage/cell-entry/v1, v_i)`, where `v_i` is the `i`-th value the member holds at `(N, K)`.
 2. **Running hash.** `h_0 = H_dom(DSM/storage/cell-run-init/v1, N ‖ K)` and `h_i = H_dom(DSM/storage/cell-run/v1, h_(i-1) ‖ d_i)`. The arrival index `i` starts at 1.
-3. **Arrival record.** `ArrivalRecordV1 { member id, N, K, i, h_i }`, where the member id is the seat's member id bytes exactly as the storage set commits them (§10, §11). A put returns the record of the entry it created. A get returns every entry's index and running hash beside its value.
+3. **Arrival record.** `ArrivalRecordV1 { member id, N, K, i, h_i }`, where the member id is the seat's member id bytes exactly as the storage set commits them (§10, §11). A put returns the record of the entry it created. A get returns each entry's index and running hash beside its value, for every entry its page holds (§6).
 4. **Committed leaf.** The SMT whose root a ByteCommit carries holds one leaf per `(N, K)`, at key `H_dom(DSM/storage/cell-leaf-key/v1, N ‖ K)`, with value `H_dom(DSM/storage/cell-leaf/v1, i ‖ h_i)` for the latest entry. An earlier arrival record is checked by replaying the values from `h_0` to the committed running hash.
 5. **Route entry.** A writer writes to each seat of the route a `RouteEntryV1 { N, K, value, seat member id, route position 0–4, chain }`, where `chain` holds the links collected at the earlier positions. The link at a seat is the arrival record that seat returned for that entry. Because the entry's bytes carry the chain, each link commits the ones before it (§9). A position with no link carries an empty: `taken`, with the arrival record showing another value's chain first at that seat, or `no_response`.
 

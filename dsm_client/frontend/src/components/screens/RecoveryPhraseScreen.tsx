@@ -2,12 +2,14 @@
 // A new wallet's recovery phrase, on the StateBoy frame: the words a page at a
 // time on the dark card for the user to write down, then three of them picked
 // back out before the wallet is created from the phrase. The phrase is the
-// only way to recover the wallet; it stays in memory and is never logged.
+// only way to recover the wallet; it stays in memory and is never logged, and
+// while this screen is up the phone takes no screenshot of it (useScreenGuard).
 import React, { useEffect, useMemo } from 'react';
 import { InfoTip } from '../common/InfoTip';
 import { Notice, ScreenFrame } from '../common/ScreenFrame';
 import { useDpadNav } from '../../hooks/useDpadNav';
 import { useBackButton } from '../../hooks/useBackButton';
+import { useScreenGuard } from '../../hooks/useScreenGuard';
 import { CHECKED_WORDS, PHRASE_PAGE_SIZE, cryptoDraw, pageCount, pageWords } from '../../onboarding/recoveryPhrase';
 import { recoveryPhraseStore, useRecoveryPhraseStore } from '../../runtime/recoveryPhraseStore';
 
@@ -49,6 +51,7 @@ function PhaseStrip({ phase }: { phase: number }): React.JSX.Element {
 
 export default function RecoveryPhraseScreen({ onCancel, onAnswer }: Props): React.JSX.Element {
   const stage = useRecoveryPhraseStore();
+  useScreenGuard('secret');
   const pages = pageCount(stage.words);
   const onLastPage = stage.page >= pages - 1;
   const check = stage.checks[stage.checkIndex];

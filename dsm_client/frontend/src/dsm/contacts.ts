@@ -10,6 +10,7 @@ import {
 } from './WebViewBridge';
 import { ContactsList, AddContactArgs, AddContactResult, BilateralRelationshipDTO, ContactCard } from './types';
 import type { ContactPairing, PersonProfile } from '../domain/types';
+import { deviceFingerprint, visibleText } from '../domain/displayName';
 
 const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.PAIRED]: 'paired',
@@ -42,10 +43,12 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   if (!pairing) {
     throw new Error(`STRICT: contacts.list answered a contact in a pairing phase the wire does not name (${c.pairing})`);
   }
+  // An alias that is nothing but invisible characters is shown as the device's fingerprint.
+  const alias = visibleText(c.alias);
   return {
     deviceId: c.deviceId,
     publicKey: c.signingPublicKey,
-    alias: c.alias,
+    alias: alias.length > 0 ? alias : deviceFingerprint(c.deviceId),
     genesisHash,
     chainTip,
     // The wire's empty string is "no address".
@@ -59,11 +62,22 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
 
 /** A person's details as the wire carries them. */
 export function profileOf(p: pb.ContactProfileV1): PersonProfile {
-  return { name: p.displayName, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey };
+  return { name: visibleText(p.displayName), email: visibleText(p.email), phone: visibleText(p.phone), phoneLookupKey: p.phoneLookupKey };
 }
 
 function profileToWire(p: PersonProfile): pb.ContactProfileV1 {
-  return new pb.ContactProfileV1({ displayName: p.name, email: p.email, phone: p.phone, phoneLookupKey: p.phoneLookupKey });
+  return new pb.ContactProfileV1({
+    displayName: visibleText(p.name),
+    email: visibleText(p.email),
+    phone: visibleText(p.phone),
+    phoneLookupKey: p.phoneLookupKey,
+  });
+}
+
+/** What a card says in a field, without its invisible characters; nothing when that leaves nothing. */
+function cardText(text: string): string | undefined {
+  const visible = visibleText(text);
+  return visible.length > 0 ? visible : undefined;
 }
 
 import { decodeFramedEnvelopeV3 } from './decoding';
@@ -141,9 +155,9 @@ export async function readContactCode(text: string): Promise<ContactCard> {
     genesisHash: card.genesisHash,
     signingPublicKey: card.signingPublicKey,
     network: card.network,
-    preferredAlias: card.preferredAlias || undefined,
-    email: card.email || undefined,
-    phone: card.phone || undefined,
+    preferredAlias: cardText(card.preferredAlias),
+    email: cardText(card.email),
+    phone: cardText(card.phone),
   };
 }
 
@@ -154,7 +168,7 @@ export async function readContactCode(text: string): Promise<ContactCard> {
 export async function addContact(args: AddContactArgs): Promise<AddContactResult> {
   try {
     const req = new pb.ContactManualAddRequest({
-      alias: args.alias,
+      alias: visibleText(args.alias),
       deviceId: args.deviceId as any,
       genesisHash: args.genesisHash as any,
       signingPublicKey: args.signingPublicKey as any,

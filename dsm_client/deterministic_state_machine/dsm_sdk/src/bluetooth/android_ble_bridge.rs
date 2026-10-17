@@ -475,7 +475,7 @@ impl AndroidBleBridge {
         address: &str,
         data: &[u8],
     ) -> Result<Option<Vec<TransportOutbound>>, DsmError> {
-        match self.frame_coordinator.ingest_chunk(data).await? {
+        match self.frame_coordinator.ingest_chunk(address, data).await? {
             FrameIngressResult::NeedMoreChunks => Ok(None),
             FrameIngressResult::ProtocolControl(_) => Ok(None),
             FrameIngressResult::MessageComplete { message } => {

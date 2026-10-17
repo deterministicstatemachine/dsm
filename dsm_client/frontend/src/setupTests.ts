@@ -136,6 +136,16 @@ if (typeof (global as any).window !== 'undefined') {
         return createDsmBridgeSuccessResponse(new Uint8Array(0));
       }
 
+      if (method === 'buildType') {
+        // A test runs as a release build would: the rig's query hook is not installed.
+        return createDsmBridgeSuccessResponse(new TextEncoder().encode('release'));
+      }
+
+      if (method === 'setScreenGuards') {
+        // Kotlin takes the window's guards and answers no bytes.
+        return createDsmBridgeSuccessResponse(new Uint8Array(0));
+      }
+
       if (method === 'nativeBoundaryIngress') {
         const response = new pb.IngressResponse({
           result: { case: 'okBytes', value: new Uint8Array(0) },

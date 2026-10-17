@@ -390,11 +390,11 @@ impl StaleGateOutcome {
 /// the old gate and arm a new one between them.
 ///
 /// STALENESS UNDER THE FINALITY BARRIER. A gate is `StillPending` while ANY
-/// `sender_outbox` row for the relationship is unsettled or awaiting its
-/// finality checkpoint (`pending_submit`, `submitting`, `submitted`,
-/// `submission_uncertain`, `finalization_checkpoint_pending`): the send behind
-/// it has not yet been made final for the peer, and only the post-quorum
-/// checkpoint sweep may release it. The former "chain tip moved off the gate's
+/// `sender_outbox` row for the relationship holds a status other than the
+/// settled ones ([`super::sender_outbox::OUTBOX_SETTLED_STATUSES`]): held for
+/// its economic admission, unsent, in flight, uncertain or awaiting its
+/// finality checkpoint, the send behind it has not yet been made final for the
+/// peer, and only the post-quorum checkpoint sweep may release it. The former "chain tip moved off the gate's
 /// parent ⇒ stale" rule is gone: after local finalization the projection tip
 /// sits at the gate's target by construction, so that rule called every
 /// legitimately-armed gate stale. A gate with NO such outbox row is an orphan
@@ -450,19 +450,29 @@ pub fn clear_stale_pending_online_gate(counterparty_device_id: &[u8]) -> Result<
     // The send behind THIS gate: the outbox row frozen with the gate's own
     // projection identity (one send in flight per relationship — the gate
     // guarantees it — so this is "any unsettled row for the relationship").
+    // Unsettled is every status but the settled ones, so a status the table
+    // gains later holds the gate until it is classified as settled.
+    let settled = super::sender_outbox::OUTBOX_SETTLED_STATUSES;
+    let mut bound = vec![
+        rusqlite::types::Value::Blob(gate_parent.to_vec()),
+        rusqlite::types::Value::Blob(gate_next.to_vec()),
+    ];
+    bound.extend(
+        settled
+            .iter()
+            .map(|status| rusqlite::types::Value::Text((*status).to_string())),
+    );
     let unsettled: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM sender_outbox
-          WHERE projection_parent = ?1 AND projection_target = ?2
-            AND status IN (?3, ?4, ?5, ?6, ?7)",
-        params![
-            gate_parent.as_slice(),
-            gate_next.as_slice(),
-            super::sender_outbox::OUTBOX_PENDING_SUBMIT,
-            super::sender_outbox::OUTBOX_SUBMITTING,
-            super::sender_outbox::OUTBOX_SUBMITTED,
-            super::sender_outbox::OUTBOX_SUBMISSION_UNCERTAIN,
-            super::sender_outbox::OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
-        ],
+        &format!(
+            "SELECT COUNT(*) FROM sender_outbox
+              WHERE projection_parent = ?1 AND projection_target = ?2
+                AND status NOT IN ({})",
+            (3..3 + settled.len())
+                .map(|n| format!("?{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        rusqlite::params_from_iter(bound),
         |row| row.get(0),
     )?;
     if unsettled > 0 {

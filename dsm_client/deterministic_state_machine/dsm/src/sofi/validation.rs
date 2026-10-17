@@ -35,15 +35,16 @@ use crate::economic::keys::balance_key;
 use crate::economic::lineage::AcceptedClaim;
 use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
 
+use super::admission::{preimage_admissible, NotAdmissible};
 use super::conformance::Validation;
 use super::derive;
 use super::escrow;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
     next_position, ComputedEscrowTerms, CoreEntry, DlvCore, EscrowKind, EscrowTerms,
-    OwnerAuthority, SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderPreBalance,
-    TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf,
-    VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderPreBalance, TraderPrecommitBody,
+    TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf, VaultStateLeaf,
+    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -109,6 +110,10 @@ pub enum Invalid {
     /// protocol has not activated (R18-1). A verifier KNOWS the branch is not
     /// live, so this is Invalid and never Unavailable.
     OwnerAuthorityNotActivated,
+    /// More hops than this release runs (`ROUTE_MAX_LEGS`, SoFi §19.4 rule
+    /// 2). The bytes are canonical; the route is not run, so it never
+    /// consumes a key, and its keys are skipped like any refused route's.
+    TooManyLegs { legs: usize, max: usize },
     /// A vault's generation, a reserve or a balance would overflow. Refused,
     /// never wrapped.
     CheckedArithmetic { what: &'static str },
@@ -1339,6 +1344,16 @@ pub fn validate(
             max: MAX_SETTLEMENT_PREIMAGE_BYTES,
         },
     ));
+    // What this release runs, decided again here as stage 9 of §31 asks: at
+    // most `ROUTE_MAX_LEGS` hops, and never the reserved owner authority
+    // (R18-1). Both are read from `B°` alone, so a route past them is refuted
+    // in hand and none of its legs is read.
+    verdict.note(preimage_admissible(preimage).map_err(|refused| {
+        Refusal::Invalid(match refused {
+            NotAdmissible::TooManyLegs { legs, max } => Invalid::TooManyLegs { legs, max },
+            NotAdmissible::OwnerAuthorityNotActivated => Invalid::OwnerAuthorityNotActivated,
+        })
+    }));
     // E binds the whole preimage, so this is what stops P naming one operation
     // and the preimage describing another.
     verdict.note(
@@ -1420,7 +1435,6 @@ pub fn validate(
         ),
         SettlementBody::Close {
             vault_id,
-            owner_authority,
             reserve_a,
             reserve_b,
             ..
@@ -1430,7 +1444,6 @@ pub fn validate(
             preimage,
             evidence,
             vault_id,
-            owner_authority,
             *reserve_a,
             *reserve_b,
         ),
@@ -2309,24 +2322,16 @@ fn check_trader_balances(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn validate_close(
     verdict: &mut Verdict,
     precommit: &TraderPrecommitBody,
     preimage: &SettlementPreimage,
     evidence: &Evidence,
     vault_id: &D32,
-    owner_authority: &OwnerAuthority,
     reserve_a: u64,
     reserve_b: u64,
 ) {
     let e = *precommit.external_commitment();
-    // R18-1: the reserved branch decodes, and is refused here. A verifier KNOWS
-    // it is not activated, so this is Invalid with no evidence consulted.
-    verdict.note(require(
-        owner_authority.is_activated(),
-        Invalid::OwnerAuthorityNotActivated,
-    ));
     verdict.note(require(
         precommit.legs().len() == 1 && precommit.legs()[0].vault_id == *vault_id,
         Invalid::LegsDoNotMatchPrecommit,
@@ -3237,7 +3242,7 @@ mod tests {
     ) -> Result<crate::sofi::smt::Folded, crate::sofi::smt::FoldError> {
         crate::merkle::batch_fold::batch_fold::<crate::sofi::smt::fold::EconomicHashes>(entries)
     }
-    use crate::sofi::wire::{PreEClosureIndex, PrecommitLeg};
+    use crate::sofi::wire::{OwnerAuthority, PreEClosureIndex, PrecommitLeg};
 
     #[test]
     fn a_well_formed_swap_is_valid() {
@@ -3307,6 +3312,34 @@ mod tests {
         // The intermediate token has no trader entry: exactly two balance
         // movements and one relationship per leg.
         assert_eq!(f.preimage.trader_core().entries().len(), 4);
+    }
+
+    /// Audit SA-48, SoFi §19.4 rule 2 and §31 stage 9: a three-hop route
+    /// whose every other rule holds is canonical bytes this release does not
+    /// run. A verifier refuses it from `B°` alone, with nothing fetched, and
+    /// a producer cannot build it.
+    #[test]
+    fn a_route_past_the_beta_hop_cap_is_invalid_with_nothing_fetched() {
+        let f = swap_fixture_n(3);
+        let SettlementBody::Swap { hops, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        assert_eq!(hops.len(), 3);
+        // Canonical bytes within the bound: the cap is what refuses them.
+        let bytes = f.preimage.encode().expect("three hops are canonical bytes");
+        assert!(bytes.len() <= MAX_SETTLEMENT_PREIMAGE_BYTES);
+        let past_the_cap = Invalid::TooManyLegs {
+            legs: 3,
+            max: crate::sofi::wire::ROUTE_MAX_LEGS,
+        };
+        assert_eq!(
+            validate(&f.precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(past_the_cap.clone()))
+        );
+        assert_eq!(
+            route_invalid_in_hand(&f.precommit, &f.preimage),
+            Some(past_the_cap)
+        );
     }
 
     /// Rebuild a fixture's settlement body with one field changed, keeping

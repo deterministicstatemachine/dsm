@@ -2822,8 +2822,10 @@ message SealedEnvelopeV1 {
 // Each device writes its own entry, signed with its AK, to the keyed cell
 // H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
 // DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
-// keeps the entry whose AK hashes (with AttA) to the device id and whose
-// signature verifies, highest counter first (dsm::core::identity::directory).
+// keeps the entry whose AK hashes (with AttA) to the device id, whose
+// signature verifies and whose evidence proves, by P0-P6, its AK as the owner
+// authority of the device under its genesis (DSM Amendment A18), highest
+// counter first (dsm::core::identity::directory).
 message DeviceDirectoryEntryBodyV1 {
   bytes  genesis          = 1 [(dsm_fixed_len)=32];
   bytes  device_id        = 2 [(dsm_fixed_len)=32];
@@ -2831,6 +2833,12 @@ message DeviceDirectoryEntryBodyV1 {
   bytes  att_a            = 4 [(dsm_fixed_len)=32];
   bytes  kyber_public_key = 5 [(dsm_fixed_len)=1184];
   uint64 counter          = 6;
+  // DSM Amendment A18: the transition t the evidence's chain reaches, and the
+  // device's P0-P6 authority evidence (AuthorityEvidenceV1 bytes: the genesis
+  // parameters, the GRK delegation and device-tree transition chain to t, and
+  // the device's inclusion proof). Bounded by the directory cell's value budget.
+  bytes  authority_position = 7 [(dsm_fixed_len)=32];
+  bytes  authority_evidence = 8;
 }
 message DeviceDirectoryEntryV1 {
   DeviceDirectoryEntryBodyV1 body = 1;
@@ -3189,9 +3197,11 @@ message PersistedRelationshipState {
 message ReceiptGuardSnapshotProto { uint64 capacity = 1; repeated uint64 sequence = 2; }
 message PersistedOfflineState { uint32 version = 1; repeated PersistedRelationshipState relationships = 2; ReceiptGuardSnapshotProto guard_snapshot = 3; }
 message ChainTip { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; uint64 height = 2; Hash32 head_hash = 3; }
-message RecoveryTombstoneRequest { Hash32 global_root = 1; uint64 counter = 2; Hash32 rollup_hash = 3; bytes device_entropy = 4 [(dsm_max_len)=4096]; bytes environment_data = 5 [(dsm_max_len)=4096]; }
+// A recovery receipt is signed with the cached recovery authority key; no
+// request carries a key (field 5 of the tombstone, 3 of the succession).
+message RecoveryTombstoneRequest { Hash32 global_root = 1; uint64 counter = 2; Hash32 rollup_hash = 3; bytes device_entropy = 4 [(dsm_max_len)=4096]; reserved 5; reserved "environment_data"; }
 message RecoveryTombstoneResponse{ bool success = 1; Hash32 tombstone_hash = 2; bytes tombstone_receipt = 3 [(dsm_max_len)=4096]; }
-message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entropy = 2 [(dsm_max_len)=4096]; bytes environment_data = 3 [(dsm_max_len)=4096]; }
+message RecoverySuccessionRequest { Hash32 tombstone_hash = 1; bytes device_entropy = 2 [(dsm_max_len)=4096]; reserved 3; reserved "environment_data"; }
 message RecoverySuccessionResponse{ bool success = 1; Hash32 succession_hash = 2; bytes succession_receipt = 3 [(dsm_max_len)=4096]; Hash32 new_genesis_hash = 4; }
 message RecoveryResumeRequest  { bytes counterparty_device_id = 1 [(dsm_fixed_len)=32]; Hash32 last_head_hash = 2; uint64 last_height = 3; }
 message RecoveryResumeResponse { bool success = 1; Hash32 new_transaction_hash = 2; bytes transaction_receipt = 3 [(dsm_max_len)=4096]; }
@@ -4584,12 +4594,18 @@ message BleConnectionFailed {
 }
 
 // ── keyed cells and indexes (storage contract Part II) ──────────────────────
-// Everything a member holds at a key, in arrival order. An empty list is an
-// asserted absence. The member decodes none of the values.
+// One page of what a member holds at a key, in arrival order (storage spec
+// §6): the entries from the arrival index the read names, at most the
+// cell-value cap of value bytes and MAX_CELL_PAGE_ENTRIES entries, and always
+// the first of them. An empty page read from index 1 is an asserted absence.
+// The member decodes none of the values.
 message CellValuesV1 {
   repeated bytes values = 1 [(dsm_max_len)=327680];
   // One arrival record per value, in the same order (storage spec §14).
   repeated ArrivalRecordV1 records = 2;
+  // The arrival index the next page starts at; 0 when this page reaches the
+  // last entry the member holds.
+  uint64 next = 3;
 }
 
 // Arrival record of one keyed-cell entry (storage spec §6, §14): the member,

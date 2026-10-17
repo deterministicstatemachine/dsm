@@ -32,6 +32,40 @@ fn err<T>(msg: impl Into<String>) -> Result<T, DsmError> {
     Err(DsmError::invalid_operation(msg.into()))
 }
 
+/// Why a cert-resync message read from the inbox was not taken.
+#[derive(Debug)]
+pub(crate) enum CertResyncRefusal {
+    /// The message's own bytes say it never will be taken: its body does not
+    /// decode, or its cosignature does not verify under the AK this device
+    /// pins for the relationship's peer. It is passed over by its content, so
+    /// it is not read and refused again on every sync.
+    NotRecognized(DsmError),
+    /// It could not be taken now (storage, network, no matching resync); it
+    /// is read again.
+    Failed(DsmError),
+}
+
+impl From<DsmError> for CertResyncRefusal {
+    fn from(e: DsmError) -> Self {
+        Self::Failed(e)
+    }
+}
+
+impl std::fmt::Display for CertResyncRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotRecognized(e) => write!(f, "not recognized: {e}"),
+            Self::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+fn not_recognized<T>(msg: &str) -> Result<T, CertResyncRefusal> {
+    Err(CertResyncRefusal::NotRecognized(
+        DsmError::invalid_operation(msg),
+    ))
+}
+
 /// Derive the deterministic fresh EK for a resync epoch. Re-derivable, so the
 /// ack handler reconstructs the exact key the request advertised.
 fn derive_resync_ek(
@@ -187,9 +221,10 @@ impl super::app_router_impl::AppRouterImpl {
         &self,
         body: &[u8],
         storage_endpoints: Vec<String>,
-    ) -> Result<(), DsmError> {
-        let req = CertResyncRequest::from_body(body)
-            .ok_or_else(|| DsmError::invalid_operation("cert resync request: malformed body"))?;
+    ) -> Result<(), CertResyncRefusal> {
+        let Some(req) = CertResyncRequest::from_body(body) else {
+            return not_recognized("cert resync request: malformed body");
+        };
         let rel_key = req.relationship_key;
 
         let (initiator_device, initiator_genesis, initiator_ak) =
@@ -204,7 +239,9 @@ impl super::app_router_impl::AppRouterImpl {
         );
         let target = cert_resync_signing_target(&joint, &req.initiator_ek_pubkey);
         if !sphincs_verify(&initiator_ak, &target, &req.intent_sig).unwrap_or(false) {
-            return err("cert resync request: initiator cosignature failed verification");
+            return not_recognized(
+                "cert resync request: initiator cosignature failed verification",
+            );
         }
 
         // We must be HEALTHY on this relationship: our own Local head present and a
@@ -275,9 +312,13 @@ impl super::app_router_impl::AppRouterImpl {
 
     /// INITIATOR (head-loss side). Verify the ack and FINALIZE: install both heads,
     /// clear the send-gate.
-    pub(crate) async fn handle_cert_resync_ack(&self, body: &[u8]) -> Result<(), DsmError> {
-        let ack = CertResyncAck::from_body(body)
-            .ok_or_else(|| DsmError::invalid_operation("cert resync ack: malformed body"))?;
+    pub(crate) async fn handle_cert_resync_ack(
+        &self,
+        body: &[u8],
+    ) -> Result<(), CertResyncRefusal> {
+        let Some(ack) = CertResyncAck::from_body(body) else {
+            return not_recognized("cert resync ack: malformed body");
+        };
         let rel_key = ack.relationship_key;
 
         // Must be a PENDING resync at exactly this epoch.
@@ -285,10 +326,12 @@ impl super::app_router_impl::AppRouterImpl {
             DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>)
         })?;
         if state != RESYNC_PENDING || epoch != ack.epoch {
-            return err(format!(
+            return Err(CertResyncRefusal::Failed(DsmError::invalid_operation(
+                format!(
                 "cert resync ack: no matching pending resync (state={state} epoch={epoch} ack={})",
                 ack.epoch
-            ));
+            ),
+            )));
         }
 
         let (_peer_device, _peer_genesis, peer_ak) =
@@ -302,7 +345,7 @@ impl super::app_router_impl::AppRouterImpl {
         );
         let target = cert_resync_signing_target(&joint, &ack.responder_local_head);
         if !sphincs_verify(&peer_ak, &target, &ack.assert_sig).unwrap_or(false) {
-            return err("cert resync ack: responder cosignature failed verification");
+            return not_recognized("cert resync ack: responder cosignature failed verification");
         }
 
         // Re-derive OUR fresh EK (deterministic — same as the request advertised).

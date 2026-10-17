@@ -16,6 +16,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import '@testing-library/jest-dom';
 
 import SendTab from '../SendTab';
+import { deviceFingerprint } from '../../../../domain/displayName';
 
 const D3 = { deviceId: 'NJ2C7P4CXGNY59', alias: 'nj2c7p4c' } as any;
 const NFF = { deviceId: 'RXDC8XQMZ7JHAB', alias: 'rxdc8xqm' } as any;
@@ -46,14 +47,14 @@ describe('SendTab recipient selection', () => {
     const select = screen.getByLabelText(/recipient/i) as HTMLSelectElement;
     fireEvent.change(select, { target: { value: D3.deviceId } });
     expect(screen.getByTestId('send-recipient-confirm')).toHaveTextContent(
-      D3.deviceId.slice(0, 8),
+      deviceFingerprint(D3.deviceId),
     );
 
     // Same contacts, opposite order — exactly what happened on the rig.
     rerender(<SendTab {...baseProps([NFF, D3])} />);
 
     expect(screen.getByTestId('send-recipient-confirm')).toHaveTextContent(
-      D3.deviceId.slice(0, 8),
+      deviceFingerprint(D3.deviceId),
     );
     expect((screen.getByLabelText(/recipient/i) as HTMLSelectElement).value).toBe(
       D3.deviceId,
@@ -76,14 +77,14 @@ describe('SendTab recipient selection', () => {
     expect(screen.getByRole('button', { name: /^send$/i })).toBeDisabled();
   });
 
-  /// The recipient is shown, by device id, right above the action.
+  /// The recipient is shown, by its device fingerprint, right above the action.
   it('shows the selected device id above Send', () => {
     render(<SendTab {...baseProps([D3, NFF])} />);
     fireEvent.change(screen.getByLabelText(/recipient/i), {
       target: { value: NFF.deviceId },
     });
     expect(screen.getByTestId('send-recipient-confirm')).toHaveTextContent(
-      NFF.deviceId.slice(0, 8),
+      deviceFingerprint(NFF.deviceId),
     );
     expect(screen.getByRole('button', { name: /^send$/i })).toBeEnabled();
   });

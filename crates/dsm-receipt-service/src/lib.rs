@@ -8,13 +8,19 @@
 //! checks the signature and the fields, holds each device and each recipient
 //! to a rate, and emails one fixed, plain receipt.
 //!
+//! A device is counted by the key its request is signed under, the one thing
+//! about the sender the signature binds: the device id beside it is a claim
+//! the request makes, and DSM derives it from the key and an attestation
+//! digest the request does not carry. A recipient is counted by the address
+//! the receipt is delivered to, read once and used for both.
+//!
 //! Outside the DSM protocol: the service decides nothing about any transfer,
 //! keeps no record of who was emailed, and logs no address. The signature
 //! proves a device asked; it does not prove the device is in the network's
 //! directory, and the service does not read the directory (an open item of
 //! A17, stated in its CONFORMANCE row).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use dsm::common::domain_tags::TAG_DSM_RECEIPT_EMAIL;
@@ -111,13 +117,7 @@ pub fn check(request: &pb::ReceiptEmailRequestV1) -> Result<(), Refusal> {
             "a receipt names an amount, a currency and a transfer",
         ));
     }
-    let Some((local, domain)) = request.to_email.split_once('@') else {
-        return Err(Refusal::bad("the email is not an address"));
-    };
-    if local.is_empty() || !domain.contains('.') || domain.contains('@') || domain.starts_with('.')
-    {
-        return Err(Refusal::bad("the email is not an address"));
-    }
+    recipient(request)?;
     if request.sender_device_id.len() != 32 || request.sender_signing_public_key.len() != 64 {
         return Err(Refusal::bad(
             "the sender's device id is 32 bytes and its key 64",
@@ -136,6 +136,39 @@ pub fn check(request: &pb::ReceiptEmailRequestV1) -> Result<(), Refusal> {
             "the signature cannot be checked: {e}"
         ))),
     }
+}
+
+/// The address a request's receipt goes to: `to_email` when it is a bare
+/// address (`user@domain.tld`) and nothing else. It is read as an address,
+/// never as a mailbox: a display name, angle brackets, a second address or
+/// anything after the address is refused, and the address keeps exactly the
+/// text it was read from, so the address the rate is held to is the address
+/// the mail is sent to.
+pub fn recipient(request: &pb::ReceiptEmailRequestV1) -> Result<lettre::Address, Refusal> {
+    let not_an_address = || Refusal::bad("the email is not an address");
+    let address: lettre::Address = request
+        .to_email
+        .parse()
+        .map_err(|_unparsed: lettre::address::AddressError| not_an_address())?;
+    let domain = address.domain();
+    if !domain.contains('.') || domain.starts_with('.') || domain.starts_with('[') {
+        return Err(not_an_address());
+    }
+    Ok(address)
+}
+
+/// The mailbox an address names, as a rate counts it: the domain and the
+/// user in lower case, the user without a `+` subaddress. Every spelling
+/// that reaches one inbox at the providers that read addresses this way
+/// counts as that inbox, so a sender cannot spread one person's receipts
+/// over spellings of their address.
+pub fn counted_as(address: &lettre::Address) -> String {
+    let user = address.user().to_lowercase();
+    let mailbox = match user.split_once('+') {
+        Some((mailbox, _subaddress)) => mailbox.to_string(),
+        None => user,
+    };
+    format!("{mailbox}@{}", address.domain().to_lowercase())
 }
 
 /// An email as the service may say it back: its first character, then `…`,
@@ -212,32 +245,51 @@ pub struct Rates {
 }
 
 /// Counts per device and per recipient over a sliding window, in memory: a
-/// restart forgets them, and nothing else is kept.
+/// restart forgets them, and nothing else is kept. Every count is let go once
+/// its window has passed, so what the limiter holds is what the window holds.
 pub struct RateLimiter {
     rates: Rates,
-    seen: HashMap<Vec<u8>, Vec<Instant>>,
+    /// Receipts admitted within the window, per key.
+    counts: HashMap<Vec<u8>, usize>,
+    /// Every admitted receipt's keys, oldest first, with when it was
+    /// admitted: the order counts are let go in.
+    admitted: VecDeque<(Instant, Vec<u8>)>,
 }
 
 impl RateLimiter {
     pub fn new(rates: Rates) -> Self {
         Self {
             rates,
-            seen: HashMap::new(),
+            counts: HashMap::new(),
+            admitted: VecDeque::new(),
         }
     }
 
-    /// Admits one receipt from `device` to `email`, or refuses it when either
-    /// is over its rate. A refused request counts against neither.
-    pub fn admit(&mut self, device: &[u8], email: &str, now: Instant) -> Result<(), Refusal> {
-        let window = self.rates.window;
-        let device_key = [b"d:".as_slice(), device].concat();
-        let email_key = [b"e:".as_slice(), email.to_lowercase().as_bytes()].concat();
-        for key in [&device_key, &email_key] {
-            if let Some(times) = self.seen.get_mut(key) {
-                times.retain(|t| now.duration_since(*t) < window);
+    /// The keys the limiter holds a count for.
+    pub fn tracked(&self) -> usize {
+        self.counts.len()
+    }
+
+    /// Admits one receipt signed under `signer` to `recipient` (as
+    /// [`counted_as`] names it), or refuses it when either is over its rate.
+    /// A refused request counts against neither.
+    pub fn admit(&mut self, signer: &[u8], recipient: &str, now: Instant) -> Result<(), Refusal> {
+        while let Some((when, _)) = self.admitted.front() {
+            if now.duration_since(*when) < self.rates.window {
+                break;
+            }
+            if let Some((_, key)) = self.admitted.pop_front() {
+                if let Some(count) = self.counts.get_mut(&key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        self.counts.remove(&key);
+                    }
+                }
             }
         }
-        let count = |key: &Vec<u8>| self.seen.get(key).map_or(0, Vec::len);
+        let device_key = [b"d:".as_slice(), signer].concat();
+        let email_key = [b"e:".as_slice(), recipient.as_bytes()].concat();
+        let count = |key: &Vec<u8>| self.counts.get(key).map_or(0, |n| *n);
         if count(&device_key) >= self.rates.per_device {
             return Err(Refusal::too_many(
                 "this device has asked for too many receipts; try later",
@@ -249,12 +301,8 @@ impl RateLimiter {
             ));
         }
         for key in [device_key, email_key] {
-            match self.seen.get_mut(&key) {
-                Some(times) => times.push(now),
-                None => {
-                    self.seen.insert(key, vec![now]);
-                }
-            }
+            *self.counts.entry(key.clone()).or_insert(0) += 1;
+            self.admitted.push_back((now, key));
         }
         Ok(())
     }
@@ -318,7 +366,7 @@ mod tests {
         };
         let mut limiter = RateLimiter::new(rates);
         let t0 = Instant::now();
-        assert_eq!(limiter.admit(&[1; 32], "Jane@Example.com", t0), Ok(()));
+        assert_eq!(limiter.admit(&[1; 32], "jane@example.com", t0), Ok(()));
         assert_eq!(limiter.admit(&[2; 32], "jane@example.com", t0), Ok(()));
         assert_eq!(
             limiter
@@ -330,6 +378,70 @@ mod tests {
             limiter.admit(&[3; 32], "jane@example.com", t0 + rates.window),
             Ok(())
         );
+    }
+
+    /// Every count is let go once its window has passed: a thousand senders
+    /// to a thousand addresses leave nothing held a window later but the
+    /// receipt admitted then.
+    #[test]
+    fn counts_are_let_go_once_their_window_has_passed() {
+        let rates = Rates {
+            per_device: 10,
+            per_recipient: 10,
+            window: Duration::from_secs(60),
+        };
+        let mut limiter = RateLimiter::new(rates);
+        let t0 = Instant::now();
+        for i in 0..1000u32 {
+            let signer = i.to_be_bytes();
+            assert_eq!(
+                limiter.admit(&signer, &format!("p{i}@example.com"), t0),
+                Ok(())
+            );
+        }
+        assert_eq!(limiter.tracked(), 2000);
+        assert_eq!(
+            limiter.admit(b"later", "later@example.com", t0 + rates.window),
+            Ok(())
+        );
+        assert_eq!(
+            limiter.tracked(),
+            2,
+            "only the receipt admitted now is held"
+        );
+    }
+
+    /// The address a rate counts is the address the mail goes to: a display
+    /// name, a second address or anything after the address is refused, and
+    /// spellings of one inbox count as that inbox.
+    #[test]
+    fn only_a_bare_address_is_a_recipient_and_its_spellings_count_as_one() {
+        let to = |email: &str| pb::ReceiptEmailRequestV1 {
+            to_email: email.into(),
+            ..req("")
+        };
+        for refused in [
+            "Eve <jane@example.com>",
+            "<jane@example.com>",
+            "jane@example.com extra",
+            "jane@example.com, eve@example.com",
+            "jane@localhost",
+            "jane@[127.0.0.1]",
+            " jane@example.com",
+        ] {
+            assert_eq!(
+                recipient(&to(refused)).map_err(|r| r.status),
+                Err(400),
+                "{refused:?} is not a bare address"
+            );
+        }
+        let counted = |email: &str| match recipient(&to(email)) {
+            Ok(address) => counted_as(&address),
+            Err(refusal) => panic!("{email:?}: {}", refusal.reason),
+        };
+        assert_eq!(counted("jane@example.com"), "jane@example.com");
+        assert_eq!(counted("Jane@Example.COM"), "jane@example.com");
+        assert_eq!(counted("jane+receipts@example.com"), "jane@example.com");
     }
 
     #[test]

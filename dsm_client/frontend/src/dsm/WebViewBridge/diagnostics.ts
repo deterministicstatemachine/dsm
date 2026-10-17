@@ -80,3 +80,14 @@ export async function returnToConnectCaller(): Promise<boolean> {
   if (bytes.length !== 1) throw new Error(`returnToConnectCaller answered ${bytes.length} bytes, not one`);
   return bytes[0] === 1;
 }
+
+export type BuildType = "debug" | "release";
+
+/** The Android build the page runs in (BuildConfig.BUILD_TYPE): rig-only hooks are a debug build's alone. */
+export async function getBuildType(): Promise<BuildType> {
+  const named = new TextDecoder().decode(await callBin("buildType", new Uint8Array(0)));
+  if (named !== "debug" && named !== "release") {
+    throw new Error(`buildType answered "${named}", not debug or release`);
+  }
+  return named;
+}

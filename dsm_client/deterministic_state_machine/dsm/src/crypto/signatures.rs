@@ -31,8 +31,9 @@ const DEFAULT_PARAMS: ParameterSet = ParameterSet::SPX256f;
 /// Signature bytes alias
 pub type Signature = Vec<u8>;
 
-/// Quantum-resistant SPHINCS+ key pair for DSM signatures
-#[derive(Debug, Clone, Zeroize)]
+/// Quantum-resistant SPHINCS+ key pair for DSM signatures. Wiped on drop;
+/// `Debug` names the public key and parameters only, never the secret key.
+#[derive(Clone, Zeroize)]
 pub struct SignatureKeyPair {
     /// Public key for signature verification (pub_seed || root)
     pub public_key: Vec<u8>,
@@ -46,6 +47,16 @@ impl Drop for SignatureKeyPair {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.zeroize();
+    }
+}
+
+impl core::fmt::Debug for SignatureKeyPair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SignatureKeyPair")
+            .field("public_key", &self.public_key)
+            .field("secret_key", &"[REDACTED]")
+            .field("params", &self.params)
+            .finish()
     }
 }
 
@@ -81,16 +92,18 @@ impl SignatureKeyPair {
                 None::<std::io::Error>,
             ));
         }
-        // Derive a fixed 32-byte seed deterministically.
-        let mut seed32 = [0u8; 32];
-        seed32.copy_from_slice(
-            crate::crypto::blake3::domain_hash(
-                crate::common::domain_tags::TAG_DSM_SPHINCS_SEED,
-                entropy,
-            )
-            .as_bytes(),
+        // Derive a fixed 32-byte seed deterministically. The digest and the
+        // seed are the secret key's whole entropy: both are wiped once the
+        // key pair is made, whether or not key generation succeeded.
+        let mut digest = crate::crypto::blake3::domain_hash(
+            crate::common::domain_tags::TAG_DSM_SPHINCS_SEED,
+            entropy,
         );
-        let kp = sphincs::generate_keypair_from_seed(params, &seed32)?;
+        let mut seed32: [u8; 32] = *digest.as_bytes();
+        digest.zeroize();
+        let kp = sphincs::generate_keypair_from_seed(params, &seed32);
+        seed32.zeroize();
+        let kp = kp?;
         Ok(Self {
             public_key: kp.public_key.clone(),
             secret_key: kp.secret_key.clone(),
@@ -444,5 +457,17 @@ mod tests {
             .verify_with_params(msg, &sig, verify_params)
             .expect("verify call should succeed but return false");
         assert!(!ok, "verification with different params must fail");
+    }
+
+    /// Formatting a key pair names its public key and parameters and never its
+    /// secret key, however the key pair is reached (`{:?}` on a struct that
+    /// holds one formats it through this impl).
+    #[test]
+    fn a_signature_keypair_formats_without_its_secret_key() {
+        let kp = test_keypair_fast();
+        let shown = format!("{kp:?}");
+        assert!(shown.contains("[REDACTED]"), "{shown}");
+        assert!(!shown.contains(&format!("{:?}", kp.secret_key)));
+        assert!(shown.contains(&format!("{:?}", kp.public_key)));
     }
 }

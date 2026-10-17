@@ -834,6 +834,82 @@ impl AppRouterImpl {
                 }
             }
 
+            "tokens.listCachedPolicies" => {
+                // The durable table is the source of truth; the in-memory map
+                // is only a read cache and can add nothing it does not have.
+                let mut anchors: BTreeSet<[u8; 32]> =
+                    match crate::storage::client_db::token_registry::all_policies() {
+                        Ok(rows) => rows.into_iter().map(|(commit, _)| commit).collect(),
+                        Err(e) => {
+                            return err(format!("tokens.listCachedPolicies failed: {e}"));
+                        }
+                    };
+                {
+                    let cache = self.policy_cache.lock().await;
+                    for anchor in cache.keys() {
+                        anchors.insert(*anchor);
+                    }
+                }
+
+                let mut policies = Vec::new();
+                for anchor in anchors {
+                    let policy_bytes = match self.load_policy_bytes(anchor).await {
+                        Ok(Some(bytes)) => bytes,
+                        Ok(None) => continue,
+                        Err(e) => return err(format!("tokens.listCachedPolicies failed: {e}")),
+                    };
+                    // Skip anything that no longer parses rather than listing a
+                    // blank row — an unreadable policy is not a policy.
+                    let Some(meta) = parse_token_policy(&policy_bytes) else {
+                        continue;
+                    };
+                    policies.push(generated::TokenPolicyCacheEntry {
+                        policy_commit: anchor.to_vec(),
+                        policy_bytes,
+                        ticker: meta.ticker,
+                        alias: meta.alias,
+                        decimals: meta.decimals,
+                        max_supply: meta.genesis_supply.to_string(),
+                    });
+                }
+
+                let reply = generated::TokenPolicyListResponse { policies };
+                pack_envelope_ok(generated::envelope::Payload::TokenPolicyListResponse(reply))
+            }
+
+            "tokens.getFeeSchedule" => {
+                // Reads the same core constant the conservation guard
+                // validates against, so the displayed fee can never disagree
+                // with the fee actually charged; and this device's standing
+                // against it from the head and the check `token.create` uses.
+                let Some(head) = self.core_sdk.device_head() else {
+                    return err("tokens.getFeeSchedule: no device head".into());
+                };
+                let era_held = era_held_for_creation_fee(&head);
+                let decimals = match dsm::core::token::era_policy::era_policy() {
+                    Ok(era) => era.decimals,
+                    Err(e) => return err(format!("tokens.getFeeSchedule: {e}")),
+                };
+                let shown =
+                    |base| super::wallet_routes::format_base_units_for_display(base, decimals);
+                pack_envelope_ok(generated::envelope::Payload::TokenFeeScheduleResponse(
+                    generated::TokenFeeScheduleResponse {
+                        token_creation_era: dsm::core::token::TOKEN_CREATION_FEE_ERA,
+                        era_held,
+                        fee_covered: creation_fee_covered(era_held),
+                        token_creation_era_display: shown(dsm::core::token::TOKEN_CREATION_FEE_ERA),
+                        era_held_display: shown(era_held),
+                    },
+                ))
+            }
+
+            other => err(format!("unknown token query path: {other}")),
+        }
+    }
+
+    // ── Token Invokes ────────────────────────────────────────────────────────
+    pub(crate) async fn handle_token_invoke(&self, i: AppInvoke) -> AppResult {
+        match i.method.as_str() {
             // Adopt a token created by someone else, by its CPTA anchor.
             //
             // A device cannot hold or move a token whose policy it does not
@@ -844,8 +920,9 @@ impl AppRouterImpl {
             // token can never be received, which is exactly how a transfer to
             // a second device fails with nothing obviously wrong.
             //
-            // This is a local registration, not a state transition: no advance,
-            // no balance change, and no fee. Only the creator burns the fee.
+            // It writes this device's token registry, so it is an invoke. It is
+            // not a state transition: no advance, no balance change, and no
+            // fee. Only the creator burns the fee.
             //
             // The anchor is re-derived from the fetched bytes and must match
             // what was asked for. That is the same rule creation enforces, and
@@ -857,7 +934,7 @@ impl AppRouterImpl {
                 // or a `dsm:token/v1:` payload from a scan. Both are decoded
                 // here rather than in the client, so there is one decoder and
                 // one place that decides what a pasted string means.
-                let input = match parse_adoption_input(&String::from_utf8_lossy(&q.params)) {
+                let input = match parse_adoption_input(&String::from_utf8_lossy(&i.args)) {
                     Ok(v) => v,
                     Err(e) => return err(format!("tokens.addByAnchor: {e}")),
                 };
@@ -1050,82 +1127,6 @@ impl AppRouterImpl {
                 ))
             }
 
-            "tokens.listCachedPolicies" => {
-                // The durable table is the source of truth; the in-memory map
-                // is only a read cache and can add nothing it does not have.
-                let mut anchors: BTreeSet<[u8; 32]> =
-                    match crate::storage::client_db::token_registry::all_policies() {
-                        Ok(rows) => rows.into_iter().map(|(commit, _)| commit).collect(),
-                        Err(e) => {
-                            return err(format!("tokens.listCachedPolicies failed: {e}"));
-                        }
-                    };
-                {
-                    let cache = self.policy_cache.lock().await;
-                    for anchor in cache.keys() {
-                        anchors.insert(*anchor);
-                    }
-                }
-
-                let mut policies = Vec::new();
-                for anchor in anchors {
-                    let policy_bytes = match self.load_policy_bytes(anchor).await {
-                        Ok(Some(bytes)) => bytes,
-                        Ok(None) => continue,
-                        Err(e) => return err(format!("tokens.listCachedPolicies failed: {e}")),
-                    };
-                    // Skip anything that no longer parses rather than listing a
-                    // blank row — an unreadable policy is not a policy.
-                    let Some(meta) = parse_token_policy(&policy_bytes) else {
-                        continue;
-                    };
-                    policies.push(generated::TokenPolicyCacheEntry {
-                        policy_commit: anchor.to_vec(),
-                        policy_bytes,
-                        ticker: meta.ticker,
-                        alias: meta.alias,
-                        decimals: meta.decimals,
-                        max_supply: meta.genesis_supply.to_string(),
-                    });
-                }
-
-                let reply = generated::TokenPolicyListResponse { policies };
-                pack_envelope_ok(generated::envelope::Payload::TokenPolicyListResponse(reply))
-            }
-
-            "tokens.getFeeSchedule" => {
-                // Reads the same core constant the conservation guard
-                // validates against, so the displayed fee can never disagree
-                // with the fee actually charged; and this device's standing
-                // against it from the head and the check `token.create` uses.
-                let Some(head) = self.core_sdk.device_head() else {
-                    return err("tokens.getFeeSchedule: no device head".into());
-                };
-                let era_held = era_held_for_creation_fee(&head);
-                let decimals = match dsm::core::token::era_policy::era_policy() {
-                    Ok(era) => era.decimals,
-                    Err(e) => return err(format!("tokens.getFeeSchedule: {e}")),
-                };
-                let shown =
-                    |base| super::wallet_routes::format_base_units_for_display(base, decimals);
-                pack_envelope_ok(generated::envelope::Payload::TokenFeeScheduleResponse(
-                    generated::TokenFeeScheduleResponse {
-                        token_creation_era: dsm::core::token::TOKEN_CREATION_FEE_ERA,
-                        era_held,
-                        fee_covered: creation_fee_covered(era_held),
-                        token_creation_era_display: shown(dsm::core::token::TOKEN_CREATION_FEE_ERA),
-                        era_held_display: shown(era_held),
-                    },
-                ))
-            }
-
-            other => err(format!("unknown token query path: {other}")),
-        }
-    }
-
-    // ── Token Invokes ────────────────────────────────────────────────────────
-    pub(crate) async fn handle_token_invoke(&self, i: AppInvoke) -> AppResult {
-        match i.method.as_str() {
             "token.create" => {
                 let arg_pack = match generated::ArgPack::decode(&*i.args) {
                     Ok(p) => p,

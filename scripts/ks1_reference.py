@@ -51,6 +51,7 @@ NET = b"dsm-beta"
 G = b"\x47" * 32
 DEVID = b"\x44" * 32
 APH = b"\x11" * 32
+MATCH_NONCE = b"\x4e" * 32
 
 w = extract(b"DSM/kdf/wallet-root/v1", SEED)
 ds = expand32(w, b"DSM/device-seed/v3", G, u32(0))
@@ -70,6 +71,7 @@ VECTORS = [
     ("smaster", sm),
     ("at_rest_key", expand32(prk_s0, b"DSM/chain-head-at-rest/v3", G, DEVID)),
     ("ml_kem_seed", blake3.blake3(b"DSM/ml-kem-identity/v1\0" + b"ML-KEM-768", key=sm).digest()),
+    ("escrow_session_seed", expand32(w, b"DSM/escrow/session-key/v2", G, MATCH_NONCE)),
 ]
 
 if __name__ == "__main__":
