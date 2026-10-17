@@ -24,4 +24,4 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"contacts.readContactCode"|sdk router query handler for contacts.readContactCode exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"inbox.pull"|sdk router query handler for inbox.pull exists
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"bilateral.pending_list"|sdk router query handler for bilateral.pending_list exists
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"storage.sync"|sdk router query handler for storage.sync exists
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs|"storage.sync"|sdk router invoke handler for storage.sync exists

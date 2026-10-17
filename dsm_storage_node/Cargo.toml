@@ -15,6 +15,7 @@ futures = "0.3.31"
 axum = { version = "0.8", features = ["macros"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }              # TLS listener
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }    # bounds on accepted connections
+http-body = "1"                                                          # response and request bodies the liveness bounds wrap
 rustls = { version = "0.23", features = ["ring"] }
 # PEM cert/key parsing via the maintained rustls-pki-types crate (Issue #24).
 # Replaces the unmaintained rustls-pemfile (RUSTSEC-2025-0134); the

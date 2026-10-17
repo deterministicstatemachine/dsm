@@ -37,6 +37,12 @@ pub enum OfflineRecover {
     Malformed,
     /// No anchor enrollment is pinned for this counterparty.
     AnchorNotEnrolled,
+    /// The verified receipt proves no offline-bearer spend under the pinned
+    /// bundle: there is no anchor transition of the step for a release to be.
+    NotTheStepsSpend,
+    /// The release's certificate names device roots other than the ones the
+    /// verified receipt proves.
+    RootsNotTheReceipts,
     /// The v2 acceptance predicate rejected the release.
     Predicate(AcceptError),
 }
@@ -115,6 +121,11 @@ struct DsmStateVerifier<'a> {
     receiver_device_id: &'a [u8; 32],
     /// The pinned bundle `B` — the SMT leaf key is `anchor_state_leaf_key(B)`.
     bundle: &'a [u8; 32],
+    /// The anchor-state leaves, before and after, that the step's verified
+    /// receipt proves its write set moved.
+    verified: &'a dsm::verification::receipt_verification::BearerLeaves,
+    /// The release's anchor counter `u_i`.
+    anchor_counter: u64,
 }
 
 impl DsmVerifier for DsmStateVerifier<'_> {
@@ -133,31 +144,33 @@ impl DsmVerifier for DsmStateVerifier<'_> {
     fn verify_transition(
         &self,
         _transition_digest: &[u8; 32],
-        _prev_frontier: &[u8; 32],
-        _next_frontier: &[u8; 32],
+        prev_frontier: &[u8; 32],
+        next_frontier: &[u8; 32],
     ) -> bool {
-        // NOTE the arguments: the trait names them `prev_root`/`next_root`, but `accept_offline`
-        // passes `cert.prev_frontier` and `cert.next_frontier` (accept.rs:235-239) — anchor
-        // frontiers, not device roots. Both are already validated inside the predicate before this
-        // is reached: the accepted-frontier pin (check 2) and `h_{i+1} = H(h_i ‖ D)` inside
-        // `verify_cert_frontier_and_sigs` (checks 8-11). So there is nothing here left for this
-        // hook to re-check from its arguments.
-        //
-        // What Def. 12 step 12 actually asks for is `σ^DSM` over the transition plus the whole-state
-        // consumption `R_i → R_{i+1}`. That CANNOT be verified here: the relationship path is not
-        // carried in the OfflineRelease — it rides in the stitched receipt. The bilateral handler
-        // verifies the receipt's state rules, together with the §C1 `h_{n+1}` recompute, and
-        // `accept_offline_release` refuses before running the predicate unless the cert's device
-        // roots equal the ones the handler verified (anchor_accept.rs:251-257).
-        //
-        // So step 12 is genuinely a no-op INSIDE the predicate, and its correctness rests on caller
-        // ordering rather than on anything this function can observe. That is a real gap between the
-        // seventeen-check predicate as written and the fifteen the code enforces, and closing it
-        // means carrying the relationship proofs in the release so the check can be self-contained
-        // — a wire change, not a patch to this function. Do not "fix" this by inventing an equality
-        // check over the arguments: they are frontiers, they are already checked, and comparing them
-        // to device roots type-checks while being meaningless.
-        true
+        // The trait names the frontier pair `prev_root`/`next_root`; `accept_offline` passes
+        // `cert.prev_frontier` and `cert.next_frontier`, anchor frontiers. Def. 12 step 12 asks
+        // for `σ^DSM` over the transition and the whole-state consumption `R_i → R_{i+1}`. Both
+        // are in the stitched receipt `decide_confirm` verified, which this verifier holds: its
+        // A-side EK signature is `σ^DSM`, and its write set folds `R_i` to `R_{i+1}`, moving this
+        // anchor-state leaf from `verified.anchor_before` to `verified.anchor_after`. The
+        // transition is that consumption when its frontiers, at the release's counter and its
+        // successor under the pinned bundle, are exactly those two leaves. The digest is bound
+        // through the successor frontier, `H(h_i ‖ D)`, which checks 7-11 tie to the transition.
+        self.anchor_counter
+            .checked_add(1)
+            .is_some_and(|next_counter| {
+                self.verified.bundle == *self.bundle
+                    && anchor_core::root_advance::anchor_state_leaf(
+                        self.bundle,
+                        prev_frontier,
+                        self.anchor_counter,
+                    ) == self.verified.anchor_before
+                    && anchor_core::root_advance::anchor_state_leaf(
+                        self.bundle,
+                        next_frontier,
+                        next_counter,
+                    ) == self.verified.anchor_after
+            })
     }
 
     fn delivers_to_receiver(&self, _transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool {
@@ -242,13 +255,7 @@ pub fn bearer_leaves_of_release(
     receiver_challenge: &[u8; 32],
 ) -> Result<dsm::verification::receipt_verification::BearerLeaves, OfflineRecover> {
     use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
-    if offline_release.is_empty() {
-        return Err(OfflineRecover::MissingRelease);
-    }
-    let rel = pb::OfflineRelease::decode(offline_release)
-        .map_err(|_| OfflineRecover::Malformed)?
-        .to_release()
-        .map_err(|_| OfflineRecover::Malformed)?;
+    let rel = decode_release(offline_release)?;
     let t = rel.transition.as_transition();
     let next_counter = t
         .anchor_counter
@@ -283,40 +290,40 @@ pub struct AdoptedAnchorState {
 /// failed predicate check. On `Ok(adopted)` the receiver proceeds to the canonical value-release
 /// commit and, after that succeeds, persists `adopted` as the holder's accepted frontier.
 ///
+/// `verified` is the confirm [`dsm::bilateral::offline::decide_confirm`] decided: the predicate's
+/// step 12 is the consumption its receipt proves, so there is no way to run the predicate without
+/// a verified receipt, and the device roots and anchor leaves are the receipt's, never values the
+/// caller supplies.
+///
 /// `accepted_frontier`: the frontier adopted from the holder's last accepted release. `None` =
 /// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
 /// authenticity rests on the anchor-state inclusion proofs + the three signatures, the same trust
 /// root as the first-transfer pin admit.
-#[allow(clippy::too_many_arguments)]
 pub fn accept_offline_release(
+    verified: &dsm::bilateral::offline::VerifiedConfirm,
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
     accepted_frontier: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
-    expected_sender_device_root_before: &[u8; 32],
-    expected_sender_device_root_after: &[u8; 32],
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
-    if offline_release.is_empty() {
-        return Err(OfflineRecover::MissingRelease);
-    }
-    let rel = pb::OfflineRelease::decode(offline_release)
-        .map_err(|_| OfflineRecover::Malformed)?
-        .to_release()
-        .map_err(|_| OfflineRecover::Malformed)?;
+    let rel = decode_release(offline_release)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
+    let spend = verified
+        .bearer()
+        .filter(|leaves| leaves.bundle == pinned.bundle)
+        .ok_or(OfflineRecover::NotTheStepsSpend)?;
 
-    // Tie the cert's device roots to the roots the handler INDEPENDENTLY verified from the confirm
-    // (the stitched receipt's relationship path + §C1 recompute). The predicate checks Π against the CERT roots; if
-    // the cert roots were not the actual verified device roots, the sender could sign an arbitrary
-    // parallel tree — reject before running the predicate.
-    if rel.cert.sender_device_root_before != *expected_sender_device_root_before
-        || rel.cert.sender_device_root_after != *expected_sender_device_root_after
+    // Tie the cert's device roots to the roots the verified receipt proves (its write set folds the
+    // one to the other). The predicate checks Π against the CERT roots; if the cert roots were not
+    // the receipt's, the sender could sign an arbitrary parallel tree — reject before running the
+    // predicate.
+    let receipt = verified.receipt();
+    if rel.cert.sender_device_root_before != receipt.parent_root
+        || rel.cert.sender_device_root_after != receipt.child_root
     {
-        return Err(OfflineRecover::Predicate(
-            AcceptError::TransitionProofInvalid,
-        ));
+        return Err(OfflineRecover::RootsNotTheReceipts);
     }
 
     let t = rel.transition.as_transition();
@@ -346,78 +353,37 @@ pub fn accept_offline_release(
     let dsm = DsmStateVerifier {
         receiver_device_id,
         bundle: &pinned.bundle,
+        verified: spend,
+        anchor_counter: t.anchor_counter,
     };
     accept_offline::<_, Ed25519ChipSig, SphincsPart>(&rel, &ctx, &dsm)
         .map_err(OfflineRecover::Predicate)?;
     Ok(adopted)
 }
 
+/// The release a confirm carries, decoded and validated as a `dsm.anchor.OfflineRelease`.
+fn decode_release(
+    offline_release: &[u8],
+) -> Result<anchor_core::root_advance::OfflineRelease, OfflineRecover> {
+    if offline_release.is_empty() {
+        return Err(OfflineRecover::MissingRelease);
+    }
+    pb::OfflineRelease::decode(offline_release)
+        .map_err(|e| {
+            log::warn!("offline release does not decode: {e}");
+            OfflineRecover::Malformed
+        })?
+        .to_release()
+        .map_err(|e| {
+            log::warn!("offline release does not validate: {e:?}");
+            OfflineRecover::Malformed
+        })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    const ZERO: [u8; 32] = [0u8; 32];
-
-    fn z() -> Vec<u8> {
-        vec![0u8; 32]
-    }
-
-    fn pin() -> PinnedAnchor {
-        PinnedAnchor {
-            bundle: ZERO,
-            anchor_id: ZERO,
-            enrolled_counter: 100,
-            partition_pk: vec![0u8; 64],
-            pk_chip: vec![0u8; 32],
-            uncompromised: true,
-        }
-    }
-
-    /// A `dsm.anchor.OfflineRelease` whose fixed-width fields all decode (passes `to_release`) but
-    /// whose cert cannot satisfy the predicate — so it reaches and is rejected by `accept_offline`.
-    fn decodable_release_bytes() -> Vec<u8> {
-        let transition = pb::TransitionPackage {
-            relationship_id: z(),
-            object_id: z(),
-            sender_device_id: z(),
-            recipient_device_id: z(),
-            prev_root: z(),
-            next_root: z(),
-            anchor_counter: 0,
-            next_anchor_counter: 1,
-            action_type: 0,
-            action_fields: vec![],
-            payload_hash: z(),
-            old_leaf_proof: vec![],
-            new_leaf_proof: vec![],
-            authority_policy_hash: z(),
-        };
-        let cert = pb::RootAdvanceCertificate {
-            anchor_bundle: z(),
-            sender_device_root_before: z(),
-            sender_device_root_after: z(),
-            prev_frontier: z(),
-            next_frontier: z(),
-            anchor_counter: 0,
-            next_anchor_counter: 1,
-            transition_digest: z(),
-            root_advance_message: z(),
-            anchor_id: z(),
-            sigma_chip: vec![],
-            sigma_host: vec![],
-            receiver_challenge: z(),
-            recipient: z(),
-        };
-        pb::OfflineRelease {
-            transition: Some(transition),
-            anchor_smt_proof_before: vec![],
-            anchor_smt_proof_after: vec![],
-            cert: Some(cert),
-            branch_proof: vec![],
-        }
-        .encode_to_vec()
-    }
 
     /// The genesis upgrade-cert hook is unreachable today (`is_genesis` is hardcoded `false` at
     /// every construction site), so this is the only way to observe what it answers. It must be
@@ -430,9 +396,16 @@ mod tests {
     fn the_dormant_genesis_upgrade_cert_hook_fails_closed() {
         let receiver = [7u8; 32];
         let bundle = [9u8; 32];
+        let leaves = dsm::verification::receipt_verification::BearerLeaves {
+            bundle,
+            anchor_before: [0x0Au8; 32],
+            anchor_after: [0x0Bu8; 32],
+        };
         let dsm = DsmStateVerifier {
             receiver_device_id: &receiver,
             bundle: &bundle,
+            verified: &leaves,
+            anchor_counter: 4,
         };
         assert!(
             !dsm.verify_upgrade_cert(&bundle),
@@ -441,66 +414,82 @@ mod tests {
         );
     }
 
+    /// SA-54. Def. 12 step 12 is the consumption the verified receipt proves: the transition's
+    /// frontier pair, at the release's counter and its successor under the pinned bundle, must
+    /// be the anchor-state leaves the receipt's write set moves. Any other frontier, counter or
+    /// bundle is not that consumption.
+    /// MUTATION CONTROL: answering the hook without the leaves (any constant answer, or one
+    /// that ignores a frontier) turns this red.
     #[test]
-    fn missing_release_routes_online() {
-        let r = accept_offline_release(
-            &[],
-            Some(&pin()),
-            Some(&ZERO),
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
+    fn the_transition_is_only_the_consumption_the_verified_receipt_proves() {
+        use anchor_core::root_advance::anchor_state_leaf;
+        let receiver = [7u8; 32];
+        let bundle = [9u8; 32];
+        let (prev, next, counter) = ([0x21u8; 32], [0x22u8; 32], 41u64);
+        let leaves = dsm::verification::receipt_verification::BearerLeaves {
+            bundle,
+            anchor_before: anchor_state_leaf(&bundle, &prev, counter),
+            anchor_after: anchor_state_leaf(&bundle, &next, counter + 1),
+        };
+        let digest = [0x23u8; 32];
+        let check = |bundle: &[u8; 32], counter: u64, prev: &[u8; 32], next: &[u8; 32]| {
+            DsmStateVerifier {
+                receiver_device_id: &receiver,
+                bundle,
+                verified: &leaves,
+                anchor_counter: counter,
+            }
+            .verify_transition(&digest, prev, next)
+        };
+
+        assert!(
+            check(&bundle, counter, &prev, &next),
+            "the step's own transition"
         );
-        assert!(matches!(r, Err(OfflineRecover::MissingRelease)));
+        assert!(
+            !check(&bundle, counter, &next, &prev),
+            "the frontiers reversed"
+        );
+        assert!(
+            !check(&bundle, counter, &prev, &prev),
+            "another successor frontier"
+        );
+        assert!(
+            !check(&bundle, counter, &next, &next),
+            "another prior frontier"
+        );
+        assert!(
+            !check(&bundle, counter + 1, &prev, &next),
+            "another counter"
+        );
+        assert!(
+            !check(&[0x0Cu8; 32], counter, &prev, &next),
+            "another bundle"
+        );
+        assert!(
+            !check(&bundle, u64::MAX, &prev, &next),
+            "a counter with no successor"
+        );
     }
 
+    /// A release that is absent, or does not decode and validate, is refused before anything
+    /// else is read.
     #[test]
-    fn malformed_release_routes_online() {
+    fn a_missing_or_malformed_release_routes_online() {
+        assert!(matches!(
+            decode_release(&[]),
+            Err(OfflineRecover::MissingRelease)
+        ));
         // Non-empty bytes with no transition/cert: decodes as a proto but fails `to_release`.
         let bytes = pb::OfflineRelease {
             anchor_smt_proof_before: vec![0x01],
             ..Default::default()
         }
         .encode_to_vec();
-        let r = accept_offline_release(
-            &bytes,
-            Some(&pin()),
-            Some(&ZERO),
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
-        );
-        assert!(matches!(r, Err(OfflineRecover::Malformed)));
-    }
-
-    #[test]
-    fn unenrolled_anchor_routes_online() {
-        let bytes = decodable_release_bytes();
-        let r =
-            accept_offline_release(&bytes, None, Some(&ZERO), &ZERO, &ZERO, &ZERO, &ZERO, &ZERO);
-        assert!(matches!(r, Err(OfflineRecover::AnchorNotEnrolled)));
-    }
-
-    #[test]
-    fn predicate_rejects_and_routes_online() {
-        // A decodable release WITH a pin reaches accept_offline and is rejected (proves the canonical
-        // predicate is wired + fail-closed — an all-zero cert can never satisfy it).
-        let bytes = decodable_release_bytes();
-        let r = accept_offline_release(
-            &bytes,
-            Some(&pin()),
-            Some(&ZERO),
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
-            &ZERO,
-        );
-        assert!(matches!(r, Err(OfflineRecover::Predicate(_))));
+        assert!(matches!(
+            decode_release(&bytes),
+            Err(OfflineRecover::Malformed)
+        ));
     }
 
     // --- receiver-admit fold: pin_admit_decision matrix ---

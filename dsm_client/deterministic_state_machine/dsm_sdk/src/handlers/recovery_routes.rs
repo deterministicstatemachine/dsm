@@ -180,15 +180,11 @@ impl AppRouterImpl {
                         };
                         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
                     }
-                    Err(e) => {
-                        // Still enabled, but first capsule failed — not fatal
-                        log::warn!("[RECOVERY] First capsule creation failed: {e}");
-                        let resp = generated::AppStateResponse {
-                            key: "recovery.enable".to_string(),
-                            value: Some("enabled=true,first_capsule_index=0".to_string()),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
-                    }
+                    // Backup is on, and the next state change makes a capsule; this
+                    // one was not made, and the player is told so (SA-52).
+                    Err(e) => err(format!(
+                        "recovery.enable: NFC backup is on, but its first capsule was not made: {e}"
+                    )),
                 }
             }
 
@@ -471,22 +467,10 @@ impl AppRouterImpl {
             // -------- recovery.resume --------
             // Gated on full tombstone sync — all counterparties must have acknowledged
             "recovery.resume" => {
-                // Check sync gate: recovery can't resume until ALL contacts have synced
-                match crate::storage::client_db::recovery::all_counterparties_synced() {
-                    Ok(true) => {} // All synced, proceed
-                    Ok(false) => {
-                        let (synced, total) =
-                            crate::storage::client_db::recovery::get_sync_progress()
-                                .unwrap_or((0, 0));
-                        return err(format!(
-                            "Recovery pending: {synced}/{total} contacts synced. \
-                             All counterparties must acknowledge the tombstone before resume."
-                        ));
-                    }
-                    Err(e) => {
-                        log::warn!("[RECOVERY] Sync gate check failed: {e}");
-                        // If we can't check, allow resume (table might not exist yet)
-                    }
+                // Recovery can't resume until ALL contacts have acknowledged the
+                // tombstone; a gate that cannot be read holds it back too.
+                if let Err(e) = super::recovery_impl::resume_gate() {
+                    return err(format!("recovery.resume: {e}"));
                 }
 
                 let req = match generated::RecoveryResumeRequest::decode(&*i.args) {
@@ -622,37 +606,9 @@ impl AppRouterImpl {
             // -------- recovery.completeResume --------
             // Final cleanup after all counterparties have been individually resumed.
             "recovery.completeResume" => {
-                // Clear sync status table (recovery cycle complete)
-                if let Err(e) = crate::storage::client_db::recovery::clear_recovery_sync_status() {
-                    log::warn!("[RECOVERY] Failed to clear sync status: {e}");
+                if let Err(e) = super::recovery_impl::complete_resume() {
+                    return err(format!("recovery.completeResume: {e}"));
                 }
-                if let Err(e) = crate::storage::client_db::recovery::clear_recovered_chain_tips() {
-                    log::warn!("[RECOVERY] Failed to clear recovered chain tips: {e}");
-                }
-                // Clear tombstone-related prefs
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "tombstone_receipt",
-                    &[],
-                );
-                let _ =
-                    crate::storage::client_db::recovery::set_recovery_pref("tombstone_hash", &[]);
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "capsule_counterparty_ids",
-                    &[],
-                );
-                let _ =
-                    crate::storage::client_db::recovery::set_recovery_pref("capsule_smt_root", &[]);
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "capsule_rollup_hash",
-                    &[],
-                );
-                let _ = crate::storage::client_db::recovery::set_recovery_pref(
-                    "succession_receipt",
-                    &[],
-                );
-
-                log::info!("[RECOVERY] Recovery cycle complete — all state cleaned up");
-
                 let resp = generated::AppStateResponse {
                     key: "recovery.completeResume".to_string(),
                     value: Some("success=true".to_string()),

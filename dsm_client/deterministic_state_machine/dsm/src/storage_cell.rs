@@ -149,6 +149,23 @@ impl ArrivalRecord {
 /// node.
 pub const MAX_MEMBER_ID_LEN: usize = 128;
 
+/// The depth of the SMT a ByteCommit's root covers: a cell's proof carries
+/// exactly this many siblings, one per bit of the leaf key.
+pub const CELL_TREE_DEPTH: usize = 256;
+
+// ── Cell reads, a page at a time (storage spec §6) ─────────────────────────
+
+/// The most value bytes one page of a cell read holds: the cell-value cap, the
+/// largest entry a member takes at a key ([`crate::route_chain::MAX_ENTRY_BYTES`]).
+/// A page always holds the first entry it is read from, so no entry a member
+/// took is ever left out of every page.
+pub const CELL_PAGE_VALUE_BYTES: usize = crate::route_chain::MAX_ENTRY_BYTES;
+
+/// The most entries one page of a cell read holds, whatever their size: with
+/// each entry's arrival record, a page of the smallest entries stays within a
+/// few times [`CELL_PAGE_VALUE_BYTES`].
+pub const MAX_CELL_PAGE_ENTRIES: usize = 256;
+
 /// A member's ByteCommit for cycle `t`: which member, which cycle, the SMT
 /// root over its cells' latest committed entries, the bytes it holds, and the
 /// digest of its previous ByteCommit. Unsigned: a verifier checks the chain
@@ -260,7 +277,7 @@ impl CellCommitProof {
         running_hash: [u8; 32],
     ) -> Option<Self> {
         let smt_proof = tree
-            .get_inclusion_proof(&leaf_key(namespace, key), 256)
+            .get_inclusion_proof(&leaf_key(namespace, key), CELL_TREE_DEPTH)
             .ok()?;
         Some(Self {
             index,
@@ -287,12 +304,13 @@ impl CellCommitProof {
 
     /// Whether this proof shows `commit` committing `(N, K)` at `(index,
     /// running_hash)`: the proof is for the cell's leaf key, carries exactly
-    /// that leaf value, has the full 256-sibling path, and folds to the root.
+    /// that leaf value, has the full [`CELL_TREE_DEPTH`]-sibling path, and
+    /// folds to the root.
     pub fn verifies(&self, commit: &ByteCommit, namespace: &[u8], key: &[u8; 32]) -> bool {
         self.index >= 1
             && self.smt_proof.key == leaf_key(namespace, key)
             && self.smt_proof.value == Some(leaf_value(self.index, &self.running_hash))
-            && self.smt_proof.siblings.len() == 256
+            && self.smt_proof.siblings.len() == CELL_TREE_DEPTH
             && SparseMerkleTree::verify_proof_against_root(&self.smt_proof, &commit.smt_root)
     }
 }

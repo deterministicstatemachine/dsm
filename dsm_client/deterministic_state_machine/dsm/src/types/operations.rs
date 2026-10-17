@@ -1729,11 +1729,7 @@ impl Operation {
                 let amount = get_u64(&mut input)? as i64;
                 let purpose = get_bytes(&mut input)?;
                 let mode = dec_mode(&mut input)?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 LockToken {
                     token_id,
                     amount,
@@ -1747,11 +1743,7 @@ impl Operation {
                 let amount = get_u64(&mut input)? as i64;
                 let purpose = get_bytes(&mut input)?;
                 let mode = dec_mode(&mut input)?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 UnlockToken {
                     token_id,
                     amount,
@@ -1766,11 +1758,7 @@ impl Operation {
                 let purpose = get_bytes(&mut input)?;
                 let owner = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 Lock {
                     token_id,
                     amount,
@@ -1786,11 +1774,7 @@ impl Operation {
                 let purpose = get_bytes(&mut input)?;
                 let owner = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 Unlock {
                     token_id,
                     amount,
@@ -1954,11 +1938,7 @@ impl Operation {
                 let operation_type = get_bytes(&mut input)?;
                 let data = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 Generic {
                     operation_type,
                     data,
@@ -2006,11 +1986,7 @@ impl Operation {
                     1 => Some(get_str(&mut input)?),
                     _ => return Err(DsmError::invalid_operation("bad opt flag")),
                 };
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 CreateToken {
                     token_id,
                     initial_supply,
@@ -2029,11 +2005,7 @@ impl Operation {
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("adopt_token policy_commit must be 32 bytes")
                     })?;
-                let signature = if input.is_empty() {
-                    vec![]
-                } else {
-                    get_bytes(&mut input)?
-                };
+                let signature = get_bytes(&mut input)?;
                 AdoptToken {
                     policy_commit,
                     signature,
@@ -2387,6 +2359,84 @@ mod tests {
 
     fn test_balance(value: u64) -> Balance {
         Balance::amount(value)
+    }
+
+    /// Every operation has one encoding. The encoder always writes the
+    /// trailing signature field, an empty signature as a zero length; bytes
+    /// that end before that field are refused rather than read as the same
+    /// operation with an empty signature. Tags 6, 7, 8, 9, 18, 20 and 32 used
+    /// to decode both.
+    #[test]
+    fn an_operation_without_its_trailing_signature_field_is_refused() {
+        let ops = vec![
+            Operation::LockToken {
+                token_id: b"TOK".to_vec(),
+                amount: 5,
+                purpose: b"p".to_vec(),
+                mode: TransactionMode::Bilateral,
+                signature: Vec::new(),
+            },
+            Operation::UnlockToken {
+                token_id: b"TOK".to_vec(),
+                amount: 5,
+                purpose: b"p".to_vec(),
+                mode: TransactionMode::Unilateral,
+                signature: Vec::new(),
+            },
+            Operation::Lock {
+                token_id: b"TOK".to_vec(),
+                amount: test_balance(5),
+                purpose: b"p".to_vec(),
+                owner: b"o".to_vec(),
+                message: "m".to_string(),
+                signature: Vec::new(),
+            },
+            Operation::Unlock {
+                token_id: b"TOK".to_vec(),
+                amount: test_balance(5),
+                purpose: b"p".to_vec(),
+                owner: b"o".to_vec(),
+                message: "m".to_string(),
+                signature: Vec::new(),
+            },
+            Operation::Generic {
+                operation_type: b"g".to_vec(),
+                data: b"d".to_vec(),
+                message: "m".to_string(),
+                signature: Vec::new(),
+            },
+            Operation::CreateToken {
+                token_id: b"NEW".to_vec(),
+                initial_supply: test_balance(9),
+                policy_commit: [4u8; 32],
+                fee_amount: crate::core::token::TOKEN_CREATION_FEE_ERA,
+                name: "n".to_string(),
+                symbol: "N".to_string(),
+                decimals: 0,
+                metadata_uri: None,
+                signature: Vec::new(),
+            },
+            Operation::AdoptToken {
+                policy_commit: [4u8; 32],
+                signature: Vec::new(),
+            },
+        ];
+        for op in ops {
+            let bytes = op.to_bytes();
+            assert_eq!(
+                Operation::from_bytes(&bytes).expect("the full encoding"),
+                op
+            );
+            let (without, length) = bytes.split_at(bytes.len() - 4);
+            assert_eq!(
+                length,
+                0u32.to_le_bytes(),
+                "an empty signature is a zero length"
+            );
+            let refused = Operation::from_bytes(without)
+                .expect_err("bytes without the signature field are not this operation");
+            assert!(refused.to_string().contains("short input"), "{refused}");
+        }
     }
 
     #[test]

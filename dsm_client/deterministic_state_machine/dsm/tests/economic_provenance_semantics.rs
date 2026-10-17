@@ -288,7 +288,7 @@ fn create_token(policy_commit: [u8; 32], supply: u64) -> dsm::types::operations:
         token_id: b"TKN".to_vec(),
         initial_supply: dsm::types::token_types::Balance::amount(supply),
         policy_commit,
-        fee_amount: 0,
+        fee_amount: dsm::core::token::TOKEN_CREATION_FEE_ERA,
         name: "Token".into(),
         symbol: "TKN".into(),
         decimals: 0,

@@ -220,14 +220,15 @@ struct Serving {
 }
 
 /// A node set's CA: it issues every node's certificate, every set-mate is
-/// pinned to it, and a device trusts it and nothing else.
-struct TestCa {
+/// pinned to it, and a device trusts it and nothing else. A test that stands
+/// a member up on its own trusts one of these the same way.
+pub(crate) struct TestCa {
     issuer: rcgen::Issuer<'static, rcgen::KeyPair>,
-    pem: Vec<u8>,
+    pub(crate) pem: Vec<u8>,
 }
 
 impl TestCa {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let key = match rcgen::KeyPair::generate() {
             Ok(key) => key,
             Err(e) => panic!("the CA's key: {e}"),
@@ -256,7 +257,7 @@ impl TestCa {
 
     /// The TLS a node serves `member_id` with: a certificate from this CA
     /// naming the member, as a DNS name, and the loopback address.
-    async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
+    pub(crate) async fn tls_for(&self, member_id: &str) -> axum_server::tls_rustls::RustlsConfig {
         let key = match rcgen::KeyPair::generate() {
             Ok(key) => key,
             Err(e) => panic!("the node's key: {e}"),

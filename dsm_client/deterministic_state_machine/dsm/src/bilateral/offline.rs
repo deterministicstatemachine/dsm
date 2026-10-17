@@ -12,8 +12,8 @@
 //! nothing.
 
 use crate::core::bilateral_transaction_manager::{
-    bilateral_sign_message, compute_precommit, compute_successor_tip,
-    operation_requires_offline_bearer, BilateralPreCommitment,
+    bilateral_accept_sign_message, bilateral_sign_message, compute_precommit,
+    compute_successor_tip, operation_requires_offline_bearer, BilateralPreCommitment,
 };
 use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
 use crate::verification::receipt_verification::{
@@ -106,17 +106,28 @@ fn verify_step_signature(
     signature: &[u8],
     what: &str,
 ) -> Result<(), DsmError> {
+    verify_signature_over(
+        peer,
+        &bilateral_sign_message(commitment_hash),
+        signature,
+        what,
+    )
+}
+
+/// `signature` is `peer`'s signature over `message`, under its pinned AK.
+fn verify_signature_over(
+    peer: &PinnedPeer<'_>,
+    message: &[u8],
+    signature: &[u8],
+    what: &str,
+) -> Result<(), DsmError> {
     if signature.is_empty() {
         return Err(DsmError::invalid_operation(format!(
             "the {what} carries no signature over its commitment"
         )));
     }
-    let valid = SignatureKeyPair::verify_raw(
-        &bilateral_sign_message(commitment_hash),
-        signature,
-        peer.signing_key,
-    )
-    .map_err(|e| DsmError::invalid_operation(format!("{what} signature: {e}")))?;
+    let valid = SignatureKeyPair::verify_raw(message, signature, peer.signing_key)
+        .map_err(|e| DsmError::invalid_operation(format!("{what} signature: {e}")))?;
     if !valid {
         return Err(DsmError::invalid_operation(format!(
             "the {what} is not signed over its commitment by the pinned AK"
@@ -225,15 +236,16 @@ pub fn decide_prepare(
 /// prepare response.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Acceptance {
-    /// σ_B over the step's commitment.
+    /// σ_B over the step's commitment and `receiver_challenge`.
     pub signature: Vec<u8>,
-    /// The receiver's challenge a bearer release answers.
-    pub receiver_challenge: Option<[u8; 32]>,
+    /// The receiver's challenge `r_R` a bearer release answers, as σ_B
+    /// signs it.
+    pub receiver_challenge: [u8; 32],
 }
 
 /// What a prepare response claims: the commitment it answers, its
-/// receiver's keys, its receiver's signature (σ_B) over that commitment, and
-/// the receiver's challenge.
+/// receiver's keys, its receiver's signature (σ_B) over that commitment and
+/// its challenge, and the challenge.
 #[derive(Clone, Copy, Debug)]
 pub struct ResponseClaims<'a> {
     pub commitment_hash: Option<[u8; 32]>,
@@ -244,8 +256,10 @@ pub struct ResponseClaims<'a> {
 
 /// The proposer's decision on a prepare response for the step
 /// `commitment_hash` it proposed to `receiver`: the response carries the
-/// receiver's pinned keys and its signature over that commitment. Nothing in
-/// a response is taken before it verifies.
+/// receiver's pinned keys and its signature over that commitment and the
+/// challenge it issues ([`bilateral_accept_sign_message`]). Nothing in a
+/// response is taken before it verifies: a challenge the receiver did not
+/// sign is refused, so the proposer never stages a release toward it.
 pub fn decide_prepare_response(
     commitment_hash: [u8; 32],
     claims: ResponseClaims<'_>,
@@ -257,15 +271,15 @@ pub fn decide_prepare_response(
         ));
     }
     verify_pinned_peer_keys(receiver, claims.credentials)?;
-    verify_step_signature(receiver, &commitment_hash, claims.signature, "acceptance")?;
-    let receiver_challenge = match claims.receiver_challenge.len() {
-        0 => None,
-        _ => Some(
-            <[u8; 32]>::try_from(claims.receiver_challenge).map_err(|_| {
-                DsmError::invalid_operation("the receiver challenge is not 32 bytes")
-            })?,
-        ),
-    };
+    let receiver_challenge = <[u8; 32]>::try_from(claims.receiver_challenge).map_err(|e| {
+        DsmError::invalid_operation(format!("the receiver challenge is not 32 bytes: {e}"))
+    })?;
+    verify_signature_over(
+        receiver,
+        &bilateral_accept_sign_message(&commitment_hash, &receiver_challenge),
+        claims.signature,
+        "acceptance",
+    )?;
     Ok(Acceptance {
         signature: claims.signature.to_vec(),
         receiver_challenge,
@@ -305,11 +319,33 @@ pub struct AcceptedStep<'a> {
     pub bearer: Option<BearerLeaves>,
 }
 
-/// A confirm the receiver may commit.
+/// A confirm the receiver may commit. Only [`decide_confirm`] makes one,
+/// so holding one is proof that its receipt verified: what needs that
+/// proof takes this type, not a receipt or roots its caller supplies.
 #[derive(Debug)]
 pub struct VerifiedConfirm {
-    pub receipt: StitchedReceiptV2,
-    pub successor_tip: [u8; 32],
+    receipt: StitchedReceiptV2,
+    successor_tip: [u8; 32],
+    bearer: Option<BearerLeaves>,
+}
+
+impl VerifiedConfirm {
+    /// The sender's stitched receipt of the step, verified.
+    pub fn receipt(&self) -> &StitchedReceiptV2 {
+        &self.receipt
+    }
+
+    /// The relationship's successor tip h_{n+1}, reproduced from the held
+    /// tip, the operation and the entropy the signed receipt commits.
+    pub fn successor_tip(&self) -> [u8; 32] {
+        self.successor_tip
+    }
+
+    /// For an offline-bearer step, the sender's anchor-state leaves the
+    /// verified receipt proves its step moved, before and after.
+    pub fn bearer(&self) -> Option<&BearerLeaves> {
+        self.bearer.as_ref()
+    }
 }
 
 /// The receiver's decision on a confirm for a step it accepted: σ_A under
@@ -317,9 +353,10 @@ pub struct VerifiedConfirm {
 /// device, holding its state rules against the sender's Device Tree
 /// commitment and its A-side EK chaining from the sender's chain head; and
 /// the successor tip reproduced from the held tip, the operation and the
-/// sender's entropy. The receipt's tips are the sender's own (per-device)
-/// lineage and are bound by its EK chain, never compared with the
-/// relationship tip.
+/// entropy the signed receipt commits. The confirm's own entropy is unsigned:
+/// it is taken only when it is the receipt's. The receipt's tips are the
+/// sender's own (per-device) lineage and are bound by its EK chain, never
+/// compared with the relationship tip.
 pub fn decide_confirm(
     claims: ConfirmClaims<'_>,
     step: AcceptedStep<'_>,
@@ -369,6 +406,15 @@ pub fn decide_confirm(
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
         DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
     })?;
+    // The entropy rides the confirm unsigned; σ_A's EK signs the receipt,
+    // whose canonical form commits the step's one entropy. A confirm whose
+    // entropy is not that one would move this device to a successor tip its
+    // sender never derived.
+    if pre_entropy != receipt.transition_entropy {
+        return Err(DsmError::invalid_operation(
+            "the confirm's pre_entropy is not the transition entropy its signed receipt commits",
+        ));
+    }
     let successor_tip = claims
         .successor_tip
         .ok_or_else(|| DsmError::invalid_operation("missing shared_chain_tip_new in confirm"))?;
@@ -382,6 +428,7 @@ pub fn decide_confirm(
     Ok(VerifiedConfirm {
         receipt,
         successor_tip,
+        bearer: step.bearer,
     })
 }
 
@@ -532,6 +579,10 @@ mod tests {
 
         fn sign_step(&self, commitment_hash: &[u8; 32]) -> Vec<u8> {
             self.sign(&bilateral_sign_message(commitment_hash))
+        }
+
+        fn sign_acceptance(&self, commitment_hash: &[u8; 32], challenge: &[u8; 32]) -> Vec<u8> {
+            self.sign(&bilateral_accept_sign_message(commitment_hash, challenge))
         }
     }
 
@@ -899,26 +950,77 @@ mod tests {
             )
         };
 
+        let accepted = receiver.sign_acceptance(&commitment, &challenge);
         assert_eq!(
-            decide(commitment, &receiver.sign_step(&commitment), &challenge)
-                .expect("the receiver's own acceptance"),
+            decide(commitment, &accepted, &challenge).expect("the receiver's own acceptance"),
             Acceptance {
-                signature: receiver.sign_step(&commitment),
-                receiver_challenge: Some(challenge),
+                signature: accepted.clone(),
+                receiver_challenge: challenge,
             }
         );
         refused(decide(commitment, &[], &challenge), "carries no signature");
         refused(
-            decide(commitment, &other.sign_step(&commitment), &challenge),
+            decide(
+                commitment,
+                &other.sign_acceptance(&commitment, &challenge),
+                &challenge,
+            ),
             "not signed over its commitment by the pinned AK",
         );
         refused(
-            decide([0x55; 32], &receiver.sign_step(&[0x55; 32]), &challenge),
+            decide(
+                [0x55; 32],
+                &receiver.sign_acceptance(&[0x55; 32], &challenge),
+                &challenge,
+            ),
             "names another commitment",
         );
+        refused(decide(commitment, &accepted, &[1, 2, 3]), "not 32 bytes");
+        refused(decide(commitment, &accepted, &[]), "not 32 bytes");
+    }
+
+    /// SA-14. The challenge `r_R` a bearer release answers is under σ_B: a
+    /// relay that replaces it in a genuine response is refused before the
+    /// proposer stages anything toward it (and so before its anchor's COMMIT
+    /// spends a counter step on a release the receiver will refuse). A σ_B
+    /// over the commitment alone — what an acceptance signed before — no
+    /// longer accepts.
+    /// MUTATION CONTROL: verifying σ_B over the commitment alone (or not
+    /// binding the challenge into the signed message) lets the substituted
+    /// challenge through and turns this red.
+    #[test]
+    fn a_relayed_response_cannot_substitute_the_receivers_challenge() {
+        let receiver = Peer::new(0x56);
+        let commitment = [0x57u8; 32];
+        let issued = [0x58u8; 32];
+        let substituted = [0x59u8; 32];
+        let decide = |signature: &[u8], challenge: &[u8]| {
+            decide_prepare_response(
+                commitment,
+                ResponseClaims {
+                    commitment_hash: Some(commitment),
+                    credentials: credentials(&receiver),
+                    signature,
+                    receiver_challenge: challenge,
+                },
+                &receiver.pinned(),
+            )
+        };
+        let sigma_b = receiver.sign_acceptance(&commitment, &issued);
+
+        assert_eq!(
+            decide(&sigma_b, &issued)
+                .expect("the challenge the receiver signed")
+                .receiver_challenge,
+            issued
+        );
         refused(
-            decide(commitment, &receiver.sign_step(&commitment), &[1, 2, 3]),
-            "not 32 bytes",
+            decide(&sigma_b, &substituted),
+            "not signed over its commitment by the pinned AK",
+        );
+        refused(
+            decide(&receiver.sign_step(&commitment), &issued),
+            "not signed over its commitment by the pinned AK",
         );
     }
 
@@ -1094,7 +1196,7 @@ mod tests {
             None,
         )
         .expect("the sender's own confirm");
-        assert_eq!(verified.successor_tip, c.successor_tip);
+        assert_eq!(verified.successor_tip(), c.successor_tip);
 
         refused(
             decide(
@@ -1144,8 +1246,8 @@ mod tests {
             decide(
                 &sigma_a,
                 &c.receipt,
-                &c.held_tip,
-                c.successor_tip,
+                &c.pre_entropy,
+                c.held_tip,
                 c.receiver.device_id,
                 None,
             ),
@@ -1161,6 +1263,61 @@ mod tests {
                 None,
             ),
             "128 KiB",
+        );
+    }
+
+    /// SA-11. The confirm's entropy and successor tip ride unsigned beside
+    /// the signed receipt. A frame whose entropy is another value — with the
+    /// successor tip recomputed from it, so the two agree with each other —
+    /// would move this device to a tip its sender never derived, and the two
+    /// sides would hold different tips. The receiver takes the step only
+    /// with the entropy its signed receipt commits.
+    /// MUTATION CONTROL: dropping the comparison of the confirm's entropy
+    /// with the receipt's lets the tampered frame commit and turns this red.
+    #[test]
+    fn a_confirm_whose_entropy_is_not_its_receipts_moves_nothing() {
+        let c = built_confirm();
+        let operation = c.transfer.operation.clone();
+        let tampered_entropy = [0x6Bu8; 32];
+        assert_ne!(tampered_entropy, c.pre_entropy);
+        let op_bytes = operation.to_bytes();
+        let tampered_successor = compute_successor_tip(
+            &c.held_tip,
+            &op_bytes,
+            &tampered_entropy,
+            &compute_precommit(&c.held_tip, &op_bytes, &tampered_entropy),
+        );
+        assert_ne!(tampered_successor, c.successor_tip);
+        let decide = |entropy: &[u8], successor_tip: [u8; 32]| {
+            decide_confirm(
+                ConfirmClaims {
+                    signature: &c.sender.sign_step(&c.commitment_hash),
+                    receipt: &c.receipt,
+                    pre_entropy: entropy,
+                    successor_tip: Some(successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id: c.receiver.device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer: None,
+                },
+                &c.sender.pinned(),
+            )
+        };
+
+        assert_eq!(
+            decide(&c.pre_entropy, c.successor_tip)
+                .expect("the sender's own confirm")
+                .successor_tip(),
+            c.successor_tip
+        );
+        refused(
+            decide(&tampered_entropy, tampered_successor),
+            "is not the transition entropy its signed receipt commits",
         );
     }
 

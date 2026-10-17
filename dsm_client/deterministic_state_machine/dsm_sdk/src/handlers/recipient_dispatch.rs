@@ -206,6 +206,7 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
     let Operation::Transfer {
         to_device_id,
         amount,
+        policy_commit,
         ..
     } = &op
     else {
@@ -220,9 +221,9 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
             "the signed transfer is addressed to another device".to_string(),
         ));
     }
-    // open the terms: the ticker, nonce and memo are read from terms that
-    // open the signed commitment, and a transfer without them is refused
-    // whole (pre-audit item 4)
+    // open the terms: the nonce and memo are read from terms that open the
+    // signed commitment, and a transfer without them is refused whole
+    // (pre-audit item 4)
     let opened = match open_terms(&req.transfer_terms, &op) {
         Ok(terms) => terms,
         Err(why) => return Ok(NotRecognized(why)),
@@ -240,7 +241,7 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
         signature: req.signature,
         terms: req.transfer_terms,
     };
-    let terms = super::recipient_accept::TransferTerms::of(amount, &opened);
+    let terms = super::recipient_accept::TransferTerms::of(amount, policy_commit, &opened);
     Ok(TransferRecognition::Recognized(Box::new(
         RecognizedTransfer {
             op,
@@ -751,7 +752,8 @@ mod tests {
             .expect("the copy reaches the members");
     }
 
-    /// Every received online transfer in B's history: (id, amount, token).
+    /// Every received online transfer in B's history: (id, amount, token),
+    /// the token named from the policy the row's signed operation commits to.
     fn received_history(p: &Pair) -> Vec<(String, u64, String)> {
         p.b.enter();
         let b = crate::util::text_id::encode_base32_crockford(&p.b.device_id);
@@ -760,13 +762,17 @@ mod tests {
             .into_iter()
             .filter(|t| t.tx_type == "online" && t.to_device == b)
             .map(|t| {
-                let token = String::from_utf8(
+                let op = Operation::from_bytes(
                     t.metadata
-                        .get("token_id")
-                        .expect("the row names its token")
-                        .clone(),
+                        .get(client_db::HISTORY_OPERATION_KEY)
+                        .expect("the row keeps its operation"),
                 )
-                .expect("a text token");
+                .expect("the operation decodes");
+                let Operation::Transfer { policy_commit, .. } = op else {
+                    panic!("a received transfer's row keeps a transfer");
+                };
+                let (token, ..) = crate::handlers::wallet_routes::token_of_commit(&policy_commit)
+                    .expect("B names the token it was credited");
                 (t.tx_id, t.amount, token)
             })
             .collect()
@@ -931,7 +937,10 @@ mod tests {
         };
         assert_eq!(recognized.opened, terms);
         assert_eq!(recognized.terms.memo, "the memo A signed");
-        assert_eq!(recognized.terms.token_id, "ERA");
+        assert_eq!(
+            recognized.terms.policy_commit,
+            crate::policy::builtin_policy_commit("ERA").expect("ERA's policy")
+        );
     }
 
     /// A transfer A signed to another device, sent to B: SIG A verifies, and
@@ -1387,8 +1396,10 @@ mod tests {
 
     /// The inbox lists a transfer by what its sender signed. A hostile
     /// sender's second copy, its wrapper claiming a million NOTX, is listed
-    /// with the signed terms; junk sealed to B is listed as unverified, with
-    /// no sender and no terms.
+    /// with the signed terms; a transfer A signed over ERA whose terms call
+    /// the token "NOSUCH" is listed as ERA, the policy its operation commits
+    /// to; junk sealed to B is listed as unverified, with no sender and no
+    /// terms.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn the_inbox_shows_what_the_sender_signed() {
@@ -1401,6 +1412,29 @@ mod tests {
             &one.message_id,
             &second_id,
             lying_wrapper(&one.transfer_bytes, [0xC7; 32]),
+        )
+        .await;
+        let tip = a_view_of_b(&p);
+        let mislabelled_terms = dsm::types::operations::TransferTerms::new(
+            b"NOSUCH".to_vec(),
+            transfer_nonce(&tip, 5, "NOSUCH", &p.b.device_id),
+            dsm::types::operations::TransactionMode::Unilateral,
+            "a label A chose".to_string(),
+        );
+        let mislabelled_id = crate::util::text_id::encode_base32_crockford(&[0x7Du8; 16]);
+        let mislabelled = signed_by_a_carrying(
+            &p,
+            p.b.device_id,
+            5,
+            &mislabelled_terms,
+            mislabelled_terms.to_bytes(),
+        );
+        post_as_the_sender(
+            &p,
+            &one.route,
+            &one.message_id,
+            &mislabelled_id,
+            mislabelled,
         )
         .await;
         let junk_id = crate::util::text_id::encode_base32_crockford(&[0x7Cu8; 16]);
@@ -1456,6 +1490,11 @@ mod tests {
             );
             assert_eq!(item.sender_id.as_deref(), Some(sender.as_str()));
         }
+        assert_eq!(
+            listing(&listed.items, &mislabelled_id).preview,
+            format!("From: {sender} Amount: 0.05 ERA"),
+            "the token is the one the operation signs, not the terms' label"
+        );
         let junk = listing(&listed.items, &junk_id);
         assert!(
             junk.preview.starts_with("Unverified: "),
@@ -1463,6 +1502,6 @@ mod tests {
             junk.preview
         );
         assert_eq!(junk.sender_id, None, "and names no sender");
-        assert_eq!(listed.items.len(), 3, "{:?}", listed.items);
+        assert_eq!(listed.items.len(), 4, "{:?}", listed.items);
     }
 }

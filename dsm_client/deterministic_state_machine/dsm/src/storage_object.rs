@@ -39,6 +39,17 @@ use crate::common::domain_tags::TAG_DSM_STORAGE_OBJECT;
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 
+/// The largest payload a member takes into its immutable store, and so the
+/// largest it answers a read of one address with. Generously above the
+/// largest canonical object in the registry (an SPX256f signature is ~49.9
+/// KiB); a node refuses a longer put before any hashing, and a reader refuses
+/// a longer answer before holding it.
+pub const MAX_IMMUTABLE_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+/// The most entries one index read answers with (§7): a member pages the
+/// addresses under a locator, in append order, this many at a time.
+pub const MAX_INDEX_PAGE: usize = 256;
+
 /// `inner(N, P) = H_dom(N, P)`.
 pub fn immutable_inner(namespace: TaggedHashDomain<'_>, payload: &[u8]) -> [u8; 32] {
     let mut h = dsm_domain_hasher(namespace);

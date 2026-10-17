@@ -644,9 +644,9 @@ async fn a_non_transferable_token_refuses_its_transfer() {
     let adopted = p
         .b
         .router()
-        .query(crate::bridge::AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        .invoke(crate::bridge::AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
         })
         .await;
     assert!(
@@ -773,9 +773,9 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     let adopted = p
         .b
         .router()
-        .query(crate::bridge::AppQuery {
-            path: "tokens.addByAnchor".to_string(),
-            params: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
+        .invoke(crate::bridge::AppInvoke {
+            method: "tokens.addByAnchor".to_string(),
+            args: crate::util::text_id::encode_base32_crockford(&row.policy_commit).into_bytes(),
         })
         .await;
     assert!(

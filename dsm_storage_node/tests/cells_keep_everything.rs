@@ -371,3 +371,102 @@ async fn a_cell_takes_the_largest_route_entry_and_refuses_a_byte_more() {
     );
     assert_eq!(get(&app, &key(0xC2)).await.1, vec![at_cap]);
 }
+
+/// One page of a cell read from arrival index `from`: the status, the values,
+/// their records' arrival indexes and where the next page starts.
+async fn get_page(
+    app: &Router,
+    key: &str,
+    query: &str,
+) -> (StatusCode, Vec<Vec<u8>>, Vec<u64>, u64) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v2/cell/{key}{query}"))
+        .header("x-namespace", NS)
+        .body(Body::empty())
+        .expect("request");
+    let resp = app.clone().oneshot(req).await.expect("oneshot");
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    if status != StatusCode::OK {
+        return (status, Vec::new(), Vec::new(), 0);
+    }
+    let page = dsm::types::proto::CellValuesV1::decode(body.as_ref()).expect("CellValuesV1");
+    let indexes = page.records.iter().map(|r| r.index).collect();
+    (status, page.values, indexes, page.next)
+}
+
+/// A cell is read a page at a time (storage spec §6): from the arrival index
+/// the read names, at most the cell-value cap of value bytes and
+/// MAX_CELL_PAGE_ENTRIES entries, each page naming where the next starts and
+/// the last naming none. Reading every page returns everything held, in
+/// arrival order, and a read past the last entry is an empty page.
+#[tokio::test]
+async fn a_cell_is_read_a_page_at_a_time() {
+    use dsm::storage_cell::{CELL_PAGE_VALUE_BYTES, MAX_CELL_PAGE_ENTRIES};
+    let app = member("cells_paged").await;
+
+    // Three values, any two of which pass the cap: one to a page.
+    let large = key(0x71);
+    let big: Vec<Vec<u8>> = (0..3u8)
+        .map(|i| vec![i; CELL_PAGE_VALUE_BYTES * 2 / 3])
+        .collect();
+    for value in &big {
+        assert_eq!(put(&app, Some(NS), &large, value).await, StatusCode::OK);
+    }
+    for (from, next) in [(1u64, 2u64), (2, 3), (3, 0)] {
+        let (status, values, indexes, at) = get_page(&app, &large, &format!("?from={from}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            values,
+            vec![big[usize::try_from(from - 1).expect("index")].clone()]
+        );
+        assert_eq!(indexes, vec![from]);
+        assert_eq!(at, next, "the page from {from} names where the next starts");
+    }
+
+    // More small values than a page holds: a full page, then the rest.
+    let many = key(0x72);
+    let count = MAX_CELL_PAGE_ENTRIES + 10;
+    let small: Vec<Vec<u8>> = (0..count)
+        .map(|i| format!("entry {i}").into_bytes())
+        .collect();
+    let ns = NS.as_bytes().to_vec();
+    let raw_key = [0x72u8; 32];
+    for chunk in small.chunks(16) {
+        let batch = chunk
+            .iter()
+            .map(|v| (ns.clone(), raw_key, v.clone()))
+            .collect();
+        assert_eq!(put_batch(&app, batch).await, StatusCode::OK);
+    }
+    let (status, first, first_indexes, next) = get_page(&app, &many, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first, small[..MAX_CELL_PAGE_ENTRIES].to_vec());
+    let expected: Vec<u64> = (1..=u64::try_from(MAX_CELL_PAGE_ENTRIES).expect("entries")).collect();
+    assert_eq!(first_indexes, expected);
+    assert_eq!(
+        next,
+        u64::try_from(MAX_CELL_PAGE_ENTRIES + 1).expect("index")
+    );
+    let (_, rest, _, after) = get_page(&app, &many, &format!("?from={next}")).await;
+    assert_eq!(rest, small[MAX_CELL_PAGE_ENTRIES..].to_vec());
+    assert_eq!(after, 0, "the last page names no next page");
+
+    // Past the last entry: an empty page that names none.
+    let (status, none, _, past) = get_page(&app, &many, "?from=10000").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(none.is_empty());
+    assert_eq!(past, 0);
+
+    // An arrival index starts at 1, and a read names nothing else.
+    for query in ["?from=0", "?from=first", "?after=3", "?from=2&limit=9"] {
+        assert_eq!(
+            get_page(&app, &many, query).await.0,
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+}

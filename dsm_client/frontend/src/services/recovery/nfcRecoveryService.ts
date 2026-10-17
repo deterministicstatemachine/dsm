@@ -111,8 +111,8 @@ function decodeMetadata(metaData: Uint8Array): {
 
 function normalizeMnemonic(mnemonic: string): string {
   const trimmed = String(mnemonic || '').trim();
-  if (trimmed.split(/\s+/).length < 12) {
-    throw new Error('Mnemonic must be at least 12 words.');
+  if (trimmed.split(/\s+/).length !== 24) {
+    throw new Error('Mnemonic must be exactly 24 words.');
   }
   return trimmed;
 }

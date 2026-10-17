@@ -63,7 +63,8 @@ serde = { version = "1.0", features = ["derive"] }
 bitcoin = { version = "0.32", default-features = false, features = ["std"] }
 
 # Cryptography - core
-blake3 = "1.5.0"
+# `zeroize`: the HKDF and key-generation paths wipe hasher states and digests.
+blake3 = { version = "1.5.0", features = ["zeroize"] }
 hmac = "0.13.0"
 sha2 = "0.11.0"
 pbkdf2 = "0.13.0"
@@ -89,7 +90,8 @@ x509-parser = "0.18"
 ff = "0.14.0"
 
 # Post-quantum cryptography - REPLACED with pure Rust implementation
-ml-kem = { version = "0.2.0", features = ["deterministic"] }  # Pure Rust FIPS 203 ML-KEM implementation (replaces pqcrypto-mlkem)
+# `zeroize`: a decapsulation key is wiped when it is dropped.
+ml-kem = { version = "0.2.0", features = ["deterministic", "zeroize"] }  # Pure Rust FIPS 203 ML-KEM implementation (replaces pqcrypto-mlkem)
 # pqcrypto-traits = { version = "0.3.5", features = ["std"] }  # REMOVED: No longer needed  
 # pqcrypto-mlkem = "0.1.0"  # REMOVED: Hardware optimized, caused SIGILL on Android
 # pqcrypto-sphincsplus has been replaced with a pure Rust implementation

@@ -113,6 +113,10 @@ pub enum WriteSetError {
         object: &'static str,
         reason: String,
     },
+    /// A token creation whose fee is not the protocol's creation fee,
+    /// [`TOKEN_CREATION_FEE_ERA`](crate::core::token::TOKEN_CREATION_FEE_ERA)
+    /// (SoFi Amendment S18). The fee is never the operation's to choose.
+    CreationFeeNotTheProtocols { fee_amount: u64 },
     /// A mutation or state constructor refused (zero-amount leaf, sibling
     /// arity, ...) — carried through from the CCB layer.
     Ccb(String),
@@ -166,6 +170,12 @@ impl core::fmt::Display for WriteSetError {
             Self::MalformedEscrowObject { object, reason } => write!(
                 f,
                 "the escrow vault creation's {object} is not canonical: {reason}"
+            ),
+            Self::CreationFeeNotTheProtocols { fee_amount } => write!(
+                f,
+                "a token creation pays the protocol's creation fee of {} ERA base units, not \
+                 {fee_amount}",
+                crate::core::token::TOKEN_CREATION_FEE_ERA
             ),
             Self::Ccb(e) => write!(f, "write set: {e}"),
         }
@@ -350,10 +360,11 @@ fn semantic_write_set(
             to_device_id,
             amount,
             policy_commit,
-            authority_policy,
             ..
         } => {
-            if authority_policy.is_some() {
+            if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                operation,
+            ) {
                 // Offline-bearer tier: moves allocation, not balance.
                 return Err(WriteSetError::NoEconomicWriteSet);
             }
@@ -384,7 +395,9 @@ fn semantic_write_set(
         }),
         // Creation releases the token's whole genesis supply to its creator
         // (`ReleaseRule::AllAtCreation`, SoFi §51) in the same write set as
-        // the ERA fee. A token with no supply is not a token (§50).
+        // the ERA fee. A token with no supply is not a token (§50), and the
+        // fee is the protocol's (S18): the producer builds and the verifier
+        // checks the one write set this table gives, so both refuse any other.
         Operation::CreateToken {
             initial_supply,
             fee_amount,
@@ -393,6 +406,11 @@ fn semantic_write_set(
         } => {
             if initial_supply.value() == 0 {
                 return Err(WriteSetError::NoEconomicWriteSet);
+            }
+            if *fee_amount != crate::core::token::TOKEN_CREATION_FEE_ERA {
+                return Err(WriteSetError::CreationFeeNotTheProtocols {
+                    fee_amount: *fee_amount,
+                });
             }
             Ok(SemanticWriteSet::CreateTokenRelease {
                 fee: (
@@ -960,15 +978,13 @@ pub fn build_write_set(
             if *facts != CreditSourceFacts::GenesisRelease {
                 return Err(WriteSetError::FactsDoNotMatchOperation);
             }
-            if fee.1 > 0 {
-                planned.push(plan_balance_debit(
-                    genesis,
-                    device_id,
-                    pre_balances,
-                    fee.0,
-                    fee.1,
-                )?);
-            }
+            planned.push(plan_balance_debit(
+                genesis,
+                device_id,
+                pre_balances,
+                fee.0,
+                fee.1,
+            )?);
             let (policy_commit, amount) = release;
             let record =
                 EconomicLeafState::TokenCreation(EconomicTokenCreationState { policy_commit });
@@ -1440,8 +1456,8 @@ pub fn verify_operation_write_set(
             }
             Ok(())
         }
-        // SoFi §51: the fee debit, if any, and the release credit, funded by
-        // the one genesis-release source. The source's arm establishes what
+        // SoFi §51: the fee debit and the release credit, funded by the one
+        // genesis-release source. The source's arm establishes what
         // the release funds; this layer pins that the witness is exactly this
         // operation's effect.
         SemanticWriteSet::CreateTokenRelease { fee, release } => {
@@ -1460,10 +1476,7 @@ pub fn verify_operation_write_set(
                     detail: "a token creation inserts exactly one creation record",
                 });
             };
-            let expected_balances = if fee.1 > 0 { 2 } else { 1 };
-            if balances.len() != expected_balances
-                || witness.mutations.len() != expected_balances + 1
-            {
+            if balances.len() != 2 || witness.mutations.len() != 3 {
                 return Err(WriteSetError::WrongWriteSet {
                     detail: "a token creation is its fee debit, one release credit and its \
                              creation record",
@@ -1474,13 +1487,11 @@ pub fn verify_operation_write_set(
                     detail: "the creation record names another token than the operation creates",
                 });
             }
-            if fee.1 > 0 {
-                let observed = expect_one_balance(&balances, fee.0)?;
-                if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
-                    return Err(WriteSetError::WrongWriteSet {
-                        detail: "the fee debit is not the operation's fee",
-                    });
-                }
+            let observed = expect_one_balance(&balances, fee.0)?;
+            if observed.pre_amount.checked_sub(observed.post_amount) != Some(fee.1) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "the fee debit is not the operation's fee",
+                });
             }
             let credit = expect_one_balance(&balances, release.0)?;
             if credit.post_amount.checked_sub(credit.pre_amount) != Some(release.1) {
@@ -2161,5 +2172,108 @@ mod escrow_create_binding_tests {
             Err(WriteSetError::MalformedVaultOperation { detail })
                 if detail.contains("its own owner's balances")
         ));
+    }
+}
+
+#[cfg(test)]
+mod creation_fee_and_bearer_tests {
+    use super::*;
+    use crate::economic::classifier::{classify, EconomicEffect};
+    use crate::types::operations::{AuthorityMode, AuthorityPolicy, TransactionMode, TransferTerms};
+
+    const G: [u8; 32] = [0x11; 32];
+    const DEV: [u8; 32] = [0x22; 32];
+
+    fn create_paying(fee_amount: u64) -> Operation {
+        Operation::CreateToken {
+            token_id: b"NEWCOIN".to_vec(),
+            initial_supply: crate::types::token_types::Balance::amount(9),
+            policy_commit: [0x7E; 32],
+            fee_amount,
+            name: "New Coin".to_string(),
+            symbol: "NEW".to_string(),
+            decimals: 0,
+            metadata_uri: None,
+            signature: Vec::new(),
+        }
+    }
+
+    /// The one table the producer builds from and the verifier checks
+    /// against pins the creation fee to the protocol's (SoFi Amendment S18),
+    /// so neither side has a write set for any other fee. A fee of 0 used to
+    /// give a write set with no fee debit at all.
+    ///
+    /// MUTATION CONTROL: delete the fee check in `semantic_write_set`'s
+    /// `CreateToken` arm and the free creation gets a write set.
+    #[test]
+    fn a_creation_paying_other_than_the_protocol_fee_has_no_write_set() {
+        let fee = crate::core::token::TOKEN_CREATION_FEE_ERA;
+        match semantic_write_set(&create_paying(fee), &G, &DEV, 1) {
+            Ok(SemanticWriteSet::CreateTokenRelease { fee: (_, paid), .. }) => {
+                assert_eq!(paid, fee)
+            }
+            Ok(_) => panic!("a token creation's write set is its release"),
+            Err(refused) => panic!("the protocol fee: {refused}"),
+        }
+        for named in [0, fee - 1, fee + 1] {
+            match semantic_write_set(&create_paying(named), &G, &DEV, 1) {
+                Err(refused) => assert_eq!(
+                    refused,
+                    WriteSetError::CreationFeeNotTheProtocols { fee_amount: named }
+                ),
+                Ok(_) => panic!("a creation paying {named} has a write set"),
+            }
+        }
+    }
+
+    fn transfer(authority_policy: Option<AuthorityPolicy>) -> Operation {
+        Operation::Transfer {
+            to_device_id: vec![0x33; 32],
+            amount: crate::types::token_types::Balance::amount(5),
+            policy_commit: [0x44; 32],
+            terms_commitment: TransferTerms {
+                token_id: b"TOK".to_vec(),
+                nonce: vec![1, 2, 3],
+                mode: TransactionMode::Bilateral,
+                memo: String::new(),
+                salt: vec![0x5A; 32],
+            }
+            .commitment(),
+            signature: Vec::new(),
+            authority_policy,
+        }
+    }
+
+    /// One predicate decides which transfers are offline-bearer, the one
+    /// `advance`, conservation and the receipt rules use: a transfer whose
+    /// authority policy declares `OnlineChecked` is an online transfer with an
+    /// online write set. The classifier and this table used to treat any
+    /// policy at all as offline-bearer, so such a transfer moved balance under
+    /// `advance` while its economic effect read as allocation only.
+    ///
+    /// MUTATION CONTROL: classify any `authority_policy: Some(_)` as
+    /// offline-bearer again and the online-checked transfer has no write set.
+    #[test]
+    fn only_an_offline_bearer_requirement_makes_a_transfer_allocation_only() {
+        let policy = |mode| {
+            Some(AuthorityPolicy {
+                mode,
+                policy_id: [3u8; 32],
+                anchor_set_id: [4u8; 32],
+            })
+        };
+        let online = transfer(policy(AuthorityMode::OnlineChecked));
+        let bearer = transfer(policy(AuthorityMode::OfflineBearerRequired));
+        assert_eq!(classify(&transfer(None)), EconomicEffect::ClosedWriteSet);
+        assert_eq!(classify(&online), EconomicEffect::ClosedWriteSet);
+        assert_eq!(classify(&bearer), EconomicEffect::OfflineAccountOnly);
+        assert!(matches!(
+            semantic_write_set(&online, &G, &DEV, 1),
+            Ok(SemanticWriteSet::DebitOnly { amount: 5, .. })
+        ));
+        match semantic_write_set(&bearer, &G, &DEV, 1) {
+            Err(refused) => assert_eq!(refused, WriteSetError::NoEconomicWriteSet),
+            Ok(_) => panic!("an offline-bearer transfer moves allocation, not balance"),
+        }
     }
 }

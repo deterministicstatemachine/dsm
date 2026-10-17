@@ -71,6 +71,7 @@ impl EmissionSchedule {
                 source: None,
             });
         }
+        shard_count(shard_depth)?;
 
         Ok(Self {
             total_supply,
@@ -217,24 +218,52 @@ pub struct SourceDlvState {
     pub remaining_supply: u64,
 }
 
+/// The number of shards of a schedule of depth `b`, `2^b`. The shard tree's
+/// heap indices are `u64` and reach `2^(b+1) − 1`, and there is one
+/// accumulator per shard, so a depth is accepted only when `2^b` is below
+/// `2^64` as a heap index and fits a `usize` as a count.
+pub fn shard_count(shard_depth: u8) -> Result<usize, DsmError> {
+    let depth = u32::from(shard_depth);
+    if depth >= u64::BITS {
+        return Err(DsmError::Validation {
+            context: format!("DJTE shard depth {shard_depth}: the shard tree's heap is u64"),
+            source: None,
+        });
+    }
+    1usize
+        .checked_shl(depth)
+        .ok_or_else(|| DsmError::Validation {
+            context: format!(
+                "DJTE shard depth {shard_depth}: 2^{shard_depth} shards exceed a usize"
+            ),
+            source: None,
+        })
+}
+
 impl SourceDlvState {
-    pub fn new(shard_depth: u8, total_supply: u64) -> Self {
+    pub fn new(shard_depth: u8, total_supply: u64) -> Result<Self, DsmError> {
         Self::new_with_schedule(EmissionSchedule::default_for_source(
             shard_depth,
             total_supply,
         ))
     }
 
-    pub fn new_with_schedule(schedule: EmissionSchedule) -> Self {
+    /// A source state at genesis for `schedule`: one empty accumulator per
+    /// shard. Refused when the schedule's depth is out of the shard tree's
+    /// range, or the accumulators cannot be allocated.
+    pub fn new_with_schedule(schedule: EmissionSchedule) -> Result<Self, DsmError> {
         let shard_depth = schedule.shard_depth;
         let total_supply = schedule.total_supply;
-        let num_shards = 1usize << shard_depth;
-        let mut accs = Vec::with_capacity(num_shards);
-        for _ in 0..num_shards {
-            accs.push(ShardActivationAccumulator::new());
-        }
+        let num_shards = shard_count(shard_depth)?;
+        let mut accs = Vec::new();
+        accs.try_reserve_exact(num_shards)
+            .map_err(|e| DsmError::Validation {
+                context: format!("DJTE shard depth {shard_depth}: {num_shards} accumulators: {e}"),
+                source: None,
+            })?;
+        accs.resize_with(num_shards, ShardActivationAccumulator::new);
 
-        Self {
+        Ok(Self {
             dlv_tip: [0u8; 32],
             emission_index: 0,
             policy: schedule,
@@ -242,7 +271,7 @@ impl SourceDlvState {
             count_smt: ShardCountSmt::new(shard_depth),
             shard_accumulators: accs,
             remaining_supply: total_supply,
-        }
+        })
     }
 
     /// Applies an activation to this state (append + count update).
@@ -378,6 +407,11 @@ pub fn select_winner_for_event(
     let mut k = uniform_index(&r0, n)?;
 
     let b = state.count_smt.shard_depth;
+    // The shard leaves start at heap index 2^b; a depth whose leaves are not
+    // u64 heap indices names no shard.
+    let shard_base = 1u64
+        .checked_shl(u32::from(b))
+        .ok_or_else(|| DsmError::Verification(format!("DJTE shard depth {b} exceeds the heap")))?;
     let mut heap: u64 = 1;
     for _ in 0..b {
         let left = heap * 2;
@@ -391,7 +425,6 @@ pub fn select_winner_for_event(
         }
     }
 
-    let shard_base = 1u64 << b;
     if heap < shard_base {
         return Err(DsmError::Verification("Invalid shard descent".into()));
     }
@@ -686,6 +719,36 @@ fn extract_shard_index(hash: &[u8; 32], depth: u8) -> u64 {
 mod tests {
     use super::*;
 
+    /// A shard depth is bounded by the shard tree's u64 heap: 2^b leaves start
+    /// at heap index 2^b, so b = 64 and above are refused where a schedule or
+    /// a source state is made, and where a winner is selected or a shard
+    /// counted on a state whose depth was set past them, rather than shifting
+    /// out of range.
+    #[test]
+    fn a_shard_depth_past_the_u64_heap_is_refused_not_shifted() {
+        assert_eq!(shard_count(2).expect("depth 2"), 4);
+        assert_eq!(shard_count(63).expect("depth 63"), 1usize << 63);
+        for depth in [64u8, 65, 255] {
+            shard_count(depth).expect_err("past the heap");
+            EmissionSchedule::new(1000, depth, 64, 1, 1).expect_err("a schedule past the heap");
+            SourceDlvState::new(depth, 1000).expect_err("a source state past the heap");
+            ShardCountSmt::new(depth)
+                .increment(0)
+                .expect_err("a shard count past the heap");
+        }
+
+        let mut state = SourceDlvState::new(2, 1000).expect("depth 2");
+        let jap = JoinActivationProof {
+            id: [0x31u8; 32],
+            gate_proof: vec![0x31],
+            nonce: [0x32u8; 32],
+        };
+        state.add_activation(&jap).expect("activation");
+        select_winner_for_event(&state, 1, &[3u8; 32]).expect("depth 2 selects");
+        state.count_smt.shard_depth = 64;
+        select_winner_for_event(&state, 1, &[3u8; 32]).expect_err("depth 64 names no shard");
+    }
+
     #[test]
     fn test_uniform_index_determinism_and_bounds() {
         let seed = [0u8; 32];
@@ -705,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_add_activation_updates_counts_and_leaf() {
-        let mut state = SourceDlvState::new(2, 1000);
+        let mut state = SourceDlvState::new(2, 1000).expect("depth 2");
 
         let id1 = [1u8; 32];
         let jap2 = JoinActivationProof {
@@ -728,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_select_winner_after_activation_is_in_range() {
-        let mut state = SourceDlvState::new(2, 1000);
+        let mut state = SourceDlvState::new(2, 1000).expect("depth 2");
 
         for v in 1u8..=4u8 {
             let jap = JoinActivationProof {
@@ -750,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_verify_emission_happy_path() {
-        let prev = SourceDlvState::new(2, 10);
+        let prev = SourceDlvState::new(2, 10).expect("depth 2");
 
         let device_id = [7u8; 32];
         let jap = JoinActivationProof {
@@ -807,7 +870,7 @@ mod tests {
 
     #[test]
     fn test_verify_emission_rejects_arbitrary_amount() {
-        let prev = SourceDlvState::new(2, 10);
+        let prev = SourceDlvState::new(2, 10).expect("depth 2");
         let device_id = [7u8; 32];
         let jap = JoinActivationProof {
             id: device_id,

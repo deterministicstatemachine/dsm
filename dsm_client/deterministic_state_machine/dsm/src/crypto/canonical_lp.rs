@@ -61,12 +61,13 @@ pub fn hash_lp3(domain: TaggedHashDomain<'_>, a: &[u8], b: &[u8], c: &[u8]) -> [
 
 #[cfg(test)]
 mod tests {
-    // Validated test domains. Deliberately prefix-related — b"d" is a prefix of
-    // b"dom" — because that is the ambiguity the canonical delimiter removes.
-    const D_A: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"domain-a");
-    const D_B: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"domain-b");
-    const D_DOM: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"dom");
-    const D_D: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"d");
+    // Validated test domains. Deliberately prefix-related — b"DSM/d" is a
+    // prefix of b"DSM/dom" — because that is the ambiguity the canonical
+    // delimiter removes.
+    const D_A: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/domain-a");
+    const D_B: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/domain-b");
+    const D_DOM: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/dom");
+    const D_D: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/d");
 
     use super::*;
 
@@ -146,8 +147,9 @@ mod tests {
     }
 
     /// NEW, and the reason the old prefix-related literals existed. `hash_lp`
-    /// used to write the domain RAW, so separation between `b"d"`, `b"dom"` and
-    /// `b"domain-a"` rested on the caller spelling a terminator. The encoder now
+    /// used to write the domain RAW, so separation between `b"DSM/d"`,
+    /// `b"DSM/dom"` and `b"DSM/domain-a"` rested on the caller spelling a
+    /// terminator. The encoder now
     /// appends exactly one delimiter, so prefix-freedom is structural.
     #[test]
     fn a_domain_that_is_a_prefix_of_another_is_still_separated() {
@@ -155,7 +157,7 @@ mod tests {
         let long = hash_lp1(D_DOM, b"payload");
         assert_ne!(
             short, long,
-            "H(d || 0x00 || 'ompayload') collided with H(dom || 0x00 || 'payload'); \
+            "H(DSM/d || 0x00 || 'ompayload') collided with H(DSM/dom || 0x00 || 'payload'); \
              the delimiter is not separating prefix-related domains"
         );
     }

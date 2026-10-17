@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use log::{debug, info, warn};
+use log::{info, warn};
 use dsm::types::error::DsmError;
 
 use crate::bluetooth::bilateral_ble_handler::BilateralBleHandler;
@@ -223,6 +223,76 @@ fn classify_prepare_response_reply(envelope_bytes: &[u8]) -> Option<BleFrameType
     }
 }
 
+/// The frames the bilateral transport takes, each known by its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BilateralFrame {
+    Prepare,
+    PrepareResponse,
+    PrepareReject,
+    Confirm,
+    CommitResponse,
+}
+
+impl BilateralFrame {
+    /// The frame `envelope` carries: a prepare-response, prepare-reject or
+    /// commit-response payload, or a transaction of exactly one op invoking
+    /// `bilateral.prepare` or `bilateral.confirm` (the step parsers take one
+    /// op only). `None` for anything else.
+    #[must_use]
+    pub fn of(envelope: &crate::generated::Envelope) -> Option<Self> {
+        use crate::generated::{envelope::Payload, universal_op::Kind, UniversalOp};
+        match &envelope.payload {
+            Some(Payload::BilateralPrepareResponse(_)) => Some(Self::PrepareResponse),
+            Some(Payload::BilateralPrepareReject(_)) => Some(Self::PrepareReject),
+            Some(Payload::BilateralCommitResponse(_)) => Some(Self::CommitResponse),
+            Some(Payload::UniversalTx(tx)) => match tx.ops.as_slice() {
+                [UniversalOp {
+                    kind: Some(Kind::Invoke(invoke)),
+                    ..
+                }] => match invoke.method.as_str() {
+                    "bilateral.prepare" => Some(Self::Prepare),
+                    "bilateral.confirm" => Some(Self::Confirm),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The BLE frame type this frame travels under.
+    #[must_use]
+    pub fn frame_type(self) -> BleFrameType {
+        match self {
+            Self::Prepare => BleFrameType::BilateralPrepare,
+            Self::PrepareResponse => BleFrameType::BilateralPrepareResponse,
+            Self::PrepareReject => BleFrameType::BilateralPrepareReject,
+            Self::Confirm => BleFrameType::BilateralConfirm,
+            Self::CommitResponse => BleFrameType::BilateralCommitResponse,
+        }
+    }
+}
+
+/// The frame a message is, when its payload bears out the frame type it
+/// arrived under. A frame type is the sender's claim: a payload that is not
+/// that frame, a frame type the bilateral transport does not take, and bytes
+/// that are not a canonical envelope are refused, and nothing is sent back.
+fn frame_borne_out(message: &TransportInboundMessage) -> Result<BilateralFrame, DsmError> {
+    let envelope = crate::envelope::from_canonical_bytes(&message.payload).map_err(|e| {
+        DsmError::invalid_operation(format!(
+            "a {:?} frame that is not a canonical envelope: {e}",
+            message.frame_type
+        ))
+    })?;
+    match BilateralFrame::of(&envelope) {
+        Some(frame) if frame.frame_type() == message.frame_type => Ok(frame),
+        carried => Err(DsmError::invalid_operation(format!(
+            "a {:?} frame whose payload is {carried:?}: not taken, nothing sent back",
+            message.frame_type
+        ))),
+    }
+}
+
 impl BleTransportDelegate for BilateralTransportAdapter {
     fn on_transport_message(
         &self,
@@ -230,8 +300,8 @@ impl BleTransportDelegate for BilateralTransportAdapter {
     ) -> DelegateFuture<Result<Vec<TransportOutbound>, DsmError>> {
         let bilateral_handler = Arc::clone(&self.bilateral_handler);
         Box::pin(async move {
-            match message.frame_type {
-                BleFrameType::BilateralPrepare => {
+            match frame_borne_out(&message)? {
+                BilateralFrame::Prepare => {
                     info!("Processing bilateral prepare request via transport adapter");
                     match bilateral_handler
                         .handle_prepare_request(
@@ -256,28 +326,7 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         }
                     }
                 }
-                BleFrameType::BilateralPrepareResponse => {
-                    let is_prepare_response =
-                        match crate::envelope::from_canonical_bytes(&message.payload) {
-                            Ok(env) => {
-                                matches!(
-                            env.payload,
-                            Some(crate::generated::envelope::Payload::BilateralPrepareResponse(_))
-                        )
-                            }
-                            Err(_) => false,
-                        };
-                    if !is_prepare_response {
-                        debug!(
-                            "Pass-through BilateralPrepareResponse frame (non-prepare-response envelope detected) size={}",
-                            message.payload.len()
-                        );
-                        return Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralPrepareResponse,
-                            message.payload,
-                        )]);
-                    }
-
+                BilateralFrame::PrepareResponse => {
                     match bilateral_handler
                         .handle_prepare_response(&message.payload)
                         .await
@@ -298,67 +347,13 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         Err(e) => Err(e),
                     }
                 }
-                BleFrameType::BilateralPrepareReject => {
-                    let is_prepare_reject =
-                        match crate::envelope::from_canonical_bytes(&message.payload) {
-                            Ok(env) => matches!(
-                                env.payload,
-                                Some(crate::generated::envelope::Payload::BilateralPrepareReject(
-                                    _
-                                ))
-                            ),
-                            Err(_) => false,
-                        };
-                    if !is_prepare_reject {
-                        debug!(
-                            "Pass-through BilateralPrepareReject frame (non-reject envelope detected) size={}",
-                            message.payload.len()
-                        );
-                        return Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralPrepareReject,
-                            message.payload,
-                        )]);
-                    }
-
+                BilateralFrame::PrepareReject => {
                     bilateral_handler
                         .handle_prepare_reject(&message.payload)
                         .await?;
                     Ok(Vec::new())
                 }
-                BleFrameType::BilateralConfirm => {
-                    let is_confirm_request =
-                        match crate::envelope::from_canonical_bytes(&message.payload) {
-                            Ok(env) => {
-                                if let Some(crate::generated::envelope::Payload::UniversalTx(tx)) =
-                                    env.payload
-                                {
-                                    if let Some(op) = tx.ops.first() {
-                                        match &op.kind {
-                                            Some(crate::generated::universal_op::Kind::Invoke(
-                                                invoke,
-                                            )) => invoke.method == "bilateral.confirm",
-                                            _ => false,
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            }
-                            Err(_) => false,
-                        };
-                    if !is_confirm_request {
-                        debug!(
-                            "Pass-through BilateralConfirm frame (non-confirm UniversalTx detected) size={}",
-                            message.payload.len()
-                        );
-                        return Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralConfirm,
-                            message.payload,
-                        )]);
-                    }
-
+                BilateralFrame::Confirm => {
                     // Spawn the confirm handler on the tokio runtime instead of
                     // awaiting inline. The GATT callback thread enters Rust via
                     // block_on(), and handle_confirm_request acquires
@@ -399,39 +394,10 @@ impl BleTransportDelegate for BilateralTransportAdapter {
                         Ok(Vec::new())
                     }
                 }
-                BleFrameType::BilateralCommitResponse => {
-                    let is_commit_response =
-                        match crate::envelope::from_canonical_bytes(&message.payload) {
-                            Ok(env) => {
-                                matches!(
-                            env.payload,
-                            Some(crate::generated::envelope::Payload::BilateralCommitResponse(_))
-                        )
-                            }
-                            Err(_) => false,
-                        };
-                    if !is_commit_response {
-                        debug!(
-                            "Pass-through BilateralCommitResponse frame (non-commit-response envelope detected) size={}",
-                            message.payload.len()
-                        );
-                        return Ok(vec![TransportOutbound::new(
-                            BleFrameType::BilateralCommitResponse,
-                            message.payload,
-                        )]);
-                    }
-
+                BilateralFrame::CommitResponse => {
                     bilateral_handler
                         .handle_commit_response(&message.payload)
                         .await?;
-                    Ok(Vec::new())
-                }
-                BleFrameType::Unspecified => Ok(vec![TransportOutbound::new(
-                    BleFrameType::Unspecified,
-                    message.payload,
-                )]),
-                _ => {
-                    debug!("Ignoring unknown BLE frame type: {:?}", message.frame_type);
                     Ok(Vec::new())
                 }
             }

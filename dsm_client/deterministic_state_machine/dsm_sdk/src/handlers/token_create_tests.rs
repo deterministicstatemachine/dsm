@@ -370,38 +370,31 @@ async fn token_check_names_each_field_token_create_would_refuse_and_creates_noth
 }
 
 /// A transaction in a created token shows its amount at that token's own
-/// decimals; the canonical base units are untouched.
+/// decimals, read from its policy commit; the canonical base units are
+/// untouched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_created_tokens_amounts_render_at_its_own_decimals() {
-    use crate::handlers::wallet_routes::enrich_transaction_display;
+    use crate::handlers::wallet_routes::{token_of_commit, transfer_display_amount};
     let d = Device::funded(0xC5).await;
     created(&create(&d.router, &request("RIGC", 2, 1_000)).await);
-    let tx = |amount: u64, amount_signed: i64| generated::TransactionInfo {
-        token_id: "RIGC".to_string(),
-        amount,
-        amount_signed,
-        ..Default::default()
-    };
-
-    let mut outgoing = tx(25_000, -25_000);
-    enrich_transaction_display(&mut outgoing).expect("the token's decimals are known");
-    assert_eq!(outgoing.display_amount, "-250.00");
-    assert_eq!((outgoing.amount, outgoing.amount_signed), (25_000, -25_000));
-
-    let mut incoming = tx(25_000, 25_000);
-    enrich_transaction_display(&mut incoming).expect("the token's decimals are known");
-    assert_eq!(incoming.display_amount, "250.00");
-
-    let mut era = generated::TransactionInfo {
-        token_id: "ERA".to_string(),
-        amount: 100,
-        amount_signed: -100,
-        ..Default::default()
-    };
-    enrich_transaction_display(&mut era).expect("the token's decimals are known");
+    let rigc = crate::storage::client_db::token_registry::get_token_by_ticker("RIGC")
+        .expect("registry read")
+        .expect("the created token is registered")
+        .policy_commit;
+    let (ticker, decimals) = token_of_commit(&rigc).expect("the token's decimals are known");
+    assert_eq!(ticker, "RIGC");
     assert_eq!(
-        era.display_amount, "-1.00",
+        transfer_display_amount(25_000, -25_000, decimals),
+        "-250.00"
+    );
+    assert_eq!(transfer_display_amount(25_000, 25_000, decimals), "250.00");
+
+    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+    let (_, era_decimals) = token_of_commit(&era).expect("ERA's decimals are known");
+    assert_eq!(
+        transfer_display_amount(100, -100, era_decimals),
+        "-1.00",
         "ERA renders at its two decimals"
     );
 }
@@ -420,9 +413,9 @@ async fn a_created_token_is_sent_after_its_creator_restarts() {
     p.b.enter();
     let adopted =
         p.b.router()
-            .query(crate::bridge::AppQuery {
-                path: "tokens.addByAnchor".to_string(),
-                params: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
+            .invoke(crate::bridge::AppInvoke {
+                method: "tokens.addByAnchor".to_string(),
+                args: crate::util::text_id::encode_base32_crockford(&pc).into_bytes(),
             })
             .await;
     assert!(

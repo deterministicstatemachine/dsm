@@ -18474,8 +18474,10 @@ export class SealedEnvelopeV1 extends Message<SealedEnvelopeV1> {
  * Each device writes its own entry, signed with its AK, to the keyed cell
  * H(DSM/device-directory-key/v1, genesis, device_id) under the namespace
  * DSM/device-directory/v1. Nodes store every entry and check nothing; a reader
- * keeps the entry whose AK hashes (with AttA) to the device id and whose
- * signature verifies, highest counter first (dsm::core::identity::directory).
+ * keeps the entry whose AK hashes (with AttA) to the device id, whose
+ * signature verifies and whose evidence proves, by P0-P6, its AK as the owner
+ * authority of the device under its genesis (DSM Amendment A18), highest
+ * counter first (dsm::core::identity::directory).
  *
  * @generated from message dsm.DeviceDirectoryEntryBodyV1
  */
@@ -18510,6 +18512,21 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
    */
   counter = protoInt64.zero;
 
+  /**
+   * DSM Amendment A18: the transition t the evidence's chain reaches, and the
+   * device's P0-P6 authority evidence (AuthorityEvidenceV1 bytes: the genesis
+   * parameters, the GRK delegation and device-tree transition chain to t, and
+   * the device's inclusion proof). Bounded by the directory cell's value budget.
+   *
+   * @generated from field: bytes authority_position = 7;
+   */
+  authorityPosition = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes authority_evidence = 8;
+   */
+  authorityEvidence = new Uint8Array(0);
+
   constructor(data?: PartialMessage<DeviceDirectoryEntryBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -18524,6 +18541,8 @@ export class DeviceDirectoryEntryBodyV1 extends Message<DeviceDirectoryEntryBody
     { no: 4, name: "att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "kyber_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 6, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 7, name: "authority_position", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "authority_evidence", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): DeviceDirectoryEntryBodyV1 {
@@ -20949,6 +20968,9 @@ export class ChainTip extends Message<ChainTip> {
 }
 
 /**
+ * A recovery receipt is signed with the cached recovery authority key; no
+ * request carries a key (field 5 of the tombstone, 3 of the succession).
+ *
  * @generated from message dsm.RecoveryTombstoneRequest
  */
 export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> {
@@ -20972,11 +20994,6 @@ export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> 
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes environment_data = 5;
-   */
-  environmentData = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RecoveryTombstoneRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -20989,7 +21006,6 @@ export class RecoveryTombstoneRequest extends Message<RecoveryTombstoneRequest> 
     { no: 2, name: "counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 3, name: "rollup_hash", kind: "message", T: Hash32 },
     { no: 4, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "environment_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryTombstoneRequest {
@@ -21072,11 +21088,6 @@ export class RecoverySuccessionRequest extends Message<RecoverySuccessionRequest
    */
   deviceEntropy = new Uint8Array(0);
 
-  /**
-   * @generated from field: bytes environment_data = 3;
-   */
-  environmentData = new Uint8Array(0);
-
   constructor(data?: PartialMessage<RecoverySuccessionRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -21087,7 +21098,6 @@ export class RecoverySuccessionRequest extends Message<RecoverySuccessionRequest
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "tombstone_hash", kind: "message", T: Hash32 },
     { no: 2, name: "device_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "environment_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoverySuccessionRequest {
@@ -28140,8 +28150,11 @@ export class BleConnectionFailed extends Message<BleConnectionFailed> {
 
 /**
  * ── keyed cells and indexes (storage contract Part II) ──────────────────────
- * Everything a member holds at a key, in arrival order. An empty list is an
- * asserted absence. The member decodes none of the values.
+ * One page of what a member holds at a key, in arrival order (storage spec
+ * §6): the entries from the arrival index the read names, at most the
+ * cell-value cap of value bytes and MAX_CELL_PAGE_ENTRIES entries, and always
+ * the first of them. An empty page read from index 1 is an asserted absence.
+ * The member decodes none of the values.
  *
  * @generated from message dsm.CellValuesV1
  */
@@ -28158,6 +28171,14 @@ export class CellValuesV1 extends Message<CellValuesV1> {
    */
   records: ArrivalRecordV1[] = [];
 
+  /**
+   * The arrival index the next page starts at; 0 when this page reaches the
+   * last entry the member holds.
+   *
+   * @generated from field: uint64 next = 3;
+   */
+  next = protoInt64.zero;
+
   constructor(data?: PartialMessage<CellValuesV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -28168,6 +28189,7 @@ export class CellValuesV1 extends Message<CellValuesV1> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 2, name: "records", kind: "message", T: ArrivalRecordV1, repeated: true },
+    { no: 3, name: "next", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CellValuesV1 {

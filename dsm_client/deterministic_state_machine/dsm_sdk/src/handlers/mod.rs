@@ -79,4 +79,4 @@ pub mod token_routes;
 pub mod transfer_helpers;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
-pub(crate) use system_routes::{handle_create_genesis_v2_query, handle_generate_mnemonic_query};
+pub(crate) use system_routes::{handle_create_genesis_v2, handle_generate_mnemonic_query};

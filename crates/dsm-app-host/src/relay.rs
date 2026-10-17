@@ -40,13 +40,82 @@ pub struct State {
 const HOLD_ROUNDS: usize = 10;
 const HOLD_ROUND: Duration = Duration::from_secs(2);
 
-pub fn router(state: State) -> Router {
+/// What one wallet, or anyone else who reaches the relay, can hold on it,
+/// and for how long. Transport bounds, never validity rules.
+#[derive(Debug, Clone, Copy)]
+pub struct Bounds {
+    /// How long a connection has to send a request's headers, the next
+    /// request's included once it has answered one.
+    pub header_read: Duration,
+    /// How long one request may take before it is answered `408`; a held
+    /// read of requests fits inside it.
+    pub request_time: Duration,
+    /// Requests worked on at once. One more is answered `503` at once.
+    pub in_flight: usize,
+}
+
+impl Bounds {
+    /// The deployed relay's bounds.
+    /// Every connected wallet keeps one read of its session's requests held,
+    /// so the in-flight bound is sized for wallets, not for SDK calls: those
+    /// wait in the SDK's own bounded queue.
+    pub const DEPLOYED: Bounds = Bounds {
+        header_read: Duration::from_secs(10),
+        request_time: Duration::from_secs(30),
+        in_flight: 512,
+    };
+}
+
+/// Answer `503` at once to a request over the relay's in-flight bound.
+async fn within_bound(
+    Extract(slots): Extract<Arc<tokio::sync::Semaphore>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Ok(_working) = slots.try_acquire() else {
+        return refused(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the relay is busy; try again".into(),
+        );
+    };
+    next.run(request).await
+}
+
+pub fn router(state: State, bounds: Bounds) -> Router {
     Router::new()
         .route("/connect/offer/{digest}", get(offer))
         .route("/connect/accept", post(accept))
         .route("/connect/requests/{session}/{after}", get(requests))
         .route("/connect/responses", post(respond))
         .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(tokio::sync::Semaphore::new(bounds.in_flight)),
+            within_bound,
+        ))
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            bounds.request_time,
+        ))
+}
+
+/// Serve the relay for `state` on `listener` over `tls` until it fails,
+/// every connection and request held to `bounds`. The binary serves through
+/// exactly this.
+pub async fn serve(
+    listener: std::net::TcpListener,
+    tls: axum_server::tls_rustls::RustlsConfig,
+    state: State,
+    bounds: Bounds,
+) -> std::io::Result<()> {
+    let mut server = axum_server::from_tcp_rustls(listener, tls)?;
+    server
+        .http_builder()
+        .http1()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(bounds.header_read);
+    server
+        .serve(router(state, bounds).into_make_service())
+        .await
 }
 
 fn id32(text: &str, what: &str) -> Result<[u8; 32], String> {
@@ -221,5 +290,78 @@ async fn respond(Extract(state): Extract<State>, body: Bytes) -> Response {
             state.record.relay("relay: answer", summary, Err(e.clone()));
             refused(StatusCode::FORBIDDEN, e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    /// The relay's state over an SDK whose queue is held and never read: a
+    /// request's SDK call waits there for as long as the test runs.
+    fn state() -> (State, std::sync::mpsc::Receiver<crate::dispatch::Job>) {
+        let (sdk, untaken) = Sdk::with_queue(8);
+        let state = State {
+            sdk,
+            record: Arc::new(Record::new(crate::identity::Account {
+                device_id: [0x11; 32],
+            })),
+            requests_changed: Arc::new(tokio::sync::Notify::new()),
+        };
+        (state, untaken)
+    }
+
+    fn offer_request() -> Result<Request<Body>, String> {
+        Request::get(format!(
+            "/connect/offer/{}",
+            encode_base32_crockford(&[0x33; 32])
+        ))
+        .body(Body::empty())
+        .map_err(|e| format!("request: {e}"))
+    }
+
+    /// With room for one request and one held (its SDK call never taken by a
+    /// worker), the next is answered `503` at once, and the held one `408`
+    /// once the request time has passed.
+    #[test]
+    fn a_busy_relay_answers_at_once_and_a_held_request_is_cut_off() -> Result<(), String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("the runtime: {e}"))?
+            .block_on(async {
+                let request_time = Duration::from_secs(1);
+                let (state, _untaken) = state();
+                let app = router(
+                    state,
+                    Bounds {
+                        in_flight: 1,
+                        request_time,
+                        ..Bounds::DEPLOYED
+                    },
+                );
+                let started = std::time::Instant::now();
+                let held = tokio::spawn(app.clone().oneshot(offer_request()?));
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let busy = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    app.clone().oneshot(offer_request()?),
+                )
+                .await
+                .map_err(|e| format!("a request over the relay's bound was held: {e}"))?
+                .map_err(|e| format!("answer: {e}"))?;
+                assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+                let held = tokio::time::timeout(Duration::from_secs(10), held)
+                    .await
+                    .map_err(|e| format!("the held request was never cut off: {e}"))?
+                    .map_err(|e| format!("task: {e}"))?
+                    .map_err(|e| format!("answer: {e}"))?;
+                assert_eq!(held.status(), StatusCode::REQUEST_TIMEOUT);
+                assert!(started.elapsed() >= request_time);
+                Ok(())
+            })
     }
 }

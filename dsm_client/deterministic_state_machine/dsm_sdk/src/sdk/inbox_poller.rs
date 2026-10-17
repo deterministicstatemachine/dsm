@@ -485,12 +485,12 @@ async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32, usize) {
         body: sync_req.encode_to_vec(),
         schema_hash: None,
     };
-    let query = crate::bridge::AppQuery {
-        path: "storage.sync".to_string(),
-        params: arg_pack.encode_to_vec(),
+    let sync = crate::bridge::AppInvoke {
+        method: "storage.sync".to_string(),
+        args: arg_pack.encode_to_vec(),
     };
 
-    let result = router.query(query).await;
+    let result = router.invoke(sync).await;
 
     if !result.success {
         let msg = result.error_message.as_deref().unwrap_or("unknown");

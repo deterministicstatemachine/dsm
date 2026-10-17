@@ -382,7 +382,9 @@ class QrScannerActivity : AppCompatActivity() {
                 for (barcode in barcodes) {
                     val rawValue = barcode.rawValue
                     if (!rawValue.isNullOrBlank() && scanLock.compareAndSet(false, true)) {
-                        Log.i(TAG, "QR code detected: ${rawValue.take(100)}...")
+                        // The code's text is not logged: it can be a contact or connect code, and the
+                        // app log goes into the debug report.
+                        Log.i(TAG, "QR code detected (${rawValue.length} characters)")
                         onQrCodeDetected(rawValue)
                         break
                     }

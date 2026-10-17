@@ -510,17 +510,19 @@ fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(&(b.len() as u32).to_le_bytes());
     out.extend_from_slice(b);
 }
+/// The length-prefixed field at `*off` in `b`, advancing `*off` past it. The
+/// length is the sender's: every offset is computed checked, so a length that
+/// would run past the body (or past `usize` on a 32-bit device) is a body
+/// that does not decode, never an overflow.
 fn take_bytes<'a>(b: &'a [u8], off: &mut usize) -> Option<&'a [u8]> {
-    if *off + 4 > b.len() {
+    let len_end = off.checked_add(4)?;
+    let &[l0, l1, l2, l3] = b.get(*off..len_end)? else {
         return None;
-    }
-    let n = u32::from_le_bytes(b[*off..*off + 4].try_into().ok()?) as usize;
-    *off += 4;
-    if *off + n > b.len() {
-        return None;
-    }
-    let s = &b[*off..*off + n];
-    *off += n;
+    };
+    // A u32 always fits a usize on the targets DSM builds for (32 and 64 bit).
+    let end = len_end.checked_add(u32::from_le_bytes([l0, l1, l2, l3]) as usize)?;
+    let s = b.get(len_end..end)?;
+    *off = end;
     Some(s)
 }
 
@@ -928,6 +930,37 @@ mod tests {
         assert_eq!(CertResyncAck::from_body(&ack.to_body()).unwrap(), ack);
         // Truncated bodies decode to None, never panic.
         assert!(CertResyncRequest::from_body(&req.to_body()[..120]).is_none());
+    }
+
+    /// SA-53. A field's length is the sender's. On a 32-bit device
+    /// (armeabi-v7a) `offset + length` from a large prefix wraps the address
+    /// space, and the old framing panicked on it — on every sync, since the
+    /// message was read again. The end of the address space is where that
+    /// sum lands on any device, so it is checked here: a field that runs past
+    /// the body, or past `usize`, does not decode.
+    /// MUTATION CONTROL: unchecked offset arithmetic panics here and turns
+    /// this red.
+    #[test]
+    fn a_field_length_past_the_body_or_the_address_space_does_not_decode() {
+        let body = [0xFFu8; 8];
+        for start in [usize::MAX - 2, usize::MAX - 5, 0, 4] {
+            let mut off = start;
+            assert_eq!(take_bytes(&body, &mut off), None, "from offset {start}");
+            assert_eq!(off, start, "a refused field moves nothing");
+        }
+
+        let req = CertResyncRequest {
+            relationship_key: [0x11u8; 32],
+            agreed_tip: [0x22u8; 32],
+            epoch: 7,
+            preserved_acceptance_commitment: [0xEFu8; 32],
+            reply_to_tip: [0x3Bu8; 32],
+            initiator_ek_pubkey: vec![0xA1u8; 64],
+            intent_sig: vec![0x5Au8; 128],
+        };
+        let mut hostile = req.to_body();
+        hostile[136..140].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(CertResyncRequest::from_body(&hostile), None);
     }
 
     /// The joint auth hash binds all four fields — changing any one changes it.

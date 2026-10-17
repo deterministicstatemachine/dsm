@@ -439,3 +439,158 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     assert_eq!(balance(&p.a, &era()), a_start + stake);
     assert_eq!(balance(&p.b, &era()), b_start - stake);
 }
+
+/// What `wallet` did with `kind` when the application `q` asked for it: its
+/// log's outcome and detail.
+async fn refused(
+    q: &TestDevice,
+    wallet: &TestDevice,
+    relay: &ForwardRelay,
+    sid: &D32,
+    kind: Kind,
+) -> String {
+    let seq = request(q, relay, sid, kind).await;
+    reply(&invoke(wallet, "connect.sync", Vec::new()).await);
+    let entry = wallet_log(wallet, sid, seq).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::Failed),
+        "request {seq} ({}) was carried out: {}",
+        entry.summary,
+        entry.detail
+    );
+    entry.detail
+}
+
+/// A computed match is the application's that staked it (SA-59). Another
+/// application connected to the same wallet under the same duel grant cannot
+/// have the wallet name the match's session key for it, ready the match,
+/// sign a move in it, withdraw from it, settle it or collect from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn another_application_cannot_drive_a_match_it_did_not_stake() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let (body, turns) = frozen();
+    let team_a = issue_team(&p.a, body.a(), "CRA").await;
+    let team_b = issue_team(&p.b, body.b(), "CRB").await;
+    let anchors = |team: &[wildstate_duel::CreatureStateV1]| -> Vec<D32> {
+        team.iter().map(|c| *c.anchor()).collect()
+    };
+    let creatures = [anchors(&team_a), anchors(&team_b)].concat();
+    let code = offer(&r, &relay, &creatures).await;
+    let sid_a = connect(&r, &p.a, &relay, &code).await;
+    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    let nonce: [u8; 32] = rand::random();
+    let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
+        Answer::DuelSessionKey(k) => k.session_public_key,
+        other => panic!("the wallet answered {other:?}"),
+    };
+    let session_key = Kind::DuelSessionKey(generated::ConnectDuelSessionKeyV1 {
+        match_nonce: nonce.to_vec(),
+    });
+    let key_a = key(ask(&r, &p.a, &relay, &sid_a, session_key.clone()).await);
+    let key_b = key(ask(&r, &p.b, &relay, &sid_b, session_key.clone()).await);
+    let proof = |s: generated::ConnectAppStatusV1| match answered(&s) {
+        Answer::Holdings(proof) => proof,
+        other => panic!("the wallet answered {other:?}"),
+    };
+    let holdings = |team: Vec<D32>| {
+        Kind::Holdings(generated::ConnectHoldingsV1 {
+            policy_commits: team.iter().map(|c| c.to_vec()).collect(),
+        })
+    };
+    let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
+    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    let lock = |side: u32,
+                opponent: &TestDevice,
+                counterpart: Vec<u8>,
+                opponent_holdings: generated::HoldingsProofV1| {
+        Kind::DuelLock(generated::ConnectDuelLockV1 {
+            setup: setup.clone(),
+            side,
+            policy_commit: era().to_vec(),
+            amount: whole_era(25),
+            opponent_genesis: opponent.genesis.to_vec(),
+            opponent_device_id: opponent.device_id.to_vec(),
+            counterpart_vault_id: counterpart,
+            memo: "arena".into(),
+            opponent_holdings: Some(opponent_holdings),
+        })
+    };
+    let locked_a = ask(&r, &p.a, &relay, &sid_a, lock(1, &p.b, Vec::new(), proof_b)).await;
+    let a_vault = locked_a.escrow_vault_ids[0].clone();
+    let cell: D32 = locked_a
+        .escrow_verdict_cell
+        .as_slice()
+        .try_into()
+        .expect("the match cell");
+    let proof_a = proof(ask(&r, &p.a, &relay, &sid_a, holdings(anchors(&team_a))).await);
+    ask(
+        &r,
+        &p.b,
+        &relay,
+        &sid_b,
+        lock(2, &p.a, a_vault.clone(), proof_a),
+    )
+    .await;
+    let ready = |opponent_ready: Vec<u8>| {
+        Kind::DuelReady(generated::ConnectDuelReadyV1 {
+            match_cell: cell.to_vec(),
+            opponent_ready,
+        })
+    };
+    let Answer::DuelReady(ready_a) =
+        answered(&ask(&r, &p.a, &relay, &sid_a, ready(Vec::new())).await)
+    else {
+        panic!("A answered another result");
+    };
+    ask(&r, &p.b, &relay, &sid_b, ready(ready_a.ready_signature)).await;
+
+    // Q: another game, connected to wallet A under the same grant.
+    let mut q = TestDevice::create("Q", 0x0D);
+    q.boot(&p.fleet).await;
+    let relay_q = ForwardRelay::start().await;
+    let code_q = offer(&q, &relay_q, &creatures).await;
+    let sid_q = connect(&q, &p.a, &relay_q, &code_q).await;
+    let commit = entry(
+        1,
+        MatchSide::A,
+        EntryKind::Commit {
+            commitment: computed::move_commitment(&salt(1, MatchSide::A), &turns[0].a.encode()),
+        },
+    );
+    let refused_key = refused(&q, &p.a, &relay_q, &sid_q, session_key).await;
+    assert!(
+        refused_key.contains("belongs to another application's match"),
+        "{refused_key}"
+    );
+    for kind in [
+        ready(Vec::new()),
+        Kind::DuelSign(generated::ConnectDuelSignV1 {
+            match_cell: cell.to_vec(),
+            preceding: Vec::new(),
+            entry: commit.clone(),
+        }),
+        Kind::DuelWithdraw(generated::ConnectDuelWithdrawV1 {
+            match_cell: cell.to_vec(),
+        }),
+        Kind::DuelSettle(generated::ConnectDuelSettleV1 {
+            match_cell: cell.to_vec(),
+            entries: Vec::new(),
+        }),
+        Kind::DuelCollect(generated::ConnectDuelCollectV1 {
+            vault_ids: vec![a_vault.clone()],
+        }),
+    ] {
+        let detail = refused(&q, &p.a, &relay_q, &sid_q, kind).await;
+        assert!(
+            detail.contains("was not staked through this application"),
+            "{detail}"
+        );
+    }
+
+    // The game that staked it still plays it: A signs its first move for R.
+    play(&r, &p.a, &relay, &sid_a, &cell, &[], commit).await;
+}

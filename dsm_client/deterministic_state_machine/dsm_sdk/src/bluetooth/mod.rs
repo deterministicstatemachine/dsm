@@ -8,6 +8,7 @@
 
 pub mod anchor_accept;
 pub mod android_ble_bridge;
+pub mod awaited_contacts;
 pub mod bilateral_ble_handler;
 pub mod bilateral_envelope;
 pub mod bilateral_session;
@@ -20,6 +21,7 @@ mod offline_step_tests;
 pub mod owed_frame_driver;
 pub mod pairing_orchestrator;
 pub mod peer_address;
+pub mod radio_ingress;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{

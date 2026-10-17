@@ -24,7 +24,8 @@ use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::core::utility::labeling;
 use crate::common::domain_tags::{
-    TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY, TAG_TIP,
+    TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
+    TAG_TIP,
 };
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
@@ -192,10 +193,8 @@ pub fn set_anchor_state_leaf_value(
     Ok(proof.to_bytes())
 }
 
-/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
-/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
-/// The bytes a party's signature over the step `commitment_hash` covers: the
-/// proposer's σ_A and the receiver's acceptance σ_B alike.
+/// The bytes the proposer's signature σ_A over the step `commitment_hash`
+/// covers.
 pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     let mut msg = Vec::with_capacity(19 + 32);
     msg.extend_from_slice(b"DSM/bilateral-sign\0");
@@ -203,6 +202,32 @@ pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
     msg
 }
 
+/// The bytes the receiver's acceptance σ_B covers: the step `commitment_hash`
+/// and the challenge `r_R` the step's release must answer. The challenge is
+/// under σ_B so that a relay cannot substitute it: the proposer takes only
+/// the challenge its receiver signed, and so stages and commits its anchor
+/// transition only toward a challenge the receiver will accept.
+pub fn bilateral_accept_sign_message(
+    commitment_hash: &[u8; 32],
+    receiver_challenge: &[u8; 32],
+) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(21 + 32 + 32);
+    msg.extend_from_slice(b"DSM/bilateral-accept\0");
+    msg.extend_from_slice(commitment_hash);
+    msg.extend_from_slice(receiver_challenge);
+    msg
+}
+
+/// The receiver's acceptance of a step, as the proposer holds it: σ_B and
+/// the challenge σ_B binds ([`bilateral_accept_sign_message`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ReceiverAcceptance<'a> {
+    pub signature: &'a [u8],
+    pub receiver_challenge: &'a [u8; 32],
+}
+
+/// Whether an operation declares it requires offline-bearer authority (the canonical per-Operation
+/// trigger). Only these transitions run the anchor gate; all others finalize unchanged.
 pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operation) -> bool {
     use crate::types::operations::{AuthorityMode, Operation};
     matches!(
@@ -215,7 +240,7 @@ pub fn operation_requires_offline_bearer(op: &crate::types::operations::Operatio
 // -------------------- Bilateral Pre-Commitment (bytes-only) --------------------
 #[derive(Clone, Debug)]
 pub struct BilateralPreCommitment {
-    /// `H(DSM/bilateral-session; lp(h_n) ‖ lp(op))`: the step this
+    /// `H(DSM/bilateral-precommit/v1; lp(h_n) ‖ lp(op))`: the step this
     /// precommitment proposes, bound to the relationship tip it extends.
     pub bilateral_commitment_hash: [u8; 32],
     pub operation: Operation,
@@ -226,7 +251,7 @@ pub struct BilateralPreCommitment {
 }
 impl BilateralPreCommitment {
     pub fn new(parent_tip: [u8; 32], operation: Operation) -> Self {
-        let mut h = dsm_domain_hasher(TAG_BILATERAL_SESSION);
+        let mut h = dsm_domain_hasher(TAG_BILATERAL_PRECOMMIT);
         canonical_lp::write_lp(&mut h, &parent_tip);
         canonical_lp::write_lp(&mut h, &operation.to_bytes());
         let mut bilateral_commitment_hash = [0u8; 32];
@@ -281,7 +306,6 @@ pub struct PreparedBilateralAdvance {
     pub offline_spend: Option<crate::types::device_state::OfflineSpend>,
 }
 
-#[derive(Debug)]
 pub struct BilateralTransactionManager {
     contact_manager: DsmContactManager,
     relationships: HashMap<[u8; 32], BilateralRelationshipAnchor>, // key = remote_device_id
@@ -290,6 +314,21 @@ pub struct BilateralTransactionManager {
     local_device_id: [u8; 32],
     local_genesis_hash: [u8; 32],
     chain_tip_store: std::sync::Arc<dyn ChainTipStore>,
+}
+
+/// Names the manager's identity and how much it holds. The signing key pair
+/// appears as its public key only: the secret key is never formatted.
+impl std::fmt::Debug for BilateralTransactionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BilateralTransactionManager")
+            .field("local_device_id", &self.local_device_id)
+            .field("local_genesis_hash", &self.local_genesis_hash)
+            .field("signing_public_key", &self.signature_keypair.public_key())
+            .field("contacts", &self.contact_manager.contacts.len())
+            .field("relationships", &self.relationships.len())
+            .field("pending_commitments", &self.pending_commitments.len())
+            .finish()
+    }
 }
 
 impl BilateralTransactionManager {
@@ -448,6 +487,25 @@ impl BilateralTransactionManager {
             sig.len()
         );
         Ok(sig)
+    }
+
+    /// The receiver's acceptance σ_B of the step `commitment_hash`, binding
+    /// the challenge `receiver_challenge` its release must answer
+    /// ([`bilateral_accept_sign_message`]).
+    pub fn sign_acceptance(
+        &self,
+        commitment_hash: &[u8; 32],
+        receiver_challenge: &[u8; 32],
+    ) -> Result<Vec<u8>, DsmError> {
+        self.signature_keypair
+            .sign(&bilateral_accept_sign_message(
+                commitment_hash,
+                receiver_challenge,
+            ))
+            .map_err(|e| {
+                error!("[BTM] sign_acceptance: failed to sign: {}", e);
+                e
+            })
     }
 
     /// The bytes a refusal of the proposal `commitment_hash` signs: the
@@ -622,9 +680,9 @@ impl BilateralTransactionManager {
         &self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
     ) -> Result<(), DsmError> {
-        if receiver_acceptance_proof.is_empty() {
+        if acceptance.signature.is_empty() {
             return Err(DsmError::InvalidOperation(
                 "receiver acceptance proof required".into(),
             ));
@@ -638,8 +696,8 @@ impl BilateralTransactionManager {
             .clone();
 
         let valid = SignatureKeyPair::verify_raw(
-            &bilateral_sign_message(pre_commitment_hash),
-            receiver_acceptance_proof,
+            &bilateral_accept_sign_message(pre_commitment_hash, acceptance.receiver_challenge),
+            acceptance.signature,
             &counterparty_pubkey,
         )
         .map_err(|e| {
@@ -691,7 +749,7 @@ impl BilateralTransactionManager {
         &mut self,
         remote_device_id: &[u8; 32],
         pre_commitment_hash: &[u8; 32],
-        receiver_acceptance_proof: &[u8],
+        acceptance: ReceiverAcceptance<'_>,
         sender_deltas: Vec<BalanceDelta>,
         anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
@@ -705,11 +763,7 @@ impl BilateralTransactionManager {
                 DsmError::InvalidOperation("pre-commitment not found or expired".into())
             })?
             .clone();
-        self.verify_receiver_acceptance_proof(
-            remote_device_id,
-            pre_commitment_hash,
-            receiver_acceptance_proof,
-        )?;
+        self.verify_receiver_acceptance_proof(remote_device_id, pre_commitment_hash, acceptance)?;
         let mut anchor = self
             .relationships
             .get(remote_device_id)
@@ -937,6 +991,44 @@ mod tests {
         assert_eq!(k, anchor_state_leaf_key(&b));
         // Different bundle -> different key.
         assert_ne!(k, anchor_state_leaf_key(&[2u8; 32]));
+    }
+
+    /// `h_0` and a step precommitment are hashed under different registered
+    /// tags. Both used `DSM/bilateral-session`, so the two meanings shared one
+    /// domain and were told apart only by how their fields happened to be
+    /// framed.
+    ///
+    /// MUTATION CONTROL: hash the precommitment under `TAG_BILATERAL_SESSION`
+    /// again and this goes red.
+    #[test]
+    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() {
+        let parent_tip = [0x5Eu8; 32];
+        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop);
+        let under = |tag| {
+            let mut h = dsm_domain_hasher(tag);
+            canonical_lp::write_lp(&mut h, &parent_tip);
+            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes());
+            bytes32(h.finalize().as_bytes())
+        };
+        assert_eq!(
+            pre.bilateral_commitment_hash,
+            under(TAG_BILATERAL_PRECOMMIT)
+        );
+        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION));
+        assert_ne!(
+            TAG_BILATERAL_PRECOMMIT.source_bytes(),
+            TAG_BILATERAL_SESSION.source_bytes()
+        );
+    }
+
+    /// Formatting the manager names its identity and its signing public key,
+    /// and never the signing secret key.
+    #[test]
+    fn the_manager_formats_without_its_signing_secret_key() {
+        let (manager, kp) = make_manager();
+        let shown = format!("{manager:?}");
+        assert!(!shown.contains(&format!("{:?}", kp.secret_key)), "{shown}");
+        assert!(shown.contains(&format!("{:?}", kp.public_key)));
     }
 
     fn make_manager_ids() -> ([u8; 32], [u8; 32]) {
@@ -1215,11 +1307,20 @@ mod tests {
             .await
             .expect("establish");
 
-        // The cached contact is replaced by one without its signing key: the
-        // relationship stands, and no precommitment is made without the key.
-        manager
+        // A re-add cannot take the contact's signing key away: it is refused
+        // and the key is kept.
+        let refused = manager
             .add_verified_contact(make_verified_contact("Grace", false, true))
-            .expect("re-add");
+            .expect_err("a re-add that drops the signing key");
+        assert!(matches!(refused, DsmError::InvalidContact(_)), "{refused}");
+        // The held record without its key: the relationship stands, and no
+        // precommitment is made without the key.
+        manager
+            .contact_manager
+            .get_contact_mut(&remote_id)
+            .expect("held contact")
+            .public_key
+            .clear();
         let op = signed_transfer_op(&manager.signature_keypair, "m", 5);
         let res = manager.create_bilateral_precommitment(&remote_id, op).await;
         assert!(matches!(res, Err(DsmError::InvalidContact(_))));

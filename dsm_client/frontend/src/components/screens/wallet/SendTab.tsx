@@ -20,6 +20,7 @@ import { useFx } from '../../fx/FxProvider';
 import { fxAmountLabel } from '../../fx/fxEngine';
 import type { TokenBalanceView } from '../../../dsm/types';
 import type { DomainContact } from '../../../domain/types';
+import { contactsNamed, deviceFingerprint } from '../../../domain/displayName';
 
 type Props = {
   contacts: DomainContact[];
@@ -29,6 +30,19 @@ type Props = {
   loadWalletData: () => Promise<void>;
   setError: (err: string | null) => void;
 };
+
+/**
+ * What the confirmation asks: the amount, the contact's alias, and the device
+ * paid by its fingerprint; and, when another contact has the same name, that
+ * it does, by theirs.
+ */
+function sendConfirmation(contacts: DomainContact[], to: DomainContact, amount: string, mode: 'online' | 'offline'): string {
+  const namesakes = contactsNamed(contacts, to.alias, to.deviceId);
+  const shared = namesakes.length > 0
+    ? ` Also named ${to.alias}: ${namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}.`
+    : '';
+  return `Send ${amount} to ${to.alias}, device ${deviceFingerprint(to.deviceId)}?${mode === 'offline' ? ' (Bluetooth)' : ''}${shared}`;
+}
 
 function SendTabInner({
   contacts,
@@ -342,10 +356,11 @@ function SendTabInner({
         {/* The recipient, spelled out immediately above the action that
             commits it. A device id is the only unambiguous name for who is
             about to receive this, and it belongs where the decision is made
-            rather than several fields further up. */}
+            rather than several fields further up: its fingerprint, the same
+            one the confirmation and the contact's card show. */}
         <div className="send-recipient-confirm sb-hint sb-hint--tight sb-mono" data-testid="send-recipient-confirm">
           {selectedContact
-            ? `To: ${selectedContact.deviceId.slice(0, 8)}`
+            ? `To: ${deviceFingerprint(selectedContact.deviceId)}`
             : 'Select a recipient'}
         </div>
 
@@ -365,7 +380,7 @@ function SendTabInner({
         visible={showSendConfirm}
         title="Send"
         message={selectedContact && selectedSendBalance
-          ? `Send ${sendForm.amount} ${selectedSendBalance.symbol} to ${selectedContact.alias}?${txMode === 'offline' ? ' (Bluetooth)' : ''}`
+          ? sendConfirmation(contacts, selectedContact, `${sendForm.amount} ${selectedSendBalance.symbol}`, txMode)
           : ''}
         onConfirm={() => { setShowSendConfirm(false); void handleSendTransaction(); }}
         onCancel={() => setShowSendConfirm(false)}

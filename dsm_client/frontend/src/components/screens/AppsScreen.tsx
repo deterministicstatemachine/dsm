@@ -5,7 +5,10 @@
 // asks for, approve it once; after that it can ask this wallet for what it
 // was granted without the player switching back to the phone, and anything
 // else waits here. Rust verifies every offer, keeps every grant and carries
-// out every request; this screen renders what Rust answers.
+// out every request; this screen renders what Rust answers. A code a link
+// brought came from outside the wallet: the offer says so, and names the app
+// Android recorded as having opened the link. The name an offer gives is its
+// own; nothing checks it.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as connect from '../../dsm/connect';
@@ -14,6 +17,7 @@ import { returnToConnectCaller } from '../../dsm/WebViewBridge';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Disclosure, Notice, ScreenFrame, ScreenTabs, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
+import { ScreenGuard } from '../common/ScreenGuard';
 
 type AppsTab = 'apps' | 'waiting';
 
@@ -139,8 +143,10 @@ export default function AppsScreen(): React.JSX.Element {
   const [sessions, setSessions] = useState<connect.Session[]>([]);
   const [waiting, setWaiting] = useState<connect.Pending[]>([]);
   const [code, setCode] = useState('');
-  // The code a link from another app on this phone brought, while it is the one shown.
+  // The code a link from outside the wallet brought, while it is the one shown,
+  // and the app Android recorded as having opened that link (null: it named none).
   const [linkedCode, setLinkedCode] = useState<string | null>(null);
+  const [linkSender, setLinkSender] = useState<string | null>(null);
   const [offer, setOffer] = useState<connect.Preview | null>(null);
   /// A camera scan this screen started and has not heard back from. The
   /// camera answers on the shared `dsm-event` channel, so a result is this
@@ -165,9 +171,13 @@ export default function AppsScreen(): React.JSX.Element {
       if (linked === null) return;
       setTab('apps');
       setOffer(null);
-      setCode(linked);
-      setLinkedCode(linked);
-      setStatus({ kind: 'info', text: 'An app on this phone handed over its connect code. READ it to see what it asks for.' });
+      setCode(linked.code);
+      setLinkedCode(linked.code);
+      setLinkSender(linked.sender);
+      setStatus({
+        kind: 'info',
+        text: `A link from outside the wallet handed over a connect code${linked.sender !== null ? `, opened by ${linked.sender}` : ''}. READ it to see what it asks for.`,
+      });
     };
     show();
     return onConnectLink(show);
@@ -248,6 +258,7 @@ export default function AppsScreen(): React.JSX.Element {
       setOffer(null);
       setCode('');
       setLinkedCode(null);
+      setLinkSender(null);
       // The app on this phone that sent the code is where the player goes on.
       if (fromLink) await returnToConnectCaller();
       return `Connected to ${connected.displayName}.`;
@@ -341,10 +352,21 @@ export default function AppsScreen(): React.JSX.Element {
             </section>
           ) : (
             <section className="sb-card" data-testid="connect-offer">
-              <b>{offer.displayName}</b> asks to connect.
+              {/* Approving grants an app standing access: no other app's window may sit over it. */}
+              <ScreenGuard kind="confirm" />
+              <b>{offer.displayName}</b> asks to connect. That is the name it gives itself.
               <div className="sb-hint sb-hint--tight">
                 Account {short(offer.appDeviceId)} · {offer.endpoint}
               </div>
+              {linkedCode !== null && linkedCode === code ? (
+                <div data-testid="connect-offer-origin">
+                  <Notice kind="error">
+                    This code came from outside the wallet: a link opened by{' '}
+                    {linkSender !== null ? <b>{linkSender}</b> : 'an app Android did not name'}.
+                    Any app or web page can open such a link. Approve only if you opened it yourself, from the app you mean to connect.
+                  </Notice>
+                </div>
+              ) : null}
               <p className="sb-hint">If you approve, it can do these without asking you again:</p>
               <ul className="sb-list">
                 {offer.scopeLines.map((line) => (
@@ -378,6 +400,8 @@ export default function AppsScreen(): React.JSX.Element {
       )}
       {tab === 'waiting' && (
         <div className="waiting-tab">
+          {/* Each approval here is irreversible: no other app's window may sit over them. */}
+          {waiting.length > 0 ? <ScreenGuard kind="confirm" /> : null}
           {waiting.length === 0 ? (
             <p className="sb-hint">Nothing is waiting for you.</p>
           ) : (
