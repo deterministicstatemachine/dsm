@@ -278,7 +278,11 @@ jobs:
       # compilation coverage is not lost: `rust-gates` still builds the
       # workspace in the dev profile.
       - name: Test
-        run: ${{ matrix.run }}
+        # Cargo writes binary starts to stderr and test results to stdout.
+        # Merge before the runner captures them so evidence keeps their order.
+        run: |
+          exec 2>&1
+          ${{ matrix.run }}
 
   # --------------------------------------------------------------------------
   # The exhaustive board, unsplit, on every push to main: the exact command
@@ -407,7 +411,7 @@ jobs:
       # each other on the system catalogs. Cells are keyed per test so tests
       # never contend for one write-once row.
       - name: Node board on Postgres
-        run: cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+        run: cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1
 
       # A green board is not evidence that THESE tests ran: a renamed module
       # or a dropped `#[cfg(test)]` would leave the board green and the
@@ -416,7 +420,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p dsm_storage_node --release --lib -- --test-threads=1 \
-            db::cell_properties db::pg::durable_posture_tests | tee registers.log
+            db::cell_properties db::pg::durable_posture_tests 2>&1 | tee registers.log
           passed=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' registers.log | head -1)
           echo "cell/register/durability tests executed on Postgres: ${passed:-0}"
           # May only grow. If a test is legitimately added, raise this floor in
