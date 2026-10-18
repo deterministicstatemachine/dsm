@@ -39,8 +39,11 @@ if [[ -n "$floating" ]]; then
 fi
 
 # 2. Every workflow mirror equals the canonical declaration.
-mirrors="$(grep -rhoE 'dtolnay/rust-toolchain@[0-9]+\.[0-9]+\.[0-9]+' .github/workflows \
-  | sed 's/.*@//' | sort -u)"
+# Each mirror pins the action by commit and names its Rust version in the
+# comment beside it (`dtolnay/rust-toolchain@<sha> # 1.98.0`): a tag can be
+# moved under a release job, a commit cannot (SA-107).
+mirrors="$(grep -rhoE 'dtolnay/rust-toolchain@[0-9a-f]{40} # [0-9]+\.[0-9]+\.[0-9]+' .github/workflows \
+  | sed 's/.*# //' | sort -u)"
 if [[ -z "$mirrors" ]]; then
   echo "ERROR: no toolchain mirrors found in .github/workflows — did the pin format change?" >&2
   fail=1
@@ -48,7 +51,7 @@ fi
 for m in $mirrors; do
   if [[ "$m" != "$CANONICAL" ]]; then
     echo "ERROR: workflow mirror $m != rust-toolchain.toml $CANONICAL" >&2
-    grep -rn "dtolnay/rust-toolchain@$m" .github/workflows >&2
+    grep -rn "dtolnay/rust-toolchain@.* # $m" .github/workflows >&2
     fail=1
   fi
 done

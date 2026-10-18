@@ -83,3 +83,35 @@ describe('a connect offer', () => {
     expect(screen.queryByTestId('connect-offer-origin')).toBeNull();
   });
 });
+
+// SA-157: what an application chose is shown without bidirectional controls.
+describe('a request waiting for the player', () => {
+  it('shows the application its name and summary with no bidi override', async () => {
+    const RLO = '\u202E';
+    installScriptedPhone({
+      'connect.list': reply({ case: 'sessions', value: new pb.ConnectSessionsV1({ sessions: [] }) }),
+      'connect.pending': reply({
+        case: 'pending',
+        value: new pb.ConnectPendingListV1({
+          pending: [
+            new pb.ConnectPendingV1({
+              sessionId: new Uint8Array(32).fill(3),
+              seq: 4n,
+              displayName: `Arena${RLO}`,
+              summary: `Pay 1 ERA, memo ${RLO}0001 ARE 0`,
+              reason: `over the grant${RLO}`,
+            }),
+          ],
+        }),
+      }),
+    });
+    render(<AppsScreen />);
+    await act(settle);
+    fireEvent.click(screen.getByRole('button', { name: /^Waiting/ }));
+    await act(settle);
+    const card = screen.getByText('Arena').closest('section');
+    expect(card).not.toBeNull();
+    expect(card).not.toHaveTextContent(RLO);
+    expect(card).toHaveTextContent('Arena: Pay 1 ERA, memo 0001 ARE 0');
+  });
+});

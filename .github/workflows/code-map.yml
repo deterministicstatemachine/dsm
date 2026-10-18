@@ -45,7 +45,7 @@ jobs:
     name: Code map
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The pins' tests read history: a commit's parent, and the first
           # commit, which holds no pins.
@@ -59,12 +59,12 @@ jobs:
                       /usr/local/.ghcup /usr/local/share/boost /usr/share/swift
           df -h /
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           components: rust-analyzer
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: requirement-map
 
@@ -110,7 +110,7 @@ jobs:
       # sets a cfg is refused from it, so it is kept with them.
       - name: The indexes and fixture run of a commit with the same key
         id: kept
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: ${{ steps.key.outputs.key }}
           path: |
@@ -189,7 +189,7 @@ jobs:
               && steps.fixture.outcome == 'success' && steps.indexes.outcome == 'success'
               && steps.map.outcome == 'success' && steps.check.outcome == 'success'
               && steps.mutations.outcome == 'success' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           key: ${{ steps.key.outputs.key }}
           path: |
@@ -211,7 +211,7 @@ jobs:
 
       - name: Keep the map
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: code-map
           path: |
@@ -265,7 +265,7 @@ jobs:
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The base commit's pins are read from history.
           fetch-depth: 0
@@ -277,9 +277,9 @@ jobs:
                       /usr/local/share/boost /usr/share/swift
           df -h /
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: pin-evidence
 
@@ -295,7 +295,7 @@ jobs:
 
       - name: Keep the evidence log
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: pin-evidence-log
           path: pin-evidence.log

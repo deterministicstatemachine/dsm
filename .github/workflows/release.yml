@@ -96,11 +96,11 @@ jobs:
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install CI system deps
         run: |
@@ -122,7 +122,7 @@ jobs:
 
       - name: Security audit (every tracked Cargo.lock)
         run: |
-          cargo install cargo-audit --quiet --locked || true
+          cargo install cargo-audit --quiet --locked --version 0.22.2
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
@@ -139,11 +139,11 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install build deps
         run: |
@@ -172,7 +172,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload storage node artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-storage-node-linux-x86_64
           path: |
@@ -194,9 +194,9 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
@@ -230,7 +230,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload frontend bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-frontend-bundle
           path: |
@@ -253,22 +253,22 @@ jobs:
     outputs:
       sha256: ${{ steps.hash.outputs.sha256 }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install SBOM tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
-          cargo install cargo-cyclonedx --quiet --locked
+          cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
 
       - name: Generate SBOM with validation
         env:
@@ -295,7 +295,7 @@ jobs:
           echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
 
       - name: Upload SBOM bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-sbom-bundle
           path: |
@@ -321,22 +321,22 @@ jobs:
       - build-frontend
       - build-sbom
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download storage node artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-storage-node-linux-x86_64
           path: dist/
 
       - name: Download frontend bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-frontend-bundle
           path: dist/
 
       - name: Download SBOM bundle
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: dsm-sbom-bundle
           path: dist/
@@ -408,7 +408,7 @@ jobs:
           head -40 dist/RELEASE_BODY.md
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: DSM ${{ github.ref_name }}

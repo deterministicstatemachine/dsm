@@ -257,7 +257,7 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
           <div className="sb-card__title">
             {setupMode === 'refresh' ? 'Rebuild the latest capsule' : "Enter this wallet's recovery phrase"}
           </div>
-          <p className="sb-hint">The 24 words written down when this wallet was made. Backup is armed only with this wallet's own phrase.</p>
+          <p className="sb-hint">The 24 words written down when this wallet was made. Backup is armed only with that phrase.</p>
           <div className="sb-field">
             <label htmlFor="nfc-mnemonic">Recovery mnemonic</label>
             <textarea

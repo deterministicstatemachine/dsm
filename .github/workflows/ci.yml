@@ -93,7 +93,7 @@ jobs:
       rust: ${{ steps.sel.outputs.rust }}
       rust_matrix: ${{ steps.sel.outputs.rust_matrix }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -123,7 +123,7 @@ jobs:
     name: Real-code guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Fetch main, the guard's reference
         run: git fetch --no-tags --depth=1 origin main
       - name: Refuse placeholders, fabricated results and boolean literals
@@ -137,7 +137,7 @@ jobs:
     if: needs.select.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # ubuntu-latest ships ~14 GB free, which the `--all-features` workspace
       # build plus the full test-binary set (with debug info) overflows
@@ -155,11 +155,11 @@ jobs:
       # Pinned: rustfmt/clippy output is version-specific. `@stable` drifts on
       # every release and then fails unchanged code on `cargo fmt --check`.
       # Bump this pin deliberately and reformat in the same PR.
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install CI system deps
         run: |
@@ -178,7 +178,7 @@ jobs:
       - name: Production safety lints
         run: bash ci/production_safety_checks.sh
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
@@ -201,7 +201,7 @@ jobs:
 
       - name: Security audit (every tracked Cargo.lock)
         run: |
-          cargo install cargo-audit --quiet || true
+          cargo install cargo-audit --quiet --locked --version 0.22.2
           bash ci/audit_every_lockfile.sh
 
   # --------------------------------------------------------------------------
@@ -243,7 +243,7 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.select.outputs.rust_matrix) }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Free disk space
         run: |
@@ -253,9 +253,9 @@ jobs:
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.group }}
 
@@ -314,7 +314,7 @@ jobs:
     env:
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Free disk space
         run: |
@@ -324,9 +324,9 @@ jobs:
           sudo docker image prune --all --force >/dev/null 2>&1 || true
           df -h /
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: board
 
@@ -349,7 +349,7 @@ jobs:
 
       - name: Keep the board log
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: board-log
           path: board.log
@@ -385,11 +385,11 @@ jobs:
       # What every node test reads; its absence makes them fail, not skip.
       DSM_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dsm_node_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install CI system deps
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
@@ -444,16 +444,16 @@ jobs:
     needs: [select, rust-gates, rust-test]
     if: github.event_name == 'workflow_dispatch' && needs.select.outputs.formal == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "21"
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install formal validation deps
         run: |
@@ -481,16 +481,16 @@ jobs:
       run:
         working-directory: dsm_client/frontend
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: dsm_client/frontend/package-lock.json
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.npm
@@ -554,7 +554,7 @@ jobs:
       run:
         working-directory: dsm_client/android
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # The bridge RPC names Kotlin handles must be the names the frontend sends;
       # this job is what a Kotlin-only change selects.
@@ -563,22 +563,24 @@ jobs:
         run: python3 ci/bridge_rpc_names.py
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
-      # `gradle/wrapper-validation-action` was here but the GHA runner could
-      # not reach the Gradle wrapper-checksum service (ETIMEDOUT to Cloudflare
-      # 104.16.72.101:443 across 3 consecutive runs — appears to be a
-      # network-policy constraint, not transient). The wrapper jar is
-      # committed and visible in every PR diff, so reviewer attention is the
-      # primary defence; this external action was belt-and-suspenders that
-      # cost more in flake than it added in assurance.
+      # The committed wrapper jar is Gradle 8.14.5's, by the checksum Gradle
+      # publishes for it; checked here with no network, since the runner could
+      # not reach the checksum service `gradle/wrapper-validation-action` asks.
+      # The distribution it fetches is pinned by `distributionSha256Sum`
+      # (SA-154). A new jar is a reviewed change to this digest.
+      - name: Verify the Gradle wrapper jar
+        run: |
+          echo "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172  dsm_client/android/gradle/wrapper/gradle-wrapper.jar" \
+            | sha256sum -c -
 
       - name: Cache Gradle caches
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.gradle/caches
@@ -605,7 +607,7 @@ jobs:
     # Three cold NDK builds (all packaged ABIs) plus the managed-device boot.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Enable KVM for the managed device
         run: |
@@ -614,17 +616,17 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: dsm_client/deterministic_state_machine
           key: android-all-abis
@@ -637,7 +639,7 @@ jobs:
           sudo apt-get install -y protobuf-compiler
 
       - name: Install cargo-ndk
-        run: cargo install cargo-ndk --locked
+        run: cargo install cargo-ndk --locked --version 4.1.2
 
       - name: Accept SDK licenses (NDK and system image downloads)
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
@@ -673,7 +675,7 @@ jobs:
             test --no-run --release --locked --package dsm_sdk --features=jni,bluetooth --lib
 
       - name: Cache Gradle caches
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.gradle/caches
@@ -691,7 +693,7 @@ jobs:
 
       - name: Upload instrumented test reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: android-instrumented-reports
           path: |
@@ -724,15 +726,15 @@ jobs:
     if: needs.select.outputs.core == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Same pin as the `rust` job: clippy output is version-specific.
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
           targets: thumbv8m.main-none-eabihf
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       # dsm-sphincs IS a workspace member, so the `rust` job already builds and
       # tests it — on the host, where `cfg(test)` makes it std. `src/lib.rs` is
@@ -804,10 +806,10 @@ jobs:
     if: needs.select.outputs.formal == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Cache elan toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.elan
           key: elan-${{ hashFiles('lean4/lean-toolchain') }}
@@ -816,8 +818,13 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/.elan/bin/lean" ]; then
-            curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | sh -s -- -y --default-toolchain "$(cat lean4/lean-toolchain)"
+            # elan v4.2.4's installer, by commit and digest: a script fetched
+            # from master and piped to sh ran whatever master held (SA-155).
+            curl -fsSL -o elan-init.sh \
+              https://raw.githubusercontent.com/leanprover/elan/227caca133724d5516bee25c2aeb3e609478f2d8/elan-init.sh
+            echo "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53  elan-init.sh" | sha256sum -c -
+            sh elan-init.sh -y --default-toolchain "$(cat lean4/lean-toolchain)"
+            rm elan-init.sh
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
@@ -850,7 +857,7 @@ jobs:
       - name: Paper and spec claims point at existing theorems
         run: python3 scripts/check_claim_trace.py
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
       - name: Install SPHINCS refinement build dependencies
         run: |
           sudo apt-get update
@@ -868,7 +875,7 @@ jobs:
     name: SPDX headers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Verify SPDX headers
         run: ./scripts/check-spdx.sh
@@ -902,17 +909,17 @@ jobs:
     needs: [select, rust-gates, rust-test]
     if: needs.select.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: Install SBOM tooling
         run: |
           sudo apt-get update
           sudo apt-get install -y jq protobuf-compiler
-          cargo install cargo-cyclonedx --quiet --locked
+          cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
 
       - name: Generate workspace SBOM bundle
         run: ./scripts/generate-sbom.sh --skip-validation
@@ -922,7 +929,7 @@ jobs:
           jq '.summary' "sbom/latest/metadata.json"
 
       - name: Upload SBOM bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: dsm-sbom
           path: sbom/
@@ -938,7 +945,7 @@ jobs:
     needs: [select, rust-gates, rust-test]
     if: needs.select.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Build storage node image
         run: docker build -f ci/docker/StorageNode.Dockerfile -t dsm/storage-node:ci .
