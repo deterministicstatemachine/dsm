@@ -255,7 +255,7 @@ async fn write_along<S: RouteSeats, const N: usize>(
         let slots: Vec<ChainSlot> = match seats.put_entries(seat, &batch).await {
             Ok(records) => {
                 log::info!("route write: the seat at position {position} took the chain");
-                records.into_iter().map(ChainSlot::Link).collect()
+                borne_out(seats, seat, &batch, records).await
             }
             Err(e) => {
                 log::warn!("route write: the seat at position {position} did not answer: {e}");
@@ -271,6 +271,49 @@ async fn write_along<S: RouteSeats, const N: usize>(
         record(&reports)?;
     }
     Ok(reports)
+}
+
+/// The slots a seat's answer to `batch` earns: each record it returned that
+/// its own arrival log bears out, as a link; any other as an empty. A record
+/// is carried into every later copy, and Core counts a later link only when
+/// every link its copy carries is valid, so one seat returning a record its
+/// log does not give made every later link of the chain invalid, and the
+/// value never final (SA-98). An empty proves nothing and invalidates
+/// nothing (§9 rule 5).
+async fn borne_out<S: RouteSeats>(
+    seats: &S,
+    seat: &[u8],
+    batch: &[CellPut],
+    records: Vec<ArrivalRecord>,
+) -> Vec<ChainSlot> {
+    let logs = futures::future::join_all(
+        batch
+            .iter()
+            .map(|(namespace, key, _)| seats.read_values(seat, namespace, key)),
+    )
+    .await;
+    batch
+        .iter()
+        .zip(logs)
+        .zip(records.into_iter().map(Some).chain(std::iter::repeat_with(|| None)))
+        .map(|(((namespace, key, copy), log), record)| {
+            let given = log.and_then(|log| {
+                dsm::route_chain::copy_record(seat, namespace, key, copy, &log)
+            });
+            match (record, given) {
+                (Some(record), Some(given)) if record == given => ChainSlot::Link(record),
+                (record, given) => {
+                    log::warn!(
+                        "route write: the seat's record is not the one its log gives \
+                         (returned {}, borne out {}); recorded empty",
+                        record.is_some(),
+                        given.is_some()
+                    );
+                    ChainSlot::NoResponse
+                }
+            }
+        })
+        .collect()
 }
 
 /// Continue a write that holds its leader link from the position after the
@@ -1300,6 +1343,119 @@ mod tests {
             self.watch(self.seats.proof(member, namespace, key, cycle))
                 .await
         }
+    }
+
+    /// A seat that takes a copy and answers with a record its own log does
+    /// not give.
+    struct Lying<'a> {
+        seats: &'a NodeSeats,
+        liar: Vec<u8>,
+    }
+
+    impl RouteSeats for Lying<'_> {
+        fn members(&self) -> Vec<Vec<u8>> {
+            self.seats.members()
+        }
+
+        async fn put_entries(
+            &self,
+            member: &[u8],
+            entries: &[CellPut],
+        ) -> Result<Vec<ArrivalRecord>, String> {
+            let records = self.seats.put_entries(member, entries).await?;
+            if member != self.liar.as_slice() {
+                return Ok(records);
+            }
+            Ok(records
+                .into_iter()
+                .map(|record| ArrivalRecord {
+                    running_hash: dsm::crypto::blake3::domain_hash_bytes(
+                        dsm::common::domain_tags::TAG_DSM_TEST_TIP,
+                        &record.running_hash,
+                    ),
+                    ..record
+                })
+                .collect())
+        }
+
+        async fn read_values(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+        ) -> Option<Vec<Vec<u8>>> {
+            self.seats.read_values(member, namespace, key).await
+        }
+
+        async fn close(&self, member: &[u8]) -> Option<u64> {
+            self.seats.close(member).await
+        }
+
+        async fn latest_cycle(&self, member: &[u8]) -> Option<u64> {
+            self.seats.latest_cycle(member).await
+        }
+
+        async fn sync_mirror(&self, member: &[u8]) {
+            self.seats.sync_mirror(member).await
+        }
+
+        async fn mirrored(
+            &self,
+            mirror: &[u8],
+            member: &[u8],
+            cycle: u64,
+        ) -> Option<Vec<ByteCommit>> {
+            self.seats.mirrored(mirror, member, cycle).await
+        }
+
+        async fn proof(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+            cycle: u64,
+        ) -> Option<CellCommitProof> {
+            self.seats.proof(member, namespace, key, cycle).await
+        }
+    }
+
+    /// SA-98. A seat that takes the chain and returns a record its own log
+    /// does not give is recorded empty in its place, and the chain goes on:
+    /// with the seat at position 1 lying, the value written still reads
+    /// Final. Carried as a link, the lie made every later link invalid.
+    /// MUTATION CONTROL: carrying every record a seat returns as a link, as
+    /// the writer did, leaves the value short of final and turns this red.
+    /// On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_seat_lying_about_its_record_is_recorded_empty_and_the_value_is_final() {
+        use dsm::route_chain::{CellReading, ChainState};
+        let (_nodes, _config, set, cell) = pinned(0x36).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let lying = Lying {
+            seats: &seats,
+            liar: cell.route().seats()[1].to_vec(),
+        };
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let [written] = from_leader(&lying, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
+            .await
+            .expect("a report");
+        assert_eq!(written.slots[1], ChainSlot::NoResponse, "{:?}", written.slots);
+
+        let evidence = read_cell(&seats, &cell).await;
+        let reading = dsm::route_chain::evaluate(&cell, &evidence, |bytes: &[u8]| {
+            (bytes == b"V").then(|| (dsm::storage_cell::entry_digest(bytes), ()))
+        });
+        assert!(
+            matches!(
+                reading,
+                Ok(CellReading::Held {
+                    state: ChainState::Final,
+                    ..
+                })
+            ),
+            "the value reads Final past the lying seat: {reading:?}"
+        );
     }
 
     /// A cell read asks for every seat's committed state at once (each

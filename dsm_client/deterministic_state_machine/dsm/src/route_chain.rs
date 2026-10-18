@@ -555,13 +555,24 @@ pub fn leader_copy_record(
         &cell.route,
     )
     .encode();
-    let n = leader_log.iter().position(|bytes| *bytes == copy)?;
-    Some(record_of(
-        cell.route.leader(),
-        &cell.namespace,
-        &cell.key,
-        &leader_log[..=n],
-    ))
+    copy_record(cell.route.leader(), &cell.namespace, &cell.key, &copy, leader_log)
+}
+
+/// `seat`'s arrival record for the first arrival of the encoded copy `copy`
+/// at the cell `(namespace, key)`, recomputed from the seat's arrival log
+/// `log`: the record the seat returns when it takes that copy. `None` when
+/// the log holds no such copy. A record a seat returns that is not this one
+/// is not a link: carried into later copies, it makes every later link
+/// invalid.
+pub fn copy_record(
+    seat: &[u8],
+    namespace: &[u8],
+    key: &[u8; 32],
+    copy: &[u8],
+    log: &[Vec<u8>],
+) -> Option<ArrivalRecord> {
+    let n = log.iter().position(|bytes| *bytes == copy)?;
+    Some(record_of(seat, namespace, key, &log[..=n]))
 }
 
 /// Whether `commit` is a ByteCommit of `record`'s seat that commits the
