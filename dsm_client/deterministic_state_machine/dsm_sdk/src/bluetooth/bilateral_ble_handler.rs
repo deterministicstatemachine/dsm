@@ -3443,6 +3443,11 @@ impl BilateralBleHandler {
         // commit mirrors it so the next step chains from it.
         let verified_a_side_ek_pk: Vec<u8> = verified.receipt().ek_pk_a.clone();
 
+        // Offline-bearer receipt is disabled (SA-61; owner, 2026-10-18): Core's
+        // `decide_prepare` refuses a bearer transfer, so no session reaches
+        // this confirm with one. What follows is kept, unreached, for the
+        // complete proof of the allocation a bearer spend debits.
+        //
         // Offline-bearer acceptance (OFFLINE_BEARER_REQUIRED transfers only). Canonical predicate:
         // the v2 Software-Authority / Hardware-Identity `accept_offline` via `anchor_accept` —
         // three signatures (σ^DSM gated by the handler's rel-proof/§C1 checks above, σ^chip + σ^host

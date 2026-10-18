@@ -204,6 +204,20 @@ pub fn decide_prepare(
     if claims.addressed_to != local_device_id.as_slice() || transfer_addressed_elsewhere {
         return Ok(PrepareDecision::NotAddressed);
     }
+    // Offline-bearer receipt is disabled. A receiver that takes a bearer
+    // transfer credits an allocation its sender asserts: nothing yet binds the
+    // sender's parent root to the allocation the spend debits (§52, §67), so a
+    // modified sender app mints or re-spends value offline (SA-61). Owner,
+    // 2026-10-18: "Disable the vulnerable acceptance path until the complete
+    // proof is implemented." The proposal is refused on its operation alone,
+    // before anything is verified or written; the confirm path behind it stays
+    // for the complete proof, unreached.
+    if operation_requires_offline_bearer(operation) {
+        return Err(DsmError::invalid_operation(
+            "offline-bearer receipt is disabled until the allocation a bearer transfer spends \
+             is proven to be its sender's (SA-61): this device takes no offline-bearer transfer",
+        ));
+    }
     verify_pinned_peer_keys(sender, claims.credentials)?;
     verify_step_signature(sender, &commitment_hash, claims.signature, "proposal")?;
 
@@ -669,6 +683,16 @@ mod tests {
         }
     }
 
+    /// A step that moves no value, marked so two of them on one tip differ.
+    fn step(mark: u8) -> Operation {
+        Operation::Generic {
+            operation_type: b"offline-step-test".to_vec(),
+            data: vec![mark],
+            message: String::new(),
+            signature: Vec::new(),
+        }
+    }
+
     fn credentials(peer: &Peer) -> PeerCredentials<'_> {
         PeerCredentials {
             signing_key: peer.public_key(),
@@ -688,7 +712,7 @@ mod tests {
         let other = Peer::new(0x42);
         let receiver = [0x43u8; 32];
         let held = [0x70u8; 32];
-        let operation = bearer_transfer(receiver);
+        let operation = step(0x01);
         let commitment =
             BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
         let decide = |commitment: [u8; 32], expected_tip: Option<[u8; 32]>, signature: &[u8]| {
@@ -725,8 +749,7 @@ mod tests {
 
         // A commitment the sender signed that is not its operation's
         // commitment on the held tip: the receiver never signs it.
-        let foreign = BilateralPreCommitment::new(held, bearer_transfer([0x44; 32]))
-            .bilateral_commitment_hash;
+        let foreign = BilateralPreCommitment::new(held, step(0x02)).bilateral_commitment_hash;
         refused(
             decide(foreign, Some(held), &sender.sign_step(&foreign)),
             "not its operation's commitment on this relationship",
@@ -762,7 +785,7 @@ mod tests {
         let sender = Peer::new(0x46);
         let receiver = [0x47u8; 32];
         let held = [0x72u8; 32];
-        let operation = bearer_transfer(receiver);
+        let operation = step(0x03);
         let commitment =
             BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
         let own_step = [0x73u8; 32];
@@ -852,11 +875,46 @@ mod tests {
             PrepareDecision::NotAddressed => {}
             other => panic!("expected NotAddressed, got {other:?}"),
         }
-        // Addressed here, the same unsigned prepare reaches the signature check.
+        // Addressed here, an unsigned prepare reaches the signature check.
+        refused(decide(&step(0x04), &receiver, None), "carries no signature");
+    }
+
+    /// Offline-bearer receipt is disabled (SA-61; owner, 2026-10-18): a
+    /// bearer transfer addressed to this device is refused on its operation
+    /// alone, however its sender signed it and whatever tip it claims, and
+    /// nothing else of it is consulted. One addressed to another device is
+    /// still not addressed here.
+    /// MUTATION CONTROL: dropping the refusal lets the sender's own signed
+    /// bearer transfer on the held tip be considered and turns this red.
+    #[test]
+    fn a_bearer_transfer_addressed_here_is_refused_on_its_operation_alone() {
+        let sender = Peer::new(0x4D);
+        let receiver = [0x4Eu8; 32];
+        let held = [0x7Bu8; 32];
+        let operation = bearer_transfer(receiver);
+        let commitment =
+            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let decide = |signature: &[u8], in_flight| {
+            decide_prepare(
+                commitment,
+                &operation,
+                PrepareClaims {
+                    addressed_to: &receiver,
+                    expected_tip: Some(held),
+                    credentials: credentials(&sender),
+                    signature,
+                },
+                &sender.pinned(),
+                &receiver,
+                held,
+                in_flight,
+            )
+        };
         refused(
-            decide(&bearer_transfer(receiver), &receiver, None),
-            "carries no signature",
+            decide(&sender.sign_step(&commitment), None),
+            "offline-bearer receipt is disabled",
         );
+        refused(decide(&[], Some([0x7Cu8; 32])), "offline-bearer receipt is disabled");
     }
 
     /// A stale proposal's claimed tip is evidence of the sender's tip only
@@ -868,7 +926,7 @@ mod tests {
         let receiver = [0x4Cu8; 32];
         let held = [0x78u8; 32];
         let claimed = [0x79u8; 32];
-        let operation = bearer_transfer(receiver);
+        let operation = step(0x05);
         let on_claimed =
             BilateralPreCommitment::new(claimed, operation.clone()).bilateral_commitment_hash;
         let decide = |commitment: [u8; 32]| {
