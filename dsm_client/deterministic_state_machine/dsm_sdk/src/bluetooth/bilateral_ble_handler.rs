@@ -4585,6 +4585,45 @@ mod tests {
         );
     }
 
+    /// SA-111. The pending list lists offline transfers, and a session that is
+    /// not one (here a step of another kind on the relationship) is passed
+    /// over: the list still answers. One such row, which a contact can make
+    /// the receiver store, made every read of the list fail for good.
+    /// MUTATION CONTROL: refusing the whole list for a session that is not a
+    /// transfer, as the list did, turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn the_pending_list_passes_over_a_step_that_is_not_a_transfer() {
+        let counterparty = [0x16u8; 32];
+        let (_manager, handler) = established_with(0x17, counterparty).await;
+        handler
+            .prepare_bilateral_transaction_with_commitment(counterparty, Operation::Noop)
+            .await
+            .expect("a step of another kind on the relationship");
+        let router = crate::handlers::app_router_impl::AppRouterImpl::new(crate::init::SdkConfig {
+            node_id: "pending-list-test".to_string(),
+            storage_endpoints: Vec::new(),
+            // Whether this build carries the offline transport it lists.
+            enable_offline: cfg!(feature = "bluetooth"),
+        })
+        .expect("router");
+        let listed = router
+            .handle_bilateral_query(crate::bridge::AppQuery {
+                path: "bilateral.pending_list".to_string(),
+                params: Vec::new(),
+            })
+            .await;
+        assert!(listed.success, "{:?}", listed.error_message);
+        let envelope = crate::envelope::local_answer_from_canonical_bytes(&listed.data[1..])
+            .expect("an answer");
+        match envelope.payload {
+            Some(generated::envelope::Payload::OfflineBilateralPendingListResponse(list)) => {
+                assert!(list.transactions.is_empty(), "no transfer is pending")
+            }
+            other => panic!("bilateral.pending_list answered {other:?}"),
+        }
+    }
+
     /// SA-115. A proposal cancelled while its prepare was being built stays
     /// cancelled. The door is released before the prepare is built; the
     /// prepared phase is then written only over the `Preparing` phase it was

@@ -1519,6 +1519,13 @@ impl CoreSDK {
         if let Some(plan) = &admission {
             sm.attach_pending_economic_admission(Some(plan.prepared.clone()));
         }
+        // Whether this advance attached an admission of its own: only that is
+        // rolled off on an error. An advance with no plan can run while the
+        // head carries another one's admission (a SoFi fulfillment, an online
+        // step awaiting finality: the fence lets a bearer step through), and
+        // clearing it on that advance's failure let the next admission take the
+        // same position (SA-90).
+        let attached_here = admission.is_some();
         // From here to commit, every error path must roll the attach off —
         // one restore point via the closure below, not scattered clears.
         // The admission, when there is one, travels with the storage set it
@@ -1582,9 +1589,11 @@ impl CoreSDK {
         let (outcome, accepted, artifacts) = match admission_result {
             Ok(v) => v,
             Err(e) => {
-                // Restore the exact prior in-memory admission (None — the
-                // pre-attach check proved nothing was pending).
-                sm.attach_pending_economic_admission(None);
+                // Roll off this advance's own attach (None — the pre-attach
+                // check proved nothing was pending). One it did not make stays.
+                if attached_here {
+                    sm.attach_pending_economic_admission(None);
+                }
                 return Err(e);
             }
         };

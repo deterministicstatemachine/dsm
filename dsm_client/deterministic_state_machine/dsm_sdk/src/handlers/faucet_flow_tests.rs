@@ -1028,3 +1028,47 @@ async fn a_release_frozen_for_an_earlier_position_is_not_reused_at_a_later_one()
     assert_eq!(outcome.tokens_received, whole_era(100));
     assert_eq!(p.a.era_balance(), whole_era(110));
 }
+
+/// SA-90. An advance with no admission plan that fails leaves the head's
+/// pending admission as it found it. Here the first claim is held (its
+/// admission pending on the head) and an offline step the fence refuses is
+/// attempted; the held admission is still the head's afterwards. Clearing it
+/// on that failure let the next admission be built at the same position and
+/// overwrite the held one.
+/// MUTATION CONTROL: clearing the pending admission on every failed advance,
+/// as the advance did, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
+    use dsm::types::device_state::{BalanceDelta, BalanceDirection};
+    let d = Device::start(0xAC).await;
+    let held = hold_the_first_claim(&d).await;
+    let refused = d.core().execute_offline_step(
+        [0x71; 32],
+        [0x72; 32],
+        dsm::types::operations::Operation::Noop,
+        &[BalanceDelta {
+            policy_commit: era(),
+            direction: BalanceDirection::Debit,
+            amount: 1,
+        }],
+        None,
+        None,
+        None,
+        &|_, _| {
+            Err(dsm::types::error::DsmError::invalid_operation(
+                "the advance is refused before its transaction opens",
+            ))
+        },
+    );
+    refused.expect_err("the step is refused");
+    assert_eq!(
+        d.core()
+            .device_head()
+            .expect("the head")
+            .pending_economic_admission()
+            .cloned(),
+        Some(held),
+        "the held admission is still the head's"
+    );
+}
