@@ -575,6 +575,7 @@ jobs:
       # The distribution it fetches is pinned by `distributionSha256Sum`
       # (SA-154). A new jar is a reviewed change to this digest.
       - name: Verify the Gradle wrapper jar
+        working-directory: .
         run: |
           echo "7d3a4ac4de1c32b59bc6a4eb8ecb8e612ccd0cf1ae1e99f66902da64df296172  dsm_client/android/gradle/wrapper/gradle-wrapper.jar" \
             | sha256sum -c -
