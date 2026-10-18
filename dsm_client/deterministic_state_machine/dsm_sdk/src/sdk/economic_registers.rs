@@ -428,11 +428,13 @@ fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
 /// A peer's step at `peer_economic_position`, validated from its own parent
 /// (DSM Amendment A14), for a caller that accepts nothing from the peer.
 ///
-/// A step is fixed once its claim is final, so this process keeps each one it
-/// validated, by network, peer and position, and answers the same question
-/// from it: a vault's chain names the same traders at the same positions
-/// generation after generation. Only a validation is kept; a refusal or an
-/// incomplete check is checked again.
+/// Core answers every time it is asked here. What a validation read is kept
+/// as evidence (`final_reads`: final cells and immutable objects), and the
+/// process keeps no verdict: a second claim of the peer final at the position
+/// from another parent is a fork, `Invalid`, and a verdict kept from before it
+/// appeared answered `Ok` for the rest of the process while a verifier asking
+/// afresh refused it (SA-92). One SoFi operation's contexts keep the answers
+/// they were given for that operation alone (`sofi_reads`).
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -441,15 +443,6 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    let key = (
-        expected_network_id.to_vec(),
-        *peer_genesis,
-        *peer_devid,
-        peer_economic_position,
-    );
-    if let Some(known) = validated_peers().steps.get(&key) {
-        return Ok(known);
-    }
     let checked = validate_peer_step(
         fetcher,
         expected_network_id,
@@ -459,16 +452,13 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
         conditional,
     )?;
     log_cost("step", peer_devid, peer_economic_position, &checked.cost());
-    let step = checked.into_answer();
-    validated_peers().steps.keep(key, step.clone());
-    Ok(step)
+    Ok(checked.into_answer())
 }
 
 /// The root a trader selected at a position and the reference a later `P`
 /// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
-/// Amendment A14). Kept as [`resolve_peer`] keeps a step, and for the same
-/// reason: a holdings status asked every few seconds, and a vault asked the
-/// same trader's parent for every exercise naming it.
+/// Amendment A14). Core answers every time, over kept evidence, as
+/// [`resolve_peer`] says.
 pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -477,10 +467,6 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<(ValidatedEconomicRoot, ParentClaimRef), PeerLineageFailure> {
-    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
-    if let Some(known) = validated_peers().roots.get(&key) {
-        return Ok(known);
-    }
     let checked = peer_root_at(
         fetcher,
         expected_network_id,
@@ -490,15 +476,14 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
         conditional,
     )?;
     log_cost("root", device_id, position, &checked.cost());
-    let known = checked.into_answer();
-    validated_peers().roots.keep(key, known);
-    Ok(known)
+    Ok(checked.into_answer())
 }
 
 /// The claim a trader accepted at a position (`SofiReads::accepted_claim_at`
 /// for another trader): what a setup naming that position is checked against
 /// (SoFi Amendment S15, MR-SOFI-0347), validated one hop (DSM Amendment
-/// A14). Kept as [`resolve_peer_root`] keeps a root.
+/// A14). Core answers every time, over kept evidence, as [`resolve_peer`]
+/// says.
 pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -507,10 +492,6 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<AcceptedClaim, PeerLineageFailure> {
-    let key = (expected_network_id.to_vec(), *genesis, *device_id, position);
-    if let Some(known) = validated_peers().claims.get(&key) {
-        return Ok(known);
-    }
     let checked = peer_claim_at(
         fetcher,
         expected_network_id,
@@ -520,77 +501,7 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
         conditional,
     )?;
     log_cost("claim", device_id, position, &checked.cost());
-    let accepted = checked.into_answer();
-    validated_peers().claims.keep(key, accepted);
-    Ok(accepted)
-}
-
-/// A peer's position on a network: what [`ValidatedPeers`] keeps answers by.
-type PeerKey = (Vec<u8>, [u8; 32], [u8; 32], u64);
-
-/// What complete checks established, by network, peer and position.
-struct Kept<V> {
-    entries: std::sync::Mutex<std::collections::HashMap<PeerKey, V>>,
-}
-
-impl<V: Clone> Kept<V> {
-    fn new() -> Self {
-        Self {
-            entries: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }
-    }
-    /// The kept answers. A thread that panicked holding the lock left whole
-    /// entries behind (each is inserted in one step), so the map is taken as
-    /// it stands.
-    fn entries(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<PeerKey, V>> {
-        match self.entries.lock() {
-            Ok(entries) => entries,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-    fn get(&self, key: &PeerKey) -> Option<V> {
-        self.entries().get(key).cloned()
-    }
-    fn keep(&self, key: PeerKey, value: V) {
-        let mut entries = self.entries();
-        if entries.len() >= VALIDATED_PEERS_MAX {
-            entries.clear();
-        }
-        entries.insert(key, value);
-    }
-}
-
-/// The steps, roots and claims this process validated, kept because a final
-/// claim's answer never changes.
-pub(crate) struct ValidatedPeers {
-    /// The steps [`resolve_peer`] and admission prevalidation validated.
-    steps: Kept<ValidatedPeerTransition>,
-    /// The roots [`resolve_peer_root`] established.
-    roots: Kept<(ValidatedEconomicRoot, ParentClaimRef)>,
-    /// The claims [`resolve_peer_claim`] established.
-    claims: Kept<AcceptedClaim>,
-}
-
-/// More than a phone's traders: past it the memory starts over.
-const VALIDATED_PEERS_MAX: usize = 4096;
-
-impl ValidatedPeers {
-    #[cfg(test)]
-    pub(crate) fn forget(&self) {
-        self.steps.entries().clear();
-        self.roots.entries().clear();
-        self.claims.entries().clear();
-    }
-}
-
-pub(crate) fn validated_peers() -> &'static ValidatedPeers {
-    static PEERS: once_cell::sync::Lazy<ValidatedPeers> =
-        once_cell::sync::Lazy::new(|| ValidatedPeers {
-            steps: Kept::new(),
-            roots: Kept::new(),
-            claims: Kept::new(),
-        });
-    &PEERS
+    Ok(checked.into_answer())
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the
@@ -620,10 +531,10 @@ impl<'a> RecordingResolver<'a> {
     }
 
     /// The peer's step validated from its own parent (DSM Amendment A14),
-    /// recorded at the fetch boundary, with what checking it cost. The step
-    /// is kept as [`resolve_peer`] keeps one: the admission that accepts it
-    /// asks [`resolve_peer`] for the same transition when it advances its own
-    /// root, and finds it there.
+    /// recorded at the fetch boundary, with what checking it cost. The
+    /// admission that accepts it asks [`resolve_peer`] for the same transition
+    /// when it advances its own root, and Core answers again over the
+    /// evidence this check read.
     pub fn validated_peer_step(
         &self,
         peer_genesis: &[u8; 32],
@@ -644,15 +555,6 @@ impl<'a> RecordingResolver<'a> {
             peer_devid,
             peer_economic_position,
             &checked.cost(),
-        );
-        validated_peers().steps.keep(
-            (
-                self.inner.expected_network_id.clone(),
-                *peer_genesis,
-                *peer_devid,
-                peer_economic_position,
-            ),
-            checked.answer().clone(),
         );
         Ok(checked)
     }

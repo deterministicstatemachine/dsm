@@ -3490,7 +3490,6 @@ async fn a_vault_walk_over_settled_history_closes_no_cycle() {
         )
         .expect("forget the vault's generations");
     }
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
     for node in &p.nodes.nodes {
         node.forget_requests();
@@ -3550,7 +3549,6 @@ fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
             .expect("forget the vault's witness, baseline and quarantine");
         }
     }
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
 }
 
@@ -3707,7 +3705,6 @@ async fn a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history() 
     realized_trade(&p, &m, 5).await;
     // The tests' devices share one process: what B's trade left in the
     // process's memory is not A's.
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
     crate::sdk::sofi_reads::forget_judgements();
     let chain = chain_at_a();
@@ -5124,10 +5121,33 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             crate::util::text_id::encode_base32_crockford(next.routed().key())
         ));
     }
+    // A trader's register key at a position is where Core looks for its
+    // claims there: every check of the trader's step reads it afresh, since a
+    // second claim final from another parent is a fork (SA-92). It is
+    // discovery, never a final cell kept.
+    let probes: std::collections::BTreeSet<String> = [&p.a, &p.b]
+        .iter()
+        .flat_map(|device| {
+            (0..=64u64).map(move |position| {
+                format!(
+                    "GET /api/v2/cell/{}",
+                    crate::util::text_id::encode_base32_crockford(
+                        &dsm::economic::register::economic_root_register_key(
+                            &device.genesis,
+                            &device.device_id,
+                            position,
+                        )
+                    )
+                )
+            })
+        })
+        .collect();
     for (member, asked) in &asked {
         let again: Vec<_> = asked
             .iter()
-            .filter(|(request, times)| **times > 1 && !open.contains(request))
+            .filter(|(request, times)| {
+                **times > 1 && !open.contains(request) && !probes.contains(*request)
+            })
             .collect();
         assert!(
             again.is_empty(),
