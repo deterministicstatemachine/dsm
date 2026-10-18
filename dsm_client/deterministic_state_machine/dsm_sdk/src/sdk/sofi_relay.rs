@@ -272,6 +272,31 @@ pub async fn relay_fulfillment(
     })
 }
 
+/// Carry the exercise holding `attempt`'s key along every leg key its `F`
+/// names, and nothing else. For an exercise whose pair is already decided
+/// (registered, or lost to another claim) that still holds a key it has not
+/// made final: Core skips or consumes a key only on a final cell, and no
+/// other party finishes this one (SA-72). The pair is not written.
+pub async fn carry_held_exercise(
+    set: &StorageSet,
+    vault_id: &D32,
+    parent_root: &D32,
+    attempt: u64,
+) -> Result<Vec<LegWrite>, DsmError> {
+    let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cell.routed()).await;
+    let read = attempt_resolution(&cell, &evidence)
+        .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
+    let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
+        return Err(refuse(
+            "no exercise holds the key; there is nothing to carry",
+        ));
+    };
+    let cells = leg_cells(set, exercise.fulfillment(), exercise.precommit())?;
+    carry_exercise(set, cells, bytes).await
+}
+
 /// Register the fulfillment whose exercise holds `vault_id`'s key
 /// `K^(attempt)` at `parent_root`, from that exercise's bytes alone (SoFi
 /// Amendment S20), and carry the exercise to every key its `F` names.

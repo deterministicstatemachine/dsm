@@ -2371,6 +2371,79 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
     assert_eq!(held_at(pair.root().routed()).await, root_before);
 }
 
+/// SA-72. A key held short of final by an exercise whose pair is already
+/// registered is carried to its keys before the walk goes on, not stepped
+/// past: Core decides a key only on a final cell, and a trader whose walk
+/// stepped past it drafted on an attempt whose skip could not conform until
+/// someone else finished the key. B's pair registers and its exercise reaches
+/// only the key's leader; the other seats then take writes again, and A's
+/// close carries B's exercise until the key is final, and is taken.
+/// MUTATION CONTROL: stepping past a held key whose pair is decided, as the
+/// walk did, leaves the key short of final and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk_goes_on() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+    let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
+    let seats: Vec<String> = attempt.routed().route().seats()[1..]
+        .iter()
+        .map(|id| member_name(id))
+        .collect();
+    for seat in &seats {
+        p.nodes
+            .refuse_cell_writes(seat, &[*attempt.routed().key()])
+            .await;
+    }
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    for seat in &seats {
+        p.nodes.accept_cell_writes(seat).await;
+    }
+    let final_at_first_key = |device: &TestDevice| {
+        device.enter();
+        let (own, parents) = standing_of(device);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let held = ctx
+            .verifier()
+            .read_attempt_cell(&m.vault_id, &r0, 0)
+            .expect("read")
+            .expect("decided");
+        assert!(held.exercise().is_some(), "B's exercise holds the first key");
+        matches!(
+            held.fact(),
+            CellFact::Held {
+                state: dsm::route_chain::ChainState::Final,
+                ..
+            }
+        )
+    };
+    assert!(!final_at_first_key(&p.a), "the key is held short of final");
+
+    let r = invoke(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert!(r.success, "A's close is taken: {:?}", r.error_message);
+    assert!(final_at_first_key(&p.a), "A's walk carried B's exercise to final");
+}
+
 /// SoFi Amendment S20 (12j), Amendment S15: a position whose root cell
 /// holds a claim naming its fulfillment but with another body than the one
 /// its `P` and `F` derive resolves Invalid for the trader's lineage, read by

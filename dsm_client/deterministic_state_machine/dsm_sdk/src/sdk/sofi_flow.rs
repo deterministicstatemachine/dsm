@@ -1544,9 +1544,10 @@ enum Walked {
     /// The live attempt: the walk's first unresolved key, advanced past keys
     /// an exercise still in flight holds.
     Live(u64),
-    /// A key the walk would have passed was held by an exercise whose pair
-    /// its trader withheld, and that pair is now registered from the
-    /// exercise. The walk is run again.
+    /// A key the walk would have passed was held by an exercise short of
+    /// final: its withheld pair is now registered from the exercise, or the
+    /// exercise of an already decided pair was carried to its keys. The walk
+    /// is run again.
     Registered,
     /// The vault moved under the draft: its parent was consumed, or every
     /// nearby key is held by an exercise still in flight. Nothing is
@@ -1619,7 +1620,51 @@ async fn walk_for_attempt(
         let Some(exercise) = read.exercise() else {
             return Ok(Walked::Live(attempt));
         };
-        if pair_withheld(verifier, exercise, attempt)? {
+        let standing = pair_standing(verifier, exercise, attempt)?;
+        let final_here = matches!(
+            read.fact(),
+            dsm::route_chain::CellFact::Held {
+                state: dsm::route_chain::ChainState::Final,
+                ..
+            }
+        );
+        // A pair already decided (registered, or lost to another claim)
+        // whose exercise holds this key short of final: Core decides the key
+        // only on a final cell, and stepping past it fenced this trader on a
+        // fulfillment that could not conform until someone else finished it.
+        // The exercise is carried to its keys and the walk runs again (SA-72).
+        if !final_here
+            && matches!(
+                standing,
+                Some(PairStanding::Registered | PairStanding::Lost | PairStanding::Misbodied)
+            )
+        {
+            crate::sdk::sofi_relay::carry_held_exercise(set, vault_id, parent_root, attempt)
+                .await?;
+            let finished = matches!(
+                verifier
+                    .read_attempt_cell(vault_id, parent_root, attempt)
+                    .map_err(verifier_error)?,
+                Ok(read) if matches!(
+                    read.fact(),
+                    dsm::route_chain::CellFact::Held {
+                        state: dsm::route_chain::ChainState::Final,
+                        ..
+                    }
+                )
+            );
+            log::info!(
+                "[sofi] carried the exercise held at attempt {attempt}, its pair {standing:?}; \
+                 final: {finished}"
+            );
+            // Final now: Core decides the key, and the walk runs again. Seats
+            // that do not take it leave it short of final, and the walk goes
+            // on past it as before.
+            if finished {
+                return Ok(Walked::Registered);
+            }
+        }
+        if standing == Some(PairStanding::Pending) {
             let relayed =
                 crate::sdk::sofi_relay::relay_exercise(set, vault_id, parent_root, attempt).await?;
             if !relayed.pair.iter().all(|report| report.reached_leader()) {
@@ -1645,15 +1690,15 @@ async fn walk_for_attempt(
     ))
 }
 
-/// Whether the position pair of the exercise holding `attempt` is still to
-/// be registered: neither registered nor lost, as its cells read now. Reads
-/// that do not decide the pair establish nothing, so the pair is not
-/// written on them.
-fn pair_withheld(
+/// Where the position pair of the exercise holding `attempt` stands, as its
+/// cells read now: `Pending` is a pair still to be registered. Reads that do
+/// not decide the pair establish nothing (`None`), so nothing is written on
+/// them.
+fn pair_standing(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     exercise: &dsm::sofi::exercise::RecognizedExercise,
     attempt: u64,
-) -> Result<bool, DsmError> {
+) -> Result<Option<PairStanding>, DsmError> {
     let (precommit, fulfillment) = (&exercise.precommit().body, &exercise.fulfillment().body);
     let standing = match verifier
         .read_registration(
@@ -1673,7 +1718,7 @@ fn pair_withheld(
             None
         }
     };
-    Ok(standing == Some(PairStanding::Pending))
+    Ok(standing)
 }
 
 /// The live attempt of a leg at `parent_root` (§31 stage 6), every withheld
