@@ -792,9 +792,9 @@ impl Verifier<'_> {
                 RegisteredEconomicClaim::SingleRoot(claim) => self
                     .parent_named_by(position, claim)
                     .map(|parent| vec![parent]),
-                RegisteredEconomicClaim::ConditionalSofi(_) => match conditional_at {
+                RegisteredEconomicClaim::ConditionalSofi(held) => match conditional_at {
                     ConditionalAt::Resolve => {
-                        self.parents_of_conditional(genesis, device_id, position)
+                        self.parents_of_conditional(genesis, device_id, position, held)
                     }
                     ConditionalAt::Unresolved | ConditionalAt::Invalid => {
                         if let Err(why) = candidate.single_root() {
@@ -950,18 +950,25 @@ impl Verifier<'_> {
         Ok(candidates)
     }
 
-    /// The parents a conditional claim at `position` may have been built on,
-    /// read one position back and no further: the root a single-root claim
-    /// there installed, with that claim; or either root a conditional claim
-    /// there commits, with its fulfillment. Each is only where to look: the
-    /// claim at `position` must be final at the cell routed from exactly one
-    /// of them, and the resolution of `position` is then derived from it
-    /// (SoFi Amendment S15). Nothing two positions back is read.
+    /// The parents the conditional claim `held` at `position` may have been
+    /// built on, read one position back and no further: of the root a
+    /// single-root claim there installed, with that claim, and the two roots
+    /// a conditional claim there commits, with its fulfillment, only the root
+    /// `held` names as its predecessor's. That is its void root: `P` returns
+    /// to the root it was built on, and a `P` built on any other is refused at
+    /// resolution (P15-2). A conditional predecessor's other root is no
+    /// parent: offering both had the claim, written also along the cell
+    /// routed from the root it was not built on, read as two claims each final
+    /// from its own parent, a fork (SA-95). Each is only where to look: the
+    /// claim at `position` must be final at the cell routed from it, and the
+    /// resolution of `position` is then derived from it (SoFi Amendment S15).
+    /// Nothing two positions back is read.
     fn parents_of_conditional(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
+        held: &SofiResolutionClaim,
     ) -> Result<Vec<ChainPoint>, PeerLineageFailure> {
         if position <= 1 {
             return Err(invalid(format!(
@@ -971,24 +978,27 @@ impl Verifier<'_> {
         }
         self.count(|c| c.conditional_hops += 1);
         let back = position - 1;
+        let named = held.void_root;
         let mut parents = Vec::new();
         for claim in self.probed(genesis, device_id, back)? {
             match claim {
                 RegisteredEconomicClaim::SingleRoot(claim) => {
                     let registered = RegisteredEconomicRoot::from_verified_single_root(&claim);
-                    parents.push(ChainPoint {
-                        root: authenticated_root(back, registered.post_economic_root()),
-                        accepted: Some(ParentClaimRef::SingleRoot {
-                            claim_ref: registered.claim_ref(),
-                        }),
-                    });
-                }
-                RegisteredEconomicClaim::ConditionalSofi(held) => {
-                    for root in [held.realize_root, held.void_root] {
+                    if registered.post_economic_root() == named {
                         parents.push(ChainPoint {
-                            root: authenticated_root(back, root),
+                            root: authenticated_root(back, named),
+                            accepted: Some(ParentClaimRef::SingleRoot {
+                                claim_ref: registered.claim_ref(),
+                            }),
+                        });
+                    }
+                }
+                RegisteredEconomicClaim::ConditionalSofi(before) => {
+                    if before.realize_root == named || before.void_root == named {
+                        parents.push(ChainPoint {
+                            root: authenticated_root(back, named),
                             accepted: Some(ParentClaimRef::Conditional {
-                                fulfillment_id: held.fulfillment_id,
+                                fulfillment_id: before.fulfillment_id,
                             }),
                         });
                     }
@@ -1400,10 +1410,10 @@ mod tests {
 
     /// DSM Amendment A14, the conditional bound: a conditional claim on a
     /// conditional parent (two trades in a row) is resolved from the parent
-    /// one position back, never two. The claim at 40 is final only along the
-    /// cell routed from the realize root the claim at 39 commits, so that is
-    /// its parent, and the resolver is asked from it; the claim at 38 is never
-    /// read.
+    /// one position back, never two. The claim at 40 was built on the realize
+    /// root the claim at 39 commits, names it, and is final along the cell
+    /// routed from it, so that is its parent, and the resolver is asked from
+    /// it; the claim at 38 is never read.
     #[test]
     fn a_conditional_claim_on_a_conditional_parent_reads_one_position_back_and_never_two() {
         let position = 40;
@@ -1413,7 +1423,10 @@ mod tests {
             void_root: [0xB9; 32],
             ..conditional_claim(position - 1)
         };
-        let held = peer_c_q(conditional_claim(position));
+        let held = peer_c_q(SofiResolutionClaim {
+            void_root: [0xA9; 32],
+            ..conditional_claim(position)
+        });
         let fetcher = RoutedClaims {
             probed: vec![
                 (position, held.clone()),
@@ -1449,7 +1462,7 @@ mod tests {
                 cost.routed_reads,
                 cost.conditional_hops
             ),
-            (2, 2, 1)
+            (2, 1, 1)
         );
         match peer_claim_at(
             &fetcher,
@@ -1465,6 +1478,51 @@ mod tests {
             ),
             other => panic!("the resolver answers here, not {other:?}"),
         }
+    }
+
+    /// SA-95. A conditional claim on a conditional parent is located from the
+    /// root it names as its predecessor's alone. Written also along the cell
+    /// routed from the parent's other root, where anyone may copy it, it is
+    /// still one claim with one parent, never a fork.
+    /// MUTATION CONTROL: offering both roots of the conditional parent, as
+    /// the lookup did, finds the claim final from each and turns this red.
+    #[test]
+    fn a_conditional_claim_copied_along_its_parents_other_root_is_no_fork() {
+        let position = 40;
+        let parent = SofiResolutionClaim {
+            fulfillment_id: [0xF9; 32],
+            realize_root: [0xA9; 32],
+            void_root: [0xB9; 32],
+            ..conditional_claim(position - 1)
+        };
+        let held = peer_c_q(SofiResolutionClaim {
+            void_root: [0xA9; 32],
+            ..conditional_claim(position)
+        });
+        let fetcher = RoutedClaims {
+            probed: vec![
+                (position, held.clone()),
+                (position - 1, peer_c_q(parent)),
+            ],
+            routed: vec![
+                (position, [0xA9; 32], held.clone()),
+                (position, [0xB9; 32], held),
+            ],
+            objects: std::collections::BTreeMap::new(),
+            asked: std::cell::RefCell::new(Vec::new()),
+        };
+        let verifier =
+            Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
+        let at = verifier
+            .located(&PEER_G, &peer_d(), position, ConditionalAt::Resolve)
+            .expect("one claim, one parent");
+        assert_eq!(at.parent.root.economic_root(), [0xA9; 32]);
+        assert_eq!(
+            at.parent.accepted,
+            Some(ParentClaimRef::Conditional {
+                fulfillment_id: [0xF9; 32]
+            })
+        );
     }
 
     /// A conditional claim whose one-back parent holds nothing yet waits for
