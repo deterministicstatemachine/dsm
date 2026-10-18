@@ -491,11 +491,14 @@ pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
 pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
 
 /// One finality certificate as it came off the wire: the node message id it
-/// is ACKed under and the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`).
+/// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
+/// and the content key of the copy it came in, by which one that never will be
+/// taken is passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationshipFinalizedMessage {
     pub message_id: String,
     pub body: Vec<u8>,
+    pub copy_key: String,
 }
 
 /// One B-side countersign delta as it came off the wire, kept whole so the
@@ -509,6 +512,9 @@ pub struct CountersignDelta {
     pub envelope_bytes: Vec<u8>,
     /// `ArgPack.body`: the `ReceiptCountersignB` wire bytes, unvalidated.
     pub body: Vec<u8>,
+    /// This copy's `envelope_merge_key`, by which a delta that never will be
+    /// taken is passed over.
+    pub copy_key: String,
 }
 
 /// Members whose last request failed. A failed member stays failed until a
@@ -2792,6 +2798,7 @@ impl B0xSDK {
                     message_id: text_id::encode_base32_crockford(&env.message_id),
                     envelope_bytes: env.encode_to_vec(),
                     body,
+                    copy_key,
                 });
                 continue;
             }
@@ -2805,6 +2812,7 @@ impl B0xSDK {
                     .push(RelationshipFinalizedMessage {
                         message_id: text_id::encode_base32_crockford(&env.message_id),
                         body,
+                        copy_key,
                     });
                 continue;
             }

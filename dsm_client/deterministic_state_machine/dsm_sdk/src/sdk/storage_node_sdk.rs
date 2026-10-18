@@ -519,6 +519,14 @@ const CELL_VALUES_BUDGET: Budget = Budget {
     allocation: 40 * 1024 * 1024,
 };
 
+/// How long one member has to answer a whole cell, every page of it. A
+/// member's pages cannot be held to a count (an honest cell of the smallest
+/// entries fills [`CELL_VALUES_BUDGET`] over hundreds of full pages), so a
+/// member answering each page just inside [`MEMBER_REQUEST_TIMEOUT`] held
+/// every read of the cell for hours (SA-68). Like that timeout, a transport
+/// bound only: a read past it is that member not answering, never a verdict.
+const CELL_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// What a cell read has taken from one member so far, page by page, held to
 /// [`CELL_VALUES_BUDGET`] for the whole cell.
 #[derive(Debug, Default)]
@@ -529,6 +537,11 @@ struct CellRead {
     /// What the values taken hold: their bytes, and each one's vector
     /// counted twice for the list that holds them as it grows.
     allocation: usize,
+    /// The value bytes of the last page, when it named a next page while
+    /// holding fewer entries than a page holds. A member ends a page short of
+    /// [`MAX_CELL_PAGE_ENTRIES`] only where the next value would carry it past
+    /// [`CELL_PAGE_VALUE_BYTES`], so the next page's first value must.
+    short_page_bytes: Option<usize>,
 }
 
 impl CellRead {
@@ -572,6 +585,24 @@ impl CellRead {
                 page.values.len(),
                 page.next
             ));
+        }
+        // A page cut short is borne out by the value that did not fit: a
+        // member that ends every page after one entry, to make a cell read
+        // take hundreds of thousands of requests, is not answering (SA-68).
+        if let Some(short) = self.short_page_bytes.take() {
+            let fits = page
+                .values
+                .first()
+                .is_none_or(|first| short.saturating_add(first.len()) <= CELL_PAGE_VALUE_BYTES);
+            if fits {
+                return Err(format!(
+                    "the page before {from} ended short of a page with {short} bytes of values, \
+                     and what follows it would have fit"
+                ));
+            }
+        }
+        if page.next != 0 && page.values.len() < MAX_CELL_PAGE_ENTRIES {
+            self.short_page_bytes = Some(page.values.iter().map(Vec::len).sum());
         }
         for value in page.values {
             self.allocation = self
@@ -919,8 +950,34 @@ impl MemberClient {
         }
     }
 
-    /// [`Self::get_cell`], with why the member's answer was not taken.
+    /// [`Self::get_cell`], with why the member's answer was not taken: every
+    /// page within [`CELL_READ_DEADLINE`].
     async fn cell_values(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+    ) -> Result<Option<Vec<Vec<u8>>>, String> {
+        self.cell_values_within(namespace, key, CELL_READ_DEADLINE)
+            .await
+    }
+
+    /// The pages of the cell, every one answered within `deadline` of the
+    /// first request.
+    async fn cell_values_within(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+        deadline: std::time::Duration,
+    ) -> Result<Option<Vec<Vec<u8>>>, String> {
+        tokio::time::timeout(deadline, self.cell_pages(namespace, key))
+            .await
+            .map_err(|elapsed| {
+                format!("the cell's pages took longer than {deadline:?} ({elapsed})")
+            })?
+    }
+
+    /// Read the cell page by page from the first arrival index.
+    async fn cell_pages(
         &self,
         namespace: &[u8],
         key: &[u8; 32],
@@ -2393,6 +2450,130 @@ mod tests {
             .expect("the read ends");
         assert_eq!(read, vec![None, None, None]);
         assert_eq!(reads.load(Ordering::SeqCst), 3, "each member was read once");
+    }
+
+    /// The page a member serves of `held` from `from`, as the node builds it:
+    /// up to a page's entries while their values fit a page's bytes, and
+    /// always the first.
+    fn node_page(held: &[Vec<u8>], from: u64) -> proto::CellValuesV1 {
+        let start = usize::try_from(from - 1).expect("an index");
+        let mut end = start;
+        let mut bytes = 0usize;
+        while end < held.len() && end - start < MAX_CELL_PAGE_ENTRIES {
+            bytes += held[end].len();
+            if end > start && bytes > CELL_PAGE_VALUE_BYTES {
+                break;
+            }
+            end += 1;
+        }
+        let per_page = end - start;
+        honest_page(held, per_page.max(1), from)
+    }
+
+    /// SA-68. A member that ends every page after one small entry, each
+    /// naming the next, would make a cell read take hundreds of thousands of
+    /// requests. A page cut short must be borne out by the value after it,
+    /// which would not have fit: here it would, so the second page refuses
+    /// the member's answer, and nothing more is asked of it.
+    /// MUTATION CONTROL: not checking the page cut short turns this red.
+    #[tokio::test]
+    async fn a_member_cutting_every_page_short_is_not_answering() {
+        let ca = TestCa::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let trickle = move |from: u64| {
+            let (value, record) = smallest_cell_entry();
+            proto::CellValuesV1 {
+                values: vec![value],
+                records: vec![proto::ArrivalRecordV1 {
+                    index: from,
+                    ..record
+                }],
+                next: from + 1,
+            }
+        };
+        let (set, _served) = set_of(
+            &ca,
+            vec![("dsm-node-1", paged_cell(trickle, reads.clone()))],
+        )
+        .await;
+        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+            .await
+            .expect("the read ends");
+        assert_eq!(read, vec![None]);
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            2,
+            "the second page refused it"
+        );
+    }
+
+    /// A page an honest member ends short, because the value after it would
+    /// carry it past a page's bytes, is read on: the cell is read whole.
+    #[tokio::test]
+    async fn a_page_ended_short_by_the_value_after_it_is_read_on() {
+        let ca = TestCa::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let held = vec![
+            vec![0x01; 16],
+            vec![0x02; CELL_PAGE_VALUE_BYTES],
+            vec![0x03; 16],
+            vec![0x04; 16],
+        ];
+        let pages = {
+            let held = held.clone();
+            move |from| node_page(&held, from)
+        };
+        assert!(node_page(&held, 1).values.len() < MAX_CELL_PAGE_ENTRIES);
+        let (set, _served) =
+            set_of(&ca, vec![("dsm-node-1", paged_cell(pages, reads.clone()))]).await;
+        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+            .await
+            .expect("the read ends");
+        assert_eq!(read, vec![Some(held)]);
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+    }
+
+    /// SA-68. A member answering full pages, each just inside a request's
+    /// timeout, is held to one deadline for the whole cell: past it the read
+    /// is that member not answering, however many pages it still has.
+    /// MUTATION CONTROL: reading the pages with no deadline turns this red.
+    #[tokio::test]
+    async fn a_cell_read_ends_at_its_deadline_however_slow_the_pages() {
+        let ca = TestCa::new();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let held: Vec<Vec<u8>> = vec![smallest_cell_entry().0; MAX_CELL_PAGE_ENTRIES * 64];
+        let slow = {
+            let reads = reads.clone();
+            axum::Router::new().route(
+                "/api/v2/cell/{key}",
+                axum::routing::get(
+                    move |axum::extract::Query(query): axum::extract::Query<
+                        std::collections::HashMap<String, u64>,
+                    >| {
+                        let (held, reads) = (held.clone(), reads.clone());
+                        async move {
+                            reads.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            let from = query.get("from").copied().expect("the arrival index");
+                            honest_page(&held, MAX_CELL_PAGE_ENTRIES, from).encode_to_vec()
+                        }
+                    },
+                ),
+            )
+        };
+        let (member, _served) = member_at(&ca, "dsm-node-1", slow).await;
+        let refused = tokio::time::timeout(
+            PATIENCE,
+            member.cell_values_within(NAMESPACE, &[0x6b; 32], Duration::from_secs(1)),
+        )
+        .await
+        .expect("the read ends")
+        .expect_err("past its deadline the member did not answer");
+        assert!(refused.contains("took longer than"), "{refused}");
+        assert!(
+            reads.load(Ordering::SeqCst) < 64,
+            "the read stopped at its deadline"
+        );
     }
 
     /// The budgets hold what an honest member answers: a cell of the

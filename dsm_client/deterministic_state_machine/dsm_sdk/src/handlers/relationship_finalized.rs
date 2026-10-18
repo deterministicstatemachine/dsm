@@ -24,9 +24,11 @@ use dsm::types::receipt_types::{
     decode_relationship_finalized_wire, relationship_finalized_signing_target,
 };
 
-/// What one polled certificate did here. ACK on the polled route only for
-/// `Applied` / `AlreadyFinalized` / `NoJournal` (nothing this device could
-/// ever use it for); everything else leaves it spooled for the next poll.
+/// What one polled certificate did here. Only `Applied` consumes the message
+/// id it was read under. `AlreadyFinalized` and `NoJournal` need no signature
+/// to reach, and anyone can seal a certificate under an honest message's id,
+/// so a copy that ends there is passed over by its content (SA-66);
+/// everything else leaves it spooled for the next poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelationshipFinalizedOutcome {
     /// Verified; `peer_finalized` flipped to 1 for that transition.

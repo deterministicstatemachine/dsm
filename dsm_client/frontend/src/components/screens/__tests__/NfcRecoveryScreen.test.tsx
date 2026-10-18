@@ -16,7 +16,6 @@ jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
   createCapsule: jest.fn(),
   disableNfcBackup: jest.fn(),
   enableNfcBackup: jest.fn(),
-  generateMnemonic: jest.fn(),
 }));
 
 jest.mock('../../../dsm/EventBridge', () => ({

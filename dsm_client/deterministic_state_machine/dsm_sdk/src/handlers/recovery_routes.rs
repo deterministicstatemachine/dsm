@@ -117,9 +117,16 @@ impl AppRouterImpl {
                     );
                 }
 
-                // Derive and cache the recovery key in memory
+                // Backup is armed with this wallet's own phrase, or not at all: a capsule
+                // under any other phrase restores nothing (SA-64). Only the recovery keys
+                // are cached; the wallet seed is the identity's root and is not written.
                 if let Err(e) =
-                    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+                    crate::sdk::recovery_sdk::RecoverySDK::require_this_wallets_phrase(&mnemonic)
+                {
+                    return err(format!("recovery.enable: {e}"));
+                }
+                if let Err(e) =
+                    crate::sdk::recovery_sdk::RecoverySDK::cache_recovery_keys(&mnemonic)
                 {
                     return err(format!("recovery.enable key derivation failed: {e}"));
                 }
@@ -190,8 +197,9 @@ impl AppRouterImpl {
 
             // -------- recovery.disable --------
             "recovery.disable" => {
-                // Clear cached key from memory first
-                crate::sdk::recovery_sdk::RecoverySDK::clear_cached_key();
+                // Drop the recovery keys. The wallet seed stays, in memory and sealed:
+                // backup off is not a logout (SA-65).
+                crate::sdk::recovery_sdk::RecoverySDK::clear_recovery_keys();
 
                 if let Err(e) = crate::sdk::recovery_sdk::RecoverySDK::disable_nfc_backup() {
                     return err(format!("recovery.disable failed: {e}"));
@@ -205,8 +213,9 @@ impl AppRouterImpl {
             }
 
             // -------- recovery.cacheMnemonic --------
-            // Derives the recovery key and keeps it in Rust memory for follow-on
-            // ring decrypt/import or lazy capsule refresh.
+            // Derives the recovery keys and keeps them in Rust memory for follow-on
+            // ring decrypt/import. The phrase may be a lost wallet's (reading its
+            // ring), so it never reaches the wallet seed (SA-64).
             "recovery.cacheMnemonic" => {
                 let mnemonic = match Self::decode_recovery_string_param(&i.args) {
                     Ok(m) => m,
@@ -223,7 +232,7 @@ impl AppRouterImpl {
                 }
 
                 if let Err(e) =
-                    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+                    crate::sdk::recovery_sdk::RecoverySDK::cache_recovery_keys(&mnemonic)
                 {
                     return err(format!("recovery.cacheMnemonic failed: {e}"));
                 }
@@ -242,6 +251,11 @@ impl AppRouterImpl {
                     Ok(m) => m,
                     Err(e) => return err(format!("recovery.createCapsule: {e}")),
                 };
+                if let Err(e) =
+                    crate::sdk::recovery_sdk::RecoverySDK::require_this_wallets_phrase(&mnemonic)
+                {
+                    return err(format!("recovery.createCapsule: {e}"));
+                }
 
                 match crate::sdk::recovery_sdk::RecoverySDK::create_capsule_from_current_state(
                     &mnemonic,
@@ -498,22 +512,6 @@ impl AppRouterImpl {
                         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
                     }
                     Err(e) => err(format!("recovery.resume failed: {e}")),
-                }
-            }
-
-            // -------- recovery.generateMnemonic --------
-            // Generates a cryptographically secure 24-word BIP-39 mnemonic via CSPRNG.
-            // Crypto stays in Rust — TypeScript never generates mnemonics.
-            "recovery.generateMnemonic" => {
-                match crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic() {
-                    Ok(words) => {
-                        let resp = generated::AppStateResponse {
-                            key: "recovery.generateMnemonic".to_string(),
-                            value: Some(words),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
-                    }
-                    Err(e) => err(format!("recovery.generateMnemonic failed: {e}")),
                 }
             }
 

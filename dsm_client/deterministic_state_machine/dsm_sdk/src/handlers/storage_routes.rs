@@ -2055,6 +2055,85 @@ fn take_in_copy(
     }
 }
 
+/// Act on what became of one finality certificate read at `address`. Only a
+/// certificate this device verified and applied consumes the message id it
+/// was read under. One that named a transition this device already finalized,
+/// or none it journaled, was reached with no signature checked, and anyone
+/// can seal a certificate under an honest message's id: consuming that id hid
+/// the honest copy for good (SA-66). Such a copy is passed over by its
+/// content, as junk is.
+fn take_in_finality_certificate(
+    outcome: crate::handlers::relationship_finalized::RelationshipFinalizedOutcome,
+    address: &str,
+    certificate: &crate::sdk::b0x_sdk::RelationshipFinalizedMessage,
+    taken: &mut CopiesTaken,
+    report: &mut StorageSyncReport,
+) {
+    use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
+    match outcome {
+        O::Applied => {
+            report.processed += 1;
+            taken.consume(address, &certificate.message_id);
+        }
+        O::AlreadyFinalized | O::NoJournal => taken.pass_over(address, &certificate.copy_key),
+        other => report.errors.push(format!(
+            "finality checkpoint {}: {other:?}",
+            certificate.message_id
+        )),
+    }
+}
+
+/// Act on what became of one countersign delta read at `address`. A delta the
+/// acceptance verifier finalized on consumes its message id. One naming a
+/// proposal already finalized was reached with nothing verified, so it is
+/// passed over by its content rather than consuming an id another message may
+/// hold (SA-66).
+fn take_in_countersign_delta(
+    outcome: CountersignOutcome,
+    address: &str,
+    delta: &crate::sdk::b0x_sdk::CountersignDelta,
+    taken: &mut CopiesTaken,
+    report: &mut StorageSyncReport,
+) {
+    match outcome {
+        CountersignOutcome::Finalized => {
+            report.processed += 1;
+            taken.consume(address, &delta.message_id);
+        }
+        CountersignOutcome::AlreadyFinalized => taken.pass_over(address, &delta.copy_key),
+        other => report
+            .errors
+            .push(format!("countersign delta {}: {other:?}", delta.message_id)),
+    }
+}
+
+/// Record what a pass over spooled artifacts decided: ids consumed, copies
+/// passed over by their content.
+async fn record_copies_taken(
+    b0x_sdk: &mut crate::sdk::b0x_sdk::B0xSDK,
+    taken: CopiesTaken,
+    report: &mut StorageSyncReport,
+) {
+    for (route, ids) in taken.consume {
+        if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
+            report.errors.push(format!(
+                "consume spooled artifacts on {}..: {e}",
+                short_route(&route)
+            ));
+        }
+    }
+    for (route, copy_keys) in taken.pass_over {
+        if let Err(e) =
+            crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
+        {
+            report.errors.push(format!(
+                "pass over spooled artifacts on {}..: {e}",
+                short_route(&route)
+            ));
+        }
+    }
+}
+
 /// Act on what became of one cert-resync message read at `address`. One its
 /// own bytes say never will be taken is passed over by its content, so it is
 /// not read and refused again on every sync; one that could not be taken now
@@ -2426,7 +2505,7 @@ impl AppRouterImpl {
         route: &str,
         report: &mut StorageSyncReport,
     ) {
-        let mut consumed = Vec::new();
+        let mut taken = CopiesTaken::default();
         for delta in b0x_sdk.take_countersign_deltas() {
             let outcome = finalize_from_countersign_delta(&delta).await;
             log::info!(
@@ -2434,25 +2513,9 @@ impl AppRouterImpl {
                 delta.message_id,
                 outcome
             );
-            match outcome {
-                CountersignOutcome::Finalized => {
-                    report.processed += 1;
-                    consumed.push(delta.message_id.clone());
-                }
-                CountersignOutcome::AlreadyFinalized => consumed.push(delta.message_id.clone()),
-                other => report
-                    .errors
-                    .push(format!("countersign delta {}: {other:?}", delta.message_id)),
-            }
+            take_in_countersign_delta(outcome, route, &delta, &mut taken, report);
         }
-        if !consumed.is_empty() {
-            if let Err(e) = b0x_sdk.record_consumed_b0x(route, consumed).await {
-                report.errors.push(format!(
-                    "consume countersign deltas on {}..: {e}",
-                    short_route(route)
-                ));
-            }
-        }
+        record_copies_taken(b0x_sdk, taken, report).await;
     }
 
     /// Finality certificates (the finality barrier), before split-transfer
@@ -2463,8 +2526,7 @@ impl AppRouterImpl {
         route: &str,
         report: &mut StorageSyncReport,
     ) {
-        use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
-        let mut consumed = Vec::new();
+        let mut taken = CopiesTaken::default();
         for checkpoint in b0x_sdk.take_relationship_finalized() {
             let outcome = crate::handlers::relationship_finalized::apply_relationship_finalized(
                 &checkpoint.body,
@@ -2475,26 +2537,9 @@ impl AppRouterImpl {
                 checkpoint.message_id,
                 outcome
             );
-            match outcome {
-                O::Applied => {
-                    report.processed += 1;
-                    consumed.push(checkpoint.message_id.clone());
-                }
-                O::AlreadyFinalized | O::NoJournal => consumed.push(checkpoint.message_id.clone()),
-                other => report.errors.push(format!(
-                    "finality checkpoint {}: {other:?}",
-                    checkpoint.message_id
-                )),
-            }
+            take_in_finality_certificate(outcome, route, &checkpoint, &mut taken, report);
         }
-        if !consumed.is_empty() {
-            if let Err(e) = b0x_sdk.record_consumed_b0x(route, consumed).await {
-                report.errors.push(format!(
-                    "consume finality checkpoints on {}..: {e}",
-                    short_route(route)
-                ));
-            }
-        }
+        record_copies_taken(b0x_sdk, taken, report).await;
     }
 
     /// Every relationship the send gate marked REQUIRED gets its resync
@@ -2759,6 +2804,96 @@ mod tests {
         assert!(taken.consume.is_empty());
         assert_eq!(errors.len(), 2, "{errors:?}");
     }
+
+    /// SA-66. A finality certificate or countersign delta reached with no
+    /// signature checked (one naming no journal here, or a transition or
+    /// proposal this device already finalized) is passed over by its
+    /// content. Only one this device verified consumes the message id it was
+    /// read under: anyone can seal a certificate under an honest message's id,
+    /// and consuming that id hid the honest copy on every member for good.
+    /// MUTATION CONTROL: consuming the id of a `NoJournal` certificate, as
+    /// the poll did, turns this red.
+    #[test]
+    fn only_a_verified_artifact_consumes_the_id_it_was_read_under() {
+        use super::{
+            take_in_countersign_delta, take_in_finality_certificate, CopiesTaken, StorageSyncReport,
+        };
+        use crate::handlers::relationship_finalized::RelationshipFinalizedOutcome as O;
+        let certificate = |id: &str, key: &str| crate::sdk::b0x_sdk::RelationshipFinalizedMessage {
+            message_id: id.to_string(),
+            body: vec![0x01],
+            copy_key: key.to_string(),
+        };
+        let delta = |id: &str, key: &str| crate::sdk::b0x_sdk::CountersignDelta {
+            message_id: id.to_string(),
+            envelope_bytes: vec![0x02],
+            body: vec![0x03],
+            copy_key: key.to_string(),
+        };
+        let mut taken = CopiesTaken::default();
+        let mut report = StorageSyncReport {
+            pulled: 0,
+            processed: 0,
+            pushed: 0,
+            errors: Vec::new(),
+            inbox_incomplete: None,
+            more_pending: Vec::new(),
+        };
+
+        // Junk sealed under the id of an honest message, and a certificate
+        // naming a transition already finalized: neither verified anything.
+        take_in_finality_certificate(
+            O::NoJournal,
+            "ROUTE",
+            &certificate("HONEST-TRANSFER-ID", "JUNK-CERTIFICATE"),
+            &mut taken,
+            &mut report,
+        );
+        take_in_finality_certificate(
+            O::AlreadyFinalized,
+            "ROUTE",
+            &certificate("HONEST-RECEIPT-ID", "REPLAYED-CERTIFICATE"),
+            &mut taken,
+            &mut report,
+        );
+        take_in_countersign_delta(
+            CountersignOutcome::AlreadyFinalized,
+            "ROUTE",
+            &delta("HONEST-REPLY-ID", "REPLAYED-DELTA"),
+            &mut taken,
+            &mut report,
+        );
+        // What this device verified and applied.
+        take_in_finality_certificate(
+            O::Applied,
+            "ROUTE",
+            &certificate("CERTIFICATE-ID", "CERTIFICATE"),
+            &mut taken,
+            &mut report,
+        );
+        take_in_countersign_delta(
+            CountersignOutcome::Finalized,
+            "ROUTE",
+            &delta("DELTA-ID", "DELTA"),
+            &mut taken,
+            &mut report,
+        );
+
+        assert_eq!(
+            taken.consume.get("ROUTE").cloned(),
+            Some(vec!["CERTIFICATE-ID".to_string(), "DELTA-ID".to_string()])
+        );
+        assert_eq!(
+            taken.pass_over.get("ROUTE").cloned(),
+            Some(vec![
+                "JUNK-CERTIFICATE".to_string(),
+                "REPLAYED-CERTIFICATE".to_string(),
+                "REPLAYED-DELTA".to_string(),
+            ])
+        );
+        assert_eq!(report.processed, 2);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+    }
     use super::resolve_trusted_sender_ak;
     use crate::sdk::b0x_sdk::CountersignDelta;
     use crate::storage::client_db;
@@ -2839,6 +2974,7 @@ mod tests {
             message_id: delta.message_id.clone(),
             envelope_bytes: delta.envelope_bytes.clone(),
             body: body.encode_to_vec(),
+            copy_key: delta.copy_key.clone(),
         }
     }
 
@@ -2983,6 +3119,7 @@ mod tests {
             message_id: honest.message_id.clone(),
             envelope_bytes: honest.envelope_bytes.clone(),
             body: full_receipt,
+            copy_key: honest.copy_key.clone(),
         };
         assert!(matches!(
             finalize_from_countersign_delta(&whole).await,

@@ -1134,6 +1134,104 @@ mod tests {
         );
     }
 
+    /// A recovery route invoked as the NFC backup screen invokes it, with one
+    /// phrase as its argument.
+    fn invoke_recovery_route(method: &str, phrase: &str) -> IngressResponse {
+        dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: method.to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: pb::AppStateRequest {
+                            key: method.to_string(),
+                            operation: String::new(),
+                            value: phrase.to_string(),
+                        }
+                        .encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        })
+    }
+
+    /// The wallet seed this session holds, and the one sealed at rest, read
+    /// back as a restart reads it.
+    fn held_and_sealed_seed() -> (Vec<u8>, Vec<u8>) {
+        use crate::sdk::recovery_sdk::RecoverySDK;
+        let held = RecoverySDK::get_cached_wallet_seed()
+            .expect("the session's seed")
+            .to_vec();
+        RecoverySDK::clear_wallet_seed_cache();
+        assert!(
+            RecoverySDK::load_and_cache_wallet_seed().expect("the seed vault"),
+            "no sealed seed"
+        );
+        let sealed = RecoverySDK::get_cached_wallet_seed()
+            .expect("the unsealed seed")
+            .to_vec();
+        (held, sealed)
+    }
+
+    /// NFC backup is armed with this wallet's own phrase or not at all, and no
+    /// recovery route writes the wallet seed (SA-64). Another wallet's phrase
+    /// is refused by `recovery.enable` and `recovery.createCapsule`, and
+    /// `recovery.cacheMnemonic`, which reads a ring with whatever phrase made
+    /// it, leaves the seed in memory and the sealed one as they were. The
+    /// wallet's own phrase arms the backup.
+    #[test]
+    #[serial]
+    fn no_recovery_route_replaces_the_wallet_seed() {
+        device_with_router(0x4E);
+        let (own, own_sealed) = held_and_sealed_seed();
+        assert_eq!(own, own_sealed);
+        let other = economic_fixtures::test_mnemonic(0x4F);
+        for method in ["recovery.enable", "recovery.createCapsule"] {
+            let refused = expect_error(invoke_recovery_route(method, &other));
+            assert!(
+                refused
+                    .message
+                    .contains("not this wallet's recovery phrase"),
+                "{method}: {}",
+                refused.message
+            );
+        }
+        let cached = expect_ok_bytes(invoke_recovery_route("recovery.cacheMnemonic", &other));
+        assert!(!cached.is_empty());
+        assert_eq!(held_and_sealed_seed(), (own.clone(), own.clone()));
+
+        let armed = expect_ok_bytes(invoke_recovery_route(
+            "recovery.enable",
+            &economic_fixtures::test_mnemonic(0x4E),
+        ));
+        assert!(!armed.is_empty());
+        assert_eq!(held_and_sealed_seed(), (own.clone(), own));
+    }
+
+    /// Turning NFC backup off drops the recovery keys and nothing else: the
+    /// wallet seed stays in memory and sealed at rest, so the wallet still
+    /// signs, and opens after a restart (SA-65).
+    #[test]
+    #[serial]
+    fn disabling_backup_keeps_the_wallet_seed() {
+        use crate::sdk::recovery_sdk::RecoverySDK;
+        device_with_router(0x50);
+        let (own, _) = held_and_sealed_seed();
+        let armed = expect_ok_bytes(invoke_recovery_route(
+            "recovery.enable",
+            &economic_fixtures::test_mnemonic(0x50),
+        ));
+        assert!(!armed.is_empty());
+        assert!(RecoverySDK::has_cached_key());
+
+        let disabled = expect_ok_bytes(invoke_recovery_route("recovery.disable", ""));
+        assert!(!disabled.is_empty());
+        assert!(!RecoverySDK::has_cached_key());
+        assert_eq!(held_and_sealed_seed(), (own.clone(), own));
+    }
+
     /// While the session is locked the ingress runs nothing the app asks but
     /// the session's own routes: no read, no write, no envelope. Rust opens it
     /// only for its PIN, and then the same requests run (S-LOCK).
