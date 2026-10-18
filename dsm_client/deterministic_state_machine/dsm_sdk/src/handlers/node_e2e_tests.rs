@@ -5188,3 +5188,147 @@ async fn a_pair_named_in_either_order_holds_each_reserve_against_its_own_token()
         "{message}"
     );
 }
+
+/// A succession proof naming `predecessor` as the device it tombstones and
+/// `successor` as the device it binds, signed under `secret`, whose public
+/// key is `authority`.
+fn succession_proof_under(
+    authority: &[u8],
+    secret: &[u8],
+    predecessor: &[u8; 32],
+    successor: &[u8; 32],
+) -> dsm::recovery::RecoverySuccessionProof {
+    let named = crate::util::text_id::encode_base32_crockford(predecessor);
+    let tombstone =
+        dsm::recovery::create_tombstone_receipt(&[0x11; 32], 7, &[0x22; 32], &named, secret)
+            .expect("a tombstone");
+    let succession = dsm::recovery::create_succession_receipt(
+        &tombstone.tombstone_hash,
+        successor,
+        &named,
+        secret,
+    )
+    .expect("a succession");
+    dsm::recovery::RecoverySuccessionProof {
+        authority_pubkey: authority.to_vec(),
+        tombstone,
+        succession,
+    }
+}
+
+/// SA-121. A device that makes a genesis of its own, anchors an authority of
+/// its own under it, and posts a succession proof under that authority naming
+/// one of B's contacts as the device it succeeds, is not that contact's
+/// successor to B: the authority a recovery acts under is the one the
+/// predecessor anchored, read under the genesis B pinned for it. The proof
+/// under A's own anchored K_A is the one that counts.
+/// MUTATION CONTROL: anchoring the proof's authority to the successor's own
+/// genesis and device, as the guard did, admits M's proof and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_succession_proof_counts_only_under_the_authority_its_predecessor_anchored() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, k_a_secret) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+    m.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("M anchors an authority of its own");
+    let (k_m, k_m_secret) = RecoverySDK::get_cached_authority_keypair().expect("M's authority");
+
+    let cell = dsm::recovery::RecoveryCell::SuccessionProof {
+        genesis: m.genesis,
+        a_new: m.device_id,
+    };
+    let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&cell, &forged.to_bytes())
+        .await
+        .expect("M posts its proof");
+
+    p.b.enter();
+    let refused = RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
+        .await
+        .expect_err("no proof under the authority A anchored is posted");
+    assert!(refused.to_string().contains("none posted"), "{refused}");
+
+    let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&cell, &honest.to_bytes())
+        .await
+        .expect("the proof under K_A");
+    let (found, predecessor) =
+        RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
+            .await
+            .expect("the proof under the authority A anchored");
+    assert_eq!(predecessor, p.a.device_id);
+    assert_eq!(found.to_bytes(), honest.to_bytes());
+}
+
+/// `device` takes in the tombstone notices posted for it, and whether it then
+/// records `tombstoned` as tombstoned.
+async fn records_tombstone_of(device: &TestDevice, tombstoned: &[u8; 32]) -> bool {
+    let r = device
+        .invoke("recovery.checkTombstones", &generated::ArgPack::default())
+        .await;
+    assert!(r.success, "{:?}", r.error_message);
+    device.enter();
+    crate::storage::client_db::recovery::is_device_tombstoned(tombstoned)
+        .expect("the tombstone record")
+}
+
+/// SA-117. A tombstone is signed under the recovery authority K_A, and a
+/// contact verifies it under the authority the tombstoned device anchored. B
+/// takes in a notice whose tombstone of A is signed under K_A and records A
+/// as tombstoned; a notice signed under an authority M anchored for itself is
+/// passed over. Verified under A's AK, as the check did, no tombstone the
+/// recovery signs is ever taken in.
+/// MUTATION CONTROL: verifying the tombstone under the contact's AK leaves A
+/// unrecorded and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, k_a_secret) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+    m.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("M anchors an authority of its own");
+    let (k_m, k_m_secret) = RecoverySDK::get_cached_authority_keypair().expect("M's authority");
+
+    let notices = dsm::recovery::RecoveryCell::TombstoneNotice {
+        contact_device_id: p.b.device_id,
+    };
+
+    let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&notices, &forged.to_bytes())
+        .await
+        .expect("M's notice");
+    assert!(
+        !records_tombstone_of(&p.b, &p.a.device_id).await,
+        "a tombstone under M's authority is not taken in"
+    );
+
+    let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&notices, &honest.to_bytes())
+        .await
+        .expect("the notice under K_A");
+    assert!(
+        records_tombstone_of(&p.b, &p.a.device_id).await,
+        "the tombstone under K_A is taken in"
+    );
+}
+

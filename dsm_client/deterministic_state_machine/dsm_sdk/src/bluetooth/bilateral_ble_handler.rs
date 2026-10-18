@@ -1095,28 +1095,6 @@ impl BilateralBleHandler {
             Some(&prepare_request.transfer_terms),
         )?;
 
-        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
-        // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
-        // co-signing — that A_new holds the genesis-anchored recovery authority and that the
-        // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
-        // non-authority forger (MITM / malicious node / C itself) and blocks ANYONE from
-        // re-establishing onto a fabricated or stale frontier; it does NOT (and cannot)
-        // distinguish the owner from a mnemonic thief — double-spend safety vs a recovering
-        // party comes from gate 2 (P5 LOCKED_RECOVERY + frontier reconciliation). Fail-closed:
-        // any failure aborts the prepare (C does not co-sign). `sender_device_id` is A_new.
-        // Ordinary establishes are untouched (guard runs only for the recovery-establish marker).
-        if dsm::recovery::is_recovery_establish_op(&operation) {
-            crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
-                &operation,
-                &sender_device_id,
-            )
-            .await?;
-            info!(
-                "Recovery re-establish accept-guard PASSED for sender={}",
-                bytes_to_base32(&sender_device_id[..8])
-            );
-        }
-
         // Capture transfer metadata for the orchestration layer to run hooks.
         // Delegate to the application layer so the transport stays coin-agnostic.
         let (meta_amount, meta_token) = if let Some(ref d) = self.settlement_delegate {
@@ -1253,6 +1231,32 @@ impl BilateralBleHandler {
                 Vec::new(),
                 crate::sdk::transfer_hooks::TransferMeta::default(),
             ));
+        }
+
+        // §0.5 recovery re-establish accept-guard (gate 1 of the two-gate model). If this
+        // prepare is a recovery-establish proposal (canonical marker), C MUST verify — before
+        // co-signing — that A_new acts under the recovery authority A_old anchored and that the
+        // carry-forward commitment bridges C's REAL CURRENT (A_old,C) frontier. This blocks a
+        // non-authority forger (MITM / malicious node / C itself) and blocks ANYONE from
+        // re-establishing onto a fabricated or stale frontier; it does NOT (and cannot)
+        // distinguish the owner from a mnemonic thief — double-spend safety vs a recovering
+        // party comes from gate 2 (P5 LOCKED_RECOVERY + frontier reconciliation). Fail-closed:
+        // any failure aborts the prepare (C does not co-sign). The sender is A_new, a contact
+        // whose genesis this device pinned. The guard runs only on a prepare Core decided from
+        // that pinned identity and the sender's signature: its storage reads and signature
+        // checks were run on the unsigned header's device id before, for anyone (SA-73).
+        // Ordinary establishes are untouched (guard runs only for the recovery-establish marker).
+        if dsm::recovery::is_recovery_establish_op(&operation) {
+            crate::sdk::RecoverySDK::verify_incoming_recovery_reestablish(
+                &operation,
+                &counterparty_device_id,
+                &sender_genesis,
+            )
+            .await?;
+            info!(
+                "Recovery re-establish accept-guard PASSED for sender={}",
+                bytes_to_base32(&counterparty_device_id[..8])
+            );
         }
 
         // Ensure contact and relationship (receiver side)
@@ -4849,6 +4853,86 @@ mod tests {
         );
     }
 
+    /// The `bilateral.prepare` envelope `sender` sends carrying `req`, its op
+    /// id `op_id`.
+    fn prepare_envelope(
+        sender: [u8; 32],
+        sender_genesis: [u8; 32],
+        message_id: [u8; 16],
+        op_id: [u8; 32],
+        req: &generated::BilateralPrepareRequest,
+    ) -> generated::Envelope {
+        generated::Envelope {
+            version: 3,
+            headers: Some(generated::Headers {
+                device_id: sender.to_vec(),
+                genesis_hash: sender_genesis.to_vec(),
+            }),
+            message_id: message_id.to_vec(),
+            payload: Some(generated::envelope::Payload::UniversalTx(
+                generated::UniversalTx {
+                    ops: vec![generated::UniversalOp {
+                        op_id: Some(generated::Hash32 { v: op_id.to_vec() }),
+                        actor: sender.to_vec(),
+                        kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
+                            program: None,
+                            method: "bilateral.prepare".to_string(),
+                            args: Some(generated::ArgPack {
+                                schema_hash: None,
+                                codec: 0,
+                                body: prost::Message::encode_to_vec(req),
+                            }),
+                            cosigners: vec![],
+                            evidence: None,
+                            nonce: None,
+                        })),
+                    }],
+                    atomic: false,
+                },
+            )),
+        }
+    }
+
+    /// SA-73. A recovery re-establish prepare from a device that is not a
+    /// contact is refused for that, before the accept-guard runs: the guard's
+    /// storage reads and signature checks are spent only on a prepare Core
+    /// decided from the sender's pinned identity and signature. It ran first,
+    /// keyed on the envelope's unsigned header, for any sender.
+    /// MUTATION CONTROL: running the guard before the decision, as the handler
+    /// did, answers with the guard's refusal and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn a_recovery_prepare_from_a_stranger_is_refused_before_the_guard_runs() {
+        init_test_db();
+        let receiver = [0x91u8; 32];
+        let stranger = [0x92u8; 32];
+        let (_mgr, handler) =
+            make_test_handler(receiver, [0x93u8; 32], b"recovery-prepare-stranger");
+        let operation =
+            dsm::recovery::build_recovery_establishment_op(&receiver, &[0x94u8; 32], &[0x95u8; 32]);
+        assert!(dsm::recovery::is_recovery_establish_op(&operation));
+        let req = generated::BilateralPrepareRequest {
+            counterparty_device_id: receiver.to_vec(),
+            operation_data: operation.to_bytes(),
+            expected_genesis_hash: None,
+            expected_counterparty_state_hash: None,
+            sender_signing_public_key: vec![0x96; 64],
+            sender_device_id: stranger.to_vec(),
+            sender_genesis_hash: None,
+            sender_kyber_public_key: vec![],
+            sender_kyber_binding_sig: vec![],
+            sender_signature: vec![0x97; 64],
+            transfer_terms: Vec::new(),
+        };
+        let envelope = prepare_envelope(stranger, [0x98u8; 32], [0x99u8; 16], [0x9Au8; 32], &req);
+        let msg = handler
+            .handle_prepare_request(&crate::envelope::to_canonical_bytes(&envelope), None)
+            .await
+            .expect_err("a stranger's prepare is refused")
+            .to_string();
+        assert!(msg.contains("not a contact"), "refused as a stranger, got: {msg}");
+    }
+
     /// The receiver checks a prepare's expected relationship tip against the
     /// tip it holds durably, never against its manager's cached view (which
     /// once took the sender's own claim). MUTATION CONTROL: reading the cached
@@ -4924,37 +5008,7 @@ mod tests {
                 .expect("sigma_A"),
             transfer_terms: Vec::new(),
         };
-        let envelope = generated::Envelope {
-            version: 3,
-            headers: Some(generated::Headers {
-                device_id: sender.to_vec(),
-                genesis_hash: sender_genesis.to_vec(),
-            }),
-            message_id: vec![0x85u8; 16],
-            payload: Some(generated::envelope::Payload::UniversalTx(
-                generated::UniversalTx {
-                    ops: vec![generated::UniversalOp {
-                        op_id: Some(generated::Hash32 {
-                            v: vec![0x86u8; 32],
-                        }),
-                        actor: sender.to_vec(),
-                        kind: Some(generated::universal_op::Kind::Invoke(generated::Invoke {
-                            program: None,
-                            method: "bilateral.prepare".to_string(),
-                            args: Some(generated::ArgPack {
-                                schema_hash: None,
-                                codec: 0,
-                                body: prost::Message::encode_to_vec(&req),
-                            }),
-                            cosigners: vec![],
-                            evidence: None,
-                            nonce: None,
-                        })),
-                    }],
-                    atomic: false,
-                },
-            )),
-        };
+        let envelope = prepare_envelope(sender, sender_genesis, [0x85u8; 16], [0x86u8; 32], &req);
 
         let (reply, _meta) = handler
             .handle_prepare_request(&crate::envelope::to_canonical_bytes(&envelope), None)

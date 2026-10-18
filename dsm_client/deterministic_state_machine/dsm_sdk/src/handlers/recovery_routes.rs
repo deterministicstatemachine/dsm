@@ -606,7 +606,8 @@ impl AppRouterImpl {
 
             // -------- recovery.checkTombstones --------
             // Contact side: tombstones posted for this device, verified under the
-            // tombstoned device's contact AK, recorded and acknowledged.
+            // recovery authority the tombstoned device anchored, recorded and
+            // acknowledged.
             "recovery.checkTombstones" => match check_tombstones().await {
                 Ok(value) => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
                     generated::AppStateResponse {
@@ -1011,17 +1012,22 @@ async fn check_tombstones() -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?
     {
-        // Anyone can write the cell: a notice counts only once it verifies
-        // under the tombstoned device's pinned contact AK.
-        let Ok(receipt) = dsm::recovery::TombstoneReceipt::from_bytes(&bytes) else {
+        // Anyone can write the cell: a notice counts only once its tombstone
+        // verifies under the recovery authority the tombstoned device anchored
+        // under the genesis this device pinned for it. The tombstone is signed
+        // under K_A, never under that device's AK (SA-117).
+        let Ok(notice) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
             continue;
         };
-        let Ok(tombstoned) = tombstoned_device(&receipt) else {
-            continue;
-        };
-        let Ok(ak) = contact_ak(&tombstoned) else {
-            continue;
-        };
+        let tombstoned =
+            match crate::sdk::recovery_sdk::RecoverySDK::predecessor_anchoring(&notice).await {
+                Ok(tombstoned) => tombstoned,
+                Err(e) => {
+                    log::info!("[RECOVERY] a tombstone notice is passed over: {e}");
+                    continue;
+                }
+            };
+        let (receipt, ak) = (notice.tombstone, notice.authority_pubkey);
         if !matches!(
             dsm::recovery::tombstone::verify_tombstone(&receipt, &ak),
             Ok(true)

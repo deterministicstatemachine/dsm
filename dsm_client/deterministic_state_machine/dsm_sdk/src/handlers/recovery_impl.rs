@@ -405,12 +405,9 @@ pub async fn execute_recovery_pipeline() -> Result<String, String> {
     )
     .map_err(|e| format!("Succession creation failed: {e}"))?;
 
-    // Store succession receipt
-    if let Err(e) =
-        crate::storage::client_db::recovery::store_succession_receipt(&succession.signature)
-    {
-        log::warn!("[RECOVERY] Failed to store succession receipt: {e}");
-    }
+    // The succession receipt, whole: the tombstone notice carries it.
+    crate::storage::client_db::recovery::store_succession_receipt(&succession.to_bytes())
+        .map_err(|e| format!("Failed to store succession receipt: {e}"))?;
 
     // Bind the new device identity with capsule state
     {
@@ -476,12 +473,36 @@ pub async fn execute_recovery_pipeline() -> Result<String, String> {
     ))
 }
 
-/// Put the stored tombstone receipt in each unsynced counterparty's notice
-/// cell. Reports `pushed`, `failed` and `total`.
-pub(crate) async fn propagate_tombstone() -> Result<String, String> {
-    let bytes = crate::storage::client_db::recovery::get_tombstone_receipt()
+/// The notice a contact takes the tombstone in: the tombstone with the
+/// recovery authority it is signed under and the succession it starts. A
+/// tombstone is signed under K_A, which the old device anchored, and a contact
+/// verifies it under that anchored authority; the receipt alone gave it only
+/// the old device's AK, under which no tombstone verifies (SA-117).
+fn tombstone_notice() -> Result<Vec<u8>, String> {
+    let tombstone = crate::storage::client_db::recovery::get_tombstone_receipt()
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "no tombstone receipt stored; call recovery.tombstone first".to_string())?;
+    let succession = crate::storage::client_db::recovery::get_succession_receipt()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no succession receipt stored; call recovery.succession first".to_string())?;
+    let (authority_pubkey, ..) =
+        crate::sdk::recovery_sdk::RecoverySDK::get_cached_authority_keypair().ok_or_else(|| {
+            "no cached recovery-authority keypair (cache the mnemonic first)".to_string()
+        })?;
+    Ok(dsm::recovery::RecoverySuccessionProof {
+        authority_pubkey,
+        tombstone: dsm::recovery::TombstoneReceipt::from_bytes(&tombstone)
+            .map_err(|e| format!("the stored tombstone: {e}"))?,
+        succession: dsm::recovery::SuccessionReceipt::from_bytes(&succession)
+            .map_err(|e| format!("the stored succession: {e}"))?,
+    }
+    .to_bytes())
+}
+
+/// Put the tombstone notice ([`tombstone_notice`]) in each unsynced
+/// counterparty's notice cell. Reports `pushed`, `failed` and `total`.
+pub(crate) async fn propagate_tombstone() -> Result<String, String> {
+    let bytes = tombstone_notice()?;
     let unsynced = crate::storage::client_db::recovery::get_unsynced_counterparties()
         .map_err(|e| e.to_string())?;
     if unsynced.is_empty() {
