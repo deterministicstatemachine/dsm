@@ -694,16 +694,29 @@ impl AppRouterImpl {
                 }
             }
             Ok(generated::ConnectDecision::Decline) => {
-                let declined = Executed {
-                    outcome: generated::ConnectOutcome::Declined,
-                    reason: "the player declined it".into(),
-                    result: None,
-                };
-                self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
-                (
-                    generated::ConnectOutcome::Declined,
-                    format!("{name}: {summary}, declined."),
-                )
+                // A run approved earlier that committed before its record was
+                // written carried the request out: declining it now records
+                // what happened, never a refusal over a committed payment
+                // (SA-129).
+                if let Some(committed) =
+                    self.finish_committed(&session, request_body.seq, &summary)?
+                {
+                    (
+                        generated::ConnectOutcome::CarriedOut,
+                        format!("{name}: {summary}, {committed}."),
+                    )
+                } else {
+                    let declined = Executed {
+                        outcome: generated::ConnectOutcome::Declined,
+                        reason: "the player declined it".into(),
+                        result: None,
+                    };
+                    self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
+                    (
+                        generated::ConnectOutcome::Declined,
+                        format!("{name}: {summary}, declined."),
+                    )
+                }
             }
             _ => return Err(format!("{ROUTE}: approve or decline")),
         };
@@ -1061,6 +1074,28 @@ impl AppRouterImpl {
         }
         match request {
             Request::AcceptIssued { anchor } => {
+                // Whose object it is is read from its committed policy before
+                // anything is rooted: rooting first left another creator's
+                // object adopted after the refusal (SA-124).
+                let creator = match self.verified_policy(*anchor).await {
+                    Ok(parsed) => match parsed.release {
+                        dsm::economic::token_policy::Release::AllAtCreation {
+                            creator_device_id,
+                            ..
+                        } => creator_device_id,
+                        _ => {
+                            return Executed::failed(
+                                "the object's committed policy names no creating device",
+                            )
+                        }
+                    },
+                    Err(e) => return Executed::failed(format!("the object's policy: {e}")),
+                };
+                if creator != session.app_device_id {
+                    return Executed::failed(
+                        "the object's committed policy names another creator than this application",
+                    );
+                }
                 if let Err(e) = self.root_anchor(anchor).await {
                     return Executed::failed(format!("rooting the object: {e}"));
                 }

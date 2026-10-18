@@ -914,6 +914,53 @@ async fn holdings_of_an_object_never_held_are_covered_only_if_the_game_issued_it
     assert_eq!(fact(&waiting), generated::ConnectFact::None);
 }
 
+/// SA-124. An application's request to accept an object another device
+/// created is refused for that before anything is rooted: the wallet adopts
+/// nothing. It rooted the object first and refused after, so another
+/// creator's object stayed adopted, under the grant and without the player.
+/// MUTATION CONTROL: rooting the object before its creator is checked, as
+/// the wallet did, leaves it in the registry and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_object_another_device_created_is_never_adopted_for_an_application() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    let theirs = create_token(&c, "THIRD", 5).await;
+
+    let asked = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::AcceptIssued(
+            generated::ConnectAcceptIssuedV1 {
+                anchor: theirs.to_vec(),
+            },
+        ),
+    )
+    .await;
+    sync_and_deliver(&p, &relay).await;
+    let answered = status(&p.a, &session, asked).await;
+    assert_ne!(
+        outcome(&answered),
+        generated::ConnectOutcome::CarriedOut,
+        "{}",
+        answered.reason
+    );
+    p.b.enter();
+    assert!(
+        crate::storage::client_db::token_registry::get_token_by_policy_commit(&theirs)
+            .expect("the registry")
+            .is_none(),
+        "another creator's object is adopted"
+    );
+}
+
 /// DSM Amendment A16, end to end: the game asks the wallet which of its
 /// contacts are who, and the wallet, under the grant's contacts scope and
 /// without asking its player, answers with each contact's device id and
@@ -1568,3 +1615,83 @@ async fn a_request_whose_record_failed_after_it_paid_is_never_paid_again() {
         "the game was paid once"
     );
 }
+
+/// SA-129. A request approved by hand whose run committed its payment and
+/// then failed to record it, declined afterwards, is recorded carried out:
+/// the payment committed, and declining it changes nothing about that. The
+/// decline recorded a refusal over a committed payment.
+/// MUTATION CONTROL: declining without reading what the request already
+/// committed, as the wallet did, records it declined and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn declining_a_request_its_crashed_run_carried_out_records_it_carried_out() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    settle(&p).await;
+
+    // Outside the grant: ERA was never payable to the game.
+    let outside = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: "approved by hand".into(),
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    let era_held = balance(&p.b, &era());
+    let wallet_db = |sql: &str| {
+        p.b.enter();
+        crate::storage::client_db::get_connection()
+            .expect("the wallet's database")
+            .lock()
+            .expect("the connection")
+            .execute_batch(sql)
+            .expect("the wallet's database answers");
+    };
+    wallet_db(&format!(
+        "CREATE TRIGGER the_record_fails BEFORE INSERT ON connect_log WHEN NEW.seq = {outside} \
+         BEGIN SELECT RAISE(ABORT, 'the record write failed'); END;"
+    ));
+    let respond = |decision: generated::ConnectDecision| {
+        invoke(
+            &p.b,
+            "connect.respond",
+            args(&generated::ConnectRespondRequestV1 {
+                session_id: session.to_vec(),
+                seq: outside,
+                decision: decision as i32,
+            }),
+        )
+    };
+    let crashed = respond(generated::ConnectDecision::Approve).await;
+    wallet_db("DROP TRIGGER the_record_fails");
+    assert!(!crashed.success, "the approved run's record failed");
+    assert_eq!(balance(&p.b, &era()), era_held - 1, "the payment committed");
+
+    let declined = respond(generated::ConnectDecision::Decline).await;
+    let Reply::Decided(decided) = reply(&declined) else {
+        panic!("connect.respond answered another reply");
+    };
+    assert_eq!(
+        generated::ConnectOutcome::try_from(decided.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "{}",
+        decided.line
+    );
+    let entry = wallet_log(&p.b, &session, outside).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "{}",
+        entry.detail
+    );
+    assert_eq!(balance(&p.b, &era()), era_held - 1, "nothing more was paid");
+}
+
