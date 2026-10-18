@@ -1694,4 +1694,3 @@ async fn declining_a_request_its_crashed_run_carried_out_records_it_carried_out(
     );
     assert_eq!(balance(&p.b, &era()), era_held - 1, "nothing more was paid");
 }
-
