@@ -255,7 +255,8 @@ pub struct GroundReads<'a> {
 /// refuted: refuting one needs the generation the evidence places it at.
 /// Enough for the skips that need no validation evidence (SoFi §23.5 and
 /// MR-SOFI-0241; Amendment S14); never enough to resolve a position or to
-/// consume a key. Built by [`establish_ground`] and by nothing else.
+/// consume a key. Built by [`establish_ground`] and [`establish_key_ground`]
+/// and by nothing else.
 #[derive(Debug, Clone)]
 pub struct GroundFacts {
     pub(crate) external_commitment: D32,
@@ -264,7 +265,8 @@ pub struct GroundFacts {
     pub(crate) parent_pre_root: D32,
     /// A Release's standing at its verdict cell (SoFi Amendment S21).
     pub(crate) verdict: VerdictFact,
-    /// One per leg of `P`, in P's leg order.
+    /// One per leg of `P`, in P's leg order ([`establish_ground`]); or the
+    /// walked key's leg alone ([`establish_key_ground`]).
     pub(crate) legs: Vec<LegFacts>,
     /// The key each leg's facts are about: `(vault, parent root, attempt)`.
     pub(crate) keys: Vec<(D32, D32, u64)>,
@@ -580,29 +582,7 @@ fn parent_position(
 pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstablished> {
     let exercise = reads.exercise;
     let precommit = &exercise.precommit().body;
-    let fulfillment = &exercise.fulfillment().body;
-    let e = *exercise.external_commitment();
-
-    if !reads.registration.is_of(precommit, fulfillment) {
-        return Err(NotEstablished::NotThisExercise(
-            "the registration read is of another position",
-        ));
-    }
-    // Where this F stands at its pair, with P in hand (SoFi Amendments S14,
-    // S20): lost to any other fulfillment holding K_ful(q)'s leader link, or
-    // to any claim at K_root(q) other than derive(P, F); misbodied when that
-    // claim names F under another body.
-    let pair = reads.registration.standing_of(precommit, fulfillment);
-
-    // The trader parent: what `P` names must be what the trader's lineage
-    // holds at `p` — the claim final at its `K_root(p)` and the root that
-    // claim installed — as this verifier itself established it, from its own
-    // admitted position or the frontier-relative walk of the trader's lineage
-    // (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is never
-    // its own authority (§6.62).
-    let named = *precommit.parent_claim_ref();
-    let parent = parent_position(named, precommit.position(), reads.parent)
-        .ok_or(NotEstablished::ParentUnresolved { parent: named })?;
+    let (pair, parent) = pair_and_parent(exercise, reads.registration, reads.parent)?;
 
     // Every leg of P at the attempt F fixed for it. The attempts cover the
     // legs exactly: that is conformance item 4, decided in hand.
@@ -614,66 +594,180 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
     let mut legs = Vec::with_capacity(precommit.legs().len());
     let mut keys = Vec::with_capacity(precommit.legs().len());
     for (leg, read) in precommit.legs().iter().zip(reads.legs) {
-        let attempt = fulfillment
-            .attempts()
-            .iter()
-            .find(|a| a.vault_id == leg.vault_id)
-            .map(|a| a.attempt)
-            .ok_or(NotEstablished::NotThisExercise(
-                "F names no attempt for a leg of P",
-            ))?;
-        if *read.cell.vault_id() != leg.vault_id
-            || *read.cell.parent_root() != leg.parent_root
-            || read.cell.attempt() != attempt
-        {
-            return Err(NotEstablished::NotThisExercise(
-                "a cell read is of another key than the leg's",
-            ));
-        }
-        let cell = read.cell.fact();
-        // Without the generation the evidence places the parent at, the chain
-        // can establish the root positively but cannot refute one it has not
-        // placed.
-        let parent = match read.chain {
-            Some(chain) if chain.names(&leg.parent_root) => ParentStatus::Canonical,
-            Some(..) | None => ParentStatus::Unavailable,
+        let (facts, key) = leg_facts(exercise, leg, read)?;
+        legs.push(facts);
+        keys.push(key);
+    }
+    Ok(GroundFacts {
+        external_commitment: *exercise.external_commitment(),
+        pair,
+        parent,
+        parent_pre_root: *precommit.void_root(),
+        verdict: verdict_fact(exercise, reads.verdict)?,
+        legs,
+        keys,
+    })
+}
+
+/// What is read about one exercise for the key a walk found it at, before
+/// any of its other legs is read: the position pair, this verifier's own
+/// resolution of `p`, the walked leg's cell, chain and walk, and a Release's
+/// verdict cell.
+#[derive(Debug, Clone, Copy)]
+pub struct KeyGroundReads<'a> {
+    pub exercise: &'a RecognizedExercise,
+    pub registration: &'a RegistrationRead,
+    pub parent: Option<TraderAtParent>,
+    /// The leg of `P` at the walked key.
+    pub key: LegReads<'a>,
+    /// For a Release, its verdict cell (SoFi Amendment S21).
+    pub verdict: Option<&'a EscrowCellRead>,
+}
+
+/// The facts of one exercise that need none of its validation evidence and
+/// stand on the walked key alone: the [`GroundFacts`] of [`establish_ground`]
+/// with one leg, the leg of `P` at that key. Every skip that needs no
+/// validation evidence and no other leg holds over them: a pair lost, a
+/// trader parent the lineage did not take, a Release's verdict on another
+/// outcome, or the walked leg's own parent consumed elsewhere. They decide a
+/// skip before the other legs are read, whose liveness can need walks past
+/// `CHAIN_DEPTH`: a key held by an exercise whose pair was lost stayed
+/// unclassified for good behind such a walk (SA-83). Over one leg they are
+/// never enough to keep a key live, to resolve a position or to consume a
+/// key.
+pub fn establish_key_ground(reads: &KeyGroundReads<'_>) -> Result<GroundFacts, NotEstablished> {
+    let exercise = reads.exercise;
+    let precommit = &exercise.precommit().body;
+    let (pair, parent) = pair_and_parent(exercise, reads.registration, reads.parent)?;
+    let leg = precommit
+        .legs()
+        .iter()
+        .find(|leg| {
+            leg.vault_id == *reads.key.cell.vault_id()
+                && leg.parent_root == *reads.key.cell.parent_root()
+        })
+        .ok_or(NotEstablished::NotThisExercise(
+            "the walked key is of no leg of P",
+        ))?;
+    let (facts, key) = leg_facts(exercise, leg, &reads.key)?;
+    Ok(GroundFacts {
+        external_commitment: *exercise.external_commitment(),
+        pair,
+        parent,
+        parent_pre_root: *precommit.void_root(),
+        verdict: verdict_fact(exercise, reads.verdict)?,
+        legs: vec![facts],
+        keys: vec![key],
+    })
+}
+
+/// Where this exercise's `F` stands at its pair, and the trader parent `P`
+/// names as this verifier established it.
+fn pair_and_parent(
+    exercise: &RecognizedExercise,
+    registration: &RegistrationRead,
+    resolved: Option<TraderAtParent>,
+) -> Result<(PairStanding, ParentPosition), NotEstablished> {
+    let precommit = &exercise.precommit().body;
+    let fulfillment = &exercise.fulfillment().body;
+    if !registration.is_of(precommit, fulfillment) {
+        return Err(NotEstablished::NotThisExercise(
+            "the registration read is of another position",
+        ));
+    }
+    // Where this F stands at its pair, with P in hand (SoFi Amendments S14,
+    // S20): lost to any other fulfillment holding K_ful(q)'s leader link, or
+    // to any claim at K_root(q) other than derive(P, F); misbodied when that
+    // claim names F under another body.
+    let pair = registration.standing_of(precommit, fulfillment);
+
+    // The trader parent: what `P` names must be what the trader's lineage
+    // holds at `p` — the claim final at its `K_root(p)` and the root that
+    // claim installed — as this verifier itself established it, from its own
+    // admitted position or the frontier-relative walk of the trader's lineage
+    // (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is never
+    // its own authority (§6.62).
+    let named = *precommit.parent_claim_ref();
+    let parent = parent_position(named, precommit.position(), resolved)
+        .ok_or(NotEstablished::ParentUnresolved { parent: named })?;
+    Ok((pair, parent))
+}
+
+/// The facts of `leg` of `P` from its cell, chain and walk, and the key they
+/// are about.
+fn leg_facts(
+    exercise: &RecognizedExercise,
+    leg: &super::wire::PrecommitLeg,
+    read: &LegReads<'_>,
+) -> Result<(LegFacts, (D32, D32, u64)), NotEstablished> {
+    let fulfillment = &exercise.fulfillment().body;
+    let e = *exercise.external_commitment();
+    let attempt = fulfillment
+        .attempts()
+        .iter()
+        .find(|a| a.vault_id == leg.vault_id)
+        .map(|a| a.attempt)
+        .ok_or(NotEstablished::NotThisExercise(
+            "F names no attempt for a leg of P",
+        ))?;
+    if *read.cell.vault_id() != leg.vault_id
+        || *read.cell.parent_root() != leg.parent_root
+        || read.cell.attempt() != attempt
+    {
+        return Err(NotEstablished::NotThisExercise(
+            "a cell read is of another key than the leg's",
+        ));
+    }
+    let cell = read.cell.fact();
+    // Without the generation the evidence places the parent at, the chain
+    // can establish the root positively but cannot refute one it has not
+    // placed.
+    let parent = match read.chain {
+        Some(chain) if chain.names(&leg.parent_root) => ParentStatus::Canonical,
+        Some(..) | None => ParentStatus::Unavailable,
+    };
+    // `AttemptLive`: every earlier key of this leg's chain is skipped,
+    // established by a walk from the first key.
+    let (attempt_live, parent_consumed_elsewhere) = if attempt == 0 {
+        (true, false)
+    } else {
+        let not_live = NotEstablished::AttemptLiveness {
+            vault_id: leg.vault_id,
+            attempt,
         };
-        // `AttemptLive`: every earlier key of this leg's chain is skipped,
-        // established by a walk from the first key.
-        let (attempt_live, parent_consumed_elsewhere) = if attempt == 0 {
-            (true, false)
-        } else {
-            let not_live = NotEstablished::AttemptLiveness {
-                vault_id: leg.vault_id,
-                attempt,
-            };
-            match read.walk {
-                Some(walk)
-                    if *walk.vault_id() == leg.vault_id
-                        && *walk.parent_root() == leg.parent_root =>
-                {
-                    walk.liveness_of(attempt, &e).ok_or(not_live)?
-                }
-                Some(..) | None => return Err(not_live),
+        match read.walk {
+            Some(walk)
+                if *walk.vault_id() == leg.vault_id && *walk.parent_root() == leg.parent_root =>
+            {
+                walk.liveness_of(attempt, &e).ok_or(not_live)?
             }
-        };
-        legs.push(LegFacts {
+            Some(..) | None => return Err(not_live),
+        }
+    };
+    Ok((
+        LegFacts {
             cell,
             parent,
             attempt_live,
             parent_consumed_elsewhere,
-        });
-        keys.push((leg.vault_id, leg.parent_root, attempt));
-    }
-    // A Release stands on the verdict its cell holds (SoFi Amendment S21):
-    // the cell the release names, read by Core, and nothing else.
-    let verdict = match exercise.preimage().settlement() {
+        },
+        (leg.vault_id, leg.parent_root, attempt),
+    ))
+}
+
+/// A Release's standing at the verdict its cell holds (SoFi Amendment S21):
+/// the cell the release names, read by Core, and nothing else.
+fn verdict_fact(
+    exercise: &RecognizedExercise,
+    verdict: Option<&EscrowCellRead>,
+) -> Result<VerdictFact, NotEstablished> {
+    Ok(match exercise.preimage().settlement() {
         SettlementBody::Release {
             verdict_cell,
             outcome,
             ..
         } => {
-            let read = reads.verdict.ok_or(NotEstablished::NotThisExercise(
+            let read = verdict.ok_or(NotEstablished::NotThisExercise(
                 "a release is read with its verdict cell",
             ))?;
             if read.key() != *verdict_cell {
@@ -684,15 +778,6 @@ pub fn establish_ground(reads: &GroundReads<'_>) -> Result<GroundFacts, NotEstab
             VerdictFact::Release(read.standing_for(outcome))
         }
         SettlementBody::Swap { .. } | SettlementBody::Close { .. } => VerdictFact::NotARelease,
-    };
-    Ok(GroundFacts {
-        external_commitment: e,
-        pair,
-        parent,
-        parent_pre_root: *precommit.void_root(),
-        verdict,
-        legs,
-        keys,
     })
 }
 
@@ -1334,6 +1419,64 @@ mod tests {
         assert_eq!(
             resolve_position(&facts.route_facts()),
             Err(Incomplete::StorageNotFinal)
+        );
+    }
+
+    /// SA-83. A key held by an exercise whose pair is lost is dead on facts
+    /// that stand on the key alone, before the other legs are read. Here the
+    /// route's second leg is at attempt 1 and no walk established its
+    /// liveness, as when that walk would reach past `CHAIN_DEPTH`: the facts
+    /// over every leg are not established, and those over the walked key
+    /// skip it.
+    /// MUTATION CONTROL: requiring every leg's facts for the walked key, as
+    /// the classification did, leaves the key unclassified and turns this
+    /// red.
+    #[test]
+    fn a_key_whose_pair_is_lost_is_dead_before_the_other_legs_are_read() {
+        let (_, mut r) = reads(2, &[0, 1]);
+        let precommit = r.exercise.precommit().body.clone();
+        let fulfillment = r.exercise.fulfillment().body.clone();
+        let another = SofiResolutionClaim {
+            fulfillment_id: OTHER_CLAIM,
+            ..derive::resolution_claim(&precommit, &fulfillment)
+        };
+        r.registration = registration_read(
+            &precommit,
+            &fulfillment,
+            &r.exercise.fulfillment().signature,
+            precommit.void_root(),
+            Some(another),
+        );
+        let ground = |legs: &[LegReads<'_>]| {
+            establish_ground(&GroundReads {
+                exercise: &r.exercise,
+                registration: &r.registration,
+                parent: r.parent,
+                legs,
+                verdict: None,
+            })
+        };
+        let second = precommit.legs()[1].vault_id;
+        assert!(matches!(
+            ground(&r.legs()),
+            Err(NotEstablished::AttemptLiveness { vault_id, attempt: 1 }) if vault_id == second
+        ));
+
+        let first = precommit.legs()[0];
+        let at_key = establish_key_ground(&KeyGroundReads {
+            exercise: &r.exercise,
+            registration: &r.registration,
+            parent: r.parent,
+            key: r.legs()[0],
+            verdict: None,
+        })
+        .expect("the walked key's own facts");
+        let leg = at_key
+            .leg_at(&first.vault_id, &first.parent_root, 0)
+            .expect("the walked key's leg");
+        assert_eq!(
+            crate::sofi::resolution::skip_without_evidence(&at_key.route_ground(), &leg).0,
+            AttemptClass::Skipped
         );
     }
 

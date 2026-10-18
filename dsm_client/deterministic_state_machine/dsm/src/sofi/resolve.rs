@@ -51,8 +51,9 @@ use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
 use super::facts::{
-    establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
-    GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished, ResolvedParent,
+    establish, establish_ground, establish_key_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
+    GroundFacts, GroundReads, InHandRefutation, KeyGroundReads, LegReads, NotEstablished,
+    ResolvedParent,
     TraderAtParent,
 };
 use super::lineage::{
@@ -755,6 +756,20 @@ enum Known {
     Ground(Box<GroundFacts>),
     /// The complete facts established over the reads.
     Facts(Box<EstablishedFacts>),
+}
+
+/// The walked key is dead on `ground`: its leg there is skipped on the facts
+/// that need no validation evidence.
+fn dead_at(ground: &GroundFacts, key: WalkedKey<'_>) -> bool {
+    ground
+        .leg_at(
+            key.read.vault_id(),
+            key.read.parent_root(),
+            key.read.attempt(),
+        )
+        .is_some_and(|leg| {
+            skip_without_evidence(&ground.route_ground(), &leg).0 == AttemptClass::Skipped
+        })
 }
 
 /// One key the walk classified: the read that found the exercise holding
@@ -2383,7 +2398,53 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             );
             return Ok(Ok(Known::RefutedInHand(refutation)));
         }
-        let read = match self.read_legs(chains, exercise, Some(key), depth, None)? {
+
+        // A key dead on facts that stand on it alone — the position's
+        // registration, the trader's parent, a Release's verdict, and the
+        // walked leg's own cell and walk — is skipped before any other leg is
+        // read. Another leg's liveness can need walks past `depth`, and a key
+        // held by an exercise whose pair was lost stayed unclassified for good
+        // behind them (SA-83).
+        let precommit = &exercise.precommit().body;
+        let registration = match self.read_registration(
+            precommit.genesis(),
+            precommit.device_id(),
+            exercise.fulfillment().body.position(),
+            precommit.void_root(),
+        )? {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
+        };
+        let verdict = match exercise.preimage().settlement() {
+            SettlementBody::Release {
+                vault_id,
+                verdict_cell,
+                ..
+            } => match self.read_release_cells(vault_id, verdict_cell)? {
+                Ok(read) => Some(read),
+                Err(why) => return Ok(Err(why)),
+            },
+            SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
+        };
+        let key_ground = match establish_key_ground(&KeyGroundReads {
+            exercise,
+            registration: &registration,
+            parent: self.parent_for(exercise),
+            key: LegReads {
+                cell: key.read,
+                chain: chains.get(key.read.vault_id()),
+                walk: Some(key.reached),
+            },
+            verdict: verdict.as_ref(),
+        }) {
+            Ok(ground) => ground,
+            Err(why) => return Ok(Err(why)),
+        };
+        if dead_at(&key_ground, key) {
+            return Ok(Ok(Known::Ground(Box::new(key_ground))));
+        }
+
+        let read = match self.read_legs(chains, exercise, Some(key), depth, Some(&registration))? {
             Ok(read) => read,
             Err(why) => return Ok(Err(why)),
         };
@@ -2402,16 +2463,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Ok(ground) => ground,
             Err(why) => return Ok(Err(why)),
         };
-        let dead = ground
-            .leg_at(
-                key.read.vault_id(),
-                key.read.parent_root(),
-                key.read.attempt(),
-            )
-            .is_some_and(|leg| {
-                skip_without_evidence(&ground.route_ground(), &leg).0 == AttemptClass::Skipped
-            });
-        if dead {
+        if dead_at(&ground, key) {
             return Ok(Ok(Known::Ground(Box::new(ground))));
         }
         Ok(self
