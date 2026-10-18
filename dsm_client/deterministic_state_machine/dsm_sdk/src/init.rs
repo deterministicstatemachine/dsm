@@ -495,11 +495,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         log::info!("[SDK Init] Minimal bootstrap router installed (awaiting genesis)");
     }
 
-    // 5) Install recovery handler into core layer
-    let recovery_impl = Arc::new(crate::handlers::RecoveryImpl::new());
-    dsm::core::bridge::install_recovery_handler(recovery_impl);
-
-    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral, Recovery) installed successfully");
+    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral) installed successfully");
 
     // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
     // identity exists; the core handlers above stay installed so bootstrap queries work before

@@ -2,12 +2,10 @@
 
 //! # Recovery Handler Implementation
 //!
-//! Implements the [`RecoveryHandler`] trait
-//! for capsule decryption and recovery session management at the SDK layer.
+//! The recovery receipts the router's `recovery.*` routes sign and apply:
+//! tombstone, succession and resume, each behind the gates those routes hold.
 
 use crate::storage::client_db::recovery::RecoveryState;
-use dsm::core::bridge::RecoveryHandler;
-use dsm::recovery::capsule::{decrypt_capsule_with_key, EncryptedCapsule};
 use dsm::recovery::tombstone::{create_succession, create_tombstone};
 use dsm::types::proto as gp;
 use prost::Message;
@@ -83,156 +81,8 @@ impl Default for RecoveryImpl {
     }
 }
 
-impl RecoveryHandler for RecoveryImpl {
-    fn handle_recovery_capsule_decrypt(
-        &self,
-        operation: gp::RecoveryCapsuleDecryptRequest,
-    ) -> Result<gp::OpResult, String> {
-        // 1. Parse encrypted capsule from bytes
-        let encrypted = EncryptedCapsule::from_bytes(&operation.encrypted_capsule)
-            .map_err(|e| format!("Failed to parse encrypted capsule: {}", e))?;
-
-        // 2. Decrypt using provided key
-        let decrypted = decrypt_capsule_with_key(&encrypted, &operation.mnemonic_key)
-            .map_err(|e| format!("Failed to decrypt capsule: {}", e))?;
-
-        // 3. Map to response proto
-        let mut chain_tips = Vec::new();
-        for (device_id_str, (height, head_hash)) in decrypted.counterparty_tips {
-            // Device IDs must be canonical base32 Crockford text when represented as strings.
-            // Fail-closed: do NOT fall back to UTF-8 bytes, which would break
-            // encode/decode symmetry and can produce non-32B identifiers.
-            let device_id_bytes = crate::util::text_id::decode_base32_crockford(&device_id_str)
-                .ok_or_else(|| "Invalid counterparty device_id base32".to_string())?;
-
-            if device_id_bytes.len() != 32 {
-                return Err(format!(
-                    "Invalid counterparty device_id length after base32 decode: got {}, expected 32",
-                    device_id_bytes.len()
-                ));
-            }
-
-            chain_tips.push(gp::ChainTip {
-                counterparty_device_id: device_id_bytes,
-                height,
-                head_hash: Some(gp::Hash32 { v: head_hash }),
-            });
-        }
-
-        // Persist capsule data for use during succession and resume.
-        // Store SMT root for state restoration.
-        if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
-            "capsule_smt_root",
-            &decrypted.smt_root,
-        ) {
-            log::warn!("[RECOVERY] Failed to persist capsule SMT root: {e}");
-        }
-        // Store rollup hash for state restoration.
-        if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
-            "capsule_rollup_hash",
-            &decrypted.rollup_hash,
-        ) {
-            log::warn!("[RECOVERY] Failed to persist capsule rollup hash: {e}");
-        }
-
-        // Persist source device binding for tombstone (v4 capsule extension).
-        if !decrypted.source_device_id.is_empty() {
-            if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
-                "capsule_source_device_id",
-                &decrypted.source_device_id,
-            ) {
-                log::warn!("[RECOVERY] Failed to persist capsule source device_id: {e}");
-            }
-        }
-        if !decrypted.genesis_hash.is_empty() {
-            if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(
-                "capsule_genesis_hash",
-                &decrypted.genesis_hash,
-            ) {
-                log::warn!("[RECOVERY] Failed to persist capsule genesis hash: {e}");
-            }
-        }
-
-        // Persist counterparty device IDs for tombstone sync gate initialization.
-        // These are needed later by recovery.tombstone to know which contacts must ACK.
-        {
-            let counterparty_ids: Vec<[u8; 32]> = chain_tips
-                .iter()
-                .filter_map(|ct| {
-                    if ct.counterparty_device_id.len() == 32 {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&ct.counterparty_device_id);
-                        Some(arr)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            if !counterparty_ids.is_empty() {
-                if let Err(e) = crate::storage::client_db::recovery::store_capsule_counterparty_ids(
-                    &counterparty_ids,
-                ) {
-                    log::warn!("[RECOVERY] Failed to persist counterparty IDs: {e}");
-                } else {
-                    log::info!(
-                        "[RECOVERY] Persisted {} counterparty IDs from capsule",
-                        counterparty_ids.len()
-                    );
-                }
-            }
-        }
-
-        let response = gp::RecoveryCapsuleDecryptResponse {
-            success: true,
-            global_root: Some(gp::Hash32 {
-                v: decrypted.smt_root,
-            }),
-            chain_tips,
-            receipt_rollup: Some(gp::Hash32 {
-                v: decrypted.rollup_hash,
-            }),
-            meta_data: vec![], // Metadata serialization if needed
-        };
-
-        // 4. Wrap in OpResult
-        let mut body = Vec::new();
-        response
-            .encode(&mut body)
-            .map_err(|e| format!("Failed to encode response: {}", e))?;
-
-        Ok(gp::OpResult {
-            op_id: None,
-            accepted: true,
-            result: Some(gp::ResultPack {
-                schema_hash: None,
-                codec: gp::Codec::Proto as i32,
-                body,
-            }),
-            error: None,
-        })
-    }
-
-    fn handle_nfc_tag(&self, operation: gp::ExternalCommit) -> Result<gp::OpResult, String> {
-        // Just return the payload (capsule bytes) as a success result.
-        // The UI will receive this and prompt the user for the mnemonic key,
-        // then call RecoveryCapsuleDecryptRequest.
-
-        let body = operation.payload;
-
-        Ok(gp::OpResult {
-            op_id: None,
-            accepted: true,
-            result: Some(gp::ResultPack {
-                schema_hash: None,
-                codec: gp::Codec::Proto as i32,
-                body,
-            }),
-            error: None,
-        })
-    }
-
-    fn handle_recovery_tombstone(
+impl RecoveryImpl {
+    pub(crate) fn handle_recovery_tombstone(
         &self,
         operation: gp::RecoveryTombstoneRequest,
     ) -> Result<gp::OpResult, String> {
@@ -283,7 +133,7 @@ impl RecoveryHandler for RecoveryImpl {
         })
     }
 
-    fn handle_recovery_succession(
+    pub(crate) fn handle_recovery_succession(
         &self,
         operation: gp::RecoverySuccessionRequest,
     ) -> Result<gp::OpResult, String> {
@@ -317,7 +167,7 @@ impl RecoveryHandler for RecoveryImpl {
 
         // Restore state from the decrypted capsule data.
         // The capsule's SMT root and counterparty chain tips were persisted
-        // during capsule decryption (handle_recovery_capsule_decrypt).
+        // when `recovery.decryptCapsule` decrypted it.
         // Now bind the new device identity.
         {
             let public_key = crate::sdk::app_state::AppState::get_public_key()
@@ -372,7 +222,7 @@ impl RecoveryHandler for RecoveryImpl {
         })
     }
 
-    fn handle_recovery_resume(
+    pub(crate) fn handle_recovery_resume(
         &self,
         operation: gp::RecoveryResumeRequest,
     ) -> Result<gp::OpResult, String> {

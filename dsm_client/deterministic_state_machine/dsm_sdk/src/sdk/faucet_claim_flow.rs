@@ -46,8 +46,9 @@
 
 use dsm::economic::admission::{dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission};
 use dsm::economic::native_reserve::{
-    era_reserve_id, release_evidence_addr, sign_release, NativeReserveReleaseBody,
-    NativeReserveState, ReleaseSource, SuccessorRead, WalkStop, ERA_FAUCET_PAYOUT,
+    decode_and_verify_release, era_reserve_id, release_evidence_addr, sign_release,
+    NativeReserveReleaseBody, NativeReserveState, ReleaseSource, SuccessorRead, WalkStop,
+    ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
@@ -176,11 +177,27 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         };
         let op_digest = dsm_operation_digest(&op.to_bytes());
 
-        // Frozen-or-sign-once per parent root, BEFORE any member write.
+        // Frozen-or-sign-once per parent root and target position, BEFORE any
+        // member write. A release frozen at this parent for an earlier
+        // position (its write never reached the leader, and the device has
+        // admitted at that position since) names a position this claim cannot
+        // credit: reusing it registered a root claim that failed its own
+        // provenance check and fenced the wallet for good (SA-70). This
+        // claim's release takes its place.
         let parent_root = parent.root();
-        let envelope = match reserve_db::get_frozen_release(&reserve_id, &parent_root)
+        let frozen = match reserve_db::get_frozen_release(&reserve_id, &parent_root)
             .map_err(|e| storage_err("load frozen release", e))?
         {
+            Some(bytes) => {
+                let named = decode_and_verify_release(&bytes)
+                    .map_err(|e| storage_err("frozen release", e))?
+                    .body
+                    .recipient_economic_position;
+                (named == target_position).then_some(bytes)
+            }
+            None => None,
+        };
+        let envelope = match frozen {
             Some(bytes) => bytes,
             None => {
                 let body = NativeReserveReleaseBody {
@@ -200,7 +217,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 };
                 let bytes =
                     sign_release(&body, &secret_key).map_err(|e| storage_err("sign release", e))?;
-                reserve_db::put_frozen_release(&reserve_id, &parent_root, &bytes)
+                reserve_db::freeze_release(&reserve_id, &parent_root, &bytes)
                     .map_err(|e| storage_err("freeze release", e))?;
                 // Read BACK rather than trusting the in-memory copy: a silent
                 // retention failure must surface before anything goes out.

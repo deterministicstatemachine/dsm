@@ -466,6 +466,22 @@ impl BilateralBleHandler {
             .map_err(|e| DsmError::invalid_operation(format!("Failed to persist session: {e}")))
     }
 
+    /// Record a proposal's session as prepared, owing its prepare frame, only
+    /// while its stored phase is still the `Preparing` it was decided on. The
+    /// door is released before the prepare is built, so a cancellation can
+    /// end the session meanwhile; an unconditional write here put the
+    /// cancelled session back to `Prepared` (SA-115, after SA-54).
+    async fn record_prepared(&self, prepared: BilateralBleSession) -> Result<(), DsmError> {
+        self.persist_session_from(&prepared, &[BilateralPhase::Preparing])
+            .await?;
+        self.sessions
+            .sessions
+            .lock()
+            .await
+            .insert(prepared.commitment_hash, prepared);
+        Ok(())
+    }
+
     /// Persist a session to SQLite storage
     async fn persist_session(&self, session: &BilateralBleSession) -> Result<(), DsmError> {
         store_bilateral_session(&session.to_record()?).map_err(|e| {
@@ -960,12 +976,7 @@ impl BilateralBleHandler {
         let mut prepared = session;
         prepared.phase = BilateralPhase::Prepared;
         prepared.owed_frame = Some(buffer.clone());
-        self.persist_session(&prepared).await?;
-        self.sessions
-            .sessions
-            .lock()
-            .await
-            .insert(pre_commitment.bilateral_commitment_hash, prepared);
+        self.record_prepared(prepared).await?;
 
         info!("Bilateral prepare request created");
         Ok((buffer, pre_commitment.bilateral_commitment_hash))
@@ -4499,16 +4510,19 @@ mod tests {
         (bilateral_manager, handler)
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn test_core_manager_integration() {
-        // A device made as wallet creation makes one: its own identity, AK and
-        // Kyber key, in a fresh database. It prepares nothing without them.
-        let (identity, _core) = crate::economic_fixtures::local_device(0x11);
+    /// A device made as wallet creation makes one (its own identity, AK and
+    /// Kyber key, in a fresh database) whose relationship with `counterparty`
+    /// is established: what a proposal needs.
+    async fn established_with(
+        seed: u8,
+        counterparty_device_id: [u8; 32],
+    ) -> (
+        Arc<RwLock<BilateralTransactionManager>>,
+        BilateralBleHandler,
+    ) {
+        let (identity, _core) = crate::economic_fixtures::local_device(seed);
         let (device_id, genesis_hash) = (identity.device_id, identity.genesis);
         let keypair = identity.signing_keypair();
-
-        let counterparty_device_id = [3u8; 32];
         let counterparty_genesis = [4u8; 32];
 
         let contact_manager = DsmContactManager::new(device_id);
@@ -4545,6 +4559,16 @@ mod tests {
                 .await
                 .expect("establish relationship");
         }
+        (bilateral_manager, handler)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_core_manager_integration() {
+        // A device made as wallet creation makes one: its own identity, AK and
+        // Kyber key, in a fresh database. It prepares nothing without them.
+        let counterparty_device_id = [3u8; 32];
+        let (bilateral_manager, handler) = established_with(0x11, counterparty_device_id).await;
 
         // prepare_bilateral_transaction records its precommitment in the core manager.
         handler
@@ -4558,6 +4582,51 @@ mod tests {
                 .list_pending_commitments()
                 .is_empty(),
             "the core manager holds the pending commitment"
+        );
+    }
+
+    /// SA-115. A proposal cancelled while its prepare was being built stays
+    /// cancelled. The door is released before the prepare is built; the
+    /// prepared phase is then written only over the `Preparing` phase it was
+    /// decided on, so the prepare's write, arriving after the cancellation,
+    /// is refused and the cancellation stands.
+    /// MUTATION CONTROL: writing the prepared phase unconditionally, as the
+    /// prepare did, puts the cancelled session back and turns this red.
+    #[tokio::test]
+    #[serial]
+    async fn a_proposal_cancelled_while_its_prepare_was_built_stays_cancelled() {
+        let counterparty = [0x13u8; 32];
+        let (_manager, handler) = established_with(0x12, counterparty).await;
+        let (_frame, commitment) = handler
+            .prepare_bilateral_transaction_with_commitment(counterparty, Operation::Noop)
+            .await
+            .expect("prepare on an established relationship");
+        let prepared = handler
+            .sessions
+            .sessions
+            .lock()
+            .await
+            .get(&commitment)
+            .cloned()
+            .expect("the prepared session");
+
+        handler
+            .cancel_proposal(commitment, "changed my mind".to_string())
+            .await
+            .expect("cancel the proposal");
+        // The prepare's own write, reaching the store after the cancellation.
+        handler
+            .record_prepared(prepared)
+            .await
+            .expect_err("the cancellation stands");
+
+        let stored = crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("read the session")
+            .expect("the session is kept");
+        assert_eq!(stored.phase, phase_to_str(&BilateralPhase::Rejected));
+        assert_eq!(
+            handler.get_session_phase(&commitment).await,
+            Some(BilateralPhase::Rejected)
         );
     }
 

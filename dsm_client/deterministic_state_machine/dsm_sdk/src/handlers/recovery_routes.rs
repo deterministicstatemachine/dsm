@@ -337,6 +337,23 @@ impl AppRouterImpl {
                 ) {
                     log::warn!("[RECOVERY] Failed to persist capsule rollup hash: {e}");
                 }
+                // The device and genesis the capsule was sealed by, which the
+                // tombstone and the recovery re-establish name. Only the Core
+                // bridge's decrypt staged them, under a key the request carried;
+                // that path is gone (SA-119), and this one decrypts under the
+                // cached K_R.
+                for (key, value) in [
+                    ("capsule_source_device_id", &decrypted.source_device_id),
+                    ("capsule_genesis_hash", &decrypted.genesis_hash),
+                ] {
+                    if !value.is_empty() {
+                        if let Err(e) =
+                            crate::storage::client_db::recovery::set_recovery_pref(key, value)
+                        {
+                            log::warn!("[RECOVERY] Failed to persist {key}: {e}");
+                        }
+                    }
+                }
 
                 if let Err(e) =
                     crate::storage::client_db::recovery::store_recovered_chain_tips(&recovered_tips)
@@ -384,7 +401,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_tombstone(&handler, req) {
+                match handler.handle_recovery_tombstone(req) {
                     Ok(op_result) => {
                         // Extract tombstone receipt from OpResult and persist it
                         if let Some(ref rp) = op_result.result {
@@ -465,8 +482,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_succession(&handler, req)
-                {
+                match handler.handle_recovery_succession(req) {
                     Ok(_op_result) => {
                         let resp = generated::AppStateResponse {
                             key: "recovery.succession".to_string(),
@@ -503,7 +519,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_resume(&handler, req) {
+                match handler.handle_recovery_resume(req) {
                     Ok(_op_result) => {
                         let resp = generated::AppStateResponse {
                             key: "recovery.resume".to_string(),
@@ -814,6 +830,8 @@ impl AppRouterImpl {
             "capsule_counterparty_ids",
             "capsule_smt_root",
             "capsule_rollup_hash",
+            "capsule_source_device_id",
+            "capsule_genesis_hash",
             "succession_receipt",
         ] {
             if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(key, &[]) {

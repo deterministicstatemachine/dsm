@@ -957,3 +957,74 @@ async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
         "credited once"
     );
 }
+
+/// SA-70. A release frozen for an earlier position is not reused at a later
+/// one. A claim whose release never reached the reserve cell's leader leaves
+/// it frozen at that head, naming the position the device was about to take.
+/// Once the device has admitted at that position by other means (here, a
+/// payment it received), the next claim at the same head signs its own
+/// release for its new position and finishes there. Reusing the frozen bytes
+/// registered a root claim that failed its own provenance check, and fenced
+/// the wallet for good.
+/// MUTATION CONTROL: reusing whatever is frozen at the parent root, as the
+/// claim did, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_frozen_for_an_earlier_position_is_not_reused_at_a_later_one() {
+    use dsm::economic::native_reserve::{
+        sign_release, NativeReserveReleaseBody, ReleaseSource, ERA_FAUCET_PAYOUT,
+    };
+    let p = Pair::boot(0, 100).await;
+    let sent = p.b.send(&p.a, whole_era(10)).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let applied = p.a.sync().await;
+    assert!(applied.success, "{:?}", applied.errors);
+
+    p.a.enter();
+    let core = &p.a.router().core_sdk;
+    let taken = crate::sdk::economic_admission_flow::validated_root_or_activate(core)
+        .expect("A's validated root")
+        .economic_position();
+    assert!(
+        taken >= 1,
+        "A admitted the payment at a position of its own"
+    );
+
+    // What a claim made before that admission froze: a release at the reserve
+    // head for the position A has since taken, its write never at the leader.
+    let head = reserve_head().await;
+    let generation = head.generation + 1;
+    let device_head = core.device_head().expect("A's head");
+    let (public_key, secret_key) =
+        crate::sdk::signing_authority::current_keypair().expect("A's keys");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("A's AttA");
+    let op = dsm::types::operations::Operation::FaucetClaim {
+        reserve_id: head.reserve_id,
+        generation,
+    };
+    let earlier = NativeReserveReleaseBody {
+        reserve_id: head.reserve_id,
+        parent_root: head.root(),
+        generation,
+        amount: ERA_FAUCET_PAYOUT,
+        recipient_genesis: device_head.genesis_digest(),
+        recipient_devid: device_head.devid(),
+        recipient_economic_position: taken,
+        recipient_operation_digest: dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
+        storage_set_id: canonical_set(NETWORK).expect("canonical set").id(),
+        source: ReleaseSource::FaucetClaimant {
+            claimant_public_key: public_key,
+            claimant_att_a: att_a,
+        },
+    };
+    let frozen = sign_release(&earlier, &secret_key).expect("sign the earlier release");
+    client_db::native_reserve::freeze_release(&head.reserve_id, &head.root(), &frozen)
+        .expect("freeze it");
+
+    let outcome = claim_era_faucet(core, NETWORK)
+        .await
+        .expect("the claim finishes at A's own next position");
+    assert_eq!(outcome.economic_position, taken + 1);
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(p.a.era_balance(), whole_era(110));
+}

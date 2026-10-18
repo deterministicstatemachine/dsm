@@ -162,16 +162,26 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     let tx = conn.transaction()?;
-    let existing: Option<String> = tx
+    let existing: Option<(String, i64)> = tx
         .query_row(
-            "SELECT status FROM connect_sessions WHERE session_id = ?1",
+            "SELECT status, last_seq FROM connect_sessions WHERE session_id = ?1",
             params![s.session_id.as_slice()],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if existing.as_deref() == Some(CONNECTED) {
+    if existing
+        .as_ref()
+        .is_some_and(|(status, _)| status == CONNECTED)
+    {
         return Err(anyhow!("this application is already connected"));
     }
+    // The same code approved again is the same session: the requests it
+    // already took stay taken. Starting it over at 0 had the relay's earlier
+    // signed requests carried out again (SA-125).
+    let last_seq = match existing {
+        Some((_, taken)) => i64_of(s.last_seq)?.max(taken),
+        None => i64_of(s.last_seq)?,
+    };
     tx.execute(
         &format!(
             "INSERT OR REPLACE INTO connect_sessions({SESSION_COLUMNS}) \
@@ -187,7 +197,7 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
             s.cert_pin.as_slice(),
             s.offer_digest.as_slice(),
             s.accept_body,
-            i64_of(s.last_seq)?,
+            last_seq,
             status_text(s.connected),
         ],
     )?;
@@ -1023,4 +1033,46 @@ pub fn app_record_fact(fact_id: &[u8], session_id: &[u8; 32], seq: u64) -> Resul
     )
     .map_err(|e| anyhow!("the fact is already granted on: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(last_seq: u64, connected: SessionStatus) -> WalletSession {
+        WalletSession {
+            session_id: [0x51; 32],
+            app_device_id: [0x52; 32],
+            app_genesis: [0x53; 32],
+            app_ak: vec![0x54; 64],
+            display_name: "Arena".to_string(),
+            endpoint: "https://arena.example".to_string(),
+            cert_pin: [0x55; 32],
+            offer_digest: [0x56; 32],
+            accept_body: vec![0x57; 16],
+            last_seq,
+            connected,
+        }
+    }
+
+    /// SA-125. Approving the same connect code again, after a disconnect,
+    /// keeps the highest request the session took: the relay's earlier signed
+    /// requests are not carried out a second time.
+    /// MUTATION CONTROL: writing the new approval's `last_seq` of 0 over the
+    /// stored one, as the approval did, turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn approving_a_code_again_keeps_the_requests_its_session_took() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+
+        insert_session(&session(7, SessionStatus::Disconnected)).expect("the first session");
+        insert_session(&session(0, SessionStatus::Connected)).expect("approved again");
+        let stored = super::session(&[0x51; 32])
+            .expect("read the session")
+            .expect("the session");
+        assert_eq!(stored.last_seq, 7);
+        assert_eq!(stored.connected, SessionStatus::Connected);
+    }
 }

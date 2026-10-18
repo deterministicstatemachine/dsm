@@ -1554,6 +1554,16 @@ fn check_settlement_core_references(
                     field: "B°.dlv_core",
                 },
             )?;
+            // The one core is the vault B° names. Decided from the operation
+            // alone: beside B°'s vault state only, an attempt whose core names
+            // another vault was never refuted, since its evidence is read for
+            // the core's vault, and it held B°'s vault's key for good (SA-84).
+            require(
+                *core.vault_id() == *vault_id,
+                Invalid::SettlementCoreReferenceMismatch {
+                    field: "B°.dlv_core.vault_id",
+                },
+            )?;
             // Its own parent must be the leg P names, and the core's.
             let leg = precommit
                 .legs()
@@ -4173,6 +4183,69 @@ mod tests {
             evidence,
             parent_claim,
         }
+    }
+
+    /// SA-84. A close whose one vault core names a vault other than B°'s is
+    /// refuted from the operation alone, with nothing about either vault in
+    /// hand. The vault id was compared only beside B°'s vault state, which
+    /// the acquisition reads for the core's vault, so such an attempt was never
+    /// refuted and held B°'s vault's attempt key for good.
+    /// MUTATION CONTROL: removing the vault-id check from
+    /// `check_settlement_core_references` turns this red.
+    #[test]
+    fn a_close_whose_core_names_another_vault_is_invalid_in_hand() {
+        let f = close_fixture(OwnerAuthority::Origin);
+        let core = f.preimage.dlv_cores()[0].clone();
+        let elsewhere = DlvCore::new(
+            token(0x5E),
+            *core.pre_root(),
+            *core.trader_genesis(),
+            *core.trader_device_id(),
+            *core.relationship_base(),
+            core.entries().to_vec(),
+        )
+        .unwrap();
+        let SettlementBody::Close {
+            vault_id,
+            parent_root,
+            setup_ref,
+            owner_authority,
+            reserve_a,
+            reserve_b,
+            trader_core,
+            closure,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a close fixture")
+        };
+        let bent = SettlementPreimage::new(
+            SettlementBody::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                owner_authority,
+                reserve_a,
+                reserve_b,
+                trader_core,
+                dlv_core: derive::dlv_core_digest(&elsewhere.encode().unwrap()),
+                closure,
+            },
+            f.preimage.trader_core().clone(),
+            vec![elsewhere],
+        )
+        .unwrap();
+        let precommit = rebind(&f, &bent);
+        let no_vault_leaves = Evidence {
+            vault_leaves: BTreeMap::new(),
+            ..f.evidence.clone()
+        };
+        assert_eq!(
+            validate(&precommit, &bent, &no_vault_leaves),
+            Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                field: "B°.dlv_core.vault_id",
+            }))
+        );
     }
 
     #[test]

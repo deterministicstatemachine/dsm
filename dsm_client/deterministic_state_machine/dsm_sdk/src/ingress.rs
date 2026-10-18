@@ -1210,6 +1210,47 @@ mod tests {
         assert_eq!(held_and_sealed_seed(), (own.clone(), own));
     }
 
+    /// A ring capsule read back through `recovery.decryptCapsule` stages the
+    /// device and genesis it was sealed by, which the tombstone names: only
+    /// the Core bridge's decrypt, now gone (SA-119), staged them.
+    #[test]
+    #[serial]
+    fn decrypting_a_ring_capsule_stages_the_device_it_was_sealed_by() {
+        device_with_router(0x52);
+        let phrase = economic_fixtures::test_mnemonic(0x52);
+        let sealed = expect_ok_bytes(invoke_recovery_route("recovery.createCapsule", &phrase));
+        let capsule = match crate::envelope::local_answer_from_canonical_bytes(&sealed[1..])
+            .map(|e| e.payload)
+        {
+            Ok(Some(pb::envelope::Payload::NfcRecoveryCapsule(c))) => c,
+            other => panic!("recovery.createCapsule answered {other:?}"),
+        };
+        let cached = expect_ok_bytes(invoke_recovery_route("recovery.cacheMnemonic", &phrase));
+        assert!(!cached.is_empty());
+        let decrypted = dispatch_ingress(IngressRequest {
+            operation: Some(ingress_request::Operation::RouterInvoke(
+                pb::RouterInvokeOp {
+                    method: "recovery.decryptCapsule".to_string(),
+                    args: pb::ArgPack {
+                        codec: pb::Codec::Proto as i32,
+                        body: capsule.encode_to_vec(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                },
+            )),
+        });
+        assert!(!expect_ok_bytes(decrypted).is_empty());
+        let staged =
+            crate::storage::client_db::recovery::get_recovery_pref("capsule_source_device_id")
+                .expect("read the staged device")
+                .expect("the staged device");
+        assert_eq!(
+            staged,
+            crate::sdk::app_state::AppState::get_device_id().expect("this device")
+        );
+    }
+
     /// Turning NFC backup off drops the recovery keys and nothing else: the
     /// wallet seed stays in memory and sealed at rest, so the wallet still
     /// signs, and opens after a restart (SA-65).
