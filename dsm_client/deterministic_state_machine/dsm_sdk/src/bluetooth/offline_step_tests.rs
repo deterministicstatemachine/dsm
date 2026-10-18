@@ -839,7 +839,11 @@ async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
 /// A's bearer transfer to B, prepared by A and delivered to B, which refuses
 /// it: offline-bearer receipt is disabled (SA-61). B writes nothing for it.
 /// Returns the step's commitment.
-async fn refused_at_the_receiver(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> [u8; 32] {
+async fn refused_at_the_receiver(
+    a: &OfflineDevice,
+    b: &OfflineDevice,
+    operation: &Proposal,
+) -> [u8; 32] {
     a.device.enter();
     let (prepare, commitment) = a
         .handler
@@ -857,7 +861,9 @@ async fn refused_at_the_receiver(a: &OfflineDevice, b: &OfflineDevice, operation
         .await
         .expect_err("B refuses the bearer transfer");
     assert!(
-        refused.to_string().contains("offline-bearer receipt is disabled"),
+        refused
+            .to_string()
+            .contains("offline-bearer receipt is disabled"),
         "{refused}"
     );
     commitment
@@ -911,7 +917,9 @@ async fn a_bearer_transfer_delivered_again_is_refused_again() {
             .await
             .expect_err("B refuses the bearer transfer");
         assert!(
-            refused.to_string().contains("offline-bearer receipt is disabled"),
+            refused
+                .to_string()
+                .contains("offline-bearer receipt is disabled"),
             "delivery {delivery}: {refused}"
         );
         assert!(

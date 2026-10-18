@@ -914,7 +914,10 @@ mod tests {
             decide(&sender.sign_step(&commitment), None),
             "offline-bearer receipt is disabled",
         );
-        refused(decide(&[], Some([0x7Cu8; 32])), "offline-bearer receipt is disabled");
+        refused(
+            decide(&[], Some([0x7Cu8; 32])),
+            "offline-bearer receipt is disabled",
+        );
     }
 
     /// A stale proposal's claimed tip is evidence of the sender's tip only
