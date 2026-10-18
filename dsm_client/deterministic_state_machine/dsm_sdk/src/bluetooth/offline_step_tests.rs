@@ -1657,7 +1657,11 @@ async fn an_old_proposal_delivered_after_the_tip_moved_is_not_kept_as_the_sender
     let reply = crate::envelope::from_canonical_bytes(&answer).expect("decode the reply");
     match reply.payload {
         Some(crate::generated::envelope::Payload::BilateralPrepareReject(reject)) => {
-            assert!(reject.reason.contains("Chain tip mismatch"), "{}", reject.reason)
+            assert!(
+                reject.reason.contains("Chain tip mismatch"),
+                "{}",
+                reject.reason
+            )
         }
         other => panic!("the old proposal is refused as stale, not {other:?}"),
     }

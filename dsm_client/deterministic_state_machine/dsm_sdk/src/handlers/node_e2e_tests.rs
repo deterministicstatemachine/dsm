@@ -2421,7 +2421,10 @@ async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk
             .read_attempt_cell(&m.vault_id, &r0, 0)
             .expect("read")
             .expect("decided");
-        assert!(held.exercise().is_some(), "B's exercise holds the first key");
+        assert!(
+            held.exercise().is_some(),
+            "B's exercise holds the first key"
+        );
         matches!(
             held.fact(),
             CellFact::Held {
@@ -2441,7 +2444,10 @@ async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk
     )
     .await;
     assert!(r.success, "A's close is taken: {:?}", r.error_message);
-    assert!(final_at_first_key(&p.a), "A's walk carried B's exercise to final");
+    assert!(
+        final_at_first_key(&p.a),
+        "A's walk carried B's exercise to final"
+    );
 }
 
 /// SoFi Amendment S20 (12j), Amendment S15: a position whose root cell
@@ -5351,4 +5357,3 @@ async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
         "the tombstone under K_A is taken in"
     );
 }
-

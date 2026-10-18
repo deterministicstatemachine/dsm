@@ -484,7 +484,9 @@ fn tombstone_notice() -> Result<Vec<u8>, String> {
         .ok_or_else(|| "no tombstone receipt stored; call recovery.tombstone first".to_string())?;
     let succession = crate::storage::client_db::recovery::get_succession_receipt()
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "no succession receipt stored; call recovery.succession first".to_string())?;
+        .ok_or_else(|| {
+            "no succession receipt stored; call recovery.succession first".to_string()
+        })?;
     let (authority_pubkey, ..) =
         crate::sdk::recovery_sdk::RecoverySDK::get_cached_authority_keypair().ok_or_else(|| {
             "no cached recovery-authority keypair (cache the mnemonic first)".to_string()

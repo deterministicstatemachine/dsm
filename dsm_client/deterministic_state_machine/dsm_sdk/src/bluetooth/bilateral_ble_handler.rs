@@ -1877,11 +1877,11 @@ impl BilateralBleHandler {
         reason: String,
         send_status: Option<generated::RelationshipSendStatus>,
     ) -> Result<Vec<u8>, DsmError> {
-        let rejector_signature = self
-            .bilateral_tx_manager
-            .read()
-            .await
-            .sign_rejection(&commitment_hash, &counterparty, &reason)?;
+        let rejector_signature = self.bilateral_tx_manager.read().await.sign_rejection(
+            &commitment_hash,
+            &counterparty,
+            &reason,
+        )?;
         let envelope = self
             .create_envelope(generated::envelope::Payload::BilateralPrepareReject(
                 generated::BilateralPrepareReject {
@@ -4967,7 +4967,10 @@ mod tests {
             .await
             .expect_err("a stranger's prepare is refused")
             .to_string();
-        assert!(msg.contains("not a contact"), "refused as a stranger, got: {msg}");
+        assert!(
+            msg.contains("not a contact"),
+            "refused as a stranger, got: {msg}"
+        );
     }
 
     /// The receiver checks a prepare's expected relationship tip against the

@@ -555,7 +555,13 @@ pub fn leader_copy_record(
         &cell.route,
     )
     .encode();
-    copy_record(cell.route.leader(), &cell.namespace, &cell.key, &copy, leader_log)
+    copy_record(
+        cell.route.leader(),
+        &cell.namespace,
+        &cell.key,
+        &copy,
+        leader_log,
+    )
 }
 
 /// `seat`'s arrival record for the first arrival of the encoded copy `copy`

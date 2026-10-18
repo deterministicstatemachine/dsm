@@ -358,16 +358,20 @@ impl<'a> LiveSofiReads<'a> {
             network_id: &self.network,
             programs: crate::sdk::outcome_programs::registry(),
         };
-        established_once(&self.once.peer_steps, (*genesis, *device_id, position), || {
-            resolve_peer(
-                &self.peer_resolver(),
-                &self.network,
-                genesis,
-                device_id,
-                position,
-                &conditional,
-            )
-        })
+        established_once(
+            &self.once.peer_steps,
+            (*genesis, *device_id, position),
+            || {
+                resolve_peer(
+                    &self.peer_resolver(),
+                    &self.network,
+                    genesis,
+                    device_id,
+                    position,
+                    &conditional,
+                )
+            },
+        )
     }
 
     fn block<T>(&self, fut: impl Future<Output = T>) -> T {
@@ -640,16 +644,20 @@ impl SofiReads for LiveSofiReads<'_> {
             network_id: &self.network,
             programs: crate::sdk::outcome_programs::registry(),
         };
-        established_once(&self.once.peer_roots, (*genesis, *device_id, position), || {
-            resolve_peer_root(
-                &self.peer_resolver(),
-                &self.network,
-                genesis,
-                device_id,
-                position,
-                &conditional,
-            )
-        })
+        established_once(
+            &self.once.peer_roots,
+            (*genesis, *device_id, position),
+            || {
+                resolve_peer_root(
+                    &self.peer_resolver(),
+                    &self.network,
+                    genesis,
+                    device_id,
+                    position,
+                    &conditional,
+                )
+            },
+        )
     }
 
     fn accepted_claim_at(

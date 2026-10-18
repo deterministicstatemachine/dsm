@@ -1500,10 +1500,7 @@ mod tests {
             ..conditional_claim(position)
         });
         let fetcher = RoutedClaims {
-            probed: vec![
-                (position, held.clone()),
-                (position - 1, peer_c_q(parent)),
-            ],
+            probed: vec![(position, held.clone()), (position - 1, peer_c_q(parent))],
             routed: vec![
                 (position, [0xA9; 32], held.clone()),
                 (position, [0xB9; 32], held),

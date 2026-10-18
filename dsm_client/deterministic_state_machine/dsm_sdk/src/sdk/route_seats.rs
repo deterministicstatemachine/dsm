@@ -295,11 +295,15 @@ async fn borne_out<S: RouteSeats>(
     batch
         .iter()
         .zip(logs)
-        .zip(records.into_iter().map(Some).chain(std::iter::repeat_with(|| None)))
+        .zip(
+            records
+                .into_iter()
+                .map(Some)
+                .chain(std::iter::repeat_with(|| None)),
+        )
         .map(|(((namespace, key, copy), log), record)| {
-            let given = log.and_then(|log| {
-                dsm::route_chain::copy_record(seat, namespace, key, copy, &log)
-            });
+            let given =
+                log.and_then(|log| dsm::route_chain::copy_record(seat, namespace, key, copy, &log));
             match (record, given) {
                 (Some(record), Some(given)) if record == given => ChainSlot::Link(record),
                 (record, given) => {
@@ -1440,7 +1444,12 @@ mod tests {
         let [written] = from_leader(&lying, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
             .await
             .expect("a report");
-        assert_eq!(written.slots[1], ChainSlot::NoResponse, "{:?}", written.slots);
+        assert_eq!(
+            written.slots[1],
+            ChainSlot::NoResponse,
+            "{:?}",
+            written.slots
+        );
 
         let evidence = read_cell(&seats, &cell).await;
         let reading = dsm::route_chain::evaluate(&cell, &evidence, |bytes: &[u8]| {

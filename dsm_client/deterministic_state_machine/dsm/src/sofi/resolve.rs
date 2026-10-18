@@ -51,10 +51,9 @@ use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
 use super::facts::{
-    establish, establish_ground, establish_key_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
-    GroundFacts, GroundReads, InHandRefutation, KeyGroundReads, LegReads, NotEstablished,
-    ResolvedParent,
-    TraderAtParent,
+    establish, establish_ground, establish_key_ground, refuted_in_hand, Established,
+    EstablishedFacts, ExerciseReads, GroundFacts, GroundReads, InHandRefutation, KeyGroundReads,
+    LegReads, NotEstablished, ResolvedParent, TraderAtParent,
 };
 use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,

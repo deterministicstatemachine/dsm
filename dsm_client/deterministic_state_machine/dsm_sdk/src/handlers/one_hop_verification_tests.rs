@@ -628,8 +628,15 @@ async fn a_step_validated_before_its_position_forked_is_refused_after() {
         &crate::sdk::signing_authority::current_secret_key().expect("A's AK secret"),
     )
     .expect("A signs it");
-    let cell = root_cell(&set, NETWORK, &p.a.genesis, &p.a.device_id, paid_at, &two_back)
-        .expect("the cell routed from the root two back");
+    let cell = root_cell(
+        &set,
+        NETWORK,
+        &p.a.genesis,
+        &p.a.device_id,
+        paid_at,
+        &two_back,
+    )
+    .expect("the cell routed from the root two back");
     register_economic_root(&set, &cell, &claim)
         .await
         .expect("the claim is written along its route");

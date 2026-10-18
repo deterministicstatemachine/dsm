@@ -1556,7 +1556,9 @@ impl RecoverySDK {
     ) -> Result<[u8; 32], DsmError> {
         let named = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
             .ok_or_else(|| {
-                DsmError::verification("recovery: the tombstone's device id is not Base32 Crockford")
+                DsmError::verification(
+                    "recovery: the tombstone's device id is not Base32 Crockford",
+                )
             })?;
         let a_old = <[u8; 32]>::try_from(named.as_slice()).map_err(|e| {
             DsmError::verification(format!("recovery: the tombstone's device id: {e}"))
@@ -1568,7 +1570,9 @@ impl RecoverySDK {
                     None::<std::io::Error>,
                 )
             })?
-            .ok_or_else(|| DsmError::verification("recovery: the tombstoned device is not a contact"))?;
+            .ok_or_else(|| {
+                DsmError::verification("recovery: the tombstoned device is not a contact")
+            })?;
         let genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice()).map_err(|e| {
             DsmError::verification(format!(
                 "recovery: the tombstoned device's pinned genesis: {e}"
