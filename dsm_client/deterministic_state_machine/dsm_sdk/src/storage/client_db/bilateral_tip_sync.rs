@@ -222,6 +222,7 @@ pub(crate) fn sync_tip_projections_in_tx(
              WHERE device_id = ?2",
             params![&target[..], &request.counterparty_device_id[..]],
         )?;
+        super::transactions::record_passed_tip_in_tx(tx, &request.counterparty_device_id, parent)?;
         clear_observed_remote_tip_in_tx(
             tx,
             &request.counterparty_device_id,

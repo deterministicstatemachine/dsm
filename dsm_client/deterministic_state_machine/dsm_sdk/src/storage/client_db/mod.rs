@@ -1591,6 +1591,14 @@ fn create_schema(conn: &Connection) -> Result<()> {
             terms_bytes               BLOB
         );
 
+        -- The tips each relationship has moved past (SA-114): a proposal
+        -- made on one of them is an old one delivered again.
+        CREATE TABLE IF NOT EXISTS relationship_passed_tips(
+            counterparty_device_id BLOB NOT NULL,
+            tip                    BLOB NOT NULL,
+            PRIMARY KEY (counterparty_device_id, tip)
+        );
+
         CREATE TABLE IF NOT EXISTS transactions(
             tx_id              TEXT PRIMARY KEY,
             tx_hash            TEXT NOT NULL,

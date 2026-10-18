@@ -1619,6 +1619,56 @@ async fn a_receiver_that_rejected_answers_the_prepare_again_with_its_rejection()
         .is_empty());
 }
 
+/// SA-114. A proposal its receiver never saw, delivered after the
+/// relationship moved past the tip it was made on, is refused as stale and
+/// changes nothing else: the tip it claims is one this relationship has
+/// passed, so it is not kept as the sender's tip. Kept, it tripped the
+/// divergence check, and online sends to the contact stopped for good.
+/// MUTATION CONTROL: keeping every claimed tip that its commitment
+/// recomputes on, as the receiver did, records the passed tip and turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_old_proposal_delivered_after_the_tip_moved_is_not_kept_as_the_senders_tip() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let old_tip = b.tip_with(&a);
+
+    a.device.enter();
+    let (old_prepare, old_commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(0x51))
+        .await
+        .expect("a proposal its receiver never sees");
+    a.handler
+        .cancel_proposal(old_commitment, "never sent".to_string())
+        .await
+        .expect("the proposer ends it");
+    offline_step(&a, &b, marked(0x52)).await;
+    assert_ne!(b.tip_with(&a), old_tip, "the relationship moved");
+
+    b.device.enter();
+    let (answer, _) = b
+        .handler
+        .handle_prepare_request(&old_prepare, None)
+        .await
+        .expect("the old proposal is answered");
+    let reply = crate::envelope::from_canonical_bytes(&answer).expect("decode the reply");
+    match reply.payload {
+        Some(crate::generated::envelope::Payload::BilateralPrepareReject(reject)) => {
+            assert!(reject.reason.contains("Chain tip mismatch"), "{}", reject.reason)
+        }
+        other => panic!("the old proposal is refused as stale, not {other:?}"),
+    }
+    let observed = crate::storage::client_db::get_observed_remote_tip_record(&a.device.device_id)
+        .expect("read the observed tip");
+    assert!(
+        observed.as_ref().map(|record| record.tip) != Some(old_tip),
+        "the passed tip is kept as the sender's: {observed:?}"
+    );
+}
+
 /// An operation of its own for a step: two steps on one tip are two steps
 /// only if their operations differ.
 fn marked(mark: u8) -> Operation {

@@ -513,31 +513,41 @@ impl BilateralTransactionManager {
     fn rejection_message(
         commitment_hash: &[u8; 32],
         rejector_device_id: &[u8; 32],
+        addressed_to: &[u8; 32],
         reason: &str,
     ) -> Vec<u8> {
-        let mut msg = Vec::with_capacity(21 + 64 + reason.len());
+        let mut msg = Vec::with_capacity(21 + 96 + reason.len());
         msg.extend_from_slice(b"DSM/bilateral-reject\0");
         msg.extend_from_slice(commitment_hash);
         msg.extend_from_slice(rejector_device_id);
+        msg.extend_from_slice(addressed_to);
         msg.extend_from_slice(reason.as_bytes());
         msg
     }
 
-    /// This device's signature refusing the proposal `commitment_hash`.
+    /// This device's signature refusing the step `commitment_hash`, addressed
+    /// to `addressed_to`: the device whose proposal it refuses, or the
+    /// receiver of this device's own proposal it cancels. A rejection names
+    /// the device it answers, so it ends only that device's step: one signed
+    /// for a contact that sent another contact's commitment once ended the
+    /// other contact's proposal (SA-110).
     pub fn sign_rejection(
         &self,
         commitment_hash: &[u8; 32],
+        addressed_to: &[u8; 32],
         reason: &str,
     ) -> Result<Vec<u8>, DsmError> {
         self.signature_keypair.sign(&Self::rejection_message(
             commitment_hash,
             &self.local_device_id,
+            addressed_to,
             reason,
         ))
     }
 
     /// A refusal of a proposal holds only when the device it was sent to
-    /// signed it, under the key that device's contact pins.
+    /// signed it, under the key that device's contact pins, addressed to this
+    /// device.
     pub fn verify_rejection(
         &self,
         rejector_device_id: &[u8; 32],
@@ -556,7 +566,12 @@ impl BilateralTransactionManager {
             .ok_or_else(|| DsmError::InvalidOperation("the rejector is not a contact".into()))?
             .public_key;
         let valid = SignatureKeyPair::verify_raw(
-            &Self::rejection_message(commitment_hash, rejector_device_id, reason),
+            &Self::rejection_message(
+                commitment_hash,
+                rejector_device_id,
+                &self.local_device_id,
+                reason,
+            ),
             signature,
             pinned_key,
         )
@@ -1337,12 +1352,11 @@ mod tests {
         )
         .expect("receiver keys");
         let commitment = [0x31u8; 32];
-        let signature = receiver
-            .sign_rejection(&commitment, "no")
-            .expect("sign the rejection");
-
         // The proposer, holding the receiver as a contact under its pinned key.
         let (proposer_id, proposer_genesis) = make_remote_ids();
+        let signature = receiver
+            .sign_rejection(&commitment, &proposer_id, "no")
+            .expect("sign the rejection");
         let proposer_kp = SignatureKeyPair::generate_from_entropy(b"rejection-proposer").unwrap();
         let mut proposer = BilateralTransactionManager::new(
             DsmContactManager::new(proposer_id),
@@ -1376,10 +1390,19 @@ mod tests {
         assert!(proposer
             .verify_rejection(&receiver_id, &[0x32u8; 32], "no", &signature)
             .is_err());
+        // SA-110: a rejection the receiver addressed to another device ends
+        // nothing here, however it reached this device.
+        let addressed_elsewhere = receiver
+            .sign_rejection(&commitment, &[0x33u8; 32], "no")
+            .expect("sign a rejection for another device");
+        proposer
+            .verify_rejection(&receiver_id, &commitment, "no", &addressed_elsewhere)
+            .expect_err("a rejection addressed to another device verified here");
         let forged = proposer_kp
             .sign(&BilateralTransactionManager::rejection_message(
                 &commitment,
                 &receiver_id,
+                &proposer_id,
                 "no",
             ))
             .unwrap();

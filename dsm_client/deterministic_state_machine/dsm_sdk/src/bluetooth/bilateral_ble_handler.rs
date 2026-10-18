@@ -1453,8 +1453,26 @@ impl BilateralBleHandler {
 
                 // The sender's claimed tip is kept only when the proposal's
                 // commitment recomputes on it: otherwise it is a claim and
-                // nothing more.
-                if let Some(expected_tip) = sender_expected_hash.filter(|_| expected_recomputes) {
+                // nothing more. A tip this relationship has already passed is
+                // an old proposal delivered again, not the sender's tip: kept,
+                // it tripped the divergence check and stopped online sends to
+                // the contact for good (SA-114).
+                let claimed = sender_expected_hash.filter(|_| expected_recomputes);
+                let passed = claimed
+                    .map(|tip| {
+                        crate::storage::client_db::relationship_passed_tip(
+                            &counterparty_device_id,
+                            &tip,
+                        )
+                    })
+                    .transpose()
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("the relationship's passed tips: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                if let Some((expected_tip, _)) = claimed.zip(passed).filter(|(_, passed)| !passed) {
                     if let Err(e) = crate::storage::client_db::record_observed_remote_chain_tip(
                         &counterparty_device_id,
                         &expected_tip,
@@ -1494,7 +1512,12 @@ impl BilateralBleHandler {
                     ),
                 );
                 let rejection = self
-                    .signed_rejection(origin_commitment_hash, reason, Some(send_status))
+                    .signed_rejection(
+                        origin_commitment_hash,
+                        counterparty_device_id,
+                        reason,
+                        Some(send_status),
+                    )
                     .await?;
                 return Ok((
                     rejection,
@@ -1793,6 +1816,7 @@ impl BilateralBleHandler {
         let rejection = self
             .signed_rejection(
                 origin_commitment_hash,
+                counterparty_device_id,
                 reason.clone(),
                 Some(sdk_send_status_from_router_status(send_status)),
             )
@@ -1841,12 +1865,15 @@ impl BilateralBleHandler {
         Ok(rejection)
     }
 
-    /// A signed rejection of the step `commitment_hash`, as its envelope: the
-    /// receiver's refusal of a proposal, or the proposer's cancellation of its
-    /// own. A step ends on a rejection only when its rejector signed it.
+    /// A signed rejection of the step `commitment_hash`, addressed to
+    /// `counterparty`, as its envelope: the receiver's refusal of a proposal,
+    /// or the proposer's cancellation of its own. A step ends on a rejection
+    /// only when its rejector signed it, addressed to the device holding the
+    /// step.
     async fn signed_rejection(
         &self,
         commitment_hash: [u8; 32],
+        counterparty: [u8; 32],
         reason: String,
         send_status: Option<generated::RelationshipSendStatus>,
     ) -> Result<Vec<u8>, DsmError> {
@@ -1854,7 +1881,7 @@ impl BilateralBleHandler {
             .bilateral_tx_manager
             .read()
             .await
-            .sign_rejection(&commitment_hash, &reason)?;
+            .sign_rejection(&commitment_hash, &counterparty, &reason)?;
         let envelope = self
             .create_envelope(generated::envelope::Payload::BilateralPrepareReject(
                 generated::BilateralPrepareReject {
@@ -1896,7 +1923,12 @@ impl BilateralBleHandler {
             ),
         );
         let rejection = self
-            .signed_rejection(commitment_hash, reason.clone(), Some(send_status))
+            .signed_rejection(
+                commitment_hash,
+                counterparty_device_id,
+                reason.clone(),
+                Some(send_status),
+            )
             .await?;
         self.persist_session(&BilateralBleSession {
             commitment_hash,
@@ -1968,7 +2000,12 @@ impl BilateralBleHandler {
             });
         }
         let cancellation = self
-            .signed_rejection(commitment_hash, reason.clone(), None)
+            .signed_rejection(
+                commitment_hash,
+                session.counterparty_device_id,
+                reason.clone(),
+                None,
+            )
             .await?;
         let mut cancelled = session;
         cancelled.phase = BilateralPhase::Rejected;
@@ -5113,12 +5150,19 @@ mod tests {
                 payload: Some(generated::envelope::Payload::BilateralPrepareReject(reject)),
             })
         };
-        let signed_by = |keys: &SignatureKeyPair, commitment_hash: [u8; 32], rejector: [u8; 32]| {
+        let addressed = |keys: &SignatureKeyPair,
+                         commitment_hash: [u8; 32],
+                         rejector: [u8; 32],
+                         addressed_to: [u8; 32]| {
             let mut msg = b"DSM/bilateral-reject\0".to_vec();
             msg.extend_from_slice(&commitment_hash);
             msg.extend_from_slice(&rejector);
+            msg.extend_from_slice(&addressed_to);
             msg.extend_from_slice(b"declined");
             keys.sign(&msg).expect("sign")
+        };
+        let signed_by = |keys: &SignatureKeyPair, commitment_hash: [u8; 32], rejector: [u8; 32]| {
+            addressed(keys, commitment_hash, rejector, proposer)
         };
         let other_keys = SignatureKeyPair::generate_from_entropy(b"signed-reject-other").unwrap();
 
@@ -5138,6 +5182,14 @@ mod tests {
                     pending,
                     [0xA9u8; 32],
                     signed_by(&counterparty_keys, pending, [0xA9u8; 32]),
+                ),
+            ),
+            (
+                "addressed to another device",
+                rejection(
+                    pending,
+                    counterparty,
+                    addressed(&counterparty_keys, pending, counterparty, [0xAAu8; 32]),
                 ),
             ),
             (
