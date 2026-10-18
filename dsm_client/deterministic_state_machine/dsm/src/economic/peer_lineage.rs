@@ -140,17 +140,6 @@ pub trait ConditionalPositionResolver {
         parent: &ParentClaimRef,
         held: &SofiResolutionClaim,
     ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure>;
-
-    /// The root the conditional position `held` selected, resolved from
-    /// `previous`, the root its `P` was built on (its void root, P15-2), under
-    /// the parent claim that `P` names. Nothing before `previous` is read.
-    /// `Invalid` for a verified contradiction, `Incomplete` or `Unresolved`
-    /// while the facts are not in hand or do not decide the position yet.
-    fn selected_root(
-        &self,
-        previous: &ValidatedEconomicRoot,
-        held: &SofiResolutionClaim,
-    ) -> Result<ValidatedEconomicRoot, PeerLineageFailure>;
 }
 
 /// What checking one step of a peer cost, in lookup stages. Every count is
@@ -963,20 +952,17 @@ impl Verifier<'_> {
 
     /// The parents the conditional claim `held` at `position` may have been
     /// built on, read one position back and no further: of the root a
-    /// single-root claim there installed, with that claim, and the root a
-    /// conditional claim there selected, with its fulfillment, only the root
+    /// single-root claim there installed, with that claim, and the two roots
+    /// a conditional claim there commits, with its fulfillment, only the root
     /// `held` names as its predecessor's. That is its void root: `P` returns
     /// to the root it was built on, and a `P` built on any other is refused at
-    /// resolution (P15-2). A conditional predecessor yields only the root it
-    /// selected, resolved from the root its own `P` names (owner, 2026-10-18:
-    /// "a conditional predecessor yields only its selected root"). Offering
-    /// both of its roots had a claim written also along the cell routed from
-    /// the other read as a fork (SA-95), and let a claim built on the root the
-    /// predecessor did not select stand as its successor: a claim naming that
-    /// root is `Invalid`. Each parent is only where to look: the claim at
-    /// `position` must be final at the cell routed from it, and the resolution
-    /// of `position` is then derived from it (SoFi Amendment S15). No claim
-    /// two positions back is read.
+    /// resolution (P15-2). A conditional predecessor's other root is no
+    /// parent: offering both had the claim, written also along the cell
+    /// routed from the root it was not built on, read as two claims each final
+    /// from its own parent, a fork (SA-95). Each is only where to look: the
+    /// claim at `position` must be final at the cell routed from it, and the
+    /// resolution of `position` is then derived from it (SoFi Amendment S15).
+    /// Nothing two positions back is read.
     fn parents_of_conditional(
         &self,
         genesis: &[u8; 32],
@@ -1008,27 +994,14 @@ impl Verifier<'_> {
                     }
                 }
                 RegisteredEconomicClaim::ConditionalSofi(before) => {
-                    if before.realize_root != named && before.void_root != named {
-                        continue;
+                    if before.realize_root == named || before.void_root == named {
+                        parents.push(ChainPoint {
+                            root: authenticated_root(back, named),
+                            accepted: Some(ParentClaimRef::Conditional {
+                                fulfillment_id: before.fulfillment_id,
+                            }),
+                        });
                     }
-                    let selected = self
-                        .conditional
-                        .selected_root(&authenticated_root(back - 1, before.void_root), &before)
-                        .map_err(|failure| at_position(back, failure))?;
-                    if selected.economic_position() != back
-                        || selected.economic_root() != named
-                    {
-                        return Err(invalid(format!(
-                            "position {position}: the claim was built on a root its conditional \
-                             predecessor at {back} did not select"
-                        )));
-                    }
-                    parents.push(ChainPoint {
-                        root: selected,
-                        accepted: Some(ParentClaimRef::Conditional {
-                            fulfillment_id: before.fulfillment_id,
-                        }),
-                    });
                 }
             }
         }
@@ -1380,41 +1353,6 @@ mod tests {
                 previous.economic_position()
             )))
         }
-        fn selected_root(
-            &self,
-            previous: &ValidatedEconomicRoot,
-            held: &SofiResolutionClaim,
-        ) -> Result<ValidatedEconomicRoot, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no conditional resolution in this test: position {} after {}",
-                held.position,
-                previous.economic_position()
-            )))
-        }
-    }
-
-    /// A conditional position resolved to the root `.0` names, at the
-    /// position after the one it is asked from; a position after it is not
-    /// resolved.
-    struct Selects([u8; 32]);
-
-    impl ConditionalPositionResolver for Selects {
-        fn resolve(
-            &self,
-            previous: &ValidatedEconomicRoot,
-            parent: &ParentClaimRef,
-            held: &SofiResolutionClaim,
-        ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure> {
-            NoResolution.resolve(previous, parent, held)
-        }
-        fn selected_root(
-            &self,
-            previous: &ValidatedEconomicRoot,
-            held: &SofiResolutionClaim,
-        ) -> Result<ValidatedEconomicRoot, PeerLineageFailure> {
-            assert_eq!(previous.economic_root(), held.void_root, "asked from P's own root");
-            Ok(authenticated_root(previous.economic_position() + 1, self.0))
-        }
     }
 
     fn conditional_claim(position: u64) -> SofiResolutionClaim {
@@ -1500,7 +1438,7 @@ mod tests {
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
-            Verifier::new(&fetcher, NETWORK, &Selects([0xA9; 32])).expect("the network's register");
+            Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
         let at = verifier
             .located(&PEER_G, &peer_d(), position, ConditionalAt::Resolve)
             .expect("the claim is final along its parent's realize root alone");
@@ -1532,7 +1470,7 @@ mod tests {
             &PEER_G,
             &peer_d(),
             position,
-            &Selects([0xA9; 32]),
+            &NoResolution,
         ) {
             Err(PeerLineageFailure::Incomplete(why)) => assert!(
                 why.contains("position 40 after 39"),
@@ -1574,7 +1512,7 @@ mod tests {
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
-            Verifier::new(&fetcher, NETWORK, &Selects([0xA9; 32])).expect("the network's register");
+            Verifier::new(&fetcher, NETWORK, &NoResolution).expect("the network's register");
         let at = verifier
             .located(&PEER_G, &peer_d(), position, ConditionalAt::Resolve)
             .expect("one claim, one parent");
@@ -1585,49 +1523,6 @@ mod tests {
                 fulfillment_id: [0xF9; 32]
             })
         );
-    }
-
-    /// SA-95, the owner's condition (2026-10-18: "a conditional predecessor
-    /// yields only its selected root"). The position at 39 selected its void
-    /// root; a claim at 40 built on its realize root, the root 39 did not
-    /// select, is final along the cell routed from it, and is `Invalid`: a
-    /// trader who built on it would spend what its realized trade gave away.
-    /// MUTATION CONTROL: taking the root the claim names without resolving
-    /// what its predecessor selected accepts the claim and turns this red.
-    #[test]
-    fn a_claim_built_on_the_root_its_conditional_predecessor_did_not_select_is_invalid() {
-        let position = 40;
-        let parent = SofiResolutionClaim {
-            fulfillment_id: [0xF9; 32],
-            realize_root: [0xA9; 32],
-            void_root: [0xB9; 32],
-            ..conditional_claim(position - 1)
-        };
-        let held = peer_c_q(SofiResolutionClaim {
-            void_root: [0xA9; 32],
-            ..conditional_claim(position)
-        });
-        let fetcher = RoutedClaims {
-            probed: vec![
-                (position, held.clone()),
-                (position - 1, peer_c_q(parent)),
-            ],
-            routed: vec![(position, [0xA9; 32], held)],
-            objects: std::collections::BTreeMap::new(),
-            asked: std::cell::RefCell::new(Vec::new()),
-        };
-        let verifier = Verifier::new(&fetcher, NETWORK, &Selects([0xB9; 32]))
-            .expect("the network's register");
-        match verifier.located(&PEER_G, &peer_d(), position, ConditionalAt::Resolve) {
-            Err(PeerLineageFailure::Invalid(why)) => {
-                assert!(why.contains("did not select"), "{why}")
-            }
-            Err(other) => panic!("a claim on the root 39 did not select is Invalid, not {other:?}"),
-            Ok(at) => panic!(
-                "a claim on the root 39 did not select is Invalid, not located from {}",
-                encode_base32_crockford(&at.parent.root.economic_root())
-            ),
-        }
     }
 
     /// A conditional claim whose one-back parent holds nothing yet waits for

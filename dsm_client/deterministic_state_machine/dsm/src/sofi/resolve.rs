@@ -2795,41 +2795,6 @@ impl<R: SofiReads + ?Sized> crate::economic::peer_lineage::ConditionalPositionRe
         let advanced = verifier.peer_position(previous, parent, held)?;
         Ok((advanced.root, advanced.claim))
     }
-
-    fn selected_root(
-        &self,
-        previous: &crate::economic::lineage::ValidatedEconomicRoot,
-        held: &SofiResolutionClaim,
-    ) -> Result<crate::economic::lineage::ValidatedEconomicRoot, PeerLineageFailure> {
-        // The parent claim is the one P names: nothing before `previous` is
-        // read, so the position is resolved under the parent its own P chose,
-        // from the root that P was built on.
-        let verifier = Verifier::new(
-            self.reads,
-            self.members,
-            self.set_id,
-            self.network_id,
-            None,
-            AcceptedGeneses::default(),
-        )
-        .with_programs(self.programs.clone());
-        let named = verifier.peer_precommit_parent(previous, held)?;
-        let resolved = Some(ResolvedParent {
-            economic_position: previous.economic_position(),
-            selected_root: previous.economic_root(),
-            named,
-        });
-        let verifier = Verifier::new(
-            self.reads,
-            self.members,
-            self.set_id,
-            self.network_id,
-            resolved,
-            AcceptedGeneses::default(),
-        )
-        .with_programs(self.programs.clone());
-        Ok(verifier.peer_position(previous, &named, held)?.root)
-    }
 }
 
 impl<R: SofiReads + ?Sized> Verifier<'_, R> {
@@ -2850,48 +2815,6 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// `p` when `p` was itself a SoFi position. A read not in hand is
     /// `Incomplete`, facts that do not decide `q` yet are `Unresolved`, and
     /// only a verified contradiction is `Invalid`.
-    /// The parent claim the `P` of another trader's SoFi position `held`
-    /// names, read through the position's registration from `previous`, the
-    /// root that `P` was built on.
-    pub fn peer_precommit_parent(
-        &self,
-        previous: &crate::economic::lineage::ValidatedEconomicRoot,
-        held: &SofiResolutionClaim,
-    ) -> Result<ParentClaimRef, PeerLineageFailure> {
-        use PeerLineageFailure::{Incomplete, Unresolved};
-        let q = held.position;
-        let read = |e: VerifierFailure| Incomplete(format!("position {q}: {e}"));
-        let registration = self
-            .read_registration(&held.genesis, &held.device_id, q, &previous.economic_root())
-            .map_err(read)?
-            .map_err(|missing| {
-                Incomplete(format!("position {q}: the registration: {missing:?}"))
-            })?;
-        let fulfillment = match registration.registration() {
-            Registration::Registered(signed)
-                if derive::fulfillment_id(&signed.body) == held.fulfillment_id =>
-            {
-                signed.clone()
-            }
-            other => {
-                return Err(Unresolved(format!(
-                    "position {q}: the pair does not hold the registered fulfillment the root \
-                     cell's claim names ({other:?})"
-                )))
-            }
-        };
-        match self
-            .reads
-            .precommit(fulfillment.body.precommit_id())
-            .map_err(|e| read(e.into()))?
-        {
-            Resolved::Kept(signed) => Ok(*signed.body.parent_claim_ref()),
-            Resolved::None | Resolved::Unavailable => Err(Incomplete(format!(
-                "position {q}: the precommit the fulfillment names is not in hand"
-            ))),
-        }
-    }
-
     pub fn peer_position(
         &self,
         previous: &crate::economic::lineage::ValidatedEconomicRoot,
