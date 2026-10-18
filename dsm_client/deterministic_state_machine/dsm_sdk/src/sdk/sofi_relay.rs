@@ -144,13 +144,20 @@ fn leg_cells(
 ) -> Result<Vec<(D32, D32, u64, AttemptCell)>, DsmError> {
     let mut cells = Vec::new();
     for attempt in fulfillment.body.attempts() {
+        // An attempt naming a vault P has no leg for names no key: P gives
+        // no parent for it. Core refutes such an F in hand (conformance item
+        // 4), and skips the key it holds once that cell is final, so the
+        // relay carries the exercise to the keys P does name. Refusing the
+        // whole relay left a leader-held copy unfinished and the vault's key
+        // held for good (SA-86).
         let Some(leg) = precommit
             .body
             .legs()
             .iter()
             .find(|l| l.vault_id == attempt.vault_id)
         else {
-            return Err(refuse("an attempt names a vault P has no leg for"));
+            log::info!("[sofi relay] an attempt names a vault P has no leg for; it names no key");
+            continue;
         };
         cells.push((
             leg.vault_id,

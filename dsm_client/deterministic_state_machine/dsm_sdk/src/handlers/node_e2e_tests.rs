@@ -2101,6 +2101,185 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SA-86. A trader that signs a fulfillment whose attempts name a vault its
+/// `P` has no leg for, and leaves that exercise only at the leader of a
+/// vault's key, holds the key: Core refutes the exercise in hand
+/// (conformance item 4) but skips the key only once its cell is final. The
+/// relay that carries such an exercise to finality refused it outright,
+/// so the next operation at the vault failed and the vault stayed frozen.
+/// The relay carries it to the keys `P` names; A's close walks past the
+/// refuted exercise and closes the vault with its reserves.
+/// MUTATION CONTROL: refusing the relay for an attempt `P` has no leg for,
+/// as it did, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_exercise_naming_a_vault_its_precommit_has_no_leg_for_does_not_freeze_the_vault() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+
+    // B trades with its pair refused, so nothing of it is written; B's P,
+    // P(E) and F are published.
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+
+    p.b.enter();
+    let head = p.b.router().core_sdk.device_head().expect("B's head");
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
+        other => panic!("B's pending admission is its fulfillment: {other:?}"),
+    };
+    let honest = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(&set, honest.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+    let preimage = match fetch_preimage(&set, precommit.body.external_commitment())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(preimage) => preimage,
+        other => panic!("P(E) is stored under its locator: {other:?}"),
+    };
+
+    // B signs another F over the same P, its attempts naming one more vault
+    // than P has legs for.
+    let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let mut attempts = honest.body.attempts().to_vec();
+    attempts.push(dsm::sofi::wire::AttemptEntry {
+        vault_id: [0xFF; 32],
+        attempt: 0,
+    });
+    attempts.sort_by_key(|a| a.vault_id);
+    let bent = dsm::sofi::wire::TraderFulfillmentBody::new(
+        *honest.body.precommit_id(),
+        honest.body.policy_fulfillment_set().to_vec(),
+        attempts,
+        honest.body.position(),
+        honest.body.signature_alg(),
+        &pk,
+        att_a,
+    )
+    .expect("a canonical F");
+    let bent_signature =
+        dsm::crypto::sphincs::sphincs_sign(&sk, &derive::fulfillment_signing_digest(&bent))
+            .expect("B signs it");
+    let own_objects =
+        crate::sdk::sofi_advance::own_closure_objects(&set, &precommit.body, &preimage)
+            .await
+            .expect("B's own closure objects");
+    let request = crate::sdk::sofi_register::InstallRequest {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage: &preimage,
+        fulfillment: &bent,
+        fulfillment_signature: &bent_signature,
+        own_objects: &own_objects,
+    };
+    let evidence = match ctx
+        .verifier()
+        .acquire_conformance_evidence(&request.objects())
+        .expect("acquire")
+    {
+        dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
+        dsm::sofi::resolve::Acquired::Exhausted(missing) => {
+            panic!("the evidence is published: {missing:?}")
+        }
+    };
+    let claim = dsm::sofi::signature::sign_resolution_claim(
+        derive::resolution_claim(&precommit.body, &bent),
+        bent.signature_alg(),
+        &pk,
+        att_a,
+        &sk,
+    )
+    .expect("B signs its C_q")
+    .encode();
+    let exercise =
+        dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
+            .expect("B's exercise");
+    recognize_exercise(&exercise.encode()).expect("Core recognizes it");
+
+    // Only the leader of the vault's first key takes it.
+    let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the vault's first key");
+    let seats: Vec<String> = key.routed().route().seats()[1..]
+        .iter()
+        .map(|id| member_name(id))
+        .collect();
+    for seat in &seats {
+        p.nodes
+            .refuse_cell_writes(seat, &[*key.routed().key()])
+            .await;
+    }
+    // The honest writer would not write it; B writes the bytes itself.
+    let written = crate::sdk::route_seats::write_recorded(&set, key.routed(), &exercise.encode())
+        .await
+        .expect("the nodes keep whatever they are given");
+    assert!(written.reached_leader());
+    for seat in &seats {
+        p.nodes.accept_cell_writes(seat).await;
+    }
+
+    // A closes the vault: the relay carries B's exercise to finality, Core
+    // skips the key it refutes, and A takes the reserves.
+    p.a.enter();
+    let era_before = balance(&p.a, &m.era);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 100,
+        "A closed the vault with its own reserve: B's refuted exercise moved nothing"
+    );
+}
+
 /// Pre-audit 12e, the owner's ruling (2026-10-01): a pair that is already
 /// registered is not written again. B's trade registers its pair, and its
 /// exercise reaches only the leader of the vault's first key, so the key is
