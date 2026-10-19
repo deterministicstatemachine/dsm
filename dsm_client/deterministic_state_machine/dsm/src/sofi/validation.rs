@@ -4028,7 +4028,7 @@ mod tests {
         let f = close_fixture(OwnerAuthority::Origin);
         let core = f.preimage.dlv_cores()[0].clone();
         let other = token(0x6D);
-        let entries = core
+        let mut entries: Vec<CoreEntry> = core
             .entries()
             .iter()
             .map(|e| match e {
@@ -4048,6 +4048,9 @@ mod tests {
                 other => other.clone(),
             })
             .collect();
+        // The relationship entry's key derives from the device it names, so
+        // the entries are put back in the key order every core carries.
+        entries.sort_by_key(CoreEntry::key);
         let bent_core = DlvCore::new(
             *core.vault_id(),
             *core.pre_root(),

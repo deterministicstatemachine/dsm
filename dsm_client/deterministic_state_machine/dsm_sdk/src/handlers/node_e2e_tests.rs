@@ -1986,7 +1986,10 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     {
         dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
         dsm::sofi::resolve::Acquired::Exhausted(missing) => {
-            panic!("the evidence is published: {missing:?}")
+            panic!(
+                "the evidence is published: {} piece(s) missing",
+                missing.len()
+            )
         }
     };
     let claim = {
@@ -2224,7 +2227,10 @@ async fn an_exercise_naming_a_vault_its_precommit_has_no_leg_for_does_not_freeze
     {
         dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
         dsm::sofi::resolve::Acquired::Exhausted(missing) => {
-            panic!("the evidence is published: {missing:?}")
+            panic!(
+                "the evidence is published: {} piece(s) missing",
+                missing.len()
+            )
         }
     };
     let claim = dsm::sofi::signature::sign_resolution_claim(
