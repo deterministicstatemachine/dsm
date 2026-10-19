@@ -59,6 +59,28 @@ pub const TAG_OFFLINE_ALLOCATION_LEAF: TaggedHashDomain<'static> =
 /// sequence advances on every load/unload/spend so a repeated amount still changes the leaf.
 pub const TAG_OFFLINE_ALLOCATION_STATE: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-allocation-state/v1");
+/// Device-SMT key of the offline account of anchor bundle `B`: `H(tag ‖ B)`. Its value is
+/// the account root `R_off`, the root of the smaller SMT the offline account is.
+pub const TAG_OFFLINE_ACCOUNT_LEAF: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/v1");
+/// Offline-account key of the allocation of one asset: `H(tag ‖ asset)`.
+pub const TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/allocation/v1");
+/// Offline-account value of an allocation: `H(tag ‖ amount_be)`.
+pub const TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/allocation-value/v1");
+/// Offline-account key of the software counter: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_COUNTER_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/counter/v1");
+/// Offline-account value of the software counter: `H(tag ‖ u_be)`.
+pub const TAG_OFFLINE_ACCOUNT_COUNTER_VALUE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/counter-value/v1");
+/// Offline-account key of the offline frontier: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_FRONTIER_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/frontier/v1");
+/// Offline-account key of the funding origin: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_ORIGIN_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/origin/v1");
 /// SMT key of the per-(vault, asset) reserve leaf:
 /// `H(tag ‖ genesis_id ‖ device_id ‖ vault_id ‖ policy_commit)`. Accounts for value the
 /// owner has ENCUMBERED into a specific vault. Deliberately not a `balances` entry: a
@@ -153,6 +175,13 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_FUSED_ANCHOR_STATE_LEAF,
     TAG_OFFLINE_ALLOCATION_LEAF,
     TAG_OFFLINE_ALLOCATION_STATE,
+    TAG_OFFLINE_ACCOUNT_LEAF,
+    TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY,
+    TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE,
+    TAG_OFFLINE_ACCOUNT_COUNTER_KEY,
+    TAG_OFFLINE_ACCOUNT_COUNTER_VALUE,
+    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY,
+    TAG_OFFLINE_ACCOUNT_ORIGIN_KEY,
     TAG_VAULT_RESERVE_LEAF,
     TAG_VAULT_RESERVE_STATE,
     TAG_SETTLEMENT_RECEIPT_LEAF,
