@@ -432,9 +432,11 @@ impl CommittedAt {
         }
     }
 
-    fn commits(&self, record: &ArrivalRecord, log: &[Vec<u8>]) -> bool {
+    /// Whether this commits `record`, against `replayed`: the replay of
+    /// the values read from the record's seat ([`SeatLog`]).
+    fn commits(&self, record: &ArrivalRecord, replayed: &[(u64, [u8; 32])]) -> bool {
         self.chain_link_holds()
-            && crate::storage_cell::record_is_committed(record, log, &self.commit, &self.proof)
+            && crate::storage_cell::record_is_committed(record, replayed, &self.commit, &self.proof)
     }
 }
 
@@ -513,25 +515,67 @@ pub enum Missing {
     LeaderLinkUnseen { position: usize },
 }
 
-/// The arrival record a seat returned for the last value of `log`, where
-/// `log` is the seat's arrival order up to and including that value: its
-/// per-key index and the seat's running hash after it (§6, §14).
-fn record_of(seat: &[u8], namespace: &[u8], key: &[u8; 32], log: &[Vec<u8>]) -> ArrivalRecord {
-    let running_hash = log.iter().fold(
-        crate::storage_cell::running_hash_init(namespace, key),
-        |previous, value| {
-            crate::storage_cell::running_hash_next(
-                &previous,
-                &crate::storage_cell::entry_digest(value),
-            )
-        },
-    );
-    ArrivalRecord {
-        member_id: seat.to_vec(),
-        namespace: namespace.to_vec(),
-        key: *key,
-        index: log.len() as u64,
-        running_hash,
+/// A seat's arrival log at a cell, replayed from `h_0` once (§6, §14): the
+/// seat's index and running hash after each value it holds. Every arrival
+/// record of the seat and every check that its ByteCommit commits one reads
+/// this one replay, so evaluating a seat costs one pass over its log however
+/// many copies it holds (SA-137).
+struct SeatLog<'l> {
+    seat: &'l [u8],
+    namespace: &'l [u8],
+    key: &'l [u8; 32],
+    log: &'l [Vec<u8>],
+    replayed: Vec<(u64, [u8; 32])>,
+}
+
+impl<'l> SeatLog<'l> {
+    fn of(seat: &'l [u8], namespace: &'l [u8], key: &'l [u8; 32], log: &'l [Vec<u8>]) -> Self {
+        Self {
+            seat,
+            namespace,
+            key,
+            log,
+            replayed: crate::storage_cell::replay(namespace, key, log),
+        }
+    }
+
+    /// Every value the seat holds, in arrival order, with where it arrived:
+    /// its index and the seat's running hash after it.
+    fn arrivals(&self) -> impl Iterator<Item = (&'l [u8], (u64, [u8; 32]))> + '_ {
+        self.log
+            .iter()
+            .map(Vec::as_slice)
+            .zip(self.replayed.iter().copied())
+    }
+
+    /// The seat's values that are `cell`'s copy for route position
+    /// `position`, in arrival order, each with where it arrived.
+    fn copies<'s>(
+        &'s self,
+        cell: &'s RoutedCell,
+        position: usize,
+    ) -> impl Iterator<Item = (RouteEntry, (u64, [u8; 32]))> + 's {
+        self.arrivals()
+            .filter_map(|(bytes, at)| RouteEntry::decode(bytes).map(|entry| (entry, at)))
+            .filter(move |(entry, ..)| is_cell_copy_at(entry, cell, position))
+    }
+
+    /// The arrival record the seat returned for the value that arrived at
+    /// `at`.
+    fn record(&self, (index, running_hash): (u64, [u8; 32])) -> ArrivalRecord {
+        ArrivalRecord {
+            member_id: self.seat.to_vec(),
+            namespace: self.namespace.to_vec(),
+            key: *self.key,
+            index,
+            running_hash,
+        }
+    }
+
+    /// Whether `commit` is a ByteCommit of the seat's that commits `record`
+    /// against the values read from the seat (§14).
+    fn commits(&self, record: &ArrivalRecord, commit: Option<&CommittedAt>) -> bool {
+        commit.is_some_and(|c| c.commits(record, &self.replayed))
     }
 }
 
@@ -577,14 +621,9 @@ pub fn copy_record(
     copy: &[u8],
     log: &[Vec<u8>],
 ) -> Option<ArrivalRecord> {
-    let n = log.iter().position(|bytes| *bytes == copy)?;
-    Some(record_of(seat, namespace, key, &log[..=n]))
-}
-
-/// Whether `commit` is a ByteCommit of `record`'s seat that commits the
-/// record against the values read from that seat (§14).
-fn committed_by(record: &ArrivalRecord, log: &[Vec<u8>], commit: Option<&CommittedAt>) -> bool {
-    commit.is_some_and(|c| c.commits(record, log))
+    let log = SeatLog::of(seat, namespace, key, log);
+    let arrived = log.arrivals().find(|(bytes, ..)| *bytes == copy);
+    arrived.map(|(_, at)| log.record(at))
 }
 
 /// Whether a route entry is this cell's copy for route position `position`:
@@ -597,62 +636,52 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
-/// The cell's position-0 copies in the leader's arrival log, in arrival
-/// order, each with its index in that log: the values the leader link is
-/// chosen from (§9 route chains, rule 3). Nothing when the leader is unread.
-fn leader_log_copies<'e>(
-    cell: &'e RoutedCell,
-    ev: &'e CellEvidence,
-) -> impl Iterator<Item = (usize, RouteEntry)> + 'e {
-    ev.seats
-        .first()
-        .and_then(|leader| leader.values.as_ref())
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .filter_map(|(n, bytes)| RouteEntry::decode(bytes).map(|entry| (n, entry)))
-        .filter(move |(.., entry)| is_cell_copy_at(entry, cell, 0))
-}
-
 /// The leader link of a cell: the first recognized value in the leader's
 /// arrival log, stored there as the cell's position-0 copy, with the record
-/// the leader returned for it (§9 route chains, rule 3).
-struct LeaderLink<T> {
+/// the leader returned for it (§9 route chains, rule 3), and the leader's
+/// log every later seat's mirror of the leader link is checked against.
+struct LeaderLink<'l, T> {
     value: Vec<u8>,
     id: [u8; 32],
     object: T,
     record: ArrivalRecord,
+    log: SeatLog<'l>,
 }
 
 /// The leader link of `cell`, or `None` when the leader holds no recognized
 /// value. `Missing` when the leader is unread, or when no closed ByteCommit
 /// of the leader's covers the record yet (§9 rule 7).
-fn leader_link<T, F>(
-    cell: &RoutedCell,
-    ev: &CellEvidence,
+fn leader_link<'l, T, F>(
+    cell: &'l RoutedCell,
+    ev: &'l CellEvidence,
     recognize: F,
-) -> Result<Option<LeaderLink<T>>, Missing>
+) -> Result<Option<LeaderLink<'l, T>>, Missing>
 where
     F: Fn(&[u8]) -> Option<([u8; 32], T)>,
 {
     let leader = ev.seats.first().ok_or(Missing::LeaderUnread)?;
-    let log = leader.values.as_ref().ok_or(Missing::LeaderUnread)?;
-    for (n, entry) in leader_log_copies(cell, ev) {
-        let Some((id, object)) = recognize(&entry.value) else {
-            continue;
-        };
-        let record = record_of(cell.route.leader(), &cell.namespace, &cell.key, &log[..=n]);
-        if !committed_by(&record, log, leader.committed.as_ref()) {
-            return Err(Missing::LeaderLinkUncommitted);
-        }
-        return Ok(Some(LeaderLink {
-            value: entry.value,
-            id,
-            object,
-            record,
-        }));
+    let log = SeatLog::of(
+        cell.route.leader(),
+        &cell.namespace,
+        &cell.key,
+        leader.values.as_ref().ok_or(Missing::LeaderUnread)?,
+    );
+    let Some((entry, at, id, object)) = log.copies(cell, 0).find_map(|(entry, at)| {
+        recognize(&entry.value).map(|(id, object)| (entry, at, id, object))
+    }) else {
+        return Ok(None);
+    };
+    let record = log.record(at);
+    if !log.commits(&record, leader.committed.as_ref()) {
+        return Err(Missing::LeaderLinkUncommitted);
     }
-    Ok(None)
+    Ok(Some(LeaderLink {
+        value: entry.value,
+        id,
+        object,
+        record,
+        log,
+    }))
 }
 
 /// One valid link after the leader: the position it holds, the record its
@@ -678,17 +707,10 @@ impl Link {
 
 /// Whether the seat at `position` has seen the leader link: its own mirror
 /// of the leader's ByteCommits covers the record (§9 route chains, rule 4).
-fn leader_seen_at(
-    cell: &RoutedCell,
-    ev: &CellEvidence,
-    seat: &SeatEvidence,
-    leader_record: &ArrivalRecord,
-) -> bool {
-    let Some(leader_log) = ev.seats.first().and_then(|leader| leader.values.as_ref()) else {
-        return false;
-    };
+fn leader_seen_at<T>(cell: &RoutedCell, seat: &SeatEvidence, leader: &LeaderLink<'_, T>) -> bool {
     seat.leader_seen.as_ref().is_some_and(|c| {
-        c.commit.member_id.as_slice() == cell.route.leader() && c.commits(leader_record, leader_log)
+        c.commit.member_id.as_slice() == cell.route.leader()
+            && c.commits(&leader.record, &leader.log.replayed)
     })
 }
 
@@ -701,9 +723,14 @@ fn leader_seen_at(
 ///   exactly the positions before it, so that together they are ONE chain;
 /// - its seat's ByteCommit commits its record;
 /// - its seat's own mirror of the leader's ByteCommits covers the leader link.
-fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) -> Vec<Link> {
+fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<'_, T>) -> Vec<Link> {
     let leader_slot = ChainSlot::Link(leader.record.clone());
     let mut links: Vec<Link> = Vec::new();
+    // Each valid link by its position and its record's index: a seat gives
+    // every arrival its own index, so a carried link is found at once rather
+    // than by a scan of every link before it (SA-137).
+    let mut at_index: std::collections::HashMap<(usize, u64), usize> =
+        std::collections::HashMap::new();
     for (position, seat_id) in cell.route.seats().iter().enumerate().skip(1) {
         let Some(seat) = ev.seats.get(position) else {
             continue;
@@ -711,17 +738,12 @@ fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) 
         let Some(log) = seat.values.as_ref() else {
             continue;
         };
-        if !leader_seen_at(cell, ev, seat, &leader.record) {
+        if !leader_seen_at(cell, seat, leader) {
             continue;
         }
-        for (m, bytes) in log.iter().enumerate() {
-            let Some(entry) = RouteEntry::decode(bytes) else {
-                continue;
-            };
-            if !is_cell_copy_at(&entry, cell, position)
-                || entry.value != leader.value
-                || entry.chain.first() != Some(&leader_slot)
-            {
+        let log = SeatLog::of(seat_id, &cell.namespace, &cell.key, log);
+        for (entry, at) in log.copies(cell, position) {
+            if entry.value != leader.value || entry.chain.first() != Some(&leader_slot) {
                 continue;
             }
             // An empty is never a link (§9 rule 5): it neither counts nor
@@ -734,18 +756,21 @@ fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) 
                     .enumerate()
                     .skip(1)
                     .all(|(earlier, slot)| match slot {
-                        ChainSlot::Link(record) => links.iter().any(|link| {
-                            link.position == earlier
-                                && link.record == *record
-                                && link.chain.as_slice() == &entry.chain[..earlier]
-                        }),
+                        ChainSlot::Link(record) => at_index
+                            .get(&(earlier, record.index))
+                            .and_then(|&n| links.get(n))
+                            .is_some_and(|link| {
+                                link.record == *record
+                                    && link.chain.as_slice() == &entry.chain[..earlier]
+                            }),
                         ChainSlot::Taken(..) | ChainSlot::NoResponse => true,
                     });
             if !one_chain {
                 continue;
             }
-            let record = record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]);
-            if committed_by(&record, log, seat.committed.as_ref()) {
+            let record = log.record(at);
+            if log.commits(&record, seat.committed.as_ref()) {
+                at_index.insert((position, record.index), links.len());
                 links.push(Link {
                     position,
                     record,
@@ -921,21 +946,19 @@ where
             .route
             .seat(position)
             .ok_or(ProofRefusal::Invalid(ProofInvalid::NotThreeLinks))?;
-        let returned_here = log.iter().enumerate().any(|(m, bytes)| {
-            RouteEntry::decode(bytes).is_some_and(|entry| {
-                is_cell_copy_at(&entry, cell, position)
-                    && entry.value == leader.value
-                    && entry.chain.as_slice() == &proof.slots[..position]
-                    && record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]) == *record
-            })
+        let log = SeatLog::of(seat_id, &cell.namespace, &cell.key, log);
+        let returned_here = log.copies(cell, position).any(|(entry, at)| {
+            entry.value == leader.value
+                && entry.chain.as_slice() == &proof.slots[..position]
+                && log.record(at) == *record
         });
         if !returned_here {
             return Err(ProofRefusal::Invalid(ProofInvalid::NoSuchLink { position }));
         }
-        if !committed_by(record, log, seat.committed.as_ref()) {
+        if !log.commits(record, seat.committed.as_ref()) {
             return Err(ProofRefusal::Missing(Missing::LinkUncommitted { position }));
         }
-        if !leader_seen_at(cell, ev, seat, &leader.record) {
+        if !leader_seen_at(cell, seat, &leader) {
             return Err(ProofRefusal::Missing(Missing::LeaderLinkUnseen {
                 position,
             }));
@@ -1014,6 +1037,19 @@ pub(crate) mod fixtures {
     /// The id of [`committed_set`].
     pub(crate) fn committed_set_id() -> [u8; 32] {
         crate::ccb::storage_set_id(&committed_set()).expect("set id")
+    }
+
+    /// The arrival record a seat returns for the last value of `log`, its
+    /// arrival order through that value.
+    pub(crate) fn record_of(
+        seat: &[u8],
+        namespace: &[u8],
+        key: &[u8; 32],
+        log: &[Vec<u8>],
+    ) -> ArrivalRecord {
+        let log = SeatLog::of(seat, namespace, key, log);
+        let last = *log.replayed.last().expect("the seat holds a value");
+        log.record(last)
     }
 
     /// One cell across its five seats.
@@ -1420,7 +1456,7 @@ mod tests {
 
     // ── evaluate: storage spec §9 ──────────────────────────────────────────
 
-    use super::fixtures::{recognize_ok, Cell};
+    use super::fixtures::{record_of, recognize_ok, Cell};
 
     const NS: &[u8] = b"DSM/test-cell";
 
@@ -1755,6 +1791,69 @@ mod tests {
         assert_eq!(
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::Preserved, b"ok-x")
+        );
+    }
+
+    /// Run `work`, and count the values this thread's replays folded while
+    /// it ran.
+    fn replays<R>(work: impl FnOnce() -> R) -> (R, usize) {
+        crate::storage_cell::REPLAYED.with(|folded| folded.set(0));
+        let done = work();
+        (
+            done,
+            crate::storage_cell::REPLAYED.with(|folded| folded.get()),
+        )
+    }
+
+    /// SA-137. Evaluating a cell replays each seat's log from `h_0` once,
+    /// however many copies of the value a seat holds: repeated copies of a
+    /// chain's links cost one pass over each log, and the chain rules read
+    /// them exactly as before (still `Final`, the same proof).
+    /// MUTATION CONTROL: computing each copy's record from a replay of the
+    /// seat's log up to it, as evaluation did, folds about `COPIES²` values
+    /// and turns this red.
+    #[test]
+    fn each_seat_log_is_replayed_once_however_many_copies_it_holds() {
+        const COPIES: usize = 200;
+        let mut c = cell();
+        c.write(b"ok-x", 2, &[]);
+        let leader = ChainSlot::Link(c.record_at(0, 1));
+        let first = ChainSlot::Link(c.record_at(1, 1));
+        for _ in 0..COPIES {
+            put_copy(&mut c, b"ok-x", 1, vec![leader.clone()]);
+            put_copy(&mut c, b"ok-x", 2, vec![leader.clone(), first.clone()]);
+        }
+        let routed = c.routed();
+        let ev = c.evidence();
+        let held_values: usize = c.logs.iter().map(Vec::len).sum();
+        assert_eq!(held_values, 1 + 2 * (COPIES + 1));
+
+        let (reading, folded) = replays(|| evaluate(&routed, &ev, recognize_ok));
+        assert_eq!(reading, held(ChainState::Final, b"ok-x"));
+        assert!(
+            folded <= held_values,
+            "evaluate folded {folded} values over {held_values} held"
+        );
+
+        let (built, folded) = replays(|| completion_proof(&routed, &ev, recognize_ok));
+        let (_, proof) = built
+            .expect("every seat read and committed")
+            .expect("a chain of three links");
+        assert_eq!(
+            proof.slots,
+            vec![leader, first, ChainSlot::Link(c.record_at(2, 1))]
+        );
+        assert!(
+            folded <= held_values,
+            "completion_proof folded {folded} values over {held_values} held"
+        );
+
+        let (checked, folded) =
+            replays(|| check_completion_proof(&routed, &ev, &proof, recognize_ok));
+        assert_eq!(checked, Ok(b"ok-x".to_vec()));
+        assert!(
+            folded <= held_values,
+            "check_completion_proof folded {folded} values over {held_values} held"
         );
     }
 

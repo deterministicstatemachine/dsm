@@ -183,6 +183,7 @@ async fn cycles_close_over_new_entries_and_commit_their_records() {
     assert!(c2.follows(&c1), "cycle 2 links to cycle 1");
 
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p1 = proof(&a, key, 1).await.expect("proof at cycle 1");
     let p2 = proof(&a, key, 2).await.expect("proof at cycle 2");
     assert!(dsm::storage_cell::record_is_committed(&r1, &held, &c1, &p1));
@@ -251,6 +252,7 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
 
     // The verifier's check: A's record, A's values, B's mirror of A, A's proof.
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p = proof(&a, key, 1).await.unwrap();
     assert!(dsm::storage_cell::record_is_committed(
         &rec,

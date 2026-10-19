@@ -331,7 +331,10 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
         running_hash: r1.1,
     };
     assert!(dsm::storage_cell::record_is_committed(
-        &rec, &values, &c1, &p1
+        &rec,
+        &dsm::storage_cell::replay(NS, &key, &values),
+        &c1,
+        &p1
     ));
     assert_eq!(
         db::get_own_bytecommit(&pool, Some(c1.cycle_index))
