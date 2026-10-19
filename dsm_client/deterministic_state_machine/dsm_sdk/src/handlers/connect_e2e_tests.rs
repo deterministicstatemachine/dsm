@@ -1616,6 +1616,112 @@ async fn a_request_whose_record_failed_after_it_paid_is_never_paid_again() {
     );
 }
 
+/// SA-123. A read of the requests of a session this account never made is
+/// refused at once, so the relay answers it `404` rather than holding it
+/// open for its whole wait; a read of a session it made is answered.
+/// MUTATION CONTROL: answering a read for any session with the requests
+/// stored under it, as the account did, answers this one with an empty batch
+/// and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_read_of_requests_for_no_session_is_refused() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let read = |session_id: [u8; 32]| {
+        args(&generated::ConnectAppRequestsQueryV1 {
+            session_id: session_id.to_vec(),
+            after: 0,
+        })
+    };
+
+    let Reply::Requests(batch) = reply(&query(&p.a, "connect.app.requests", read(session)).await)
+    else {
+        panic!("connect.app.requests answered another reply");
+    };
+    assert!(batch.requests.is_empty(), "{batch:?}");
+
+    let unknown = query(&p.a, "connect.app.requests", read([0x5E; 32])).await;
+    assert!(
+        !unknown.success,
+        "a read for no session was answered: {:?}",
+        unknown.data
+    );
+    assert!(
+        unknown
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("no such session")),
+        "{:?}",
+        unknown.error_message
+    );
+}
+
+/// SA-126. A payment the application asks for first takes in what the
+/// wallet's inbox holds (the send's own sync). A transfer another contact
+/// sent, accepted there, is that contact's operation: only the payment's
+/// debit is bound to the request, and the grant counts the request's spend
+/// with the debit, never with the transfer taken in.
+/// MUTATION CONTROL: running the send's sync inside the request's binding,
+/// as the wallet did, binds the transfer taken in as the request's first
+/// operation and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_taken_in_while_a_request_pays_is_not_the_requests() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+
+    // Another contact pays the wallet; the transfer waits in its inbox.
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    c.add_contact(&p.b).await;
+    p.b.add_contact(&c).await;
+    let era_before = p.b.era_balance();
+    let paid_in = c.send(&p.b, 500).await;
+    assert!(paid_in.success, "{:?}", paid_in.error_message);
+    assert_eq!(p.b.era_balance(), era_before, "nothing taken in yet");
+
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 3,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    carried_out(&p.b, &session, pay).await;
+    assert_eq!(balance(&p.b, &wild), 17);
+    assert_eq!(
+        p.b.era_balance(),
+        era_before + 500,
+        "the payment's own sync took the transfer in"
+    );
+
+    p.b.enter();
+    let bound = crate::storage::client_db::connect::bound_operations(&session, pay)
+        .expect("the request's operations");
+    // The debit alone: the transfer taken in before it is not bound.
+    assert_eq!(bound.len(), 1, "the request committed one debit: {bound:?}");
+    assert_eq!(
+        crate::storage::client_db::connect::spent_all(&session).expect("the grant's spend"),
+        vec![(wild, 3)]
+    );
+}
+
 /// SA-129. A request approved by hand whose run committed its payment and
 /// then failed to record it, declined afterwards, is recorded carried out:
 /// the payment committed, and declining it changes nothing about that. The

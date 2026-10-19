@@ -2170,8 +2170,17 @@ fn presence<T, E: std::fmt::Display>(read: &Result<Option<T>, E>) -> String {
 
 impl AppRouterImpl {
     /// One `storage.sync`: pull and process the inbox, then push what is
-    /// owed. A completed run is counted.
+    /// owed. A completed run is counted. What it takes in is other devices'
+    /// operations, never bound to a connected application's request, even
+    /// when the request's own payment runs the sync (SA-126).
     async fn storage_sync(
+        &self,
+        request: StorageSyncRequestV,
+    ) -> Result<StorageSyncReport, StorageSyncFailure> {
+        crate::sdk::connect::operations::taking_in(self.pull_process_push(request)).await
+    }
+
+    async fn pull_process_push(
         &self,
         request: StorageSyncRequestV,
     ) -> Result<StorageSyncReport, StorageSyncFailure> {
