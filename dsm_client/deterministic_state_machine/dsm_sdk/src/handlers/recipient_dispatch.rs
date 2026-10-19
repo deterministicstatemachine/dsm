@@ -1048,7 +1048,16 @@ mod tests {
         wrong_path.step_writes[0].path.siblings[0] ^= 0x01;
         let mut extra_write = honest.clone();
         extra_write.step_writes.push(ReceiptWrite {
-            leaf: ReceiptLeaf::AnchorState,
+            leaf: ReceiptLeaf::OfflineAccount(Box::new(
+                dsm::types::offline_account::SpendWitness {
+                    pre_account_root: honest.parent_root,
+                    pre_allocation: 1,
+                    pre_counter: 0,
+                    pre_frontier: honest.parent_tip,
+                    next_frontier: honest.child_tip,
+                    account_paths: Vec::new(),
+                },
+            )),
             path: honest.step_writes[0].path.clone(),
         });
 

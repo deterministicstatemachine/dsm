@@ -455,8 +455,10 @@ pub(crate) fn build_dsm_admission(
         post_economic_root: built.post_root,
         accepted_substrate_addr: substrate_addr,
         admission_manifest_addr: manifest_addr,
-        c_dsm_plus,
-        embedded_parent: chain_state.embedded_parent,
+        substrate: dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+            c_dsm_plus,
+            embedded_parent: chain_state.embedded_parent,
+        },
     };
     let mut artifacts = extra_artifacts;
     artifacts.push((
@@ -710,7 +712,192 @@ pub(crate) async fn admitted_self_loop_operation(
         &validated,
         parts.witness,
         parts.manifest,
-        operation,
+        AdmittedSubstrate::Dsm(operation),
+        pending,
+        Vec::new(),
+    )
+    .await?;
+    Ok((outcome, admitted))
+}
+
+/// The frozen-artifact purpose of an offline boundary's body.
+const OFFLINE_BOUNDARY_BODY_PURPOSE: &str = "economic-offline-boundary-body";
+
+/// One ADMITTED offline boundary, end to end: a load of `amount` of `asset`
+/// from the online balance into the offline account of `bundle`, or an
+/// unload back. Resume any pending admission, take the boundary in Core,
+/// build its body, write set, witness and manifest from exactly what Core
+/// took, make the boundary and its admission durable together, then publish,
+/// register, validate and admit — the one finish every admission runs. The
+/// boundary registers BEFORE the route reports success.
+pub(crate) async fn admitted_offline_boundary(
+    core: &CoreSDK,
+    bundle: [u8; 32],
+    kind: dsm::types::device_state::OfflineBoundaryKind,
+    asset: [u8; 32],
+    amount: u64,
+) -> Result<
+    (
+        dsm::types::device_state::OfflineBoundaryOutcome,
+        AdmittedOutcome,
+    ),
+    DsmError,
+> {
+    use dsm::economic::offline_boundary::{
+        offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineBoundaryBody,
+    };
+    let network_id = committed_network_id()?;
+    if let Some(pending) = core
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+    {
+        resume_pending_admission(core, &network_id, pending).await?;
+    }
+    let head = core
+        .device_head()
+        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
+    let genesis = head.genesis_digest();
+    let devid = head.devid();
+    let set = canonical_set(&network_id)?;
+    let validated = validated_root_or_activate(core)?;
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
+    let authority = authority_material(&network_id, &genesis)?;
+    let pending_kind = match kind {
+        dsm::types::device_state::OfflineBoundaryKind::Load => {
+            dsm::economic::admission::PendingAdmissionKind::OfflineLoad {
+                asset_policy_commit: asset,
+            }
+        }
+        dsm::types::device_state::OfflineBoundaryKind::Unload => {
+            dsm::economic::admission::PendingAdmissionKind::OfflineUnload {
+                asset_policy_commit: asset,
+            }
+        }
+    };
+    let mut built: Option<(
+        EconomicTransitionWitness,
+        EconomicAdmissionManifest,
+        Vec<u8>,
+    )> = None;
+    let (outcome, pending) = core.admitted_boundary(
+        &bundle,
+        kind,
+        &asset,
+        amount,
+        |boundary| {
+            let body = OfflineBoundaryBody::of(boundary, kind, bundle, asset, amount)?
+                .encode()
+                .map_err(|e| storage_err("boundary body", e))?;
+            let digest = offline_boundary_operation_digest(&body);
+            let evidence_addr = offline_boundary_evidence_addr(&body);
+            let pre_root = tree.root();
+            let write_set = dsm::economic::write_set::build_boundary_write_set(
+                kind,
+                &asset,
+                amount,
+                &boundary.operation_id,
+                &genesis,
+                &devid,
+                &pre_state.as_write_set_pre_state(),
+                &mut tree,
+            )
+            .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+            let witness = EconomicTransitionWitness::new(
+                pre_root,
+                write_set.post_root,
+                boundary.operation_id,
+                digest,
+                write_set.mutations,
+                write_set.credit_sources,
+            )
+            .map_err(|e| storage_err("witness", e))?;
+            let witness_bytes = witness
+                .encode()
+                .map_err(|e| storage_err("witness encode", e))?;
+            let manifest = EconomicAdmissionManifest::new(
+                authority.position,
+                immutable_inner(
+                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                    &witness_bytes,
+                ),
+                authority.addr,
+                AdmissionSubstrate::OfflineBoundary { evidence_addr },
+                witness.derived_provenance_index(),
+            )
+            .map_err(|e| storage_err("manifest", e))?;
+            let manifest_bytes = manifest
+                .encode()
+                .map_err(|e| storage_err("manifest encode", e))?;
+            let coords = AcceptedAdmissionCoords {
+                post_economic_root: write_set.post_root,
+                accepted_substrate_addr: evidence_addr,
+                admission_manifest_addr: manifest
+                    .addr()
+                    .map_err(|e| storage_err("manifest addr", e))?,
+                substrate: dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary,
+            };
+            let key = |tag, bytes: &[u8]| {
+                crate::sdk::economic_registers::immutable_object_key(tag, bytes)
+            };
+            let artifacts = vec![
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                        &witness_bytes,
+                    ),
+                    witness_bytes,
+                    "economic-transition-witness",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+                        &manifest_bytes,
+                    ),
+                    manifest_bytes,
+                    "economic-admission-manifest",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE,
+                        &body,
+                    ),
+                    body.clone(),
+                    OFFLINE_BOUNDARY_BODY_PURPOSE,
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+                        &authority.bytes,
+                    ),
+                    authority.bytes.clone(),
+                    "economic-authority-evidence",
+                ),
+            ];
+            let prepared = PendingEconomicAdmission::prepared(
+                pending_kind,
+                validated.economic_position() + 1,
+                pre_root,
+                digest,
+            );
+            built = Some((witness, manifest, body));
+            Ok((prepared, coords, artifacts))
+        },
+        &set.id(),
+    )?;
+    let (witness, manifest, body) = built.ok_or_else(|| {
+        DsmError::storage(
+            "boundary committed without building its admission".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    let admitted = finish_admission(
+        core,
+        &network_id,
+        &set,
+        &validated,
+        witness,
+        manifest,
+        AdmittedSubstrate::OfflineBoundary(body),
         pending,
         Vec::new(),
     )
@@ -779,6 +966,14 @@ fn admission_already_finished(
     }
 }
 
+/// The substrate an admission's finish validates against: the exact
+/// operation a DSM successor carried, or the exact bytes of an offline
+/// boundary's body. The finish verifies each again before it trusts it.
+pub(crate) enum AdmittedSubstrate {
+    Dsm(Operation),
+    OfflineBoundary(Vec<u8>),
+}
+
 /// Everything after local acceptance. Separated so recovery re-enters here.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finish_admission(
@@ -788,7 +983,7 @@ pub(crate) async fn finish_admission(
     validated: &ValidatedEconomicRoot,
     witness: EconomicTransitionWitness,
     manifest: EconomicAdmissionManifest,
-    operation: Operation,
+    substrate: AdmittedSubstrate,
     pending: PendingEconomicAdmission,
     // Frozen only in the ADMIT transaction (the RELEASE object): nothing
     // here may reach the network before ECON_ADMITTED.
@@ -805,7 +1000,7 @@ pub(crate) async fn finish_admission(
         validated,
         witness,
         manifest,
-        operation,
+        substrate,
         pending,
         post_admit_artifacts,
     )
@@ -823,7 +1018,7 @@ async fn finish_locked(
     validated: &ValidatedEconomicRoot,
     witness: EconomicTransitionWitness,
     manifest: EconomicAdmissionManifest,
-    operation: Operation,
+    substrate: AdmittedSubstrate,
     mut pending: PendingEconomicAdmission,
     post_admit_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<AdmittedOutcome, DsmError> {
@@ -987,12 +1182,37 @@ async fn finish_locked(
                 DsmError::invalid_operation(format!("registered claim: {conditional}"))
             })?,
     );
-    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        operation,
-        coords.c_dsm_plus,
-        coords.embedded_parent,
-        coords.accepted_substrate_addr,
-    );
+    let accepted = match substrate {
+        AdmittedSubstrate::Dsm(operation) => {
+            let (embedded_parent, c_dsm_plus) = coords.substrate.successor().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "a DSM admission whose coordinates are not a successor's",
+                )
+            })?;
+            AcceptedSubstrate::from_verified_dsm_successor(
+                operation,
+                c_dsm_plus,
+                embedded_parent,
+                coords.accepted_substrate_addr,
+            )
+        }
+        AdmittedSubstrate::OfflineBoundary(body) => {
+            if dsm::economic::offline_boundary::offline_boundary_evidence_addr(&body)
+                != coords.accepted_substrate_addr
+            {
+                return Err(DsmError::invalid_operation(
+                    "the boundary body is not the one the admission names",
+                ));
+            }
+            let verified = dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
+                &body, &genesis, &devid,
+            )?;
+            AcceptedSubstrate::from_verified_offline_boundary(
+                verified,
+                coords.accepted_substrate_addr,
+            )
+        }
+    };
     let resolver = LiveRegisterResolver {
         set,
         runtime: tokio::runtime::Handle::current(),
@@ -1206,13 +1426,23 @@ pub(crate) async fn resume_pending_admission(
         crate::sdk::identity_presentation::OwnerIdentityInputs::beta(network_id),
     )?
     .position;
+    let substrate_slot = match coords.substrate {
+        dsm::economic::admission::AcceptedSubstrateCoords::Successor { .. } => {
+            AdmissionSubstrate::DsmSuccessor {
+                evidence_addr: coords.accepted_substrate_addr,
+            }
+        }
+        dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary => {
+            AdmissionSubstrate::OfflineBoundary {
+                evidence_addr: coords.accepted_substrate_addr,
+            }
+        }
+    };
     let manifest = EconomicAdmissionManifest::new(
         authority_position,
         witness_addr,
         authority_addr,
-        AdmissionSubstrate::DsmSuccessor {
-            evidence_addr: coords.accepted_substrate_addr,
-        },
+        substrate_slot,
         witness.derived_provenance_index(),
     )
     .map_err(|e| storage_err("reconstruct manifest", e))?;
@@ -1243,6 +1473,52 @@ pub(crate) async fn resume_pending_admission(
                     .map_err(|e| storage_err("witness leaf", e))?,
             ),
         }
+    }
+
+    // An offline boundary finishes from its EXACT frozen body: verified again
+    // in the finish, and bound here to the address and the digest the
+    // admission carries.
+    if let dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary = coords.substrate {
+        let body_key_prefix = format!(
+            "immutable::{}::",
+            String::from_utf8_lossy(
+                dsm::common::domain_tags::TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE.source_bytes()
+            )
+        );
+        let body =
+            crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
+                &body_key_prefix,
+                OFFLINE_BOUNDARY_BODY_PURPOSE,
+            )
+            .map_err(|e| storage_err("load frozen boundary body", e))?
+            .ok_or_else(|| {
+                DsmError::storage(
+                    "no frozen boundary body for the pending admission".to_string(),
+                    None::<std::io::Error>,
+                )
+            })?;
+        if dsm::economic::offline_boundary::offline_boundary_evidence_addr(&body)
+            != coords.accepted_substrate_addr
+            || dsm::economic::offline_boundary::offline_boundary_operation_digest(&body)
+                != pending.operation_digest
+        {
+            return Err(DsmError::storage(
+                "frozen boundary body does not match the pending admission".to_string(),
+                None::<std::io::Error>,
+            ));
+        }
+        return finish_admission(
+            core,
+            network_id,
+            &set,
+            &validated,
+            witness,
+            manifest,
+            AdmittedSubstrate::OfflineBoundary(body),
+            pending,
+            Vec::new(),
+        )
+        .await;
     }
 
     // The EXACT operation, from the frozen SUCCESSOR EVIDENCE — recovery
@@ -1287,7 +1563,8 @@ pub(crate) async fn resume_pending_admission(
     .map_err(|e| storage_err("verify frozen successor evidence", e))?;
     let operation = verified_successor.operation;
     if verified_successor.operation_digest != pending.operation_digest
-        || verified_successor.c_dsm_plus != coords.c_dsm_plus
+        || Some(verified_successor.c_dsm_plus)
+            != coords.substrate.successor().map(|(_, c_plus)| c_plus)
     {
         return Err(DsmError::storage(
             "frozen successor evidence does not match the pending admission".to_string(),
@@ -1316,7 +1593,15 @@ pub(crate) async fn resume_pending_admission(
         None => Vec::new(),
     };
     finish_admission(
-        core, network_id, &set, &validated, witness, manifest, operation, pending, post_admit,
+        core,
+        network_id,
+        &set,
+        &validated,
+        witness,
+        manifest,
+        AdmittedSubstrate::Dsm(operation),
+        pending,
+        post_admit,
     )
     .await
 }
@@ -1498,17 +1783,15 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;
 
     // ── Wire ↔ validated-operation binding ─────────────────────────────────
-    if peer
-        .verified_operation()
-        .with_cleared_signature()
-        .to_bytes()
-        != canonical_operation_bytes
-    {
+    let peer_operation = peer.verified_operation().ok_or_else(|| {
+        terminal("the validated debit is an offline boundary, not a signed operation".to_string())
+    })?;
+    if peer_operation.with_cleared_signature().to_bytes() != canonical_operation_bytes {
         return Err(terminal(
             "the signed operation bytes are not the validated debit operation".to_string(),
         ));
     }
-    if evidence_receipt.child_tip != *peer.c_dsm_plus() {
+    if Some(&evidence_receipt.child_tip) != peer.c_dsm_plus() {
         return Err(terminal(
             "the A-side receipt is for a different bilateral step than the validated debit \
              successor"

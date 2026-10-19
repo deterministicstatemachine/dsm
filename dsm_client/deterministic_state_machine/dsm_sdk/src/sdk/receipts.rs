@@ -2110,14 +2110,14 @@ mod tests {
             .expect("genesis installed the head");
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
         assert!(
-            head.advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+            head.advance(rel_key, devid_b, Operation::Noop, &[], None)
                 .is_err(),
             "a step on a relationship the device never established is refused"
         );
 
         let established = head.establish_relationship(devid_b).expect("establish");
         let outcome = established
-            .advance(rel_key, devid_b, Operation::Noop, &[], None, None)
+            .advance(rel_key, devid_b, Operation::Noop, &[], None)
             .expect("the first step");
         assert_eq!(outcome.parent_r_a, established.root());
         assert_eq!(

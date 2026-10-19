@@ -3,13 +3,13 @@
 //!
 //! Invoke routes:
 //! - `wallet.loadOffline`  → move `amount` of an asset from the online balance into this device's
-//!   device-bound offline-bearer allocation ("cash in hand"). A conserved regime shift: online
-//!   `available` drops, the allocation rises, the device root advances + persists.
-//! - `wallet.unloadOffline` → reconcile: move `amount` from the allocation back to online `available`.
+//!   offline account ("cash in hand"): an admitted economic transition that debits the online
+//!   balance and credits the account by the same amount.
+//! - `wallet.unloadOffline` → move `amount` from the offline account back to the online balance:
+//!   an admitted transition whose online credit is funded by exactly that account debit.
 //!
-//! The allocation is keyed by the device's enrolled anchor bundle `B`, so managing it requires the
-//! anchor device to be present (its `B` identifies which allocation to touch). The online balance debit
-//! itself is the network witness that those units left online-spendable liquidity.
+//! The offline account is the one of the device's enrolled anchor bundle `B`, so managing it
+//! requires the anchor device to be present, standing where the account does.
 
 use prost::Message;
 
@@ -67,8 +67,9 @@ impl AppRouterImpl {
             Err(e) => return err(format!("wallet.{verb}: policy_commit resolve failed: {e}")),
         };
 
-        // The allocation is bound to the enrolled anchor bundle B — resolve it from the connected anchor
-        // device. Offline cash is the appliance-gated regime, so managing it needs the anchor present.
+        // The offline account is the one of the enrolled anchor bundle B — resolve it from the
+        // connected anchor device. Offline cash is the appliance-gated regime, so managing it needs
+        // the anchor present, standing where the account does.
         let snap = self.core_sdk.anchor_appliance_status();
         if !snap.connected {
             return err(format!(
@@ -76,15 +77,39 @@ impl AppRouterImpl {
             ));
         }
         let bundle = snap.bundle;
+        if let Err(e) = self.core_sdk.require_offline_account_at(
+            &bundle,
+            &snap.frontier_root,
+            snap.anchor_counter,
+        ) {
+            return err(format!("wallet.{verb}: {e}"));
+        }
 
-        // Apply the conserved regime shift (fail-closed persist-before-install in CoreSDK).
-        let outcome = if is_load {
-            self.core_sdk.load_offline_cash(bundle, asset, amount)
+        // The boundary is an admitted economic transition: taken by Core, made durable with its
+        // admission, registered and validated before this route reports success.
+        let kind = if is_load {
+            dsm::types::device_state::OfflineBoundaryKind::Load
         } else {
-            self.core_sdk.unload_offline_cash(bundle, asset, amount)
+            dsm::types::device_state::OfflineBoundaryKind::Unload
         };
-        let outcome = match outcome {
-            Ok(o) => o,
+        let outcome = match crate::sdk::economic_admission_flow::admitted_offline_boundary(
+            &self.core_sdk,
+            bundle,
+            kind,
+            asset,
+            amount,
+        )
+        .await
+        {
+            Ok((outcome, _admitted)) => outcome,
+            Err(e) => return err(format!("wallet.{verb}: {e}")),
+        };
+        let allocation = outcome
+            .new_device_state
+            .offline_allocation(&bundle, &asset)
+            .ok_or_else(|| "the boundary left no allocation of the asset".to_string());
+        let allocation = match allocation {
+            Ok(a) => a,
             Err(e) => return err(format!("wallet.{verb}: {e}")),
         };
 
@@ -95,12 +120,12 @@ impl AppRouterImpl {
             super::wallet_routes::format_base_units_for_display(base_units, decimals)
         };
         let online_display = render(online_balance);
-        let allocation_display = render(outcome.amount);
+        let allocation_display = render(allocation);
         let resp = generated::OfflineCashResponse {
             success: true,
             online_balance,
-            allocation_balance: outcome.amount,
-            device_root: outcome.new_root.to_vec(),
+            allocation_balance: allocation,
+            device_root: outcome.post_device_root.to_vec(),
             message: format!(
                 "{} {} {} — offline allocation now {}, online {}",
                 if is_load { "loaded" } else { "unloaded" },
@@ -194,5 +219,41 @@ mod tests {
         assert!(!res.success);
         let msg = res.error_message.unwrap_or_default();
         assert!(msg.contains("invalid amount"), "{msg}");
+    }
+
+    /// The software counter is the authority and the chip its mirror: an
+    /// account opens only at a chip that has never released, and once open
+    /// the chip must stand exactly where the account does. Nothing is
+    /// rewritten to follow the chip.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_offline_account_is_never_rewritten_to_follow_the_chip() {
+        let r = router_on_a_device();
+        let core = &r.core_sdk;
+        let refused = |result: Result<(), dsm::types::error::DsmError>, reason: &str| {
+            let e = result.expect_err(reason);
+            assert!(e.to_string().contains(reason), "{e}");
+        };
+        refused(
+            core.require_offline_account_at(&[0xB1; 32], &[0x01; 32], 3),
+            "a counter with no software record",
+        );
+        core.require_offline_account_at(&[0xB1; 32], &[0x01; 32], 0)
+            .expect("the account opens at the chip's enrolled origin");
+        core.require_offline_account_at(&[0xB1; 32], &[0x01; 32], 0)
+            .expect("the chip stands where the account does");
+        refused(
+            core.require_offline_account_at(&[0xB1; 32], &[0x01; 32], 1),
+            "the software counter is the authority",
+        );
+        refused(
+            core.require_offline_account_at(&[0xB1; 32], &[0x02; 32], 0),
+            "the software counter is the authority",
+        );
+        let account = core
+            .device_head()
+            .and_then(|head| head.offline_account(&[0xB1; 32]).cloned())
+            .expect("the account is open");
+        assert_eq!((account.counter(), account.frontier()), (0, [0x01; 32]));
     }
 }

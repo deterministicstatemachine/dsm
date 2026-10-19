@@ -558,76 +558,192 @@ impl CoreSDK {
             bump_capsule,
             Some(&move |tx: &rusqlite::Transaction<'_>,
                         o: &dsm::types::device_state::AdvanceOutcome| {
-                // CAS re-assert of the admitted predecessor INSIDE the
-                // transaction that makes local acceptance durable: the
-                // pre-lock check can go stale only through this same
-                // serialized path, but the invariant is cheap to restate and
-                // a violated restatement is corruption, not a race.
-                let admitted =
-                    crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
-                        .map_err(|e| {
-                            DsmError::storage(
-                                format!("admission predecessor CAS: {e}"),
-                                None::<std::io::Error>,
-                            )
-                        })?;
-                let (expect_pos, expect_root) = match admitted {
-                    Some(a) => {
-                        // THE FENCE, on the commit that makes acceptance
-                        // durable. It decides more than the equality below:
-                        // for a resolved conditional predecessor it requires
-                        // this descendant to be built on the root the route
-                        // actually selected, and for an unresolved one it
-                        // refuses outright.
-                        dsm::sofi::lineage::descendant_fence(
-                            a.predecessor_claim(),
-                            &pending.pre_economic_root,
-                        )
-                        .map_err(|e| {
-                            DsmError::invalid_operation(format!("admission commit: {e}"))
-                        })?;
-                        let v = dsm::economic::lineage::ValidatedEconomicRoot::
-                            rehydrate_from_admitted_store(a)
-                            .map_err(|e| {
-                                DsmError::invalid_operation(format!("admission commit: {e}"))
-                            })?;
-                        (v.economic_position() + 1, v.economic_root())
-                    }
-                    None => (1, dsm::economic::tree::empty_economic_root()),
-                };
-                if pending.economic_position != expect_pos
-                    || pending.pre_economic_root != expect_root
-                {
-                    return Err(DsmError::invalid_operation(
-                        "admission commit: the admitted predecessor changed under the \
-                         admission — refusing to make a stale acceptance durable",
-                    ));
-                }
-                crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
-                    tx, &devid, &pending,
-                )
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!("commit pending economic admission: {e}"),
-                        None::<std::io::Error>,
-                    )
-                })?;
-                for (key, payload, purpose) in &artifacts {
-                    crate::storage::client_db::frozen_publication_artifact::
-                        freeze_artifact_with_conn(tx, &set_id, key, payload, &bound_root, purpose)
-                    .map_err(|e| {
-                        DsmError::storage(
-                            format!("freeze admission evidence {key}: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                }
+                Self::make_admission_durable_in_tx(
+                    tx,
+                    &devid,
+                    &pending,
+                    &artifacts,
+                    &set_id,
+                    &bound_root,
+                )?;
                 if let Some(also) = also {
                     also(tx, o)?;
                 }
                 Ok(())
             }),
         )
+    }
+
+    /// Inside the transaction that makes a local acceptance durable: re-assert
+    /// the admitted predecessor the admission extends, write the pending row,
+    /// and freeze the admission's evidence bound to `bound_root`. One
+    /// implementation for every substrate.
+    fn make_admission_durable_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        devid: &[u8; 32],
+        pending: &dsm::economic::admission::PendingEconomicAdmission,
+        artifacts: &[(String, Vec<u8>, &'static str)],
+        set_id: &[u8; 32],
+        bound_root: &[u8; 32],
+    ) -> Result<(), DsmError> {
+        // CAS re-assert of the admitted predecessor INSIDE the transaction
+        // that makes local acceptance durable: the pre-lock check can go
+        // stale only through this same serialized path, but the invariant is
+        // cheap to restate and a violated restatement is corruption, not a
+        // race.
+        let admitted = crate::storage::client_db::economic_lineage::get_admitted_with_conn(tx)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("admission predecessor CAS: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        let (expect_pos, expect_root) =
+            match admitted {
+                Some(a) => {
+                    // THE FENCE, on the commit that makes acceptance durable. It
+                    // decides more than the equality below: for a resolved
+                    // conditional predecessor it requires this descendant to be
+                    // built on the root the route actually selected, and for an
+                    // unresolved one it refuses outright.
+                    dsm::sofi::lineage::descendant_fence(
+                        a.predecessor_claim(),
+                        &pending.pre_economic_root,
+                    )
+                    .map_err(|e| DsmError::invalid_operation(format!("admission commit: {e}")))?;
+                    let v = dsm::economic::lineage::ValidatedEconomicRoot::
+                    rehydrate_from_admitted_store(a)
+                    .map_err(|e| DsmError::invalid_operation(format!("admission commit: {e}")))?;
+                    (v.economic_position() + 1, v.economic_root())
+                }
+                None => (1, dsm::economic::tree::empty_economic_root()),
+            };
+        if pending.economic_position != expect_pos || pending.pre_economic_root != expect_root {
+            return Err(DsmError::invalid_operation(
+                "admission commit: the admitted predecessor changed under the admission — \
+                 refusing to make a stale acceptance durable",
+            ));
+        }
+        crate::storage::client_db::economic_admission::put_pending_admission_with_conn(
+            tx, devid, pending,
+        )
+        .map_err(|e| {
+            DsmError::storage(
+                format!("commit pending economic admission: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
+        for (key, payload, purpose) in artifacts {
+            crate::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn(
+                tx, set_id, key, payload, bound_root, purpose,
+            )
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("freeze admission evidence {key}: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// One offline boundary — a load or an unload of the offline account of
+    /// `bundle` — taken by Core and made a durable local acceptance of its
+    /// economic admission, all under the head lock.
+    ///
+    /// Core takes the boundary from the head (`cross_offline_boundary`);
+    /// `prepare` builds the admission from exactly that boundary — its
+    /// prepared admission, acceptance coordinates and evidence — and the head
+    /// that carries the admission, the pending row and the frozen evidence
+    /// commit in ONE transaction. Either the boundary never happened, or it
+    /// and everything needed to finish its admission exist durably. A head
+    /// already fenced by another admission takes no boundary.
+    pub(crate) fn admitted_boundary(
+        &self,
+        bundle: &[u8; 32],
+        kind: dsm::types::device_state::OfflineBoundaryKind,
+        asset: &[u8; 32],
+        amount: u64,
+        prepare: impl FnOnce(
+            &dsm::types::device_state::OfflineBoundaryOutcome,
+        ) -> Result<
+            (
+                dsm::economic::admission::PendingEconomicAdmission,
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+    ) -> Result<
+        (
+            dsm::types::device_state::OfflineBoundaryOutcome,
+            dsm::economic::admission::PendingEconomicAdmission,
+        ),
+        DsmError,
+    > {
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline boundary: DeviceState not initialized (genesis first)")
+        })?;
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "offline boundary: the admission at position {} is still pending — finish it \
+                 before moving value across the offline boundary",
+                pending.economic_position
+            )));
+        }
+        let outcome = head.cross_offline_boundary(bundle, kind, asset, amount)?;
+        let (prepared, coords, artifacts) = prepare(&outcome)?;
+        let pending = prepared
+            .into_locally_accepted(coords)
+            .map_err(DsmError::invalid_operation)?;
+        let new_head = outcome
+            .new_device_state
+            .clone()
+            .with_pending_economic_admission(Some(pending.clone()));
+        let devid = new_head.devid();
+        let bound_root = new_head.root();
+        {
+            let binding = crate::storage::client_db::get_connection().map_err(|e| {
+                DsmError::storage(format!("offline boundary: {e}"), None::<std::io::Error>)
+            })?;
+            let mut conn = binding.lock().map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: the database lock is poisoned: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            let tx = conn.transaction().map_err(|e| {
+                DsmError::storage(format!("offline boundary tx: {e}"), None::<std::io::Error>)
+            })?;
+            Self::make_admission_durable_in_tx(
+                &tx,
+                &devid,
+                &pending,
+                &artifacts,
+                storage_set_id,
+                &bound_root,
+            )?;
+            crate::storage::client_db::update_bcr_device_head_with_conn(&tx, &new_head).map_err(
+                |e| {
+                    DsmError::storage(
+                        format!("offline boundary: persist device head: {e}"),
+                        None::<std::io::Error>,
+                    )
+                },
+            )?;
+            tx.commit().map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: commit: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        }
+        sm.set_device_head(new_head.clone());
+        drop(sm);
+        Self::reproject_committed_head(&new_head);
+        Ok((outcome, pending))
     }
 
     fn dual_write_advance_outcome_with_extra(
@@ -1833,6 +1949,54 @@ pub struct AnchorStatusSnapshot {
 }
 
 impl CoreSDK {
+    /// The offline account of `bundle` standing exactly where the anchor stands, at `frontier`
+    /// and `counter`. The account is the authority and the chip its mirror, so nothing is ever
+    /// rewritten to follow the chip: an account not yet open is opened here only at the chip's
+    /// enrolled origin — a chip that has never released (`u = 0`) — and any other disagreement
+    /// fails closed. A counter that moved with no account recording it, or an account standing
+    /// anywhere the chip does not, is inconsistent with the software state.
+    pub fn require_offline_account_at(
+        &self,
+        bundle: &[u8; 32],
+        frontier: &[u8; 32],
+        counter: u64,
+    ) -> Result<(), DsmError> {
+        let mut sm = self.state_machine.lock();
+        let ds = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline account: DeviceState not initialized (genesis first)")
+        })?;
+        match ds.offline_account(bundle) {
+            Some(account) => {
+                if account.counter() != counter || account.frontier() != *frontier {
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline account: the anchor stands at counter {counter} but the offline \
+                         account at {} (or at another frontier) — the software counter is the \
+                         authority; recover the appliance first (fail closed)",
+                        account.counter()
+                    )));
+                }
+                Ok(())
+            }
+            None => {
+                if counter != 0 {
+                    return Err(DsmError::invalid_operation(format!(
+                        "offline account: none is open, and the anchor's counter has moved to \
+                         {counter} — a counter with no software record (fail closed)"
+                    )));
+                }
+                let opened = ds.open_offline_account(bundle, *frontier, counter)?;
+                crate::storage::client_db::update_bcr_device_head(&opened).map_err(|e| {
+                    DsmError::storage(
+                        format!("offline account: persist the opened account: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                sm.set_device_head(opened);
+                Ok(())
+            }
+        }
+    }
+
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
     /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
@@ -1962,52 +2126,8 @@ impl CoreSDK {
         let before = app.status()?;
         let appliance_prev_root = before.root;
 
-        // The account is the authority and the chip its mirror: the chip must stand at the
-        // account's counter and frontier. An account not yet open is opened here, at the chip's
-        // enrolled origin only — a chip that has never released (`u = 0`). A chip whose counter
-        // moved with no account recording it, or that stands anywhere the account does not, is
-        // inconsistent with the software state and fails closed; nothing is rewritten to follow it.
-        {
-            let mut sm = self.state_machine.lock();
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "offline-bearer: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            match ds.offline_account(&pin.bundle) {
-                Some(account) => {
-                    if account.counter() != before.anchor_counter
-                        || account.frontier() != before.root
-                    {
-                        return Err(DsmError::invalid_operation(format!(
-                            "offline-bearer stage: the anchor stands at counter {} but the offline \
-                             account at {} (or at another frontier) — the software counter is the \
-                             authority; recover the appliance before staging (fail closed)",
-                            before.anchor_counter,
-                            account.counter()
-                        )));
-                    }
-                }
-                None => {
-                    if before.anchor_counter != 0 {
-                        return Err(DsmError::invalid_operation(format!(
-                            "offline-bearer stage: no offline account is open, and the anchor's \
-                             counter has moved to {} — a counter with no software record (fail \
-                             closed)",
-                            before.anchor_counter
-                        )));
-                    }
-                    let opened = ds.open_offline_account(&pin.bundle, before.root, 0)?;
-                    crate::storage::client_db::update_bcr_device_head(&opened).map_err(|e| {
-                        DsmError::storage(
-                            format!("offline-bearer: persist the opened offline account: {e}"),
-                            None::<std::io::Error>,
-                        )
-                    })?;
-                    sm.set_device_head(opened);
-                }
-            }
-        }
+        // The account is the authority and the chip its mirror.
+        self.require_offline_account_at(&pin.bundle, &before.root, before.anchor_counter)?;
 
         // Stage Δ°: the digest excludes `next_root`, so D is computable first and the successor
         // frontier is derived, never invented.

@@ -365,7 +365,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         &validated,
         parts.witness,
         parts.manifest,
-        op,
+        crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(op),
         pending,
         Vec::new(),
     )

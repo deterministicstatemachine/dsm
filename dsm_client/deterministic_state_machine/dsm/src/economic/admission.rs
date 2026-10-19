@@ -209,21 +209,54 @@ impl EconomicAdmissionState {
 pub struct AcceptedAdmissionCoords {
     pub post_economic_root: [u8; 32],
     /// The exact accepted substrate artifact: the successor evidence for a
-    /// DSM admission, or the `OfflineBoundaryAttestationV1` for a boundary.
+    /// DSM admission, or the boundary body for an offline boundary.
     pub accepted_substrate_addr: [u8; 32],
     pub admission_manifest_addr: [u8; 32],
-    /// The accepted successor's chain-state commitment — the `C_dsm+` the v2
-    /// economic operation id binds. Recovery cannot re-derive it from the
-    /// head (unrelated non-economic activity may advance other tips), so it
-    /// is durable admission state like everything else here. For an offline
-    /// boundary this is the boundary attestation's commitment (Step 5).
-    pub c_dsm_plus: [u8; 32],
-    /// The accepted successor's own parent tip — with `c_dsm_plus` this is
-    /// the successor's `(embedded_parent, tip)` pair, which acceptance
-    /// evidence binds its countersigned B-side pair to. Durable for the same
-    /// reason as `c_dsm_plus`: recovery cannot re-derive it from the head.
-    /// Zero for an offline boundary (Step 5).
-    pub embedded_parent: [u8; 32],
+    /// What the substrate's kind needs kept beside its address.
+    pub substrate: AcceptedSubstrateCoords,
+}
+
+/// The substrate coordinates an admission keeps, by kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptedSubstrateCoords {
+    /// A DSM successor (and a SoFi fulfillment's transition).
+    Successor {
+        /// The accepted successor's chain-state commitment — the `C_dsm+`
+        /// the v2 economic operation id binds. Recovery cannot re-derive it
+        /// from the head (unrelated non-economic activity may advance other
+        /// tips), so it is durable admission state like everything else here.
+        c_dsm_plus: [u8; 32],
+        /// The accepted successor's own parent tip — with `c_dsm_plus` this
+        /// is the successor's `(embedded_parent, tip)` pair, which acceptance
+        /// evidence binds its countersigned B-side pair to. Durable for the
+        /// same reason as `c_dsm_plus`.
+        embedded_parent: [u8; 32],
+    },
+    /// An offline boundary. Its identity and effect are re-derived from its
+    /// frozen body, at `accepted_substrate_addr`, so nothing is kept beside it.
+    OfflineBoundary,
+}
+
+impl AcceptedSubstrateCoords {
+    /// The successor's `(embedded_parent, C_dsm+)`, for a successor.
+    pub fn successor(&self) -> Option<([u8; 32], [u8; 32])> {
+        match self {
+            Self::Successor {
+                c_dsm_plus,
+                embedded_parent,
+            } => Some((*embedded_parent, *c_dsm_plus)),
+            Self::OfflineBoundary => None,
+        }
+    }
+
+    /// Whether these coordinates are the kind `kind` admits.
+    fn fits(&self, kind: &PendingAdmissionKind) -> bool {
+        let boundary = matches!(
+            kind,
+            PendingAdmissionKind::OfflineLoad { .. } | PendingAdmissionKind::OfflineUnload { .. }
+        );
+        boundary == matches!(self, Self::OfflineBoundary)
+    }
 }
 
 /// The durable record of an admission in flight.
@@ -289,6 +322,11 @@ impl PendingEconomicAdmission {
                 "admission: acceptance coordinates can be installed exactly once, from Prepared",
             );
         }
+        if !coords.substrate.fits(&self.kind) {
+            return Err(
+                "admission: the substrate coordinates are not those of the admission's kind",
+            );
+        }
         Ok(Self {
             state: EconomicAdmissionState::LocalAcceptedPendingEcon,
             acceptance: Some(coords),
@@ -326,6 +364,11 @@ impl PendingEconomicAdmission {
     ) -> Result<Self, &'static str> {
         if state == EconomicAdmissionState::Prepared {
             return Err("admission: a Prepared admission is never durable");
+        }
+        if !coords.substrate.fits(&kind) {
+            return Err(
+                "admission: the substrate coordinates are not those of the admission's kind",
+            );
         }
         Ok(Self {
             kind,
@@ -482,8 +525,10 @@ mod tests {
                 post_economic_root: [2; 32],
                 accepted_substrate_addr: [4; 32],
                 admission_manifest_addr: [5; 32],
-                c_dsm_plus: [6; 32],
-                embedded_parent: [7; 32],
+                substrate: AcceptedSubstrateCoords::Successor {
+                    c_dsm_plus: [6; 32],
+                    embedded_parent: [7; 32],
+                },
             })
             .expect("prepared -> accepted")
     }

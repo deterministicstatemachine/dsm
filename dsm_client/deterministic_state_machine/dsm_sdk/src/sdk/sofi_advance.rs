@@ -155,8 +155,10 @@ fn fulfillment_acceptance_coords(
         post_economic_root: predecessor_root,
         accepted_substrate_addr: fulfillment_addr,
         admission_manifest_addr: precommit_addr,
-        c_dsm_plus: chain_state.compute_chain_tip(),
-        embedded_parent: chain_state.embedded_parent,
+        substrate: dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+            c_dsm_plus: chain_state.compute_chain_tip(),
+            embedded_parent: chain_state.embedded_parent,
+        },
     }
 }
 

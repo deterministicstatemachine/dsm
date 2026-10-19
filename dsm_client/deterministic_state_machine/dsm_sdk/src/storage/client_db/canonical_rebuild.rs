@@ -410,7 +410,6 @@ mod tests {
             },
             &[],
             None,
-            None,
         );
         if let Ok(o) = seeded {
             cp = o.new_device_state;

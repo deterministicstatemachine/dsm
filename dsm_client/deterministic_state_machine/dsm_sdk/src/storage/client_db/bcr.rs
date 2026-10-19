@@ -88,7 +88,7 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x03;
 // `DeviceState`, so a head has nothing to persist there. Breaking bump, NO back-compat reader.
 // v0x08 replaces the v0x04 offline-allocations section with the offline accounts: each account
 // is its own SMT whose root is one device leaf, and the section carries what rebuilds it — its
-// bundle, counter, frontier, funding origin and allocations. The fused anchor-state and flat
+// bundle, counter, frontier, funding chain and allocations. The fused anchor-state and flat
 // allocation leaves are gone from `extra_leaves`. Breaking bump, NO back-compat reader.
 const DEVICE_STATE_VERSION: u8 = 0x08;
 
@@ -287,10 +287,10 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(bundle);
         out.extend_from_slice(&account.counter().to_le_bytes());
         out.extend_from_slice(&account.frontier());
-        match account.origin() {
-            Some(origin) => {
+        match account.funding_chain() {
+            Some(chain) => {
                 out.push(1u8);
-                out.extend_from_slice(&origin);
+                out.extend_from_slice(&chain);
             }
             None => out.push(0u8),
         }
@@ -407,10 +407,12 @@ pub fn decode_device_state(
         );
         let frontier: [u8; 32] =
             take::<32>(&mut cursor).map_err(|e| anyhow!("account frontier: {e}"))?;
-        let origin = match read_u8(&mut cursor).map_err(|e| anyhow!("account origin flag: {e}"))? {
+        let funding_chain = match read_u8(&mut cursor)
+            .map_err(|e| anyhow!("account funding-chain flag: {e}"))?
+        {
             0 => None,
-            1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("account origin: {e}"))?),
-            other => return Err(anyhow!("account origin flag invalid: {other}")),
+            1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("account funding chain: {e}"))?),
+            other => return Err(anyhow!("account funding-chain flag invalid: {other}")),
         };
         let allocation_count =
             read_len_u32(&mut cursor).map_err(|e| anyhow!("allocation count: {e}"))?;
@@ -429,7 +431,7 @@ pub fn decode_device_state(
         }
         if let Some(prior) = offline_accounts.insert(
             bundle,
-            OfflineAccount::restore(allocations, counter, frontier, origin),
+            OfflineAccount::restore(allocations, counter, frontier, funding_chain),
         ) {
             return Err(anyhow!(
                 "two offline accounts name one bundle (the first at counter {})",
@@ -726,8 +728,7 @@ mod tests {
             post_economic_root: [2u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6u8; 32],
+            substrate: dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary,
         })
         .expect("prepared -> accepted");
         {
@@ -870,7 +871,6 @@ mod tests {
                 },
                 &[],
                 None,
-                None,
             )
             .expect("adoption precedes receipt");
         let self_loop_tip = RelChainTip {
@@ -906,7 +906,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 7,
                 }],
-                None,
                 None,
             )
             .expect("advance relationship");
@@ -977,7 +976,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 9,
                 }],
-                None,
                 None,
             )
             .expect("second advance");
@@ -1062,7 +1060,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 11,
                 }],
-                None,
                 None,
             )
             .expect("third advance");

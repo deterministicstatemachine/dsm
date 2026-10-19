@@ -225,7 +225,6 @@ fn step(
                 amount,
             }],
             None,
-            None,
         )
         .expect("the step");
     let receipt = StitchedReceiptV2::of_step(
@@ -282,7 +281,6 @@ pub fn transfer_step(sender: &Party, receiver: &Party, amount: u64) -> Step {
                 direction: BalanceDirection::Credit,
                 amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
             }],
-            None,
             None,
         )
         .expect("the faucet payout")

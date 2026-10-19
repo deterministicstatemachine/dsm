@@ -1552,15 +1552,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             operation_digest        BLOB NOT NULL,      -- 32B
             accepted_substrate_addr BLOB NOT NULL,      -- 32B
             admission_manifest_addr BLOB NOT NULL,      -- 32B
-            c_dsm_plus              BLOB NOT NULL,      -- 32B, the accepted
+            c_dsm_plus              BLOB,               -- 32B, the accepted
                                                         -- successor's chain-state
                                                         -- commitment (v2 econ-op-id
                                                         -- preimage) — recovery
-                                                        -- cannot re-derive it
-            embedded_parent         BLOB NOT NULL      -- 32B, the successor's own
+                                                        -- cannot re-derive it. NULL
+                                                        -- for an offline boundary,
+                                                        -- re-derived from its body
+            embedded_parent         BLOB               -- 32B, the successor's own
                                                         -- parent tip: with c_dsm_plus
                                                         -- the (parent, tip) pair the
-                                                        -- acceptance B-side binds to
+                                                        -- acceptance B-side binds to;
+                                                        -- NULL for an offline boundary
         );
 
         -- Device head storage is BCR-only (§4.3): no state counter and no

@@ -5577,6 +5577,7 @@ mod tests {
                 anchor_bundle_b: [5u8; 32],
                 asset: [0x0Fu8; 32],
                 amount: 1,
+                next_frontier: [6u8; 32],
             }),
             parent_tip: Some(tip),
             owed_frame: None,

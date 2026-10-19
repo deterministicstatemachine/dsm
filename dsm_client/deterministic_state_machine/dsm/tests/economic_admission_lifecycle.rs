@@ -62,8 +62,16 @@ fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> Pending
             post_economic_root: [2; 32],
             accepted_substrate_addr: [4; 32],
             admission_manifest_addr: [5; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6; 32],
+            substrate: match kind {
+                PendingAdmissionKind::OfflineLoad { .. }
+                | PendingAdmissionKind::OfflineUnload { .. } => {
+                    dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary
+                }
+                _ => dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+                    embedded_parent: [0x5E; 32],
+                    c_dsm_plus: [6; 32],
+                },
+            },
         })
         .expect("prepared -> accepted")
         .advanced_to(state)
@@ -971,8 +979,16 @@ fn held_first_claim(
         post_economic_root: fx.post_root,
         accepted_substrate_addr: SUBSTRATE_ADDR,
         admission_manifest_addr: manifest_for(&fx.witness).addr().expect("addressable"),
-        c_dsm_plus: C_DSM_PLUS,
-        embedded_parent: EMBEDDED_PARENT,
+        substrate: match kind {
+            PendingAdmissionKind::OfflineLoad { .. }
+            | PendingAdmissionKind::OfflineUnload { .. } => {
+                dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary
+            }
+            _ => dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+                c_dsm_plus: C_DSM_PLUS,
+                embedded_parent: EMBEDDED_PARENT,
+            },
+        },
     })
     .expect("prepared -> accepted")
 }
@@ -1420,4 +1436,100 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
         ),
         "{refused}"
     );
+}
+
+/// The `0x0075` arm on its own, beside the write-set check that stands in
+/// front of it: it funds a credit only on an unload's admission, and only
+/// with its source recorded as consumed in the same witness.
+#[test]
+fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
+    use dsm::economic::provenance::{verify_transition_provenance, ProvenanceContext, ProvenanceError};
+    use dsm::types::device_state::OfflineBoundaryKind::{Load, Unload};
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let fx = faucet_fixture(1);
+    let online = std::collections::BTreeMap::from([(era, 500)]);
+    let head = head_of(G, &fx, &[(era, 500)], &[], None)
+        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .expect("the account opens");
+    let mut tree = EconomicSmt::new();
+    let held = bal(era, 500);
+    tree.insert(
+        held.leaf_key(&G, dev()),
+        held.leaf_value().expect("encodable"),
+    );
+    let pre_root = tree.root();
+    let load = boundary(&head, Load, 300, pre_root, &mut tree.clone(), &online, 2);
+    let after_load = std::collections::BTreeMap::from([(era, 200)]);
+    let mut loaded_tree = tree.clone();
+    let built = dsm::economic::write_set::build_boundary_write_set(
+        Load,
+        &era,
+        300,
+        &load.outcome.operation_id,
+        &G,
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(&online, 2),
+        &mut loaded_tree,
+    )
+    .expect("the load's write set");
+    assert_eq!(built.post_root, load.witness.post_economic_root);
+    let unload = boundary(
+        &load.outcome.new_device_state,
+        Unload,
+        100,
+        loaded_tree.root(),
+        &mut loaded_tree.clone(),
+        &after_load,
+        3,
+    );
+    let ctx = |offline_boundary| ProvenanceContext {
+        genesis: &G,
+        device_id: dev(),
+        economic_position: 3,
+        network_id: b"dsm-testnet",
+        proven_ak: &fx.pk,
+        canonical_storage_set_id: canonical_set_id(),
+        substrate_b_pair: None,
+        verified_operation: None,
+        offline_boundary,
+    };
+    let resolver = OneTicket {
+        envelope: fx.envelope.clone(),
+    };
+    verify_transition_provenance(&unload.witness, &resolver, &ctx(Some(&unload.verified)))
+        .expect("the unload's own debit funds its credit");
+    // On a load's substrate the same credit has no offline debit to fund it.
+    assert_eq!(
+        verify_transition_provenance(&unload.witness, &resolver, &ctx(Some(&load.verified))),
+        Err(ProvenanceError::NotAnOfflineUnload)
+    );
+    assert_eq!(
+        verify_transition_provenance(&unload.witness, &resolver, &ctx(None)),
+        Err(ProvenanceError::NotAnOfflineUnload)
+    );
+    // The credit without the consumption of its source is not funded once.
+    let credit_only: Vec<EconomicLeafMutation> = unload
+        .witness
+        .mutations
+        .iter()
+        .filter(|m| matches!(m.post_state, Some(EconomicLeafState::Balance(_))))
+        .cloned()
+        .collect();
+    let witness = EconomicTransitionWitness::new(
+        unload.witness.pre_economic_root,
+        unload.witness.post_economic_root,
+        unload.witness.economic_operation_id,
+        unload.witness.operation_digest,
+        credit_only,
+        vec![CreditSource::OfflineBoundaryDebit(
+            dsm::economic::credit::CreditSourceOfflineBoundaryDebit {
+                credit_mutation_index: 0,
+            },
+        )],
+    )
+    .expect("a witness");
+    assert!(matches!(
+        verify_transition_provenance(&witness, &resolver, &ctx(Some(&unload.verified))),
+        Err(ProvenanceError::SourceNotRecordedAsConsumed { .. })
+    ));
 }

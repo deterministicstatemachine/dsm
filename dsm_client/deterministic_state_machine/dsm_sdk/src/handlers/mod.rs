@@ -51,6 +51,8 @@ pub mod inbox_routes;
 pub mod mempool_api;
 #[cfg(test)]
 mod node_e2e_tests;
+#[cfg(test)]
+mod offline_boundary_tests;
 pub mod offline_cash_routes;
 #[cfg(test)]
 mod one_hop_verification_tests;

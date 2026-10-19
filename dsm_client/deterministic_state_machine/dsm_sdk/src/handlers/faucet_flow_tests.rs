@@ -779,7 +779,7 @@ async fn a_faucet_lineage_is_walkable_by_a_foreign_verifier() {
     );
     assert!(matches!(
         peer.verified_operation(),
-        dsm::types::operations::Operation::FaucetClaim { .. }
+        Some(dsm::types::operations::Operation::FaucetClaim { .. })
     ));
 }
 
@@ -1052,7 +1052,6 @@ async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
             direction: BalanceDirection::Debit,
             amount: 1,
         }],
-        None,
         None,
         None,
         &|_, _| {

@@ -27,7 +27,8 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use dsm::economic::admission::{
-    AcceptedAdmissionCoords, EconomicAdmissionState, PendingAdmissionKind, PendingEconomicAdmission,
+    AcceptedAdmissionCoords, AcceptedSubstrateCoords, EconomicAdmissionState, PendingAdmissionKind,
+    PendingEconomicAdmission,
 };
 
 fn kind_code(kind: &PendingAdmissionKind) -> i64 {
@@ -80,6 +81,11 @@ pub fn put_pending_admission_with_conn(
     // The column holds whatever 32 bytes the KIND needs back, which is the
     // fenced asset for a boundary and the fulfillment id for a SoFi position.
     let fenced: Option<Vec<u8>> = pending.kind.durable_digest().map(|a| a.to_vec());
+    // A successor's (C_dsm+, parent); a boundary keeps nothing beside its body.
+    let (c_dsm_plus, embedded_parent) = match coords.substrate.successor() {
+        Some((parent, c_plus)) => (Some(c_plus.to_vec()), Some(parent.to_vec())),
+        None => (None, None),
+    };
     tx.execute(
         "INSERT INTO economic_pending_admissions(
              device_id, kind, fenced_asset, lifecycle_state, economic_position,
@@ -110,8 +116,8 @@ pub fn put_pending_admission_with_conn(
             pending.operation_digest.as_slice(),
             coords.accepted_substrate_addr.as_slice(),
             coords.admission_manifest_addr.as_slice(),
-            coords.c_dsm_plus.as_slice(),
-            coords.embedded_parent.as_slice(),
+            c_dsm_plus,
+            embedded_parent,
         ],
     )?;
     Ok(())
@@ -160,8 +166,8 @@ pub fn load_pending_admission_with_conn(
                     r.get::<_, Vec<u8>>(6)?,
                     r.get::<_, Vec<u8>>(7)?,
                     r.get::<_, Vec<u8>>(8)?,
-                    r.get::<_, Vec<u8>>(9)?,
-                    r.get::<_, Vec<u8>>(10)?,
+                    r.get::<_, Option<Vec<u8>>>(9)?,
+                    r.get::<_, Option<Vec<u8>>>(10)?,
                 ))
             },
         )
@@ -231,8 +237,18 @@ pub fn load_pending_admission_with_conn(
             post_economic_root: digest32(post, "post_economic_root")?,
             accepted_substrate_addr: digest32(substrate, "accepted_substrate_addr")?,
             admission_manifest_addr: digest32(manifest, "admission_manifest_addr")?,
-            c_dsm_plus: digest32(c_plus, "c_dsm_plus")?,
-            embedded_parent: digest32(parent, "embedded_parent")?,
+            substrate: match (c_plus, parent) {
+                (Some(c_plus), Some(parent)) => AcceptedSubstrateCoords::Successor {
+                    c_dsm_plus: digest32(c_plus, "c_dsm_plus")?,
+                    embedded_parent: digest32(parent, "embedded_parent")?,
+                },
+                (None, None) => AcceptedSubstrateCoords::OfflineBoundary,
+                _ => {
+                    return Err(anyhow!(
+                        "stored admission holds half a successor's coordinates"
+                    ))
+                }
+            },
         },
     )
     .map(Some)

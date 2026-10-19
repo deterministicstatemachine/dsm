@@ -403,7 +403,6 @@ mod tests {
                 &[],
                 None,
                 None,
-                None,
                 // The settlement refuses at the tip, before a receipt is kept.
                 &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], &[]),
             )
