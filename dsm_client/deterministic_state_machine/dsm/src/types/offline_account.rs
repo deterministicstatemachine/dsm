@@ -38,9 +38,11 @@ use crate::common::domain_tags::{
     TAG_OFFLINE_ACCOUNT_FRONTIER_KEY, TAG_OFFLINE_ACCOUNT_LEAF, TAG_OFFLINE_ACCOUNT_ORIGIN_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::merkle::batch_fold::{verify_batch, FoldEntry, FOLD_HEIGHT};
+use crate::merkle::batch_fold::{fold_path, verify_batch, FoldEntry, FOLD_HEIGHT};
+use crate::merkle::smt_path::{self, EncodedPath};
 use crate::merkle::sparse_merkle_tree::{DeviceSmtHashes, SparseMerkleTree};
 use crate::types::error::DsmError;
+use crate::types::proto::SmtPath as SmtPathProto;
 
 /// Device-SMT key of the offline account for anchor bundle `B`:
 /// `H("DSM/offline-account/v1" ‖ B)`. Its value is the account root `R_off`.
@@ -490,6 +492,172 @@ impl OfflineAccount {
             entries,
         })
     }
+}
+
+/// What a receipt carries for the offline account an offline-bearer spend
+/// writes: the account as it stood before the step, the frontier the spend
+/// advances to, and the account paths of the leaves the spend writes, in key
+/// order. The account after the step is derived from these and the operation,
+/// never carried.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpendWitness {
+    pub pre_account_root: [u8; 32],
+    pub pre_allocation: u64,
+    pub pre_counter: u64,
+    pub pre_frontier: [u8; 32],
+    pub next_frontier: [u8; 32],
+    pub account_paths: Vec<EncodedPath>,
+}
+
+impl SpendWitness {
+    /// The witness of `spend` taken by `before` (the account the spend
+    /// started from), with the paths of the spend's writes.
+    pub fn of(before: &OfflineAccount, spend: &OfflineAccountMove) -> Result<Self, DsmError> {
+        let StepBefore::Spend {
+            allocation,
+            counter,
+            frontier,
+        } = spend.before
+        else {
+            return Err(DsmError::invalid_operation(
+                "a spend witness is taken of a spend",
+            ));
+        };
+        Ok(Self {
+            pre_account_root: before.root(),
+            pre_allocation: allocation,
+            pre_counter: counter,
+            pre_frontier: frontier,
+            next_frontier: spend.account.frontier(),
+            account_paths: spend
+                .entries
+                .iter()
+                .map(|e| smt_path::encode::<DeviceSmtHashes>(&e.path))
+                .collect(),
+        })
+    }
+
+    /// The account root after spending `amount` of `asset`: the spend's
+    /// writes, recomputed from this witness, folded from its pre-root.
+    pub fn post_account_root(&self, asset: &[u8; 32], amount: u64) -> Result<[u8; 32], DsmError> {
+        let paths = self
+            .account_paths
+            .iter()
+            .map(|p| {
+                smt_path::decode::<DeviceSmtHashes>(&p.explicit_heights, &p.siblings).map_err(|e| {
+                    DsmError::invalid_operation(format!("an offline account path: {e}"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        verify_step(
+            &self.pre_account_root,
+            &OfflineAccountStep::Spend {
+                asset: *asset,
+                amount,
+                next_frontier: self.next_frontier,
+            },
+            &StepBefore::Spend {
+                allocation: self.pre_allocation,
+                counter: self.pre_counter,
+                frontier: self.pre_frontier,
+            },
+            &paths,
+        )
+    }
+}
+
+fn decode_path(path: &SmtPathProto) -> Result<Box<[[u8; 32]; FOLD_HEIGHT]>, DsmError> {
+    smt_path::decode::<DeviceSmtHashes>(&path.heights, &path.siblings)
+        .map_err(|e| DsmError::invalid_operation(format!("an offline state proof's path: {e}")))
+}
+
+fn path_proto(path: &[[u8; 32]; FOLD_HEIGHT]) -> SmtPathProto {
+    let encoded = smt_path::encode::<DeviceSmtHashes>(path);
+    SmtPathProto {
+        heights: encoded.explicit_heights.to_vec(),
+        siblings: encoded.siblings,
+    }
+}
+
+/// Encode the proof that `device_tree` commits `account` at the leaf of
+/// `bundle`, with the account's counter and frontier: what an offline release
+/// carries beside each of its device roots.
+pub fn offline_state_proof(
+    device_tree: &SparseMerkleTree,
+    bundle: &[u8; 32],
+    account: &OfflineAccount,
+) -> Result<Vec<u8>, DsmError> {
+    use prost::Message;
+    let path = |tree: &SparseMerkleTree, key: &[u8; 32]| -> Result<SmtPathProto, DsmError> {
+        let proof = tree
+            .get_inclusion_proof(key, FOLD_HEIGHT)
+            .map_err(|e| DsmError::merkle(format!("offline state proof: {e}")))?;
+        let siblings: Box<[[u8; 32]; FOLD_HEIGHT]> = proof
+            .siblings
+            .into_boxed_slice()
+            .try_into()
+            .map_err(|path: Box<[[u8; 32]]>| {
+            DsmError::merkle(format!(
+                "offline state proof: a path of {} siblings, not 256",
+                path.len()
+            ))
+        })?;
+        Ok(path_proto(&siblings))
+    };
+    Ok(crate::types::proto::OfflineStateProof {
+        account_root: account.root().to_vec(),
+        account_leaf: Some(path(device_tree, &offline_account_leaf_key(bundle))?),
+        counter: Some(path(&account.tree, &counter_key())?),
+        frontier: Some(path(&account.tree, &frontier_key())?),
+    }
+    .encode_to_vec())
+}
+
+/// Verify that `device_root` commits the offline account of `bundle` with its
+/// software counter at `counter` and its frontier at `frontier`, by the
+/// encoded `proof`: the account's leaf in the device SMT, and the counter and
+/// frontier leaves in the account's own SMT, all folding to the roots named.
+pub fn verify_offline_state(
+    device_root: &[u8; 32],
+    bundle: &[u8; 32],
+    frontier: &[u8; 32],
+    counter: u64,
+    proof: &[u8],
+) -> Result<(), DsmError> {
+    use prost::Message;
+    let proof = crate::types::proto::OfflineStateProof::decode(proof)
+        .map_err(|e| DsmError::invalid_operation(format!("an offline state proof: {e}")))?;
+    let account_root: [u8; 32] = proof.account_root.as_slice().try_into().map_err(|e| {
+        DsmError::invalid_operation(format!("an offline state proof's account root: {e}"))
+    })?;
+    let missing = || DsmError::invalid_operation("an offline state proof is missing a path");
+    let account_leaf = decode_path(proof.account_leaf.as_ref().ok_or_else(missing)?)?;
+    let counter_path = decode_path(proof.counter.as_ref().ok_or_else(missing)?)?;
+    let frontier_path = decode_path(proof.frontier.as_ref().ok_or_else(missing)?)?;
+    if fold_path::<DeviceSmtHashes>(&counter_key(), Some(&counter_value(counter)), &counter_path)
+        != account_root
+    {
+        return Err(DsmError::invalid_operation(
+            "the offline account does not hold the counter named",
+        ));
+    }
+    if fold_path::<DeviceSmtHashes>(&frontier_key(), Some(frontier), &frontier_path) != account_root
+    {
+        return Err(DsmError::invalid_operation(
+            "the offline account does not hold the frontier named",
+        ));
+    }
+    if fold_path::<DeviceSmtHashes>(
+        &offline_account_leaf_key(bundle),
+        Some(&account_root),
+        &account_leaf,
+    ) != *device_root
+    {
+        return Err(DsmError::invalid_operation(
+            "the device root does not commit this offline account",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

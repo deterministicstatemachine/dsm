@@ -128,18 +128,17 @@ pub struct StitchedReceiptV2 {
 }
 
 /// Which leaf one of a receipt's writes is, and the one witness a verifier
-/// cannot derive: the offline allocation's pre-state preimage (its leaf is an
-/// opaque hash of `(amount, sequence)`). Every other key and value is derived
-/// from inputs the verifier validated independently.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// cannot derive: the offline account an offline-bearer spend drew from, as it
+/// stood before the step. Every other key and value is derived from inputs the
+/// verifier validated independently, and the account after the step is folded
+/// from the witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptLeaf {
     /// The relationship leaf: `parent_tip` before, `child_tip` after.
     Relationship,
-    /// The anchor-state leaf of the pinned bundle: before and after from the
-    /// release's signed counter pair and frontiers.
-    AnchorState,
-    /// The offline allocation leaf, as it stood before the step.
-    OfflineAllocation { pre_amount: u64, pre_sequence: u64 },
+    /// The offline account of the pinned bundle, as it stood before the
+    /// spend.
+    OfflineAccount(Box<crate::types::offline_account::SpendWitness>),
 }
 
 /// One leaf a receipt's step writes: which leaf, and its path against the
@@ -153,19 +152,25 @@ pub struct ReceiptWrite {
 impl ReceiptWrite {
     fn to_proto(&self) -> crate::types::proto::StepWrite {
         use crate::types::proto::{
-            step_write::Leaf, StepWriteAnchorState, StepWriteOfflineAllocation,
-            StepWriteRelationship,
+            step_write::Leaf, SmtPath, StepWriteOfflineAccount, StepWriteRelationship,
         };
         crate::types::proto::StepWrite {
-            leaf: Some(match self.leaf {
+            leaf: Some(match &self.leaf {
                 ReceiptLeaf::Relationship => Leaf::Relationship(StepWriteRelationship {}),
-                ReceiptLeaf::AnchorState => Leaf::AnchorState(StepWriteAnchorState {}),
-                ReceiptLeaf::OfflineAllocation {
-                    pre_amount,
-                    pre_sequence,
-                } => Leaf::OfflineAllocation(StepWriteOfflineAllocation {
-                    pre_amount,
-                    pre_sequence,
+                ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(StepWriteOfflineAccount {
+                    pre_account_root: w.pre_account_root.to_vec(),
+                    pre_allocation: w.pre_allocation,
+                    pre_counter: w.pre_counter,
+                    pre_frontier: w.pre_frontier.to_vec(),
+                    next_frontier: w.next_frontier.to_vec(),
+                    account_paths: w
+                        .account_paths
+                        .iter()
+                        .map(|p| SmtPath {
+                            heights: p.explicit_heights.to_vec(),
+                            siblings: p.siblings.clone(),
+                        })
+                        .collect(),
                 }),
             }),
             path_heights: self.path.explicit_heights.to_vec(),
@@ -180,11 +185,38 @@ impl ReceiptWrite {
         let leaf = match w.leaf {
             None => return Err(DsmError::invalid_operation("a receipt write names no leaf")),
             Some(Leaf::Relationship(_)) => ReceiptLeaf::Relationship,
-            Some(Leaf::AnchorState(_)) => ReceiptLeaf::AnchorState,
-            Some(Leaf::OfflineAllocation(a)) => ReceiptLeaf::OfflineAllocation {
-                pre_amount: a.pre_amount,
-                pre_sequence: a.pre_sequence,
-            },
+            Some(Leaf::OfflineAccount(a)) => {
+                let fixed = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
+                    bytes.try_into().map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "a receipt's offline account {what}: {e}"
+                        ))
+                    })
+                };
+                let account_paths = a
+                    .account_paths
+                    .into_iter()
+                    .map(|p| {
+                        decode::<DeviceSmtHashes>(&p.heights, &p.siblings).map_err(|e| {
+                            DsmError::invalid_operation(format!(
+                                "a receipt's offline account path: {e}"
+                            ))
+                        })?;
+                        Ok(EncodedPath {
+                            explicit_heights: fixed(&p.heights, "path height set")?,
+                            siblings: p.siblings,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, DsmError>>()?;
+                ReceiptLeaf::OfflineAccount(Box::new(crate::types::offline_account::SpendWitness {
+                    pre_account_root: fixed(&a.pre_account_root, "pre-root")?,
+                    pre_allocation: a.pre_allocation,
+                    pre_counter: a.pre_counter,
+                    pre_frontier: fixed(&a.pre_frontier, "pre-frontier")?,
+                    next_frontier: fixed(&a.next_frontier, "next frontier")?,
+                    account_paths,
+                }))
+            }
         };
         // Only the one canonical encoding of a device-tree path is a path.
         decode::<DeviceSmtHashes>(&w.path_heights, &w.path_siblings)
@@ -589,8 +621,8 @@ impl StitchedReceiptV2 {
     /// producer. It proves the step's whole write set: every leaf the advance
     /// wrote, each with its path against the step's pre-root
     /// ([`AdvanceOutcome::transition`]). `bearer` is present exactly for the
-    /// author's own offline-bearer spend: its anchor-state leaves under its
-    /// pinned bundle, as the step's release names them.
+    /// author's own offline-bearer spend: its pinned bundle and the counter and
+    /// frontiers the step's release names.
     ///
     /// Refused when the step writes a leaf no receipt names, or when the
     /// receipt fails
@@ -607,13 +639,10 @@ impl StitchedReceiptV2 {
         bearer: Option<crate::verification::receipt_verification::BearerLeaves>,
         device_tree_commitment: &DeviceTreeAcceptanceCommitment,
     ) -> Result<Self, DsmError> {
-        use crate::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
 
         let relationship_key = compute_smt_key(&devid_a, &devid_b);
-        let anchor_key = bearer.map(|b| anchor_state_leaf_key(&b.bundle));
-        let step_writes = outcome
-            .transition
-            .receipt_writes(&relationship_key, anchor_key.as_ref())?;
+        let step_writes = outcome.transition.receipt_writes(&relationship_key)?;
         let (parent_tip, child_tip) = outcome.relationship_pair();
         let dev_proof = crate::common::device_tree::DeviceTree::single(devid_a)
             .proof(&devid_a)

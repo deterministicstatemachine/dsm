@@ -156,8 +156,8 @@ impl Certificate {
 
 impl pb::OfflineRelease {
     pub fn to_release(&self) -> Result<OfflineRelease, ProtoError> {
-        bounded(&self.anchor_smt_proof_before, MAX_LEAF_PROOF)?;
-        bounded(&self.anchor_smt_proof_after, MAX_LEAF_PROOF)?;
+        bounded(&self.offline_state_proof_before, MAX_LEAF_PROOF)?;
+        bounded(&self.offline_state_proof_after, MAX_LEAF_PROOF)?;
         if self.branch_proof.len() > MAX_BRANCH_PROOF {
             return Err(ProtoError::BadLength);
         }
@@ -177,8 +177,8 @@ impl pb::OfflineRelease {
         }
         Ok(OfflineRelease {
             transition,
-            anchor_smt_proof_before: self.anchor_smt_proof_before.clone(),
-            anchor_smt_proof_after: self.anchor_smt_proof_after.clone(),
+            offline_state_proof_before: self.offline_state_proof_before.clone(),
+            offline_state_proof_after: self.offline_state_proof_after.clone(),
             cert,
             branch_proof,
         })
@@ -189,8 +189,8 @@ impl OfflineRelease {
     pub fn to_pb(&self) -> pb::OfflineRelease {
         pb::OfflineRelease {
             transition: Some(self.transition.to_pb()),
-            anchor_smt_proof_before: self.anchor_smt_proof_before.clone(),
-            anchor_smt_proof_after: self.anchor_smt_proof_after.clone(),
+            offline_state_proof_before: self.offline_state_proof_before.clone(),
+            offline_state_proof_after: self.offline_state_proof_after.clone(),
             cert: Some(self.cert.to_pb()),
             branch_proof: self.branch_proof.iter().map(|c| c.to_pb()).collect(),
         }

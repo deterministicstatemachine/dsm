@@ -7,29 +7,29 @@
 //! when applying transitions, not from opaque receipt tip hashes alone.
 
 use crate::common::device_tree::DevTreeProof;
-use crate::core::bilateral_transaction_manager::{
-    anchor_state_leaf_key, compute_smt_key, operation_requires_offline_bearer,
-};
+use crate::core::bilateral_transaction_manager::{compute_smt_key, operation_requires_offline_bearer};
 use crate::merkle::batch_fold::{verify_batch, FoldEntry};
 use crate::merkle::smt_path;
 use crate::merkle::sparse_merkle_tree::DeviceSmtHashes;
 use crate::types::device_state::relationship_chain_tip_v2;
 use crate::types::error::DsmError;
-use crate::types::offline_allocation_leaf::{offline_allocation_key, offline_allocation_value};
+use crate::types::offline_account::offline_account_leaf_key;
 use crate::types::operations::Operation;
 use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
 
-/// The anchor-state leaf of the author's own offline-bearer spend, before and
-/// after, as the verifier derived them under the pinned bundle from the
-/// release's signed counter pair and frontiers — never read from the receipt.
+/// What the verifier holds of the author's own offline-bearer spend from the
+/// release it verified, never from the receipt: the pinned bundle, and the
+/// release's signed counter and frontiers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BearerLeaves {
     /// The author's pinned anchor bundle `B`.
     pub bundle: [u8; 32],
-    /// `anchor_state_leaf(B, h_i, u_i)`.
-    pub anchor_before: [u8; 32],
-    /// `anchor_state_leaf(B, h_{i+1}, u_i+1)`.
-    pub anchor_after: [u8; 32],
+    /// The software counter `u_i` the spend started from.
+    pub counter: u64,
+    /// The frontier `h_i` the spend started from.
+    pub frontier: [u8; 32],
+    /// The frontier `h_{i+1}` the spend advanced to.
+    pub next_frontier: [u8; 32],
 }
 
 /// What a verifier holds, independently of the receipt, to derive every leaf
@@ -58,12 +58,13 @@ pub struct ReceiptStateContext<'a> {
 ///   `relationship_chain_tip_v2(k, parent_tip, devid_b, op, e)`.
 /// - The step's writes are exactly the leaves its operation implies, each
 ///   once, ordered by key: the relationship leaf; and for the author's own
-///   offline-bearer spend also the anchor-state leaf of the pinned bundle and
-///   the offline allocation it drew from. Every key and value is derived here
-///   — the relationship's from the tips, the anchor's from [`BearerLeaves`],
-///   the allocation's after-state from its before-state and the operation's
-///   amount. Only the allocation's before-state is a witness, because its leaf
-///   is an opaque hash; it is bound by the fold like every other value.
+///   offline-bearer spend also the leaf of the offline account of the pinned
+///   bundle. Every key and value is derived here — the relationship's from the
+///   tips, the account's after-root by folding the spend (the allocation
+///   debit, the counter step and the frontier's advance) from the account the
+///   receipt states it started from, whose counter and frontiers must be the
+///   release's ([`BearerLeaves`]). Only that starting account is a witness;
+///   it is bound by both folds like every other value.
 /// - Folded together against `parent_root`, the writes are `child_root`: the
 ///   receipt proves the whole move of the author's root, so no leaf it names
 ///   can move differently and no leaf it does not name can move at all.
@@ -141,7 +142,7 @@ pub fn verify_receipt_state(
             ))
         }
     };
-    let expected_count = if bearer.is_some() { 3 } else { 1 };
+    let expected_count = if bearer.is_some() { 2 } else { 1 };
     if receipt.step_writes.len() != expected_count {
         return Err(DsmError::invalid_operation(format!(
             "the step writes {expected_count} leaves; the receipt proves {}",
@@ -149,52 +150,27 @@ pub fn verify_receipt_state(
         )));
     }
 
+    // A leaf named twice derives one key twice, which the key-order check
+    // below refuses.
     let mut entries: Vec<FoldEntry> = Vec::with_capacity(expected_count);
-    let (mut relationship, mut anchor, mut allocation) = (false, false, false);
     for write in &receipt.step_writes {
-        let (key, pre, post) = match (write.leaf, &bearer) {
-            (ReceiptLeaf::Relationship, _) if !relationship => {
-                relationship = true;
-                (rel_key, receipt.parent_tip, receipt.child_tip)
-            }
-            (ReceiptLeaf::AnchorState, Some((_, leaves))) if !anchor => {
-                anchor = true;
-                if leaves.anchor_before == leaves.anchor_after {
+        let (key, pre, post) = match (&write.leaf, &bearer) {
+            (ReceiptLeaf::Relationship, _) => (rel_key, receipt.parent_tip, receipt.child_tip),
+            (ReceiptLeaf::OfflineAccount(witness), Some(((amount, asset), release))) => {
+                // The account the spend started from is the release's: its
+                // counter and both frontiers are the ones the release signed.
+                if witness.pre_counter != release.counter
+                    || witness.pre_frontier != release.frontier
+                    || witness.next_frontier != release.next_frontier
+                {
                     return Err(DsmError::invalid_operation(
-                        "an offline-bearer spend moves its anchor-state leaf",
+                        "the receipt's offline account is not the one its release advances",
                     ));
                 }
                 (
-                    anchor_state_leaf_key(&leaves.bundle),
-                    leaves.anchor_before,
-                    leaves.anchor_after,
-                )
-            }
-            (
-                ReceiptLeaf::OfflineAllocation {
-                    pre_amount,
-                    pre_sequence,
-                },
-                Some(((amount, asset), leaves)),
-            ) if !allocation => {
-                allocation = true;
-                let post_amount = pre_amount.checked_sub(*amount).ok_or_else(|| {
-                    DsmError::invalid_operation(
-                        "the offline allocation holds less than the operation spends",
-                    )
-                })?;
-                let post_sequence = pre_sequence.checked_add(1).ok_or_else(|| {
-                    DsmError::invalid_operation("the offline allocation's sequence overflows")
-                })?;
-                (
-                    offline_allocation_key(
-                        &ctx.author_genesis,
-                        &receipt.devid_a,
-                        &leaves.bundle,
-                        asset,
-                    ),
-                    offline_allocation_value(pre_amount, pre_sequence),
-                    offline_allocation_value(post_amount, post_sequence),
+                    offline_account_leaf_key(&release.bundle),
+                    witness.pre_account_root,
+                    witness.post_account_root(asset, *amount)?,
                 )
             }
             (leaf, _) => {
@@ -422,7 +398,15 @@ mod tests {
             };
         });
         refused("a write naming another leaf", &|r| {
-            r.step_writes[0].leaf = ReceiptLeaf::AnchorState
+            r.step_writes[0].leaf =
+                ReceiptLeaf::OfflineAccount(Box::new(crate::types::offline_account::SpendWitness {
+                    pre_account_root: w.fork.receipt.parent_root,
+                    pre_allocation: 1,
+                    pre_counter: 0,
+                    pre_frontier: w.fork.receipt.parent_tip,
+                    next_frontier: w.fork.receipt.child_tip,
+                    account_paths: Vec::new(),
+                }))
         });
         refused("a write too many", &|r| {
             let again = r.step_writes[0].clone();
@@ -461,13 +445,14 @@ mod tests {
             with(ReceiptStateContext {
                 bearer: Some(BearerLeaves {
                     bundle: w.fork.receipt.child_root,
-                    anchor_before: w.fork.receipt.parent_tip,
-                    anchor_after: w.fork.receipt.child_tip,
+                    counter: 0,
+                    frontier: w.fork.receipt.parent_tip,
+                    next_frontier: w.fork.receipt.child_tip,
                 }),
                 ..context
             })
             .is_err(),
-            "anchor-state leaves for a step that moves none"
+            "an offline account for a step that moves none"
         );
         let other_tree = w.receiver.device_tree_commitment();
         assert!(

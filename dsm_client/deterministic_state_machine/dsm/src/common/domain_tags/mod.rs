@@ -196,7 +196,7 @@ mod tests {
     // +6 with key schedule KS1 (Extract-then-Expand): the three Extract salts
     // and twelve Expand / keyed labels replace the six v2 key-tree tags,
     // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
-    const EXPECTED_TAG_COUNT: usize = 412;
+    const EXPECTED_TAG_COUNT: usize = 410;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

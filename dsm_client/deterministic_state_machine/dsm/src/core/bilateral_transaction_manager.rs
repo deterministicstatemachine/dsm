@@ -23,10 +23,7 @@ use crate::types::device_state::BalanceDelta;
 use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::core::utility::labeling;
-use crate::common::domain_tags::{
-    TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_FUSED_ANCHOR_STATE_LEAF, TAG_SMT_KEY,
-    TAG_TIP,
-};
+use crate::common::domain_tags::{TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_SMT_KEY, TAG_TIP};
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
 /// Per whitepaper §16.6: "For each {i,j} ∈ Rel there exists a forward-only chain C_{i,j}"
@@ -139,60 +136,6 @@ pub fn compute_successor_tip(
     bytes32(h.finalize().as_bytes())
 }
 
-/// SMT key of the single per-device anchor-state leaf: `H("DSM/fused-anchor-state-leaf/v1" ‖ B)`.
-///
-/// One stable key per device (the fused anchor is device-level — one appliance, one counter),
-/// bound to the immutable anchor bundle `B`. Its VALUE is the current v2 anchor-state leaf
-/// `anchor_state_leaf(B, h_i, u_i)` (computed by the anchor-core-holding caller), bootstrapped
-/// when the anchor is attached and replaced old→successor on every bearer transfer's device-SMT
-/// advance. So `R_i` proves `key → L_i` and `R_{i+1}` proves the same `key → L_{i+1}`. Never
-/// keyed by relationship id, root, frontier, or counter.
-pub fn anchor_state_leaf_key(bundle: &[u8; 32]) -> [u8; 32] {
-    let mut h = dsm_domain_hasher(TAG_FUSED_ANCHOR_STATE_LEAF);
-    h.update(bundle);
-    bytes32(h.finalize().as_bytes())
-}
-
-/// Receiver-side (v2 Software-Authority): verify that `device_root` (`R_i`/`R_{i+1}`) commits the
-/// given anchor-state leaf VALUE `leaf` — the anchor-core v2 leaf `anchor_state_leaf(B, h_i, u_i)`
-/// the acceptance predicate already computed — at the stable per-device key `anchor_state_leaf_key(B)`,
-/// via the release's carried SMT inclusion `proof`. Value-agnostic (dsm never recomputes the v2 leaf,
-/// so it needs no anchor-core dep). Fail-closed on any mismatch (wrong key/value/root) or an empty
-/// proof — so a release with no attached `Π` routes to online recovery.
-pub fn verify_anchor_state_leaf(
-    device_root: &[u8; 32],
-    bundle: &[u8; 32],
-    leaf: &[u8; 32],
-    proof_bytes: &[u8],
-) -> bool {
-    use crate::merkle::sparse_merkle_tree::{SmtInclusionProof, SparseMerkleTree};
-    let key = anchor_state_leaf_key(bundle);
-    let Some(proof) = SmtInclusionProof::from_bytes(proof_bytes) else {
-        return false;
-    };
-    proof.key == key
-        && proof.value == Some(*leaf)
-        && SparseMerkleTree::verify_proof_against_root(&proof, device_root)
-}
-
-/// Producer-side (v2): set the per-device anchor-state leaf to the given VALUE `leaf` (the anchor-core
-/// v2 leaf `anchor_state_leaf(B, h_i, u_i)`, computed by the caller — the SDK has anchor-core) at the
-/// stable per-device key, and return its inclusion proof against the resulting device root. So the
-/// returned proof binds the same root the transfer commits; the receiver checks it with
-/// [`verify_anchor_state_leaf`].
-pub fn set_anchor_state_leaf_value(
-    smt: &mut crate::merkle::sparse_merkle_tree::SparseMerkleTree,
-    bundle: &[u8; 32],
-    leaf: &[u8; 32],
-) -> Result<Vec<u8>, DsmError> {
-    let key = anchor_state_leaf_key(bundle);
-    smt.update_leaf(&key, leaf);
-    let proof = smt
-        .get_inclusion_proof(&key, 256)
-        .map_err(|e| DsmError::invalid_operation(format!("anchor-state proof: {e}")))?;
-    Ok(proof.to_bytes())
-}
-
 /// The bytes the proposer's signature σ_A over the step `commitment_hash`
 /// covers.
 pub fn bilateral_sign_message(commitment_hash: &[u8; 32]) -> Vec<u8> {
@@ -293,16 +236,12 @@ pub struct PreparedBilateralAdvance {
     /// Bilateral precommitment hash, for post-commit cleanup via
     /// [`BilateralTransactionManager::consume_pre_commitment`].
     pub pre_commitment_hash: [u8; 32],
-    /// Offline-bearer fused-anchor-state leaf update to commit atomically with the relationship
-    /// leaf (Software-Authority / Hardware-Identity). `Some` iff this is a bearer transfer whose sender drove the
-    /// appliance; the SAME value the sender's `simulate_advance_for_confirm` used to build the wire
-    /// proofs, so the canonical committed root matches (both-or-neither). `None` for ordinary transfers.
-    pub anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
-    /// Offline-cash allocation debit for an offline-bearer transfer: the value is drawn from the
-    /// device-bound allocation instead of the online balance, so `deltas` is empty and this is `Some`.
-    /// Carried forward from the confirm-build seam (stashed on the session) — NEVER reconstructed
-    /// from `anchor_leaf`, whose key is `H(B)` and cannot recover the bundle. Threaded identically
-    /// into the determinism-guard sim and the canonical commit so all three sender roots byte-match.
+    /// The offline-account spend of an offline-bearer transfer: the value is drawn from the
+    /// account's allocation instead of the online balance, so `deltas` is empty and this is
+    /// `Some`; the counter and frontier move with it. Carried forward from the confirm-build seam
+    /// (stashed on the session), with the frontier the sender's appliance staged. Threaded
+    /// identically into the determinism-guard sim and the canonical commit so all three sender
+    /// roots byte-match.
     pub offline_spend: Option<crate::types::device_state::OfflineSpend>,
 }
 
@@ -766,7 +705,6 @@ impl BilateralTransactionManager {
         pre_commitment_hash: &[u8; 32],
         acceptance: ReceiverAcceptance<'_>,
         sender_deltas: Vec<BalanceDelta>,
-        anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<PreparedBilateralAdvance, DsmError> {
         info!("prepare_bilateral_advance: tripwire (no SMT/anchor mutation)");
@@ -859,7 +797,6 @@ impl BilateralTransactionManager {
             deltas: sender_deltas,
             parent_tip: anchor.chain_tip,
             pre_commitment_hash: *pre_commitment_hash,
-            anchor_leaf,
             offline_spend,
         })
     }
@@ -934,78 +871,6 @@ mod tests {
             bytes32(h.finalize().as_bytes())
         };
         assert_eq!(base, explicit);
-    }
-
-    #[test]
-    fn anchor_state_leaf_inclusion_round_trips_and_rejects_tamper() {
-        use crate::merkle::sparse_merkle_tree::SparseMerkleTree;
-        let b = [0xB1u8; 32];
-        // Opaque v2 anchor-state leaf VALUES (anchor-core computes the real ones).
-        let leaf0 = [0xC0u8; 32];
-        let leaf1 = [0xC1u8; 32];
-
-        let mut smt = SparseMerkleTree::new();
-        // Bootstrap leaf_0, then the "parent" proof against prev_root.
-        let parent_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf0).expect("set0");
-        let prev_root = *smt.root();
-        assert!(verify_anchor_state_leaf(
-            &prev_root,
-            &b,
-            &leaf0,
-            &parent_proof
-        ));
-
-        // Advance the leaf to the successor leaf_1; "child" proof vs next_root.
-        let child_proof = set_anchor_state_leaf_value(&mut smt, &b, &leaf1).expect("set1");
-        let next_root = *smt.root();
-        assert!(verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf1,
-            &child_proof
-        ));
-
-        // Fail-closed rejections:
-        // wrong leaf value under next_root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf0,
-            &child_proof
-        ));
-        // right value but wrong root (child proof does not verify under prev_root).
-        assert!(!verify_anchor_state_leaf(
-            &prev_root,
-            &b,
-            &leaf1,
-            &child_proof
-        ));
-        // parent (old) state is NOT committed by next_root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &b,
-            &leaf0,
-            &parent_proof
-        ));
-        // wrong bundle (wrong leaf KEY) rejects even with the right value + root.
-        assert!(!verify_anchor_state_leaf(
-            &next_root,
-            &[9u8; 32],
-            &leaf1,
-            &child_proof
-        ));
-        // an empty proof rejects (a release with no attached proof routes online).
-        assert!(!verify_anchor_state_leaf(&next_root, &b, &leaf1, &[]));
-    }
-
-    #[test]
-    fn anchor_state_leaf_key_is_stable_per_bundle() {
-        let b = [1u8; 32];
-        let k = anchor_state_leaf_key(&b);
-        // One stable key per device bundle (value changes, key does not).
-        assert_eq!(k, anchor_state_leaf_key(&b));
-        // Different bundle -> different key.
-        assert_ne!(k, anchor_state_leaf_key(&[2u8; 32]));
     }
 
     /// `h_0` and a step precommitment are hashed under different registered

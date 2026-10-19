@@ -474,7 +474,7 @@ impl EconomicActivationSnapshot {
         }
         Ok(Self {
             online_balances_empty: held.is_empty(),
-            outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+            outstanding_offline_allocation: head.holds_offline_value(),
         })
     }
 }

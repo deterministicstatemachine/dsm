@@ -994,17 +994,21 @@ fn head_of(
         balances.iter().copied().collect(),
         Vec::new(),
         std::collections::BTreeMap::new(),
-        allocations
-            .iter()
-            .map(|(key, amount)| {
+        // Any allocation is held in one offline account, as a load leaves it.
+        Some(allocations)
+            .filter(|held| !held.is_empty())
+            .map(|held| {
                 (
-                    *key,
-                    dsm::types::device_state::OfflineAllocation {
-                        amount: *amount,
-                        sequence: 1,
-                    },
+                    [0xB0; 32],
+                    dsm::types::offline_account::OfflineAccount::restore(
+                        held.iter().copied().collect(),
+                        0,
+                        [0x01; 32],
+                        Some([0x0F; 32]),
+                    ),
                 )
             })
+            .into_iter()
             .collect(),
         pending,
     )
@@ -1031,7 +1035,7 @@ fn a_held_first_admission_resumes_on_the_activation_root() {
 
     let as_it_stands = EconomicActivationSnapshot {
         online_balances_empty: head.balances_snapshot().is_empty(),
-        outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+        outstanding_offline_allocation: head.holds_offline_value(),
     };
     activate(as_it_stands).expect_err("the head as it stands carries the held credit");
 

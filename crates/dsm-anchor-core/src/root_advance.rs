@@ -109,12 +109,6 @@ pub fn anchor_root_advance(prev_frontier: &[u8; 32], d: &[u8; 32]) -> [u8; 32] {
     h(domain::ANCHOR_ROOT_ADVANCE_V2, &[prev_frontier, d])
 }
 
-/// Anchor-state leaf `L_i = H("DSM/anchor-state/v2" ‖ B ‖ h_i ‖ le64(u_i))`, committed
-/// inside the device SMT root `R_i`. The receiver's SMT inclusion proof `Π_i` proves this.
-pub fn anchor_state_leaf(bundle: &[u8; 32], frontier: &[u8; 32], u: u64) -> [u8; 32] {
-    h(domain::ANCHOR_STATE_V2, &[bundle, frontier, &u64_le(u)])
-}
-
 /// Root-advance message `M_{i+1}` (§10). Binds both device SMT roots `R_i`/`R_{i+1}`, both
 /// frontier roots `h_i`/`h_{i+1}`, the counter pair, the digest, the recipient, and the
 /// challenge. All three release signatures cover this exact message.
@@ -240,16 +234,17 @@ pub struct Certificate {
 }
 
 /// The exported release package `Pkg = (Δ, Π_i, Π_{i+1}, Cert, BranchProof[optional])`
-/// (§10, Def. 9). `anchor_smt_proof_*` are the device-SMT inclusion proofs for the
-/// anchor-state leaf in `R_i` / `R_{i+1}`, verified by the receiver's `DsmVerifier`
-/// (the appliance carries them as opaque bytes). `branch_proof` is an ordered list of
+/// (§10, Def. 9). `offline_state_proof_*` prove that `R_i` / `R_{i+1}` commit the sender's
+/// offline account at the release's frontier and counter: the account's leaf in the device
+/// SMT, and the counter and frontier leaves in the account's own SMT. The receiver's
+/// `DsmVerifier` checks them (the appliance carries them as opaque bytes). `branch_proof` is an ordered list of
 /// prior certificates for frontier catch-up (Def. 10); empty for a direct-from-frontier
 /// release.
 #[derive(Clone)]
 pub struct OfflineRelease {
     pub transition: OwnedTransition,
-    pub anchor_smt_proof_before: Vec<u8>,
-    pub anchor_smt_proof_after: Vec<u8>,
+    pub offline_state_proof_before: Vec<u8>,
+    pub offline_state_proof_after: Vec<u8>,
     pub cert: Certificate,
     pub branch_proof: Vec<Certificate>,
 }

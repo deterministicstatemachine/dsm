@@ -284,8 +284,8 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
         let release = OfflineRelease {
             transition: p.txn.clone(),
-            anchor_smt_proof_before: Vec::new(),
-            anchor_smt_proof_after: Vec::new(),
+            offline_state_proof_before: Vec::new(),
+            offline_state_proof_after: Vec::new(),
             cert: p.cert.clone(),
             branch_proof: Vec::new(),
         };

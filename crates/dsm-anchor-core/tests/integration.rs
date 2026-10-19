@@ -108,7 +108,14 @@ impl Dsm {
     }
 }
 impl DsmVerifier for Dsm {
-    fn verify_smt_leaf(&self, _r: &[u8; 32], _p: &[u8], _l: &[u8; 32]) -> bool {
+    fn verify_offline_state(
+        &self,
+        _r: &[u8; 32],
+        _b: &[u8; 32],
+        _f: &[u8; 32],
+        _u: u64,
+        _p: &[u8],
+    ) -> bool {
         self.smt_ok
     }
     fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
