@@ -20,8 +20,9 @@
 //!    ([`anchor_glue::service_request`] → `anchor_core::service::dispatch`) — `σ^chip` on the
 //!    TROPIC01 die, `σ^host` via `dsm-sphincs`. The protocol state machine is NOT reimplemented here;
 //!    it is `anchor_core`, the same crate the `dsm-anchor-pico` binary drives.
-//!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, the appliance stays
-//!    uninitialized and every authority op is refused (`SG_ERR_INTERNAL`).
+//!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
+//!    outcome the appliance may not serve from, the appliance stays uninitialized and every
+//!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.
 //!  * Standalone crypto self-test + NS-launch/measurement bring-up proofs are retained behind the
 //!    (default-OFF) `SIGMA_CHIP_SELFTEST` / `BRINGUP_NS_LAUNCH_PROOF` flags for silicon triage.
 
@@ -345,12 +346,35 @@ extern "C" {
 }
 
 /// Secure reset heartbeat, at a fixed symbol in Secure SRAM (resolve via `nm`). The unlocked-board
-/// bringup reads it to confirm the Secure reset path executed from SRAM (word 0 == the sentinel and
-/// word 1 incrementing means the bootrom copied the image and entered the SRAM monitor). Not an
-/// authority signal — purely a boot-liveness probe removed once the NS launch (step 5) lands.
+/// bringup reads it to confirm the Secure reset path executed from SRAM: word 0 == the sentinel
+/// means the bootrom copied the image and entered the SRAM monitor; word 1 is the appliance
+/// bring-up result (`HEARTBEAT_APPLIANCE_INSTALLED`, or the `anchor_glue::InitStage` at which
+/// `anchor_glue::init` refused; 0 = not reached). Not an authority signal — purely a boot-liveness
+/// probe removed once the NS launch (step 5) lands.
 #[no_mangle]
 pub static mut DSM_SECURE_HEARTBEAT: [u32; 2] = [0; 2];
 const HEARTBEAT_SENTINEL: u32 = 0x4453_4d31; // "DSM1"
+/// `DSM_SECURE_HEARTBEAT[1]` once `anchor_glue::init` installed the appliance; any other non-zero
+/// value is the `anchor_glue::InitStage` at which it refused.
+const HEARTBEAT_APPLIANCE_INSTALLED: u32 = 1;
+
+/// Bring-up triage beside the heartbeat: when `anchor_glue::init` refuses, the `Debug` rendering
+/// of its `InitFailure` (stage and the cause that stage reported), truncated to fit. Untouched
+/// when the appliance is installed. Not an authority signal.
+#[no_mangle]
+pub static mut DSM_SECURE_INIT_CAUSE: [u8; INIT_CAUSE_LEN] = [0; INIT_CAUSE_LEN];
+const INIT_CAUSE_LEN: usize = 96;
+
+/// Copy `failure`'s rendering into [`DSM_SECURE_INIT_CAUSE`].
+///
+/// SAFETY: single-threaded reset context, before the Non-secure launch.
+unsafe fn record_init_cause(failure: &anchor_glue::InitFailure) {
+    let text = alloc::format!("{failure:?}");
+    let cause = core::ptr::addr_of_mut!(DSM_SECURE_INIT_CAUSE);
+    for (i, byte) in text.bytes().take(INIT_CAUSE_LEN).enumerate() {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*cause)[i]), byte);
+    }
+}
 
 // ── Reset entry (placeholder until step 5 SAU init + step 7 measured loader) ──────────────────
 #[hal::entry]
@@ -413,12 +437,20 @@ fn main() -> ! {
     // Step 7: build the REAL appliance (TROPIC01 σ^chip + BLAKE3-SPHINCS+ σ^host, resident chip key,
     // one-way birth fuse) BEFORE the boundary is locked and NS launched, so the Secure-only SPI0/
     // TROPIC bring-up runs while the monitor still owns everything. Fail-closed: a chip/session/
-    // enroll failure leaves the appliance uninitialized and every authority op refuses (the SG
-    // handler returns SG_ERR_INTERNAL). Record readiness in heartbeat[1] for bring-up triage.
-    let app_ready = unsafe { anchor_glue::init() };
+    // enroll failure, or a §26 recovery the appliance may not serve from, leaves the appliance
+    // uninitialized and every authority op refuses (the SG handler returns SG_ERR_INTERNAL).
+    // Record the result in heartbeat[1] for bring-up triage: 1 = installed, otherwise the
+    // failing `anchor_glue::InitStage` discriminant, with the cause in DSM_SECURE_INIT_CAUSE.
+    let init_word = match unsafe { anchor_glue::init() } {
+        Ok(()) => HEARTBEAT_APPLIANCE_INSTALLED,
+        Err(failure) => {
+            unsafe { record_init_cause(&failure) };
+            failure.stage() as u32
+        }
+    };
     unsafe {
         let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), app_ready as u32);
+        core::ptr::write_volatile(core::ptr::addr_of_mut!((*hb)[1]), init_word);
     }
 
     // BENCH ONLY (feature `bench_self_enroll`, never production): enroll the measurement digest from
