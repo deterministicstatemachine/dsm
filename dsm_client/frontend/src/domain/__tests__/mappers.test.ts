@@ -5,6 +5,7 @@ import {
 } from '../mappers';
 import { TokenMove, TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
 import { toBase32Crockford } from '../../dsm/decoding';
+import { deviceFingerprint } from '../displayName';
 
 describe('domain mappers', () => {
   describe('mapContactList', () => {
@@ -66,6 +67,24 @@ describe('domain mappers', () => {
           receiptVerified: false,
         },
       ]);
+    });
+
+    // Audit 2026-10-18, SA-159: Rust labels the counterparty by the contact's
+    // alias, and history shows it as every name is shown.
+    it('shows the counterparty label without what renders as nothing, and by device when nothing else is left', () => {
+      const HANGUL_FILLER = '\u3164';
+      const RLO = '\u202E';
+      const [padded, overridden, blankOut, blankIn] = mapTransactions([
+        row({ recipient: `alice${HANGUL_FILLER}` }),
+        row({ recipient: `${RLO}ecila` }),
+        row({ recipient: `${HANGUL_FILLER}\uFFA0`, amountSigned: -500n }),
+        row({ recipient: `${HANGUL_FILLER}\uFFA0`, amountSigned: 500n, displayAmount: '5.00' }),
+      ]);
+      expect(padded.recipient).toBe('alice');
+      expect(overridden.recipient).toBe('ecila');
+      // Outgoing, the counterparty is the recipient; incoming, the sender.
+      expect(blankOut.recipient).toBe(deviceFingerprint(toBase32Crockford(b(0x22))));
+      expect(blankIn.recipient).toBe(deviceFingerprint(toBase32Crockford(b(0x11))));
     });
 
     it('names the transport of a transfer and none for a dBTC row', () => {
