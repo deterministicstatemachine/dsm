@@ -70,14 +70,79 @@ impl Drop for InFlight {
     }
 }
 
+/// The peer a connection is counted against for its share of the node's
+/// connections: an IPv4 address, or the /64 an IPv6 address is in, since one
+/// IPv6 host is handed a whole /64 and picks any address in it. An IPv4
+/// address carried in IPv6 (a dual-stack listener) is that IPv4 address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Peer {
+    V4(std::net::Ipv4Addr),
+    V6Prefix([u8; 8]),
+}
+
+impl Peer {
+    pub fn of(address: std::net::IpAddr) -> Self {
+        match address {
+            std::net::IpAddr::V4(v4) => Self::V4(v4),
+            std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => Self::V4(v4),
+                None => {
+                    let mut prefix = [0u8; 8];
+                    prefix.copy_from_slice(&v6.octets()[..8]);
+                    Self::V6Prefix(prefix)
+                }
+            },
+        }
+    }
+}
+
+/// A stream whose remote end the node can name, so the connection counts
+/// against that peer's share.
+pub trait PeerAddressed {
+    fn peer(&self) -> io::Result<Peer>;
+}
+
+impl PeerAddressed for tokio::net::TcpStream {
+    fn peer(&self) -> io::Result<Peer> {
+        Ok(Peer::of(self.peer_addr()?.ip()))
+    }
+}
+
+/// The connections each peer holds open. A peer's count is gone once its
+/// last connection closes.
+type PeerCounts = Arc<std::sync::Mutex<std::collections::HashMap<Peer, usize>>>;
+
+/// One connection's place in its peer's share, given back when the
+/// connection closes.
+struct PeerShare {
+    peers: PeerCounts,
+    peer: Peer,
+}
+
+impl Drop for PeerShare {
+    fn drop(&mut self) {
+        let mut held = LiveConnections::counts(&self.peers);
+        if let Some(count) = held.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                held.remove(&self.peer);
+            }
+        }
+    }
+}
+
 /// Holds at most [`crate::ConnectionBounds::max_open`] connections open at
-/// once, and keeps each one's liveness bounds. It runs before the TLS
-/// handshake, so a connection over the bound costs the node an accept and
-/// nothing more: it is closed at once, and its client meets what it meets at
-/// a node that is unavailable.
+/// once, at most [`crate::ConnectionBounds::max_per_peer`] of them from any
+/// one peer ([`Peer`]), and keeps each one's liveness bounds. It runs before
+/// the TLS handshake, so a connection over either bound costs the node an
+/// accept and nothing more: it is closed at once, and its client meets what
+/// it meets at a node that is unavailable. A peer holding its whole share
+/// leaves the rest of the node's connections to everyone else.
 #[derive(Clone)]
 pub struct LiveConnections {
     open: Arc<tokio::sync::Semaphore>,
+    peers: PeerCounts,
+    max_per_peer: usize,
     idle: Duration,
     write_stall: Duration,
 }
@@ -86,49 +151,89 @@ impl LiveConnections {
     pub fn new(bounds: &crate::ConnectionBounds) -> Self {
         Self {
             open: Arc::new(tokio::sync::Semaphore::new(bounds.max_open)),
+            peers: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            max_per_peer: bounds.max_per_peer,
             idle: bounds.idle,
             write_stall: bounds.write_stall,
         }
     }
+
+    /// The per-peer counts. A panic while they were held leaves every count
+    /// whole (each is one integer written in place), so they are read as
+    /// they stand.
+    fn counts(
+        peers: &std::sync::Mutex<std::collections::HashMap<Peer, usize>>,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<Peer, usize>> {
+        match peers.lock() {
+            Ok(counts) => counts,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// A place among the node's connections and in `peer`'s share, or why
+    /// there is none.
+    fn admit(&self, peer: Peer) -> io::Result<(tokio::sync::OwnedSemaphorePermit, PeerShare)> {
+        let mut held = Self::counts(&self.peers);
+        if let Some(count) = held.get(&peer).filter(|n| **n >= self.max_per_peer) {
+            return Err(io::Error::other(format!(
+                "{peer:?} holds as many connections as one peer may: {count}"
+            )));
+        }
+        let open = self.open.clone().try_acquire_owned().map_err(|full| {
+            io::Error::other(format!(
+                "the node holds as many connections as it may: {full}"
+            ))
+        })?;
+        *held.entry(peer).or_insert(0) += 1;
+        Ok((
+            open,
+            PeerShare {
+                peers: self.peers.clone(),
+                peer,
+            },
+        ))
+    }
 }
 
-impl<I, S> axum_server::accept::Accept<I, S> for LiveConnections {
+impl<I: PeerAddressed, S> axum_server::accept::Accept<I, S> for LiveConnections {
     type Stream = LiveConnection<I>;
     type Service = Counted<S>;
     type Future = std::future::Ready<io::Result<(LiveConnection<I>, Counted<S>)>>;
 
     fn accept(&self, stream: I, service: S) -> Self::Future {
-        std::future::ready(match self.open.clone().try_acquire_owned() {
-            Ok(open) => {
-                let connection = Arc::new(ConnectionUse::default());
-                Ok((
-                    LiveConnection {
-                        stream,
-                        _open: open,
-                        connection: connection.clone(),
-                        idle: self.idle,
-                        write_stall: self.write_stall,
-                        idle_timer: None,
-                        write_timer: None,
-                    },
-                    Counted {
-                        inner: service,
-                        connection,
-                    },
-                ))
-            }
-            Err(full) => Err(io::Error::other(format!(
-                "the node holds as many connections as it may: {full}"
-            ))),
-        })
+        std::future::ready(
+            stream
+                .peer()
+                .and_then(|peer| self.admit(peer))
+                .map(|(open, share)| {
+                    let connection = Arc::new(ConnectionUse::default());
+                    (
+                        LiveConnection {
+                            stream,
+                            _open: open,
+                            _share: share,
+                            connection: connection.clone(),
+                            idle: self.idle,
+                            write_stall: self.write_stall,
+                            idle_timer: None,
+                            write_timer: None,
+                        },
+                        Counted {
+                            inner: service,
+                            connection,
+                        },
+                    )
+                }),
+        )
     }
 }
 
-/// A connection, counted against the node's bound for as long as it is open,
-/// and closed when it sits idle or a response's write stalls.
+/// A connection, counted against the node's bound and its peer's share for
+/// as long as it is open, and closed when it sits idle or a response's write stalls.
 pub struct LiveConnection<S> {
     stream: S,
     _open: tokio::sync::OwnedSemaphorePermit,
+    _share: PeerShare,
     connection: Arc<ConnectionUse>,
     idle: Duration,
     write_stall: Duration,
@@ -436,5 +541,41 @@ where
 
     fn call(&mut self, request: axum::http::Request<B>) -> Self::Future {
         self.inner.call(request.map(MinRateBody::new))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Peer;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    /// An IPv4 peer is its address, carried in IPv6 or not; an IPv6 peer is
+    /// its /64, so the addresses one host picks from its prefix share one
+    /// count, and another /64 is another peer.
+    #[test]
+    fn a_peer_is_its_ipv4_address_or_its_ipv6_64() {
+        let v4 = Ipv4Addr::new(203, 0, 113, 7);
+        assert_eq!(Peer::of(IpAddr::V4(v4)), Peer::V4(v4));
+        assert_eq!(
+            Peer::of(IpAddr::V6(v4.to_ipv6_mapped())),
+            Peer::V4(v4),
+            "an IPv4 address on a dual-stack listener is that IPv4 peer"
+        );
+        assert_ne!(
+            Peer::of(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 8))),
+            Peer::V4(v4)
+        );
+
+        let host = |last: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, last));
+        assert_eq!(
+            Peer::of(host(1)),
+            Peer::of(host(0xffff)),
+            "two addresses in one /64 are one peer"
+        );
+        assert_ne!(
+            Peer::of(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1))),
+            Peer::of(host(1)),
+            "another /64 is another peer"
+        );
     }
 }

@@ -29,6 +29,39 @@ use dsm::storage_cell::{leaf_key, leaf_value, ByteCommit};
 /// A node keeps the trees of at most this many closed cycles.
 pub const KEPT_CYCLES: usize = 64;
 
+/// Proofs that hold or wait for the node's one tree build at once
+/// ([`CommittedCells::hold_tree_build`]). A proof's cycle may be any the node
+/// ever closed, and a tree that is not kept is built over every cell the
+/// store committed by then, so anyone can make the node build one after
+/// another; a proof waiting its turn holds a slot under the node's
+/// concurrency limit. Past these, a proof that needs a build is answered at
+/// once that the node is busy, as an unavailable node answers, and the
+/// node's other requests keep their slots.
+pub const TREE_BUILDS_QUEUED: usize = 4;
+
+/// A proof needed a tree build while [`TREE_BUILDS_QUEUED`] proofs already
+/// held or waited for one.
+#[derive(Debug)]
+pub struct TreeBuildsFull;
+
+impl std::fmt::Display for TreeBuildsFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{TREE_BUILDS_QUEUED} proofs already hold or wait for the node's tree build"
+        )
+    }
+}
+
+impl std::error::Error for TreeBuildsFull {}
+
+/// A proof's turn at the node's one tree build: its place among
+/// [`TREE_BUILDS_QUEUED`] and the build itself, both given back when it ends.
+pub struct TreeBuild<'a> {
+    _queued: tokio::sync::SemaphorePermit<'a>,
+    _build: tokio::sync::MutexGuard<'a, ()>,
+}
+
 /// A node's kept trees hold at most this many leaves between them; the
 /// newest cycle's tree is kept whatever its size. At about 250 bytes a leaf
 /// this bounds them to a few hundred megabytes on the largest store.
@@ -48,10 +81,13 @@ pub struct CommittedCells {
     /// connection and cannot starve every other request of the pool. It
     /// guards the leaf set as of the last cycle this process saw close, when
     /// it holds one.
-    pub(crate) closer: tokio::sync::Mutex<Option<CommittedLeaves>>,
+    pub(crate) closer: tokio::sync::Mutex<Option<Arc<CommittedLeaves>>>,
     /// Held while a proof builds the tree of a cycle that is not kept
     /// ([`CommittedCells::hold_tree_build`]).
     tree_build: tokio::sync::Mutex<()>,
+    /// The proofs holding or waiting for `tree_build`, at most
+    /// [`TREE_BUILDS_QUEUED`].
+    tree_builds_queued: tokio::sync::Semaphore,
     /// Recently closed cycles' trees, by cycle, each with the digest of the
     /// ByteCommit whose root it is.
     trees: Mutex<KeptTrees>,
@@ -76,6 +112,7 @@ impl CommittedCells {
         Self {
             closer: tokio::sync::Mutex::new(None),
             tree_build: tokio::sync::Mutex::new(()),
+            tree_builds_queued: tokio::sync::Semaphore::new(TREE_BUILDS_QUEUED),
             trees: Mutex::new(BTreeMap::new()),
             kept_cycles,
             kept_leaves,
@@ -108,9 +145,17 @@ impl CommittedCells {
     /// builds it while it holds this, so one tree over the store's every cell
     /// is built at a time, however many proofs ask. A proof waits here holding
     /// no database connection, and finds the tree kept when the build it
-    /// waited behind was for its cycle.
-    pub async fn hold_tree_build(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.tree_build.lock().await
+    /// waited behind was for its cycle. With [`TREE_BUILDS_QUEUED`] proofs
+    /// already holding or waiting for it, [`TreeBuildsFull`] at once.
+    pub async fn hold_tree_build(&self) -> Result<TreeBuild<'_>, TreeBuildsFull> {
+        let queued = self.tree_builds_queued.try_acquire().map_err(|full| {
+            log::info!("tree build: {full}");
+            TreeBuildsFull
+        })?;
+        Ok(TreeBuild {
+            _queued: queued,
+            _build: self.tree_build.lock().await,
+        })
     }
 
     /// The cycles whose trees are kept, oldest first.
@@ -166,9 +211,10 @@ impl CommittedLeaves {
     /// as the store's "latest entry at or before the cycle" reads it. The
     /// tree is this one with the leaves that changed written. It is still as
     /// of the previous ByteCommit until the caller stores the new one and
-    /// sets it.
-    pub(crate) fn advance(self, stamped: &[(CellLeaf, u64)]) -> Result<Self> {
-        let mut latest = self.latest;
+    /// sets it. This leaf set is left as it is, so a close that does not
+    /// commit still holds the leaf set the store is as of.
+    pub(crate) fn advance(&self, stamped: &[(CellLeaf, u64)]) -> Result<Self> {
+        let mut latest = self.latest.clone();
         let mut written = BTreeSet::new();
         let mut cell_bytes = self.cell_bytes;
         for ((namespace, key, index, running_hash), length) in stamped {
@@ -192,7 +238,7 @@ impl CommittedLeaves {
                     .map(|(leaf, (index, running_hash))| (*leaf, leaf_value(*index, running_hash))),
             )
         } else {
-            let mut tree = Arc::unwrap_or_clone(self.tree);
+            let mut tree = SparseMerkleTree::clone(&self.tree);
             for leaf in &written {
                 let (index, running_hash) = latest[leaf];
                 tree.update_leaf(leaf, &leaf_value(index, &running_hash));
@@ -200,7 +246,7 @@ impl CommittedLeaves {
             tree
         };
         Ok(Self {
-            commit: self.commit,
+            commit: self.commit.clone(),
             latest,
             tree: Arc::new(tree),
             cell_bytes,

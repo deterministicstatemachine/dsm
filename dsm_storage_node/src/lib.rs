@@ -407,6 +407,10 @@ pub struct ConnectionBounds {
     /// Connections held open at once. One more is closed as soon as it is
     /// accepted, before its TLS handshake.
     pub max_open: usize,
+    /// Connections one peer ([`liveness::Peer`]) holds open at once, out of
+    /// `max_open`. One more from that peer is closed as `max_open`'s is, and
+    /// the connections it cannot take stay with everyone else.
+    pub max_per_peer: usize,
 }
 
 /// Bound every connection the node accepts before a request on it reaches
@@ -432,9 +436,9 @@ pub fn bound_connections(
 }
 
 /// The node's TLS server on `server`'s listener, every connection held to
-/// `bounds`: counted against the connection cap and its liveness bounds from
-/// the moment it is accepted ([`liveness::LiveConnections`]), then TLS, then
-/// the connection bounds. The binary serves through exactly this, and so do
+/// `bounds`: counted against the connection cap, its peer's share of it and
+/// its liveness bounds from the moment it is accepted
+/// ([`liveness::LiveConnections`]), then TLS, then the connection bounds. The binary serves through exactly this, and so do
 /// tests that stand up its listener.
 pub fn node_server<A: axum_server::Address>(
     server: axum_server::Server<A>,
@@ -488,7 +492,8 @@ pub fn build_app(state: std::sync::Arc<AppState>, limits: AppLimits) -> axum::Ro
         // A device's wait on its spools is held open on purpose, so it sits
         // outside the timeout and the concurrency limit above: the wait
         // bounds its own length and the number held (b0x::MAX_WAIT,
-        // b0x::MAX_WAITERS), and holds no database connection while it waits.
+        // b0x::MAX_WAITERS), holds no database connection while it waits, and
+        // takes one of b0x::WAIT_LOOKS turns to read the store.
         .merge(crate::api::transport::b0x::wait_router(
             state.clone(),
             limits.wait_bound,

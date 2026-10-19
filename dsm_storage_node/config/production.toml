@@ -68,6 +68,7 @@ listen_addr = "__LISTEN_ADDR__"
 port = 8080
 max_connections = 256    # requests in flight at once, across every route together
 max_open_connections = 4096   # connections held open at once; one more is closed before its TLS handshake
+max_open_connections_per_peer = 128   # of those, held by one peer (an IPv4 address or an IPv6 /64) at once
 
 [tls]
 cert_path = "/certs/node.crt"

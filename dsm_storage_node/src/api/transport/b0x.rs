@@ -41,6 +41,15 @@ pub const MAX_WAITERS: usize = 4096;
 /// [`MAX_WAITERS`] is.
 pub const MAX_WAITERS_PER_SPOOL: usize = 4;
 
+/// Waits reading the store at once, out of the node's
+/// [`crate::db::POOL_MAX_SIZE`] connections. A wait reads the store when it
+/// starts and when arrivals went by it unseen, and [`MAX_WAITERS`] of them
+/// can start or fall behind together; the rest wait their turn holding no
+/// connection, so the wait route, which runs outside the node's concurrency
+/// limit, never holds more than these of the connections every other route
+/// shares.
+pub const WAIT_LOOKS: usize = crate::db::POOL_MAX_SIZE / 4;
+
 /// A wait request's body: [`MAX_WAIT_MARKS`] marks fit well inside it.
 const MAX_WAIT_BODY_BYTES: usize = 64 * 1024;
 
@@ -58,14 +67,15 @@ struct Arrival {
 }
 
 /// The spools that took an entry, announced to every wait (storage spec §8,
-/// long-poll), and the slots waits are held in, across the node and per
-/// spool. In-process: a node's spool is written by its own submit route
-/// alone.
+/// long-poll), the slots waits are held in, across the node and per spool,
+/// and the turns waits take reading the store ([`WAIT_LOOKS`]). In-process:
+/// a node's spool is written by its own submit route alone.
 #[derive(Clone)]
 pub struct SpoolWaits {
     arrivals: tokio::sync::broadcast::Sender<Arrival>,
     slots: Arc<tokio::sync::Semaphore>,
     per_spool: Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    looks: Arc<tokio::sync::Semaphore>,
 }
 
 impl Default for SpoolWaits {
@@ -75,6 +85,7 @@ impl Default for SpoolWaits {
             arrivals,
             slots: Arc::new(tokio::sync::Semaphore::new(MAX_WAITERS)),
             per_spool: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            looks: Arc::new(tokio::sync::Semaphore::new(WAIT_LOOKS)),
         }
     }
 }
@@ -190,8 +201,9 @@ pub fn router(app: Arc<AppState>) -> Router<()> {
 /// request timeout, so no protocol fact depends on it (storage spec §1 rule
 /// 4), and the node reads no clock for it. Held on purpose, so it is served
 /// outside the node's request timeout and concurrency limit
-/// ([`crate::build_app`]): [`MAX_WAITERS`] bounds it instead, and a held wait
-/// holds no database connection.
+/// ([`crate::build_app`]): [`MAX_WAITERS`] bounds it instead, a held wait
+/// holds no database connection, and at most [`WAIT_LOOKS`] waits read the
+/// store at once.
 pub fn wait_router(app: Arc<AppState>, bound: std::time::Duration) -> Router<()> {
     Router::new()
         .route("/api/v2/b0x/wait", post(wait_for_spools))
@@ -317,8 +329,13 @@ async fn wait_for_spools(
 }
 
 /// The spools among `marks` that hold an entry at or after the position
-/// given for each, read from the store.
+/// given for each, read from the store once this wait's turn among
+/// [`WAIT_LOOKS`] comes; until then it holds no connection.
 async fn ready_spools(app: &AppState, marks: &[(String, i64)]) -> Result<Vec<String>, StatusCode> {
+    let _turn = app.spool_waits.looks.acquire().await.map_err(|e| {
+        log::error!("b0x wait: the store's turns are closed: {e}");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
     crate::db::spool_ready(&app.db_pool, marks)
         .await
         .map_err(|e| {

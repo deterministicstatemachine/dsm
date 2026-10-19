@@ -38,7 +38,7 @@ fn limits(concurrency_limit: usize, request_timeout: Duration) -> AppLimits {
 }
 
 /// The deployed node's connection bounds, holding at most `max_open`
-/// connections.
+/// connections, any one peer as many of them.
 fn bounds(max_open: usize) -> dsm_storage_node::ConnectionBounds {
     dsm_storage_node::ConnectionBounds {
         header_read: Duration::from_secs(10),
@@ -47,6 +47,7 @@ fn bounds(max_open: usize) -> dsm_storage_node::ConnectionBounds {
         idle: dsm_storage_node::CONNECTION_IDLE,
         write_stall: dsm_storage_node::WRITE_STALL,
         max_open,
+        max_per_peer: max_open,
     }
 }
 
@@ -366,6 +367,66 @@ fn a_node_holds_no_more_connections_than_its_bound() {
             Err(_held_open) => {}
             Ok(read) => {
                 panic!("a connection within the bound, once one ended, was not held: {read:?}")
+            }
+        }
+        drop(held);
+    });
+}
+
+/// One peer holds at most its share of the node's connections, however many
+/// the node has room for: with room for eight and a share of two, a peer
+/// holding two (opened and never sent a byte) has a third closed as soon as it
+/// is accepted, while the node still holds six free; once one of its two
+/// ends, the peer is held again. The node's own TLS server is started, as the
+/// binary starts it.
+#[test]
+fn one_peer_holds_no_more_than_its_share_of_the_nodes_connections() {
+    use tokio::io::AsyncReadExt;
+    common::runtime().block_on(async {
+        let app = node("rl_peer_share", limits(256, Duration::from_secs(60))).await;
+        let listener =
+            common::ok_or_panic(tokio::net::TcpListener::bind("127.0.0.1:0").await, "bind");
+        let address = common::ok_or_panic(listener.local_addr(), "address");
+        let listener = common::ok_or_panic(listener.into_std(), "the listener");
+        let server = dsm_storage_node::node_server(
+            common::ok_or_panic(axum_server::from_tcp(listener), "a server"),
+            common::node_tls().await,
+            &dsm_storage_node::ConnectionBounds {
+                max_per_peer: 2,
+                ..bounds(8)
+            },
+        );
+        tokio::spawn(server.serve(app.into_make_service()));
+        let connect = move || async move {
+            common::ok_or_panic(tokio::net::TcpStream::connect(address).await, "connect")
+        };
+
+        let mut held = vec![connect().await, connect().await];
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut third = connect().await;
+        let mut rest = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(3), third.read_to_end(&mut rest)).await {
+            Ok(Ok(_)) => assert!(rest.is_empty(), "the node answered a connection over the peer's share"),
+            Ok(Err(e)) => assert!(
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                ),
+                "the connection over the share ended in an error that is not the node closing it: {e}"
+            ),
+            Err(elapsed) => panic!(
+                "a peer holding its share had a third connection held, the node holding six free: {elapsed}"
+            ),
+        }
+
+        drop(held.pop());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let mut again = connect().await;
+        let mut byte = [0u8; 1];
+        match tokio::time::timeout(Duration::from_secs(1), again.read(&mut byte)).await {
+            Err(_held_open) => {}
+            Ok(read) => {
+                panic!("a connection within the peer's share, once one ended, was not held: {read:?}")
             }
         }
         drop(held);
