@@ -61,9 +61,9 @@ pub const TAG_OFFLINE_ACCOUNT_COUNTER_VALUE: TaggedHashDomain<'static> =
 /// Offline-account key of the offline frontier: `H(tag)`.
 pub const TAG_OFFLINE_ACCOUNT_FRONTIER_KEY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/offline-account/frontier/v1");
-/// Offline-account key of the funding origin: `H(tag)`.
-pub const TAG_OFFLINE_ACCOUNT_ORIGIN_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/offline-account/origin/v1");
+/// Offline-account key of the funding chain: `H(tag)`.
+pub const TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/offline-account/funding-chain/v1");
 /// SMT key of the per-(vault, asset) reserve leaf:
 /// `H(tag ‖ genesis_id ‖ device_id ‖ vault_id ‖ policy_commit)`. Accounts for value the
 /// owner has ENCUMBERED into a specific vault. Deliberately not a `balances` entry: a
@@ -161,7 +161,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_OFFLINE_ACCOUNT_COUNTER_KEY,
     TAG_OFFLINE_ACCOUNT_COUNTER_VALUE,
     TAG_OFFLINE_ACCOUNT_FRONTIER_KEY,
-    TAG_OFFLINE_ACCOUNT_ORIGIN_KEY,
+    TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY,
     TAG_VAULT_RESERVE_LEAF,
     TAG_VAULT_RESERVE_STATE,
     TAG_SETTLEMENT_RECEIPT_LEAF,

@@ -104,6 +104,7 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
         canonical_storage_set_id: [0xB1; 32],
         substrate_b_pair: None,
         verified_operation: None,
+        offline_boundary: None,
     }
 }
 

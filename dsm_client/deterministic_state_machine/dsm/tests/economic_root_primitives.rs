@@ -530,13 +530,15 @@ fn a_reserved_class_is_unusable_on_the_wire_until_its_schema_is_installed() {
     // Editing this assertion is the point: reserving or promoting a class is
     // a deliberate diff. 0x0029 is now LIVE — the issuance predicate this
     // protocol lacked exists, so the class was moved into `class` with the
-    // field table that earns it. 0x002A-0x002F are STRUCTURALLY held for the
-    // Step-5 offline/portable objects, so a later PR cannot allocate one
-    // because "the plan said it was reserved" while the code said nothing;
-    // 0x0030 was allocated PAST them for the faucet credit source.
+    // field table that earns it. 0x002A and 0x002B are LIVE: the offline load
+    // and unload boundary bodies, promoted with their field tables.
+    // 0x002C-0x002F are STRUCTURALLY held for the remaining offline/portable
+    // objects, so a later PR cannot allocate one because "the plan said it was
+    // reserved" while the code said nothing; 0x0030 was allocated PAST them
+    // for the faucet credit source.
     assert_eq!(
         reserved::ALL,
-        &[0x002A, 0x002B, 0x002C, 0x002D, 0x002E, 0x002F],
+        &[0x002C, 0x002D, 0x002E, 0x002F],
         "the reserved set is exact — promoting a class must be a deliberate diff here"
     );
     assert!(

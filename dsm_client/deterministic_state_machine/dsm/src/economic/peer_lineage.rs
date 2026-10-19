@@ -42,7 +42,8 @@
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
-    TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE, TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+    TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE, TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+    TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::economic::authority_evidence::{
@@ -56,7 +57,8 @@ use crate::economic::lineage::{
     EconomicValidationError, ValidatedEconomicRoot,
 };
 use crate::economic::provenance::{
-    PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
+    PeerLineageFailure, PeerSubstrate, ProvenanceResolver, ReserveReleaseWin,
+    ValidatedPeerTransition,
 };
 use crate::economic::register::{
     economic_root_register_key, read_root_cell, resolve_for_trader, resolve_root_register_profile,
@@ -355,6 +357,7 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
             P::GenesisReleaseInvalid(..)
             | P::MarketLegPolicy(..)
             | P::PeerDebitIsNotAnOnlineTransfer
+            | P::NotAnOfflineUnload
             | P::PeerDebitNotAddressedToConsumer
             | P::PeerDebitIndexIsNotTheOperationDebit
             | P::PeerWitnessDoesNotMatchValidatedRoot
@@ -387,7 +390,7 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
         | EconomicValidationError::EconomicOperationIdMismatch { .. }
         | EconomicValidationError::SubstrateKindMismatch
         | EconomicValidationError::SubstrateEvidenceMismatch { .. }
-        | EconomicValidationError::OfflineBoundaryWriteSetNotYetSpecified
+        | EconomicValidationError::OfflineBoundaryIdMismatch { .. }
         | EconomicValidationError::WriteSet(..)
         | EconomicValidationError::ManifestAddrMismatch { .. }
         | EconomicValidationError::Manifest(..) => invalid_at(&e),
@@ -697,42 +700,73 @@ impl Verifier<'_> {
         )?;
         let witness = crate::economic::decode::decode_transition_witness(&witness_bytes)
             .map_err(|e| invalid(format!("witness at {position}: {e}")))?;
-        let successor_addr = match &manifest.substrate {
-            AdmissionSubstrate::DsmSuccessor { evidence_addr } => *evidence_addr,
-            AdmissionSubstrate::OfflineBoundary { .. } => {
-                return Err(invalid(
-                    "offline-boundary admissions have no specified write-set semantics yet",
-                ))
+        let (accepted, substrate) = match &manifest.substrate {
+            AdmissionSubstrate::DsmSuccessor {
+                evidence_addr: successor_addr,
+            } => {
+                let successor_bytes = self
+                    .fetcher
+                    .immutable(TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE, successor_addr)?;
+                let verified = verify_dsm_successor_evidence(
+                    &successor_bytes,
+                    genesis,
+                    device_id,
+                    &facts.proven_ak,
+                )
+                .map_err(|e| invalid(format!("successor evidence at {position}: {e}")))?;
+                if let StepRole::Source = role {
+                    // A credit's source is a peer's online transfer, and only
+                    // its own step is validated here. Its write set is a
+                    // debit and names no credit source, so nothing behind it
+                    // is asked for.
+                    if !matches!(
+                        verified.operation,
+                        crate::types::operations::Operation::Transfer {
+                            authority_policy: None,
+                            ..
+                        }
+                    ) {
+                        return Err(invalid(format!(
+                            "position {position}: the credit's source is not an online transfer"
+                        )));
+                    }
+                }
+                (
+                    AcceptedSubstrate::from_verified_dsm_successor(
+                        verified.operation.clone(),
+                        verified.c_dsm_plus,
+                        verified.embedded_parent,
+                        *successor_addr,
+                    ),
+                    PeerSubstrate::Dsm {
+                        c_dsm_plus: verified.c_dsm_plus,
+                        embedded_parent: verified.embedded_parent,
+                        verified_operation: verified.operation,
+                    },
+                )
+            }
+            AdmissionSubstrate::OfflineBoundary { evidence_addr } => {
+                if let StepRole::Source = role {
+                    return Err(invalid(format!(
+                        "position {position}: the credit's source is an offline boundary, not an \
+                         online transfer"
+                    )));
+                }
+                let body_bytes = self
+                    .fetcher
+                    .immutable(TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE, evidence_addr)?;
+                let verified = crate::economic::offline_boundary::OfflineBoundaryBody::verify(
+                    &body_bytes,
+                    genesis,
+                    device_id,
+                )
+                .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                (
+                    AcceptedSubstrate::from_verified_offline_boundary(verified, *evidence_addr),
+                    PeerSubstrate::OfflineBoundary(verified),
+                )
             }
         };
-        let successor_bytes = self
-            .fetcher
-            .immutable(TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE, &successor_addr)?;
-        let verified =
-            verify_dsm_successor_evidence(&successor_bytes, genesis, device_id, &facts.proven_ak)
-                .map_err(|e| invalid(format!("successor evidence at {position}: {e}")))?;
-        if let StepRole::Source = role {
-            // A credit's source is a peer's online transfer, and only its own
-            // step is validated here. Its write set is a debit and names no
-            // credit source, so nothing behind it is asked for.
-            if !matches!(
-                verified.operation,
-                crate::types::operations::Operation::Transfer {
-                    authority_policy: None,
-                    ..
-                }
-            ) {
-                return Err(invalid(format!(
-                    "position {position}: the credit's source is not an online transfer"
-                )));
-            }
-        }
-        let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-            verified.operation.clone(),
-            verified.c_dsm_plus,
-            verified.embedded_parent,
-            successor_addr,
-        );
         let registered = RegisteredEconomicRoot::from_verified_single_root(claim);
         let ancestry = SourceAncestry { verifier: self };
         let no_sources = DebitHasNoSources { verifier: self };
@@ -759,9 +793,7 @@ impl Verifier<'_> {
             advanced.root,
             witness,
             facts.proven_ak,
-            verified.c_dsm_plus,
-            verified.embedded_parent,
-            verified.operation,
+            substrate,
             manifest_addr,
             advanced.claim,
         ))

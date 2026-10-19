@@ -1163,3 +1163,261 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
         Err(ActivationPointUnreadable::CreditNotOnHead { policy_commit: era })
     );
 }
+
+// ── Offline boundaries: a load and an unload, admitted ────────────────────
+
+/// One boundary taken by the device head and admitted after `previous`: its
+/// body, its write set against the economic tree, and the registration that
+/// names them.
+struct AdmittedBoundary {
+    outcome: dsm::types::device_state::OfflineBoundaryOutcome,
+    verified: dsm::economic::offline_boundary::VerifiedOfflineBoundary,
+    evidence_addr: [u8; 32],
+    witness: EconomicTransitionWitness,
+}
+
+const BUNDLE: [u8; 32] = [0xB0; 32];
+
+fn boundary(
+    head: &dsm::types::device_state::DeviceState,
+    kind: dsm::types::device_state::OfflineBoundaryKind,
+    amount: u64,
+    pre_root: [u8; 32],
+    tree: &mut EconomicSmt,
+    balances: &std::collections::BTreeMap<[u8; 32], u64>,
+    position: u64,
+) -> AdmittedBoundary {
+    use dsm::economic::offline_boundary::{offline_boundary_evidence_addr, OfflineBoundaryBody};
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let outcome = head
+        .cross_offline_boundary(&BUNDLE, kind, &era, amount)
+        .expect("the head takes the boundary");
+    let bytes = OfflineBoundaryBody::of(&outcome, kind, BUNDLE, era, amount)
+        .expect("body")
+        .encode()
+        .expect("encode");
+    let verified = OfflineBoundaryBody::verify(&bytes, &G, dev()).expect("the body verifies");
+    let built = dsm::economic::write_set::build_boundary_write_set(
+        kind,
+        &era,
+        amount,
+        &outcome.operation_id,
+        &G,
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(balances, position),
+        tree,
+    )
+    .expect("the boundary's write set");
+    let witness = EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        verified.operation_id(),
+        verified.operation_digest(),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("a witness");
+    AdmittedBoundary {
+        outcome,
+        verified,
+        evidence_addr: offline_boundary_evidence_addr(&bytes),
+        witness,
+    }
+}
+
+fn validate_boundary(
+    fx: &FaucetFixture,
+    previous: &dsm::economic::lineage::ValidatedEconomicRoot,
+    position: u64,
+    b: &AdmittedBoundary,
+    witness: &EconomicTransitionWitness,
+) -> Result<dsm::economic::lineage::ValidatedAdvance, EconomicValidationError> {
+    let manifest = EconomicAdmissionManifest::new(
+        [0xA1; 32],
+        [0xA2; 32],
+        [0xA3; 32],
+        AdmissionSubstrate::OfflineBoundary {
+            evidence_addr: b.evidence_addr,
+        },
+        witness.derived_provenance_index(),
+    )
+    .expect("valid manifest");
+    let registered = registered_for(&manifest, position, witness.post_economic_root);
+    advance_validated(
+        previous,
+        &registered,
+        &manifest,
+        witness,
+        &AcceptedSubstrate::from_verified_offline_boundary(b.verified, b.evidence_addr),
+        &OneTicket {
+            envelope: fx.envelope.clone(),
+        },
+        &G,
+        dev(),
+        b"dsm-testnet",
+        &fx.pk,
+    )
+}
+
+/// A load debits the online balance it moves into the offline account; an
+/// unload credits it back, funded by exactly the account debit its body
+/// proves, and consumes that debit: the same unload cannot fund a second
+/// credit, and no other amount, asset or boundary validates.
+#[test]
+fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
+    use dsm::types::device_state::OfflineBoundaryKind::{Load, Unload};
+    use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
+    let era = dsm::core::token::token_state_manager::era_policy_commit();
+    let fx = faucet_fixture(1);
+    let manifest = manifest_for(&fx.witness);
+    let at_one = run(
+        &fx,
+        &registered_for(&manifest, 1, fx.post_root),
+        &manifest,
+        &fx.witness,
+        &accepted_for(&fx.op),
+    )
+    .expect("the faucet claim validates")
+    .root;
+
+    let mut tree = EconomicSmt::new();
+    let credit = bal(era, ERA_FAUCET_PAYOUT);
+    tree.insert(
+        credit.leaf_key(&G, dev()),
+        credit.leaf_value().expect("encodable"),
+    );
+    assert_eq!(tree.root(), at_one.economic_root());
+    let head = head_of(G, &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
+        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .expect("the account opens");
+
+    // ── position 2: load 300 ──
+    let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT)]);
+    let load = boundary(
+        &head,
+        Load,
+        300,
+        at_one.economic_root(),
+        &mut tree,
+        &online,
+        2,
+    );
+    let at_two = validate_boundary(&fx, &at_one, 2, &load, &load.witness)
+        .expect("the load validates")
+        .root;
+    assert_eq!(
+        load.outcome
+            .new_device_state
+            .offline_allocation(&BUNDLE, &era),
+        Some(300)
+    );
+
+    // ── position 3: unload 100 ──
+    let online = std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 300)]);
+    let after_load = tree.clone();
+    let unload = boundary(
+        &load.outcome.new_device_state,
+        Unload,
+        100,
+        at_two.economic_root(),
+        &mut tree,
+        &online,
+        3,
+    );
+    let at_three =
+        validate_boundary(&fx, &at_two, 3, &unload, &unload.witness).expect("the unload validates");
+    assert_eq!(at_three.funded.len(), 1, "the unload's credit is funded");
+    assert_eq!(at_three.funded[0].amount, 100);
+
+    // The same unload cannot fund a second credit: its source is consumed.
+    let again = dsm::economic::write_set::build_boundary_write_set(
+        Unload,
+        &era,
+        100,
+        &unload.outcome.operation_id,
+        &G,
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(
+            &std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 200)]),
+            4,
+        ),
+        &mut tree,
+    )
+    .expect_err("a consumed offline debit funds nothing more");
+    assert_eq!(
+        again,
+        dsm::economic::write_set::WriteSetError::SourceAlreadyConsumed
+    );
+
+    // A credit larger than the account debit the body proves is refused.
+    let inflated = dsm::economic::write_set::build_boundary_write_set(
+        Unload,
+        &era,
+        101,
+        &unload.outcome.operation_id,
+        &G,
+        dev(),
+        &dsm::economic::write_set::EconomicPreState::new(&online, 3),
+        &mut after_load.clone(),
+    )
+    .expect("a write set for 101");
+    let witness = EconomicTransitionWitness::new(
+        at_two.economic_root(),
+        inflated.post_root,
+        unload.verified.operation_id(),
+        unload.verified.operation_digest(),
+        inflated.mutations,
+        inflated.credit_sources,
+    )
+    .expect("a witness");
+    let refused = validate_boundary(&fx, &at_two, 3, &unload, &witness)
+        .expect_err("a credit the offline debit does not fund");
+    assert!(
+        refused
+            .to_string()
+            .contains("not exactly the amount it unloads"),
+        "{refused}"
+    );
+
+    // An unload's write set presented on a load's body is refused.
+    let refused = validate_boundary(
+        &fx,
+        &at_two,
+        3,
+        &AdmittedBoundary {
+            outcome: unload.outcome.clone(),
+            verified: load.verified,
+            evidence_addr: load.evidence_addr,
+            witness: unload.witness.clone(),
+        },
+        &unload.witness,
+    )
+    .expect_err("another boundary's body");
+    assert!(
+        matches!(
+            refused,
+            EconomicValidationError::OperationDigestMismatch { .. }
+        ),
+        "{refused}"
+    );
+
+    // A witness that names another boundary's identity is refused.
+    let renamed = EconomicTransitionWitness::new(
+        unload.witness.pre_economic_root,
+        unload.witness.post_economic_root,
+        load.verified.operation_id(),
+        unload.witness.operation_digest,
+        unload.witness.mutations.clone(),
+        unload.witness.credit_sources.clone(),
+    )
+    .expect("a witness");
+    let refused = validate_boundary(&fx, &at_two, 3, &unload, &renamed)
+        .expect_err("another boundary's identity");
+    assert!(
+        matches!(
+            refused,
+            EconomicValidationError::OfflineBoundaryIdMismatch { .. }
+        ),
+        "{refused}"
+    );
+}

@@ -14,7 +14,7 @@
 //!            allocation(asset) → H(amount) ┤
 //!            counter           → H(u)      ┤   the software counter (DSM §68)
 //!            frontier          → h         ┤   the offline frontier
-//!            origin            → op id     ┘   the boundary that last funded it
+//!            funding chain     → op id     ┘   the last boundary, which chains every one before it
 //! ```
 //!
 //! The counter leaf is the authority for offline progression (DSM §68, §69):
@@ -35,7 +35,8 @@ use std::collections::BTreeMap;
 use crate::common::domain_tags::{
     TAG_OFFLINE_ACCOUNT_ALLOCATION_KEY, TAG_OFFLINE_ACCOUNT_ALLOCATION_VALUE,
     TAG_OFFLINE_ACCOUNT_COUNTER_KEY, TAG_OFFLINE_ACCOUNT_COUNTER_VALUE,
-    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY, TAG_OFFLINE_ACCOUNT_LEAF, TAG_OFFLINE_ACCOUNT_ORIGIN_KEY,
+    TAG_OFFLINE_ACCOUNT_FRONTIER_KEY, TAG_OFFLINE_ACCOUNT_LEAF,
+    TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::merkle::batch_fold::{fold_path, verify_batch, FoldEntry, FOLD_HEIGHT};
@@ -87,10 +88,15 @@ pub fn frontier_key() -> [u8; 32] {
         .as_bytes()
 }
 
-/// Account-tree key of the funding origin. Its value is the economic operation
-/// id of the boundary (load or unload) that last moved value across.
-pub fn origin_key() -> [u8; 32] {
-    *dsm_domain_hasher(TAG_OFFLINE_ACCOUNT_ORIGIN_KEY)
+/// Account-tree key of the funding chain. Its value is the economic operation
+/// id of the boundary (load or unload) that last moved value across — and that
+/// id is a hash over the account root the boundary started from, which holds
+/// this leaf's previous value. So the leaf commits every boundary since the
+/// account opened, as a hash chain: a later load extends the chain, it never
+/// replaces the provenance of value an earlier load brought in. A verifier
+/// holding the boundaries' bodies walks the chain back from any account root.
+pub fn funding_chain_key() -> [u8; 32] {
+    *dsm_domain_hasher(TAG_OFFLINE_ACCOUNT_FUNDING_CHAIN_KEY)
         .finalize()
         .as_bytes()
 }
@@ -98,19 +104,19 @@ pub fn origin_key() -> [u8; 32] {
 /// One transition of an offline account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineAccountStep {
-    /// A canonical load: `amount` of `asset` enters the account. `origin` is
+    /// A canonical load: `amount` of `asset` enters the account. `boundary_id` is
     /// the economic operation id of the load.
     Load {
         asset: [u8; 32],
         amount: u64,
-        origin: [u8; 32],
+        boundary_id: [u8; 32],
     },
     /// A canonical unload: `amount` of `asset` leaves the account for the
-    /// online balance. `origin` is the economic operation id of the unload.
+    /// online balance. `boundary_id` is the economic operation id of the unload.
     Unload {
         asset: [u8; 32],
         amount: u64,
-        origin: [u8; 32],
+        boundary_id: [u8; 32],
     },
     /// An offline-bearer spend: `amount` of `asset` leaves the account, and
     /// the counter and the frontier advance with it in the same write set.
@@ -127,10 +133,10 @@ pub enum OfflineAccountStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepBefore {
     /// Before a load or an unload: the allocation of the step's asset, if the
-    /// account holds one, and the origin, if a boundary has funded it.
+    /// account holds one, and the funding chain, if a boundary has funded it.
     Boundary {
         allocation: Option<u64>,
-        origin: Option<[u8; 32]>,
+        funding_chain: Option<[u8; 32]>,
     },
     /// Before a spend: the allocation of the step's asset, the counter and
     /// the frontier.
@@ -163,11 +169,11 @@ pub fn step_writes(
             OfflineAccountStep::Load {
                 asset,
                 amount,
-                origin,
+                boundary_id,
             },
             StepBefore::Boundary {
                 allocation,
-                origin: prior_origin,
+                funding_chain: prior_chain,
             },
         ) => {
             positive(*amount, "a load")?;
@@ -178,17 +184,17 @@ pub fn step_writes(
                 })?,
                 None => *amount,
             };
-            boundary_writes(asset, *allocation, next, *prior_origin, *origin)?
+            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
         }
         (
             OfflineAccountStep::Unload {
                 asset,
                 amount,
-                origin,
+                boundary_id,
             },
             StepBefore::Boundary {
                 allocation,
-                origin: prior_origin,
+                funding_chain: prior_chain,
             },
         ) => {
             positive(*amount, "an unload")?;
@@ -200,7 +206,7 @@ pub fn step_writes(
                     "an unload takes more than the offline allocation holds",
                 )
             })?;
-            boundary_writes(asset, *allocation, next, *prior_origin, *origin)?
+            boundary_writes(asset, *allocation, next, *prior_chain, *boundary_id)?
         }
         (
             OfflineAccountStep::Spend {
@@ -267,10 +273,10 @@ fn boundary_writes(
     asset: &[u8; 32],
     allocation: Option<u64>,
     next: u64,
-    prior_origin: Option<[u8; 32]>,
-    origin: [u8; 32],
+    prior_chain: Option<[u8; 32]>,
+    boundary_id: [u8; 32],
 ) -> Result<Vec<AccountWrite>, DsmError> {
-    if prior_origin == Some(origin) {
+    if prior_chain == Some(boundary_id) {
         return Err(DsmError::invalid_operation(
             "a boundary names the operation that already funded the account",
         ));
@@ -282,9 +288,9 @@ fn boundary_writes(
             post: allocation_value(next),
         },
         AccountWrite {
-            key: origin_key(),
-            pre: prior_origin,
-            post: origin,
+            key: funding_chain_key(),
+            pre: prior_chain,
+            post: boundary_id,
         },
     ])
 }
@@ -335,7 +341,7 @@ pub struct OfflineAccount {
     allocations: BTreeMap<[u8; 32], u64>,
     counter: u64,
     frontier: [u8; 32],
-    origin: Option<[u8; 32]>,
+    funding_chain: Option<[u8; 32]>,
 }
 
 impl core::fmt::Debug for OfflineAccount {
@@ -345,7 +351,7 @@ impl core::fmt::Debug for OfflineAccount {
             .field("allocations", &self.allocations)
             .field("counter", &self.counter)
             .field("frontier", &self.frontier)
-            .field("origin", &self.origin)
+            .field("funding_chain", &self.funding_chain)
             .finish()
     }
 }
@@ -371,7 +377,7 @@ impl OfflineAccount {
         allocations: BTreeMap<[u8; 32], u64>,
         counter: u64,
         frontier: [u8; 32],
-        origin: Option<[u8; 32]>,
+        funding_chain: Option<[u8; 32]>,
     ) -> Self {
         let leaves = allocations
             .iter()
@@ -380,13 +386,13 @@ impl OfflineAccount {
                 (counter_key(), counter_value(counter)),
                 (frontier_key(), frontier),
             ])
-            .chain(origin.map(|o| (origin_key(), o)));
+            .chain(funding_chain.map(|o| (funding_chain_key(), o)));
         Self {
             tree: SparseMerkleTree::from_leaves(leaves),
             allocations,
             counter,
             frontier,
-            origin,
+            funding_chain,
         }
     }
 
@@ -416,8 +422,8 @@ impl OfflineAccount {
     }
 
     /// The economic operation id of the boundary that last funded the account.
-    pub fn origin(&self) -> Option<[u8; 32]> {
-        self.origin
+    pub fn funding_chain(&self) -> Option<[u8; 32]> {
+        self.funding_chain
     }
 
     /// The values `step`'s touched leaves hold in this account.
@@ -426,7 +432,7 @@ impl OfflineAccount {
             OfflineAccountStep::Load { asset, .. } | OfflineAccountStep::Unload { asset, .. } => {
                 Ok(StepBefore::Boundary {
                     allocation: self.allocation(asset),
-                    origin: self.origin,
+                    funding_chain: self.funding_chain,
                 })
             }
             OfflineAccountStep::Spend { asset, .. } => Ok(StepBefore::Spend {
@@ -454,26 +460,26 @@ impl OfflineAccount {
             allocations: self.allocations.clone(),
             counter: self.counter,
             frontier: self.frontier,
-            origin: self.origin,
+            funding_chain: self.funding_chain,
         };
         match step {
             OfflineAccountStep::Load {
                 asset,
                 amount,
-                origin,
+                boundary_id,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held += amount;
-                account.origin = Some(*origin);
+                account.funding_chain = Some(*boundary_id);
             }
             OfflineAccountStep::Unload {
                 asset,
                 amount,
-                origin,
+                boundary_id,
             } => {
                 let held = account.allocations.entry(*asset).or_insert(0);
                 *held -= amount;
-                account.origin = Some(*origin);
+                account.funding_chain = Some(*boundary_id);
             }
             OfflineAccountStep::Spend {
                 asset,
@@ -679,11 +685,11 @@ mod tests {
         m.entries.iter().map(|e| e.path.clone()).collect()
     }
 
-    fn load(asset: [u8; 32], amount: u64, origin: u8) -> OfflineAccountStep {
+    fn load(asset: [u8; 32], amount: u64, boundary: u8) -> OfflineAccountStep {
         OfflineAccountStep::Load {
             asset,
             amount,
-            origin: [origin; 32],
+            boundary_id: [boundary; 32],
         }
     }
 
@@ -705,7 +711,7 @@ mod tests {
             OfflineAccountStep::Unload {
                 asset: ASSET,
                 amount: 5,
-                origin: [0x12; 32],
+                boundary_id: [0x12; 32],
             },
         ];
         let mut account = opened;
@@ -720,12 +726,12 @@ mod tests {
         assert_eq!(account.allocation(&OTHER), Some(7));
         assert_eq!(account.counter(), 1);
         assert_eq!(account.frontier(), [0x02; 32]);
-        assert_eq!(account.origin(), Some([0x12; 32]));
+        assert_eq!(account.funding_chain(), Some([0x12; 32]));
         let rebuilt = OfflineAccount::restore(
             account.allocations().clone(),
             account.counter(),
             account.frontier(),
-            account.origin(),
+            account.funding_chain(),
         );
         assert_eq!(rebuilt.root(), account.root());
     }
@@ -786,7 +792,7 @@ mod tests {
             opened.step(&OfflineAccountStep::Unload {
                 asset: ASSET,
                 amount: 1,
-                origin: [0x10; 32],
+                boundary_id: [0x10; 32],
             }),
             "does not hold",
         );
@@ -816,7 +822,7 @@ mod tests {
             allocation_key(&ASSET),
             counter_key(),
             frontier_key(),
-            origin_key(),
+            funding_chain_key(),
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {

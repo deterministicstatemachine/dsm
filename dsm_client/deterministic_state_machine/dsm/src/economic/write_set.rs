@@ -1540,6 +1540,232 @@ fn expect_one_balance(
     })
 }
 
+/// Build the write set of an offline boundary against the producer's own
+/// pre-state: a load is one balance debit of the asset it loads; an unload is
+/// one balance credit of the asset it unloads, funded by the offline debit the
+/// unload body proves (`0x0075`), with the source that debit names consumed
+/// from ZERO in the same witness.
+///
+/// The boundary is what Core took ([`OfflineBoundaryOutcome`]): its asset,
+/// amount and identity are the ones Core derived, never chosen here.
+///
+/// [`OfflineBoundaryOutcome`]: crate::types::device_state::OfflineBoundaryOutcome
+pub fn build_boundary_write_set(
+    kind: crate::types::device_state::OfflineBoundaryKind,
+    asset: &[u8; 32],
+    amount: u64,
+    boundary_id: &[u8; 32],
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    pre_state: &EconomicPreState<'_>,
+    tree: &mut EconomicSmt,
+) -> Result<BuiltWriteSet, WriteSetError> {
+    use crate::types::device_state::OfflineBoundaryKind;
+    if amount == 0 {
+        return Err(WriteSetError::WrongWriteSet {
+            detail: "a boundary moves a positive amount",
+        });
+    }
+    let have = pre_state.balances.get(asset).copied();
+    // (key, pre, post)
+    let mut planned: Vec<(
+        [u8; 32],
+        Option<EconomicLeafState>,
+        Option<EconomicLeafState>,
+    )> = Vec::new();
+    match kind {
+        OfflineBoundaryKind::Load => {
+            let held = have.ok_or(WriteSetError::InsufficientBalance {
+                policy_commit: *asset,
+                have: 0,
+                need: amount,
+            })?;
+            let rest = held
+                .checked_sub(amount)
+                .ok_or(WriteSetError::InsufficientBalance {
+                    policy_commit: *asset,
+                    have: held,
+                    need: amount,
+                })?;
+            planned.push((
+                crate::economic::keys::balance_key(genesis, device_id, asset),
+                balance_state(*asset, held)?,
+                balance_state(*asset, rest)?,
+            ));
+        }
+        OfflineBoundaryKind::Unload => {
+            let next = match have {
+                Some(held) => held
+                    .checked_add(amount)
+                    .ok_or(WriteSetError::BalanceOverflow)?,
+                None => amount,
+            };
+            let pre = match have {
+                Some(held) => balance_state(*asset, held)?,
+                None => None,
+            };
+            planned.push((
+                crate::economic::keys::balance_key(genesis, device_id, asset),
+                pre,
+                balance_state(*asset, next)?,
+            ));
+            let consumed = EconomicLeafState::ConsumedSource(EconomicConsumedSourceState {
+                source_id: crate::economic::offline_boundary::offline_boundary_debit_source_id(
+                    genesis,
+                    device_id,
+                    boundary_id,
+                ),
+                consumer_economic_operation_id: *boundary_id,
+            });
+            let key = consumed.leaf_key(genesis, device_id);
+            if tree.get(&key).is_some() {
+                return Err(WriteSetError::SourceAlreadyConsumed);
+            }
+            planned.push((key, None, Some(consumed)));
+        }
+    }
+    planned.sort_by_key(|(key, ..)| *key);
+    let mut mutations = Vec::with_capacity(planned.len());
+    let mut credit_sources = Vec::new();
+    for (index, (key, pre, post)) in planned.into_iter().enumerate() {
+        let siblings = tree.siblings(&key).to_vec();
+        let funded = kind == OfflineBoundaryKind::Unload
+            && matches!(&post, Some(EconomicLeafState::Balance(_)));
+        let mutation = EconomicLeafMutation::new(pre, post.clone(), siblings)
+            .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
+        match &post {
+            Some(state) => {
+                let value = state
+                    .leaf_value()
+                    .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
+                tree.insert(key, value);
+            }
+            None => tree.remove(&key),
+        }
+        if funded {
+            let credit_mutation_index = u32::try_from(index)
+                .map_err(|e| WriteSetError::Ccb(format!("index overflow: {e}")))?;
+            credit_sources.push(CreditSource::OfflineBoundaryDebit(
+                crate::economic::credit::CreditSourceOfflineBoundaryDebit {
+                    credit_mutation_index,
+                },
+            ));
+        }
+        mutations.push(mutation);
+    }
+    Ok(BuiltWriteSet {
+        mutations,
+        credit_sources,
+        post_root: tree.root(),
+    })
+}
+
+/// The VERIFIER half of [`build_boundary_write_set`]: the witness's mutations
+/// must be exactly the effect of the verified boundary — for a load, one
+/// balance debit of its asset by its amount and nothing else; for an unload,
+/// one balance credit of its asset by its amount, funded by the boundary's
+/// offline debit, and the consumed-source leaf that debit names, inserted from
+/// ZERO and naming the boundary as its consumer.
+pub fn verify_boundary_write_set(
+    boundary: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    witness: &EconomicTransitionWitness,
+) -> Result<(), WriteSetError> {
+    use crate::types::device_state::OfflineBoundaryKind;
+    let asset = boundary.asset();
+    let amount = boundary.amount();
+    let balance_of = |m: &EconomicLeafMutation| -> Result<(u64, u64), WriteSetError> {
+        let amount_of = |s: &Option<EconomicLeafState>| match s {
+            None => Ok(0),
+            Some(EconomicLeafState::Balance(b)) if b.policy_commit == asset => Ok(b.amount),
+            Some(_) => Err(WriteSetError::WrongWriteSet {
+                detail: "a boundary moves the balance of the asset it names and nothing else",
+            }),
+        };
+        Ok((amount_of(&m.pre_state)?, amount_of(&m.post_state)?))
+    };
+    match boundary.kind() {
+        OfflineBoundaryKind::Load => {
+            let [debit] = witness.mutations.as_slice() else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load is exactly one balance mutation",
+                });
+            };
+            let (pre, post) = balance_of(debit)?;
+            if pre.checked_sub(post) != Some(amount) {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load's debit is not exactly the amount it loads",
+                });
+            }
+            if !witness.credit_sources.is_empty() {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "a load has no credit to fund",
+                });
+            }
+            Ok(())
+        }
+        OfflineBoundaryKind::Unload => {
+            let expected_source =
+                crate::economic::offline_boundary::offline_boundary_debit_source_id(
+                    genesis,
+                    device_id,
+                    &boundary.operation_id(),
+                );
+            let mut credit_index = None;
+            let mut consumed_seen = None;
+            for (i, m) in witness.mutations.iter().enumerate() {
+                match (&m.pre_state, &m.post_state) {
+                    (None, Some(EconomicLeafState::ConsumedSource(c))) => {
+                        if c.source_id != expected_source
+                            || c.consumer_economic_operation_id != boundary.operation_id()
+                        {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "the consumed source is not the unload's own offline debit",
+                            });
+                        }
+                        if consumed_seen.replace(i).is_some() {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload consumes its offline debit once",
+                            });
+                        }
+                    }
+                    _ => {
+                        let (pre, post) = balance_of(m)?;
+                        if post.checked_sub(pre) != Some(amount) {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload's credit is not exactly the amount it unloads",
+                            });
+                        }
+                        let index = u32::try_from(i)
+                            .map_err(|e| WriteSetError::Ccb(format!("index overflow: {e}")))?;
+                        if credit_index.replace(index).is_some() {
+                            return Err(WriteSetError::WrongWriteSet {
+                                detail: "an unload credits one balance",
+                            });
+                        }
+                    }
+                }
+            }
+            let (Some(credit_index), Some(_)) = (credit_index, consumed_seen) else {
+                return Err(WriteSetError::WrongWriteSet {
+                    detail: "an unload is one balance credit and the consumption of its debit",
+                });
+            };
+            match witness.credit_sources.as_slice() {
+                [CreditSource::OfflineBoundaryDebit(d)]
+                    if d.credit_mutation_index == credit_index =>
+                {
+                    Ok(())
+                }
+                _ => Err(WriteSetError::WrongWriteSet {
+                    detail: "an unload's credit is funded by its offline debit and nothing else",
+                }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod sofi_refusal_tests {

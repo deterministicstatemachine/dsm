@@ -1549,7 +1549,7 @@ impl DeviceState {
     ///
     /// The boundary's operation id is derived here, from the roots it starts
     /// from ([`OfflineBoundaryId::operation_id`]), and becomes the account's
-    /// origin leaf: the funding origin is never the caller's to name.
+    /// funding chain: the funding origin is never the caller's to name.
     pub fn cross_offline_boundary(
         &self,
         bundle: &[u8; 32],
@@ -1562,7 +1562,7 @@ impl DeviceState {
             DsmError::invalid_operation("no offline account is open for this anchor bundle")
         })?;
         let pre_device_root = *self.smt.root();
-        let origin = OfflineBoundaryId {
+        let boundary_id = OfflineBoundaryId {
             genesis: self.genesis,
             device_id: self.devid,
             kind,
@@ -1579,7 +1579,7 @@ impl DeviceState {
                 OfflineAccountStep::Load {
                     asset: *asset,
                     amount,
-                    origin,
+                    boundary_id,
                 },
                 held.and_then(|b| b.checked_sub(amount)).ok_or_else(|| {
                     DsmError::invalid_operation("a load moves more than the online balance holds")
@@ -1589,7 +1589,7 @@ impl DeviceState {
                 OfflineAccountStep::Unload {
                     asset: *asset,
                     amount,
-                    origin,
+                    boundary_id,
                 },
                 match held {
                     Some(b) => b.checked_add(amount).ok_or_else(|| {
@@ -1621,7 +1621,7 @@ impl DeviceState {
                 offline_accounts,
                 ..self.clone()
             },
-            operation_id: origin,
+            operation_id: boundary_id,
             pre_device_root,
             post_device_root,
             pre_account_root: account.root(),
@@ -1817,7 +1817,7 @@ impl DeviceState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::types::operations::{Operation, TransactionMode};
 
@@ -2143,7 +2143,7 @@ mod tests {
 
     // ── amendment 2c-H: a route settle's movement and its receipt leaves ────
 
-    fn fresh_device(b: u8) -> DeviceState {
+    pub(crate) fn fresh_device(b: u8) -> DeviceState {
         DeviceState::new([0u8; 32], devid(b), pubkey())
     }
 
@@ -2693,7 +2693,10 @@ mod tests {
         assert_eq!(online(loaded, &token), Some(70));
         assert_eq!(loaded.offline_allocation(&bundle, &token), Some(30));
         assert_eq!(
-            loaded.offline_account(&bundle).expect("open").origin(),
+            loaded
+                .offline_account(&bundle)
+                .expect("open")
+                .funding_chain(),
             Some(load.operation_id),
             "the load's own identity funds the account"
         );
@@ -2716,7 +2719,7 @@ mod tests {
                 &OfflineAccountStep::Load {
                     asset: token,
                     amount: 30,
-                    origin: load.operation_id,
+                    boundary_id: load.operation_id,
                 },
                 &load.account_move.before,
                 &paths,
