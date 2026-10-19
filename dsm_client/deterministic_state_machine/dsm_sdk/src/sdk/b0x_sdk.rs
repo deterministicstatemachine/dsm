@@ -625,6 +625,37 @@ pub(crate) fn spool_end(address: &str, endpoint: &str) -> Option<u64> {
         .copied()
 }
 
+/// Each distinct copy the members returned once, by its merge key, taken
+/// from the members in turn: every member's first copy, then every member's
+/// second, and so on. Each member's own copies keep its spool's order, so a
+/// consumer that takes only some takes each member's oldest. No member's
+/// answer gets ahead of another's: a member that returns nothing but fresh
+/// junk takes at most its turn of any budget the consumer spends on the
+/// merged copies, and the copies the other members hold are read within
+/// the rest (SA-101).
+fn merge_member_copies<T>(member_copies: Vec<Vec<(String, T)>>) -> Vec<(String, T)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    let mut members: Vec<std::vec::IntoIter<(String, T)>> =
+        member_copies.into_iter().map(Vec::into_iter).collect();
+    loop {
+        let mut took_a_turn = Vec::new();
+        for member in &mut members {
+            if let Some(copy) = member.next() {
+                took_a_turn.push(copy);
+            }
+        }
+        if took_a_turn.is_empty() {
+            return merged;
+        }
+        for (copy_key, copy) in took_a_turn {
+            if seen.insert(copy_key.clone()) {
+                merged.push((copy_key, copy));
+            }
+        }
+    }
+}
+
 /// How long a member holds a wait before answering that nothing landed: the
 /// deployed node's bound (`dsm_storage_node::api::transport::b0x::MAX_WAIT`).
 pub(crate) const MEMBER_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(25);
@@ -2604,11 +2635,9 @@ impl B0xSDK {
         // This device's key, once for the whole read: without it nothing can
         // be opened, which is this device's state and not the envelopes'.
         let kyber_secret = local_kyber_secret()?;
-        // Each distinct copy once, by `envelope_merge_key`, in the order the
-        // spools hold them: a consumer that takes only some takes the oldest,
-        // and nothing spooled later gets ahead of them.
-        let mut copies: Vec<(String, dsm::types::proto::Envelope)> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // What each member's spool holds that this device has not consumed or
+        // passed over, in that spool's order. They are merged below.
+        let mut member_copies: Vec<Vec<(String, dsm::types::proto::Envelope)>> = Vec::new();
         // Members whose spool was read to an answer. None is not an empty
         // inbox: nothing was read (storage spec §4).
         let mut answered = 0usize;
@@ -2659,6 +2688,7 @@ impl B0xSDK {
                 PagesEnded::End => ReadStop::End,
                 PagesEnded::PageCap | PagesEnded::Failed => ReadStop::PageCap,
             };
+            let mut copies = Vec::new();
             'pages: for batch in member.pages {
                 if batch.next_seq > Self::MAX_SPOOL_POSITION {
                     malformed = Some(format!(
@@ -2718,9 +2748,7 @@ impl B0xSDK {
                                 continue;
                             }
                             consumed_run = false;
-                            if seen.insert(copy_key.clone()) {
-                                copies.push((copy_key, inner));
-                            }
+                            copies.push((copy_key, inner));
                         }
                         Err(e) => {
                             warn!("b0x envelope {} does not open: {}", id, e);
@@ -2732,6 +2760,7 @@ impl B0xSDK {
                 }
                 cursor = batch.next_seq;
             }
+            member_copies.push(copies);
             b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
             // A read that failed leaves the cursor where it was: what it did
             // not reach is read from there again.
@@ -2767,6 +2796,7 @@ impl B0xSDK {
         }
         let members = self.storage_node_endpoints.len();
         let coverage = SpoolCoverage::of(answered, members, self.quorum_k);
+        let copies = merge_member_copies(member_copies);
 
         let mut entries = Vec::new();
         let mut unknown = Vec::new();
