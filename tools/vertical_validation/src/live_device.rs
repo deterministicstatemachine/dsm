@@ -318,7 +318,6 @@ impl LiveDevice {
             op.clone(),
             value_moved(op, BalanceDirection::Debit)?.as_slice(),
             None,
-            None,
         )
     }
 
@@ -331,7 +330,6 @@ impl LiveDevice {
             from.devid,
             op.clone(),
             value_moved(op, BalanceDirection::Credit)?.as_slice(),
-            None,
             None,
         )
     }
@@ -554,7 +552,6 @@ pub fn faucet_claim(head: &DeviceState, generation: u64) -> Result<DeviceState, 
                 direction: BalanceDirection::Credit,
                 amount: ERA_FAUCET_PAYOUT,
             }],
-            None,
             None,
         )
         .map(|outcome| {

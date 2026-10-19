@@ -613,11 +613,11 @@ pub struct AcceptedOfflineBoundary {
 /// whenever the digests happened to agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptedSubstrate {
-    // Boxed: the successor arm carries the verified operation (~500B) while
-    // the boundary arm is two digests; an unboxed enum would make every
-    // substrate the size of the largest.
+    // Boxed, both: the successor arm carries the verified operation (~500B)
+    // and the boundary arm the verified boundary's roots; unboxed, every
+    // substrate would be the size of the largest.
     DsmSuccessor(Box<AcceptedDsmSuccessor>),
-    OfflineBoundary(AcceptedOfflineBoundary),
+    OfflineBoundary(Box<AcceptedOfflineBoundary>),
 }
 
 impl AcceptedSubstrate {
@@ -648,10 +648,10 @@ impl AcceptedSubstrate {
         verified: crate::economic::offline_boundary::VerifiedOfflineBoundary,
         evidence_addr: [u8; 32],
     ) -> Self {
-        Self::OfflineBoundary(AcceptedOfflineBoundary {
+        Self::OfflineBoundary(Box::new(AcceptedOfflineBoundary {
             verified,
             evidence_addr,
-        })
+        }))
     }
 
     /// The verified offline boundary, for an offline-boundary substrate.

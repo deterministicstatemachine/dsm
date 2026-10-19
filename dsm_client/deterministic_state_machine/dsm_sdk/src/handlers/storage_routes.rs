@@ -1743,7 +1743,9 @@ impl AppRouterImpl {
                         &prereqs.validated,
                         built.parts.witness,
                         built.parts.manifest,
-                        crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(signed_op),
+                        crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(Box::new(
+                            signed_op,
+                        )),
                         pending,
                         // The RELEASE object: frozen only in the admit
                         // transaction, published right after.

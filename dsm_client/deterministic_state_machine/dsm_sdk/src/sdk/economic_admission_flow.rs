@@ -712,7 +712,7 @@ pub(crate) async fn admitted_self_loop_operation(
         &validated,
         parts.witness,
         parts.manifest,
-        AdmittedSubstrate::Dsm(operation),
+        AdmittedSubstrate::Dsm(Box::new(operation)),
         pending,
         Vec::new(),
     )
@@ -792,10 +792,12 @@ pub(crate) async fn admitted_offline_boundary(
             let evidence_addr = offline_boundary_evidence_addr(&body);
             let pre_root = tree.root();
             let write_set = dsm::economic::write_set::build_boundary_write_set(
-                kind,
-                &asset,
-                amount,
-                &boundary.operation_id,
+                &dsm::economic::write_set::BoundaryEffect {
+                    kind,
+                    asset,
+                    amount,
+                    boundary_id: boundary.operation_id,
+                },
                 &genesis,
                 &devid,
                 &pre_state.as_write_set_pre_state(),
@@ -970,7 +972,8 @@ fn admission_already_finished(
 /// operation a DSM successor carried, or the exact bytes of an offline
 /// boundary's body. The finish verifies each again before it trusts it.
 pub(crate) enum AdmittedSubstrate {
-    Dsm(Operation),
+    // Boxed: an operation can carry a SPHINCS+ signature.
+    Dsm(Box<Operation>),
     OfflineBoundary(Vec<u8>),
 }
 
@@ -1184,6 +1187,7 @@ async fn finish_locked(
     );
     let accepted = match substrate {
         AdmittedSubstrate::Dsm(operation) => {
+            let operation = *operation;
             let (embedded_parent, c_dsm_plus) = coords.substrate.successor().ok_or_else(|| {
                 DsmError::invalid_operation(
                     "a DSM admission whose coordinates are not a successor's",
@@ -1599,7 +1603,7 @@ pub(crate) async fn resume_pending_admission(
         &validated,
         witness,
         manifest,
-        AdmittedSubstrate::Dsm(operation),
+        AdmittedSubstrate::Dsm(Box::new(operation)),
         pending,
         post_admit,
     )

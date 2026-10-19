@@ -1900,7 +1900,7 @@ impl AppRouterImpl {
             &econ_validated,
             econ_parts_final.witness,
             econ_parts_final.manifest,
-            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(admission_op),
+            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(Box::new(admission_op)),
             pending_admission,
             Vec::new(),
         )

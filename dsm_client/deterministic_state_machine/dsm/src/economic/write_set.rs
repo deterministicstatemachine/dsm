@@ -1540,6 +1540,16 @@ fn expect_one_balance(
     })
 }
 
+/// The economic effect of one offline boundary, as Core took it: which way
+/// it moved value, what and how much, and its identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundaryEffect {
+    pub kind: crate::types::device_state::OfflineBoundaryKind,
+    pub asset: [u8; 32],
+    pub amount: u64,
+    pub boundary_id: [u8; 32],
+}
+
 /// Build the write set of an offline boundary against the producer's own
 /// pre-state: a load is one balance debit of the asset it loads; an unload is
 /// one balance credit of the asset it unloads, funded by the offline debit the
@@ -1551,16 +1561,20 @@ fn expect_one_balance(
 ///
 /// [`OfflineBoundaryOutcome`]: crate::types::device_state::OfflineBoundaryOutcome
 pub fn build_boundary_write_set(
-    kind: crate::types::device_state::OfflineBoundaryKind,
-    asset: &[u8; 32],
-    amount: u64,
-    boundary_id: &[u8; 32],
+    boundary: &BoundaryEffect,
     genesis: &[u8; 32],
     device_id: &[u8; 32],
     pre_state: &EconomicPreState<'_>,
     tree: &mut EconomicSmt,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     use crate::types::device_state::OfflineBoundaryKind;
+    let BoundaryEffect {
+        kind,
+        asset,
+        amount,
+        boundary_id,
+    } = boundary;
+    let (kind, asset, amount, boundary_id) = (*kind, asset, *amount, boundary_id);
     if amount == 0 {
         return Err(WriteSetError::WrongWriteSet {
             detail: "a boundary moves a positive amount",

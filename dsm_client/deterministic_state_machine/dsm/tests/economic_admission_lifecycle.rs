@@ -1214,10 +1214,12 @@ fn boundary(
         .expect("encode");
     let verified = OfflineBoundaryBody::verify(&bytes, &G, dev()).expect("the body verifies");
     let built = dsm::economic::write_set::build_boundary_write_set(
-        kind,
-        &era,
-        amount,
-        &outcome.operation_id,
+        &dsm::economic::write_set::BoundaryEffect {
+            kind,
+            asset: era,
+            amount,
+            boundary_id: outcome.operation_id,
+        },
         &G,
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(balances, position),
@@ -1347,10 +1349,12 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
 
     // The same unload cannot fund a second credit: its source is consumed.
     let again = dsm::economic::write_set::build_boundary_write_set(
-        Unload,
-        &era,
-        100,
-        &unload.outcome.operation_id,
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Unload,
+            asset: era,
+            amount: 100,
+            boundary_id: unload.outcome.operation_id,
+        },
         &G,
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(
@@ -1367,10 +1371,12 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
 
     // A credit larger than the account debit the body proves is refused.
     let inflated = dsm::economic::write_set::build_boundary_write_set(
-        Unload,
-        &era,
-        101,
-        &unload.outcome.operation_id,
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Unload,
+            asset: era,
+            amount: 101,
+            boundary_id: unload.outcome.operation_id,
+        },
         &G,
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(&online, 3),
@@ -1462,10 +1468,12 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let after_load = std::collections::BTreeMap::from([(era, 200)]);
     let mut loaded_tree = tree.clone();
     let built = dsm::economic::write_set::build_boundary_write_set(
-        Load,
-        &era,
-        300,
-        &load.outcome.operation_id,
+        &dsm::economic::write_set::BoundaryEffect {
+            kind: Load,
+            asset: era,
+            amount: 300,
+            boundary_id: load.outcome.operation_id,
+        },
         &G,
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(&online, 2),

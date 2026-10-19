@@ -2610,15 +2610,14 @@ impl BilateralBleHandler {
         // asymmetric (what T_A stores); the symmetric `h_n_plus_1` is still
         // sent in the confirm envelope for tripwire + contacts.chain_tip
         // alignment.
-        let sender_bearer_leaves = match staged_bearer.as_ref() {
-            None => None,
-            Some((staged, _)) => Some(dsm::verification::receipt_verification::BearerLeaves {
+        let sender_bearer_leaves = staged_bearer.as_ref().map(|(staged, _)| {
+            dsm::verification::receipt_verification::BearerLeaves {
                 bundle: staged.pin.bundle,
                 counter: staged.transition.anchor_counter,
                 frontier: staged.appliance_prev_root,
                 next_frontier: staged.appliance_next_root,
-            }),
-        };
+            }
+        });
         let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
             self.device_id,
             session.counterparty_device_id,
