@@ -874,7 +874,6 @@ impl BilateralBleHandler {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: Some(pre_commitment.parent_tip),
@@ -1553,7 +1552,6 @@ impl BilateralBleHandler {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
@@ -1943,7 +1941,6 @@ impl BilateralBleHandler {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
@@ -2511,12 +2508,12 @@ impl BilateralBleHandler {
             } else {
                 None
             };
-        // Offline-bearer transfer: draw value from the device-bound offline-cash allocation, not the online
-        // balance. Build the allocation-spend descriptor ONCE here — it carries the anchor bundle B from the
-        // staged appliance, which is NOT recoverable from anchor_leaf's H(B) key, so it is stashed on
-        // the session (below) and threaded identically into the canonical commit. Empty deltas and
-        // Some(offline_spend) are ONE atomic decision (empty deltas without offline_spend is rejected
-        // by the conservation guard — the fail-closed case).
+        // Offline-bearer transfer: draw value from the offline account, not the online balance.
+        // Build the account-spend descriptor ONCE here — it carries the anchor bundle B and the
+        // frontier the staged transition advances to — so it is stashed on the session (below) and
+        // threaded identically into the canonical commit. Empty deltas and Some(offline_spend) are
+        // ONE atomic decision (empty deltas without offline_spend is rejected by the conservation
+        // guard — the fail-closed case).
         let offline_spend: Option<dsm::types::device_state::OfflineSpend> =
             match (staged_bearer.as_ref(), &session.operation) {
                 (
@@ -2564,6 +2561,7 @@ impl BilateralBleHandler {
                         anchor_bundle_b: staged.pin.bundle,
                         asset,
                         amount: amount.value(),
+                        next_frontier: staged.appliance_next_root,
                     })
                 }
                 _ => None,
@@ -2575,9 +2573,8 @@ impl BilateralBleHandler {
             session.counterparty_device_id,
             session.operation.clone(),
             &[],
-            staged_bearer.as_ref().map(|(s, _)| s.anchor_leaf.clone()),
-            // Bearer→allocation: draw the value from the offline-cash allocation instead of the online balance.
-            // The same descriptor is stashed on the session and used at the canonical commit.
+            // Bearer: draw the value from the offline account instead of the online balance. The
+            // same descriptor is stashed on the session and used at the canonical commit.
             offline_spend,
         )?;
         // The root the relationship path authenticates h_n under: the device
@@ -2608,29 +2605,19 @@ impl BilateralBleHandler {
         // the sender holds it to the state rules HERE, before the appliance's
         // irreversible COMMIT below: a receipt that cannot hold never spends a
         // counter step. Its canonical bytes do not depend on the release. For
-        // a bearer step its anchor-state leaves are the leaf the simulation
-        // moved and the successor the staging derived. Tips are A-side
+        // a bearer step the receipt's account must be the one the staged
+        // transition advances: its counter and both frontiers. Tips are A-side
         // asymmetric (what T_A stores); the symmetric `h_n_plus_1` is still
         // sent in the confirm envelope for tripwire + contacts.chain_tip
         // alignment.
         let sender_bearer_leaves = match staged_bearer.as_ref() {
             None => None,
-            Some((staged, _)) => {
-                let before = sim_outcome
-                    .transition
-                    .write_at(&staged.anchor_leaf.key)
-                    .and_then(|write| write.pre)
-                    .ok_or_else(|| {
-                        DsmError::state_machine(
-                            "offline-bearer: the simulation did not move the anchor-state leaf (fail closed)",
-                        )
-                    })?;
-                Some(dsm::verification::receipt_verification::BearerLeaves {
-                    bundle: staged.pin.bundle,
-                    anchor_before: before,
-                    anchor_after: staged.anchor_leaf.new_value,
-                })
-            }
+            Some((staged, _)) => Some(dsm::verification::receipt_verification::BearerLeaves {
+                bundle: staged.pin.bundle,
+                counter: staged.transition.anchor_counter,
+                frontier: staged.appliance_prev_root,
+                next_frontier: staged.appliance_next_root,
+            }),
         };
         let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
             self.device_id,
@@ -2642,8 +2629,8 @@ impl BilateralBleHandler {
 
         // v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
         // FINALIZE with the REAL device roots the simulation just produced, and attach Π_i/Π_{i+1}
-        // (the anchor-state inclusion proofs from the same simulation) to the release package. The
-        // simulation above already folded the staged leaf into R_{i+1}, so a failed release cannot
+        // (the offline-state proofs from the same simulation) to the release package. The
+        // simulation above already folded the spend into R_{i+1}, so a failed release cannot
         // ride empty (the confirm's roots would be inconsistent with the canonical commit) — it
         // FAILS the confirm build, after a best-effort cancel returns an appliance stuck between
         // PREPARE and COMMIT to Ready.
@@ -2651,12 +2638,12 @@ impl BilateralBleHandler {
             None => None,
             Some((staged, r_r)) => {
                 let (proof_prev, proof_next) = sim_outcome
-                    .anchor_proofs
+                    .offline_state_proofs
                     .as_ref()
                     .map(|p| (p.parent.clone(), p.child.clone()))
                     .ok_or_else(|| {
                         DsmError::state_machine(
-                            "offline-bearer: simulation produced no anchor-state proofs (fail closed)",
+                            "offline-bearer: simulation produced no offline-state proofs (fail closed)",
                         )
                     })?;
                 // The anchor's COMMIT below spends a counter step: the
@@ -2798,11 +2785,10 @@ impl BilateralBleHandler {
         confirm_pending.stitched_receipt_bytes = Some(confirm_request.stitched_receipt.clone());
         confirm_pending.sent_child_root = Some(sender_smt_root);
         confirm_pending.owed_frame = Some(buffer.clone());
-        if let Some(art) = bearer_artifacts.as_ref() {
-            confirm_pending.anchor_leaf = Some(art.anchor_leaf.clone());
-            // The allocation-spend descriptor (Copy): the commit debits the SAME allocation the
-            // sim did — the bundle B is not recoverable from anchor_leaf.
-            confirm_pending.offline_spend = offline_spend;
+        // The account-spend descriptor, kept exactly when a release was made: the commit
+        // spends the SAME account, to the SAME frontier, as the sim did.
+        if let Some(released) = bearer_artifacts.as_ref().and(offline_spend) {
+            confirm_pending.offline_spend = Some(released);
         }
         let durable = confirm_pending.to_record().and_then(|record| {
             let storage =
@@ -3764,7 +3750,6 @@ impl BilateralBleHandler {
                 session.operation.clone(),
                 &receiver_deltas,
                 None,
-                None,
                 Some(&sign_step),
                 &commit_step,
             )
@@ -3965,7 +3950,6 @@ impl BilateralBleHandler {
             session_operation,
             own_receipt,
             counter_signed_receipt,
-            session_anchor_leaf,
             session_sent_child_root,
             session_offline_spend,
             session_terms,
@@ -4007,7 +3991,6 @@ impl BilateralBleHandler {
                 sess.operation.clone(),
                 own.clone(),
                 counter.clone(),
-                sess.anchor_leaf.clone(),
                 sess.sent_child_root,
                 sess.offline_spend,
                 sess.terms.clone(),
@@ -4045,8 +4028,8 @@ impl BilateralBleHandler {
             }
 
             // Sender deltas are ALWAYS empty on this transport: a bearer
-            // Transfer draws from the offline-cash allocation via the
-            // allocation-spend descriptor the confirm-build stashed on the
+            // Transfer draws from the offline account via the
+            // account-spend descriptor the confirm-build stashed on the
             // session, and nothing else here moves value. A Transfer session
             // that reaches commit WITHOUT that descriptor is a broken
             // invariant (the confirm-build refuses to construct one), not a
@@ -4070,8 +4053,7 @@ impl BilateralBleHandler {
                         receiver_challenge: &counterparty_acceptance.1,
                     },
                     Vec::new(),
-                    session_anchor_leaf.clone(), // bearer: the SAME successor leaf the confirm proofs used
-                    session_offline_spend, // bearer→allocation: the SAME allocation debit the confirm-build sim used
+                    session_offline_spend, // bearer: the SAME account spend the confirm-build sim used
                 )
                 .await
             {
@@ -4284,7 +4266,6 @@ impl BilateralBleHandler {
             prepared.counterparty_devid,
             prepared.operation.clone(),
             &prepared.deltas,
-            prepared.anchor_leaf.clone(), // bearer: commit the same fused-anchor leaf as the sim proofs
             // Bearer→allocation: the SAME allocation debit the confirm-build sim used
             // (`prepared.offline_spend`, Copy) — `prepared.deltas` is empty for a bearer transfer,
             // so the value is drawn from the offline-cash allocation, not the online balance, and the
@@ -5116,7 +5097,6 @@ mod tests {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
@@ -5351,7 +5331,6 @@ mod tests {
                 stitched_receipt_bytes: None,
                 counter_signed_receipt: None,
                 receiver_challenge: None,
-                anchor_leaf: None,
                 sent_child_root: None,
                 offline_spend: None,
                 parent_tip: None,
@@ -5518,7 +5497,6 @@ mod tests {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
@@ -5594,7 +5572,6 @@ mod tests {
             counter_signed_receipt: Some(vec![4u8; 8]),
             // A confirmed step holds the challenge its acceptance signed.
             receiver_challenge: Some([3u8; 32]),
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: Some(dsm::types::device_state::OfflineSpend {
                 anchor_bundle_b: [5u8; 32],
@@ -5824,8 +5801,7 @@ mod tests {
             parent_tip: None,
             receiver_challenge: None,
             sent_child_root: None,
-            anchor_leaf_key: None,
-            anchor_leaf_value: None,
+            spend_next_frontier: None,
             spend_anchor_bundle: None,
             spend_asset: None,
             spend_amount: None,

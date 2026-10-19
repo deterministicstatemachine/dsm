@@ -170,7 +170,6 @@ pub fn rebuild_head_from_checkpoint(
             state.operation.clone(),
             &deltas,
             None,
-            None,
         ) {
             Ok(o) => o,
             Err(e) => {

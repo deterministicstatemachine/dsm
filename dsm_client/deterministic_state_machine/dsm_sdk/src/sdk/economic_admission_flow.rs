@@ -111,7 +111,7 @@ pub(crate) fn validated_root_or_activate(
     let snapshot = match head.pending_economic_admission() {
         None => EconomicActivationSnapshot {
             online_balances_empty: head.balances_snapshot().is_empty(),
-            outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+            outstanding_offline_allocation: head.holds_offline_value(),
         },
         Some(first) => {
             let (_, witness) = frozen_witness_of(first)?;

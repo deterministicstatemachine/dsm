@@ -511,7 +511,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// 31: an application account's session carries the wallet's status
 /// (`connect_app_sessions.status` NOT NULL): the wallet's signed disconnect
 /// ends it on the application's side too (DSM Amendment A11, MR-DSM-0292).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 31;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1582,11 +1582,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             parent_tip                BLOB,
             receiver_challenge        BLOB,
             sent_child_root           BLOB,
-            anchor_leaf_key           BLOB,
-            anchor_leaf_value         BLOB,
             spend_anchor_bundle       BLOB,
             spend_asset               BLOB,
             spend_amount              INTEGER,
+            spend_next_frontier       BLOB,
             owed_frame                BLOB,
             terms_bytes               BLOB
         );

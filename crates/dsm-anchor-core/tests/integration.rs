@@ -4,7 +4,9 @@
 //! DSM device SMT); the appliance supplies `σ^chip` + `σ^host` over one root-advance message.
 #![allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
 
-use anchor_core::accept::{accept_offline, AcceptError, DsmVerifier, VerifierContext};
+use anchor_core::accept::{
+    accept_offline, AcceptError, DsmVerifier, OfflineStateRefused, VerifierContext,
+};
 use anchor_core::appliance::{Appliance, Record, RecoverOutcome, Status};
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::hash::h as hash;
@@ -115,8 +117,12 @@ impl DsmVerifier for Dsm {
         _f: &[u8; 32],
         _u: u64,
         _p: &[u8],
-    ) -> bool {
-        self.smt_ok
+    ) -> Result<(), OfflineStateRefused> {
+        if self.smt_ok {
+            Ok(())
+        } else {
+            Err(OfflineStateRefused)
+        }
     }
     fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
         self.transition_ok

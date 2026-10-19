@@ -55,9 +55,9 @@ pub struct CoreSDK {
     policy_system: TokenPolicySystem,
     /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
     /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
-    /// its down-counter + fused-anchor lineage advance. Its `commit_0` is bootstrapped into the
-    /// DeviceState anchor-state leaf on birth; each bearer transfer drives PREPARE→COMMIT→EMIT→
-    /// FINALIZE and advances the leaf in the same `DeviceState::advance`.
+    /// its down-counter + fused-anchor lineage advance. The device's offline account is opened at
+    /// the chip's enrolled origin; each bearer transfer steps the account's software counter and
+    /// frontier in `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
     anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
 }
 
@@ -291,7 +291,6 @@ impl CoreSDK {
             dev_id,
             operation,
             deltas,
-            None,
             None,
             in_tx_extra,
             None,
@@ -1186,7 +1185,7 @@ impl CoreSDK {
     /// view derived from the AdvanceOutcome's DeviceState + chain state. The
     /// `State` will be removed once all downstream readers migrate to
     /// `DeviceState`.
-    /// Ordinary advance (no fused-anchor-state leaf, no allocation draw).
+    /// Ordinary advance (no offline-account spend).
     pub fn execute_on_relationship(
         &self,
         rel_key: [u8; 32],
@@ -1199,7 +1198,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            None,
             None,
             None,
             None,
@@ -1220,7 +1218,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         before_commit: Option<
             &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
@@ -1235,7 +1232,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
             Some(settle),
             before_commit,
@@ -1324,7 +1320,6 @@ impl CoreSDK {
             operation,
             deltas,
             None,
-            None,
             Some(&write),
             Some(&pre),
             admission,
@@ -1364,7 +1359,6 @@ impl CoreSDK {
             operation,
             deltas,
             None,
-            None,
             in_tx_extra,
             None,
             admission,
@@ -1402,7 +1396,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         in_tx_extra: Option<
             &dyn Fn(
@@ -1552,7 +1545,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf, // Some(..) commits the fused-anchor-state leaf atomically (offline-bearer)
             offline_spend, // Some(..) draws the value from the offline-cash allocation instead of online balance
         )?;
         // The sender's signed A-side pair is deliberately NOT compared against
@@ -1690,92 +1682,20 @@ impl CoreSDK {
         Ok(())
     }
 
-    /// **Load** `amount` of `asset` from the online balance into this device's offline-cash allocation,
-    /// bound to the enrolled anchor bundle `B`. An online, conserved regime shift: online
-    /// `available` drops and the device-bound allocation rises by the same amount (device root advances).
-    /// Fail-closed persistence: the new device head is durably written BEFORE it is installed, so a
-    /// persist failure leaves the in-memory head on the prior state (the load is never-happened).
-    pub fn load_offline_cash(
-        &self,
-        anchor_bundle_b: [u8; 32],
-        asset: [u8; 32],
-        amount: u64,
-    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
-        let mut sm = self.state_machine.lock();
-        let outcome = {
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "load_offline_cash: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            ds.load_offline_cash(&anchor_bundle_b, &asset, amount)?
-        };
-        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
-            |e| {
-                DsmError::storage(
-                    format!("load_offline_cash: persist device head failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            },
-        )?;
-        sm.set_device_head(outcome.new_device_state.clone());
-        Self::reproject_committed_head(&outcome.new_device_state);
-        Ok(outcome)
-    }
-
-    /// **Unload** `amount` from this device's offline-cash allocation back to the online balance
-    /// (reconcile): the allocation drops and online `available` rises by the same amount. Same
-    /// fail-closed persist-before-install discipline as [`Self::load_offline_cash`].
-    pub fn unload_offline_cash(
-        &self,
-        anchor_bundle_b: [u8; 32],
-        asset: [u8; 32],
-        amount: u64,
-    ) -> Result<dsm::types::device_state::OfflineAllocationOutcome, DsmError> {
-        let mut sm = self.state_machine.lock();
-        let outcome = {
-            let ds = sm.device_head().ok_or_else(|| {
-                DsmError::state_machine(
-                    "unload_offline_cash: DeviceState not initialized (genesis first)",
-                )
-            })?;
-            ds.unload_offline_cash(&anchor_bundle_b, &asset, amount)?
-        };
-        crate::storage::client_db::update_bcr_device_head(&outcome.new_device_state).map_err(
-            |e| {
-                DsmError::storage(
-                    format!("unload_offline_cash: persist device head failed: {e}"),
-                    None::<std::io::Error>,
-                )
-            },
-        )?;
-        sm.set_device_head(outcome.new_device_state.clone());
-        Self::reproject_committed_head(&outcome.new_device_state);
-        Ok(outcome)
-    }
-
-    /// Current offline-cash allocation balance for `asset` under the enrolled anchor bundle `B`.
-    pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> u64 {
+    /// The allocation of `asset` in the offline account of the enrolled anchor bundle `B`, if the
+    /// account is open and holds one.
+    pub fn offline_cash_balance(&self, anchor_bundle_b: [u8; 32], asset: [u8; 32]) -> Option<u64> {
         let sm = self.state_machine.lock();
-        match sm.device_head() {
-            Some(ds) => {
-                let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
-                    &ds.genesis_digest(),
-                    &ds.devid(),
-                    &anchor_bundle_b,
-                    &asset,
-                );
-                ds.offline_allocation(&key)
-            }
-            None => 0,
-        }
+        sm.device_head()?
+            .offline_allocation(&anchor_bundle_b, &asset)
     }
 
     /// The offline allocation of `asset` under the bundle of the appliance
-    /// attached in this process, or `None` while none has been attached or
-    /// before genesis. The allocation leaf is keyed by the appliance's bundle,
-    /// which only the appliance states, so a device that has not attached one
-    /// cannot say what it holds offline: that is unknown, not zero.
+    /// attached in this process, or `None` while none has been attached,
+    /// before genesis, or while its account holds none of `asset`. The account
+    /// is keyed by the appliance's bundle, which only the appliance states, so
+    /// a device that has not attached one cannot say what it holds offline:
+    /// that is unknown, not zero.
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance
@@ -1783,14 +1703,7 @@ impl CoreSDK {
             .as_ref()
             .map(|appliance| appliance.pin().bundle)?;
         let sm = self.state_machine.lock();
-        let ds = sm.device_head()?;
-        let key = dsm::types::offline_allocation_leaf::offline_allocation_key(
-            &ds.genesis_digest(),
-            &ds.devid(),
-            &bundle,
-            asset,
-        );
-        Some(ds.offline_allocation(&key))
+        sm.device_head()?.offline_allocation(&bundle, asset)
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
@@ -1815,7 +1728,6 @@ impl CoreSDK {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
         let sm = self.state_machine.lock();
@@ -1824,7 +1736,6 @@ impl CoreSDK {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
         )
     }
@@ -1871,14 +1782,12 @@ impl CoreSDK {
 }
 
 /// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
-/// transfer: the wire release + the anchor-state leaf update the DSM advance must apply + the
-/// appliance frontier lineage the receiver pins/adopts + the pin material to admit the anchor.
+/// transfer: the wire release + the appliance frontier lineage the receiver pins/adopts + the pin
+/// material to admit the anchor.
 #[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
     /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
     pub offline_release: Vec<u8>,
-    /// The anchor-state leaf update the DSM advance applied (`Some(...)` on the canonical commit).
-    pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
     /// The appliance frontier `h_i` this transfer consumes (the receiver's accepted frontier).
     pub appliance_prev_root: [u8; 32],
     /// The successor frontier `h_{i+1}` the receiver adopts after acceptance.
@@ -1888,18 +1797,16 @@ pub struct OfflineBearerArtifacts {
 }
 
 /// A STAGED offline-bearer transition (v2 producer phase 1): the transition `Δ` and its successor
-/// anchor-state leaf are fully determined from the appliance's active state, but NOTHING has been
-/// signed or committed — the appliance is untouched. The DSM layer runs its advance simulation over
-/// `anchor_leaf` to materialize the real device SMT roots `R_i`/`R_{i+1}` and the inclusion proofs
+/// frontier are fully determined from the offline account's frontier and counter, which the
+/// appliance's active state matches, but NOTHING has been signed or committed — the appliance is
+/// untouched. The DSM layer runs its advance simulation with the spend's next frontier to
+/// materialize the real device SMT roots `R_i`/`R_{i+1}` and the offline-state proofs
 /// `Π_i`/`Π_{i+1}`, then feeds those into [`CoreSDK::release_offline_bearer`] so the release is
-/// born with the real roots in its signed transcript (no placeholder stamping, no re-stamp).
+/// born with the real roots in its signed transcript.
 #[derive(Clone)]
 pub struct StagedBearerTransition {
     /// The fully-formed transition `Δ` (owned; `as_transition()` for the appliance call).
     pub transition: anchor_core::root_advance::OwnedTransition,
-    /// The successor anchor-state leaf `L_{i+1} = H("DSM/anchor-state/v2" ‖ B ‖ h_{i+1} ‖ u_{i+1})`
-    /// at the stable per-device key — what the DSM advance commits atomically with the transfer.
-    pub anchor_leaf: dsm::types::device_state::AnchorLeafUpdate,
     /// The appliance frontier `h_i` this transfer consumes.
     pub appliance_prev_root: [u8; 32],
     /// The successor frontier `h_{i+1} = H(h_i ‖ D)`.
@@ -1929,7 +1836,7 @@ impl CoreSDK {
     /// Read-only anchor appliance snapshot for the `anchor.status` diagnostics route (signal (c)).
     /// Attaches (and caches) the appliance via the installed factory if not already attached, then
     /// reads `pin()`/`status()`. Unlike [`stage_offline_bearer_transition`](Self::stage_offline_bearer_transition)
-    /// this performs NO anchor-state leaf reconciliation and NO mutation. When no appliance can
+    /// this performs NO offline-account check and NO mutation. When no appliance can
     /// attach (no device / fail-closed) it returns a disconnected snapshot rather than an error, so
     /// the diagnostics panel can render "no anchor connected" instead of failing.
     #[must_use]
@@ -1995,12 +1902,12 @@ impl CoreSDK {
         }
     }
 
-    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance
-    /// (reconciling the DeviceState anchor-state leaf to the chip's CURRENT active state), then
-    /// deterministically stage the next transition — compute `D`, the successor frontier
-    /// `h_{i+1} = H(h_i ‖ D)`, and the successor anchor-state leaf. NO appliance mutation, NO
-    /// signatures, NO counter move: the caller first simulates the DSM advance over `anchor_leaf`
-    /// to obtain the real device roots `R_i`/`R_{i+1}`, then calls
+    /// v2 producer phase 1 (Software-Authority / Hardware-Identity): lazily attach the appliance,
+    /// check it against the offline account — the account's software counter and frontier are the
+    /// authority, and the chip must stand exactly where they do — then deterministically stage the
+    /// next transition: compute `D` and the successor frontier `h_{i+1} = H(h_i ‖ D)`. NO
+    /// appliance mutation, NO signatures, NO counter move: the caller first simulates the DSM
+    /// advance with that frontier to obtain the real device roots `R_i`/`R_{i+1}`, then calls
     /// [`release_offline_bearer`](Self::release_offline_bearer).
     #[allow(clippy::too_many_arguments)]
     pub fn stage_offline_bearer_transition(
@@ -2014,8 +1921,7 @@ impl CoreSDK {
         action_fields: Vec<u8>,
         receiver_challenge: [u8; 32],
     ) -> Result<StagedBearerTransition, DsmError> {
-        use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
-        use dsm::core::bilateral_transaction_manager::anchor_state_leaf_key;
+        use anchor_core::root_advance::{anchor_root_advance, transition_digest};
 
         let dev = self.device_info.device_id;
         let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
@@ -2025,8 +1931,7 @@ impl CoreSDK {
             // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
             // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
             // producer. The factory is called once and cached (stateful appliance). Construction only —
-            // the anchor-state-leaf reconcile is done PER stage call below (see the comment there), not
-            // once at birth: the chip can advance between attach and a later transfer.
+            // the check against the offline account is made PER stage call below, not once at birth.
             let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
                 match crate::bridge::anchor_appliance_factory() {
                     Some(factory) => factory()?,
@@ -2057,37 +1962,50 @@ impl CoreSDK {
         let before = app.status()?;
         let appliance_prev_root = before.root;
 
-        // PER-CALL reconcile (the fix for receiver `PrevStateUncommitted`): keep the device-head
-        // anchor-state leaf byte-equal to the value the certificate will claim —
-        // `anchor_state_leaf(B, before.root, before.anchor_counter)` at `anchor_state_leaf_key(B)`.
-        // `before` is a LIVE chip status read that drives cert.prev_frontier/anchor_counter, so the
-        // leaf the sim's Π_i proves must be reconciled to the SAME live state. This previously ran only
-        // once at first attach (`if guard.is_none()`), so any chip move afterward that was not mirrored
-        // into a persisted device head — a committed-but-failed attempt (COMMIT burns the counter +
-        // FINALIZE advances the frontier), a reflash-birth, or an online-only advance that rebuilt the
-        // head — left the stored leaf stale, Π_i proved a stale value, and the receiver rejected.
-        // `with_anchor_state_leaf` touches only `anchor_state_leaf_key(B)`; balances / relationship tips
-        // / offline_allocations are untouched (allocation conservation is unaffected).
+        // The account is the authority and the chip its mirror: the chip must stand at the
+        // account's counter and frontier. An account not yet open is opened here, at the chip's
+        // enrolled origin only — a chip that has never released (`u = 0`). A chip whose counter
+        // moved with no account recording it, or that stands anywhere the account does not, is
+        // inconsistent with the software state and fails closed; nothing is rewritten to follow it.
         {
-            let value = anchor_state_leaf(&pin.bundle, &before.root, before.anchor_counter);
-            let key = anchor_state_leaf_key(&pin.bundle);
             let mut sm = self.state_machine.lock();
             let ds = sm.device_head().ok_or_else(|| {
                 DsmError::state_machine(
                     "offline-bearer: DeviceState not initialized (genesis first)",
                 )
             })?;
-            let stored = ds.extra_leaves_snapshot().get(&key).copied();
-            // No-op guard: an idempotent same-value write preserves the SMT root, but the explicit
-            // skip makes the determinism guarantee obvious and avoids a needless head replacement.
-            if stored != Some(value) {
-                log::info!(
-                    "[offline-bearer] anchor-state leaf reconciled to live chip: u(anchor_counter)={} (stored={}, chip is source of truth)",
-                    before.anchor_counter,
-                    stored.map(|v| crate::util::text_id::encode_base32_crockford(&v[..6])).unwrap_or_else(|| "absent".into()),
-                );
-                let bootstrapped = ds.with_anchor_state_leaf(&key, &value)?;
-                sm.set_device_head(bootstrapped);
+            match ds.offline_account(&pin.bundle) {
+                Some(account) => {
+                    if account.counter() != before.anchor_counter
+                        || account.frontier() != before.root
+                    {
+                        return Err(DsmError::invalid_operation(format!(
+                            "offline-bearer stage: the anchor stands at counter {} but the offline \
+                             account at {} (or at another frontier) — the software counter is the \
+                             authority; recover the appliance before staging (fail closed)",
+                            before.anchor_counter,
+                            account.counter()
+                        )));
+                    }
+                }
+                None => {
+                    if before.anchor_counter != 0 {
+                        return Err(DsmError::invalid_operation(format!(
+                            "offline-bearer stage: no offline account is open, and the anchor's \
+                             counter has moved to {} — a counter with no software record (fail \
+                             closed)",
+                            before.anchor_counter
+                        )));
+                    }
+                    let opened = ds.open_offline_account(&pin.bundle, before.root, 0)?;
+                    crate::storage::client_db::update_bcr_device_head(&opened).map_err(|e| {
+                        DsmError::storage(
+                            format!("offline-bearer: persist the opened offline account: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                    sm.set_device_head(opened);
+                }
             }
         }
 
@@ -2113,19 +2031,8 @@ impl CoreSDK {
         let appliance_next_root = anchor_root_advance(&appliance_prev_root, &d);
         owned.next_root = appliance_next_root;
 
-        // Successor anchor-state leaf: what the device SMT holds AFTER this transfer commits.
-        let anchor_leaf = dsm::types::device_state::AnchorLeafUpdate {
-            key: anchor_state_leaf_key(&pin.bundle),
-            new_value: anchor_state_leaf(
-                &pin.bundle,
-                &appliance_next_root,
-                before.anchor_counter + 1,
-            ),
-        };
-
         Ok(StagedBearerTransition {
             transition: owned,
-            anchor_leaf,
             appliance_prev_root,
             appliance_next_root,
             pin,
@@ -2136,7 +2043,7 @@ impl CoreSDK {
     /// FINALIZE for a staged transition, with the REAL device SMT roots the caller's advance
     /// simulation produced. The release is emitted with those roots inside the signed transcript
     /// (σ^DSM binding is the caller's; σ^chip + σ^host are produced here) — there is no placeholder
-    /// stamping and no post-hoc re-stamp. The anchor-state inclusion proofs `Π_i`/`Π_{i+1}` (from
+    /// stamping and no post-hoc re-stamp. The offline-state proofs `Π_i`/`Π_{i+1}` (from
     /// the same simulation) are attached to the release package here — they sit OUTSIDE all three
     /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
     /// them mutates no signed bytes. Fails closed if the appliance's post-finalize frontier
@@ -2147,8 +2054,8 @@ impl CoreSDK {
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        anchor_smt_proof_before: Vec<u8>,
-        anchor_smt_proof_after: Vec<u8>,
+        offline_state_proof_before: Vec<u8>,
+        offline_state_proof_after: Vec<u8>,
     ) -> Result<OfflineBearerArtifacts, DsmError> {
         use prost::Message;
 
@@ -2182,12 +2089,11 @@ impl CoreSDK {
                     Some(e),
                 )
             })?;
-        rel.anchor_smt_proof_before = anchor_smt_proof_before;
-        rel.anchor_smt_proof_after = anchor_smt_proof_after;
+        rel.offline_state_proof_before = offline_state_proof_before;
+        rel.offline_state_proof_after = offline_state_proof_after;
 
         Ok(OfflineBearerArtifacts {
             offline_release: rel.encode_to_vec(),
-            anchor_leaf: staged.anchor_leaf.clone(),
             appliance_prev_root: staged.appliance_prev_root,
             appliance_next_root: staged.appliance_next_root,
             pin: staged.pin.clone(),

@@ -2528,7 +2528,6 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         before_commit: Option<
             &dyn Fn(
@@ -2545,7 +2544,6 @@ impl AppRouter for AppRouterImpl {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
             before_commit,
             settle,
@@ -2558,7 +2556,6 @@ impl AppRouter for AppRouterImpl {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError> {
         self.core_sdk.simulate_advance_for_confirm(
@@ -2566,7 +2563,6 @@ impl AppRouter for AppRouterImpl {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
         )
     }
@@ -2600,16 +2596,16 @@ impl AppRouter for AppRouterImpl {
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        anchor_smt_proof_before: Vec<u8>,
-        anchor_smt_proof_after: Vec<u8>,
+        offline_state_proof_before: Vec<u8>,
+        offline_state_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
         self.core_sdk.release_offline_bearer(
             staged,
             receiver_challenge,
             sender_device_root_before,
             sender_device_root_after,
-            anchor_smt_proof_before,
-            anchor_smt_proof_after,
+            offline_state_proof_before,
+            offline_state_proof_after,
         )
     }
 

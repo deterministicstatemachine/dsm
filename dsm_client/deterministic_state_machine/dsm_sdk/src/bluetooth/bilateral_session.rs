@@ -75,22 +75,17 @@ pub struct BilateralBleSession {
     /// received from that response, bound into the appliance PREPARE. `None` for ordinary
     /// transfers.
     pub receiver_challenge: Option<[u8; 32]>,
-    /// SENDER-only: the fused-anchor-state leaf update the appliance produced for this bearer
-    /// transfer, stashed at confirm-build time so `finalize_sender_step`
-    /// commits the SAME successor state the on-wire proofs were built from (both-or-neither). `None`
-    /// for ordinary transfers and on the receiver side.
-    pub anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
     /// SENDER-only: the simulated post-advance Per-Device SMT root (`child_r_a`) the confirm's
     /// receipt names, as sent to the receiver. Stashed at confirm-build time so the canonical
     /// commit can enforce both-or-neither: the committed root MUST equal it, else the sender fails
     /// closed to recovery (the receiver verified the receipt against this value). `None` on the
     /// receiver side and before a confirm is built.
     pub sent_child_root: Option<[u8; 32]>,
-    /// SENDER-only: the offline-cash allocation debit for a bearer transfer, created ONCE at confirm-build
-    /// and stashed here so the canonical commit draws value from the allocation identically to the sim.
-    /// It carries the anchor bundle `B` — which is NOT recoverable from `anchor_leaf` (whose key is
-    /// `H(B)`), so it must live as session state, never be reconstructed at commit. `Some` iff this
-    /// bearer transfer is allocation-backed; `None` for ordinary transfers and on the receiver side.
+    /// SENDER-only: the offline-account spend of a bearer transfer, created ONCE at confirm-build
+    /// and stashed here so the canonical commit spends the account identically to the sim: the
+    /// anchor bundle `B`, the asset and amount, and the frontier the staged transition advances
+    /// to. It lives as session state and is never reconstructed at commit. `Some` iff this is a
+    /// bearer transfer; `None` for ordinary transfers and on the receiver side.
     pub offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     /// SENDER-only: the relationship tip the proposed step extends — its
     /// precommitment's parent. With the operation it hashes to the
@@ -170,16 +165,20 @@ impl BilateralBleSession {
     /// The session's durable row: everything a restart needs to carry the
     /// session on where it stopped.
     pub fn to_record(&self) -> Result<BilateralSessionRecord, DsmError> {
-        let (spend_anchor_bundle, spend_asset, spend_amount) = match &self.offline_spend {
-            Some(spend) => (
-                Some(spend.anchor_bundle_b.to_vec()),
-                Some(spend.asset.to_vec()),
-                Some(i64::try_from(spend.amount).map_err(|_| {
-                    DsmError::invalid_operation("an offline spend's amount exceeds i64::MAX")
-                })?),
-            ),
-            None => (None, None, None),
-        };
+        let (spend_anchor_bundle, spend_asset, spend_amount, spend_next_frontier) =
+            match &self.offline_spend {
+                Some(spend) => (
+                    Some(spend.anchor_bundle_b.to_vec()),
+                    Some(spend.asset.to_vec()),
+                    Some(i64::try_from(spend.amount).map_err(|e| {
+                        DsmError::invalid_operation(format!(
+                            "an offline spend's amount exceeds i64::MAX: {e}"
+                        ))
+                    })?),
+                    Some(spend.next_frontier.to_vec()),
+                ),
+                None => (None, None, None, None),
+            };
         Ok(BilateralSessionRecord {
             commitment_hash: self.commitment_hash.to_vec(),
             counterparty_device_id: self.counterparty_device_id.to_vec(),
@@ -194,19 +193,18 @@ impl BilateralBleSession {
             parent_tip: self.parent_tip.map(|t| t.to_vec()),
             receiver_challenge: self.receiver_challenge.map(|c| c.to_vec()),
             sent_child_root: self.sent_child_root.map(|r| r.to_vec()),
-            anchor_leaf_key: self.anchor_leaf.as_ref().map(|l| l.key.to_vec()),
-            anchor_leaf_value: self.anchor_leaf.as_ref().map(|l| l.new_value.to_vec()),
             spend_anchor_bundle,
             spend_asset,
             spend_amount,
+            spend_next_frontier,
             owed_frame: self.owed_frame.clone(),
             terms_bytes: self.terms.as_ref().map(|t| t.to_bytes()),
         })
     }
 
     /// The session a durable row holds. A row that does not decode — a field
-    /// of the wrong length, an unknown phase, half an anchor leaf or half an
-    /// offline spend — is an error, never a session with a stand-in.
+    /// of the wrong length, an unknown phase or part of an offline spend — is
+    /// an error; no session is made from part of a row.
     pub fn from_record(record: &BilateralSessionRecord) -> Result<Self, DsmError> {
         let commitment_hash = array32("commitment_hash", Some(&record.commitment_hash))?
             .ok_or_else(|| DsmError::invalid_operation("commitment_hash is required"))?;
@@ -223,26 +221,13 @@ impl BilateralBleSession {
                 None::<std::io::Error>,
             )
         })?;
-        let anchor_leaf = match (
-            array32("anchor_leaf_key", record.anchor_leaf_key.as_ref())?,
-            array32("anchor_leaf_value", record.anchor_leaf_value.as_ref())?,
-        ) {
-            (Some(key), Some(new_value)) => {
-                Some(dsm::types::device_state::AnchorLeafUpdate { key, new_value })
-            }
-            (None, None) => None,
-            _ => {
-                return Err(DsmError::invalid_operation(
-                    "persisted bilateral session: half an anchor leaf",
-                ))
-            }
-        };
         let offline_spend = match (
             array32("spend_anchor_bundle", record.spend_anchor_bundle.as_ref())?,
             array32("spend_asset", record.spend_asset.as_ref())?,
             record.spend_amount,
+            array32("spend_next_frontier", record.spend_next_frontier.as_ref())?,
         ) {
-            (Some(anchor_bundle_b), Some(asset), Some(amount)) => {
+            (Some(anchor_bundle_b), Some(asset), Some(amount), Some(next_frontier)) => {
                 Some(dsm::types::device_state::OfflineSpend {
                     anchor_bundle_b,
                     asset,
@@ -251,12 +236,13 @@ impl BilateralBleSession {
                             "persisted bilateral session: a negative offline spend",
                         )
                     })?,
+                    next_frontier,
                 })
             }
-            (None, None, None) => None,
+            (None, None, None, None) => None,
             _ => {
                 return Err(DsmError::invalid_operation(
-                    "persisted bilateral session: half an offline spend",
+                    "persisted bilateral session: part of an offline spend",
                 ))
             }
         };
@@ -279,7 +265,6 @@ impl BilateralBleSession {
             stitched_receipt_bytes: record.stitched_receipt_bytes.clone(),
             counter_signed_receipt: record.counter_signed_receipt.clone(),
             receiver_challenge: array32("receiver_challenge", record.receiver_challenge.as_ref())?,
-            anchor_leaf,
             sent_child_root: array32("sent_child_root", record.sent_child_root.as_ref())?,
             offline_spend,
             parent_tip: array32("parent_tip", record.parent_tip.as_ref())?,
@@ -429,7 +414,6 @@ mod tests {
             stitched_receipt_bytes: None,
             counter_signed_receipt: None,
             receiver_challenge: None,
-            anchor_leaf: None,
             sent_child_root: None,
             offline_spend: None,
             parent_tip: None,
@@ -530,14 +514,11 @@ mod tests {
         session.parent_tip = Some([0x54; 32]);
         session.receiver_challenge = Some([0x55; 32]);
         session.sent_child_root = Some([0x56; 32]);
-        session.anchor_leaf = Some(dsm::types::device_state::AnchorLeafUpdate {
-            key: [0x57; 32],
-            new_value: [0x58; 32],
-        });
         session.offline_spend = Some(dsm::types::device_state::OfflineSpend {
             anchor_bundle_b: [0x59; 32],
             asset: [0x5A; 32],
             amount: 7,
+            next_frontier: [0x58; 32],
         });
         session.owed_frame = Some(vec![0x5B; 48]);
         let restored =
@@ -558,7 +539,6 @@ mod tests {
         assert_eq!(restored.parent_tip, session.parent_tip);
         assert_eq!(restored.receiver_challenge, session.receiver_challenge);
         assert_eq!(restored.sent_child_root, session.sent_child_root);
-        assert_eq!(restored.anchor_leaf, session.anchor_leaf);
         assert_eq!(restored.offline_spend, session.offline_spend);
         assert_eq!(restored.owed_frame, session.owed_frame);
         assert_eq!(
@@ -567,16 +547,21 @@ mod tests {
         );
     }
 
-    /// A row that does not decode is an error, never a session with a
-    /// stand-in: half an anchor leaf, a short field, an unknown phase.
+    /// A row that does not decode is an error, never a session made from
+    /// part of it: part of an offline spend, a short field, an unknown phase.
     #[test]
     fn a_row_that_does_not_decode_is_refused() {
         let row = make_session([0x43; 32], BilateralPhase::ConfirmPending)
             .to_record()
             .expect("row");
-        let mut half_leaf = row.clone();
-        half_leaf.anchor_leaf_key = Some(vec![0x61; 32]);
-        assert!(BilateralBleSession::from_record(&half_leaf).is_err());
+        let mut part_spend = row.clone();
+        part_spend.spend_next_frontier = Some(vec![0x61; 32]);
+        let refused =
+            BilateralBleSession::from_record(&part_spend).expect_err("part of an offline spend");
+        assert!(
+            refused.to_string().contains("part of an offline spend"),
+            "{refused}"
+        );
         let mut short_root = row.clone();
         short_root.sent_child_root = Some(vec![0x62; 31]);
         assert!(BilateralBleSession::from_record(&short_root).is_err());
