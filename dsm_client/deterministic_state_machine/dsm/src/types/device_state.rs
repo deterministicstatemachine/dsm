@@ -2898,6 +2898,102 @@ pub(crate) mod tests {
         );
     }
 
+    /// A bearer spend's receipt proves the account leaf it moved, folded from
+    /// the account it states it started from — and that account must be the
+    /// one the spend's release advances: its counter and both frontiers.
+    #[test]
+    fn the_receipt_of_a_bearer_spend_proves_the_account_its_release_advances() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::types::receipt_types::{
+            DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2,
+        };
+        use crate::verification::receipt_verification::{
+            verify_receipt_state, BearerLeaves, ReceiptStateContext,
+        };
+        let (token, bundle, genesis) = (pc(0xA1), [0xB5; 32], [0x6E; 32]);
+        let mut loaded = with_offline_account(0xD7, token, bundle)
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
+            .expect("load 40")
+            .new_device_state;
+        loaded.set_genesis_digest(genesis);
+        let cp = devid(0xC7);
+        let rk = compute_smt_key(&loaded.devid, &cp);
+        let loaded = loaded.establish_relationship(cp).expect("establish");
+        let out = loaded
+            .advance(
+                rk,
+                cp,
+                bearer_op(cp, token, 25),
+                &[],
+                Some(OfflineSpend {
+                    anchor_bundle_b: bundle,
+                    asset: token,
+                    amount: 25,
+                    next_frontier: [0x02; 32],
+                }),
+            )
+            .expect("bearer advance");
+        let commitment = DeviceTreeAcceptanceCommitment::from_root(
+            crate::common::device_tree::DeviceTree::single(loaded.devid).root(),
+        );
+        let release = |counter: u64, frontier: u8, next: u8| BearerLeaves {
+            bundle,
+            counter,
+            frontier: [frontier; 32],
+            next_frontier: [next; 32],
+        };
+        let receipt = StitchedReceiptV2::of_step(
+            genesis,
+            loaded.devid,
+            cp,
+            &out,
+            Some(release(0, 0x01, 0x02)),
+            &commitment,
+        )
+        .expect("the receipt proves the spend its release advances");
+        let check = |receipt: &StitchedReceiptV2, bearer: Option<BearerLeaves>| {
+            verify_receipt_state(
+                receipt,
+                &ReceiptStateContext {
+                    device_tree_commitment: &commitment,
+                    author_genesis: genesis,
+                    operation: &out.new_chain_state.operation,
+                    bearer,
+                },
+            )
+        };
+        let refused = |result: Result<(), DsmError>, reason: &str| {
+            let e = result.expect_err(reason);
+            assert!(e.to_string().contains(reason), "{e}");
+        };
+        for other in [
+            release(1, 0x01, 0x02),
+            release(0, 0x03, 0x02),
+            release(0, 0x01, 0x03),
+        ] {
+            refused(
+                check(&receipt, Some(other)),
+                "not the one its release advances",
+            );
+        }
+        refused(
+            check(&receipt, None),
+            "verified against the release it advances",
+        );
+        // A receipt stating another allocation before the spend folds to
+        // another account root.
+        let mut inflated = receipt.clone();
+        for write in inflated.step_writes.iter_mut() {
+            if let ReceiptLeaf::OfflineAccount(witness) = &mut write.leaf {
+                witness.pre_allocation = 1_000;
+            }
+        }
+        refused(
+            check(&inflated, Some(release(0, 0x01, 0x02))),
+            "the offline account step:",
+        );
+    }
+
     #[test]
     fn an_ordinary_advance_leaves_the_offline_account_where_it_was() {
         use crate::core::bilateral_transaction_manager::compute_smt_key;

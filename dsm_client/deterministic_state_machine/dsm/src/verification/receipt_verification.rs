@@ -133,12 +133,12 @@ pub fn verify_receipt_state(
         (None, None) => None,
         (Some(_), None) => {
             return Err(DsmError::invalid_operation(
-                "an offline-bearer spend is verified against its anchor-state leaves",
+                "an offline-bearer spend is verified against the release it advances",
             ))
         }
         (None, Some(_)) => {
             return Err(DsmError::invalid_operation(
-                "only the author's own offline-bearer spend writes its anchor-state leaf",
+                "only the author's own offline-bearer spend writes its offline account",
             ))
         }
     };
