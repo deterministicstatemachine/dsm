@@ -12979,16 +12979,10 @@ export class StepWrite extends Message<StepWrite> {
     case: "relationship";
   } | {
     /**
-     * @generated from field: dsm.StepWriteAnchorState anchor_state = 2;
+     * @generated from field: dsm.StepWriteOfflineAccount offline_account = 6;
      */
-    value: StepWriteAnchorState;
-    case: "anchorState";
-  } | {
-    /**
-     * @generated from field: dsm.StepWriteOfflineAllocation offline_allocation = 3;
-     */
-    value: StepWriteOfflineAllocation;
-    case: "offlineAllocation";
+    value: StepWriteOfflineAccount;
+    case: "offlineAccount";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   /**
@@ -13010,8 +13004,7 @@ export class StepWrite extends Message<StepWrite> {
   static readonly typeName = "dsm.StepWrite";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "relationship", kind: "message", T: StepWriteRelationship, oneof: "leaf" },
-    { no: 2, name: "anchor_state", kind: "message", T: StepWriteAnchorState, oneof: "leaf" },
-    { no: 3, name: "offline_allocation", kind: "message", T: StepWriteOfflineAllocation, oneof: "leaf" },
+    { no: 6, name: "offline_account", kind: "message", T: StepWriteOfflineAccount, oneof: "leaf" },
     { no: 4, name: "path_heights", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "path_siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
@@ -13068,83 +13061,183 @@ export class StepWriteRelationship extends Message<StepWriteRelationship> {
 }
 
 /**
- * The anchor-state leaf of the pinned bundle B: before and after are the
- * anchor-state leaves the release's signed counter pair and frontiers name.
+ * The offline account of the pinned bundle B, the one device-SMT leaf an
+ * offline-bearer spend writes besides its relationship: the account as it
+ * stood before the step. The account is its own SMT; after is derived — the
+ * allocation of the operation's asset less its amount, the counter plus one,
+ * and the frontier the release advances to — by folding account_paths (one per
+ * account leaf the spend writes, in key order) from pre_account_root.
  *
- * @generated from message dsm.StepWriteAnchorState
+ * @generated from message dsm.StepWriteOfflineAccount
  */
-export class StepWriteAnchorState extends Message<StepWriteAnchorState> {
-  constructor(data?: PartialMessage<StepWriteAnchorState>) {
+export class StepWriteOfflineAccount extends Message<StepWriteOfflineAccount> {
+  /**
+   * @generated from field: bytes pre_account_root = 1;
+   */
+  preAccountRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 pre_allocation = 2;
+   */
+  preAllocation = protoInt64.zero;
+
+  /**
+   * @generated from field: uint64 pre_counter = 3;
+   */
+  preCounter = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes pre_frontier = 4;
+   */
+  preFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes next_frontier = 5;
+   */
+  nextFrontier = new Uint8Array(0);
+
+  /**
+   * @generated from field: repeated dsm.SmtPath account_paths = 6;
+   */
+  accountPaths: SmtPath[] = [];
+
+  constructor(data?: PartialMessage<StepWriteOfflineAccount>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StepWriteAnchorState";
+  static readonly typeName = "dsm.StepWriteOfflineAccount";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "pre_account_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "pre_allocation", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "pre_counter", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 4, name: "pre_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 5, name: "next_frontier", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 6, name: "account_paths", kind: "message", T: SmtPath, repeated: true },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteAnchorState {
-    return new StepWriteAnchorState().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineAccount {
+    return new StepWriteOfflineAccount().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteAnchorState {
-    return new StepWriteAnchorState().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteOfflineAccount {
+    return new StepWriteOfflineAccount().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteAnchorState {
-    return new StepWriteAnchorState().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteOfflineAccount {
+    return new StepWriteOfflineAccount().fromJsonString(jsonString, options);
   }
 
-  static equals(a: StepWriteAnchorState | PlainMessage<StepWriteAnchorState> | undefined, b: StepWriteAnchorState | PlainMessage<StepWriteAnchorState> | undefined): boolean {
-    return proto3.util.equals(StepWriteAnchorState, a, b);
+  static equals(a: StepWriteOfflineAccount | PlainMessage<StepWriteOfflineAccount> | undefined, b: StepWriteOfflineAccount | PlainMessage<StepWriteOfflineAccount> | undefined): boolean {
+    return proto3.util.equals(StepWriteOfflineAccount, a, b);
   }
 }
 
 /**
- * The offline allocation leaf of (genesis, device, B, asset): the allocation as
- * it stood before the step. After is derived: amount less the operation's
- * amount, sequence plus one.
+ * A leaf-to-root path in the one canonical encoding: the 256-bit set of heights
+ * whose sibling is not the tree's default there, and those siblings, lowest
+ * height first.
  *
- * @generated from message dsm.StepWriteOfflineAllocation
+ * @generated from message dsm.SmtPath
  */
-export class StepWriteOfflineAllocation extends Message<StepWriteOfflineAllocation> {
+export class SmtPath extends Message<SmtPath> {
   /**
-   * @generated from field: uint64 pre_amount = 1;
+   * @generated from field: bytes heights = 1;
    */
-  preAmount = protoInt64.zero;
+  heights = new Uint8Array(0);
 
   /**
-   * @generated from field: uint64 pre_sequence = 2;
+   * @generated from field: bytes siblings = 2;
    */
-  preSequence = protoInt64.zero;
+  siblings = new Uint8Array(0);
 
-  constructor(data?: PartialMessage<StepWriteOfflineAllocation>) {
+  constructor(data?: PartialMessage<SmtPath>) {
     super();
     proto3.util.initPartial(data, this);
   }
 
   static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.StepWriteOfflineAllocation";
+  static readonly typeName = "dsm.SmtPath";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "pre_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
-    { no: 2, name: "pre_sequence", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 1, name: "heights", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "siblings", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): StepWriteOfflineAllocation {
-    return new StepWriteOfflineAllocation().fromBinary(bytes, options);
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): SmtPath {
+    return new SmtPath().fromBinary(bytes, options);
   }
 
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): StepWriteOfflineAllocation {
-    return new StepWriteOfflineAllocation().fromJson(jsonValue, options);
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): SmtPath {
+    return new SmtPath().fromJson(jsonValue, options);
   }
 
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): StepWriteOfflineAllocation {
-    return new StepWriteOfflineAllocation().fromJsonString(jsonString, options);
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): SmtPath {
+    return new SmtPath().fromJsonString(jsonString, options);
   }
 
-  static equals(a: StepWriteOfflineAllocation | PlainMessage<StepWriteOfflineAllocation> | undefined, b: StepWriteOfflineAllocation | PlainMessage<StepWriteOfflineAllocation> | undefined): boolean {
-    return proto3.util.equals(StepWriteOfflineAllocation, a, b);
+  static equals(a: SmtPath | PlainMessage<SmtPath> | undefined, b: SmtPath | PlainMessage<SmtPath> | undefined): boolean {
+    return proto3.util.equals(SmtPath, a, b);
+  }
+}
+
+/**
+ * Proves a device root commits the offline account of a bundle B at a frontier
+ * and a software counter: the account's leaf in the device SMT (value
+ * account_root), and the counter and frontier leaves in the account's own SMT.
+ * Carried in an offline release beside each of its two device roots.
+ *
+ * @generated from message dsm.OfflineStateProof
+ */
+export class OfflineStateProof extends Message<OfflineStateProof> {
+  /**
+   * @generated from field: bytes account_root = 1;
+   */
+  accountRoot = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.SmtPath account_leaf = 2;
+   */
+  accountLeaf?: SmtPath;
+
+  /**
+   * @generated from field: dsm.SmtPath counter = 3;
+   */
+  counter?: SmtPath;
+
+  /**
+   * @generated from field: dsm.SmtPath frontier = 4;
+   */
+  frontier?: SmtPath;
+
+  constructor(data?: PartialMessage<OfflineStateProof>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineStateProof";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "account_root", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "account_leaf", kind: "message", T: SmtPath },
+    { no: 3, name: "counter", kind: "message", T: SmtPath },
+    { no: 4, name: "frontier", kind: "message", T: SmtPath },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineStateProof {
+    return new OfflineStateProof().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineStateProof {
+    return new OfflineStateProof().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineStateProof {
+    return new OfflineStateProof().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined, b: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined): boolean {
+    return proto3.util.equals(OfflineStateProof, a, b);
   }
 }
 
