@@ -578,6 +578,18 @@ pub async fn insert_immutable_object_if_absent(
     Ok(outcome)
 }
 
+/// Whether this member holds an immutable object at a content address.
+pub async fn holds_immutable_object(pool: &Pool, addr_b32: &str) -> Result<bool> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT 1 FROM immutable_objects WHERE addr_b32 = $1",
+            &[&addr_b32],
+        )
+        .await?;
+    Ok(row.is_some())
+}
+
 /// Return the `(namespace, payload)` tuple at a content address, or `None`.
 pub async fn get_immutable_object(
     pool: &Pool,

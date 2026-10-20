@@ -2657,7 +2657,8 @@ fn signed_by_b(
 /// else at the key, or after that value in the leader's log, cannot stop the
 /// registration being read. B trades and realizes at `q`. Fulfillments B
 /// signed naming a precommit that can never be read — the one candidate
-/// under its locator is an object one member alone holds — are then written
+/// under its locator is a precommit B signed that one member alone holds, so
+/// it is the precommit and never `Stored` — are then written
 /// at the leader of `K_ful(q)`, after B's own, and at a member that does not
 /// lead `K_ful(q + 1)`, where nothing else is. The vault's owner, walking the
 /// vault afresh, reads B's registration and reaches the generation B's trade
@@ -2688,7 +2689,6 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
     let next = position_cells(&set, &p.b.genesis, &p.b.device_id, q + 1, &realized_root)
         .expect("B's position pair at q + 1");
 
-    // A precommit nobody can read: its one candidate is held by one member.
     let clients = SetClient::new(&set).expect("the set's members");
     let member = |id: &[u8]| {
         clients
@@ -2702,27 +2702,6 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         .iter()
         .find(|member| member.member_id().as_bytes() != next.fulfillment().route().leader())
         .expect("a member that does not lead K_ful(q + 1)");
-    let unreadable = [0x5C; 32];
-    let lone = b"bytes one member holds";
-    not_leading
-        .put_immutable(TAG_DSM_SOFI_PRECOMMIT_OBJECT, lone)
-        .await
-        .expect("the member keeps what it is given");
-    not_leading
-        .append_index(
-            TAG_DSM_SOFI_TRADER_PRECOMMIT_ID.source_bytes(),
-            &unreadable,
-            &dsm::storage_object::immutable_addr(TAG_DSM_SOFI_PRECOMMIT_OBJECT, lone),
-        )
-        .await
-        .expect("the member appends what it holds");
-    assert!(
-        matches!(
-            fetch_precommit(&set, &unreadable).await.expect("read"),
-            Resolved::Unavailable
-        ),
-        "the precommit can never be read"
-    );
 
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
@@ -2736,6 +2715,61 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         Registration::Registered(signed) => signed.body.clone(),
         other => panic!("B's fulfillment is registered at q: {other:?}"),
     };
+
+    // A precommit nobody can read: B signed it, and one member alone holds
+    // it, so its one candidate is the precommit and never Stored.
+    let Resolved::Kept(own_precommit) = fetch_precommit(&set, registered.precommit_id())
+        .await
+        .expect("read")
+    else {
+        panic!("B's precommit is published");
+    };
+    let ours = &own_precommit.body;
+    let lone = TraderPrecommitBody::new(
+        *ours.genesis(),
+        *ours.device_id(),
+        ours.position(),
+        *ours.parent_claim_ref(),
+        *ours.external_commitment(),
+        ours.legs().to_vec(),
+        [0x5E; 32],
+        *ours.void_root(),
+        *ours.storage_set_id(),
+        ours.signature_alg(),
+        ours.claimant_public_key(),
+    )
+    .expect("a well-formed P");
+    p.b.enter();
+    let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's signing key");
+    let lone_signature =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&lone))
+            .expect("B signs");
+    let lone_bytes = Publication::Precommit {
+        body: &lone,
+        signature: &lone_signature,
+    }
+    .object_bytes()
+    .expect("a P envelope");
+    let unreadable = derive::precommit_id(&lone);
+    not_leading
+        .put_immutable(TAG_DSM_SOFI_PRECOMMIT_OBJECT, &lone_bytes)
+        .await
+        .expect("the member keeps what it is given");
+    not_leading
+        .append_index(
+            TAG_DSM_SOFI_TRADER_PRECOMMIT_ID.source_bytes(),
+            &unreadable,
+            &dsm::storage_object::immutable_addr(TAG_DSM_SOFI_PRECOMMIT_OBJECT, &lone_bytes),
+        )
+        .await
+        .expect("the member appends what it holds");
+    assert!(
+        matches!(
+            fetch_precommit(&set, &unreadable).await.expect("read"),
+            Resolved::Unavailable
+        ),
+        "the precommit can never be read"
+    );
 
     // After B's own fulfillment, in the leader's log at K_ful(q).
     let at_q = pair.fulfillment();
@@ -3895,6 +3929,84 @@ async fn a_contradicting_witness_is_refused_and_a_missing_baseline_is_walked() {
     );
 }
 
+/// SA-132. The baseline locator is predictable, and anyone may put and append
+/// there. Behind the owner's baseline sit more baseline-shaped copies than one
+/// read examines: the owner's presentation and frontier, under authentication
+/// that does not hold. They are nothing, for only a baseline Core
+/// authenticates as the owner's is recognized under the locator. B's first
+/// adoption reads the owner's baseline and the read's budget's worth of the
+/// copies, and adopts nothing: the read is not all of the locator, and one
+/// more baseline of the owner's there would be an equivocation. B's next
+/// adoption reads on past what the first decided nothing, and adopts.
+/// MUTATION CONTROL: adopting from a read that is not complete turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
+    use dsm::common::domain_tags::{
+        TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+    };
+    use dsm::sofi::storage::Discovered;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..2 {
+        realized_trade(&p, &m, 5).await;
+    }
+    let offered = offered_to_b(&p, &m).await;
+    let generation = offered[0].generation;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let index = TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes();
+    let locator = derive::vault_baseline_locator(&m.vault_id, generation);
+    let owners = match crate::sdk::storage_io::resolve_locator_all(&set, index, &locator, 8, |b| {
+        Some((locator, b.to_vec()))
+    })
+    .await
+    .expect("the owner's baseline")
+    {
+        Discovered::Complete(found) => found,
+        other => panic!("the owner's baseline is all there is: {other:?}"),
+    };
+    assert_eq!(owners.len(), 1, "the owner published one baseline");
+    let owner = crate::generated::VaultBaselineV1::decode(owners[0].as_slice())
+        .expect("the owner's baseline decodes");
+    for n in 0..9u8 {
+        let mut copy = owner.clone();
+        copy.auth_ccb.push(n);
+        let (addr, ..) = crate::sdk::storage_io::put_immutable(
+            &set,
+            TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+            &copy.encode_to_vec(),
+        )
+        .await
+        .expect("anyone may put an object");
+        crate::sdk::storage_io::append_to_index(&set, index, &locator, &addr)
+            .await
+            .expect("anyone may append what the members hold");
+    }
+
+    forget_the_vault(&p.b, &m.vault_id);
+    adopt_at_b(&p, &offered)
+        .await
+        .expect("a read that is not all of the locator refuses nothing");
+    p.b.enter();
+    assert!(
+        crate::storage::client_db::sofi_vault_head::head(&m.vault_id)
+            .expect("B's store")
+            .is_none(),
+        "nothing is adopted from a read that is not complete"
+    );
+    adopt_at_b(&p, &offered)
+        .await
+        .expect("B adopts the baseline");
+    let rows = crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
+        .expect("B's record");
+    assert_eq!(
+        rows.iter().map(|r| r.generation).collect::<Vec<_>>(),
+        vec![generation],
+        "B's record starts at the owner's baseline"
+    );
+}
+
 /// `d`'s walk of `vault_id` with its history read ahead (SoFi Amendment
 /// S23): the generations it established, root by root.
 async fn walk_with_history(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<[u8; 32]> {
@@ -4752,7 +4864,7 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         &self,
         vault_id: &[u8; 32],
         root: &[u8; 32],
-    ) -> Result<Vec<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+    ) -> Result<dsm::sofi::storage::Discovered<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
         self.live.history_leaf_candidates(vault_id, root)
     }
     fn token_policy_bytes(

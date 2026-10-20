@@ -2558,14 +2558,15 @@ mod tests {
     }
 
     /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
-    /// holds may be this device's setup, so a relationship-index scan that
-    /// met one is a network failure; only a scan whose every candidate was
-    /// established says no admitted setup is published. On the storage node's
-    /// own code, on Postgres.
+    /// returns — listed by a hostile member, for an honest one appends only
+    /// what it holds — may be this device's setup, so a relationship-index
+    /// scan that met one is a network failure; only a scan whose every
+    /// candidate was established says no admitted setup is published. On the
+    /// storage node's own code, on Postgres.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal() {
-        let _fleet = crate::test_support::one_device::Fleet::start();
+        let fleet = crate::test_support::one_device::Fleet::start();
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         let client = SetClient::new(&set).expect("a client of the set");
@@ -2585,10 +2586,16 @@ mod tests {
             Err(DsmError::InvalidOperation(_))
         ));
 
-        // An address whose bytes no member holds: not established.
+        // An address whose bytes no member holds, listed by a hostile member:
+        // not established.
         let unknown_vault = [0x64; 32];
         let locator = derive::relationship_index_key(&genesis, &device_id, &unknown_vault);
-        assert_eq!(client.append_index(index, &locator, &[0x98; 32]).await, 5);
+        assert_eq!(client.append_index(index, &locator, &[0x98; 32]).await, 0);
+        let hostile = fleet.nodes().nodes[0].member_id.clone();
+        fleet
+            .nodes()
+            .list_unheld(&hostile, index, &locator, &[0x98; 32])
+            .await;
         assert!(matches!(
             own_setup_ref(&set, &genesis, &device_id, &unknown_vault).await,
             Err(DsmError::Storage { .. })

@@ -11,7 +11,7 @@
 
 use dsm::crypto::domain::TaggedHashDomain;
 use dsm::merkle::sparse_merkle_tree::SmtInclusionProof;
-use dsm::sofi::storage::ObjectRead;
+use dsm::sofi::storage::{IndexEnd, ObjectRead};
 use dsm::storage_cell::{
     ArrivalRecord, ByteCommit, CellCommitProof, CELL_PAGE_VALUE_BYTES, CELL_TREE_DEPTH,
     MAX_CELL_PAGE_ENTRIES,
@@ -612,6 +612,29 @@ fn namespace_header(namespace: &[u8]) -> Result<HeaderValue, String> {
 /// (§14 mirror sync). Identity, not authentication.
 const ECHO_HEADER: &str = "x-dsm-node-id";
 
+/// One member's answer to an index read: each address with its append
+/// sequence, in append order, and where the read stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRead {
+    pub entries: Vec<(i64, [u8; 32])>,
+    pub end: IndexEnd,
+}
+
+impl IndexRead {
+    /// The addresses, in append order.
+    pub fn addrs(&self) -> Vec<[u8; 32]> {
+        self.entries.iter().map(|(_, addr)| *addr).collect()
+    }
+
+    /// What Core merges of it.
+    pub fn member_index(&self) -> dsm::sofi::storage::MemberIndex {
+        dsm::sofi::storage::MemberIndex {
+            addrs: self.addrs(),
+            end: self.end,
+        }
+    }
+}
+
 /// What a member answered when asked for its latest ByteCommit (§14). An
 /// observation, never a verdict (§4): nothing here was checked against a
 /// mirror or a predecessor.
@@ -780,8 +803,9 @@ impl MemberClient {
         Some(proto::IndexPageV1::decode(body.as_slice()).ok()?.entries)
     }
 
-    /// The addresses under `locator` from the start, page after page, until
-    /// the index ends, `max` were read, or `pages` pages were. `None` unless
+    /// The addresses under `locator` past append sequence `after`, page
+    /// after page, until the index ends, `max` were read, or `pages` pages
+    /// were, each with its sequence, and where the read stopped. `None` unless
     /// every page was one an honest member gives: answered, no longer than a
     /// page, and holding only addresses, each at a sequence past the one
     /// before it. A member that answers otherwise did not answer, and what it
@@ -792,11 +816,13 @@ impl MemberClient {
         &self,
         namespace: &[u8],
         locator: &[u8; 32],
+        after: i64,
         max: usize,
         pages: usize,
-    ) -> Option<Vec<[u8; 32]>> {
-        let mut addrs: Vec<[u8; 32]> = Vec::new();
-        let mut after = 0i64;
+    ) -> Option<IndexRead> {
+        let mut entries: Vec<(i64, [u8; 32])> = Vec::new();
+        let mut after = after.max(0);
+        let mut end = IndexEnd::Cut;
         for _ in 0..pages {
             let page = self
                 .read_index(namespace, locator, after, MAX_INDEX_PAGE as i64)
@@ -821,7 +847,7 @@ impl MemberClient {
                 }
                 after = entry.seq;
                 match <[u8; 32]>::try_from(entry.addr.as_slice()) {
-                    Ok(addr) => addrs.push(addr),
+                    Ok(addr) => entries.push((entry.seq, addr)),
                     Err(e) => {
                         log::warn!(
                             "index read at {}: an entry that is not an address: {e}",
@@ -831,11 +857,16 @@ impl MemberClient {
                     }
                 }
             }
-            if !full || addrs.len() >= max {
+            // A page short of a full one is the end of the member's index.
+            if !full {
+                end = IndexEnd::Ended;
+                break;
+            }
+            if entries.len() >= max {
                 break;
             }
         }
-        Some(addrs)
+        Some(IndexRead { entries, end })
     }
 
     /// Put entries in one local transaction at the member, all or none (§6).
@@ -1251,16 +1282,31 @@ impl SetClient {
         namespace: &[u8],
         locator: &[u8; 32],
         max_per_member: usize,
-    ) -> Vec<Option<Vec<[u8; 32]>>> {
+    ) -> Vec<Option<IndexRead>> {
+        self.read_index_after(namespace, locator, &[], max_per_member)
+            .await
+    }
+
+    /// [`Self::read_index`], each member read past the sequence `after`
+    /// names for it by member id (from the start where it names none).
+    pub async fn read_index_after(
+        &self,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        after: &[(Vec<u8>, i64)],
+        max_per_member: usize,
+    ) -> Vec<Option<IndexRead>> {
         // As many pages as `max_per_member` addresses fill, and one at least:
         // a member that was not asked has not answered.
         let pages = max_per_member.div_ceil(MAX_INDEX_PAGE).max(1);
         // Each member's pages follow one another; the members are read at once.
-        futures::future::join_all(
-            self.members
+        futures::future::join_all(self.members.iter().map(|member| {
+            let from = after
                 .iter()
-                .map(|member| member.index(namespace, locator, max_per_member, pages)),
-        )
+                .find(|(id, _)| id.as_slice() == member.member_id.as_bytes())
+                .map_or(0, |(_, seq)| *seq);
+            member.index(namespace, locator, from, max_per_member, pages)
+        }))
         .await
     }
 
@@ -1608,9 +1654,13 @@ mod tests {
                 .await
                 .expect("the put is taken");
             right
-                .append_index(b"DSM/test/index", &[0x41; 32], &[0x42; 32])
+                .append_index(
+                    b"DSM/test/index",
+                    &[0x41; 32],
+                    &dsm::storage_object::immutable_addr(ns, b"bytes"),
+                )
                 .await
-                .expect("the append is taken");
+                .expect("the append of what the member holds is taken");
             assert_eq!(
                 right.latest_bytecommit().await.answer,
                 LatestByteCommit::NoCycle,
@@ -1966,6 +2016,14 @@ mod tests {
             .collect()
     }
 
+    /// The addresses of each member's read, where it answered.
+    fn addrs_of(reads: &[Option<super::IndexRead>]) -> Vec<Option<Vec<[u8; 32]>>> {
+        reads
+            .iter()
+            .map(|read| read.as_ref().map(super::IndexRead::addrs))
+            .collect()
+    }
+
     /// One address, at sequence 1: the index of a member that holds it.
     fn one_address(after: i64) -> Vec<proto::IndexEntryV1> {
         if after == 0 {
@@ -2007,7 +2065,7 @@ mod tests {
         let reads = tokio::time::timeout(PATIENCE, set.read_index(NAMESPACE, &LOCATOR, 64))
             .await
             .expect("the read ends whatever a member answers");
-        assert_eq!(reads, vec![None, Some(vec![[0x41; 32]])]);
+        assert_eq!(addrs_of(&reads), vec![None, Some(vec![[0x41; 32]])]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "one page showed it");
     }
 
@@ -2036,7 +2094,7 @@ mod tests {
         let reads = tokio::time::timeout(PATIENCE, set.read_index(NAMESPACE, &LOCATOR, 4096))
             .await
             .expect("the read ends whatever a member answers");
-        assert_eq!(reads, vec![None, Some(vec![[0x41; 32]])]);
+        assert_eq!(addrs_of(&reads), vec![None, Some(vec![[0x41; 32]])]);
         assert_eq!(
             asked.load(Ordering::SeqCst),
             2,
@@ -2062,10 +2120,15 @@ mod tests {
         let reads = tokio::time::timeout(PATIENCE, set.read_index(NAMESPACE, &LOCATOR, budget))
             .await
             .expect("the read ends whatever a member answers");
-        let [Some(addrs)] = reads.as_slice() else {
+        let [Some(read)] = reads.as_slice() else {
             panic!("the member answered whole pages: {reads:?}");
         };
-        assert_eq!(addrs.len(), 2 * MAX_INDEX_PAGE);
+        assert_eq!(read.entries.len(), 2 * MAX_INDEX_PAGE);
+        assert_eq!(
+            read.end,
+            dsm::sofi::storage::IndexEnd::Cut,
+            "a read stopped at its bound does not say the index ended"
+        );
         assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
 

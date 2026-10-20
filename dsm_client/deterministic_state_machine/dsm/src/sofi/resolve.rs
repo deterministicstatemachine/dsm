@@ -134,6 +134,9 @@ enum BelowBaseline {
     HeadNotInHand,
     /// No candidate the locator gave is proven: each, and why.
     NotProven(Vec<(u64, history::NotProven)>),
+    /// No candidate read so far is proven, and the read of the locator is
+    /// not complete: the leaf may be among those not read yet (SA-87).
+    LeavesNotEstablished(Vec<(u64, history::NotProven)>),
 }
 
 impl core::fmt::Display for BelowBaseline {
@@ -150,6 +153,11 @@ impl core::fmt::Display for BelowBaseline {
                 write!(f, "the history head the baseline commits is not in hand")
             }
             Self::NotProven(unproven) => write!(f, "no candidate is proven: {unproven:?}"),
+            Self::LeavesNotEstablished(unproven) => write!(
+                f,
+                "no candidate read so far is proven ({unproven:?}), and the history leaves \
+                 under the root are not all read"
+            ),
         }
     }
 }
@@ -313,7 +321,7 @@ pub trait SofiReads {
         &self,
         vault_id: &D32,
         root: &D32,
-    ) -> Result<Vec<Vec<u8>>, ReadFailure>;
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure>;
     /// The owner baseline this device adopted for `genesis`'s vault, as Core
     /// authenticates it from this device's record now (SoFi Amendment
     /// S24), or `None` when it adopted none.
@@ -1957,7 +1965,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             )));
         }
         let mut unproven = Vec::new();
-        for candidate in self.reads.history_leaf_candidates(vault_id, root)? {
+        let found = self.reads.history_leaf_candidates(vault_id, root)?;
+        let complete = matches!(found, Discovered::Complete(..));
+        let candidates = match found {
+            Discovered::Complete(leaves) | Discovered::Partial(leaves) => leaves,
+        };
+        for candidate in candidates {
             let Some((named, generation, leaf_root)) = history::decode_leaf(&candidate) else {
                 continue;
             };
@@ -1975,7 +1988,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 Err(why) => unproven.push((generation, why)),
             }
         }
-        Ok(BelowBaseline::NotProven(unproven))
+        Ok(if complete {
+            BelowBaseline::NotProven(unproven)
+        } else {
+            BelowBaseline::LeavesNotEstablished(unproven)
+        })
     }
 
     /// The chain this device recorded of `vault_id`, anchored and linked

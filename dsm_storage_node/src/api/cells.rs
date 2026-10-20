@@ -276,7 +276,11 @@ async fn get_cell(
     Ok(octets(page.encode_to_vec()))
 }
 
-/// Append a 32-byte content address under the locator.
+/// Append a 32-byte content address under the locator, when this member
+/// holds the object at it: anyone may append the address of an object the
+/// member already holds (storage spec §7). An address this member holds no
+/// object at names nothing here and is not appended (422). What the object is
+/// is never read: the member checks only what it holds.
 async fn append_index(
     Extension(state): Extension<Arc<AppState>>,
     Path(locator): Path<String>,
@@ -287,6 +291,16 @@ async fn append_index(
     let locator = digest32(&locator)?;
     if body.len() != 32 {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    let addr_b32 = dsm::utils::text_id::encode_base32_crockford(body.as_ref());
+    let held = crate::db::holds_immutable_object(&state.db_pool, &addr_b32)
+        .await
+        .map_err(|e| {
+            log::error!("index append: DB read failed: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    if !held {
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
     }
     let mut scoped = ns;
     scoped.push(0);

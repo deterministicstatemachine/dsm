@@ -28,6 +28,15 @@ const OBJECT_BUDGET: usize = 16 * 1024 * 1024;
 /// Bytes of final cells' reads kept.
 const CELL_BUDGET: usize = 24 * 1024 * 1024;
 
+/// Bytes of locator scan cursors kept.
+const CURSOR_BUDGET: usize = 1024 * 1024;
+
+/// What one member's cursor is counted as, beside its member id.
+const CURSOR_BYTES: usize = 16;
+
+/// What one address a scan recognized is counted as.
+const KEPT_ADDRESS_BYTES: usize = 32;
+
 /// What one seat's commitments and proofs are counted as, beside the values
 /// it holds: two ByteCommits and an inclusion proof each, at most.
 const SEAT_PROOF_BYTES: usize = 20 * 1024;
@@ -83,6 +92,15 @@ impl<K: Eq + Hash + Clone, V: Clone> Bounded<K, V> {
         self.order.push_back(key.clone());
         self.entries.insert(key, (value, size));
     }
+
+    /// Keep `value` under `key` in place of anything it held.
+    fn replace(&mut self, key: K, value: V, size: usize, budget: usize) {
+        if let Some((_, gone)) = self.entries.remove(&key) {
+            self.bytes -= gone;
+            self.order.retain(|kept| kept != &key);
+        }
+        self.keep(key, value, size, budget);
+    }
 }
 
 static OBJECTS: once_cell::sync::Lazy<Mutex<Bounded<[u8; 32], Vec<u8>>>> =
@@ -94,6 +112,30 @@ static STORED_OBJECTS: once_cell::sync::Lazy<Mutex<Bounded<[u8; 32], Vec<u8>>>> 
     once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
 
 static FINAL_CELLS: once_cell::sync::Lazy<Mutex<Bounded<CellKey, CellEvidence>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
+
+/// A locator as a scan of it depends on it: the storage set it is read
+/// over, the index namespace and the locator.
+pub(crate) type LocatorKey = ([u8; 32], Vec<u8>, [u8; 32]);
+
+/// What scans of a locator have read past (`storage_io`): each member's
+/// cursor, the sequence through which every address it holds there was
+/// decided, and the addresses among those recognized under the locator. A
+/// recognized address is examined again by every scan, so nothing is taken
+/// on trust of it; only the work of reading what was decided nothing is
+/// saved. An address is its bytes, so what was decided of Stored bytes stays
+/// decided; an address short of three holders that is stored later is found
+/// again at the append that follows the store, past the cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PassedOver {
+    /// Each member's cursor, by member id.
+    pub(crate) cursors: Vec<(Vec<u8>, i64)>,
+    /// The addresses passed over that the scans recognized, in the order the
+    /// scans met them.
+    pub(crate) kept: Vec<[u8; 32]>,
+}
+
+static PASSED_OVER: once_cell::sync::Lazy<Mutex<Bounded<LocatorKey, PassedOver>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(Bounded::new()));
 
 /// A panic elsewhere while a store's lock was held leaves every entry whole:
@@ -152,6 +194,24 @@ pub(crate) fn keep_final_cell(cell: &RoutedCell, evidence: &CellEvidence) {
     lock(&FINAL_CELLS).keep(cell_key(cell), evidence.clone(), size, CELL_BUDGET);
 }
 
+/// What scans of `locator` have read past, when it is kept.
+pub(crate) fn passed_over(locator: &LocatorKey) -> Option<PassedOver> {
+    lock(&PASSED_OVER).get(locator)
+}
+
+/// Keep `passed` as what scans of `locator` have read past.
+pub(crate) fn keep_passed_over(locator: LocatorKey, passed: PassedOver) {
+    let size = locator.1.len()
+        + 64
+        + passed
+            .cursors
+            .iter()
+            .map(|(member, _)| member.len() + CURSOR_BYTES)
+            .sum::<usize>()
+        + passed.kept.len() * KEPT_ADDRESS_BYTES;
+    lock(&PASSED_OVER).replace(locator, passed, size, CURSOR_BUDGET);
+}
+
 /// Forget everything kept, where a test stands in for a fresh start: a node
 /// set that starts is a fresh fleet, in which nothing has been written (tests
 /// reuse identities, and so cells, over fleets that start empty), and a
@@ -162,6 +222,7 @@ pub(crate) fn forget_everything() {
     *lock(&OBJECTS) = Bounded::new();
     *lock(&STORED_OBJECTS) = Bounded::new();
     *lock(&FINAL_CELLS) = Bounded::new();
+    *lock(&PASSED_OVER) = Bounded::new();
     // The walks' judgements stand on cells read final in the same world.
     crate::sdk::sofi_reads::forget_judgements();
 }

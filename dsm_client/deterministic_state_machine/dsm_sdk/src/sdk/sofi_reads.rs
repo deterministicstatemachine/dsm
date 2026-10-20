@@ -496,8 +496,8 @@ impl SofiReads for LiveSofiReads<'_> {
         &self,
         vault_id: &D32,
         root: &D32,
-    ) -> Result<Vec<Vec<u8>>, ReadFailure> {
-        let found = self.read(
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure> {
+        self.read(
             "history leaf candidates",
             resolve_locator_all(
                 self.set,
@@ -513,10 +513,7 @@ impl SofiReads for LiveSofiReads<'_> {
                     })
                 },
             ),
-        )?;
-        Ok(match found {
-            Discovered::Complete(leaves) | Discovered::Partial(leaves) => leaves,
-        })
+        )
     }
 
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {
@@ -897,7 +894,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn an_unestablished_genesis_candidate_is_not_read_as_unpublished() {
-        let _device = crate::test_support::one_device::Device::start(0xE3).await;
+        let device = crate::test_support::one_device::Device::start(0xE3).await;
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         let client = SetClient::new(&set).expect("a client of the set");
@@ -917,10 +914,16 @@ mod tests {
             Ok(VaultGenesis::NotPublished)
         ));
 
-        // An address whose bytes no member holds: not established.
+        // An address whose bytes no member holds, listed by a hostile member
+        // (an honest one appends only what it holds): not established.
         let unknown_vault = [0x72; 32];
         let locator = derive::vault_genesis_locator(&unknown_vault);
-        assert_eq!(client.append_index(index, &locator, &[0x99; 32]).await, 5);
+        assert_eq!(client.append_index(index, &locator, &[0x99; 32]).await, 0);
+        let hostile = device.nodes.nodes[0].member_id.clone();
+        device
+            .nodes
+            .list_unheld(&hostile, index, &locator, &[0x99; 32])
+            .await;
         assert!(
             matches!(
                 ctx.verifier().vault_genesis(&unknown_vault),
