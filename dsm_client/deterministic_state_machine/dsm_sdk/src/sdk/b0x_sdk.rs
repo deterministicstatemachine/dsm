@@ -2482,6 +2482,22 @@ impl B0xSDK {
     /// The next call continues from the stored position.
     const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
 
+    /// The bytes of the pages read from one node in one retrieval: one page
+    /// at its largest ([`spool_page_limit`]). A member answering pages of the
+    /// largest envelopes is read one page a call, not sixteen, so what one
+    /// route's read holds is bounded by bytes as well as pages (SA-97). Pages
+    /// of honest envelopes, far smaller, still reach the page cap first. The
+    /// next call continues from the stored position.
+    fn retrieve_bytes_per_node() -> usize {
+        spool_page_limit()
+    }
+
+    /// Whether one retrieval reads another page from a node it has read
+    /// `pages` pages of, `fetched` bytes in all.
+    fn reads_on(pages: usize, fetched: usize) -> bool {
+        pages < Self::MAX_RETRIEVE_PAGES_PER_NODE && fetched < Self::retrieve_bytes_per_node()
+    }
+
     /// The position after `seq` on a node's spool, when `seq` is one the node
     /// could hold. A spool position is the node's database sequence number,
     /// so it and the one after it are at most `i64::MAX`; a number past that
@@ -2523,7 +2539,8 @@ impl B0xSDK {
     }
 
     /// The pages of `epc`'s spool at `b0x_address` from `start`, as the member
-    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`]: fetched only,
+    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`] and
+    /// [`Self::retrieve_bytes_per_node`]: fetched only,
     /// nothing opened or recorded. The read stops at the spool's end, at the
     /// page cap, at a page whose next position no spool can hold (the caller
     /// refuses it), or at a member that does not answer. No client for the
@@ -2536,7 +2553,8 @@ impl B0xSDK {
     ) -> Result<MemberPages, DsmError> {
         let mut pages = Vec::new();
         let mut cursor = start;
-        while pages.len() < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+        let mut fetched = 0usize;
+        while Self::reads_on(pages.len(), fetched) {
             let client = self.client_for(epc)?;
             let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
             let resp = client
@@ -2584,6 +2602,7 @@ impl B0xSDK {
                 });
             }
             let next = batch.next_seq;
+            fetched = fetched.saturating_add(batch.encoded_len());
             pages.push(batch);
             if next > Self::MAX_SPOOL_POSITION {
                 // Not a position a spool can hold: the reader refuses this
@@ -4407,6 +4426,34 @@ mod member_answer_bounds {
         let full = page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES);
         let read = spool_page(answer(200, full.encode_to_vec().into()).await).await;
         assert_eq!(read, Ok(full));
+    }
+
+    /// SA-97. One retrieval reads a node's pages up to one page at its
+    /// largest in bytes: a member answering full pages of the largest
+    /// envelopes is read one page a call, so a route's read never holds
+    /// sixteen of them, while sixteen pages of honest envelopes are all read.
+    /// MUTATION CONTROL: dropping the byte bound from `B0xSDK::reads_on`
+    /// turns this red.
+    #[test]
+    fn a_retrieval_reads_a_node_within_one_page_of_bytes() {
+        use super::B0xSDK;
+        let largest = page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES).encoded_len();
+        assert!(B0xSDK::reads_on(0, 0), "the first page is read");
+        assert!(
+            !B0xSDK::reads_on(1, largest),
+            "nothing past one page of the largest envelopes"
+        );
+        let honest = page(MAX_BATCH_RETRIEVE, 4 * 1024).encoded_len();
+        for read in 0..16 {
+            assert!(
+                B0xSDK::reads_on(read, read * honest),
+                "page {read} of honest envelopes is read"
+            );
+        }
+        assert!(
+            !B0xSDK::reads_on(16, 16 * honest),
+            "the page cap still ends a read"
+        );
     }
 
     /// A wait's answer names spools among those asked about, each once; one

@@ -1889,6 +1889,13 @@ const STORAGE_SYNC_DEFAULT_LIMIT: usize = 100;
 /// The largest per-route budget a request may ask for.
 const STORAGE_SYNC_MAX_LIMIT: u32 = 200;
 
+/// How many routes a sync reads at once. Each member's part of one route's
+/// read is held to one spool page at its largest
+/// (`B0xSDK::retrieve_bytes_per_node`), so a sync holds at most this many
+/// routes' reads of every member at once, however many routes it has
+/// (SA-97).
+const ROUTES_READ_AT_ONCE: usize = 4;
+
 /// A decoded `storage.sync` request.
 struct StorageSyncRequestV {
     pull_inbox: bool,
@@ -2279,160 +2286,167 @@ impl AppRouterImpl {
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
         let (mut routes_read, mut routes_partial, mut routes_unread) = (0usize, 0usize, 0usize);
-        // Every route is read at once, each by a reader of its own: a sync
-        // costs the slowest route's reads, not the sum of every route's. What
-        // each read is then processed route by route, in the order it always
+        // The routes are read a window at a time, every route in a window at
+        // once, each by a reader of its own: a window costs its slowest
+        // route's reads, not the sum of every route's, and what is held at
+        // once is a window's reads, never every route's (SA-97). What each
+        // read is then processed route by route, in the order it always
         // was; a route's processing never depends on another route's read.
-        let mut readers = Vec::with_capacity(tagged_addresses.len());
-        for _ in &tagged_addresses {
-            match crate::sdk::b0x_sdk::B0xSDK::new(
-                device_id_b32.to_string(),
-                self.core_sdk.clone(),
-                storage_endpoints.to_vec(),
-            ) {
-                Ok(reader) => readers.push(reader),
-                Err(e) => return Err(report.stop(format!("b0x init failed: {e}"))),
+        let mut routes = tagged_addresses.into_iter().peekable();
+        while routes.peek().is_some() {
+            let window: Vec<_> = routes.by_ref().take(ROUTES_READ_AT_ONCE).collect();
+            let mut readers = Vec::with_capacity(window.len());
+            for _ in &window {
+                match crate::sdk::b0x_sdk::B0xSDK::new(
+                    device_id_b32.to_string(),
+                    self.core_sdk.clone(),
+                    storage_endpoints.to_vec(),
+                ) {
+                    Ok(reader) => readers.push(reader),
+                    Err(e) => return Err(report.stop(format!("b0x init failed: {e}"))),
+                }
             }
-        }
-        let retrievals = futures::future::join_all(
-            readers
-                .iter_mut()
-                .zip(&tagged_addresses)
-                .map(|(reader, tagged)| reader.retrieve_resuming(&tagged.address)),
-        )
-        .await;
-        for ((tagged, mut route_sdk), retrieved) in
-            tagged_addresses.into_iter().zip(readers).zip(retrievals)
-        {
-            // Replies ride the same spool as forward transfers, as distinct
-            // payloads; they are drained whether or not this route yielded
-            // transfers, since a reply alone can release a pending gate.
-            self.process_countersign_deltas(&mut route_sdk, &tagged.address, &mut report)
-                .await;
-            self.process_finality_checkpoints(&mut route_sdk, &tagged.address, &mut report)
-                .await;
-            // §5.2: the route fixes the tip an item was composed on — the
-            // inbox address hashes the relationship's tip (storage node spec
-            // §8). Every item on a previous-tip route steps from a tip this
-            // device has already advanced past: nothing on it is staged. A copy
-            // of an object the canonical apply has decided is consumed; any
-            // other is left where it is.
-            let stale = tagged.freshness == RouteFreshness::PreviousTip;
-            for artifact in route_sdk.take_evidence_artifacts() {
-                let copy = if stale {
-                    crate::handlers::recipient_dispatch::classify_stale_receipt_copy(
-                        &artifact.evidence.full_receipt_bytes,
-                    )
-                    .map(StaleOrIngested::Stale)
-                } else {
-                    crate::handlers::recipient_dispatch::ingest_evidence_half(
-                        &artifact.evidence.full_receipt_bytes,
+            let retrievals = futures::future::join_all(
+                readers
+                    .iter_mut()
+                    .zip(&window)
+                    .map(|(reader, tagged)| reader.retrieve_resuming(&tagged.address)),
+            )
+            .await;
+            for ((tagged, mut route_sdk), retrieved) in
+                window.into_iter().zip(readers).zip(retrievals)
+            {
+                // Replies ride the same spool as forward transfers, as distinct
+                // payloads; they are drained whether or not this route yielded
+                // transfers, since a reply alone can release a pending gate.
+                self.process_countersign_deltas(&mut route_sdk, &tagged.address, &mut report)
+                    .await;
+                self.process_finality_checkpoints(&mut route_sdk, &tagged.address, &mut report)
+                    .await;
+                // §5.2: the route fixes the tip an item was composed on — the
+                // inbox address hashes the relationship's tip (storage node spec
+                // §8). Every item on a previous-tip route steps from a tip this
+                // device has already advanced past: nothing on it is staged. A copy
+                // of an object the canonical apply has decided is consumed; any
+                // other is left where it is.
+                let stale = tagged.freshness == RouteFreshness::PreviousTip;
+                for artifact in route_sdk.take_evidence_artifacts() {
+                    let copy = if stale {
+                        crate::handlers::recipient_dispatch::classify_stale_receipt_copy(
+                            &artifact.evidence.full_receipt_bytes,
+                        )
+                        .map(StaleOrIngested::Stale)
+                    } else {
+                        crate::handlers::recipient_dispatch::ingest_evidence_half(
+                            &artifact.evidence.full_receipt_bytes,
+                            &tagged.address,
+                            &artifact.message_id,
+                        )
+                        .map(StaleOrIngested::Ingested)
+                    };
+                    take_in_copy(
+                        copy,
                         &tagged.address,
                         &artifact.message_id,
-                    )
-                    .map(StaleOrIngested::Ingested)
-                };
-                take_in_copy(
-                    copy,
-                    &tagged.address,
-                    &artifact.message_id,
-                    &artifact.copy_key,
-                    &mut taken,
-                    &mut report,
-                );
-            }
-            for message in route_sdk.take_cert_resync_messages() {
-                let outcome =
-                    if message.method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD {
+                        &artifact.copy_key,
+                        &mut taken,
+                        &mut report,
+                    );
+                }
+                for message in route_sdk.take_cert_resync_messages() {
+                    let outcome = if message.method
+                        == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
+                    {
                         self.handle_cert_resync_request(&message.body, storage_endpoints.to_vec())
                             .await
                     } else {
                         self.handle_cert_resync_ack(&message.body).await
                     };
-                take_in_cert_resync(
-                    outcome,
-                    &tagged.address,
-                    &message,
-                    &mut taken,
-                    &mut report.errors,
-                );
-            }
-            self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
-                .await;
+                    take_in_cert_resync(
+                        outcome,
+                        &tagged.address,
+                        &message,
+                        &mut taken,
+                        &mut report.errors,
+                    );
+                }
+                self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
+                    .await;
 
-            let (polled, read_on) = match retrieved {
-                Ok(outcome) => {
-                    if let crate::sdk::b0x_sdk::SpoolCoverage::Partial { responded, needed } =
-                        outcome.coverage
-                    {
-                        routes_partial += 1;
+                let (polled, read_on) = match retrieved {
+                    Ok(outcome) => {
+                        if let crate::sdk::b0x_sdk::SpoolCoverage::Partial { responded, needed } =
+                            outcome.coverage
+                        {
+                            routes_partial += 1;
+                            report.errors.push(format!(
+                                "inbox read partial on {}..: {responded} of {} members answered, \
+                                 {needed} needed to meet every delivery",
+                                short_route(&tagged.address),
+                                outcome.members
+                            ));
+                        } else {
+                            routes_read += 1;
+                        }
+                        // Opened, and none of the payloads a device spools: never
+                        // will be.
+                        for copy_key in &outcome.unknown {
+                            taken.pass_over(&tagged.address, copy_key);
+                        }
+                        (outcome.entries, outcome.more)
+                    }
+                    Err(e) => {
+                        routes_unread += 1;
                         report.errors.push(format!(
-                            "inbox read partial on {}..: {responded} of {} members answered, \
-                             {needed} needed to meet every delivery",
-                            short_route(&tagged.address),
-                            outcome.members
+                            "inbox pull failed on {}..: {e}",
+                            short_route(&tagged.address)
                         ));
+                        continue;
+                    }
+                };
+                // More on this route than this sync takes: a read that stopped at
+                // its page cap, or more entries than the route's budget. The next
+                // sync resumes it.
+                if read_on || polled.len() > limit {
+                    report
+                        .more_pending
+                        .push(format!("{}..", short_route(&tagged.address)));
+                }
+                for entry in polled.into_iter().take(limit) {
+                    pulled += 1;
+                    // Only transfers are the transfer pipeline's business; the
+                    // boundary reads every value-bearing field from the signed
+                    // operation it verifies itself. A request whose body is not
+                    // what its method names never will be: passed over by its
+                    // content, so it is not charged to this route's budget again.
+                    if entry.kind != crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
+                        taken.pass_over(&tagged.address, &entry.copy_key);
+                        continue;
+                    }
+                    let copy = if stale {
+                        crate::handlers::recipient_dispatch::classify_stale_transfer_copy(
+                            &entry.transfer_wire_bytes,
+                            &entry.sender_device_id,
+                        )
+                        .map(StaleOrIngested::Stale)
                     } else {
-                        routes_read += 1;
-                    }
-                    // Opened, and none of the payloads a device spools: never
-                    // will be.
-                    for copy_key in &outcome.unknown {
-                        taken.pass_over(&tagged.address, copy_key);
-                    }
-                    (outcome.entries, outcome.more)
-                }
-                Err(e) => {
-                    routes_unread += 1;
-                    report.errors.push(format!(
-                        "inbox pull failed on {}..: {e}",
-                        short_route(&tagged.address)
-                    ));
-                    continue;
-                }
-            };
-            // More on this route than this sync takes: a read that stopped at
-            // its page cap, or more entries than the route's budget. The next
-            // sync resumes it.
-            if read_on || polled.len() > limit {
-                report
-                    .more_pending
-                    .push(format!("{}..", short_route(&tagged.address)));
-            }
-            for entry in polled.into_iter().take(limit) {
-                pulled += 1;
-                // Only transfers are the transfer pipeline's business; the
-                // boundary reads every value-bearing field from the signed
-                // operation it verifies itself. A request whose body is not
-                // what its method names never will be: passed over by its
-                // content, so it is not charged to this route's budget again.
-                if entry.kind != crate::sdk::b0x_sdk::B0xEntryKind::Transfer {
-                    taken.pass_over(&tagged.address, &entry.copy_key);
-                    continue;
-                }
-                let copy = if stale {
-                    crate::handlers::recipient_dispatch::classify_stale_transfer_copy(
-                        &entry.transfer_wire_bytes,
-                        &entry.sender_device_id,
-                    )
-                    .map(StaleOrIngested::Stale)
-                } else {
-                    crate::handlers::recipient_dispatch::ingest_transfer_half(
-                        &entry.transfer_wire_bytes,
-                        &entry.sender_device_id,
+                        crate::handlers::recipient_dispatch::ingest_transfer_half(
+                            &entry.transfer_wire_bytes,
+                            &entry.sender_device_id,
+                            &entry.inbox_key,
+                            &entry.transaction_id,
+                        )
+                        .map(StaleOrIngested::Ingested)
+                    };
+                    take_in_copy(
+                        copy,
                         &entry.inbox_key,
                         &entry.transaction_id,
-                    )
-                    .map(StaleOrIngested::Ingested)
-                };
-                take_in_copy(
-                    copy,
-                    &entry.inbox_key,
-                    &entry.transaction_id,
-                    &entry.copy_key,
-                    &mut taken,
-                    &mut report,
-                );
+                        &entry.copy_key,
+                        &mut taken,
+                        &mut report,
+                    );
+                }
             }
         }
         // At most `limit` per route, which the request bounds by
