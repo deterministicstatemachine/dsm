@@ -3456,13 +3456,14 @@ async fn a_vault_traded_through_closes_for_its_owner() {
     );
 }
 
-/// DSM Amendment A14, conditional positions back to back: a trader trades
+/// Conditional positions back to back (DSM Amendment A19, restoring A8's
+/// SoFi positions in the chain): a trader trades
 /// three times in a row, so each trade's `P` names the trader's previous
 /// trade, a conditional position, as its parent. Every trade resolves
 /// Realized, and the owner's close, which judges each of the trader's
-/// exercises as a peer's, resolves too: a conditional parent on a conditional
-/// parent is found one position back, among the roots the claim there
-/// commits, never by reading further.
+/// exercises as a peer's, resolves too: each conditional position in the
+/// walked segment is resolved from SoFi's public objects, and the next is
+/// read at the cell routed from the root it selected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn trades_back_to_back_resolve_and_the_owner_closes_after_them() {

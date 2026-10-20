@@ -181,9 +181,11 @@ pub(crate) async fn verify(
     let set = crate::sdk::storage_set::canonical_set(&network)
         .map_err(|e| Refusal::Incomplete(format!("the pinned storage set: {e}")))?;
     let position = proof.position;
-    // The holder's root at `position` is final once walked, and the process
-    // keeps it (`economic_registers::resolve_peer_root`): a status polled
-    // again walks nothing. Whether the proof is still current is read below
+    // The holder's root at `position` is read from this account's frontier
+    // for the holder (`economic_registers::resolve_peer_root`, DSM Amendment
+    // A19): a frontier at or past `position` answers it, and a read records
+    // nothing, so what lies past the frontier is walked again on each poll.
+    // Whether the proof is still current is read below
     // on every call, never kept: the next root cell is open until the holder
     // moves on.
     let validated: ValidatedEconomicRoot = tokio::task::block_in_place(|| {

@@ -46,6 +46,8 @@ pub mod escrow_routes;
 #[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
+#[cfg(test)]
+mod frontier_verification_tests;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
@@ -54,8 +56,6 @@ mod node_e2e_tests;
 #[cfg(test)]
 mod offline_boundary_tests;
 pub mod offline_cash_routes;
-#[cfg(test)]
-mod one_hop_verification_tests;
 pub mod online_finalize;
 pub mod prefs_routes;
 pub mod receipt_routes;

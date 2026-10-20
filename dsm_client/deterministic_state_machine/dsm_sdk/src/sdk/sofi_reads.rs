@@ -228,17 +228,6 @@ struct OnceFetcher<'r, 'a> {
 }
 
 impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
-    /// Never kept: what members hold under a key is where to look, and a
-    /// later look may find a claim that was not there yet.
-    fn register_key_values(
-        &self,
-        genesis: &D32,
-        device_id: &D32,
-        position: u64,
-    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
-        self.live.register_key_values(genesis, device_id, position)
-    }
-
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         // Kept once Core reads a final claim at the cell from them.
         read_once(

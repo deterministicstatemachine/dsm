@@ -511,6 +511,14 @@ fn get_database_path() -> Result<PathBuf> {
 /// 31: an application account's session carries the wallet's status
 /// (`connect_app_sessions.status` NOT NULL): the wallet's signed disconnect
 /// ends it on the application's side too (DSM Amendment A11, MR-DSM-0292).
+///
+/// 32, unchanged: a receiver keeps its frontier for each peer again (DSM
+/// Amendment A19), `peer_frontier`, created on open; no existing table
+/// changes. A row is a coordinate this receiver validated itself, written in
+/// the transaction that accepts a step or by a contact add's validation, and
+/// nothing behind it is read again. A database made at 27 or 28 keeps the
+/// rows A8 recorded: each is a coordinate the receiver validated itself, in
+/// the same shape and encoding.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -842,6 +850,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- The digest of the claim the lineage accepted at the position:
             -- present for kinds 0 and 1, NULL for kind 2.
             claim_ref         BLOB          -- 32B or NULL
+        );
+
+        -- DSM Amendment A19: this receiver's frontier for a peer, a
+        -- coordinate it validated itself, with the claim it accepted there.
+        CREATE TABLE IF NOT EXISTS peer_frontier(
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            economic_root       BLOB NOT NULL,      -- 32B
+            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
+            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
         DROP TABLE IF EXISTS economic_admitted;
 

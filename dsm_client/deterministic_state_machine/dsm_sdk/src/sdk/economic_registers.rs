@@ -21,8 +21,9 @@
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
 use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
-    peer_claim_at, peer_root_at, validate_peer_step, Checked, ConditionalPositionResolver,
-    PeerEvidenceFetcher, StepCost,
+    peer_claim_at, peer_root_at, validate_peer_lineage, validate_peer_prefix, Checked,
+    ConditionalPositionResolver, PeerEvidenceFetcher, PeerFrontier, PeerFrontiers, StepCost,
+    ValidatedPeerLineage, ValidatedPrefix,
 };
 use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
@@ -170,8 +171,8 @@ pub async fn root_claim_settlement(
 
 /// The LIVE provenance resolver: raw reads of the register cells Core names,
 /// the native reserve walked from its genesis state, immutable objects
-/// re-hash-verified, and peers' steps verified by Core one hop, each from its
-/// own parent (DSM Amendment A14).
+/// re-hash-verified, and peers' lineages verified by Core from this
+/// receiver's frontiers (DSM Amendment A19).
 pub struct LiveRegisterResolver<'a> {
     pub set: &'a StorageSet,
     pub runtime: tokio::runtime::Handle,
@@ -303,18 +304,6 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         self.register_candidate(network_id)
     }
 
-    fn register_key_values(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
-        tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(register_key_values(self.set, genesis, device_id, position))
-        })
-    }
-
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         #[cfg(test)]
         asked_cells::note(cell.routed().key());
@@ -380,65 +369,46 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 }
 
-/// What each member of `set` holds under `K_root(position)` of `(genesis,
-/// devid)` (DSM Amendment A14), in set order, `None` where a member did not
-/// answer: the candidates Core checks, each at the cell routed from the
-/// parent it names, and whether enough members answered is Core's to judge.
-/// Every member is asked at once. Discovery, never authority, so nothing
-/// read here is kept.
-pub(crate) async fn register_key_values(
-    set: &StorageSet,
-    genesis: &[u8; 32],
-    devid: &[u8; 32],
-    position: u64,
-) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
-    use crate::sdk::route_seats::RouteSeats;
-    let seats = NodeSeats::new(set).map_err(|e| incomplete("register seats", e))?;
-    let key = dsm::economic::register::economic_root_register_key(genesis, devid, position);
-    #[cfg(test)]
-    asked_cells::note(&key);
-    let namespace = dsm::economic::register::economic_root_namespace();
-    let members = seats.members();
-    // Only a route entry at this key carrying a claim naming it is a
-    // candidate (`PeerLineageVerifier::probed`); nothing else is kept.
-    let candidate = |bytes: &[u8]| {
-        dsm::route_chain::RouteEntry::decode(bytes).is_some_and(|entry| {
-            entry.namespace == namespace
-                && entry.key == key
-                && dsm::economic::register::root_claim_naming(&entry.value, &key).is_some()
-        })
-    };
-    let answers = futures::future::join_all(members.iter().map(|member| {
-        crate::sdk::route_seats::kept_values(&seats, member, namespace, &key, &candidate)
-    }))
-    .await;
-    Ok(answers)
+/// This receiver's frontiers, as its store records them (DSM Amendments A8,
+/// A19).
+pub struct StoredFrontiers;
+
+impl PeerFrontiers for StoredFrontiers {
+    fn frontier_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::frontier_below(genesis, device_id, position)
+            .map_err(|e| {
+                PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
+            })
+    }
 }
 
-/// What one check of a peer's step cost, logged where it ran (DSM Amendment
-/// A14): every count is bounded by a constant, whatever the position.
+/// What one verification of a peer cost, logged where it ran (DSM Amendment
+/// A19): one position for a peer this receiver is current with.
 fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     log::info!(
-        "[A14] {what} of {} at position {position}: register_probes={} routed_reads={} \
-         source_steps={} conditional_hops={} history_steps=0 frontier_reads=0",
+        "[A19] {what} of {} at position {position}: steps_validated={} routed_reads={} \
+         source_steps={}",
         text_id::encode_base32_crockford(devid),
-        cost.register_probes,
+        cost.steps_validated,
         cost.routed_reads,
-        cost.source_steps,
-        cost.conditional_hops
+        cost.source_steps
     );
 }
 
-/// A peer's step at `peer_economic_position`, validated from its own parent
-/// (DSM Amendment A14), for a caller that accepts nothing from the peer.
+/// A peer's step at `peer_economic_position`, validated from this
+/// receiver's frontier for the peer (DSM Amendment A19), for a caller that
+/// accepts nothing from the peer and so records none of the frontiers the
+/// walk reached.
 ///
 /// Core answers every time it is asked here. What a validation read is kept
 /// as evidence (`final_reads`: final cells and immutable objects), and the
-/// process keeps no verdict: a second claim of the peer final at the position
-/// from another parent is a fork, `Invalid`, and a verdict kept from before it
-/// appeared answered `Ok` for the rest of the process while a verifier asking
-/// afresh refused it (SA-92). One SoFi operation's contexts keep the answers
-/// they were given for that operation alone (`sofi_reads`).
+/// process keeps no verdict (SA-92). One SoFi operation's contexts keep the
+/// answers they were given for that operation alone (`sofi_reads`).
 pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -447,22 +417,51 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    let checked = validate_peer_step(
+    resolve_peer_lineage(
         fetcher,
         expected_network_id,
         peer_genesis,
         peer_devid,
         peer_economic_position,
         conditional,
+    )
+    .map(|lineage| lineage.into_parts().0)
+}
+
+/// A peer's lineage validated to `peer_economic_position` from this
+/// receiver's frontier (DSM Amendment A19), over WHATEVER fetcher the caller
+/// supplies, with the frontiers its credits' sources reached. Nothing is
+/// recorded here: a frontier, the peer's or a source's, is recorded only by
+/// the transaction that accepts a step, or by a contact add's validation.
+pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    peer_economic_position: u64,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<ValidatedPeerLineage, PeerLineageFailure> {
+    let checked = validate_peer_lineage(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        peer_economic_position,
+        &StoredFrontiers,
+        conditional,
     )?;
-    log_cost("step", peer_devid, peer_economic_position, &checked.cost());
+    log_cost(
+        "lineage",
+        peer_devid,
+        peer_economic_position,
+        &checked.cost(),
+    );
     Ok(checked.into_answer())
 }
 
 /// The root a trader selected at a position and the reference a later `P`
-/// names it by (`SofiReads::trader_root_at`), validated one hop (DSM
-/// Amendment A14). Core answers every time, over kept evidence, as
-/// [`resolve_peer`] says.
+/// names it by (`SofiReads::trader_root_at`), validated from this receiver's
+/// frontier (DSM Amendment A19). Nothing is recorded.
 pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -477,6 +476,7 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
         genesis,
         device_id,
         position,
+        &StoredFrontiers,
         conditional,
     )?;
     log_cost("root", device_id, position, &checked.cost());
@@ -485,9 +485,8 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
 
 /// The claim a trader accepted at a position (`SofiReads::accepted_claim_at`
 /// for another trader): what a setup naming that position is checked against
-/// (SoFi Amendment S15, MR-SOFI-0347), validated one hop (DSM Amendment
-/// A14). Core answers every time, over kept evidence, as [`resolve_peer`]
-/// says.
+/// (SoFi Amendment S15, MR-SOFI-0347), validated from this receiver's
+/// frontier (DSM Amendment A19). Nothing is recorded.
 pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -502,10 +501,88 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
         genesis,
         device_id,
         position,
+        &StoredFrontiers,
         conditional,
     )?;
     log_cost("claim", device_id, position, &checked.cost());
     Ok(checked.into_answer())
+}
+
+/// A contact's lineage validated from this receiver's frontier for it toward
+/// the head the register holds (DSM Amendment A19, contact add), with the
+/// frontiers its credits' sources reached. Nothing is recorded here.
+pub(crate) fn resolve_peer_prefix<F: PeerEvidenceFetcher>(
+    fetcher: &F,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<ValidatedPrefix, PeerLineageFailure> {
+    let checked = validate_peer_prefix(
+        fetcher,
+        expected_network_id,
+        peer_genesis,
+        peer_devid,
+        &StoredFrontiers,
+        conditional,
+    )?;
+    let reached = checked
+        .answer()
+        .reached()
+        .map_or(0, PeerFrontier::economic_position);
+    log_cost("prefix", peer_devid, reached, &checked.cost());
+    Ok(checked.into_answer())
+}
+
+/// Validate a contact's lineage from this receiver's frontier for it toward
+/// the head the register holds, and record the frontiers it reached (DSM
+/// Amendment A19, contact add), so the contact's first payment is one step.
+/// A walk that stops short records what it validated. One that meets a step
+/// that verifies as wrong records nothing, and the contact's payments are
+/// refused when they arrive, as any acceptance would refuse them.
+pub(crate) async fn prevalidate_contact(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+) -> Result<(), String> {
+    let network_id = crate::sdk::economic_admission_flow::committed_network_id()
+        .map_err(|e| format!("the committed network: {e}"))?;
+    let set = crate::sdk::storage_set::canonical_set(&network_id)
+        .map_err(|e| format!("the register set: {e}"))?;
+    let runtime = tokio::runtime::Handle::current();
+    let prefix = tokio::task::spawn_blocking(move || {
+        let live = LiveRegisterResolver {
+            set: &set,
+            runtime,
+            expected_network_id: network_id.clone(),
+        };
+        let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
+            .map_err(|e| format!("SoFi reads: {e}"))?;
+        resolve_peer_prefix(
+            &live,
+            &network_id,
+            &genesis,
+            &device_id,
+            &sofi.peer_position_resolver(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("the contact's validation did not finish: {e}"))??;
+    let frontiers: Vec<PeerFrontier> = prefix
+        .reached()
+        .into_iter()
+        .chain(prefix.source_frontiers())
+        .cloned()
+        .collect();
+    crate::storage::client_db::economic_lineage::record_frontiers(&frontiers)
+        .map_err(|e| format!("recording the contact's frontier: {e}"))?;
+    log::info!(
+        "[A19] contact {} validated to position {}: {:?}",
+        text_id::encode_base32_crockford(&device_id),
+        prefix.reached().map_or(0, PeerFrontier::economic_position),
+        prefix.stop()
+    );
+    Ok(())
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the
@@ -534,24 +611,23 @@ impl<'a> RecordingResolver<'a> {
         }
     }
 
-    /// The peer's step validated from its own parent (DSM Amendment A14),
-    /// recorded at the fetch boundary, with what checking it cost. The
-    /// admission that accepts it asks [`resolve_peer`] for the same transition
-    /// when it advances its own root, and Core answers again over the
-    /// evidence this check read.
-    pub fn validated_peer_step(
+    /// The peer's lineage validated from this receiver's frontier (DSM
+    /// Amendment A19), recorded at the fetch boundary, with what checking it
+    /// cost and the frontiers its credits' sources reached.
+    pub fn validated_peer_lineage(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
         conditional: &dyn ConditionalPositionResolver,
-    ) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
-        let checked = validate_peer_step(
+    ) -> Result<Checked<ValidatedPeerLineage>, PeerLineageFailure> {
+        let checked = validate_peer_lineage(
             self,
             &self.inner.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
+            &StoredFrontiers,
             conditional,
         )?;
         log_cost(
@@ -570,17 +646,6 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         network_id: &[u8],
     ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
         self.inner.register_candidate(network_id)
-    }
-
-    fn register_key_values(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
-        dsm::economic::peer_lineage::PeerEvidenceFetcher::register_key_values(
-            self.inner, genesis, device_id, position,
-        )
     }
 
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
@@ -795,11 +860,11 @@ pub(crate) fn missing_text(missing: Missing) -> String {
     }
 }
 
-/// Every root-register key a check asked this process's resolver for, its
-/// unrouted probes and its routed reads alike, kept reads included: a one-hop
-/// check asks the key of each position it validates, so this counts the
-/// positions read where the members' request logs cannot (a final cell is
-/// read from its seats once and kept). Observation for tests.
+/// Every routed root-cell key a check asked this process's resolver for,
+/// kept reads included: a walk asks the cell of each position it validates,
+/// so this counts the positions read where the members' request logs cannot
+/// (a final cell is read from its seats once and kept). Observation for
+/// tests.
 #[cfg(test)]
 pub(crate) mod asked_cells {
     use std::collections::HashMap;

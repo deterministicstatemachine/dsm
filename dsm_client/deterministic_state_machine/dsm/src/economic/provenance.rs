@@ -100,11 +100,13 @@ pub enum ValidatedPeerTransition {
     /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
     /// resolution happened. A boolean `is_unresolved` would get this wrong.
     ///
-    /// **Nothing constructs this arm (E1c-3).** `validate_peer_step`
-    /// refuses every conditional claim, resolved or not, because a resolved
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_lineage`
+    /// answers a conditional claim at its target `Unresolved`, resolved or
+    /// not, and builds no transition for it, because a resolved
     /// position's register cell still holds `C_q` — resolution is
     /// verifier-local and never rewrites the cell. The arm exists so that when
-    /// the walk learns to traverse a resolved SoFi position, the refusal in
+    /// the walk learns to take a resolved SoFi position as its target, the
+    /// refusal in
     /// [`prevalidate_sender_debit`] is already there; until then no input can
     /// reach that refusal, and it has no test that performs the forbidden
     /// debit.
