@@ -2745,6 +2745,11 @@ fn connect_app_requests(params: &[u8]) -> Result<Reply, String> {
     const ROUTE: &str = "connect.app.requests";
     let req: generated::ConnectAppRequestsQueryV1 = body(params, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
+    // A read for a session this account never made has nothing to wait for:
+    // refused at once, so the relay does not hold it (SA-123).
+    store::app_session(&sid)
+        .map_err(|e| format!("{ROUTE}: {e}"))?
+        .ok_or_else(|| format!("{ROUTE}: no such session"))?;
     let mut requests = Vec::new();
     for bytes in store::app_requests_after(&sid, req.after).map_err(|e| format!("{ROUTE}: {e}"))? {
         requests.push(
