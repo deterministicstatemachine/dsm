@@ -2038,6 +2038,12 @@ fn take_in_copy(
     match ingested {
         Ingested::Staged => {}
         Ingested::Decided => taken.consume(address, message_id),
+        // Its sender's backlog is full (SA-100): neither consumed nor passed
+        // over, so it is taken on a later sync once that backlog clears.
+        Ingested::Held(why) => log::info!(
+            "[storage.sync] copy {message_id} on {}.. is held: {why}",
+            short_route(address)
+        ),
         // Not being recognized is a fact about the copy's own bytes against
         // the keys this device pins for the contact; what this device cannot
         // decide yet is an `Err` or a staged copy, never this. So the copy

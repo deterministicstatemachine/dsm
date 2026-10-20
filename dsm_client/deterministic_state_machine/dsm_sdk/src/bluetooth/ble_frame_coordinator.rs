@@ -35,7 +35,11 @@ use crate::storage::client_db::types::ChunkPersistenceParams;
 /// Using 400 gives ~460 total, safely under 514 with headroom.
 /// A 29KB SPHINCS+ signature fits in ~75 chunks (~30s) vs 168 at 180 bytes.
 const MAX_BLE_CHUNK_SIZE: usize = 400;
-/// The most frames in reassembly on this device at once.
+/// The most frames in reassembly on this device at once. Past it, the frame
+/// that has gone longest without taking a chunk makes room, never the oldest
+/// one: a frame that is arriving goes only if every other frame here took a
+/// chunk since its last, so a peer that rotates its radio address to open
+/// frames on fresh links must out-write it that many times over (SA-113).
 const MAX_PENDING_REASSEMBLY: usize = 256;
 /// The most frames one link may have in reassembly at once. A peer sends one
 /// step's frames at a time; past this, the link's own oldest frame goes, never
@@ -320,18 +324,23 @@ struct ReassemblyBuffer {
     shape: FrameShape,
     received_chunks: HashMap<u16, Vec<u8>>,
     /// Transport-only: wall-clock instant when this buffer was created.
-    /// Used for reassembly timeout enforcement and LRU eviction.
+    /// Used for reassembly timeout enforcement and a link's own eviction.
     created_at: Instant,
+    /// Transport-only: when this buffer last took a chunk it did not hold.
+    /// Used for eviction across links.
+    last_chunk_at: Instant,
 }
 
 impl ReassemblyBuffer {
     fn new(frame_type: BleFrameType, shape: FrameShape, commitment: &[u8; 32]) -> Self {
+        let now = Instant::now();
         Self {
             frame_commitment: *commitment,
             frame_type,
             shape,
             received_chunks: HashMap::new(),
-            created_at: Instant::now(),
+            created_at: now,
+            last_chunk_at: now,
         }
     }
 
@@ -788,8 +797,9 @@ impl BleFrameCoordinator {
 
         if !buffers.contains_key(&key) {
             // A link has at most MAX_PENDING_FRAMES_PER_LINK frames arriving,
-            // and the device MAX_PENDING_REASSEMBLY: past either, the oldest
-            // frame of that link, or of all links, makes room.
+            // and the device MAX_PENDING_REASSEMBLY: past the first, the
+            // link's own oldest frame makes room; past the second, the frame
+            // of any link that has gone longest without taking a chunk.
             let link_oldest = buffers
                 .iter()
                 .filter(|(k, _)| k.link == key.link)
@@ -801,7 +811,7 @@ impl BleFrameCoordinator {
             } else if buffers.len() >= MAX_PENDING_REASSEMBLY {
                 buffers
                     .iter()
-                    .min_by_key(|(_, buf)| buf.created_at)
+                    .min_by_key(|(_, buf)| buf.last_chunk_at)
                     .map(|(k, _)| k.clone())
             } else {
                 None
@@ -897,6 +907,7 @@ impl BleFrameCoordinator {
             })
             .map_err(|e| storage("persisting a chunk", e))?;
             slot.insert(chunk.data);
+            buffer.last_chunk_at = Instant::now();
         }
 
         if !buffer.is_complete() {
@@ -1321,6 +1332,79 @@ mod tests {
                     .is_empty(),
                 "the evicted frame's persisted chunks went with it"
             );
+        });
+    }
+
+    /// SA-113. A peer that rotates its radio address opens frames on fresh
+    /// links, each within its link's bound, until the device holds
+    /// MAX_PENDING_REASSEMBLY, and then one more. The honest frame arriving on
+    /// LINK_A, older than all of them but still taking chunks, is not pushed
+    /// out: the frame idle longest makes room, and the honest frame completes.
+    /// MUTATION CONTROL: evicting the oldest frame across links turns this red.
+    #[test]
+    #[serial_test::serial]
+    fn an_address_rotating_peer_cannot_push_out_a_frame_that_is_arriving() {
+        init_test_db();
+        let coord = test_coordinator();
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            let honest = payload(0x70, 3 * MAX_BLE_CHUNK_SIZE);
+            let chunks = coord
+                .encode_message(BleFrameType::BilateralConfirm, &honest)
+                .expect("chunks");
+            let rotated = |i: usize| format!("RR:RR:RR:RR:{:02X}:{:02X}", i / 256, i % 256);
+            let opening = |i: usize| {
+                coord
+                    .encode_message(
+                        BleFrameType::BilateralPrepare,
+                        &payload(
+                            u8::try_from(i % 251).expect("small"),
+                            2 * MAX_BLE_CHUNK_SIZE + i,
+                        ),
+                    )
+                    .expect("chunks")
+                    .remove(0)
+            };
+
+            coord
+                .ingest_chunk(LINK_A, &chunks[0])
+                .await
+                .expect("the honest frame opens");
+            for i in 0..MAX_PENDING_REASSEMBLY - 1 {
+                coord
+                    .ingest_chunk(&rotated(i), &opening(i))
+                    .await
+                    .expect("a rotated link's frame");
+            }
+            assert_eq!(
+                coord.pending_reassembly.lock().await.len(),
+                MAX_PENDING_REASSEMBLY,
+                "the device is full"
+            );
+            coord
+                .ingest_chunk(LINK_A, &chunks[1])
+                .await
+                .expect("the honest frame takes its next chunk");
+            let past = MAX_PENDING_REASSEMBLY - 1;
+            coord
+                .ingest_chunk(&rotated(past), &opening(past))
+                .await
+                .expect("one more rotated link's frame");
+            assert_eq!(
+                coord.pending_reassembly.lock().await.len(),
+                MAX_PENDING_REASSEMBLY
+            );
+
+            match coord
+                .ingest_chunk(LINK_A, &chunks[2])
+                .await
+                .expect("the honest frame's last chunk")
+            {
+                FrameIngressResult::MessageComplete { message } => {
+                    assert_eq!(message.payload, honest);
+                }
+                other => panic!("the honest frame was pushed out: {other:?}"),
+            }
         });
     }
 

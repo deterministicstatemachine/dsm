@@ -98,6 +98,12 @@ pub enum Ingested {
     /// transfer's nonce is spent, or the receipt's step is taken — so it can
     /// never execute here. Nothing is staged; the copy may be consumed.
     Decided,
+    /// Not checked: the contact it names already holds
+    /// `MAX_UNBOUND_PER_SENDER` unbound staged objects of its kind here, and
+    /// this copy is of none of them (SA-100). Nothing is staged or recorded;
+    /// the copy stays on the spool, and is taken once that backlog binds or
+    /// is decided.
+    Held(String),
     /// Not recognized. Nothing is recorded about it.
     NotRecognized(String),
 }
@@ -154,39 +160,95 @@ pub(crate) fn transfer_object_id(signed_operation_bytes: &[u8]) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// Recognize a transfer half: `wire` is the `OnlineTransferRequest` a spooled
-/// envelope carried, `header_sender` the Base32 device id its header named.
-pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRecognition, String> {
-    use TransferRecognition::NotRecognized;
+/// A transfer half parsed, and resolved to the contact its header names and
+/// the key this device stores for it: nothing about it is verified yet.
+struct CandidateTransfer {
+    req: dsm::types::proto::OnlineTransferRequest,
+    candidate: [u8; 32],
+    ak: Vec<u8>,
+}
+
+/// The parse and candidate-identity stages of a transfer half. The inner
+/// `Err` is why the half is not a transfer this device can take.
+fn candidate_transfer(
+    wire: &[u8],
+    header_sender: &str,
+) -> Result<Result<CandidateTransfer, String>, String> {
     // parse
     let req = match dsm::types::proto::OnlineTransferRequest::decode(wire) {
         Ok(r) => r,
-        Err(e) => return Ok(NotRecognized(format!("the transfer does not decode: {e}"))),
+        Err(e) => return Ok(Err(format!("the transfer does not decode: {e}"))),
     };
     if req.canonical_operation_bytes.is_empty() {
-        return Ok(NotRecognized(
-            "the transfer carries no canonical operation bytes".to_string(),
+        return Ok(Err(
+            "the transfer carries no canonical operation bytes".to_string()
         ));
     }
     // resolve candidate identity: a hint choosing which stored key to try
     let Some(candidate) = crate::util::text_id::decode_base32_crockford(header_sender) else {
-        return Ok(NotRecognized(format!(
+        return Ok(Err(format!(
             "the header names {header_sender}, not a Base32 device id"
         )));
     };
     let candidate = match <[u8; 32]>::try_from(candidate.as_slice()) {
         Ok(id) => id,
         Err(e) => {
-            return Ok(NotRecognized(format!(
+            return Ok(Err(format!(
                 "the header names {header_sender}, not a device id: {e}"
             )))
         }
     };
     let Some(ak) = super::storage_routes::stored_sender_ak(header_sender)? else {
-        return Ok(NotRecognized(format!(
+        return Ok(Err(format!(
             "no locally trusted sender AK for {header_sender}"
         )));
     };
+    Ok(Ok(CandidateTransfer { req, candidate, ak }))
+}
+
+/// Recognize a transfer half: `wire` is the `OnlineTransferRequest` a spooled
+/// envelope carried, `header_sender` the Base32 device id its header named.
+pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRecognition, String> {
+    match candidate_transfer(wire, header_sender)? {
+        Ok(candidate) => verify_candidate_transfer(candidate, header_sender),
+        Err(why) => Ok(TransferRecognition::NotRecognized(why)),
+    }
+}
+
+/// Why a candidate transfer is held, if it is: the contact its header names
+/// already holds `MAX_UNBOUND_PER_SENDER` unbound staged transfers here, and
+/// the candidate is none of them (SA-100). Read before its signature is
+/// checked, from rows only verified objects reach, so a copy that merely
+/// names a contact cannot fill that contact's backlog.
+fn transfer_backlog_full(
+    candidate: &CandidateTransfer,
+    header_sender: &str,
+) -> Result<Option<String>, String> {
+    let store = |e: anyhow::Error| format!("reading {header_sender}'s staged transfers: {e}");
+    let held = recipient_staging::unbound_transfer_count(&candidate.candidate).map_err(store)?;
+    if held < recipient_staging::MAX_UNBOUND_PER_SENDER
+        || recipient_staging::transfer_is_staged(
+            &candidate.candidate,
+            &candidate.req.canonical_operation_bytes,
+            &candidate.req.signature,
+        )
+        .map_err(store)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{header_sender} already holds {held} unbound transfers staged here"
+    )))
+}
+
+/// The verify, derive-sender, check-recipient and object-key stages of a
+/// candidate transfer.
+fn verify_candidate_transfer(
+    candidate: CandidateTransfer,
+    header_sender: &str,
+) -> Result<TransferRecognition, String> {
+    use TransferRecognition::NotRecognized;
+    let CandidateTransfer { req, candidate, ak } = candidate;
     // verify
     let op = match Operation::decode_and_bind_signed(
         &req.canonical_operation_bytes,
@@ -256,28 +318,52 @@ pub fn recognize_transfer(wire: &[u8], header_sender: &str) -> Result<TransferRe
     )))
 }
 
-/// Recognize a receipt half from the full A-side receipt wire bytes.
-pub fn recognize_receipt(full_receipt_bytes: &[u8]) -> Result<ReceiptRecognition, String> {
-    use ReceiptRecognition::NotRecognized;
+/// A receipt half parsed, addressed to this device and not yet accepted
+/// here: its signatures are not checked yet.
+struct CandidateReceipt {
+    receipt: StitchedReceiptV2,
+    commitment: [u8; 32],
+    relationship_key: [u8; 32],
+}
+
+/// What recognition decides about a receipt half before any signature.
+enum ReceiptDecidedUnsigned {
+    /// A copy of a receipt this device already accepted.
+    Accepted,
+    /// Why the half is not a receipt this device can take.
+    NotRecognized(String),
+}
+
+/// The parse and check-recipient stages of a receipt half, and whether it is
+/// one this device already accepted. The inner `Err` is what recognition
+/// decided without a signature.
+fn candidate_receipt(
+    full_receipt_bytes: &[u8],
+) -> Result<Result<CandidateReceipt, ReceiptDecidedUnsigned>, String> {
+    use ReceiptDecidedUnsigned::NotRecognized;
     // parse
     let receipt = match StitchedReceiptV2::from_canonical_protobuf(full_receipt_bytes) {
         Ok(r) => r,
-        Err(e) => return Ok(NotRecognized(format!("the receipt does not decode: {e}"))),
+        Err(e) => {
+            return Ok(Err(NotRecognized(format!(
+                "the receipt does not decode: {e}"
+            ))))
+        }
     };
     // check recipient before anything is verified against a relationship: the
     // chain is looked up for (devid_a, devid_b), which must include this device
     let here = this_device()?;
     if receipt.devid_b != here {
-        return Ok(NotRecognized(
+        return Ok(Err(NotRecognized(
             "the receipt names another device as its recipient".to_string(),
-        ));
+        )));
     }
     let commitment = match receipt.compute_commitment() {
         Ok(c) => c,
         Err(e) => {
-            return Ok(NotRecognized(format!(
+            return Ok(Err(NotRecognized(format!(
                 "the receipt commitment cannot be computed: {e}"
-            )))
+            ))))
         }
     };
     let relationship_key =
@@ -290,8 +376,58 @@ pub fn recognize_receipt(full_receipt_bytes: &[u8]) -> Result<ReceiptRecognition
     .map_err(|e| format!("the acceptance journal is unreadable: {e}"))?
     .is_some()
     {
-        return Ok(ReceiptRecognition::Accepted);
+        return Ok(Err(ReceiptDecidedUnsigned::Accepted));
     }
+    Ok(Ok(CandidateReceipt {
+        receipt,
+        commitment,
+        relationship_key,
+    }))
+}
+
+/// Recognize a receipt half from the full A-side receipt wire bytes.
+pub fn recognize_receipt(full_receipt_bytes: &[u8]) -> Result<ReceiptRecognition, String> {
+    match candidate_receipt(full_receipt_bytes)? {
+        Ok(candidate) => verify_candidate_receipt(candidate, full_receipt_bytes),
+        Err(ReceiptDecidedUnsigned::Accepted) => Ok(ReceiptRecognition::Accepted),
+        Err(ReceiptDecidedUnsigned::NotRecognized(why)) => {
+            Ok(ReceiptRecognition::NotRecognized(why))
+        }
+    }
+}
+
+/// Why a candidate receipt is held, if it is: the contact it names as its
+/// signer already holds `MAX_UNBOUND_PER_SENDER` unbound staged receipts
+/// here, and the candidate is none of them (SA-100). As for transfers, read
+/// before any signature is checked, from rows only verified receipts reach.
+fn receipt_backlog_full(candidate: &CandidateReceipt) -> Result<Option<String>, String> {
+    let signer = crate::util::text_id::encode_base32_crockford(&candidate.receipt.devid_a);
+    let store = |e: anyhow::Error| format!("reading {signer}'s staged receipts: {e}");
+    let held =
+        recipient_staging::unbound_receipt_count(&candidate.receipt.devid_a).map_err(store)?;
+    if held < recipient_staging::MAX_UNBOUND_PER_SENDER
+        || recipient_staging::get_receipt(&candidate.commitment)
+            .map_err(store)?
+            .is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{signer} already holds {held} unbound receipts staged here"
+    )))
+}
+
+/// The verify, derive-sender and object-key stages of a candidate receipt.
+fn verify_candidate_receipt(
+    candidate: CandidateReceipt,
+    full_receipt_bytes: &[u8],
+) -> Result<ReceiptRecognition, String> {
+    use ReceiptRecognition::NotRecognized;
+    let CandidateReceipt {
+        receipt,
+        commitment,
+        relationship_key,
+    } = candidate;
     // resolve candidate identity
     let candidate_b32 = crate::util::text_id::encode_base32_crockford(&receipt.devid_a);
     let Some(ak) = super::storage_routes::stored_sender_ak(&candidate_b32)? else {
@@ -433,7 +569,14 @@ pub fn ingest_transfer_half(
     address: &str,
     message_id: &str,
 ) -> Result<IngestOutcome, String> {
-    let recognized = match recognize_transfer(wire, header_sender)? {
+    let candidate = match candidate_transfer(wire, header_sender)? {
+        Ok(candidate) => candidate,
+        Err(why) => return Ok(IngestOutcome::only(Ingested::NotRecognized(why))),
+    };
+    if let Some(why) = transfer_backlog_full(&candidate, header_sender)? {
+        return Ok(IngestOutcome::only(Ingested::Held(why)));
+    }
+    let recognized = match verify_candidate_transfer(candidate, header_sender)? {
         TransferRecognition::Recognized(r) => *r,
         TransferRecognition::NotRecognized(why) => {
             return Ok(IngestOutcome::only(Ingested::NotRecognized(why)))
@@ -487,7 +630,17 @@ pub fn ingest_evidence_half(
     address: &str,
     message_id: &str,
 ) -> Result<IngestOutcome, String> {
-    let recognized = match recognize_receipt(full_receipt_bytes)? {
+    let candidate = match candidate_receipt(full_receipt_bytes)? {
+        Ok(candidate) => candidate,
+        Err(ReceiptDecidedUnsigned::Accepted) => return Ok(IngestOutcome::only(Ingested::Decided)),
+        Err(ReceiptDecidedUnsigned::NotRecognized(why)) => {
+            return Ok(IngestOutcome::only(Ingested::NotRecognized(why)))
+        }
+    };
+    if let Some(why) = receipt_backlog_full(&candidate)? {
+        return Ok(IngestOutcome::only(Ingested::Held(why)));
+    }
+    let recognized = match verify_candidate_receipt(candidate, full_receipt_bytes)? {
         ReceiptRecognition::Verified(r) => *r,
         ReceiptRecognition::Accepted => return Ok(IngestOutcome::only(Ingested::Decided)),
         ReceiptRecognition::NotRecognized(why) => {
@@ -710,6 +863,33 @@ mod tests {
         message_id: &str,
         request: Vec<u8>,
     ) {
+        sealed_as_the_sender(p, original_id, message_id, request);
+        p.a.enter();
+        let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+            p.a.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("A's spool client");
+        spool
+            .submit_stored_envelope_with_retry(
+                route,
+                message_id,
+                &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
+            )
+            .await
+            .expect("the copy reaches the members");
+    }
+
+    /// A's own frozen transfer envelope, the one spooled under `original_id`,
+    /// re-sealed to B under `message_id` with `request` as its body: the
+    /// sealed bytes, which A keeps under `message_id`.
+    fn sealed_as_the_sender(
+        p: &Pair,
+        original_id: &str,
+        message_id: &str,
+        request: Vec<u8>,
+    ) -> Vec<u8> {
         use dsm::types::proto as pb;
         p.a.enter();
         let sealed = crate::sdk::b0x_sdk::kept_seal(original_id).expect("A kept the sealed send");
@@ -735,21 +915,7 @@ mod tests {
         }
         p.a.enter();
         crate::sdk::b0x_sdk::seal_for(&p.b.device_id, message_id, &inner.encode_to_vec())
-            .expect("seal for B");
-        let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
-            crate::util::text_id::encode_base32_crockford(&p.a.device_id),
-            p.a.router().core_sdk.clone(),
-            p.fleet.endpoints(),
-        )
-        .expect("A's spool client");
-        spool
-            .submit_stored_envelope_with_retry(
-                route,
-                message_id,
-                &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
-            )
-            .await
-            .expect("the copy reaches the members");
+            .expect("seal for B")
     }
 
     /// Every received online transfer in B's history: (id, amount, token),
@@ -1400,6 +1566,179 @@ mod tests {
             !recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
                 .expect("barrier"),
             "the rival holds nothing once its nonce is spent"
+        );
+    }
+
+    /// SA-100: a hostile contact signs transfers and receipts to B without
+    /// end, each verifying and none ever executable. B stages at most
+    /// `MAX_UNBOUND_PER_SENDER` of each kind from it; every further new copy
+    /// is held, recording nothing, while a copy of an object already staged
+    /// is still taken, so the backlog that is staged can still bind.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_contacts_unbound_backlog_is_bounded_per_kind() {
+        use crate::test_support::receipts::Party;
+        use dsm::types::receipt_types::compute_receipt_challenge_response_target;
+        let cap = recipient_staging::MAX_UNBOUND_PER_SENDER;
+        let (p, one) = sent().await;
+        let tip = a_view_of_b(&p);
+        let extra = 3;
+        let mut transfers = Vec::new();
+        for amount in 1..=(cap + extra) as u64 {
+            transfers.push(signed_by_a(
+                &p,
+                p.b.device_id,
+                amount,
+                transfer_nonce(&tip, amount, "ERA", &p.b.device_id),
+            ));
+        }
+        for (i, request) in transfers.iter().enumerate() {
+            let out = ingested(ingest_transfer_half(
+                request,
+                &one.header_sender,
+                &one.route,
+                &format!("FLOOD-{i}"),
+            ));
+            if i < cap {
+                assert_eq!(out, Ingested::Staged, "transfer {i} is within the bound");
+            } else {
+                assert!(
+                    matches!(&out, Ingested::Held(why) if why.contains("unbound transfers")),
+                    "transfer {i} is past the bound: {out:?}"
+                );
+            }
+        }
+        assert_eq!(rows("recipient_staged_transfer"), cap as i64);
+        assert_eq!(rows("recipient_transfer_observation"), cap as i64);
+        assert_eq!(
+            ingested(ingest_transfer_half(
+                &transfers[0],
+                &one.header_sender,
+                &one.route,
+                "FLOOD-AGAIN",
+            )),
+            Ingested::Staged,
+            "a copy of a staged transfer is still taken"
+        );
+
+        let op = match recognize_transfer(&one.transfer_bytes, &one.header_sender)
+            .expect("recognition")
+        {
+            TransferRecognition::Recognized(r) => r.op,
+            TransferRecognition::NotRecognized(why) => panic!("the honest transfer: {why}"),
+        };
+        let honest =
+            StitchedReceiptV2::from_canonical_protobuf(&one.evidence_bytes).expect("the receipt");
+        let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+        let signed_by_a = |mut r: StitchedReceiptV2| -> Vec<u8> {
+            let commitment = r.compute_commitment().expect("the commitment");
+            let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+            let c_pre = dsm::core::bilateral_transaction_manager::compute_precommit(
+                &r.parent_tip,
+                &op.with_cleared_signature().to_bytes(),
+                &r.transition_entropy,
+            );
+            let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
+            r.set_ek_pk_a(answer.ek_pk);
+            r.set_ek_cert_a(answer.ek_cert);
+            r.set_kyber_ct_a(answer.kyber_ct);
+            r.add_sig_a(answer.sig);
+            r.to_full_protobuf().expect("re-encode")
+        };
+        let mut receipts = Vec::new();
+        for i in 0..cap + extra {
+            let mut receipt = honest.clone();
+            receipt.child_root[0] ^= u8::try_from(i + 1).expect("a small index");
+            receipts.push(signed_by_a(receipt));
+        }
+        for (i, bytes) in receipts.iter().enumerate() {
+            let out = ingested(ingest_evidence_half(
+                bytes,
+                &one.evidence_route,
+                &format!("FLOOD-RECEIPT-{i}"),
+            ));
+            if i < cap {
+                assert_eq!(out, Ingested::Staged, "receipt {i} is within the bound");
+            } else {
+                assert!(
+                    matches!(&out, Ingested::Held(why) if why.contains("unbound receipts")),
+                    "receipt {i} is past the bound: {out:?}"
+                );
+            }
+        }
+        assert_eq!(rows("recipient_staged_receipt"), cap as i64);
+        assert_eq!(rows("recipient_receipt_observation"), cap as i64);
+        assert_eq!(
+            ingested(ingest_evidence_half(
+                &receipts[0],
+                &one.evidence_route,
+                "FLOOD-RECEIPT-AGAIN",
+            )),
+            Ingested::Staged,
+            "a copy of a staged receipt is still taken"
+        );
+        assert_eq!(rows("recipient_pair"), 0, "none of them binds");
+    }
+
+    /// SA-101: the first member in set order withholds the honest transfer
+    /// and serves, ahead of it, as many fresh copies sealed to B as the poll
+    /// takes from a route — anyone can seal to B, so each is new and none was
+    /// passed over before. The other members hold the honest copy. One poll
+    /// still reaches it: no member's answer fills the route's budget, and B
+    /// is credited.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn the_first_member_cannot_fill_a_routes_budget() {
+        let (p, one) = sent().await;
+        p.b.enter();
+        let first = crate::sdk::storage_set::pinned_endpoints().expect("B's pinned set")[0].clone();
+        let member = p
+            .nodes
+            .nodes
+            .iter()
+            .find(|n| n.endpoint == first)
+            .expect("the first member in set order is a node of the fleet");
+        let withheld = member
+            .spool()
+            .await
+            .into_iter()
+            .filter(|s| s.message_id.as_deref() == Some(one.message_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(withheld.len(), 1, "the first member holds the honest copy");
+        let client = member.pool().get().await.expect("the member's database");
+        client
+            .execute(
+                "DELETE FROM inbox_spool WHERE envelope = $1",
+                &[&withheld[0].envelope],
+            )
+            .await
+            .expect("the first member withholds the honest copy");
+        let budget = crate::sdk::inbox_poller::poll_sync_request().limit;
+        for i in 0..budget {
+            let mut raw = [0x60u8; 16];
+            raw[15] = u8::try_from(i).expect("the budget fits a byte");
+            let id = crate::util::text_id::encode_base32_crockford(&raw);
+            let junk = sealed_as_the_sender(
+                &p,
+                &one.message_id,
+                &id,
+                format!("fresh junk {i}").into_bytes(),
+            );
+            dsm_storage_node::db::spool_insert(member.pool(), &one.route, &junk)
+                .await
+                .expect("the first member spools its own junk");
+        }
+        assert!(
+            p.holders_of(&one.message_id).await >= 1,
+            "the other members hold the honest copy"
+        );
+
+        let synced = p.b.sync().await;
+        assert!(synced.success, "{:?}", synced.errors);
+        assert_eq!(
+            p.b.era_balance(),
+            10,
+            "one poll reaches the honest copy past the first member's junk"
         );
     }
 

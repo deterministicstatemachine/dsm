@@ -15,11 +15,26 @@ use prost::Message;
 /// What a GATT identity read establishes.
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdentityReadVerdict {
-    /// A reach is connecting for another appliance: record nothing.
-    NotExpected,
+    /// Nothing about the peer: record nothing.
+    Unestablished(Unestablished),
     /// The link carries this peer. `paired` when its contact already holds a
     /// BLE address (pairing completed), so no identity write-back is owed.
     Proceed { paired: bool },
+}
+
+/// Why a GATT identity read establishes nothing.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Unestablished {
+    /// A reach is connecting for another appliance.
+    #[error("not the addressed appliance")]
+    NotExpected,
+    /// The identity names a device this device holds no contact for. It is
+    /// answered at once: pairing starts only for a contact already stored,
+    /// so nothing here waits for this one to appear, and a read is never held
+    /// on its caller's thread for it — anyone in radio range can name any
+    /// device id, and the caller is the BLE stack's one dispatcher (SA-109).
+    #[error("the identity names no contact of this device")]
+    NotAContact,
 }
 
 /// Decide what the identity characteristic value `raw_proto` establishes for
@@ -36,19 +51,29 @@ pub fn identity_read_verdict(
     match expected.len() {
         0 => {}
         32 if expected == char_value.device_id.as_slice() => {}
-        32 => return Ok(IdentityReadVerdict::NotExpected),
+        32 => {
+            return Ok(IdentityReadVerdict::Unestablished(
+                Unestablished::NotExpected,
+            ))
+        }
         n => return Err(format!("expected device id is {n} bytes, not 32")),
     }
-    let paired = crate::storage::client_db::get_contact_by_device_id(&char_value.device_id)
+    let Some(contact) = crate::storage::client_db::get_contact_by_device_id(&char_value.device_id)
         .map_err(|e| format!("SQLite query error: {e}"))?
-        .and_then(|contact| contact.ble_address)
+    else {
+        return Ok(IdentityReadVerdict::Unestablished(
+            Unestablished::NotAContact,
+        ));
+    };
+    let paired = contact
+        .ble_address
         .is_some_and(|address| !address.is_empty());
     Ok(IdentityReadVerdict::Proceed { paired })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_read_verdict, IdentityReadVerdict};
+    use super::{identity_read_verdict, IdentityReadVerdict, Unestablished};
     use crate::generated as pb;
     use crate::storage::client_db::{store_contact, update_contact_ble_status, ContactRecord};
     use prost::Message;
@@ -99,7 +124,9 @@ mod tests {
 
         assert_eq!(
             identity_read_verdict(&identity_value(other), &target),
-            Ok(IdentityReadVerdict::NotExpected)
+            Ok(IdentityReadVerdict::Unestablished(
+                Unestablished::NotExpected
+            ))
         );
     }
 
@@ -123,6 +150,39 @@ mod tests {
             identity_read_verdict(&identity_value(device_id), &[]),
             Ok(IdentityReadVerdict::Proceed { paired: true })
         );
+    }
+
+    /// SA-109: anyone in radio range can present an identity naming any
+    /// device. One that names no contact of this device establishes nothing
+    /// and is answered at once, without waiting for a contact to appear —
+    /// a read past this verdict once held the BLE dispatcher for 15 s per id.
+    /// Read again once the contact is stored, it proceeds.
+    #[test]
+    #[serial]
+    fn an_identity_naming_no_contact_is_answered_at_once() {
+        init_test_db();
+        let stranger = [0x5e; 32];
+        for expected in [Vec::new(), stranger.to_vec()] {
+            let asked = std::time::Instant::now();
+            assert_eq!(
+                identity_read_verdict(&identity_value(stranger), &expected),
+                Ok(IdentityReadVerdict::Unestablished(
+                    Unestablished::NotAContact
+                ))
+            );
+            assert!(
+                asked.elapsed() < crate::bluetooth::awaited_contacts::CONTACT_AWAIT_POLL,
+                "answered without waiting: {:?}",
+                asked.elapsed()
+            );
+        }
+        add_contact(stranger);
+        let Ok(IdentityReadVerdict::Proceed { paired }) =
+            identity_read_verdict(&identity_value(stranger), &[])
+        else {
+            panic!("once its contact is stored, the identity proceeds");
+        };
+        assert!(!paired, "its contact holds no BLE address yet");
     }
 
     #[test]

@@ -315,6 +315,64 @@ pub fn unbound_receipts_from(sender: &[u8; 32]) -> Result<Vec<StagedReceipt>> {
     Ok(rows)
 }
 
+/// The most staged transfers, and separately the most staged receipts, one
+/// contact can hold here that no pair holds yet (SA-100). An honest contact
+/// has at most one unresolved transfer toward this device at a time (the
+/// finality barrier allows one unresolved semantic predecessor per
+/// originator), so it never comes near this. A contact that signs more cannot
+/// grow this store past it, nor the signature checks every sync repeats over
+/// what is staged. The bound is per contact: one contact's backlog never holds
+/// another's objects back.
+pub const MAX_UNBOUND_PER_SENDER: usize = 4;
+
+/// How many staged transfers from `sender` no pair holds yet.
+pub fn unbound_transfer_count(sender: &[u8; 32]) -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipient_staged_transfer t
+         WHERE t.sender_device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM recipient_pair p WHERE p.op_id = t.op_id)",
+        params![sender.as_slice()],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n)?)
+}
+
+/// How many staged receipts from `sender` no pair holds yet.
+pub fn unbound_receipt_count(sender: &[u8; 32]) -> Result<usize> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM recipient_staged_receipt r
+         WHERE r.sender_device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM recipient_pair p WHERE p.commitment = r.commitment)",
+        params![sender.as_slice()],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(n)?)
+}
+
+/// Whether the operation `canonical_operation_bytes`, signed `signature`, is
+/// staged as a transfer from `sender`: a copy of an object already staged.
+pub fn transfer_is_staged(
+    sender: &[u8; 32],
+    canonical_operation_bytes: &[u8],
+    signature: &[u8],
+) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM recipient_staged_transfer
+             WHERE sender_device_id = ?1 AND canonical_operation_bytes = ?2 AND signature = ?3",
+            params![sender.as_slice(), canonical_operation_bytes, signature],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// Bind a staged transfer to the staged receipt whose child tip it produces.
 /// The caller has recomputed that child; the pair is keyed by both objects,
 /// so neither can be bound twice.

@@ -21,7 +21,7 @@ pub const CONTACT_AWAIT_LIMIT: Duration = Duration::from_secs(15);
 /// How often a waiting identity looks for its contact.
 pub const CONTACT_AWAIT_POLL: Duration = Duration::from_millis(500);
 
-/// The most identities that wait at once on each BLE path.
+/// The most identities that wait at once.
 pub const MAX_AWAITED_CONTACTS: usize = 4;
 
 /// Why an identity was not taken into a wait.

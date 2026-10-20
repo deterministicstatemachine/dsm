@@ -428,11 +428,6 @@ struct PendingIdentity {
 static PENDING_IDENTITIES: Lazy<AwaitedContacts<PendingIdentity>> =
     Lazy::new(|| AwaitedContacts::new(MAX_AWAITED_CONTACTS));
 
-/// GATT identity reads waiting, on the caller's thread, for their contact's
-/// insertion: bounded, so a peer cannot hold more than this many callers.
-static GATT_IDENTITY_WAITS: Lazy<AwaitedContacts<()>> =
-    Lazy::new(|| AwaitedContacts::new(MAX_AWAITED_CONTACTS));
-
 /// Process a BLE identity envelope received on the PAIRING characteristic.
 ///
 /// The advertiser receives a protobuf Envelope containing BleEvent.identity_observed
@@ -1084,55 +1079,6 @@ fn observe_gatt_identity_inner(
         char_value.device_id[1]
     );
 
-    match crate::storage::client_db::has_contact_for_device_id(&char_value.device_id) {
-        Ok(true) => {
-            log::info!(
-                "GATT identity read: contact EXISTS in SQLite for {:02x}{:02x}...",
-                char_value.device_id[0],
-                char_value.device_id[1]
-            );
-        }
-        Ok(false) => {
-            // This blocks the caller's thread while the contact is added: at
-            // most MAX_AWAITED_CONTACTS reads wait at once, one per device.
-            let device_id: [u8; 32] = char_value
-                .device_id
-                .as_slice()
-                .try_into()
-                .map_err(|e| format!("device id: {e}"))?;
-            let slot = GATT_IDENTITY_WAITS
-                .begin(device_id, ())
-                .map_err(|refused| {
-                    format!("contact missing in SQLite, not waited for: {refused}")
-                })?;
-            let rt = crate::runtime::get_runtime();
-            let waited = rt.block_on(async {
-                let start = std::time::Instant::now();
-                while start.elapsed() < CONTACT_AWAIT_LIMIT {
-                    tokio::time::sleep(CONTACT_AWAIT_POLL).await;
-                    if crate::storage::client_db::has_contact_for_device_id(&device_id)? {
-                        return Ok(Some(()));
-                    }
-                }
-                Ok::<_, anyhow::Error>(None)
-            });
-            drop(slot);
-            match waited {
-                Ok(Some(())) => {}
-                Ok(None) => return Err("contact missing in SQLite".to_string()),
-                Err(e) => return Err(format!("SQLite query error while waiting: {e}")),
-            }
-            log::info!(
-                "GATT identity read: contact appeared in SQLite during retry window for {:02x}{:02x}...",
-                char_value.device_id[0],
-                char_value.device_id[1]
-            );
-        }
-        Err(e) => {
-            return Err(format!("SQLite query error: {e}"));
-        }
-    }
-
     let obs = pb::BleIdentityObserved {
         address: ble_address.to_string(),
         genesis_hash: char_value.genesis_hash.clone(),
@@ -1198,12 +1144,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 Ok(s) => s.into(),
                 Err(e) => {
                     log::error!("processGattIdentityRead: JNI address extraction failed: {e}");
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        "JNI address extraction failed",
-                    );
+                    return refuse_identity_read(&mut env, "JNI address extraction failed");
                 }
             };
 
@@ -1213,12 +1154,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                 Ok(v) => v,
                 Err(e) => {
                     log::error!("processGattIdentityRead: JNI byte array extraction failed: {e}");
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        "JNI byte array extraction failed",
-                    );
+                    return refuse_identity_read(&mut env, "JNI byte array extraction failed");
                 }
             };
             let expected: Vec<u8> =
@@ -1226,26 +1162,14 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                     Ok(v) => v,
                     Err(e) => {
                         log::error!("processGattIdentityRead: expected device id unreadable: {e}");
-                        return emit_identity_read_result(
-                            &mut env,
-                            false,
-                            &[],
-                            "expected device id unreadable",
-                        );
+                        return refuse_identity_read(&mut env, "expected device id unreadable");
                     }
                 };
 
             match crate::bluetooth::gatt_identity::identity_read_verdict(&raw_proto, &expected) {
-                Ok(crate::bluetooth::gatt_identity::IdentityReadVerdict::NotExpected) => {
-                    log::info!(
-                        "processGattIdentityRead: {ble_address} is not the appliance this reach is for"
-                    );
-                    return emit_identity_read_result(
-                        &mut env,
-                        false,
-                        &[],
-                        "not the addressed appliance",
-                    );
+                Ok(crate::bluetooth::gatt_identity::IdentityReadVerdict::Unestablished(why)) => {
+                    log::info!("processGattIdentityRead: {ble_address}: {why}");
+                    return refuse_identity_read(&mut env, &why.to_string());
                 }
                 Ok(crate::bluetooth::gatt_identity::IdentityReadVerdict::Proceed { paired }) => {
                     let (peer_device_id, peer_genesis_hash) = match observe_gatt_identity_inner(
@@ -1256,7 +1180,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                         Ok(v) => v,
                         Err(e) => {
                             log::error!("processGattIdentityRead: {e}");
-                            return emit_identity_read_result(&mut env, false, &[], &e);
+                            return refuse_identity_read(&mut env, &e);
                         }
                     };
                     let write_back = if paired {
@@ -1264,18 +1188,18 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processGattId
                     } else {
                         local_identity_write_back(&ble_address)
                     };
-                    emit_identity_read_result_with_identity(
+                    answer_identity_read(
                         &mut env,
-                        true,
-                        &write_back,
-                        "",
-                        &peer_device_id,
-                        &peer_genesis_hash,
+                        IdentityReadAnswer::Established {
+                            write_back_envelope: &write_back,
+                            peer_device_id: &peer_device_id,
+                            peer_genesis_hash: &peer_genesis_hash,
+                        },
                     )
                 }
                 Err(e) => {
                     log::error!("processGattIdentityRead: {e}");
-                    emit_identity_read_result(&mut env, false, &[], &e)
+                    refuse_identity_read(&mut env, &e)
                 }
             }
         }),
@@ -1309,44 +1233,55 @@ fn local_identity_write_back(ble_address: &str) -> Vec<u8> {
     }
 }
 
-/// Encode and return a BleGattIdentityReadResult as a JNI byte array.
-fn emit_identity_read_result(
-    env: &mut JNIEnv<'_>,
-    success: bool,
-    write_back_envelope: &[u8],
-    error_message: &str,
-) -> jni::sys::jbyteArray {
-    emit_identity_read_result_with_identity(
-        env,
-        success,
-        write_back_envelope,
-        error_message,
-        &[],
-        &[],
-    )
+/// What a GATT identity read answers Kotlin.
+enum IdentityReadAnswer<'a> {
+    /// The link carries this peer: its identity, for Kotlin-side anchoring,
+    /// and the write-back owed to it (empty when none is).
+    Established {
+        write_back_envelope: &'a [u8],
+        peer_device_id: &'a [u8],
+        peer_genesis_hash: &'a [u8],
+    },
+    /// Nothing about the peer is established, and why.
+    NotEstablished(&'a str),
 }
 
-/// Full version that includes the peer's identity for Kotlin-side anchoring.
-fn emit_identity_read_result_with_identity(
+/// Answer that the read established nothing, and why.
+fn refuse_identity_read(env: &mut JNIEnv<'_>, why: &str) -> jni::sys::jbyteArray {
+    answer_identity_read(env, IdentityReadAnswer::NotEstablished(why))
+}
+
+/// Encode `answer` as a BleGattIdentityReadResult JNI byte array.
+fn answer_identity_read(
     env: &mut JNIEnv<'_>,
-    success: bool,
-    write_back_envelope: &[u8],
-    error_message: &str,
-    peer_device_id: &[u8],
-    peer_genesis_hash: &[u8],
+    answer: IdentityReadAnswer<'_>,
 ) -> jni::sys::jbyteArray {
-    let result = pb::BleGattIdentityReadResult {
-        success,
-        write_back_envelope: write_back_envelope.to_vec(),
-        error_message: error_message.to_string(),
-        peer_device_id: peer_device_id.to_vec(),
-        peer_genesis_hash: peer_genesis_hash.to_vec(),
+    let success = matches!(answer, IdentityReadAnswer::Established { .. });
+    let result = match answer {
+        IdentityReadAnswer::Established {
+            write_back_envelope,
+            peer_device_id,
+            peer_genesis_hash,
+        } => pb::BleGattIdentityReadResult {
+            success,
+            write_back_envelope: write_back_envelope.to_vec(),
+            error_message: String::new(),
+            peer_device_id: peer_device_id.to_vec(),
+            peer_genesis_hash: peer_genesis_hash.to_vec(),
+        },
+        IdentityReadAnswer::NotEstablished(why) => pb::BleGattIdentityReadResult {
+            success,
+            write_back_envelope: Vec::new(),
+            error_message: why.to_string(),
+            peer_device_id: Vec::new(),
+            peer_genesis_hash: Vec::new(),
+        },
     };
     let encoded = result.encode_to_vec();
     match env.byte_array_from_slice(&encoded) {
         Ok(arr) => arr.into_raw(),
         Err(e) => {
-            log::error!("emit_identity_read_result: JNI byte_array_from_slice failed: {e}");
+            log::error!("answer_identity_read: JNI byte_array_from_slice failed: {e}");
             empty(env)
         }
     }
