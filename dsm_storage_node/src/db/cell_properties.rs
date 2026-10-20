@@ -340,16 +340,28 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
         Some(c1.clone())
     );
 
-    assert!(db::mirror_put(&pool, &c1).await.expect("mirror"), "new");
-    assert!(
-        !db::mirror_put(&pool, &c1).await.expect("again"),
+    assert_eq!(
+        db::mirror_put(&pool, std::slice::from_ref(&c1))
+            .await
+            .expect("mirror"),
+        1,
+        "new"
+    );
+    assert_eq!(
+        db::mirror_put(&pool, std::slice::from_ref(&c1))
+            .await
+            .expect("again"),
+        0,
         "identical bytes are held once"
     );
     let mut forked = c1.clone();
     forked.smt_root = [0xEE; 32];
-    assert!(
-        db::mirror_put(&pool, &forked).await.expect("fork"),
-        "a different one is new"
+    assert_eq!(
+        db::mirror_put(&pool, &[forked, c1.clone()])
+            .await
+            .expect("fork"),
+        1,
+        "a different one is new, beside the one already held"
     );
     let mirrored = db::mirror_get(&pool, member, c1.cycle_index)
         .await
@@ -359,7 +371,13 @@ async fn bytecommits_close_link_and_prove_on_this_backend() {
         2,
         "identical bytes once, an equivocation kept beside it"
     );
-    assert!(db::mirror_last_cycle(&pool, member).await.expect("last") >= c1.cycle_index);
+    assert_eq!(
+        db::mirror_cycles_held(&pool, member, c1.cycle_index, c1.cycle_index)
+            .await
+            .expect("held"),
+        std::collections::BTreeSet::from([c1.cycle_index]),
+        "the equivocation is one cycle held"
+    );
 }
 
 /// Batches over the same keys in opposite orders all complete: a member
@@ -610,6 +628,85 @@ async fn a_kept_tree_answers_only_for_the_byte_commit_it_was_kept_for() {
     );
     db::put_cell(&pool, NS, &key, b"later").await.expect("put");
     close_and_check(&pool, &a, b"dsm-node-reset").await;
+    super::schema_properties::drop_schema(&admin, &schema).await;
+}
+
+/// A close whose caller goes away before it commits leaves the node holding
+/// the leaf set the store is as of, so the next close continues from it
+/// instead of reading every cell again. The close is held at its stamping of
+/// the new entries (another transaction holds the entry's row) and dropped
+/// there, once the store shows it waiting, as the server drops a request
+/// whose client disconnects; the node still holds the leaf set as of cycle
+/// 1, and the next close, from it, has the root and bytes of the full
+/// rebuild.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_whose_caller_goes_away_keeps_the_leaf_set_it_held() {
+    use std::sync::Arc;
+    let (pool, admin, schema) = super::schema_properties::isolated_schema(0x42).await;
+    let pool = Arc::new(pool);
+    db::init_db(&pool).await.expect("init");
+    let node = Arc::new(db::CommittedCells::default());
+    let member = b"dsm-node-cancelled";
+    db::put_cell(&pool, NS, &unique_key(0x42), b"first")
+        .await
+        .expect("put");
+    let first = close_and_check(&pool, &node, member).await;
+    db::put_cell(&pool, NS, &unique_key(0x42), b"second")
+        .await
+        .expect("put");
+
+    let mut holder = pool.get().await.expect("connection");
+    let holding = holder.transaction().await.expect("a transaction");
+    holding
+        .batch_execute("SELECT 1 FROM cells WHERE committed_cycle IS NULL FOR UPDATE")
+        .await
+        .expect("hold the new entry's row");
+    let holder_pid: i32 = holding
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("the holder's backend")
+        .get(0);
+    let closing = {
+        let (pool, node) = (pool.clone(), node.clone());
+        tokio::spawn(async move { db::close_cycle(&pool, &node, member).await })
+    };
+    let watcher = admin.get().await.expect("connection");
+    loop {
+        let waiting: i64 = watcher
+            .query_one(
+                "SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+                &[&holder_pid],
+            )
+            .await
+            .expect("who waits on the holder")
+            .get(0);
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            !closing.is_finished(),
+            "the close was not held at its stamping"
+        );
+        tokio::task::yield_now().await;
+    }
+    closing.abort();
+    match closing.await {
+        Err(dropped) if dropped.is_cancelled() => {}
+        other => panic!("the close was not dropped while it waited: {other:?}"),
+    }
+    assert_eq!(
+        node.closer
+            .lock()
+            .await
+            .as_ref()
+            .map(|held| held.commit.clone()),
+        Some(Some(first)),
+        "the dropped close let go of the leaf set the store is as of"
+    );
+
+    holding.rollback().await.expect("let the row go");
+    let second = close_and_check(&pool, &node, member).await;
+    assert_eq!(second.cycle_index, 2);
     super::schema_properties::drop_schema(&admin, &schema).await;
 }
 
