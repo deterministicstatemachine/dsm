@@ -14,7 +14,7 @@ import { startNativeQrScannerViaRouter } from '../../dsm/WebViewBridge';
 import type { ContactCard } from '../../dsm/types';
 import type { PersonProfile } from '../../domain/types';
 import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
-import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
+import { contactsNamed, deviceFingerprint, visibleText } from '../../domain/displayName';
 import { encodeBase32Crockford } from '../../utils/textId';
 import { Avatar, Icon, PageTitle } from './parts';
 import { modernNav } from './modernNav';
@@ -84,7 +84,8 @@ export default function ModernAddContact(): React.JSX.Element {
     addContact(profile.name, card, profile).then(
       (result) => {
         if (result.accepted) {
-          setStep({ kind: 'added', name: profile.name.length > 0 ? profile.name : result.alias });
+          const named = visibleText(profile.name);
+          setStep({ kind: 'added', name: named.length > 0 ? named : result.alias });
           return;
         }
         setProblem(result.error);
@@ -139,7 +140,7 @@ export default function ModernAddContact(): React.JSX.Element {
           </section>
           {taken.length > 0 ? (
             <div className="s-notice s-error" role="alert">
-              You already have a contact named {step.profile.name} ({taken.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
+              You already have a contact named {visibleText(step.profile.name)} ({taken.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
               This code is device {deviceFingerprint(step.card.deviceId)}. Give this person a name you can tell apart.
             </div>
           ) : null}
