@@ -170,11 +170,14 @@ impl core::fmt::Display for BelowBaseline {
 struct Extending(D32);
 
 impl Extending {
-    /// `None` when this thread is extending `vault`'s chain already.
+    /// `None` when this thread is extending `vault`'s chain already. The
+    /// guard is built only when this entry marked the vault: a guard built
+    /// for a refused entry would unmark the vault when dropped, while the
+    /// extension that marked it is still running.
     fn enter(vault: D32) -> Option<Self> {
         EXTENDING
             .with(|extending| extending.borrow_mut().insert(vault))
-            .then_some(Self(vault))
+            .then(|| Self(vault))
     }
 }
 
@@ -3013,6 +3016,32 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An extension stays marked while it runs, however many entries for
+    /// the same vault are refused inside it. A refused entry that unmarked the
+    /// vault let a third, nested one extend the chain the first was extending:
+    /// a walk of a trader whose positions each resolve through this vault
+    /// asked for the chain again without end, until the stack overflowed
+    /// (`node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history`
+    /// under DSM Amendment A19).
+    /// MUTATION CONTROL: building the guard for a refused entry
+    /// (`then_some(Self(vault))`) turns this red.
+    #[test]
+    fn a_refused_entry_leaves_the_running_extension_marked() {
+        let vault = [0x5E; 32];
+        let running = Extending::enter(vault).expect("the first entry marks the vault");
+        for nested in 1..=3 {
+            assert!(
+                Extending::enter(vault).is_none(),
+                "nested entry {nested}: the vault's chain is being extended"
+            );
+        }
+        drop(running);
+        assert!(
+            Extending::enter(vault).is_some(),
+            "once the extension ends, the vault can be extended again"
+        );
+    }
 
     /// SoFi Amendment S16: another trader's conditional parent resolves only
     /// to the position `P` names, held by the fulfillment `P` names.
