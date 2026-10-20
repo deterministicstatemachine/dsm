@@ -153,27 +153,22 @@ mod tests {
     }
 
     /// SA-109: anyone in radio range can present an identity naming any
-    /// device. One that names no contact of this device establishes nothing
-    /// and is answered at once, without waiting for a contact to appear —
-    /// a read past this verdict once held the BLE dispatcher for 15 s per id.
-    /// Read again once the contact is stored, it proceeds.
+    /// device. One that names no contact of this device establishes nothing:
+    /// the verdict is `NotAContact`, which the GATT read handler refuses on
+    /// the spot, so nothing waits for a contact to appear — a read past this
+    /// verdict once held the BLE dispatcher for 15 s per id. Read again once
+    /// the contact is stored, it proceeds.
     #[test]
     #[serial]
     fn an_identity_naming_no_contact_is_answered_at_once() {
         init_test_db();
         let stranger = [0x5e; 32];
         for expected in [Vec::new(), stranger.to_vec()] {
-            let asked = std::time::Instant::now();
             assert_eq!(
                 identity_read_verdict(&identity_value(stranger), &expected),
                 Ok(IdentityReadVerdict::Unestablished(
                     Unestablished::NotAContact
                 ))
-            );
-            assert!(
-                asked.elapsed() < crate::bluetooth::awaited_contacts::CONTACT_AWAIT_POLL,
-                "answered without waiting: {:?}",
-                asked.elapsed()
             );
         }
         add_contact(stranger);

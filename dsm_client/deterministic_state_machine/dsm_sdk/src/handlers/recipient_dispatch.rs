@@ -1662,7 +1662,7 @@ mod tests {
             } else {
                 assert!(
                     matches!(&out, Ingested::Held(why) if why.contains("unbound receipts")),
-                    "receipt {i} is past the bound: {out:?}"
+                    "receipt {i} is past the bound"
                 );
             }
         }

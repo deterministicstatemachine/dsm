@@ -410,19 +410,12 @@ enum Cycle {
     NotRun(String),
 }
 
-/// How long the listener waits before its next cycle, `elapsed` after the
-/// start of the cycle that answered `sessions`: until [`MIN_CYCLE`] has
-/// passed since that start, or [`RETRY_AFTER`] when no session's sync
-/// completed — every relay down or refusing.
-fn pause_after(elapsed: Duration, sessions: &[generated::ConnectSessionV1]) -> Duration {
-    if sessions
+/// Whether no session's sync completed in a cycle that answered `sessions`:
+/// every relay down or refusing. The listener then waits [`RETRY_AFTER`].
+fn none_completed(sessions: &[generated::ConnectSessionV1]) -> bool {
+    sessions
         .iter()
         .all(|session| !session.last_error.is_empty())
-    {
-        RETRY_AFTER
-    } else {
-        MIN_CYCLE.saturating_sub(elapsed)
-    }
 }
 
 async fn listen() {
@@ -431,20 +424,23 @@ async fn listen() {
     log::info!("[connect] listener stopped: no application is connected");
 }
 
-/// Run `cycle` over and over, each one paced ([`pause_after`]), until one
-/// answers that no application is connected.
+/// Run `cycle` over and over until one answers that no application is
+/// connected. Each cycle runs beside a [`MIN_CYCLE`] pause and the next
+/// starts once both have ended, so no two cycles start closer together; a
+/// cycle in which no session's sync completed waits [`RETRY_AFTER`] more.
 async fn listen_with<F, C>(cycle: F)
 where
     F: Fn() -> C,
     C: core::future::Future<Output = Cycle>,
 {
     loop {
-        let started = tokio::time::Instant::now();
-        match cycle().await {
+        let (answered, ()) = tokio::join!(cycle(), tokio::time::sleep(MIN_CYCLE));
+        match answered {
             Cycle::Sessions(sessions) if sessions.is_empty() => break,
-            Cycle::Sessions(sessions) => {
-                tokio::time::sleep(pause_after(started.elapsed(), &sessions)).await;
+            Cycle::Sessions(sessions) if none_completed(&sessions) => {
+                tokio::time::sleep(RETRY_AFTER).await;
             }
+            Cycle::Sessions(_) => {}
             Cycle::NotRun(why) => {
                 log::warn!("[connect] a sync cycle did not run: {why}");
                 tokio::time::sleep(RETRY_AFTER).await;
@@ -517,11 +513,10 @@ mod tests {
     /// SA-82. The listener never starts cycles faster than one a
     /// `MIN_CYCLE`: cycles that answer at once — a request held for the
     /// player asks the relay nothing — are paced, not run back to back, and
-    /// cycles in which every session failed wait `RETRY_AFTER`. Two and a
-    /// half seconds of cycles that each answer at once run three, where
+    /// cycles in which every session failed wait `RETRY_AFTER` more. Two and
+    /// a half intervals of cycles that each answer at once run three, where
     /// unpaced they ran without end.
-    /// MUTATION CONTROL: dropping the pause after a cycle that answered turns
-    /// this red.
+    /// MUTATION CONTROL: dropping the pause beside each cycle turns this red.
     #[tokio::test]
     async fn the_listener_never_cycles_faster_than_its_minimum_interval() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -530,17 +525,9 @@ mod tests {
             last_error: "the relay did not answer".into(),
             ..Default::default()
         };
-        let one = std::slice::from_ref(&healthy);
-        assert_eq!(pause_after(Duration::ZERO, one), MIN_CYCLE);
-        assert_eq!(pause_after(MIN_CYCLE * 2, one), Duration::ZERO);
-        assert_eq!(
-            pause_after(Duration::ZERO, std::slice::from_ref(&failing)),
-            RETRY_AFTER
-        );
-        assert_eq!(
-            pause_after(Duration::ZERO, &[failing, healthy.clone()]),
-            MIN_CYCLE
-        );
+        assert!(none_completed(std::slice::from_ref(&failing)));
+        assert!(!none_completed(std::slice::from_ref(&healthy)));
+        assert!(!none_completed(&[failing, healthy.clone()]));
 
         let cycles = std::sync::Arc::new(AtomicUsize::new(0));
         let counted = cycles.clone();
