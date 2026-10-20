@@ -465,12 +465,14 @@ pub enum ProvenanceError {
     /// genesis release: not fetched, or the bytes did not re-hash to the
     /// commit. The taxonomy survives, so an outage is retried.
     GenesisReleasePolicy(PeerLineageFailure),
-    /// A DLV successor's leg fails the applicable token policy — the SoFi
-    /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
-    /// every release. The anchored bytes did not re-hash to the committed
-    /// leg, did not parse, or the parsed policy refuses the asset as a
-    /// market leg.
-    MarketLegPolicy(String),
+    /// A Transfer moves a token whose committed policy does not let it
+    /// transfer: SoFi §49 checks `transferable` "on every transfer, online
+    /// and offline", so a foreign verifier refuses it as the endpoints do.
+    AssetNotTransferable,
+    /// The committed policy of a transferred token could not be established:
+    /// not fetched, or the bytes did not re-hash to the commit. The taxonomy
+    /// survives, so an outage is retried.
+    TransferPolicy(PeerLineageFailure),
     /// A `0x0075` credit on an admission whose substrate is not an offline
     /// unload: there is no offline debit to fund it.
     NotAnOfflineUnload,
@@ -565,6 +567,43 @@ pub enum ProvenanceError {
     RegisterNotEstablished(PeerLineageFailure),
 }
 
+/// The transfer conjunct of SoFi §49: a Transfer moves the token
+/// `policy_commit` names only when that token's committed policy transfers.
+/// The policy is read as every conjunct here reads one: ERA's from Core's
+/// own bytes (Amendment S11), any other from the bytes the resolver anchors,
+/// which must re-hash to the commit.
+pub fn check_transfer_policy(
+    policy_commit: &[u8; 32],
+    resolver: &dyn ProvenanceResolver,
+) -> Result<(), ProvenanceError> {
+    let bytes = if *policy_commit == crate::core::token::era_policy::era_policy_commit() {
+        crate::core::token::era_policy::era_policy_bytes().to_vec()
+    } else {
+        resolver
+            .anchored_policy_bytes(policy_commit)
+            .map_err(ProvenanceError::TransferPolicy)?
+    };
+    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != *policy_commit
+    {
+        return Err(ProvenanceError::TransferPolicy(
+            PeerLineageFailure::Incomplete(
+                "policy bytes do not re-hash to the transferred token's policy commit".into(),
+            ),
+        ));
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(&bytes).map_err(|e| {
+        ProvenanceError::TransferPolicy(PeerLineageFailure::Invalid(format!(
+            "the transferred token's committed policy does not parse: {e}"
+        )))
+    })?;
+    if policy.transferable {
+        Ok(())
+    } else {
+        Err(ProvenanceError::AssetNotTransferable)
+    }
+}
+
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -574,9 +613,11 @@ impl core::fmt::Display for ProvenanceError {
             Self::GenesisReleasePolicy(e) => {
                 write!(f, "genesis-release token policy: {e}")
             }
-            Self::MarketLegPolicy(m) => {
-                write!(f, "market leg token policy: {m}")
-            }
+            Self::AssetNotTransferable => write!(
+                f,
+                "the transferred token's committed policy does not let it transfer"
+            ),
+            Self::TransferPolicy(e) => write!(f, "transferred token policy: {e}"),
             Self::NotAnOfflineUnload => write!(
                 f,
                 "an offline-boundary debit funds a credit only on an offline unload's admission"

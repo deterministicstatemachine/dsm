@@ -58,8 +58,6 @@ pub fn running_hash_next(previous: &[u8; 32], digest: &[u8; 32]) -> [u8; 32] {
 
 /// The `(i, h_i)` of every value at `(N, K)`, in arrival order, starting at 1.
 pub fn replay(namespace: &[u8], key: &[u8; 32], values: &[Vec<u8>]) -> Vec<(u64, [u8; 32])> {
-    #[cfg(test)]
-    REPLAYED.with(|replayed| replayed.set(replayed.get() + values.len()));
     let mut h = running_hash_init(namespace, key);
     let mut out = Vec::with_capacity(values.len());
     for (n, v) in values.iter().enumerate() {
@@ -317,18 +315,38 @@ impl CellCommitProof {
     }
 }
 
+/// The running hash after a cell's `index`-th entry at one member, where a
+/// reader holds it: what the values it read from that member replay to. A
+/// reader that did not keep the hash at an index has `None` there, which
+/// proves nothing about the member.
+pub trait RunningHashes {
+    fn running_hash_at(&self, index: u64) -> Option<[u8; 32]>;
+}
+
+/// [`replay`] of every value read from a member, from its first.
+impl RunningHashes for Vec<(u64, [u8; 32])> {
+    fn running_hash_at(&self, index: u64) -> Option<[u8; 32]> {
+        // Index 0 names no entry: refused, never an underflow.
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| i.checked_sub(1))
+            .and_then(|i| self.get(i))
+            .map(|(_, h)| *h)
+    }
+}
+
 /// Whether an arrival record is committed by a member's ByteCommit: the
 /// ByteCommit is that member's, its proof verifies for the record's cell, the
 /// committed entry is at or after the record's, and the values read from the
 /// member replay to both running hashes. Agreement with the reads alone is
 /// not enough; the commitment is what makes a link checkable (§6, §14).
 ///
-/// `replayed` is [`replay`] of the values read from the member at the
-/// record's `(N, K)`, from its first: every record of one member is checked
+/// `read` holds the running hashes the values read from the member at the
+/// record's `(N, K)` replay to: every record of one member is checked
 /// against one replay of its values, never a replay per record (SA-137).
 pub fn record_is_committed(
     record: &ArrivalRecord,
-    replayed: &[(u64, [u8; 32])],
+    read: &impl RunningHashes,
     commit: &ByteCommit,
     proof: &CellCommitProof,
 ) -> bool {
@@ -338,22 +356,8 @@ pub fn record_is_committed(
     {
         return false;
     }
-    // Index 0 names no entry: refused, never an underflow.
-    let at = |i: u64| {
-        usize::try_from(i)
-            .ok()
-            .and_then(|i| i.checked_sub(1))
-            .and_then(|i| replayed.get(i))
-            .map(|(_, h)| *h)
-    };
-    at(record.index) == Some(record.running_hash) && at(proof.index) == Some(proof.running_hash)
-}
-
-#[cfg(test)]
-thread_local! {
-    /// How many values this thread's [`replay`]s have folded: what a test
-    /// reads to show a verifier replays each log once (SA-137).
-    pub(crate) static REPLAYED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    read.running_hash_at(record.index) == Some(record.running_hash)
+        && read.running_hash_at(proof.index) == Some(proof.running_hash)
 }
 
 #[cfg(test)]

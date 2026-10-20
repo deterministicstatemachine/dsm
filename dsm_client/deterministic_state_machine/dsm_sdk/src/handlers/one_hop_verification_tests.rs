@@ -458,11 +458,15 @@ async fn a_faucet_claim_reads_the_cell_it_won_once() {
     assert_eq!(d.era_balance(), crate::economic_fixtures::whole_era(100));
 }
 
-/// An admission publishes its own evidence, whatever older debt the device
-/// holds. Eight unrelated frozen objects, older than the claim, fill the
-/// sweep's batch; the claim's own evidence is published by its manifest's
-/// key before the sweep, so the claim is admitted in the same pass, and the
-/// older objects are still published by the sweep.
+/// SA-134. An admission publishes its own evidence and waits on nothing
+/// else the device owes the set. Eight unrelated frozen objects older than
+/// the claim fill the sweep's batch, and one more is frozen for a storage set
+/// no catalog names, so nothing can ever publish it; the claim's own evidence
+/// is published by its manifest's key and the claim is admitted in the same
+/// pass, beside the object no set takes.
+/// MUTATION CONTROL: holding the admission until the device's whole table is
+/// `Stored`, as the finish did, leaves the claim held by the object no set
+/// takes and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_admission_publishes_its_own_evidence_behind_an_older_backlog() {
@@ -485,19 +489,36 @@ async fn an_admission_publishes_its_own_evidence_behind_an_older_backlog() {
             key
         })
         .collect();
+    let stuck = {
+        let payload = b"an object owed to a set no catalog names".to_vec();
+        let key = crate::sdk::economic_registers::immutable_object_key(namespace, &payload);
+        let binding = client_db::get_connection().expect("the store");
+        let conn = match binding.lock() {
+            Ok(conn) => conn,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        fpa::freeze_artifact_with_conn(&conn, &[0xEE; 32], &key, &payload, &[0x0E; 32], "stuck")
+            .expect("frozen");
+        key
+    };
 
     let claimed = crate::sdk::faucet_claim_flow::claim_era_faucet(d.core(), NETWORK)
         .await
         .expect("the claim is admitted in the pass that publishes its evidence");
     assert_eq!(claimed.economic_position, 1);
-    for key in &older {
-        let row = fpa::get_artifact(key).expect("the store").expect("the row");
-        assert_eq!(
-            row.state,
-            fpa::ArtifactState::Stored,
-            "{key} is published too"
-        );
-    }
+    assert_eq!(
+        u32::try_from(older.len()).expect("a batch of rows"),
+        batch,
+        "the older objects fill the sweep's batch"
+    );
+    let row = fpa::get_artifact(&stuck)
+        .expect("the store")
+        .expect("the row");
+    assert_ne!(
+        row.state,
+        fpa::ArtifactState::Stored,
+        "no set takes the object, and the claim was admitted beside it"
+    );
 }
 
 /// A holdings status checks the holder's root at the proven position one hop

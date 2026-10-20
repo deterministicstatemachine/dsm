@@ -338,6 +338,23 @@ impl VerdictCell {
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
     }
+
+    /// What a reader keeps of a seat's log at this cell: the copies of
+    /// verdicts whose `Y` and table derive its key. Those its reading counts
+    /// are among them, and so is every verdict for this cell it passes over
+    /// and says why (`VerdictCellRead::passed_over`); bytes that are no
+    /// verdict for this cell are no object naming its key, and never count
+    /// (storage spec §9, route chains, rule 3).
+    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            EscrowVerdict::decode(bytes).is_ok_and(|verdict| {
+                verdict_cell_key(
+                    verdict.external_commitment(),
+                    &table_digest(verdict.table()),
+                ) == self.key
+            })
+        })
+    }
 }
 
 /// Where a Release stands at its verdict cell (SoFi §19.9, "The facts").

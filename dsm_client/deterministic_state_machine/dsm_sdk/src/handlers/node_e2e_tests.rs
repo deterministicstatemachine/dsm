@@ -2327,7 +2327,7 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
     let held_at = |cell: &dsm::route_chain::RoutedCell| {
         let (namespace, key) = (cell.namespace().to_vec(), *cell.key());
         let client = &client;
-        async move { client.get_cell(&namespace, &key).await }
+        async move { client.held_at(&namespace, &key).await }
     };
     let ful_before = held_at(pair.fulfillment()).await;
     let root_before = held_at(pair.root().routed()).await;
@@ -4694,8 +4694,9 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     fn cell(
         &self,
         cell: &dsm::route_chain::RoutedCell,
+        keep: &(dyn Fn(&dsm::route_chain::RouteEntry) -> bool + Sync),
     ) -> Result<dsm::route_chain::CellEvidence, dsm::sofi::resolve::ReadFailure> {
-        self.live.cell(cell)
+        self.live.cell(cell, keep)
     }
     fn precommit(
         &self,

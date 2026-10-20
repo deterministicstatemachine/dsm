@@ -99,7 +99,7 @@ pub(crate) async fn next_root_cell(
     let cell = root_cell(set, network_id, genesis, devid, next, root)?;
     let seats = NodeSeats::new(set)?;
     // A claim final at the cell holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         root_claim_final(&cell, evidence)
     })
     .await;
@@ -146,7 +146,7 @@ pub async fn root_claim_settlement(
 ) -> Result<RootClaimSettlement, DsmError> {
     let seats = NodeSeats::new(set)?;
     // A claim final at the cell holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         root_claim_final(cell, evidence)
     })
     .await;
@@ -308,7 +308,7 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
-    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
         tokio::task::block_in_place(|| {
             self.runtime
                 .block_on(register_key_values(self.set, genesis, device_id, position))
@@ -326,8 +326,10 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
             return Ok(kept);
         }
         let seats = NodeSeats::new(self.set).map_err(|e| incomplete("register seats", e))?;
-        let evidence =
-            tokio::task::block_in_place(|| self.runtime.block_on(read_cell(&seats, cell.routed())));
+        let evidence = tokio::task::block_in_place(|| {
+            self.runtime
+                .block_on(read_cell(&seats, cell.routed(), &cell.keeps()))
+        });
         if matches!(
             read_root_cell(cell, &evidence),
             Ok(CellReading::Held {
@@ -378,17 +380,18 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for LiveRegisterResolver<'
     }
 }
 
-/// Every value any member of `set` holds under `K_root(position)` of
-/// `(genesis, devid)` (DSM Amendment A14): the candidates Core checks, each at
-/// the cell routed from the parent it names. Every member is asked at once.
-/// Discovery, never authority, so nothing read here is kept. `Incomplete`
-/// when no member answered.
+/// What each member of `set` holds under `K_root(position)` of `(genesis,
+/// devid)` (DSM Amendment A14), in set order, `None` where a member did not
+/// answer: the candidates Core checks, each at the cell routed from the
+/// parent it names, and whether enough members answered is Core's to judge.
+/// Every member is asked at once. Discovery, never authority, so nothing
+/// read here is kept.
 pub(crate) async fn register_key_values(
     set: &StorageSet,
     genesis: &[u8; 32],
     devid: &[u8; 32],
     position: u64,
-) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
     use crate::sdk::route_seats::RouteSeats;
     let seats = NodeSeats::new(set).map_err(|e| incomplete("register seats", e))?;
     let key = dsm::economic::register::economic_root_register_key(genesis, devid, position);
@@ -396,19 +399,20 @@ pub(crate) async fn register_key_values(
     asked_cells::note(&key);
     let namespace = dsm::economic::register::economic_root_namespace();
     let members = seats.members();
-    let answers = futures::future::join_all(
-        members
-            .iter()
-            .map(|member| seats.read_values(member, namespace, &key)),
-    )
+    // Only a route entry at this key carrying a claim naming it is a
+    // candidate (`PeerLineageVerifier::probed`); nothing else is kept.
+    let candidate = |bytes: &[u8]| {
+        dsm::route_chain::RouteEntry::decode(bytes).is_some_and(|entry| {
+            entry.namespace == namespace
+                && entry.key == key
+                && dsm::economic::register::root_claim_naming(&entry.value, &key).is_some()
+        })
+    };
+    let answers = futures::future::join_all(members.iter().map(|member| {
+        crate::sdk::route_seats::kept_values(&seats, member, namespace, &key, &candidate)
+    }))
     .await;
-    if answers.iter().all(Option::is_none) {
-        return Err(PeerLineageFailure::Incomplete(format!(
-            "no member answered for {}'s register key at position {position}",
-            text_id::encode_base32_crockford(devid)
-        )));
-    }
-    Ok(answers.into_iter().flatten().flatten().collect())
+    Ok(answers)
 }
 
 /// What one check of a peer's step cost, logged where it ran (DSM Amendment
@@ -573,7 +577,7 @@ impl dsm::economic::peer_lineage::PeerEvidenceFetcher for RecordingResolver<'_> 
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
-    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
         dsm::economic::peer_lineage::PeerEvidenceFetcher::register_key_values(
             self.inner, genesis, device_id, position,
         )

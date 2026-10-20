@@ -1083,13 +1083,20 @@ pub fn advance_validated(
         verified_operation: accepted.dsm_verified_operation(),
         offline_boundary: accepted.offline_boundary(),
     };
-    // THE MARKET-LEG TOKEN-POLICY CONJUNCT: a DLV successor's legs must
-    // satisfy the applicable token policy (SoFi Def 4.1 / Req 4.4 / Req 4.6).
-    // Central, on the VERIFIED operation, so fund and close are bound even
-    // though their SameTransitionMove credits carry no evidence channel.
-    // Non-DLV operations pass vacuously.
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
+
+    // THE TRANSFER CONJUNCT: a Transfer moves a token only when its committed
+    // policy transfers (SoFi §49, "on every transfer, online and offline").
+    // Checked here, on the verified operation, so every verifier of the
+    // step — not only the two endpoints — refuses a non-transferable token
+    // moved by a sender that skips its own check (SA-136).
+    if let Some(crate::types::operations::Operation::Transfer { policy_commit, .. }) =
+        accepted.dsm_verified_operation()
+    {
+        crate::economic::provenance::check_transfer_policy(policy_commit, resolver)
+            .map_err(EconomicValidationError::Provenance)?;
+    }
 
     // A SoFi operation cannot reach here — `verify_operation_write_set`
     // refuses it by name above — and if it ever did, "no DLV transition"

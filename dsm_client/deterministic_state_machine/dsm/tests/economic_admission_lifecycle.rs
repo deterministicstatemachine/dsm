@@ -403,6 +403,168 @@ impl ProvenanceResolver for OneTicket {
     }
 }
 
+// ── The transfer conjunct (SoFi §49) ────────────────────────────────────────
+
+/// A created token's policy, as the wallet packs it and the network anchors
+/// it: the `TokenPolicyV3` proto around the blob, with the movement flags
+/// `flags`.
+fn created_policy(flags: u8) -> Vec<u8> {
+    use dsm::economic::token_policy::{
+        ReleaseRule, ALLOWLIST_KIND_NONE, SUPPLY_CLASS_NATIVE, TOKEN_KIND_FUNGIBLE,
+        TOKEN_POLICY_VERSION,
+    };
+    let mut blob = vec![
+        TOKEN_POLICY_VERSION,
+        TOKEN_KIND_FUNGIBLE,
+        SUPPLY_CLASS_NATIVE,
+        flags,
+        ReleaseRule::AllAtCreation.code(),
+    ];
+    blob.extend_from_slice(&G);
+    blob.extend_from_slice(dev());
+    blob.push(1);
+    blob.push(1);
+    blob.extend_from_slice(&3u16.to_be_bytes());
+    blob.extend_from_slice(b"key");
+    blob.push(4);
+    blob.extend_from_slice(b"NOTX");
+    blob.extend_from_slice(&4u16.to_be_bytes());
+    blob.extend_from_slice(b"Notx");
+    blob.push(2);
+    blob.extend_from_slice(&100_000u128.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.push(ALLOWLIST_KIND_NONE);
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    prost::Message::encode_to_vec(&dsm::types::proto::TokenPolicyV3 { policy_bytes: blob })
+}
+
+fn commit_of(policy: &[u8]) -> [u8; 32] {
+    dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, policy)
+}
+
+/// [`OneTicket`] that roots exactly one token policy: `served` under
+/// `commit`, whatever bytes those are.
+struct RootsOnePolicy {
+    commit: [u8; 32],
+    served: Vec<u8>,
+    rest: OneTicket,
+}
+impl ProvenanceResolver for RootsOnePolicy {
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        self.rest.root_register_candidate_set(network_id)
+    }
+    fn validated_peer_transition(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        self.rest
+            .validated_peer_transition(genesis, device_id, position)
+    }
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.rest.native_reserve_release(reserve_id, generation)
+    }
+    fn immutable_evidence(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.rest.immutable_evidence(namespace, addr)
+    }
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.rest.held_ek_step(signer, addr)
+    }
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        if *policy_commit == self.commit {
+            Ok(self.served.clone())
+        } else {
+            self.rest.anchored_policy_bytes(policy_commit)
+        }
+    }
+}
+
+/// SA-136, SoFi §49: `transferable` is checked "on every transfer, online
+/// and offline", so Core's transfer rule — the one every verifier of a step
+/// runs, not only the two endpoints' wallets — refuses a Transfer of a token
+/// whose committed policy does not transfer. A transferable token passes;
+/// ERA's policy is Core's own and asks no resolver. A policy that could not
+/// be established — not rooted, or bytes that are not the committed policy
+/// — keeps the class it was established in: not a verdict on the token.
+/// MUTATION CONTROL: dropping the `transferable` test from
+/// `check_transfer_policy` turns the first assertion red.
+#[test]
+fn a_transfer_of_a_token_whose_policy_does_not_transfer_is_refused_by_core() {
+    use dsm::economic::provenance::{check_transfer_policy, ProvenanceError};
+    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    let roots = |policy: Vec<u8>| RootsOnePolicy {
+        commit: commit_of(&policy),
+        served: policy,
+        rest: OneTicket {
+            envelope: Vec::new(),
+        },
+    };
+    let held = created_policy(POLICY_FLAG_BURN);
+    let resolver = roots(held.clone());
+    assert!(
+        matches!(
+            check_transfer_policy(&commit_of(&held), &resolver),
+            Err(ProvenanceError::AssetNotTransferable)
+        ),
+        "a non-transferable token's transfer is refused"
+    );
+    let moves = created_policy(POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
+    let resolver = roots(moves.clone());
+    check_transfer_policy(&commit_of(&moves), &resolver).expect("a transferable token moves");
+    check_transfer_policy(
+        &dsm::core::token::token_state_manager::era_policy_commit(),
+        &resolver,
+    )
+    .expect("ERA's own policy transfers");
+
+    let unrooted = roots(moves.clone());
+    assert!(
+        matches!(
+            check_transfer_policy(&commit_of(&held), &unrooted),
+            Err(ProvenanceError::TransferPolicy(
+                PeerLineageFailure::Incomplete(_)
+            ))
+        ),
+        "a policy not rooted is not established, never refused"
+    );
+    let lying = RootsOnePolicy {
+        commit: commit_of(&held),
+        served: moves,
+        rest: OneTicket {
+            envelope: Vec::new(),
+        },
+    };
+    assert!(
+        matches!(
+            check_transfer_policy(&commit_of(&held), &lying),
+            Err(ProvenanceError::TransferPolicy(
+                PeerLineageFailure::Incomplete(_)
+            ))
+        ),
+        "bytes that are not the committed policy prove nothing about the token"
+    );
+}
+
 /// [`OneTicket`] whose catalog could not be read: the network's register
 /// set is not established.
 struct NoRegisterSet(OneTicket);

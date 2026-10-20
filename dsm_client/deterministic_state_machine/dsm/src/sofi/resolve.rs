@@ -232,8 +232,14 @@ pub struct RecordedGenerationRow {
 pub trait SofiReads {
     /// Every seat's reads of `cell` (storage spec §9): what each seat holds,
     /// its committed state from a mirror, and each later seat's own mirror
-    /// of the leader. The verifier evaluates the route chains.
-    fn cell(&self, cell: &RoutedCell) -> Result<CellEvidence, ReadFailure>;
+    /// of the leader. Each seat's log is read keeping what `keep` keeps,
+    /// the copies the verifier's reading of the cell can count. The verifier
+    /// evaluates the route chains.
+    fn cell(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&crate::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<CellEvidence, ReadFailure>;
     /// `P` by `PrecommitId`: the one stored envelope under the id whose body
     /// re-derives it (R8).
     fn precommit(&self, id: &D32) -> Result<Resolved<Signed<TraderPrecommitBody>>, ReadFailure>;
@@ -906,7 +912,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         verdict_cell: &D32,
     ) -> Result<Result<VerdictCellRead, CellMissing>, VerifierFailure> {
         let cell = self.verdict_cell(verdict_cell)?;
-        let evidence = self.reads.cell(cell.routed())?;
+        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match verdict_resolution(&cell, &evidence) {
             Ok(read) => read,
             Err(missing) => return Ok(Err(missing)),
@@ -943,7 +949,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     ) -> Result<Result<ComputedCellRead, NotEstablished>, VerifierFailure> {
         let cells = ComputedCells::new(terms, self.members, &self.set_id)
             .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))?;
-        let start_evidence = self.reads.cell(cells.start_routed())?;
+        let start_evidence = self
+            .reads
+            .cell(cells.start_routed(), &cells.keeps_start())?;
         let start = match start_resolution(&cells, &start_evidence) {
             Ok(read) => read,
             Err(missing) => {
@@ -976,7 +984,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             (Some(super::wire::StartKind::Start), CellFact::Held { .. })
         );
         let matched = if started {
-            let evidence = self.reads.cell(cells.match_routed())?;
+            let evidence = self
+                .reads
+                .cell(cells.match_routed(), &cells.keeps_match(&self.programs))?;
             let read = match match_resolution(&cells, &evidence, &self.programs) {
                 Ok(read) => read,
                 Err(MatchUnread::ProgramNotRegistered { program }) => {
@@ -1071,7 +1081,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         attempt: u64,
     ) -> Result<Result<AttemptCellRead, CellMissing>, VerifierFailure> {
         let cell = self.attempt_cell(vault_id, parent_root, attempt)?;
-        let evidence = self.reads.cell(cell.routed())?;
+        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match attempt_resolution(&cell, &evidence) {
             Ok(read) => read,
             Err(missing) => return Ok(Err(missing)),
@@ -1115,8 +1125,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         parent_root: &D32,
     ) -> Result<Result<RegistrationRead, CellMissing>, VerifierFailure> {
         let cells = self.position_cells(genesis, device_id, position, parent_root)?;
-        let ful_evidence = self.reads.cell(cells.fulfillment())?;
-        let root_evidence = self.reads.cell(cells.root().routed())?;
+        let ful_evidence = self
+            .reads
+            .cell(cells.fulfillment(), &cells.keeps_fulfillment())?;
+        let root_evidence = self
+            .reads
+            .cell(cells.root().routed(), &cells.root().keeps())?;
         let registration = match fulfillment_registered(&cells, &ful_evidence, &root_evidence) {
             Ok(registration) => registration,
             Err(missing) => return Ok(Err(missing)),
@@ -1216,7 +1230,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             }
         };
         let cells = self.position_cells(genesis, device_id, position, &routing)?;
-        let evidence = self.reads.cell(cells.root().routed())?;
+        let evidence = self
+            .reads
+            .cell(cells.root().routed(), &cells.root().keeps())?;
         Ok(
             match crate::economic::register::read_root_cell(cells.root(), &evidence) {
                 Ok(crate::route_chain::CellReading::Held {

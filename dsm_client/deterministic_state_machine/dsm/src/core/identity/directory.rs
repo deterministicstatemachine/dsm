@@ -226,6 +226,14 @@ impl DirectoryEntry {
     }
 }
 
+/// Whether `bytes` are a directory entry naming `genesis` and `device_id`: a
+/// candidate [`select_entry`] ranks. Whether it proves itself is decided
+/// there, best first, never here.
+pub fn names_directory_entry(genesis: &[u8; 32], device_id: &[u8; 32], bytes: &[u8]) -> bool {
+    DirectoryEntry::decode(bytes)
+        .is_ok_and(|entry| &entry.body.genesis == genesis && &entry.body.device_id == device_id)
+}
+
 /// From everything read at a device's cell, across every member, the entry to
 /// use: one that names this genesis and device and proves itself, with the
 /// highest counter. Ties (only the device itself could sign two) go to the

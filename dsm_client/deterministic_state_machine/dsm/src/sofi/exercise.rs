@@ -369,6 +369,15 @@ impl AttemptCell {
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
     }
+
+    /// What a reader keeps of a seat's log at this cell: the copies of
+    /// exercises naming its key, the only ones its reading can count
+    /// ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            exercise_at(self)(bytes).is_some()
+        })
+    }
 }
 
 /// What the ladder reads at one attempt key (Section 23.1), bound to the key

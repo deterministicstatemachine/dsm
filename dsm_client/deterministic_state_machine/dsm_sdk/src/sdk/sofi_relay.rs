@@ -100,9 +100,12 @@ async fn carry_pair(
     let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
     let seats = NodeSeats::new(set)?;
     // A claim final at K_root holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
-        root_claim_final(cells.root(), evidence)
-    })
+    let evidence = read_cell_kept(
+        &seats,
+        cells.root().routed(),
+        &cells.root().keeps(),
+        |evidence| root_claim_final(cells.root(), evidence),
+    )
     .await;
     let claim = match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
@@ -179,7 +182,7 @@ async fn held_exercise(
 ) -> Result<Option<(RecognizedExercise, Vec<u8>)>, DsmError> {
     let seats = NodeSeats::new(set)?;
     for (.., cell) in cells {
-        let evidence = read_cell(&seats, cell.routed()).await;
+        let evidence = read_cell(&seats, cell.routed(), &cell.keeps()).await;
         let read = match attempt_resolution(cell, &evidence) {
             Ok(read) => read,
             Err(undecided) => {
@@ -285,7 +288,7 @@ pub async fn carry_held_exercise(
 ) -> Result<Vec<LegWrite>, DsmError> {
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
-    let evidence = read_cell(&seats, cell.routed()).await;
+    let evidence = read_cell(&seats, cell.routed(), &cell.keeps()).await;
     let read = attempt_resolution(&cell, &evidence)
         .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
     let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
@@ -316,7 +319,7 @@ pub async fn relay_exercise(
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
     // An exercise final at the key holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         attempt_resolution(&cell, evidence).is_ok_and(|read| {
             matches!(
                 read.fact(),

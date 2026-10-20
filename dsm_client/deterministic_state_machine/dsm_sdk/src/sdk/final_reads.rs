@@ -141,7 +141,13 @@ pub(crate) fn keep_final_cell(cell: &RoutedCell, evidence: &CellEvidence) {
     let size = evidence
         .seats
         .iter()
-        .map(|seat| SEAT_PROOF_BYTES + seat.values.iter().flatten().map(Vec::len).sum::<usize>())
+        .map(|seat| {
+            SEAT_PROOF_BYTES
+                + seat
+                    .values
+                    .as_ref()
+                    .map_or(0, dsm::route_chain::HeldLog::kept_bytes)
+        })
         .sum();
     lock(&FINAL_CELLS).keep(cell_key(cell), evidence.clone(), size, CELL_BUDGET);
 }

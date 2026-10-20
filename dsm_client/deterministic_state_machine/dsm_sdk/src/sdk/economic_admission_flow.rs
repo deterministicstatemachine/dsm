@@ -1043,11 +1043,13 @@ async fn finish_locked(
     // The evidence the claim names, put to the set and read back `Stored`
     // (storage spec §5 rule 6) before the claim is registered: a root whose
     // evidence nobody holds would be registered but unwalkable. The sweep
-    // carries the EXACT frozen bytes. Anything not yet `Stored` holds the
-    // admission for resume; the next pass re-runs the sweep. This
-    // admission's own evidence, frozen with its manifest, goes first and by
-    // key: the sweep takes the oldest rows, and a backlog older than the
-    // admission would otherwise leave its own evidence for a later pass.
+    // carries the EXACT frozen bytes. Anything of this admission's own not
+    // yet `Stored` holds the admission for resume; the next pass publishes
+    // it again. Only this admission's evidence — frozen with its manifest,
+    // bound to its root, for its set — holds it: an object the device owes
+    // the set for anything else is the sweep's (`storage.sync`), and holding
+    // every admission on the device's whole table let one object that can
+    // never be published stop them all (SA-134).
     let manifest_key = crate::sdk::economic_registers::immutable_object_key_for_inner(
         dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
         &coords.admission_manifest_addr,
@@ -1055,12 +1057,11 @@ async fn finish_locked(
     crate::handlers::artifact_republish::republish_frozen_with(&manifest_key)
         .await
         .map_err(|e| storage_err("publish admission evidence", e))?;
-    crate::handlers::artifact_republish::republish_unpublished_artifacts()
-        .await
-        .map_err(|e| storage_err("publish admission evidence", e))?;
     let unpublished =
-        crate::storage::client_db::frozen_publication_artifact::list_unpublished_artifacts(1)
-            .map_err(|e| storage_err("check evidence", e))?;
+        crate::storage::client_db::frozen_publication_artifact::list_unpublished_frozen_with(
+            &manifest_key,
+        )
+        .map_err(|e| storage_err("check evidence", e))?;
     if let Some(row) = unpublished.first() {
         return Err(storage_err(
             "publish admission evidence",

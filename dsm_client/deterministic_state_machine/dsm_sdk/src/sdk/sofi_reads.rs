@@ -235,7 +235,7 @@ impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
         genesis: &D32,
         device_id: &D32,
         position: u64,
-    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+    ) -> Result<dsm::economic::peer_lineage::MemberAnswers, PeerLineageFailure> {
         self.live.register_key_values(genesis, device_id, position)
     }
 
@@ -397,7 +397,11 @@ fn recognize_genesis(bytes: &[u8]) -> Option<(VaultGenesisPreimage, Vec<u8>)> {
 }
 
 impl SofiReads for LiveSofiReads<'_> {
-    fn cell(&self, cell: &RoutedCell) -> Result<CellEvidence, ReadFailure> {
+    fn cell(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&dsm::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<CellEvidence, ReadFailure> {
         // The reads Core evaluated as final here are kept with the
         // completion proof ([`Self::keep_completion`]); anything else is
         // read again.
@@ -416,7 +420,7 @@ impl SofiReads for LiveSofiReads<'_> {
             return Ok(kept);
         }
         let seats = NodeSeats::new(self.set).map_err(|e| ReadFailure(format!("seats: {e}")))?;
-        Ok(self.block(read_cell(&seats, cell)))
+        Ok(self.block(read_cell(&seats, cell, keep)))
     }
 
     fn precommit(&self, id: &D32) -> Result<Resolved<Signed<TraderPrecommitBody>>, ReadFailure> {

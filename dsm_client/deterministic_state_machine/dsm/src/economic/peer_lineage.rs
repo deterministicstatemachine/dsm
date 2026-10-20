@@ -73,19 +73,24 @@ use crate::utils::text_id::encode_base32_crockford;
 /// immutable objects by address. The fetcher supplies bytes, never a verdict:
 /// the verifier evaluates every cell's route chains itself and re-checks every
 /// address.
+/// What each member of a register answered at one key, in set order: the
+/// values it holds there, or `None` where it did not answer.
+pub type MemberAnswers = Vec<Option<Vec<Vec<u8>>>>;
+
 pub trait PeerEvidenceFetcher {
-    /// Every value any member of the register holds under `K_root(position)`
-    /// of `(genesis, device_id)`, as the member stores it (a route entry),
-    /// read at every member without a route. It is
-    /// where to look, never what is final: each claim found there is checked
-    /// at the cell routed from the parent it names (DSM Amendment A14).
-    /// `Incomplete` when no member answered.
+    /// What each member of the register holds under `K_root(position)` of
+    /// `(genesis, device_id)`, as the member stores it (route entries), read
+    /// at every member without a route: `None` for a member that did not
+    /// answer. It is where to look, never what is final: each claim found
+    /// there is checked at the cell routed from the parent it names (DSM
+    /// Amendment A14), and the verifier decides whether enough members
+    /// answered to have seen every claim that can be final.
     fn register_key_values(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
-    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure>;
+    ) -> Result<MemberAnswers, PeerLineageFailure>;
     /// Every seat's reads of `cell` (storage spec §9): the values each seat
     /// holds, its committed state from a mirror, and each later seat's own
     /// mirror of the leader. The verifier evaluates them.
@@ -349,13 +354,14 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
     match e {
         EconomicValidationError::Provenance(p) => match p {
             P::GenesisReleasePolicy(failure)
+            | P::TransferPolicy(failure)
             | P::PeerTransitionNotValidated { failure, .. }
             | P::AcceptanceEvidence(failure)
             | P::OwnerLineage(failure)
             | P::RegisterNotEstablished(failure)
             | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
             P::GenesisReleaseInvalid(..)
-            | P::MarketLegPolicy(..)
+            | P::AssetNotTransferable
             | P::PeerDebitIsNotAnOnlineTransfer
             | P::NotAnOfflineUnload
             | P::PeerDebitNotAddressedToConsumer
@@ -473,6 +479,26 @@ enum ConditionalAt {
     Invalid,
 }
 
+/// Which kind of claim a candidate is.
+#[derive(Clone, Copy)]
+enum ClaimShape {
+    SingleRoot,
+    Conditional,
+}
+
+/// What a root cell routed from one parent reads (storage spec §9).
+enum AtRoute {
+    /// This claim is final there, and no other ever will be.
+    Final(RegisteredEconomicClaim),
+    /// This claim holds the leader link, short of Final: any party may carry
+    /// its chain on (§9 route chains, rule 8), so it can become final.
+    Held(RegisteredEconomicClaim),
+    /// No claim holds the cell.
+    Open,
+    /// The reads in hand do not decide the cell.
+    Undecided(String),
+}
+
 /// A claim of a peer final at its position, and the parent it was found
 /// final from.
 struct Located {
@@ -530,19 +556,19 @@ impl Verifier<'_> {
         add(&mut cost);
         self.cost.set(cost);
     }
-    /// The claim final at `position`'s root cell, routed from the root
-    /// authenticated at the position before. Only a claim naming
-    /// `K_root(position)` is recognized there, and the key is a hash of
-    /// `(G, DevID, position)`, so the claim that holds the cell is this
-    /// peer's at this position; any other bytes count as nothing, however
-    /// early they arrived.
-    fn final_claim(
+    /// What the root cell at `position` routed from `previous` reads: the
+    /// cell routed from the root authenticated at the position before. Only
+    /// a claim naming `K_root(position)` is recognized there, and the key is
+    /// a hash of `(G, DevID, position)`, so the claim that holds the cell is
+    /// this peer's at this position; any other bytes count as nothing,
+    /// however early they arrived.
+    fn at_route(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
         previous: &ValidatedEconomicRoot,
-    ) -> Result<RegisteredEconomicClaim, PeerLineageFailure> {
+    ) -> Result<AtRoute, PeerLineageFailure> {
         let cell = RootCell::new(
             genesis,
             device_id,
@@ -553,25 +579,20 @@ impl Verifier<'_> {
         )
         .map_err(|e| incomplete(format!("root cell at {position}: {e:?}")))?;
         let evidence = self.fetcher.register_cell(&cell)?;
-        match read_root_cell(&cell, &evidence) {
+        Ok(match read_root_cell(&cell, &evidence) {
             Ok(CellReading::Held {
                 object,
                 state: ChainState::Final,
                 ..
-            }) => Ok(object),
+            }) => AtRoute::Final(object),
             Ok(CellReading::Held {
+                object,
                 state: ChainState::LeaderHeld | ChainState::Preserved,
                 ..
-            }) => Err(incomplete(format!(
-                "position {position}: the claim holding the root cell is not final yet"
-            ))),
-            Ok(CellReading::Open) => Err(incomplete(format!(
-                "position {position}: no claim holds the root cell"
-            ))),
-            Err(missing) => Err(incomplete(format!(
-                "position {position}: the root cell is not decided yet: {missing:?}"
-            ))),
-        }
+            }) => AtRoute::Held(object),
+            Ok(CellReading::Open) => AtRoute::Open,
+            Err(missing) => AtRoute::Undecided(format!("{missing:?}")),
+        })
     }
 
     /// Authenticate a single-root claim: its manifest by content address,
@@ -815,10 +836,16 @@ impl Verifier<'_> {
         conditional_at: ConditionalAt,
     ) -> Result<Located, PeerLineageFailure> {
         let candidates = self.probed(genesis, device_id, position)?;
-        let mut survivors: Vec<Located> = Vec::new();
+        let mut survivors: Vec<(Located, ClaimShape)> = Vec::new();
+        // Candidates that may yet be final: the read does not decide them.
+        // A survivor beside one is not alone yet (SA-135).
         let mut waiting: Vec<String> = Vec::new();
         let mut unresolved: Vec<String> = Vec::new();
-        let mut conditional: Option<String> = None;
+        // Conditional claims where the caller wants a transition or a credit's
+        // source: the position has none while one holds it, so their parents
+        // are read one position back only when a single-root claim survives
+        // beside them, to rule out the fork.
+        let mut set_aside: Vec<RegisteredEconomicClaim> = Vec::new();
         for candidate in candidates {
             let parents = match &candidate {
                 RegisteredEconomicClaim::SingleRoot(claim) => self
@@ -829,51 +856,46 @@ impl Verifier<'_> {
                         self.parents_of_conditional(genesis, device_id, position, held)
                     }
                     ConditionalAt::Unresolved | ConditionalAt::Invalid => {
-                        if let Err(why) = candidate.single_root() {
-                            conditional = Some(why.to_string());
-                        }
+                        set_aside.push(candidate);
                         continue;
                     }
                 },
             };
-            let parents = match parents {
-                Ok(parents) => parents,
-                Err(PeerLineageFailure::Incomplete(m)) => {
-                    waiting.push(m);
+            self.tally(
+                genesis,
+                device_id,
+                position,
+                candidate,
+                parents,
+                (&mut survivors, &mut waiting, &mut unresolved),
+            )?;
+        }
+        // Why a conditional claim at the position has no single root: what
+        // the caller is told when nothing else survives.
+        let conditional_why = set_aside
+            .iter()
+            .find_map(|candidate| candidate.single_root().err().map(|why| why.to_string()));
+        if !survivors.is_empty() {
+            // Final beside a single-root claim, a conditional claim is a fork.
+            for candidate in set_aside {
+                let RegisteredEconomicClaim::ConditionalSofi(held) = &candidate else {
                     continue;
-                }
-                Err(PeerLineageFailure::Unresolved(m)) => {
-                    unresolved.push(m);
-                    continue;
-                }
-                Err(other) => return Err(other),
-            };
-            for parent in parents {
-                self.count(|c| c.routed_reads += 1);
-                match self.final_claim(genesis, device_id, position, &parent.root) {
-                    Ok(final_there)
-                        if claim_identity(&final_there) == claim_identity(&candidate) =>
-                    {
-                        survivors.push(Located {
-                            parent,
-                            claim: final_there,
-                        })
-                    }
-                    // Another claim holds this route. If it is the peer's at
-                    // this key, it is a candidate here of its own.
-                    Ok(_) => waiting.push(format!(
-                        "position {position}: a claim found at the register key is not the one \
-                         final at the cell routed from its parent"
-                    )),
-                    Err(PeerLineageFailure::Incomplete(m)) => waiting.push(m),
-                    Err(other) => return Err(other),
-                }
+                };
+                let parents = self.parents_of_conditional(genesis, device_id, position, held);
+                self.tally(
+                    genesis,
+                    device_id,
+                    position,
+                    candidate,
+                    parents,
+                    (&mut survivors, &mut waiting, &mut unresolved),
+                )?;
             }
         }
         if survivors.len() > 1 {
             let named = survivors
                 .iter()
-                .map(|l| encode_base32_crockford(&claim_identity(&l.claim)))
+                .map(|(l, _)| encode_base32_crockford(&claim_identity(&l.claim)))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(invalid(format!(
@@ -882,30 +904,105 @@ impl Verifier<'_> {
                 survivors.len()
             )));
         }
-        if let Some(found) = survivors.pop() {
-            return Ok(found);
-        }
+        // Exactly one claim may survive (A14): one beside a candidate the
+        // reads do not decide is not shown alone, and is not established.
         if !waiting.is_empty() {
             return Err(incomplete(waiting.join("; ")));
         }
         if !unresolved.is_empty() {
             return Err(PeerLineageFailure::Unresolved(unresolved.join("; ")));
         }
-        match (conditional, conditional_at) {
+        if let Some((found, shape)) = survivors.pop() {
+            if matches!(shape, ClaimShape::SingleRoot)
+                || matches!(conditional_at, ConditionalAt::Resolve)
+            {
+                return Ok(found);
+            }
+        }
+        match (conditional_why, conditional_at) {
             (Some(_), ConditionalAt::Invalid) => Err(invalid(format!(
                 "position {position}: the credit's source is a conditional SoFi position, not an \
                  online transfer"
             ))),
-            (Some(why), _) => Err(PeerLineageFailure::Unresolved(format!(
+            (Some(why), ConditionalAt::Unresolved) => Err(PeerLineageFailure::Unresolved(format!(
                 "peer {}/{} at position {position}: {why}",
                 encode_base32_crockford(genesis),
                 encode_base32_crockford(device_id)
             ))),
-            (None, _) => Err(incomplete(format!(
+            _ => Err(incomplete(format!(
                 "position {position}: no claim of this peer is final at the cell routed from its \
                  parent"
             ))),
         }
+    }
+
+    /// Take `candidate`, with the parents it may have been built on, to the
+    /// cell routed from each, and record what that read shows of it: a
+    /// survivor final there, a candidate the read does not decide, or one
+    /// decided not final from that parent.
+    fn tally(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        candidate: RegisteredEconomicClaim,
+        parents: Result<Vec<ChainPoint>, PeerLineageFailure>,
+        (survivors, waiting, unresolved): (
+            &mut Vec<(Located, ClaimShape)>,
+            &mut Vec<String>,
+            &mut Vec<String>,
+        ),
+    ) -> Result<(), PeerLineageFailure> {
+        let shape = match &candidate {
+            RegisteredEconomicClaim::SingleRoot(..) => ClaimShape::SingleRoot,
+            RegisteredEconomicClaim::ConditionalSofi(..) => ClaimShape::Conditional,
+        };
+        let parents = match parents {
+            Ok(parents) => parents,
+            Err(PeerLineageFailure::Incomplete(m)) => {
+                waiting.push(m);
+                return Ok(());
+            }
+            Err(PeerLineageFailure::Unresolved(m)) => {
+                unresolved.push(m);
+                return Ok(());
+            }
+            Err(other) => return Err(other),
+        };
+        let identity = claim_identity(&candidate);
+        for parent in parents {
+            self.count(|c| c.routed_reads += 1);
+            match self.at_route(genesis, device_id, position, &parent.root) {
+                Ok(AtRoute::Final(final_there)) if claim_identity(&final_there) == identity => {
+                    survivors.push((
+                        Located {
+                            parent,
+                            claim: final_there,
+                        },
+                        shape,
+                    ))
+                }
+                // Its own leader link, short of final: anyone may carry its
+                // chain on, so it may yet be final there.
+                Ok(AtRoute::Held(held_there)) if claim_identity(&held_there) == identity => waiting
+                    .push(format!(
+                        "position {position}: a claim holds the cell routed from its parent and \
+                         is not final yet"
+                    )),
+                // Another claim holds this route for good, or none does:
+                // decided, and this candidate is not final from this parent.
+                // If the holder is the peer's at this key, it is a candidate
+                // here of its own.
+                Ok(AtRoute::Final(..) | AtRoute::Held(..) | AtRoute::Open) => {}
+                Ok(AtRoute::Undecided(why)) => waiting.push(format!(
+                    "position {position}: the cell routed from a candidate's parent is not \
+                     decided yet: {why}"
+                )),
+                Err(PeerLineageFailure::Incomplete(m)) => waiting.push(m),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(())
     }
 
     /// The parent a single-root claim at `position` names: the activation
@@ -962,13 +1059,30 @@ impl Verifier<'_> {
     ) -> Result<Vec<RegisteredEconomicClaim>, PeerLineageFailure> {
         let key = economic_root_register_key(genesis, device_id, position);
         self.count(|c| c.register_probes += 1);
-        let held = self
+        let answers = self
             .fetcher
             .register_key_values(genesis, device_id, position)?;
+        // A claim final at its route has links at FINAL_LINKS of the
+        // register's members, each holding a copy at this key. Read from
+        // fewer than `members - FINAL_LINKS + 1` of them, a final claim can
+        // sit wholly at the members not read, so the read cannot show which
+        // claims there are, and a lone survivor among what it found is not
+        // alone (SA-135). Coverage, never a vote.
+        let members = self.register.set.len();
+        let answered = answers.iter().filter(|answer| answer.is_some()).count();
+        let needed = members.saturating_sub(crate::route_chain::FINAL_LINKS) + 1;
+        if answered < needed {
+            return Err(incomplete(format!(
+                "position {position}: {answered} of {members} members answered at the register \
+                 key, and a claim final at its route can be missed by fewer than {needed}"
+            )));
+        }
         let namespace = crate::economic::register::economic_root_namespace();
         let mut seen = std::collections::BTreeSet::new();
-        let candidates: Vec<RegisteredEconomicClaim> = held
+        let candidates: Vec<RegisteredEconomicClaim> = answers
             .iter()
+            .flatten()
+            .flatten()
             .filter_map(|bytes| crate::route_chain::RouteEntry::decode(bytes))
             .filter(|entry| entry.namespace == namespace && entry.key == key)
             .filter_map(|entry| root_claim_naming(&entry.value, &key))
@@ -1282,7 +1396,7 @@ mod tests {
             genesis: &[u8; 32],
             device_id: &[u8; 32],
             position: u64,
-        ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        ) -> Result<MemberAnswers, PeerLineageFailure> {
             self.probed.borrow_mut().push(position);
             let register = Register::resolve(self, NETWORK)?;
             let cell = RootCell::new(
@@ -1295,7 +1409,7 @@ mod tests {
             )
             .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))?;
             let routed = cell.routed();
-            Ok(self
+            let held: Vec<Vec<u8>> = self
                 .writes_at(position)
                 .into_iter()
                 .map(|value| {
@@ -1307,7 +1421,8 @@ mod tests {
                     )
                     .encode()
                 })
-                .collect())
+                .collect();
+            Ok(vec![Some(held); register.set.len()])
         }
         fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
             let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
@@ -1467,6 +1582,9 @@ mod tests {
             ],
             routed: vec![(position, [0xA9; 32], held)],
             objects: std::collections::BTreeMap::new(),
+            held_short: Vec::new(),
+            unread: Vec::new(),
+            silent: 0,
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
@@ -1538,6 +1656,9 @@ mod tests {
                 (position, [0xB9; 32], held),
             ],
             objects: std::collections::BTreeMap::new(),
+            held_short: Vec::new(),
+            unread: Vec::new(),
+            silent: 0,
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
@@ -1760,8 +1881,33 @@ mod tests {
     struct RoutedClaims {
         probed: Vec<(u64, Vec<u8>)>,
         routed: Vec<(u64, [u8; 32], Vec<u8>)>,
+        /// Claims written only to the leader of the cell routed from their
+        /// parent: held there, short of final.
+        held_short: Vec<(u64, [u8; 32], Vec<u8>)>,
+        /// Parents whose routed cell's leader does not answer.
+        unread: Vec<(u64, [u8; 32])>,
+        /// How many members do not answer at the register key.
+        silent: usize,
         objects: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
         asked: std::cell::RefCell<Vec<u64>>,
+    }
+
+    impl RoutedClaims {
+        fn new(
+            probed: Vec<(u64, Vec<u8>)>,
+            routed: Vec<(u64, [u8; 32], Vec<u8>)>,
+            objects: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+        ) -> Self {
+            Self {
+                probed,
+                routed,
+                held_short: Vec::new(),
+                unread: Vec::new(),
+                silent: 0,
+                objects,
+                asked: std::cell::RefCell::new(Vec::new()),
+            }
+        }
     }
 
     impl PeerEvidenceFetcher for RoutedClaims {
@@ -1770,7 +1916,7 @@ mod tests {
             genesis: &[u8; 32],
             device_id: &[u8; 32],
             position: u64,
-        ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        ) -> Result<MemberAnswers, PeerLineageFailure> {
             let register = Register::resolve(self, NETWORK)?;
             let cell = RootCell::new(
                 genesis,
@@ -1783,7 +1929,7 @@ mod tests {
             .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))?;
             let routed = cell.routed();
             self.asked.borrow_mut().push(position);
-            Ok(self
+            let held: Vec<Vec<u8>> = self
                 .probed
                 .iter()
                 .filter(|(at, _)| *at == position)
@@ -1796,26 +1942,44 @@ mod tests {
                     )
                     .encode()
                 })
+                .collect();
+            let members = register.set.len();
+            Ok((0..members)
+                .map(|member| (member >= self.silent).then(|| held.clone()))
                 .collect())
         }
         fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
             let register = Register::resolve(self, NETWORK)?;
             let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
-            for (at, parent, value) in &self.routed {
-                let from = RootCell::new(
+            let routed_from = |at: u64, parent: &[u8; 32]| {
+                RootCell::new(
                     &PEER_G,
                     &peer_d(),
-                    *at,
+                    at,
                     parent,
                     &register.set,
                     &register.profile.storage_set_id,
                 )
-                .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))?;
-                if from.routed().seed() == cell.routed().seed() {
+                .map(|from| from.routed().seed() == cell.routed().seed())
+                .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))
+            };
+            for (at, parent, value) in &self.routed {
+                if routed_from(*at, parent)? {
                     seats.write(value, crate::route_chain::ROUTE_LEN - 1, &[]);
                 }
             }
-            Ok(seats.evidence())
+            for (at, parent, value) in &self.held_short {
+                if routed_from(*at, parent)? {
+                    seats.write(value, 0, &[]);
+                }
+            }
+            let mut evidence = seats.evidence();
+            for (at, parent) in &self.unread {
+                if routed_from(*at, parent)? {
+                    evidence.seats[0].values = None;
+                }
+            }
+            Ok(evidence)
         }
         fn native_reserve_release(
             &self,
@@ -1957,6 +2121,9 @@ mod tests {
             probed: vec![(position, unfinal), (position, finalized.clone())],
             routed: vec![(position, [0x41; 32], finalized.clone())],
             objects,
+            held_short: Vec::new(),
+            unread: Vec::new(),
+            silent: 0,
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
@@ -1985,6 +2152,9 @@ mod tests {
                 (position, [0x42; 32], second.clone()),
             ],
             objects,
+            held_short: Vec::new(),
+            unread: Vec::new(),
+            silent: 0,
             asked: std::cell::RefCell::new(Vec::new()),
         };
         let verifier =
@@ -2003,5 +2173,88 @@ mod tests {
                 encode_base32_crockford(&claim_identity(&at.claim))
             ),
         }
+    }
+
+    /// SA-135, A14: "exactly one claim may survive". A claim final at its own
+    /// route is not alone while a rival claim of the peer holds its own
+    /// route's leader link short of final — any party may carry that chain on
+    /// (§9 route chains, rule 8) and make the two a fork — or while the
+    /// rival's route is not decided. Either way the position is not
+    /// established, never the lone claim accepted.
+    /// MUTATION CONTROL: taking a lone survivor before asking whether any
+    /// rival is undecided, as `located` did, turns both red.
+    #[test]
+    fn a_final_claim_beside_an_undecided_rival_is_not_established() {
+        let position = 5;
+        let mut objects = std::collections::BTreeMap::new();
+        let finalized = claim_built_on(position, [0x41; 32], [0x61; 32], &mut objects);
+        let rival = claim_built_on(position, [0x42; 32], [0x62; 32], &mut objects);
+        let probed = vec![(position, finalized.clone()), (position, rival.clone())];
+        let routed = vec![(position, [0x41; 32], finalized.clone())];
+
+        let mut held = RoutedClaims::new(probed.clone(), routed.clone(), objects.clone());
+        held.held_short = vec![(position, [0x42; 32], rival)];
+        let mut unread = RoutedClaims::new(probed.clone(), routed.clone(), objects.clone());
+        unread.unread = vec![(position, [0x42; 32])];
+        for (fetcher, what) in [(&held, "held short of final"), (&unread, "unread")] {
+            let verifier =
+                Verifier::new(fetcher, NETWORK, &NoResolution).expect("the network's register");
+            match verifier.located(&PEER_G, &peer_d(), position, ConditionalAt::Unresolved) {
+                Err(PeerLineageFailure::Incomplete(..)) => {}
+                Err(other) => panic!("a rival {what} is not a verdict: {other:?}"),
+                Ok(at) => panic!(
+                    "a claim beside a rival {what} was located: {}",
+                    encode_base32_crockford(&claim_identity(&at.claim))
+                ),
+            }
+        }
+
+        // The rival's route decided against it, the final claim is alone.
+        let decided = RoutedClaims::new(probed, routed, objects);
+        let verifier =
+            Verifier::new(&decided, NETWORK, &NoResolution).expect("the network's register");
+        let at = verifier
+            .located(&PEER_G, &peer_d(), position, ConditionalAt::Unresolved)
+            .expect("the rival is final nowhere: the claim is alone");
+        assert_eq!(claim_identity(&at.claim), identity_of(&finalized));
+    }
+
+    /// SA-135. A claim final at its route has copies at FINAL_LINKS members
+    /// under the register key, so a probe answered by fewer than
+    /// `members - FINAL_LINKS + 1` of them can miss one wholly: the claims it
+    /// found are not shown to be all, and the position is not established.
+    /// With that many answering, every final claim is seen.
+    /// MUTATION CONTROL: taking whatever members answered, as `probed` did,
+    /// turns the first assertion red.
+    #[test]
+    fn a_register_probe_too_few_members_answered_establishes_nothing() {
+        let position = 5;
+        let mut objects = std::collections::BTreeMap::new();
+        let finalized = claim_built_on(position, [0x41; 32], [0x61; 32], &mut objects);
+        let probed = vec![(position, finalized.clone())];
+        let routed = vec![(position, [0x41; 32], finalized.clone())];
+        let members = crate::route_chain::ROUTE_LEN;
+        let needed = members - crate::route_chain::FINAL_LINKS + 1;
+
+        let mut few = RoutedClaims::new(probed.clone(), routed.clone(), objects.clone());
+        few.silent = members - needed + 1;
+        let verifier = Verifier::new(&few, NETWORK, &NoResolution).expect("the network's register");
+        assert!(
+            matches!(
+                verifier.located(&PEER_G, &peer_d(), position, ConditionalAt::Unresolved),
+                Err(PeerLineageFailure::Incomplete(..))
+            ),
+            "{} of {members} members answering cannot show every final claim",
+            needed - 1
+        );
+
+        let mut enough = RoutedClaims::new(probed, routed, objects);
+        enough.silent = members - needed;
+        let verifier =
+            Verifier::new(&enough, NETWORK, &NoResolution).expect("the network's register");
+        let at = verifier
+            .located(&PEER_G, &peer_d(), position, ConditionalAt::Unresolved)
+            .expect("enough members answered to see every final claim");
+        assert_eq!(claim_identity(&at.claim), identity_of(&finalized));
     }
 }

@@ -463,9 +463,12 @@ async fn final_root_cell(
     let cells = position_cells(set, genesis, device_id, position, parent_root)?;
     let seats = NodeSeats::new(set)?;
     // A claim final at K_root holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
-        root_claim_final(cells.root(), evidence)
-    })
+    let evidence = read_cell_kept(
+        &seats,
+        cells.root().routed(),
+        &cells.root().keeps(),
+        |evidence| root_claim_final(cells.root(), evidence),
+    )
     .await;
     Ok(match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {

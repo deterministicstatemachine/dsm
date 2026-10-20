@@ -548,6 +548,25 @@ pub fn recognize_release(parent: &NativeReserveState, bytes: &[u8]) -> Option<Ve
     Some(release)
 }
 
+/// What a reader keeps of a seat's log at `cell`, the successor cell of the
+/// state of `reserve_id` whose root is `parent_root`, read before that state
+/// is established (a root an epoch index names, SoFi Amendment S23): the
+/// copies of releases that verify and name that reserve and root as their
+/// parent. Every release the state's own rule keeps ([`SuccessorCell::keeps`])
+/// is among them, so the walk that reaches the state judges the read in
+/// full.
+pub fn named_successor_keeps<'c>(
+    cell: &'c RoutedCell,
+    reserve_id: &'c [u8; 32],
+    parent_root: &'c [u8; 32],
+) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + 'c {
+    crate::route_chain::recognized_copies(cell, move |bytes| {
+        decode_and_verify_release(bytes).is_ok_and(|release| {
+            release.body.reserve_id == *reserve_id && release.body.parent_root == *parent_root
+        })
+    })
+}
+
 /// What one read of the parent's successor cell established (Part II §13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SuccessorRead {
@@ -605,6 +624,15 @@ impl SuccessorCell {
 
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
+    }
+
+    /// What a reader keeps of a seat's log at this cell: the copies of
+    /// releases that verify and succeed its parent, the only ones its
+    /// reading can count ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            release_of(&self.parent)(bytes).is_some()
+        })
     }
 }
 

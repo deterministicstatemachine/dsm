@@ -22,7 +22,7 @@ use dsm::types::proto;
 use prost::Message;
 use reqwest::header::HeaderValue;
 
-use crate::sdk::bounded_read::{self, Bound, Budget, Refused};
+use crate::sdk::bounded_read::{self, Bound, Budget};
 use crate::sdk::storage_set::StorageSet;
 use crate::util::text_id::encode_base32_crockford;
 
@@ -502,41 +502,28 @@ fn cell_page_limit(member_id: &str, namespace: &[u8]) -> usize {
 
 // A cell holds every value anyone put at it (§6). Each page of it is bounded
 // by the protocol ([`cell_page_limit`]), and a reader reads page after page;
-// how many pages a cell has, the protocol does not bound. A mirror holds every
-// distinct ByteCommit a set-mate stated for one cycle (§14), unpaged and
-// unbounded. These budgets are this device's resource limits for one whole
-// cell and one mirror answer, not protocol rules: a read past one is refused
-// as unread, never taken as absent, truncated, or invalid, and while an
-// honest cell or mirror is larger than its budget that read is not available
-// from that member.
-
-/// One whole cell read from one member, over all its pages: about
-/// twenty-five of the largest entries a cell takes. What its values hold may
-/// cost five times the bytes: a cell of the smallest entries a member takes
-/// costs about four.
-const CELL_VALUES_BUDGET: Budget = Budget {
-    bytes: 8 * 1024 * 1024,
-    allocation: 40 * 1024 * 1024,
-};
+// how many pages a cell has, the protocol does not bound. A cell read hands
+// each value to its reader as its page arrives, and the reader keeps what it
+// recognizes, so what a member holds at a key costs this device the time to
+// read it, never the memory to hold it: bytes that are not a recognized
+// object naming the key never count, so junk blocks nothing (storage spec
+// §9, route chains, rule 3; SA-67). A mirror holds every distinct ByteCommit
+// a set-mate stated for one cycle (§14), unpaged and unbounded; its budget
+// is this device's resource limit for one mirror answer, not a protocol
+// rule: a read past it is refused as unread, never taken as absent,
+// truncated, or invalid.
 
 /// How long one member has to answer a whole cell, every page of it. A
 /// member's pages cannot be held to a count (an honest cell of the smallest
-/// entries fills [`CELL_VALUES_BUDGET`] over hundreds of full pages), so a
-/// member answering each page just inside [`MEMBER_REQUEST_TIMEOUT`] held
-/// every read of the cell for hours (SA-68). Like that timeout, a transport
-/// bound only: a read past it is that member not answering, never a verdict.
+/// entries fills hundreds of full pages), so a member answering each page
+/// just inside [`MEMBER_REQUEST_TIMEOUT`] held every read of the cell for
+/// hours (SA-68). Like that timeout, a transport bound only: a read past it
+/// is that member not answering, never a verdict.
 const CELL_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// What a cell read has taken from one member so far, page by page, held to
-/// [`CELL_VALUES_BUDGET`] for the whole cell.
+/// The pages of one cell read from one member, checked as they arrive.
 #[derive(Debug, Default)]
-struct CellRead {
-    values: Vec<Vec<u8>>,
-    /// The bytes of every page read.
-    bytes: usize,
-    /// What the values taken hold: their bytes, and each one's vector
-    /// counted twice for the list that holds them as it grows.
-    allocation: usize,
+struct CellPages {
     /// The value bytes of the last page, when it named a next page while
     /// holding fewer entries than a page holds. A member ends a page short of
     /// [`MAX_CELL_PAGE_ENTRIES`] only where the next value would carry it past
@@ -544,23 +531,16 @@ struct CellRead {
     short_page_bytes: Option<usize>,
 }
 
-impl CellRead {
-    /// Take the page `body`, read from arrival index `from`, and return the
-    /// index the next page starts at (0 when this page reaches the last
-    /// entry). A page that holds more entries than a page holds, does not
-    /// start where it was read from, runs its records out of step with its
-    /// values, or names a next page anywhere but just past itself is not a
-    /// page; reading past the budget is a resource limit.
-    fn take(&mut self, from: u64, body: &[u8]) -> Result<u64, String> {
+impl CellPages {
+    /// Take the page `body`, read from arrival index `from`: its values, in
+    /// arrival order, and the index the next page starts at (0 when this
+    /// page reaches the last entry). A page that holds more entries than a
+    /// page holds, does not start where it was read from, runs its records
+    /// out of step with its values, or names a next page anywhere but just
+    /// past itself is not a page.
+    fn take(&mut self, from: u64, body: &[u8]) -> Result<(Vec<Vec<u8>>, u64), String> {
         for field in [1, 2] {
             bounded_read::at_most(body, field, MAX_CELL_PAGE_ENTRIES).map_err(|e| e.to_string())?;
-        }
-        self.bytes = self.bytes.saturating_add(body.len());
-        if self.bytes > CELL_VALUES_BUDGET.bytes {
-            return Err(Refused::OverByteBudget {
-                budget: CELL_VALUES_BUDGET.bytes,
-            }
-            .to_string());
         }
         let page = proto::CellValuesV1::decode(body).map_err(|e| format!("not a page: {e}"))?;
         if page.records.len() != page.values.len() {
@@ -604,23 +584,14 @@ impl CellRead {
         if page.next != 0 && page.values.len() < MAX_CELL_PAGE_ENTRIES {
             self.short_page_bytes = Some(page.values.iter().map(Vec::len).sum());
         }
-        for value in page.values {
-            self.allocation = self
-                .allocation
-                .saturating_add(value.len())
-                .saturating_add(2 * std::mem::size_of::<Vec<u8>>());
-            if self.allocation > CELL_VALUES_BUDGET.allocation {
-                return Err(Refused::OverAllocationBudget {
-                    needed: self.allocation,
-                    budget: CELL_VALUES_BUDGET.allocation,
-                }
-                .to_string());
-            }
-            self.values.push(value);
-        }
-        Ok(page.next)
+        Ok((page.values, page.next))
     }
 }
+
+/// What a cell read hands its reader: each value the member holds there, in
+/// arrival order, to keep or drop. An `Err` stops the read, which is then no
+/// answer from that member.
+pub type CellFold<'f> = dyn FnMut(Vec<u8>) -> Result<(), String> + Send + 'f;
 
 /// One mirror's answer for one member and cycle: thousands of ByteCommits,
 /// where one is honest and two prove an equivocation. Decoding a ByteCommit
@@ -936,13 +907,24 @@ impl MemberClient {
             .collect()
     }
 
-    /// Everything the member holds at the cell, in arrival order, read page
-    /// by page (§6). `None` when the member did not answer every page, or
-    /// answered one that is not a page, or past this device's budget for a
-    /// cell ([`CELL_VALUES_BUDGET`]); an empty list is an answer.
-    pub async fn get_cell(&self, namespace: &[u8], key: &[u8; 32]) -> Option<Vec<Vec<u8>>> {
-        match self.cell_values(namespace, key).await {
-            Ok(values) => values,
+    /// Read the member's cell page by page (§6), from arrival index `from`,
+    /// and hand each value to `take` in arrival order as its page arrives.
+    /// The arrival index of the last value the member holds as far as it was
+    /// read (`from - 1` when it holds none from there), once it answered
+    /// every page within [`CELL_READ_DEADLINE`]; `None` when it did not, or
+    /// answered one that is not a page, or `take` stopped the read.
+    pub async fn fold_cell(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+        from: u64,
+        take: &mut CellFold<'_>,
+    ) -> Option<u64> {
+        match self
+            .fold_cell_within(namespace, key, from, take, CELL_READ_DEADLINE)
+            .await
+        {
+            Ok(held) => held,
             Err(why) => {
                 log::warn!("cell get at {}: {why}", self.member_id);
                 None
@@ -950,42 +932,36 @@ impl MemberClient {
         }
     }
 
-    /// [`Self::get_cell`], with why the member's answer was not taken: every
-    /// page within [`CELL_READ_DEADLINE`].
-    async fn cell_values(
+    /// [`Self::fold_cell`] within `deadline` of the first request, with why
+    /// the member's answer was not taken.
+    async fn fold_cell_within(
         &self,
         namespace: &[u8],
         key: &[u8; 32],
-    ) -> Result<Option<Vec<Vec<u8>>>, String> {
-        self.cell_values_within(namespace, key, CELL_READ_DEADLINE)
-            .await
-    }
-
-    /// The pages of the cell, every one answered within `deadline` of the
-    /// first request.
-    async fn cell_values_within(
-        &self,
-        namespace: &[u8],
-        key: &[u8; 32],
+        from: u64,
+        take: &mut CellFold<'_>,
         deadline: std::time::Duration,
-    ) -> Result<Option<Vec<Vec<u8>>>, String> {
-        tokio::time::timeout(deadline, self.cell_pages(namespace, key))
+    ) -> Result<Option<u64>, String> {
+        tokio::time::timeout(deadline, self.cell_pages(namespace, key, from, take))
             .await
             .map_err(|elapsed| {
                 format!("the cell's pages took longer than {deadline:?} ({elapsed})")
             })?
     }
 
-    /// Read the cell page by page from the first arrival index.
+    /// Read the cell page by page from arrival index `from`.
     async fn cell_pages(
         &self,
         namespace: &[u8],
         key: &[u8; 32],
-    ) -> Result<Option<Vec<Vec<u8>>>, String> {
+        from: u64,
+        take: &mut CellFold<'_>,
+    ) -> Result<Option<u64>, String> {
         let header = namespace_header(namespace)?;
         let page_limit = Bound::Limit(cell_page_limit(&self.member_id, namespace));
-        let mut read = CellRead::default();
-        let mut from = 1u64;
+        let mut pages = CellPages::default();
+        let mut from = from.max(1);
+        let mut last = from - 1;
         loop {
             let request = self
                 .client
@@ -998,8 +974,13 @@ impl MemberClient {
             let Some(body) = answer(request, page_limit).await? else {
                 return Ok(None);
             };
-            match read.take(from, &body)? {
-                0 => return Ok(Some(read.values)),
+            let (values, next) = pages.take(from, &body)?;
+            last = last.saturating_add(values.len() as u64);
+            for value in values {
+                take(value)?;
+            }
+            match next {
+                0 => return Ok(Some(last)),
                 next => from = next,
             }
         }
@@ -1308,15 +1289,29 @@ impl SetClient {
         }
         took
     }
+}
 
-    /// Everything every member holds at a cell, in member order; `None`
-    /// where a member did not answer.
-    pub async fn get_cell(&self, namespace: &[u8], key: &[u8; 32]) -> Vec<Option<Vec<Vec<u8>>>> {
-        futures::future::join_all(
-            self.members
-                .iter()
-                .map(|member| member.get_cell(namespace, key)),
-        )
+#[cfg(test)]
+impl SetClient {
+    /// Every value each member holds at a cell, in member order and each
+    /// member's in arrival order; `None` where a member did not answer. What
+    /// a test reads back of what the members store.
+    pub(crate) async fn held_at(
+        &self,
+        namespace: &[u8],
+        key: &[u8; 32],
+    ) -> Vec<Option<Vec<Vec<u8>>>> {
+        futures::future::join_all(self.members.iter().map(|member| async move {
+            let mut values = Vec::new();
+            let held = {
+                let mut take = |value: Vec<u8>| {
+                    values.push(value);
+                    Ok(())
+                };
+                member.fold_cell(namespace, key, 1, &mut take).await
+            };
+            held.map(|_| values)
+        }))
         .await
     }
 }
@@ -1809,7 +1804,7 @@ mod tests {
     // reached by the client every member is reached by
     // ([`build_member_client`]); it answers whatever its test has it answer.
 
-    use super::{SetClient, CELL_VALUES_BUDGET, MIRRORED_BUDGET};
+    use super::{SetClient, MIRRORED_BUDGET};
     use dsm::storage_cell::{CELL_PAGE_VALUE_BYTES, MAX_CELL_PAGE_ENTRIES};
     use crate::sdk::bounded_read::{self, Refused};
     use crate::test_support::nodes::TestCa;
@@ -2285,7 +2280,7 @@ mod tests {
             ],
         )
         .await;
-        let reads = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let reads = tokio::time::timeout(PATIENCE, set.held_at(NAMESPACE, &[0x6b; 32]))
             .await
             .expect("the read ends");
         assert_eq!(reads, vec![None, None, Some(vec![value])]);
@@ -2357,7 +2352,7 @@ mod tests {
         };
         let (set, _served) =
             set_of(&ca, vec![("dsm-node-1", paged_cell(pages, reads.clone()))]).await;
-        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let read = tokio::time::timeout(PATIENCE, set.held_at(NAMESPACE, &[0x6b; 32]))
             .await
             .expect("the read ends");
         assert_eq!(read, vec![Some(held)]);
@@ -2368,40 +2363,56 @@ mod tests {
         );
     }
 
-    /// A member whose pages never end, each naming the next, is read until
-    /// this device's budget for one cell is spent, and no further; the read
-    /// is not an answer from it.
+    /// SA-67. A cell holds whatever anyone put there (§6), and bytes that
+    /// are no recognized object naming the key never count (§9, route
+    /// chains, rule 3). A cell holding more junk than this device ever held
+    /// a whole cell in — thirty of the largest entries, past the 8 MiB the
+    /// whole-cell read refused at — is read through, page by page, keeping
+    /// nothing of the junk, to the recognized value after it.
+    /// MUTATION CONTROL: refusing a cell read once its pages pass a byte
+    /// budget, as the whole-cell read did, turns this red.
     #[tokio::test]
-    async fn a_cell_read_ends_at_this_devices_budget_however_many_pages() {
+    async fn junk_past_any_budget_is_read_through_to_the_value_after_it() {
+        const JUNK: usize = 30;
+        // The junk is more than a whole cell was read within.
+        const _: () = assert!(JUNK * CELL_PAGE_VALUE_BYTES > 8 * 1024 * 1024);
         let ca = TestCa::new();
         let reads = Arc::new(AtomicUsize::new(0));
-        let largest = CELL_PAGE_VALUE_BYTES;
-        let endless = move |from: u64| {
-            let (_, record) = smallest_cell_entry();
-            proto::CellValuesV1 {
-                values: vec![vec![0x76; largest]],
-                records: vec![proto::ArrivalRecordV1 {
-                    index: from,
-                    ..record
-                }],
-                next: from + 1,
-            }
+        let mut held: Vec<Vec<u8>> = vec![vec![0x76; CELL_PAGE_VALUE_BYTES]; JUNK];
+        held.push(b"ok-the-object".to_vec());
+        // One of the largest values fills a page, so each page holds one.
+        let pages = {
+            let held = held.clone();
+            move |from| honest_page(&held, 1, from)
         };
-        let (set, _served) = set_of(
-            &ca,
-            vec![("dsm-node-1", paged_cell(endless, reads.clone()))],
-        )
-        .await;
-        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let (set, _served) =
+            set_of(&ca, vec![("dsm-node-1", paged_cell(pages, reads.clone()))]).await;
+        let member = &set.members()[0];
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        let mut handed = 0usize;
+        let read = {
+            let mut take = |value: Vec<u8>| {
+                handed += 1;
+                if value.starts_with(b"ok") {
+                    kept.push(value);
+                }
+                Ok(())
+            };
+            tokio::time::timeout(
+                PATIENCE,
+                member.fold_cell(NAMESPACE, &[0x6b; 32], 1, &mut take),
+            )
             .await
-            .expect("the read ends");
-        assert_eq!(read, vec![None]);
-        let pages = reads.load(Ordering::SeqCst);
-        assert!(
-            pages <= CELL_VALUES_BUDGET.bytes / largest + 1,
-            "{pages} pages read past a budget of {} bytes",
-            CELL_VALUES_BUDGET.bytes
+            .expect("the read ends")
+        };
+        assert_eq!(
+            read,
+            Some(JUNK as u64 + 1),
+            "every entry the member holds is read"
         );
+        assert_eq!(handed, JUNK + 1);
+        assert_eq!(kept, vec![b"ok-the-object".to_vec()]);
+        assert_eq!(reads.load(Ordering::SeqCst), JUNK + 1, "one page per entry");
     }
 
     /// A page that does not follow its read is not an answer: one naming
@@ -2445,7 +2456,7 @@ mod tests {
             ],
         )
         .await;
-        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let read = tokio::time::timeout(PATIENCE, set.held_at(NAMESPACE, &[0x6b; 32]))
             .await
             .expect("the read ends");
         assert_eq!(read, vec![None, None, None]);
@@ -2496,7 +2507,7 @@ mod tests {
             vec![("dsm-node-1", paged_cell(trickle, reads.clone()))],
         )
         .await;
-        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let read = tokio::time::timeout(PATIENCE, set.held_at(NAMESPACE, &[0x6b; 32]))
             .await
             .expect("the read ends");
         assert_eq!(read, vec![None]);
@@ -2526,7 +2537,7 @@ mod tests {
         assert!(node_page(&held, 1).values.len() < MAX_CELL_PAGE_ENTRIES);
         let (set, _served) =
             set_of(&ca, vec![("dsm-node-1", paged_cell(pages, reads.clone()))]).await;
-        let read = tokio::time::timeout(PATIENCE, set.get_cell(NAMESPACE, &[0x6b; 32]))
+        let read = tokio::time::timeout(PATIENCE, set.held_at(NAMESPACE, &[0x6b; 32]))
             .await
             .expect("the read ends");
         assert_eq!(read, vec![Some(held)]);
@@ -2562,9 +2573,16 @@ mod tests {
             )
         };
         let (member, _served) = member_at(&ca, "dsm-node-1", slow).await;
+        let mut dropped = |_value: Vec<u8>| Ok(());
         let refused = tokio::time::timeout(
             PATIENCE,
-            member.cell_values_within(NAMESPACE, &[0x6b; 32], Duration::from_secs(1)),
+            member.fold_cell_within(
+                NAMESPACE,
+                &[0x6b; 32],
+                1,
+                &mut dropped,
+                Duration::from_secs(1),
+            ),
         )
         .await
         .expect("the read ends")
@@ -2576,33 +2594,11 @@ mod tests {
         );
     }
 
-    /// The budgets hold what an honest member answers: a cell of the
-    /// smallest entries a member takes, read page after page until its byte
-    /// budget is filled, stays within its allocation budget, and a mirror
+    /// The mirror budget holds what an honest member answers: a mirror
     /// answer that fills its byte budget with the smallest ByteCommits
     /// decodes within its allocation budget.
     #[test]
-    fn the_budgets_hold_an_answer_of_the_smallest_honest_elements() {
-        let held = vec![smallest_cell_entry().0; MAX_CELL_PAGE_ENTRIES * 1024];
-        let mut read = super::CellRead::default();
-        let (mut from, mut spent) = (1u64, 0usize);
-        loop {
-            let page = honest_page(&held, MAX_CELL_PAGE_ENTRIES, from).encode_to_vec();
-            if spent + page.len() > CELL_VALUES_BUDGET.bytes {
-                // The byte budget is filled to within one page.
-                assert!(spent + 2 * page.len() > CELL_VALUES_BUDGET.bytes);
-                break;
-            }
-            spent += page.len();
-            from = read
-                .take(from, &page)
-                .expect("a cell of the smallest entries is read within the budget");
-        }
-        assert_eq!(
-            read.values.len(),
-            usize::try_from(from - 1).expect("an index")
-        );
-
+    fn the_mirror_budget_holds_an_answer_of_the_smallest_honest_commits() {
         let commit = proto::ByteCommitV4 {
             member_id: b"m".to_vec(),
             cycle_index: 2,
@@ -2706,7 +2702,7 @@ mod tests {
                 assert_eq!(records.len(), entries.len());
             }
         }
-        let reads = client.get_cell(NAMESPACE, &key).await;
+        let reads = client.held_at(NAMESPACE, &key).await;
         assert_eq!(reads.len(), client.members.len());
         for read in reads {
             assert_eq!(read.as_ref(), Some(&held), "every value, in arrival order");
