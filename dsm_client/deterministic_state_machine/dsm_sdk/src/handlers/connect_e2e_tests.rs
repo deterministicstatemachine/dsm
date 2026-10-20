@@ -1174,7 +1174,51 @@ async fn a_stalled_application_holds_no_disconnect_of_its_session() {
     assert!(disconnected.success, "{:?}", disconnected.error_message);
 }
 
-/// Two syncs at once, as the listener's and one the player starts: the/// Two syncs at once, as the listener's and one the player starts: the
+/// SA-81. An accept for a session the application already holds is
+/// answered from what it holds, before its signature is checked or the
+/// wallet's directory read: the same bytes again are that session, and the
+/// same accept with its signature changed is refused as another accept for
+/// it, not as a bad signature — nothing was verified for it.
+/// MUTATION CONTROL: verifying the accept before the session is looked up,
+/// as `connect.app.accept` did, answers the changed accept with a signature
+/// failure and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_replayed_accept_is_answered_before_it_is_verified() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    p.a.enter();
+    let accept = crate::storage::client_db::connect::app_session(&session)
+        .expect("the application's sessions")
+        .expect("the session")
+        .accept;
+
+    let again = invoke(&p.a, "connect.app.accept", args_raw(accept.clone())).await;
+    let Reply::Session(view) = reply(&again) else {
+        panic!("connect.app.accept answered another reply");
+    };
+    assert_eq!(view.session_id, session.to_vec());
+
+    let mut changed = generated::AppConnectAcceptV1::decode(accept.as_slice()).expect("an accept");
+    changed.signature[0] ^= 0x01;
+    let refused = invoke(
+        &p.a,
+        "connect.app.accept",
+        args_raw(changed.encode_to_vec()),
+    )
+    .await;
+    assert!(!refused.success, "a changed accept is not taken");
+    let why = refused.error_message.expect("a refusal says why");
+    assert!(
+        why.contains("holds another accept"),
+        "refused before its signature is checked: {why}"
+    );
+}
+
+/// Two syncs at once, as the listener's and one the player starts: the
 /// replay guard is read and the request carried out as one step, so a
 /// payment runs once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

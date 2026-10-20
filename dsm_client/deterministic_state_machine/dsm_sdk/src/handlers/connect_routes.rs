@@ -1737,6 +1737,26 @@ impl AppRouterImpl {
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .ok_or_else(|| format!("{ROUTE}: this account made no such offer"))?;
         let network = own_network()?;
+        // A session's id is the offer and the wallet's device id, both named
+        // by the accept before anything about it is checked. An accept for a
+        // session this account already holds is answered from what it holds,
+        // before any signature is checked or the wallet's directory read: the
+        // same bytes again are that session, any other bytes are refused.
+        // Replayed over the public relay, one accept cost a SPHINCS+
+        // verification and a directory read every time (SA-81).
+        if let Some(card) = probe.wallet_card.as_ref() {
+            let named =
+                crate::sdk::connect::signed::card_identity(card, &probe.wallet_att_a, &network)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let sid = session_id(&digest, &named.device_id);
+            if let Some(held) = store::app_session(&sid).map_err(|e| format!("{ROUTE}: {e}"))? {
+                return if held.accept == accept.encode_to_vec() {
+                    Ok(Reply::Session(app_session_view(&held)?))
+                } else {
+                    Err(format!("{ROUTE}: this session holds another accept"))
+                };
+            }
+        }
         let verified =
             app::verify_accept(&accept, &offer, &network).map_err(|e| format!("{ROUTE}: {e}"))?;
         let resolved = resolve_counterparty_via_transport(&verified.wallet_card)
