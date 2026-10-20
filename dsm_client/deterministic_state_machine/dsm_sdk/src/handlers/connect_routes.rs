@@ -127,6 +127,13 @@ impl Executed {
     }
 }
 
+/// The request a signed answer answers.
+fn interim_seq(answer: &generated::AppResponseV1) -> Result<u64, String> {
+    generated::AppResponseBodyV1::decode(answer.body.as_slice())
+        .map(|body| body.seq)
+        .map_err(|e| format!("the waiting notice just signed: {e}"))
+}
+
 /// How far one fetched request got.
 enum Flow {
     /// Processed (carried out, declined or failed): the next may follow.
@@ -134,8 +141,10 @@ enum Flow {
     /// Already processed earlier: skipped.
     Seen,
     /// Outside its grant: it waits for the player, and so does every later
-    /// request of the session.
-    Waiting,
+    /// request of the session. The signed notice that it waits, for the
+    /// application, is sent once the session's lock is released: the
+    /// application's endpoint never holds the lock (SA-127).
+    Waiting(Box<generated::AppResponseV1>),
     /// Inside its grant but not yet constructible: its relationship with the
     /// application is catching up (a transfer the wallet received awaits the
     /// application's finality). Nothing is answered or spent; the next sync
@@ -143,11 +152,23 @@ enum Flow {
     NotYet(String),
 }
 
-/// One processor at a time: the replay guard is read and a request carried
-/// out under it as one step, whichever of the listener's sync, a sync the
-/// player starts, the player's own decision or a disconnect reaches it first.
-static PROCESSING: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
-    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+/// One processor at a time for each session: a session's replay guard is
+/// read and a request carried out under it as one step, whichever of the
+/// listener's sync, a sync the player starts, the player's own decision or a
+/// disconnect reaches it first. The guard is per session (DSM Amendment
+/// A11), so the lock is too: no application's requests, and no application's
+/// endpoint, hold another application or the player (SA-127).
+static PROCESSING: once_cell::sync::Lazy<
+    std::sync::Mutex<BTreeMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+/// The processing lock of the session `session_id` ([`PROCESSING`]).
+fn session_lock(session_id: &[u8; 32]) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, String> {
+    let mut locks = PROCESSING
+        .lock()
+        .map_err(|e| format!("the sessions' processing locks: {e}"))?;
+    Ok(locks.entry(*session_id).or_default().clone())
+}
 
 /// What became of a request the player approved.
 enum Approved {
@@ -663,7 +684,8 @@ impl AppRouterImpl {
         const ROUTE: &str = "connect.respond";
         let req: generated::ConnectRespondRequestV1 = body(args, ROUTE)?;
         let sid = d32(&req.session_id, "the session")?;
-        let one = PROCESSING.lock().await;
+        let lock = session_lock(&sid)?;
+        let one = lock.lock().await;
         let session = store::session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .filter(|s| s.connected == store::SessionStatus::Connected)
@@ -869,7 +891,8 @@ impl AppRouterImpl {
             if held.state != store::PendingState::Approved {
                 return Ok(());
             }
-            let one = PROCESSING.lock().await;
+            let lock = session_lock(&session.session_id)?;
+            let one = lock.lock().await;
             let current = connected(&session.session_id)?;
             let approved = self.carry_out_approved(&current, &held).await?;
             drop(one);
@@ -880,18 +903,26 @@ impl AppRouterImpl {
         }
         let after = connected(&session.session_id)?.last_seq;
         let batch = relay.requests(&session.session_id, after).await?;
+        let lock = session_lock(&session.session_id)?;
         for request in &batch.requests {
-            let one = PROCESSING.lock().await;
+            let one = lock.lock().await;
             // Re-read under the lock: each processed request moves the guard.
             let current = connected(&session.session_id)?;
-            let flow = self
-                .process(&current, &relay, &request.encode_to_vec())
-                .await?;
+            let flow = self.process(&current, &request.encode_to_vec()).await?;
             drop(one);
             match flow {
                 Flow::Processed => deliver_owed(&current).await?,
                 Flow::Seen => {}
-                Flow::Waiting => break,
+                Flow::Waiting(interim) => {
+                    let seq = interim_seq(&interim)?;
+                    relay.respond(&interim).await.map_err(|e| {
+                        format!(
+                            "request {seq} waits for the player; telling the application \
+                             failed: {e}"
+                        )
+                    })?;
+                    break;
+                }
                 Flow::NotYet(why) => return Err(why),
             }
         }
@@ -901,7 +932,6 @@ impl AppRouterImpl {
     async fn process(
         &self,
         session: &store::WalletSession,
-        relay: &Relay,
         request_bytes: &[u8],
     ) -> Result<Flow, String> {
         let (request_body, request) = match read_request(request_bytes, session) {
@@ -989,12 +1019,7 @@ impl AppRouterImpl {
                 })?;
                 let interim = generated::AppResponseV1::decode(interim.as_slice())
                     .map_err(|e| format!("the waiting notice just signed: {e}"))?;
-                relay.respond(&interim).await.map_err(|e| {
-                    format!(
-                        "request {seq} waits for the player; telling the application failed: {e}"
-                    )
-                })?;
-                Ok(Flow::Waiting)
+                Ok(Flow::Waiting(Box::new(interim)))
             }
         }
     }
@@ -2629,7 +2654,8 @@ async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
     let req: generated::ConnectSessionRefV1 = body(args, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
     // A request being carried out finishes first; none starts after.
-    let one = PROCESSING.lock().await;
+    let lock = session_lock(&sid)?;
+    let one = lock.lock().await;
     store::disconnect(&sid).map_err(|e| format!("{ROUTE}: {e}"))?;
     drop(one);
     let session = store::session(&sid)

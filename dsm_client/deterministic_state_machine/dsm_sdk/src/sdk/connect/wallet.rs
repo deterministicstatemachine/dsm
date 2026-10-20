@@ -357,6 +357,13 @@ static LISTENER: once_cell::sync::Lazy<std::sync::Mutex<Option<tokio::task::Join
 /// How long to wait after a cycle that could not run before the next one.
 const RETRY_AFTER: Duration = Duration::from_secs(3);
 
+/// The least time from the start of one sync cycle to the start of the next.
+/// The relay's long poll paces a cycle that waits on it; one that does not —
+/// a request held for the player, which asks the relay nothing, or a relay
+/// that answers at once — would otherwise run back to back (SA-82). A
+/// transport pace, never a verdict.
+const MIN_CYCLE: Duration = Duration::from_secs(1);
+
 /// Start the listener unless one is running. It ends by itself once no
 /// application is connected; approving one starts it again.
 pub fn start_listener() -> Result<(), String> {
@@ -395,62 +402,91 @@ pub fn resume_listener() -> Result<(), String> {
     Ok(())
 }
 
+/// What one sync cycle came to.
+enum Cycle {
+    /// The cycle ran and answered every connected application's session.
+    Sessions(Vec<generated::ConnectSessionV1>),
+    /// No cycle ran: why.
+    NotRun(String),
+}
+
+/// How long the listener waits before its next cycle, `elapsed` after the
+/// start of the cycle that answered `sessions`: until [`MIN_CYCLE`] has
+/// passed since that start, or [`RETRY_AFTER`] when no session's sync
+/// completed — every relay down or refusing.
+fn pause_after(elapsed: Duration, sessions: &[generated::ConnectSessionV1]) -> Duration {
+    if sessions
+        .iter()
+        .all(|session| !session.last_error.is_empty())
+    {
+        RETRY_AFTER
+    } else {
+        MIN_CYCLE.saturating_sub(elapsed)
+    }
+}
+
 async fn listen() {
     log::info!("[connect] listener started");
+    listen_with(sync_cycle).await;
+    log::info!("[connect] listener stopped: no application is connected");
+}
+
+/// Run `cycle` over and over, each one paced ([`pause_after`]), until one
+/// answers that no application is connected.
+async fn listen_with<F, C>(cycle: F)
+where
+    F: Fn() -> C,
+    C: core::future::Future<Output = Cycle>,
+{
     loop {
-        // The router is invoked here, not through the ingress, so the lock is
-        // read here: while the wallet is locked no request is fetched or run
-        // (SA-18). `connect.sync` holds every request back while it is locked
-        // too; this keeps the listener from cycling the relay meanwhile.
-        match crate::sdk::session_manager::lock_holds() {
-            Ok(None) => {}
-            Ok(Some(..)) => {
-                tokio::time::sleep(RETRY_AFTER).await;
-                continue;
+        let started = tokio::time::Instant::now();
+        match cycle().await {
+            Cycle::Sessions(sessions) if sessions.is_empty() => break,
+            Cycle::Sessions(sessions) => {
+                tokio::time::sleep(pause_after(started.elapsed(), &sessions)).await;
             }
-            Err(e) => {
-                log::warn!("[connect] the session lock could not be read: {e}");
-                tokio::time::sleep(RETRY_AFTER).await;
-                continue;
-            }
-        }
-        let Some(router) = crate::bridge::app_router() else {
-            tokio::time::sleep(RETRY_AFTER).await;
-            continue;
-        };
-        let result = router
-            .invoke(crate::bridge::AppInvoke {
-                method: "connect.sync".into(),
-                args: Vec::new(),
-            })
-            .await;
-        if !result.success {
-            log::warn!(
-                "[connect] a sync cycle did not run: {:?}",
-                result.error_message
-            );
-            tokio::time::sleep(RETRY_AFTER).await;
-            continue;
-        }
-        match crate::handlers::response_helpers::decode_local_envelope(&result.data) {
-            Ok(generated::Envelope {
-                payload:
-                    Some(generated::envelope::Payload::ConnectReply(generated::ConnectReplyV1 {
-                        reply: Some(generated::connect_reply_v1::Reply::Sessions(s)),
-                    })),
-                ..
-            }) => {
-                if s.sessions.is_empty() {
-                    break;
-                }
-            }
-            other => {
-                log::warn!("[connect] a sync cycle answered {other:?}, not the sessions");
+            Cycle::NotRun(why) => {
+                log::warn!("[connect] a sync cycle did not run: {why}");
                 tokio::time::sleep(RETRY_AFTER).await;
             }
         }
     }
-    log::info!("[connect] listener stopped: no application is connected");
+}
+
+/// One sync cycle: `connect.sync` through the router, unless the wallet is
+/// locked.
+async fn sync_cycle() -> Cycle {
+    // The router is invoked here, not through the ingress, so the lock is
+    // read here: while the wallet is locked no request is fetched or run
+    // (SA-18). `connect.sync` holds every request back while it is locked
+    // too; this keeps the listener from cycling the relay meanwhile.
+    match crate::sdk::session_manager::lock_holds() {
+        Ok(None) => {}
+        Ok(Some(..)) => return Cycle::NotRun("the wallet is locked".into()),
+        Err(e) => return Cycle::NotRun(format!("the session lock could not be read: {e}")),
+    }
+    let Some(router) = crate::bridge::app_router() else {
+        return Cycle::NotRun("no router yet".into());
+    };
+    let result = router
+        .invoke(crate::bridge::AppInvoke {
+            method: "connect.sync".into(),
+            args: Vec::new(),
+        })
+        .await;
+    if !result.success {
+        return Cycle::NotRun(format!("{:?}", result.error_message));
+    }
+    match crate::handlers::response_helpers::decode_local_envelope(&result.data) {
+        Ok(generated::Envelope {
+            payload:
+                Some(generated::envelope::Payload::ConnectReply(generated::ConnectReplyV1 {
+                    reply: Some(generated::connect_reply_v1::Reply::Sessions(s)),
+                })),
+            ..
+        }) => Cycle::Sessions(s.sessions),
+        other => Cycle::NotRun(format!("it answered {other:?}, not the sessions")),
+    }
 }
 
 /// Encode an `AppResponseV1` the wallet signed over `body`.
@@ -476,6 +512,51 @@ mod tests {
         assert!(memo.ends_with("1 capsule"));
         assert_ne!(payment_ref(&session, 7), payment_ref(&session, 8));
         assert_eq!(payment_memo(&session, 7, "  "), payment_ref(&session, 7));
+    }
+
+    /// SA-82. The listener never starts cycles faster than one a
+    /// `MIN_CYCLE`: cycles that answer at once — a request held for the
+    /// player asks the relay nothing — are paced, not run back to back, and
+    /// cycles in which every session failed wait `RETRY_AFTER`. Two and a
+    /// half seconds of cycles that each answer at once run three, where
+    /// unpaced they ran without end.
+    /// MUTATION CONTROL: dropping the pause after a cycle that answered turns
+    /// this red.
+    #[tokio::test]
+    async fn the_listener_never_cycles_faster_than_its_minimum_interval() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let healthy = generated::ConnectSessionV1::default();
+        let failing = generated::ConnectSessionV1 {
+            last_error: "the relay did not answer".into(),
+            ..Default::default()
+        };
+        let one = std::slice::from_ref(&healthy);
+        assert_eq!(pause_after(Duration::ZERO, one), MIN_CYCLE);
+        assert_eq!(pause_after(MIN_CYCLE * 2, one), Duration::ZERO);
+        assert_eq!(
+            pause_after(Duration::ZERO, std::slice::from_ref(&failing)),
+            RETRY_AFTER
+        );
+        assert_eq!(
+            pause_after(Duration::ZERO, &[failing, healthy.clone()]),
+            MIN_CYCLE
+        );
+
+        let cycles = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = cycles.clone();
+        let listener = tokio::spawn(async move {
+            listen_with(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let sessions = vec![healthy.clone()];
+                async move { Cycle::Sessions(sessions) }
+            })
+            .await
+        });
+        tokio::time::sleep(MIN_CYCLE * 5 / 2).await;
+        listener.abort();
+        let ran = cycles.load(Ordering::SeqCst);
+        assert!(ran <= 3, "{ran} cycles ran in two and a half intervals");
+        assert!(ran >= 1, "the listener ran no cycle");
     }
 
     /// DSM Amendment A16: a contacts answer is each contact's device id,

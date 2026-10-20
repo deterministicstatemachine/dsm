@@ -53,12 +53,18 @@ pub(super) struct Held {
     serve: Serve,
     /// Whether the relay takes answers, or is down and refuses every one, as an unreachable application's would.
     answers: Reach,
+    /// What a stalled answer waits on.
+    stalled: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Reach {
     Up,
     Down,
+    /// It takes the wallet's notices that it ended a session, and holds
+    /// every other answer unanswered until the test lets it go: an
+    /// application's endpoint that stalls.
+    Stall,
 }
 
 type Shared = Arc<Mutex<Held>>;
@@ -109,14 +115,24 @@ async fn serve_requests(
 }
 
 async fn keep_response(State(held): State<Shared>, body: Bytes) -> StatusCode {
-    let mut held = held.lock().expect("the relay");
-    match held.answers {
-        Reach::Down => StatusCode::SERVICE_UNAVAILABLE,
-        Reach::Up => {
-            held.responses.push(body.to_vec());
-            StatusCode::OK
+    let stalled = {
+        let mut kept = held.lock().expect("the relay");
+        let seq = generated::AppResponseV1::decode(body.as_ref())
+            .and_then(|r| generated::AppResponseBodyV1::decode(r.body.as_slice()))
+            .map(|b| b.seq);
+        match (kept.answers, seq) {
+            (Reach::Down, _) => return StatusCode::SERVICE_UNAVAILABLE,
+            (Reach::Stall, Ok(seq)) if seq != crate::handlers::connect_routes::DISCONNECT_SEQ => {
+                kept.stalled.clone()
+            }
+            (Reach::Up | Reach::Stall, _) => {
+                kept.responses.push(body.to_vec());
+                return StatusCode::OK;
+            }
         }
-    }
+    };
+    stalled.notified().await;
+    StatusCode::SERVICE_UNAVAILABLE
 }
 
 impl ForwardRelay {
@@ -139,6 +155,7 @@ impl ForwardRelay {
             responses: Vec::new(),
             answers: Reach::Up,
             serve: Serve::Above,
+            stalled: Arc::new(tokio::sync::Notify::new()),
         }));
         let app = axum::Router::new()
             .route("/connect/offer/{digest}", get(serve_offer))
@@ -162,6 +179,12 @@ impl ForwardRelay {
     /// The relay taking answers again, or down (the application unreachable).
     pub(super) fn answers(&self, reach: Reach) {
         self.held().answers = reach;
+    }
+
+    /// Let the stalled answer go, now or as soon as it arrives: it is
+    /// refused.
+    pub(super) fn release_stalled(&self) {
+        self.held().stalled.notify_one();
     }
 
     pub(super) fn held(&self) -> std::sync::MutexGuard<'_, Held> {
@@ -1099,7 +1122,59 @@ async fn a_payment_approved_by_hand_waits_while_the_relationship_settles() {
     );
 }
 
-/// Two syncs at once, as the listener's and one the player starts: the
+/// SA-127. An application's endpoint that stalls holds nothing else: a
+/// request outside the grant waits for the player, and the notice that it
+/// waits goes to an endpoint that never answers; meanwhile the player's
+/// disconnect of that very session completes. The notice is sent once the
+/// session's lock is released, never under it.
+/// MUTATION CONTROL: sending the waiting notice under the session's lock, as
+/// `process` did under one lock for every application, holds the disconnect
+/// behind the stalled endpoint and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_stalled_application_holds_no_disconnect_of_its_session() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: "outside the grant".into(),
+        }),
+    )
+    .await;
+    relay.answers(Reach::Stall);
+    let synced = invoke(&p.b, "connect.sync", Vec::new());
+    let disconnected = async {
+        // The sync reaches the request and stalls on its notice first.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let done = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            invoke(
+                &p.b,
+                "connect.disconnect",
+                args(&generated::ConnectSessionRefV1 {
+                    session_id: session.to_vec(),
+                }),
+            ),
+        )
+        .await;
+        relay.release_stalled();
+        done
+    };
+    let (_, disconnected) = tokio::join!(synced, disconnected);
+    let disconnected =
+        disconnected.expect("the disconnect is not held behind the stalled endpoint");
+    assert!(disconnected.success, "{:?}", disconnected.error_message);
+}
+
+/// Two syncs at once, as the listener's and one the player starts: the/// Two syncs at once, as the listener's and one the player starts: the
 /// replay guard is read and the request carried out as one step, so a
 /// payment runs once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
