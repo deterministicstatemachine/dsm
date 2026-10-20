@@ -3937,7 +3937,8 @@ async fn a_contradicting_witness_is_refused_and_a_missing_baseline_is_walked() {
 /// adoption reads the owner's baseline and the read's budget's worth of the
 /// copies, and adopts nothing: the read is not all of the locator, and one
 /// more baseline of the owner's there would be an equivocation. B's next
-/// adoption reads on past what the first decided nothing, and adopts.
+/// adoption, in the same process, reads on past what the first decided
+/// nothing, and adopts.
 /// MUTATION CONTROL: adopting from a read that is not complete turns this
 /// red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3984,20 +3985,21 @@ async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
             .expect("anyone may append what the members hold");
     }
 
+    // Both adoptions in one process of B's: entering a device again is a
+    // fresh process, which keeps nothing it read.
     forget_the_vault(&p.b, &m.vault_id);
-    adopt_at_b(&p, &offered)
+    p.b.enter();
+    let adopt = || crate::sdk::sofi_flow::adopt_offered(&p.b.router().core_sdk, &set, &offered);
+    adopt()
         .await
         .expect("a read that is not all of the locator refuses nothing");
-    p.b.enter();
     assert!(
         crate::storage::client_db::sofi_vault_head::head(&m.vault_id)
             .expect("B's store")
             .is_none(),
         "nothing is adopted from a read that is not complete"
     );
-    adopt_at_b(&p, &offered)
-        .await
-        .expect("B adopts the baseline");
+    adopt().await.expect("B adopts the baseline");
     let rows = crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
         .expect("B's record");
     assert_eq!(
