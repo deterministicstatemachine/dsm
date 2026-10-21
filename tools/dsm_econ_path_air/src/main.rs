@@ -6,13 +6,14 @@
 //! dsm_econ_path_air [--paths N] [--log-blowup B] [--queries Q] [--pow P]
 //! ```
 //!
-//! `N` is a power of two (default 1: one leaf's path; 2 is one mutation, pre
-//! and post; 4 is a transfer touching two leaves). Prints trace shape,
+//! `N` is the number of paths (default 1: one leaf's path; 2 is one mutation,
+//! pre and post; 4 is a transfer touching two leaves). Each path is the leaf
+//! hash and 256 node hashes; the trace pads to a power of two. Prints trace shape,
 //! generation / proving / verification time, proof size and peak RSS.
 
 use std::time::Instant;
 
-use dsm_econ_path_air::{EconSmtPathAir, PathWitness, SMT_HEIGHT, public_values};
+use dsm_econ_path_air::{EconSmtPathAir, PathWitness, public_values, random_witness};
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
@@ -22,10 +23,12 @@ use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
 use p3_matrix::Matrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use p3_uni_stark::{StarkConfig, prove_with_preprocessed, setup_preprocessed, verify_with_preprocessed};
+use p3_uni_stark::{
+    StarkConfig, prove_with_preprocessed, setup_preprocessed, verify_with_preprocessed,
+};
 use p3_util::log2_strict_usize;
+use rand::SeedableRng;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
 
 type F = KoalaBear;
 type EF = BinomialExtensionField<F, 4>;
@@ -33,7 +36,14 @@ type Perm16 = Poseidon2KoalaBear<16>;
 type Perm24 = Poseidon2KoalaBear<24>;
 type Sponge = PaddingFreeSponge<Perm24, 24, 16, 8>;
 type Compress = TruncatedPermutation<Perm16, 2, 8, 16>;
-type ValMmcs = MerkleTreeMmcs<<F as p3_field::Field>::Packing, <F as p3_field::Field>::Packing, Sponge, Compress, 2, 8>;
+type ValMmcs = MerkleTreeMmcs<
+    <F as p3_field::Field>::Packing,
+    <F as p3_field::Field>::Packing,
+    Sponge,
+    Compress,
+    2,
+    8,
+>;
 type ChallengeMmcs = ExtensionMmcs<F, EF, ValMmcs>;
 type Challenger = DuplexChallenger<F, Perm24, 24, 16>;
 type Dft = Radix2DitParallel<F>;
@@ -48,11 +58,20 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut args = Args { paths: 1, log_blowup: 1, queries: 100, pow_bits: 16 };
+    let mut args = Args {
+        paths: 1,
+        log_blowup: 1,
+        queries: 100,
+        pow_bits: 16,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
-        let value = it.next().unwrap_or_else(|| panic!("{flag} needs a value"));
-        let n: usize = value.parse().unwrap_or_else(|_| panic!("{flag}: not a number: {value}"));
+        let Some(value) = it.next() else {
+            panic!("{flag} needs a value")
+        };
+        let Ok(n) = value.parse::<usize>() else {
+            panic!("{flag}: not a number: {value}")
+        };
         match flag.as_str() {
             "--paths" => args.paths = n,
             "--log-blowup" => args.log_blowup = n,
@@ -61,7 +80,7 @@ fn parse_args() -> Args {
             other => panic!("unknown flag {other}"),
         }
     }
-    assert!(args.paths.is_power_of_two(), "--paths must be a power of two");
+    assert!(args.paths > 0, "--paths must be at least one");
     args
 }
 
@@ -71,27 +90,19 @@ fn peak_rss_bytes() -> u64 {
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
     assert_eq!(rc, 0, "getrusage failed");
     let maxrss = usage.ru_maxrss as u64;
-    if cfg!(target_os = "macos") { maxrss } else { maxrss * 1024 }
-}
-
-fn random_path(rng: &mut SmallRng) -> PathWitness {
-    let mut key = [0u8; 32];
-    let mut leaf = [0u8; 32];
-    rng.fill_bytes(&mut key);
-    rng.fill_bytes(&mut leaf);
-    let mut siblings = Box::new([[0u8; 32]; SMT_HEIGHT]);
-    for s in siblings.iter_mut() {
-        rng.fill_bytes(s);
+    if cfg!(target_os = "macos") {
+        maxrss
+    } else {
+        maxrss * 1024
     }
-    PathWitness { key, leaf, siblings }
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     let args = parse_args();
 
     // Random witnesses: the cost does not depend on their values.
     let mut rng = SmallRng::seed_from_u64(0x5a5a);
-    let paths: Vec<PathWitness> = (0..args.paths).map(|_| random_path(&mut rng)).collect();
+    let paths: Vec<PathWitness> = (0..args.paths).map(|_| random_witness(&mut rng)).collect();
     let air = EconSmtPathAir::new(paths.iter().map(|p| p.key).collect());
     let pvs = public_values::<F>(&paths);
 
@@ -124,27 +135,44 @@ fn main() {
     let log_rows = log2_strict_usize(rows);
 
     let t = Instant::now();
-    let (pp_prover, pp_vk) = setup_preprocessed(&config, &air, log_rows)
-        .expect("preprocessed setup")
-        .expect("this AIR has preprocessed columns");
+    let Some((pp_prover, pp_vk)) = setup_preprocessed(&config, &air, log_rows)
+        .map_err(|e| format!("preprocessed setup: {e:?}"))?
+    else {
+        return Err("this AIR has preprocessed columns".to_string());
+    };
     let setup_time = t.elapsed();
 
     let t = Instant::now();
-    let proof = prove_with_preprocessed(&config, &air, trace, &pvs, Some(&pp_prover)).expect("prove");
+    let proof = prove_with_preprocessed(&config, &air, trace, &pvs, Some(&pp_prover))
+        .map_err(|e| format!("prove: {e:?}"))?;
     let prove_time = t.elapsed();
-    let proof_bytes = postcard::to_allocvec(&proof).expect("serialize proof").len();
+    let proof_bytes = postcard::to_allocvec(&proof)
+        .map_err(|e| format!("serialize proof: {e:?}"))?
+        .len();
 
     let t = Instant::now();
-    verify_with_preprocessed(&config, &air, &proof, &pvs, Some(&pp_vk)).expect("verify");
+    verify_with_preprocessed(&config, &air, &proof, &pvs, Some(&pp_vk))
+        .map_err(|e| format!("verify: {e:?}"))?;
     let verify_time = t.elapsed();
 
-    println!("paths              {}", args.paths);
-    println!("trace              {rows} rows x {width} cols ({:.1} MB of field elements)", (rows * width * 4) as f64 / 1e6);
-    println!("fri                log_blowup={} queries={} query_pow_bits={}", args.log_blowup, args.queries, args.pow_bits);
+    println!(
+        "paths              {} ({} path rows, padded to {rows})",
+        args.paths,
+        air.real_rows()
+    );
+    println!(
+        "trace              {rows} rows x {width} cols ({:.1} MB of field elements)",
+        (rows * width * 4) as f64 / 1e6
+    );
+    println!(
+        "fri                log_blowup={} queries={} query_pow_bits={}",
+        args.log_blowup, args.queries, args.pow_bits
+    );
     println!("trace generation   {gen_time:?}");
     println!("preprocessed setup {setup_time:?}");
     println!("prove              {prove_time:?}");
     println!("verify             {verify_time:?}");
     println!("proof size         {proof_bytes} bytes");
     println!("peak rss           {:.0} MB", peak_rss_bytes() as f64 / 1e6);
+    Ok(())
 }

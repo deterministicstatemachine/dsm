@@ -2,34 +2,47 @@
 
 //! The economic SMT authentication path as a Plonky3 AIR.
 //!
-//! `R_econ` is a 256-level sparse Merkle tree whose internal nodes are
+//! `R_econ` is a 256-level sparse Merkle tree whose leaves are
+//! `econ_leaf(key, value) = BLAKE3(tag ‖ 0x00 ‖ key ‖ value)` with the 24-byte
+//! tag `DSM/economic-smt-leaf/v1`, and whose internal nodes are
 //! `econ_node(l, r) = BLAKE3(tag ‖ 0x00 ‖ l ‖ r)` with the 24-byte tag
-//! `DSM/economic-smt-node/v1` (`dsm::economic::tree`). The message is 89
-//! bytes, so one node is exactly two BLAKE3 compressions in one chunk: the
+//! `DSM/economic-smt-node/v1` (`dsm::economic::tree`). Either message is 89
+//! bytes, so one hash is exactly two BLAKE3 compressions in one chunk: the
 //! first over bytes `0..64` with the IV as chaining value and `CHUNK_START`,
 //! the second over bytes `64..89` with the first's output as chaining value
 //! and `CHUNK_END | ROOT`. The hash is the first eight output words of the
 //! second compression.
 //!
 //! One trace row is one compression, proven by [`Blake3Air`] as a sub-AIR over
-//! the first `NUM_BLAKE3_COLS` columns. Two rows make one level; 512 rows make
-//! one path, folded leaf-to-root exactly as `root_from_path` folds it. The
-//! columns after the BLAKE3 block carry the level's child digest (`current`)
-//! and `sibling` as bits, and the constraints bind:
+//! the first `NUM_BLAKE3_COLS` columns. Two rows make one hash. A path is the
+//! leaf hash followed by 256 node hashes, 514 rows, folded leaf-to-root exactly
+//! as `root_from_path` folds it. The columns after the BLAKE3 block carry the
+//! hash's two operands as bits, `current` and `sibling`, and the constraints
+//! bind:
 //!
-//! - row A's message to `tag ‖ 0x00 ‖ left ‖ right` where `(left, right)` is
-//!   `(current, sibling)` when the key bit is 0 and `(sibling, current)` when
-//!   it is 1 — the key bit is a preprocessed column, fixed by the verifier
-//!   from the key, never chosen by the prover;
-//! - row B's chaining value to row A's output, and row B's message to the
-//!   tail of `right`;
-//! - the next level's `current` to row B's output;
-//! - the first `current` of each path to the leaf public values and the last
-//!   output to the root public values, as 16-bit limbs.
+//! - the leaf hash's message to `leaf tag ‖ 0x00 ‖ key ‖ value`, key in
+//!   `current` and value in `sibling`, both tied to the path's public values;
+//! - a node hash's message to `node tag ‖ 0x00 ‖ left ‖ right` where
+//!   `(left, right)` is `(current, sibling)` when the key bit is 0 and
+//!   `(sibling, current)` when it is 1 — the key bit is a preprocessed column,
+//!   fixed by the verifier from the key, never chosen by the prover;
+//! - the second row's chaining value to the first row's output, and its
+//!   message to the tail of `right`;
+//! - the next hash's `current` to the previous hash's output;
+//! - the last output of each path to the root public values.
 //!
-//! A proof is over `N` paths (a power of two) with one key each, which is the
-//! shape of a mutation: the pre-state path and the post-state path of one
-//! leaf share a key and siblings and differ in the leaf.
+//! The statement proven for each path is: `root = fold(econ_leaf(key, value),
+//! siblings)`, with `key`, `value` and `root` public and the siblings private.
+//!
+//! The trace height is a power of two: the rows past the last path are copies
+//! of its final compression, so Blake3Air holds on them, with every selector
+//! off so no other constraint reads them.
+//!
+//! A proof is over `N` paths with one key each, which is the shape of a
+//! mutation: the pre-state path and the post-state path of one leaf share a
+//! key and siblings and differ in the value. A leaf that is absent on one side
+//! of a mutation (an insertion or a removal) is not covered: its leaf node is
+//! the zero digest, not a hash.
 
 use core::mem::offset_of;
 
@@ -39,6 +52,8 @@ use p3_blake3_air::{Blake3Air, Blake3Cols, Blake3CompressionInput, NUM_BLAKE3_CO
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_uni_stark::SubAirBuilder;
+use rand::Rng;
+use rand::rngs::SmallRng;
 
 /// `DSM/economic-smt-node/v1`, as `dsm::common::domain_tags` spells it.
 pub const TAG_ECONOMIC_SMT_NODE: &[u8; 24] = b"DSM/economic-smt-node/v1";
@@ -52,14 +67,16 @@ pub const NODE_MSG_LEN: usize = PREFIX_LEN + 64;
 pub const TAIL_LEN: usize = NODE_MSG_LEN - 64;
 /// Full 256-bit key space (`ECONOMIC_SMT_HEIGHT`).
 pub const SMT_HEIGHT: usize = 256;
-/// Two compressions per level.
-pub const ROWS_PER_PATH: usize = 2 * SMT_HEIGHT;
+/// Rows of the leaf hash: two compressions.
+pub const LEAF_ROWS: usize = 2;
+/// Rows per path: the leaf hash, then two compressions per level.
+pub const ROWS_PER_PATH: usize = LEAF_ROWS + 2 * SMT_HEIGHT;
 /// Columns after the BLAKE3 block: `current` (256 bits) then `sibling` (256 bits).
 pub const NUM_EXTRA_COLS: usize = 512;
 /// Trace width.
 pub const NUM_COLS: usize = NUM_BLAKE3_COLS + NUM_EXTRA_COLS;
-/// Public values per path: leaf as 16 u16 limbs, root as 16 u16 limbs.
-pub const PUBLIC_VALUES_PER_PATH: usize = 32;
+/// Public values per path: key, value and root, each as 16 u16 limbs.
+pub const PUBLIC_VALUES_PER_PATH: usize = 48;
 
 const IV: [u32; 8] = [
     0x6A09_E667,
@@ -75,6 +92,12 @@ const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9,
 const CHUNK_START: u32 = 1;
 const CHUNK_END: u32 = 2;
 const ROOT: u32 = 8;
+
+/// Bit `k` of `v`, as 0 or 1.
+#[inline]
+const fn bit_of(v: u32, k: usize) -> u8 {
+    ((v >> k) & 1) as u8
+}
 
 // ---------------------------------------------------------------------------
 // BLAKE3 on the host, for trace construction and for the reference hash.
@@ -144,45 +167,86 @@ pub fn compress(input: &Blake3CompressionInput) -> [u32; 16] {
 fn words_le(bytes: &[u8]) -> [u32; 16] {
     let mut block = [0u8; 64];
     block[..bytes.len()].copy_from_slice(bytes);
-    core::array::from_fn(|w| u32::from_le_bytes([block[4 * w], block[4 * w + 1], block[4 * w + 2], block[4 * w + 3]]))
+    core::array::from_fn(|w| {
+        u32::from_le_bytes([
+            block[4 * w],
+            block[4 * w + 1],
+            block[4 * w + 2],
+            block[4 * w + 3],
+        ])
+    })
 }
 
 fn digest_words(d: &[u8; 32]) -> [u32; 8] {
-    core::array::from_fn(|w| u32::from_le_bytes([d[4 * w], d[4 * w + 1], d[4 * w + 2], d[4 * w + 3]]))
+    core::array::from_fn(|w| {
+        u32::from_le_bytes([d[4 * w], d[4 * w + 1], d[4 * w + 2], d[4 * w + 3]])
+    })
 }
 
 fn digest_bytes(words: &[u32]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    for (w, word) in words.iter().take(8).enumerate() {
-        out[4 * w..4 * w + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    out
+    core::array::from_fn(|i| words[i / 4].to_le_bytes()[i % 4])
 }
 
-/// The two compressions of `econ_node(left, right)`, in order, and the node.
-pub fn node_compressions(left: &[u8; 32], right: &[u8; 32]) -> ([Blake3CompressionInput; 2], [u8; 32]) {
+/// A hook that may alter one compression after it is built and before it is
+/// compressed: `(0, first)` or `(1, second)`. Production passes none; tests use
+/// it to build a trace that is honest everywhere except one link.
+type Tweak<'a> = &'a dyn Fn(usize, &mut Blake3CompressionInput);
+
+/// The two compressions of `H_dom(tag, left ‖ right)`, in order, and the digest.
+pub fn pair_compressions(
+    tag: &[u8; 24],
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> ([Blake3CompressionInput; 2], [u8; 32]) {
+    pair_compressions_with(tag, left, right, &|_, _| {})
+}
+
+fn pair_compressions_with(
+    tag: &[u8; 24],
+    left: &[u8; 32],
+    right: &[u8; 32],
+    tweak: Tweak<'_>,
+) -> ([Blake3CompressionInput; 2], [u8; 32]) {
     let mut msg = [0u8; NODE_MSG_LEN];
-    msg[..24].copy_from_slice(TAG_ECONOMIC_SMT_NODE);
+    msg[..24].copy_from_slice(tag);
     msg[24] = 0;
     msg[PREFIX_LEN..PREFIX_LEN + 32].copy_from_slice(left);
     msg[PREFIX_LEN + 32..].copy_from_slice(right);
-    let first = Blake3CompressionInput {
+    let mut first = Blake3CompressionInput {
         chaining_value: IV,
         block: words_le(&msg[..64]),
         counter: 0,
         block_len: 64,
         flags: CHUNK_START,
     };
+    tweak(0, &mut first);
     let out_a = compress(&first);
-    let second = Blake3CompressionInput {
+    let mut second = Blake3CompressionInput {
         chaining_value: core::array::from_fn(|i| out_a[i]),
         block: words_le(&msg[64..]),
         counter: 0,
         block_len: TAIL_LEN as u32,
         flags: CHUNK_END | ROOT,
     };
+    tweak(1, &mut second);
     let out_b = compress(&second);
     ([first, second], digest_bytes(&out_b))
+}
+
+/// The two compressions of `econ_node(left, right)`, in order, and the node.
+pub fn node_compressions(
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> ([Blake3CompressionInput; 2], [u8; 32]) {
+    pair_compressions(TAG_ECONOMIC_SMT_NODE, left, right)
+}
+
+/// The two compressions of `econ_leaf(key, value)`, in order, and the leaf.
+pub fn leaf_compressions(
+    key: &[u8; 32],
+    value: &[u8; 32],
+) -> ([Blake3CompressionInput; 2], [u8; 32]) {
+    pair_compressions(TAG_ECONOMIC_SMT_LEAF, key, value)
 }
 
 /// `econ_node` by the `blake3` crate — the reference the AIR is held to.
@@ -217,7 +281,11 @@ pub fn direction(key: &[u8; 32], step: usize) -> u8 {
 }
 
 /// `root_from_path` by the reference hash.
-pub fn root_from_path_reference(key: &[u8; 32], leaf: &[u8; 32], siblings: &[[u8; 32]; SMT_HEIGHT]) -> [u8; 32] {
+pub fn root_from_path_reference(
+    key: &[u8; 32],
+    leaf: &[u8; 32],
+    siblings: &[[u8; 32]; SMT_HEIGHT],
+) -> [u8; 32] {
     let mut current = *leaf;
     for (i, sibling) in siblings.iter().enumerate() {
         current = if direction(key, i) == 0 {
@@ -233,18 +301,40 @@ pub fn root_from_path_reference(key: &[u8; 32], leaf: &[u8; 32], siblings: &[[u8
 // One path's witness.
 // ---------------------------------------------------------------------------
 
-/// One leaf-to-root path: what the prover knows.
+/// One leaf-to-root path: what the prover knows. `key`, `value` and the root
+/// it folds to are the statement; the siblings are private.
 #[derive(Clone)]
 pub struct PathWitness {
     pub key: [u8; 32],
-    pub leaf: [u8; 32],
+    pub value: [u8; 32],
     pub siblings: Box<[[u8; 32]; SMT_HEIGHT]>,
 }
 
 impl PathWitness {
+    /// `econ_leaf(key, value)`.
+    pub fn leaf(&self) -> [u8; 32] {
+        econ_leaf_reference(&self.key, &self.value)
+    }
+
     /// The root this path folds to.
     pub fn root(&self) -> [u8; 32] {
-        root_from_path_reference(&self.key, &self.leaf, &self.siblings)
+        root_from_path_reference(&self.key, &self.leaf(), &self.siblings)
+    }
+}
+
+fn random_digest(rng: &mut SmallRng) -> [u8; 32] {
+    core::array::from_fn(|_| rng.next_u32() as u8)
+}
+
+/// A random witness. A proof's cost does not depend on the values.
+pub fn random_witness(rng: &mut SmallRng) -> PathWitness {
+    let key = random_digest(rng);
+    let value = random_digest(rng);
+    let siblings = Box::new(core::array::from_fn(|_| random_digest(rng)));
+    PathWitness {
+        key,
+        value,
+        siblings,
     }
 }
 
@@ -253,15 +343,20 @@ pub fn digest_limbs<F: PrimeField64>(d: &[u8; 32]) -> [F; 16] {
     let words = digest_words(d);
     core::array::from_fn(|i| {
         let w = words[i / 2];
-        if i % 2 == 0 { F::from_u16(w as u16) } else { F::from_u16((w >> 16) as u16) }
+        if i % 2 == 0 {
+            F::from_u16(w as u16)
+        } else {
+            F::from_u16((w >> 16) as u16)
+        }
     })
 }
 
-/// The public values for `paths`: per path, leaf limbs then root limbs.
+/// The public values for `paths`: per path, key limbs, value limbs, root limbs.
 pub fn public_values<F: PrimeField64>(paths: &[PathWitness]) -> Vec<F> {
     let mut pvs = Vec::with_capacity(paths.len() * PUBLIC_VALUES_PER_PATH);
     for p in paths {
-        pvs.extend_from_slice(&digest_limbs::<F>(&p.leaf));
+        pvs.extend_from_slice(&digest_limbs::<F>(&p.key));
+        pvs.extend_from_slice(&digest_limbs::<F>(&p.value));
         pvs.extend_from_slice(&digest_limbs::<F>(&p.root()));
     }
     pvs
@@ -307,27 +402,34 @@ const fn sibling_bit(b: usize, j: usize) -> usize {
     OFF_SIBLING + 32 * (b / 4) + 8 * (b % 4) + j
 }
 
-/// Preprocessed columns: `is_a`, `direction`, `is_path_start`, `is_path_end`,
-/// then one selector per path.
+/// Preprocessed columns, all fixed by the verifier from the keys:
+/// `is_a` and `is_b` (first and second compression of a hash, both zero on the
+/// padding rows), `is_leaf` (either row of the leaf hash), `is_leaf_a` (its
+/// first row), `direction` (the key bit a node level consumes; zero on the leaf
+/// rows), `carry` (the second row of a hash whose output feeds the next hash),
+/// `is_end` (the last row of a path), then one selector per path.
 const PRE_IS_A: usize = 0;
-const PRE_DIRECTION: usize = 1;
-const PRE_PATH_START: usize = 2;
-const PRE_PATH_END: usize = 3;
-const PRE_PATH_SEL: usize = 4;
+const PRE_IS_B: usize = 1;
+const PRE_IS_LEAF: usize = 2;
+const PRE_IS_LEAF_A: usize = 3;
+const PRE_DIRECTION: usize = 4;
+const PRE_CARRY: usize = 5;
+const PRE_IS_END: usize = 6;
+const PRE_PATH_SEL: usize = 7;
 
 // ---------------------------------------------------------------------------
 // The AIR.
 // ---------------------------------------------------------------------------
 
-/// The economic SMT path AIR over `keys.len()` paths (a power of two), one key
-/// each. The keys are the verifier's: they fix the preprocessed trace.
+/// The economic SMT path AIR over `keys.len()` paths, one key each. The keys
+/// are the verifier's: they fix the preprocessed trace.
 pub struct EconSmtPathAir {
     pub keys: Vec<[u8; 32]>,
 }
 
 impl EconSmtPathAir {
     pub fn new(keys: Vec<[u8; 32]>) -> Self {
-        assert!(!keys.is_empty() && keys.len().is_power_of_two(), "paths must be a power of two");
+        assert!(!keys.is_empty(), "at least one path");
         Self { keys }
     }
 
@@ -335,8 +437,14 @@ impl EconSmtPathAir {
         self.keys.len()
     }
 
-    pub fn num_rows(&self) -> usize {
+    /// Rows that carry a path.
+    pub fn real_rows(&self) -> usize {
         self.keys.len() * ROWS_PER_PATH
+    }
+
+    /// The trace height: the path rows, padded to a power of two.
+    pub fn num_rows(&self) -> usize {
+        self.real_rows().next_power_of_two()
     }
 
     fn preprocessed_width_(&self) -> usize {
@@ -344,42 +452,89 @@ impl EconSmtPathAir {
     }
 
     /// The main trace for `paths`, whose keys must be this AIR's keys in order.
-    pub fn generate_trace<F: PrimeField64>(&self, paths: &[PathWitness], extra_capacity_bits: usize) -> RowMajorMatrix<F> {
+    pub fn generate_trace<F: PrimeField64>(
+        &self,
+        paths: &[PathWitness],
+        extra_capacity_bits: usize,
+    ) -> RowMajorMatrix<F> {
+        self.generate_trace_with(paths, extra_capacity_bits, &|_, _| {})
+            .0
+    }
+
+    /// The trace, with `tweak(row, compression)` applied to the compression of
+    /// each trace row before it is compressed, and the root each path then folds
+    /// to. With no alteration the roots are the witnesses'.
+    fn generate_trace_with<F: PrimeField64>(
+        &self,
+        paths: &[PathWitness],
+        extra_capacity_bits: usize,
+        tweak: Tweak<'_>,
+    ) -> (RowMajorMatrix<F>, Vec<[u8; 32]>) {
         assert_eq!(paths.len(), self.keys.len());
         for (p, k) in paths.iter().zip(&self.keys) {
             assert_eq!(&p.key, k, "path key is not the AIR's key");
         }
-        let mut inputs = Vec::with_capacity(self.num_rows());
-        // (current, sibling) per row A; zero on row B.
-        let mut extras: Vec<([u8; 32], [u8; 32])> = Vec::with_capacity(self.num_rows());
+        let rows = self.num_rows();
+        let mut inputs: Vec<Blake3CompressionInput> = Vec::with_capacity(rows);
+        // The two operands of a hash on its first row; nothing on its second or on padding.
+        let mut extras: Vec<Option<([u8; 32], [u8; 32])>> = Vec::with_capacity(rows);
+        let mut roots = Vec::with_capacity(paths.len());
         for p in paths {
-            let mut current = p.leaf;
+            let base = inputs.len();
+            let (two, leaf) =
+                pair_compressions_with(TAG_ECONOMIC_SMT_LEAF, &p.key, &p.value, &|which, input| {
+                    tweak(base + which, input)
+                });
+            inputs.extend(two);
+            extras.push(Some((p.key, p.value)));
+            extras.push(None);
+            let mut current = leaf;
             for (i, sibling) in p.siblings.iter().enumerate() {
-                let (left, right) = if direction(&p.key, i) == 0 { (current, *sibling) } else { (*sibling, current) };
-                let (two, node) = node_compressions(&left, &right);
-                inputs.push(two[0].clone());
-                inputs.push(two[1].clone());
-                extras.push((current, *sibling));
-                extras.push(([0u8; 32], [0u8; 32]));
+                let (left, right) = if direction(&p.key, i) == 0 {
+                    (current, *sibling)
+                } else {
+                    (*sibling, current)
+                };
+                let at = inputs.len();
+                let (two, node) = pair_compressions_with(
+                    TAG_ECONOMIC_SMT_NODE,
+                    &left,
+                    &right,
+                    &|which, input| tweak(at + which, input),
+                );
+                inputs.extend(two);
+                extras.push(Some((current, *sibling)));
+                extras.push(None);
                 current = node;
             }
+            roots.push(current);
+        }
+        // Padding: a copy of the last genuine compression, which Blake3Air holds on.
+        let [.., last] = inputs.as_slice() else {
+            panic!("a trace needs at least one path");
+        };
+        let filler = *last;
+        while inputs.len() < rows {
+            inputs.push(filler);
+            extras.push(None);
         }
         let blake = p3_blake3_air::generate_trace_rows_with_inputs::<F>(inputs, 0);
-        let rows = self.num_rows();
         let mut values = F::zero_vec((rows * NUM_COLS) << extra_capacity_bits);
         values.truncate(rows * NUM_COLS);
         for r in 0..rows {
             let dst = &mut values[r * NUM_COLS..(r + 1) * NUM_COLS];
-            dst[..NUM_BLAKE3_COLS].copy_from_slice(&blake.values[r * NUM_BLAKE3_COLS..(r + 1) * NUM_BLAKE3_COLS]);
-            let (cur, sib) = extras[r];
-            for b in 0..32 {
-                for j in 0..8 {
-                    dst[current_bit(b, j)] = F::from_bool((cur[b] >> j) & 1 == 1);
-                    dst[sibling_bit(b, j)] = F::from_bool((sib[b] >> j) & 1 == 1);
+            dst[..NUM_BLAKE3_COLS]
+                .copy_from_slice(&blake.values[r * NUM_BLAKE3_COLS..(r + 1) * NUM_BLAKE3_COLS]);
+            if let Some((cur, sib)) = extras[r] {
+                for b in 0..32 {
+                    for j in 0..8 {
+                        dst[current_bit(b, j)] = F::from_u8((cur[b] >> j) & 1);
+                        dst[sibling_bit(b, j)] = F::from_u8((sib[b] >> j) & 1);
+                    }
                 }
             }
         }
-        RowMajorMatrix::new(values, NUM_COLS)
+        (RowMajorMatrix::new(values, NUM_COLS), roots)
     }
 }
 
@@ -397,17 +552,21 @@ impl<F: PrimeField64> BaseAir<F> for EconSmtPathAir {
         let rows = self.num_rows();
         let mut values = F::zero_vec(rows * w);
         for (p, key) in self.keys.iter().enumerate() {
-            for i in 0..SMT_HEIGHT {
-                let d = F::from_bool(direction(key, i) == 1);
-                for half in 0..2 {
-                    let r = p * ROWS_PER_PATH + 2 * i + half;
-                    let row = &mut values[r * w..(r + 1) * w];
-                    row[PRE_IS_A] = F::from_bool(half == 0);
-                    row[PRE_DIRECTION] = d;
-                    row[PRE_PATH_START] = F::from_bool(i == 0 && half == 0);
-                    row[PRE_PATH_END] = F::from_bool(i == SMT_HEIGHT - 1 && half == 1);
-                    row[PRE_PATH_SEL + p] = F::ONE;
+            for k in 0..ROWS_PER_PATH {
+                let row = &mut values[(p * ROWS_PER_PATH + k) * w..(p * ROWS_PER_PATH + k + 1) * w];
+                let half = k % 2;
+                let is_leaf = k < LEAF_ROWS;
+                let level = k.saturating_sub(LEAF_ROWS) / 2;
+                row[PRE_IS_A] = F::from_bool(half == 0);
+                row[PRE_IS_B] = F::from_bool(half == 1);
+                row[PRE_IS_LEAF] = F::from_bool(is_leaf);
+                row[PRE_IS_LEAF_A] = F::from_bool(k == 0);
+                if !is_leaf {
+                    row[PRE_DIRECTION] = F::from_u8(direction(key, level));
                 }
+                row[PRE_CARRY] = F::from_bool(half == 1 && k != ROWS_PER_PATH - 1);
+                row[PRE_IS_END] = F::from_bool(k == ROWS_PER_PATH - 1);
+                row[PRE_PATH_SEL + p] = F::ONE;
             }
         }
         Some(RowMajorMatrix::new(values, w))
@@ -454,15 +613,19 @@ where
         let pre = builder.preprocessed().clone();
         let pl = pre.current_slice();
         let is_a: AB::Expr = pl[PRE_IS_A].into();
+        let is_leaf: AB::Expr = pl[PRE_IS_LEAF].into();
+        let is_leaf_a: AB::Expr = pl[PRE_IS_LEAF_A].into();
         let d: AB::Expr = pl[PRE_DIRECTION].into();
-        let is_start: AB::Expr = pl[PRE_PATH_START].into();
-        let is_end: AB::Expr = pl[PRE_PATH_END].into();
-        let path_sel: Vec<AB::Expr> = (0..self.keys.len()).map(|p| pl[PRE_PATH_SEL + p].into()).collect();
+        let carry: AB::Expr = pl[PRE_CARRY].into();
+        let is_end: AB::Expr = pl[PRE_IS_END].into();
+        let path_sel: Vec<AB::Expr> = (0..self.keys.len())
+            .map(|p| pl[PRE_PATH_SEL + p].into())
+            .collect();
         let pvs: Vec<AB::Expr> = builder.public_values().iter().map(|&v| v.into()).collect();
-        let is_b = AB::Expr::ONE - is_a.clone();
 
-        let bit_const = |v: u32, k: usize| AB::Expr::from_bool((v >> k) & 1 == 1);
-        // The left and right 32-byte operands of this level, as the key bit selects them.
+        let bit_const = |v: u32, k: usize| AB::Expr::from_u8(bit_of(v, k));
+        // The left and right 32-byte operands of this hash, as the key bit selects
+        // them. On the leaf rows the direction is zero: `(key, value)` in order.
         let left = |b: usize, j: usize| -> AB::Expr {
             let cur: AB::Expr = local[current_bit(b, j)].into();
             let sib: AB::Expr = local[sibling_bit(b, j)].into();
@@ -474,17 +637,12 @@ where
             sib.clone() + d.clone() * (cur - sib)
         };
 
-        // --- Row A: the first compression of `econ_node(left, right)`.
-        // Operand bits are booleans (the message bits are, by Blake3Air, but the
-        // selection only forces the chosen operand's bits to be).
-        for b in 0..32 {
-            for j in 0..8 {
-                let cur: AB::Expr = local[current_bit(b, j)].into();
-                let sib: AB::Expr = local[sibling_bit(b, j)].into();
-                builder.assert_zero(is_a.clone() * cur.bool_check());
-                builder.assert_zero(is_a.clone() * sib.bool_check());
-            }
-        }
+        // --- Row A: the first compression of `H_dom(tag, left ‖ right)`.
+        // The operand bits need no boolean check of their own: every bit of
+        // `current` and `sibling` is equated below to a message bit of row A or B
+        // (the direction is a preprocessed 0 or 1, so each operand lands in
+        // exactly one of `left`, `right`), and Blake3Air constrains the message
+        // bits to be boolean.
         // Chaining value = IV; counter = 0; block_len = 64; flags = CHUNK_START.
         for w in 0..8 {
             for k in 0..32 {
@@ -502,12 +660,15 @@ where
             builder.assert_zero(is_a.clone() * (len - bit_const(64, k)));
             builder.assert_zero(is_a.clone() * (flags - bit_const(CHUNK_START, k)));
         }
-        // Message block 0 = tag ‖ 0x00 ‖ left ‖ right[0..7].
+        // Message block 0 = tag ‖ 0x00 ‖ left ‖ right[0..7], the tag the leaf's on
+        // the leaf rows and the node's elsewhere.
         for b in 0..64 {
             for j in 0..8 {
                 let m: AB::Expr = local[input_bit(b, j)].into();
                 let expected = if b < 24 {
-                    AB::Expr::from_bool((TAG_ECONOMIC_SMT_NODE[b] >> j) & 1 == 1)
+                    let node_bit = AB::Expr::from_u8((TAG_ECONOMIC_SMT_NODE[b] >> j) & 1);
+                    let leaf_bit = AB::Expr::from_u8((TAG_ECONOMIC_SMT_LEAF[b] >> j) & 1);
+                    node_bit.clone() + is_leaf.clone() * (leaf_bit - node_bit)
                 } else if b < PREFIX_LEN {
                     AB::Expr::ZERO
                 } else if b < PREFIX_LEN + 32 {
@@ -542,14 +703,18 @@ where
         for b in 0..64 {
             for j in 0..8 {
                 let m: AB::Expr = next[input_bit(b, j)].into();
-                let expected = if b < TAIL_LEN { right(64 - PREFIX_LEN - 32 + b, j) } else { AB::Expr::ZERO };
+                let expected = if b < TAIL_LEN {
+                    right(64 - PREFIX_LEN - 32 + b, j)
+                } else {
+                    AB::Expr::ZERO
+                };
                 builder.assert_zero(is_a.clone() * (m - expected));
             }
         }
 
-        // --- Row B → next level's row A: the node becomes `current`, except at
-        // the end of a path.
-        let carry = is_b.clone() * (AB::Expr::ONE - is_end.clone());
+        // --- Row B → the next hash's row A: the digest becomes `current`,
+        // from the leaf hash into the first level and from each level into the
+        // next; not at the end of a path, and not on the padding.
         for w in 0..8 {
             for k in 0..32 {
                 let cur_next: AB::Expr = next[OFF_CURRENT + 32 * w + k].into();
@@ -558,17 +723,33 @@ where
             }
         }
 
-        // --- Boundaries: the first `current` is the leaf, the last output the
-        // root, per path, as u16 limbs.
+        // --- Boundaries, per path, as u16 limbs: the leaf hash's key and value
+        // are the public key and value; the last output is the public root.
         for (p, sel) in path_sel.iter().enumerate() {
             let base = p * PUBLIC_VALUES_PER_PATH;
             for w in 0..8 {
                 for half in 0..2 {
                     let bits = half * 16..half * 16 + 16;
-                    let leaf_limb: AB::Expr = pack_bits_le(bits.clone().map(|k| local[OFF_CURRENT + 32 * w + k]));
+                    let key_limb: AB::Expr =
+                        pack_bits_le(bits.clone().map(|k| local[OFF_CURRENT + 32 * w + k]));
+                    let value_limb: AB::Expr =
+                        pack_bits_le(bits.clone().map(|k| local[OFF_SIBLING + 32 * w + k]));
                     let root_limb: AB::Expr = pack_bits_le(bits.map(|k| local[out_bit(w, k)]));
-                    builder.assert_zero(is_start.clone() * sel.clone() * (leaf_limb - pvs[base + 2 * w + half].clone()));
-                    builder.assert_zero(is_end.clone() * sel.clone() * (root_limb - pvs[base + 16 + 2 * w + half].clone()));
+                    builder.assert_zero(
+                        is_leaf_a.clone()
+                            * sel.clone()
+                            * (key_limb - pvs[base + 2 * w + half].clone()),
+                    );
+                    builder.assert_zero(
+                        is_leaf_a.clone()
+                            * sel.clone()
+                            * (value_limb - pvs[base + 16 + 2 * w + half].clone()),
+                    );
+                    builder.assert_zero(
+                        is_end.clone()
+                            * sel.clone()
+                            * (root_limb - pvs[base + 32 + 2 * w + half].clone()),
+                    );
                 }
             }
         }
@@ -578,80 +759,319 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p3_koala_bear::KoalaBear;
     use p3_matrix::Matrix;
-    use rand::rngs::SmallRng;
-    use rand::{Rng, SeedableRng};
+    use rand::SeedableRng;
 
-    fn random_path(rng: &mut SmallRng) -> PathWitness {
-        let mut key = [0u8; 32];
-        let mut leaf = [0u8; 32];
-        rng.fill_bytes(&mut key);
-        rng.fill_bytes(&mut leaf);
-        let mut siblings = Box::new([[0u8; 32]; SMT_HEIGHT]);
-        for s in siblings.iter_mut() {
-            rng.fill_bytes(s);
-        }
-        PathWitness { key, leaf, siblings }
+    type F = KoalaBear;
+
+    fn honest(
+        seed: u64,
+        paths: usize,
+    ) -> (EconSmtPathAir, Vec<PathWitness>, RowMajorMatrix<F>, Vec<F>) {
+        let mut rng = SmallRng::seed_from_u64(seed);
+        let witnesses: Vec<PathWitness> = (0..paths).map(|_| random_witness(&mut rng)).collect();
+        let air = EconSmtPathAir::new(witnesses.iter().map(|p| p.key).collect());
+        let trace = air.generate_trace::<F>(&witnesses, 0);
+        let pvs = public_values::<F>(&witnesses);
+        (air, witnesses, trace, pvs)
     }
 
     #[test]
     fn the_two_compressions_are_econ_node() {
         let mut rng = SmallRng::seed_from_u64(7);
         for _ in 0..64 {
-            let mut l = [0u8; 32];
-            let mut r = [0u8; 32];
-            rng.fill_bytes(&mut l);
-            rng.fill_bytes(&mut r);
+            let l = random_digest(&mut rng);
+            let r = random_digest(&mut rng);
             let (_, node) = node_compressions(&l, &r);
             assert_eq!(node, econ_node_reference(&l, &r));
         }
     }
 
     #[test]
-    fn the_trace_rows_output_the_node() {
-        type F = p3_koala_bear::KoalaBear;
-        let mut rng = SmallRng::seed_from_u64(11);
-        let path = random_path(&mut rng);
-        let air = EconSmtPathAir::new(vec![path.key]);
-        let trace = air.generate_trace::<F>(&[path.clone()], 0);
-        assert_eq!(trace.height(), ROWS_PER_PATH);
-        // The last row B's output is the root.
-        let last = trace.row_slice(ROWS_PER_PATH - 1).unwrap();
-        let mut root = [0u8; 32];
-        for b in 0..32 {
-            for j in 0..8 {
-                let bit = last[out_bit(b / 4, 8 * (b % 4) + j)];
-                if bit == F::ONE {
-                    root[b] |= 1 << j;
-                }
-            }
+    fn the_two_compressions_are_econ_leaf() {
+        let mut rng = SmallRng::seed_from_u64(8);
+        for _ in 0..64 {
+            let k = random_digest(&mut rng);
+            let v = random_digest(&mut rng);
+            let (_, leaf) = leaf_compressions(&k, &v);
+            assert_eq!(leaf, econ_leaf_reference(&k, &v));
         }
-        assert_eq!(root, path.root());
     }
 
     #[test]
-    fn the_constraints_hold_on_an_honest_trace_and_fail_on_a_wrong_leaf_or_a_changed_sibling() {
-        type F = p3_koala_bear::KoalaBear;
-        let mut rng = SmallRng::seed_from_u64(3);
-        let paths = vec![random_path(&mut rng), random_path(&mut rng)];
-        let air = EconSmtPathAir::new(paths.iter().map(|p| p.key).collect());
-        let trace = air.generate_trace::<F>(&paths, 0);
-        let pvs = public_values::<F>(&paths);
+    fn the_leaf_and_the_node_of_the_same_operands_differ() {
+        let mut rng = SmallRng::seed_from_u64(9);
+        let a = random_digest(&mut rng);
+        let b = random_digest(&mut rng);
+        assert_ne!(econ_leaf_reference(&a, &b), econ_node_reference(&a, &b));
+    }
+
+    #[test]
+    fn the_trace_is_padded_to_a_power_of_two_and_its_rows_output_the_root() {
+        let (air, witnesses, trace, _) = honest(11, 1);
+        assert_eq!(trace.height(), 1024);
+        assert_eq!(air.real_rows(), ROWS_PER_PATH);
+        // The last real row B's output is the root.
+        let Some(last) = trace.row_slice(ROWS_PER_PATH - 1) else {
+            panic!("the last real row exists");
+        };
+        let root: [u8; 32] = core::array::from_fn(|b| {
+            (0..8).fold(0u8, |acc, j| {
+                if last[out_bit(b / 4, 8 * (b % 4) + j)] == F::ONE {
+                    acc | (1 << j)
+                } else {
+                    acc
+                }
+            })
+        });
+        assert_eq!(root, witnesses[0].root());
+    }
+
+    #[test]
+    fn the_constraints_hold_on_an_honest_trace_of_one_two_and_four_paths() {
+        for paths in [1, 2, 4] {
+            let (air, _, trace, pvs) = honest(3 + paths as u64, paths);
+            p3_air::check_constraints(&air, &trace, &pvs);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_wrong_value_public_value_fails() {
+        let (air, _, trace, mut pvs) = honest(3, 2);
+        pvs[16] += F::ONE;
         p3_air::check_constraints(&air, &trace, &pvs);
+    }
 
-        // A prover who presents the right root for a different leaf fails the
-        // leaf boundary.
-        let mut wrong = pvs.clone();
-        wrong[0] += F::ONE;
-        let result = std::panic::catch_unwind(|| p3_air::check_constraints(&air, &trace, &wrong));
-        assert!(result.is_err(), "a wrong leaf public value must not satisfy the constraints");
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_wrong_key_public_value_fails() {
+        let (air, _, trace, mut pvs) = honest(3, 2);
+        pvs[0] += F::ONE;
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
 
-        // A sibling changed after hashing fails the message binding of its row.
-        let mut tampered = trace.clone();
-        let row = ROWS_PER_PATH + 2 * 100; // path 1, level 100, row A
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_wrong_root_public_value_fails() {
+        let (air, _, trace, mut pvs) = honest(3, 2);
+        pvs[PUBLIC_VALUES_PER_PATH + 32] += F::ONE;
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_sibling_changed_after_hashing_fails() {
+        let (air, _, mut trace, pvs) = honest(3, 2);
+        let row = ROWS_PER_PATH + LEAF_ROWS + 2 * 100; // path 1, level 100, row A
         let col = sibling_bit(5, 3);
-        tampered.values[row * NUM_COLS + col] = F::ONE - tampered.values[row * NUM_COLS + col];
-        let result = std::panic::catch_unwind(|| p3_air::check_constraints(&air, &tampered, &pvs));
-        assert!(result.is_err(), "a changed sibling must not satisfy the constraints");
+        trace.values[row * NUM_COLS + col] = F::ONE - trace.values[row * NUM_COLS + col];
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_value_changed_in_the_leaf_row_after_hashing_fails() {
+        let (air, _, mut trace, pvs) = honest(3, 2);
+        let row = ROWS_PER_PATH; // path 1, leaf hash, row A
+        let col = sibling_bit(9, 1);
+        trace.values[row * NUM_COLS + col] = F::ONE - trace.values[row * NUM_COLS + col];
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_leaf_not_carried_into_the_first_level_fails() {
+        let (air, _, mut trace, pvs) = honest(3, 1);
+        let row = LEAF_ROWS; // path 0, level 0, row A: its `current` must be the leaf
+        let col = current_bit(2, 4);
+        trace.values[row * NUM_COLS + col] = F::ONE - trace.values[row * NUM_COLS + col];
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    /// Public values for `paths` with the roots a (possibly altered) trace folds to.
+    fn public_values_with_roots(paths: &[PathWitness], roots: &[[u8; 32]]) -> Vec<F> {
+        let mut pvs = Vec::new();
+        for (p, root) in paths.iter().zip(roots) {
+            pvs.extend_from_slice(&digest_limbs::<F>(&p.key));
+            pvs.extend_from_slice(&digest_limbs::<F>(&p.value));
+            pvs.extend_from_slice(&digest_limbs::<F>(root));
+        }
+        pvs
+    }
+
+    /// A trace honest everywhere except the one compression `alter` changes at
+    /// trace row `row`, with public values that state the root it then folds to.
+    fn one_row_altered(
+        row: usize,
+        alter: impl Fn(&mut Blake3CompressionInput),
+    ) -> (EconSmtPathAir, RowMajorMatrix<F>, Vec<F>) {
+        let mut rng = SmallRng::seed_from_u64(21);
+        let witnesses = vec![random_witness(&mut rng)];
+        let air = EconSmtPathAir::new(vec![witnesses[0].key]);
+        let (trace, roots) = air.generate_trace_with::<F>(&witnesses, 0, &|r, input| {
+            if r == row {
+                alter(input);
+            }
+        });
+        let pvs = public_values_with_roots(&witnesses, &roots);
+        (air, trace, pvs)
+    }
+
+    #[test]
+    fn an_alteration_that_changes_nothing_is_still_an_honest_trace() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |_| {});
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_second_compression_not_chained_to_the_first_fails() {
+        let (air, trace, pvs) =
+            one_row_altered(LEAF_ROWS + 20 + 1, |input| input.chaining_value[0] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_first_compression_not_started_from_the_iv_fails() {
+        let (air, trace, pvs) =
+            one_row_altered(LEAF_ROWS + 20, |input| input.chaining_value[0] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_first_compression_with_other_flags_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.flags ^= 4);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_second_compression_with_other_flags_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20 + 1, |input| input.flags ^= 4);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_second_compression_with_another_length_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20 + 1, |input| input.block_len -= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_first_compression_with_another_length_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.block_len = 63);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_first_compression_with_a_block_counter_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.counter = 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_second_compression_with_a_block_counter_fails() {
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20 + 1, |input| input.counter = 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn another_domain_tag_fails() {
+        // Word 0 of the first block is the first four bytes of the tag.
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.block[0] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_nonzero_separator_byte_fails() {
+        // Byte 24 is the low byte of word 6.
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.block[6] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_right_operand_head_changed_in_the_first_block_fails() {
+        // Word 15 is bytes 60..64 of the message: bytes 3..7 of the right operand.
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20, |input| input.block[15] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_right_operand_tail_changed_in_the_second_block_fails() {
+        // Word 0 of the second block is message bytes 64..68: right bytes 7..11.
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20 + 1, |input| input.block[0] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_nonzero_padding_word_in_the_second_block_fails() {
+        // The message is 89 bytes; word 15 of the second block is bytes 124..128.
+        let (air, trace, pvs) = one_row_altered(LEAF_ROWS + 20 + 1, |input| input.block[15] ^= 1);
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_leaf_hash_not_connected_to_the_first_level_fails() {
+        // Two honest paths under one key: the leaf hash of the first and the
+        // levels of the second. Every row is consistent in itself; only the
+        // step from the leaf hash into level 0 is broken.
+        let mut rng = SmallRng::seed_from_u64(31);
+        let first = random_witness(&mut rng);
+        let mut second = random_witness(&mut rng);
+        second.key = first.key;
+        let air = EconSmtPathAir::new(vec![first.key]);
+        let from_first = air.generate_trace::<F>(core::slice::from_ref(&first), 0);
+        let from_second = air.generate_trace::<F>(core::slice::from_ref(&second), 0);
+        let mut spliced = from_first.clone();
+        for row in LEAF_ROWS..air.real_rows() {
+            let range = row * NUM_COLS..(row + 1) * NUM_COLS;
+            spliced.values[range.clone()].copy_from_slice(&from_second.values[range]);
+        }
+        let stated = PathWitness {
+            key: first.key,
+            value: first.value,
+            siblings: second.siblings.clone(),
+        };
+        let pvs = public_values_with_roots(&[stated], &[second.root()]);
+        p3_air::check_constraints(&air, &spliced, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_sibling_changed_in_the_second_block_after_hashing_fails() {
+        let (air, _, mut trace, pvs) = {
+            let (air, w, trace, pvs) = honest(3, 2);
+            (air, w, trace, pvs)
+        };
+        let row = ROWS_PER_PATH + LEAF_ROWS + 2 * 100; // path 1, level 100, row A
+        let col = sibling_bit(20, 2); // a byte of the operand the second block carries
+        trace.values[row * NUM_COLS + col] = F::ONE - trace.values[row * NUM_COLS + col];
+        p3_air::check_constraints(&air, &trace, &pvs);
+    }
+
+    #[test]
+    #[should_panic(expected = "failed constraints")]
+    fn a_trace_built_for_another_key_fails_the_verifiers_direction_bits() {
+        let (_, witnesses, trace, pvs) = honest(3, 1);
+        // The verifier derives its preprocessed trace from the key it was
+        // given; one differing key bit moves a level's operands.
+        let mut other_key = witnesses[0].key;
+        other_key[0] ^= 0x80;
+        let other = EconSmtPathAir::new(vec![other_key]);
+        p3_air::check_constraints(&other, &trace, &pvs);
     }
 }

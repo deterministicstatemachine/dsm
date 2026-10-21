@@ -1,51 +1,53 @@
-# Results — 2026-10-21, first runs
+# Results — 2026-10-21
 
 Plonky3 at `a4982ec0` (git, 2026-10-21). KoalaBear, degree-4 extension, FRI
 with `log_blowup` 1, 100 queries, 16 PoW bits (the Plonky3 benchmark defaults;
 roughly 100 bits conjectured — not yet tuned to a stated target).
 
-## Apple M-series, 18 cores, rustup 1.98.0 (`run_bench.sh`)
+## Apple M-series, 18 cores, cargo 1.98.0, `run_bench.sh` (this AIR: leaf hash included)
 
-| paths | rows | trace | prove | verify | peak RSS | proof |
-|---|---|---|---|---|---|---|
-| 1 (one leaf) | 512 | 19.8 MB | **39 ms** | 21 ms | 103 MB | 4.24 MB |
-| 2 (one mutation: pre + post) | 1024 | 39.6 MB | **63 ms** | 22 ms | 165 MB | 4.26 MB |
-| 4 (a transfer touching two leaves) | 2048 | 79.3 MB | **100 ms** | 22 ms | 284 MB | 4.28 MB |
+| paths | path rows | trace rows | trace | prove | verify | peak RSS | proof |
+|---|---|---|---|---|---|---|---|
+| 1 (one leaf) | 514 | 1024 | 39.6 MB | **56 ms** | 23 ms | 161 MB | 4.26 MB |
+| 2 (one mutation: pre + post) | 1028 | 2048 | 79.3 MB | **95 ms** | 24 ms | 291 MB | 4.28 MB |
+| 4 (a transfer touching two leaves) | 2056 | 4096 | 158.6 MB | **165 ms** | 24 ms | 522 MB | 4.31 MB |
 
-## Linux x86-64 container, 2 cores, 7 GB
+One run each, measured once; no repetition or variance.
 
-| paths | prove | verify | peak RSS |
-|---|---|---|---|
-| 1 | 637 ms | 84 ms | 58 MB |
+## The earlier AIR (no leaf hash; 512 rows per path, no padding), same machine
 
-The two-core box is the pessimistic proxy for a phone until one is attached:
-a mid-range Android SoC has four performance cores and NEON, which Plonky3's
-31-bit field arithmetic uses. Read the phone estimate for a two-leaf transfer
-as **one to three seconds, under 300 MB**, comfortably inside the FibRace
-envelope (3–10 s, ≥ 3 GB RAM) that 1,420 phone models already proved at.
+| paths | prove | verify | peak RSS | proof |
+|---|---|---|---|---|
+| 1 | 39 ms | 21 ms | 103 MB | 4.24 MB |
+| 2 | 63 ms | 22 ms | 165 MB | 4.26 MB |
+| 4 | 100 ms | 22 ms | 284 MB | 4.28 MB |
+
+Linux x86-64 container, 2 cores, 7 GB, that AIR, one path: 637 ms prove, 84 ms
+verify, 58 MB. **Not re-measured on this AIR.**
 
 ## Reading the numbers
 
-- **Prover time scales linearly in rows** and is dominated by the FFT and
-  Merkle commitment of a 9,680-column trace; `Blake3Air` is wide by design
-  (all state as bits) and that width, not the number of rows, is where the
-  cost sits. A narrower BLAKE3 arithmetization would cut both time and proof
-  size but is not needed to decide viability.
-- **Proof size (~4.2 MB) is almost all query openings** of that wide trace
-  (100 queries × opened rows). It barely moves with path count. It matters only
-  if the base proof itself were stored; in the recursive design only the outer
-  proof is, and the inner proof is consumed in-circuit. Fewer queries with more
-  PoW or higher blowup trades prover time for size when that matters.
-- **Verification is constant** (~22 ms) whatever the path count — the property
-  the acceptance rule needs.
-- **Memory is the binding constraint on phones**, as FibRace found; 284 MB for
-  a transfer is an order of magnitude inside the headroom.
+- **The leaf hash costs more than its two rows.** 514 rows per path is just past
+  a power of two, so the trace doubles: 56 ms against 39 ms for one path, and
+  peak memory 161 MB against 103 MB. The padding is not free; the 510 spare rows
+  of a one-path trace are where the leaf-state hash and the next hashes of a
+  step should go before any further doubling is accepted.
+- **Prover time scales with trace height** and is dominated by the FFT and
+  Merkle commitment of a 9,680-column trace; `Blake3Air` is wide by design (all
+  state as bits). A narrower BLAKE3 arithmetization would cut time and proof
+  size; not tried.
+- **Proof size (~4.3 MB) is almost all query openings** of that wide trace. It
+  barely moves with path count. In a recursive design only the outer proof is
+  stored; not built.
+- **Verification is nearly constant** (23–24 ms) whatever the path count.
+- **Memory** grows with trace height: 522 MB for a four-path proof. This is the
+  number that decides whether a phone can run it; no phone was measured.
 
-## What this decides
+## What this does and does not decide
 
-Proving a full economic root advance on the sender's device is viable with
-headroom: the path cost that dominates `advance_validated` is tens of
-milliseconds on a laptop and single-digit seconds in the worst reading on a
-phone. The remaining cost to measure is the recursion layer
-(`Plonky3-recursion` reports ~100 ms per layer on an M4 Pro with Poseidon2
-hashing of the inner proof), which is independent of lineage length.
+Measured: a Mac proves and verifies the Merkle-path statement for up to four
+leaves in under 200 ms and 522 MB. Not measured, and not decided by this:
+a phone's time or memory (the earlier two-core container figure, roughly 16x the
+Mac for one path, is the only proxy, and it is for the older AIR); the recursion
+layer; the cost of the rest of the step predicate; the authority and finality
+facts a valid step also needs.
