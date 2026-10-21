@@ -797,3 +797,83 @@ async fn a_read_records_the_frontier_it_validated() {
         "the second read validates A's new step alone"
     );
 }
+
+/// A payment that follows the payer's transactions in another relationship is
+/// accepted (plan R05). A pays C, C takes it in, then A pays B. A's step for C
+/// lies between B's frontier for A and A's paying position, so B validates it
+/// as part of A's segment; the transactions of a relationship B is not a party
+/// to are neither a reason to refuse nor skipped.
+/// MUTATION CONTROL: a walk that refuses its second position (the budget cut
+/// to one) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_after_the_payers_dealings_with_others_is_accepted() {
+    let (p, c) = three_devices().await;
+    let sent = p.a.send(&c, 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let with_c_at = admitted_position(&p.a);
+    accept(&c).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_at = admitted_position(&p.a);
+    assert!(
+        with_c_at < paid_at,
+        "A's step for C precedes its payment to B"
+    );
+
+    let asked = accept(&p.b).await;
+    assert_eq!(p.b.era_balance(), 10, "B takes the payment in");
+    let read = read_of(&asked, &p.a, paid_at + 1);
+    assert!(
+        read.contains(&with_c_at) && read.contains(&paid_at),
+        "B validated A's step for C and A's payment to B: {read:?}"
+    );
+}
+
+/// The same payment is accepted, with the same committed effect, whether the
+/// receiver is current with the payer or new to it (plan R06). D adds A after
+/// A's funding, so its contact add validated A to position 1; B added A
+/// before, and holds nothing of A. A pays D, then pays B the same amount. Both
+/// accept and both admit their credit as their first position; D reads only
+/// A's paying step, B reads A from its funding.
+/// MUTATION CONTROL: validating nothing at the add turns this red (D reads
+/// A's funding again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_same_payment_is_accepted_whether_the_receiver_is_current_or_new_to_the_payer() {
+    let p = Pair::boot(100, 0).await;
+    let mut d = TestDevice::create("D", 0x0D);
+    d.boot(&p.fleet).await;
+    d.add_contact(&p.a).await;
+    p.a.add_contact(&d).await;
+
+    let sent = p.a.send(&d, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let to_d_at = admitted_position(&p.a);
+    let asked = accept(&d).await;
+    let d_read = read_of(&asked, &p.a, to_d_at + 1);
+
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let to_b_at = admitted_position(&p.a);
+    let asked = accept(&p.b).await;
+    let b_read = read_of(&asked, &p.a, to_b_at + 1);
+
+    assert_eq!(d.era_balance(), 10);
+    assert_eq!(p.b.era_balance(), 10);
+    assert_eq!(
+        admitted_position(&d),
+        admitted_position(&p.b),
+        "both admit the credit as the same position of their own"
+    );
+    assert_eq!(
+        d_read,
+        vec![to_d_at],
+        "D, current with A, validates one step"
+    );
+    assert_eq!(
+        b_read,
+        (1..=to_b_at).collect::<Vec<_>>(),
+        "B, new to A, validates A from its funding"
+    );
+}

@@ -385,6 +385,12 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
         0,
         "no journal row during the hold"
     );
+    assert!(
+        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, u64::MAX)
+            .unwrap()
+            .is_none(),
+        "no frontier for the sender: the walk the outage cut short promoted none"
+    );
 
     // Fleet back: the SAME row proceeds through the full admission.
     p.nodes.bring_up(&down).await;
@@ -399,5 +405,17 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
             .0,
         1,
         "the credit admitted"
+    );
+    p.a.enter();
+    let (sender_paid_at, _) = client_db::economic_lineage::get_admitted_coordinate()
+        .unwrap()
+        .unwrap();
+    p.b.enter();
+    assert_eq!(
+        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, u64::MAX)
+            .unwrap()
+            .map(|frontier| frontier.economic_position()),
+        Some(sender_paid_at),
+        "the walk that passed recorded the sender's paying position"
     );
 }
