@@ -816,7 +816,6 @@ mod tests {
                     amount: 10,
                 }],
                 None,
-                None,
             )
             .expect("value advance")
             .new_device_state;
@@ -837,7 +836,6 @@ mod tests {
                     signature: vec![],
                 },
                 &[],
-                None,
                 None,
             )
             .expect("non-value advance")

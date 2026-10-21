@@ -578,6 +578,18 @@ pub async fn insert_immutable_object_if_absent(
     Ok(outcome)
 }
 
+/// Whether this member holds an immutable object at a content address.
+pub async fn holds_immutable_object(pool: &Pool, addr_b32: &str) -> Result<bool> {
+    let client = pool.get().await?;
+    let row = client
+        .query_opt(
+            "SELECT 1 FROM immutable_objects WHERE addr_b32 = $1",
+            &[&addr_b32],
+        )
+        .await?;
+    Ok(row.is_some())
+}
+
 /// Return the `(namespace, payload)` tuple at a content address, or `None`.
 pub async fn get_immutable_object(
     pool: &Pool,
@@ -957,6 +969,12 @@ pub async fn get_cell_entries(pool: &Pool, namespace: &[u8], key: &[u8]) -> Resu
 /// stamped entries' and every immutable object's: the leaf set as of the
 /// latest ByteCommit is read whole from the store only when this process
 /// does not hold it as of that very ByteCommit (see [`CommittedCells`]).
+///
+/// The leaf set held is replaced only once the new cycle is committed, and a
+/// leaf set read from the store is held as soon as it is read. A close that
+/// ends early — its caller went away, or its transaction failed and rolled
+/// back — leaves the store at the ByteCommit the held leaf set is as of, so
+/// the next close uses it instead of reading every cell again.
 pub async fn close_cycle(
     pool: &Pool,
     committed: &CommittedCells,
@@ -988,18 +1006,22 @@ pub async fn close_cycle(
         .await?
         .get(0);
     // The leaf set as of `last`: the one this process holds when it is as of
-    // that very ByteCommit, else read whole from the store. Taken out, so a
-    // close that fails leaves none held and the next one reads the store.
-    let base = match kept.take() {
-        Some(held) if held.commit == last => held,
-        _ => read_committed_leaves(&tx, last.clone()).await?,
+    // that very ByteCommit, else read whole from the store and held at once.
+    // It stays held whatever happens to this close until the new cycle is
+    // committed: until then the store's latest ByteCommit is `last`.
+    let base = match kept.as_ref().filter(|held| held.commit == last) {
+        Some(held) => held.clone(),
+        None => {
+            let read = Arc::new(read_committed_leaves(&tx, last.clone()).await?);
+            *kept = Some(read.clone());
+            read
+        }
     };
     if !pending {
         tx.commit().await?;
         if let Some(c) = &last {
             committed.keep(c.cycle_index, c.digest(), base.tree.clone());
         }
-        *kept = Some(base);
         return Ok(last);
     }
     let cycle = last.as_ref().map_or(1, |c| c.cycle_index + 1);
@@ -1050,7 +1072,7 @@ pub async fn close_cycle(
     tx.commit().await?;
     committed.keep(cycle, digest, next.tree.clone());
     next.commit = Some(commit.clone());
-    *kept = Some(next);
+    *kept = Some(Arc::new(next));
     Ok(Some(commit))
 }
 
@@ -1162,7 +1184,9 @@ pub async fn get_own_bytecommit(
 /// closes, so its tree is built once: a tree `committed` keeps for the
 /// cycle's ByteCommit answers, and a cycle whose tree is not kept (an old
 /// one, or any after a restart) is built from the store and kept, one build
-/// at a time ([`CommittedCells`]).
+/// at a time ([`CommittedCells`]). A proof that needs that build while
+/// [`super::TREE_BUILDS_QUEUED`] proofs already hold or wait for it is
+/// refused with [`super::TreeBuildsFull`], before it waits.
 pub async fn cell_commit_proof(
     pool: &Pool,
     committed: &CommittedCells,
@@ -1212,7 +1236,7 @@ pub async fn cell_commit_proof(
     if let Some(tree) = committed.tree_at(cycle, &digest) {
         return Ok(proof_from(&tree));
     }
-    let _building = committed.hold_tree_build().await;
+    let _building = committed.hold_tree_build().await?;
     // The build this proof waited behind may have been for its cycle.
     if let Some(tree) = committed.tree_at(cycle, &digest) {
         return Ok(proof_from(&tree));
@@ -1235,27 +1259,57 @@ pub async fn cell_commit_proof(
     Ok(proof)
 }
 
-/// Keep a ByteCommit this node fetched from `member_id` itself. Idempotent
-/// for identical bytes; a different ByteCommit for the same cycle is kept
-/// beside the first as evidence. Returns whether it was not already held.
-pub async fn mirror_put(pool: &Pool, commit: &dsm::storage_cell::ByteCommit) -> Result<bool> {
+/// Keep ByteCommits this node fetched from their members themselves, in one
+/// durable transaction. Idempotent for identical bytes; a different
+/// ByteCommit for a cycle already held is kept beside the first as evidence.
+/// Returns how many were not already held.
+pub async fn mirror_put(pool: &Pool, commits: &[dsm::storage_cell::ByteCommit]) -> Result<u64> {
     use prost::Message;
     let mut client = pool.get().await?;
     let tx = begin_durable_write(&mut client).await?;
-    let inserted = tx
-        .execute(
+    let insert = tx
+        .prepare(
             "INSERT INTO bytecommit_mirror (member_id, cycle_index, digest, commit_pb)
              VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-            &[
-                &commit.member_id,
-                &i64::try_from(commit.cycle_index)?,
-                &commit.digest().as_slice(),
-                &commit.to_proto().encode_to_vec(),
-            ],
         )
         .await?;
+    let mut inserted = 0u64;
+    for commit in commits {
+        inserted += tx
+            .execute(
+                &insert,
+                &[
+                    &commit.member_id,
+                    &i64::try_from(commit.cycle_index)?,
+                    &commit.digest().as_slice(),
+                    &commit.to_proto().encode_to_vec(),
+                ],
+            )
+            .await?;
+    }
     tx.commit().await?;
-    Ok(inserted == 1)
+    Ok(inserted)
+}
+
+/// The cycles from `from` through `through` at which this node mirrored any
+/// ByteCommit of `member_id`.
+pub async fn mirror_cycles_held(
+    pool: &Pool,
+    member_id: &[u8],
+    from: u64,
+    through: u64,
+) -> Result<std::collections::BTreeSet<u64>> {
+    let client = pool.get().await?;
+    let rows = client
+        .query(
+            "SELECT DISTINCT cycle_index FROM bytecommit_mirror
+             WHERE member_id = $1 AND cycle_index BETWEEN $2 AND $3",
+            &[&member_id, &i64::try_from(from)?, &i64::try_from(through)?],
+        )
+        .await?;
+    rows.iter()
+        .map(|r| Ok(u64::try_from(r.get::<_, i64>(0))?))
+        .collect()
 }
 
 /// Every distinct ByteCommit this node mirrored for `member_id` at `cycle`.
@@ -1275,19 +1329,6 @@ pub async fn mirror_get(
     rows.iter()
         .map(|r| decode_commit(&r.get::<_, Vec<u8>>(0)))
         .collect()
-}
-
-/// The highest cycle mirrored for `member_id`, 0 if none.
-pub async fn mirror_last_cycle(pool: &Pool, member_id: &[u8]) -> Result<u64> {
-    let client = pool.get().await?;
-    let t: Option<i64> = client
-        .query_one(
-            "SELECT MAX(cycle_index) FROM bytecommit_mirror WHERE member_id = $1",
-            &[&member_id],
-        )
-        .await?
-        .get(0);
-    Ok(u64::try_from(t.unwrap_or(0))?)
 }
 
 /// Append a content address under `locator`. Never removed.

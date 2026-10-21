@@ -223,7 +223,6 @@ fn step(
                 amount,
             }],
             None,
-            None,
         )
         .expect("the step");
     let receipt = StitchedReceiptV2::of_step(

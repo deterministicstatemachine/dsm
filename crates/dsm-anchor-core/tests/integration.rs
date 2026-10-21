@@ -4,8 +4,10 @@
 //! DSM device SMT); the appliance supplies `σ^chip` + `σ^host` over one root-advance message.
 #![allow(clippy::disallowed_methods, clippy::unwrap_used, clippy::expect_used)]
 
-use anchor_core::accept::{accept_offline, AcceptError, DsmVerifier, VerifierContext};
-use anchor_core::appliance::{Appliance, Record, RecoverOutcome, Status};
+use anchor_core::accept::{
+    accept_offline, AcceptError, DsmVerifier, OfflineStateRefused, VerifierContext,
+};
+use anchor_core::appliance::{Appliance, BootRecoveryRefusal, Record, RecoverOutcome, Status};
 use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::hash::h as hash;
 use anchor_core::proto::{decode_response, encode_request, pb};
@@ -108,8 +110,19 @@ impl Dsm {
     }
 }
 impl DsmVerifier for Dsm {
-    fn verify_smt_leaf(&self, _r: &[u8; 32], _p: &[u8], _l: &[u8; 32]) -> bool {
-        self.smt_ok
+    fn verify_offline_state(
+        &self,
+        _r: &[u8; 32],
+        _b: &[u8; 32],
+        _f: &[u8; 32],
+        _u: u64,
+        _p: &[u8],
+    ) -> Result<(), OfflineStateRefused> {
+        if self.smt_ok {
+            Ok(())
+        } else {
+            Err(OfflineStateRefused)
+        }
     }
     fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
         self.transition_ok
@@ -366,21 +379,103 @@ fn recover_prepared_can_complete() {
 }
 
 #[test]
-fn recover_ready_stale_adopts_live_and_ahead_fails_closed() {
+fn recover_ready_fails_closed_when_the_chip_counter_disagrees_with_the_software_counter() {
+    // Chip advanced past the software counter: a transition moved the mirror that the active
+    // frontier never recorded. Recovery must not pair the advanced counter with the old frontier.
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);
     f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
         .unwrap();
     f.a.commit().unwrap();
-    f.a.finalize().unwrap(); // counter at 99, u=1
-    f.a.active.anchor_counter = 0; // stale (behind the chip)
+    f.a.finalize().unwrap(); // chip counter at H0 - 1, u = 1
+    f.a.active.anchor_counter = 0; // software counter behind the chip mirror
     let root = f.a.active.root;
-    assert_eq!(f.a.recover(), RecoverOutcome::Accept(root));
-    assert_eq!(f.a.active.anchor_counter, 1); // reconciled to the live chip counter
-
-    let mut f = fixture(H0);
-    f.a.active.anchor_counter = 5; // ahead — impossible for a real down-counter
     assert_eq!(f.a.recover(), RecoverOutcome::FailClosed);
+    assert_eq!(f.a.active.anchor_counter, 0);
+    assert_eq!(f.a.active.root, root);
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
+
+    // Software counter ahead of the chip mirror: impossible for a real down-counter.
+    let mut f = fixture(H0);
+    f.a.active.anchor_counter = 5;
+    assert_eq!(f.a.recover(), RecoverOutcome::FailClosed);
+    assert_eq!(f.a.active.anchor_counter, 5);
+    assert_eq!(f.a.active.root, f.frontier0);
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
+}
+
+// --- §26 recovery at boot (a device serving the appliance itself) ---
+
+#[test]
+fn recover_at_boot_serves_a_ready_appliance_whose_counters_agree() {
+    let mut f = fixture(H0);
+    assert_eq!(f.a.recover_at_boot(), Ok(()));
+    assert_eq!(f.a.active.root, f.frontier0);
+    assert_eq!(f.a.active.status, Status::Ready);
+}
+
+#[test]
+fn recover_at_boot_refuses_a_chip_counter_advanced_past_the_software_counter() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
+    f.a.commit().unwrap();
+    f.a.finalize().unwrap();
+    f.a.active.anchor_counter = 0;
+    assert_eq!(
+        f.a.recover_at_boot(),
+        Err(BootRecoveryRefusal::Outcome(RecoverOutcome::FailClosed))
+    );
+}
+
+#[test]
+fn recover_at_boot_refuses_a_prepared_record_missing_its_signatures() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
+    if let Record::Prepared(p) = &mut f.a.active.record {
+        p.cert.sigma_host.clear();
+    }
+    assert_eq!(
+        f.a.recover_at_boot(),
+        Err(BootRecoveryRefusal::Outcome(
+            RecoverOutcome::OnlineCancelOrResolve
+        ))
+    );
+    // Refusal leaves the record for online resolution; nothing was cancelled.
+    assert_eq!(f.a.active.status, Status::Prepared);
+    assert!(matches!(f.a.active.record, Record::Prepared(_)));
+}
+
+#[test]
+fn recover_at_boot_resets_a_prepared_record_whose_counter_did_not_move() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
+    assert_eq!(f.a.recover_at_boot(), Ok(()));
+    assert_eq!(f.a.active.status, Status::Ready);
+    assert!(matches!(f.a.active.record, Record::Empty));
+    assert_eq!(f.a.active.root, f.frontier0);
+    assert_eq!(f.a.active.anchor_counter, 0);
+}
+
+#[test]
+fn recover_at_boot_serves_a_committed_release_for_reemission() {
+    let mut f = fixture(H0);
+    let t = make_transition(f.frontier0, 0);
+    let next_frontier = t.next_root;
+    f.a.prepare(&t.as_transition(), &RCHAL, &R_I, &R_NEXT)
+        .unwrap();
+    f.a.commit().unwrap();
+    assert_eq!(f.a.recover_at_boot(), Ok(()));
+    // The committed record survives for the same successor to be re-emitted and finalized.
+    assert_eq!(f.a.emit().unwrap().cert.next_frontier, next_frontier);
+    assert_eq!(f.a.finalize().unwrap(), next_frontier);
 }
 
 #[test]

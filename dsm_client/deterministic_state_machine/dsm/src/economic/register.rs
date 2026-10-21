@@ -141,6 +141,15 @@ impl RootCell {
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
     }
+
+    /// What a reader keeps of a seat's log at this cell: the copies of
+    /// claims naming its key, the only ones its reading can count
+    /// ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            claim_at(self)(bytes).is_some()
+        })
+    }
 }
 
 /// The route-chain reading of a root cell over claims naming its key

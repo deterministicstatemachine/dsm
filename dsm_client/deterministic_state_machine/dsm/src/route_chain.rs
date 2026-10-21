@@ -24,9 +24,14 @@
 //! the entry every seat stores, the chain slots, the chain states, and the
 //! evidence a verifier gathers to evaluate them.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+
 use crate::ccb::{CcbError, StorageSetMembers};
 use crate::sofi::fisher_yates::{permute, FisherYatesError};
-use crate::storage_cell::{ArrivalRecord, ByteCommit, CellCommitProof};
+use crate::storage_cell::{
+    entry_digest, running_hash_init, running_hash_next, ArrivalRecord, ByteCommit, CellCommitProof,
+    RunningHashes,
+};
 use crate::types::proto;
 
 /// Every route has one position per member of the five-member set.
@@ -432,18 +437,246 @@ impl CommittedAt {
         }
     }
 
-    fn commits(&self, record: &ArrivalRecord, log: &[Vec<u8>]) -> bool {
+    /// Whether this commits `record`, against `log`: what the values read
+    /// from the record's seat fold to ([`HeldLog`]).
+    fn commits(&self, record: &ArrivalRecord, log: &HeldLog) -> bool {
         self.chain_link_holds()
             && crate::storage_cell::record_is_committed(record, log, &self.commit, &self.proof)
     }
 }
 
+/// One copy of the cell a [`HeldLog`] keeps: where it arrived, and the entry
+/// without its value, which the log holds once for every copy carrying it.
+#[derive(Debug, Clone)]
+struct HeldCopy {
+    index: u64,
+    running_hash: [u8; 32],
+    seat: Vec<u8>,
+    position: usize,
+    chain: Vec<ChainSlot>,
+    value: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many entries this thread's [`HeldLog`]s have folded: what a test
+    /// reads to show a verifier folds each log once (SA-137).
+    static FOLDED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What a kept copy costs a log beyond its value, before its seat and its
+/// chain's records: its arrival, its position and the slots that hold them.
+const HELD_COPY_COST: usize = 96;
+
+/// A seat's arrival log at one cell as a reader read it (§6, §14), folded
+/// entry by entry in arrival order: the running hash through every entry,
+/// and the copies of the cell the reader keeps, each with where it arrived.
+/// An entry that is no kept copy is hashed and dropped, so bytes at a seat
+/// that are no recognized object naming the cell cost a reader one hash and
+/// nothing it holds: they never count, and junk blocks nothing (§9 route
+/// chains, rule 3).
+///
+/// What a verifier keeps is [`recognized_copies`]: the only copies Core's
+/// evaluation can count. Evaluating a log kept that way reads exactly what
+/// evaluating the seat's whole log reads.
+#[derive(Debug, Clone)]
+pub struct HeldLog {
+    namespace: Vec<u8>,
+    key: [u8; 32],
+    /// How many entries were folded: the arrival index of the last.
+    count: u64,
+    /// The running hash after the last folded entry, `h_0` before any.
+    head: [u8; 32],
+    /// Indices whose running hash was asked for before the fold reached
+    /// them ([`HeldLog::want`]).
+    wanted: BTreeSet<u64>,
+    /// The running hash at each wanted index the fold has passed.
+    marks: BTreeMap<u64, [u8; 32]>,
+    /// The kept copies, in arrival order.
+    copies: Vec<HeldCopy>,
+    /// Each distinct value a kept copy carries, once.
+    values: Vec<Vec<u8>>,
+    /// Where in `values` each value is, by its entry digest.
+    value_at: HashMap<[u8; 32], usize>,
+    /// The bytes the kept copies and their values hold.
+    kept_bytes: usize,
+}
+
+impl HeldLog {
+    /// A seat's log at the cell `(namespace, key)` before any entry is
+    /// folded.
+    pub fn new(namespace: &[u8], key: &[u8; 32]) -> Self {
+        Self {
+            namespace: namespace.to_vec(),
+            key: *key,
+            count: 0,
+            head: running_hash_init(namespace, key),
+            wanted: BTreeSet::new(),
+            marks: BTreeMap::new(),
+            copies: Vec::new(),
+            values: Vec::new(),
+            value_at: HashMap::new(),
+            kept_bytes: 0,
+        }
+    }
+
+    /// The log of `values`, the entries a seat holds at `cell` in arrival
+    /// order from its first, keeping what `keep` keeps.
+    pub fn of(cell: &RoutedCell, values: &[Vec<u8>], keep: &dyn Fn(&RouteEntry) -> bool) -> Self {
+        let mut log = Self::new(&cell.namespace, &cell.key);
+        for value in values {
+            log.fold(value, keep);
+        }
+        log
+    }
+
+    /// Fold the seat's next entry, `bytes`, the one after the last folded.
+    /// It is kept when it decodes as a route entry naming the cell
+    /// ([`RouteEntry::decode`]) that `keep` keeps.
+    pub fn fold(&mut self, bytes: &[u8], keep: &dyn Fn(&RouteEntry) -> bool) {
+        #[cfg(test)]
+        FOLDED.with(|folded| folded.set(folded.get() + 1));
+        self.count = self.count.saturating_add(1);
+        self.head = running_hash_next(&self.head, &entry_digest(bytes));
+        if self.wanted.remove(&self.count) {
+            self.marks.insert(self.count, self.head);
+        }
+        let Some(entry) = RouteEntry::decode(bytes) else {
+            return;
+        };
+        if entry.namespace != self.namespace || entry.key != self.key || !keep(&entry) {
+            return;
+        }
+        let RouteEntry {
+            value,
+            seat,
+            position,
+            chain,
+            ..
+        } = entry;
+        let digest = entry_digest(&value);
+        let value = match self.value_at.get(&digest) {
+            Some(&at) => at,
+            None => {
+                self.kept_bytes = self.kept_bytes.saturating_add(value.len());
+                self.values.push(value);
+                let at = self.values.len() - 1;
+                self.value_at.insert(digest, at);
+                at
+            }
+        };
+        let records: usize = chain
+            .iter()
+            .filter_map(ChainSlot::record)
+            .map(|r| HELD_COPY_COST + r.member_id.len() + r.namespace.len())
+            .sum();
+        self.kept_bytes = self
+            .kept_bytes
+            .saturating_add(HELD_COPY_COST + seat.len() + records);
+        self.copies.push(HeldCopy {
+            index: self.count,
+            running_hash: self.head,
+            seat,
+            position,
+            chain,
+            value,
+        });
+    }
+
+    /// Keep the running hash after the entry at `index` when the fold
+    /// reaches it: the index a ByteCommit's proof names, asked for before
+    /// the entries up to it are read.
+    pub fn want(&mut self, index: u64) {
+        if index > self.count {
+            self.wanted.insert(index);
+        }
+    }
+
+    /// The namespace of the cell the log is at.
+    pub fn namespace(&self) -> &[u8] {
+        &self.namespace
+    }
+
+    /// The key of the cell the log is at.
+    pub fn key(&self) -> &[u8; 32] {
+        &self.key
+    }
+
+    /// How many entries were folded: the arrival index of the last.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// The bytes the kept copies hold: what a reader bounds.
+    pub fn kept_bytes(&self) -> usize {
+        self.kept_bytes
+    }
+
+    /// Every kept copy, in arrival order, with where it arrived: its index
+    /// and the seat's running hash after it.
+    fn arrivals(&self) -> impl Iterator<Item = (RouteEntry, (u64, [u8; 32]))> + '_ {
+        self.copies.iter().map(|copy| {
+            (
+                RouteEntry {
+                    namespace: self.namespace.clone(),
+                    key: self.key,
+                    value: self.values[copy.value].clone(),
+                    seat: copy.seat.clone(),
+                    position: copy.position,
+                    chain: copy.chain.clone(),
+                },
+                (copy.index, copy.running_hash),
+            )
+        })
+    }
+}
+
+/// The running hash at an index the fold kept: the last entry folded, a
+/// kept copy, or an index asked for before the fold reached it. Anywhere
+/// else the log holds none, which proves nothing about the seat.
+impl RunningHashes for HeldLog {
+    fn running_hash_at(&self, index: u64) -> Option<[u8; 32]> {
+        if index == 0 {
+            return None;
+        }
+        if index == self.count {
+            return Some(self.head);
+        }
+        if let Some(mark) = self.marks.get(&index) {
+            return Some(*mark);
+        }
+        let at = self.copies.partition_point(|copy| copy.index < index);
+        self.copies
+            .get(at)
+            .filter(|copy| copy.index == index)
+            .map(|copy| copy.running_hash)
+    }
+}
+
+/// What a verifier keeps of a seat's log at `cell`: the copies of `cell` for
+/// the route position they name whose value `recognized` recognizes. A
+/// value holds the cell only from the leader's first recognized copy, and a
+/// later link only carries that same value (§9 route chains, rules 3 and 4),
+/// so no other entry can count.
+pub fn recognized_copies<'c>(
+    cell: &'c RoutedCell,
+    recognized: impl Fn(&[u8]) -> bool + Sync + 'c,
+) -> impl Fn(&RouteEntry) -> bool + Sync + 'c {
+    move |entry| is_cell_copy_at(entry, cell, entry.position) && recognized(&entry.value)
+}
+
+/// What a writer keeps of a seat's log: the copies that are `copy`, whose
+/// arrival it recovers ([`copy_record`]).
+pub fn copies_of(copy: &RouteEntry) -> impl Fn(&RouteEntry) -> bool + Sync + '_ {
+    move |entry| entry == copy
+}
+
 /// Everything a verifier holds about one seat of a cell's route.
 #[derive(Debug, Clone)]
 pub struct SeatEvidence {
-    /// Everything the seat holds at the cell, in arrival order. `None` when
-    /// the seat has not been read.
-    pub values: Option<Vec<Vec<u8>>>,
+    /// The seat's arrival log at the cell as it was read, folded ([`HeldLog`]).
+    /// `None` when the seat has not been read.
+    pub values: Option<HeldLog>,
     /// The seat's committed state for the cell, if a ByteCommit covering it
     /// has closed and been obtained.
     pub committed: Option<CommittedAt>,
@@ -513,25 +746,48 @@ pub enum Missing {
     LeaderLinkUnseen { position: usize },
 }
 
-/// The arrival record a seat returned for the last value of `log`, where
-/// `log` is the seat's arrival order up to and including that value: its
-/// per-key index and the seat's running hash after it (§6, §14).
-fn record_of(seat: &[u8], namespace: &[u8], key: &[u8; 32], log: &[Vec<u8>]) -> ArrivalRecord {
-    let running_hash = log.iter().fold(
-        crate::storage_cell::running_hash_init(namespace, key),
-        |previous, value| {
-            crate::storage_cell::running_hash_next(
-                &previous,
-                &crate::storage_cell::entry_digest(value),
-            )
-        },
-    );
-    ArrivalRecord {
-        member_id: seat.to_vec(),
-        namespace: namespace.to_vec(),
-        key: *key,
-        index: log.len() as u64,
-        running_hash,
+/// A seat's arrival log at a cell as the reader folded it ([`HeldLog`]):
+/// every arrival record of the seat and every check that its ByteCommit
+/// commits one reads this one fold, so evaluating a seat costs one pass over
+/// its log however many copies it holds (SA-137).
+struct SeatLog<'l> {
+    seat: &'l [u8],
+    log: &'l HeldLog,
+}
+
+impl<'l> SeatLog<'l> {
+    fn of(seat: &'l [u8], log: &'l HeldLog) -> Self {
+        Self { seat, log }
+    }
+
+    /// The seat's copies of `cell` for route position `position`, in arrival
+    /// order, each with where it arrived.
+    fn copies<'s>(
+        &'s self,
+        cell: &'s RoutedCell,
+        position: usize,
+    ) -> impl Iterator<Item = (RouteEntry, (u64, [u8; 32]))> + 's {
+        self.log
+            .arrivals()
+            .filter(move |(entry, ..)| is_cell_copy_at(entry, cell, position))
+    }
+
+    /// The arrival record the seat returned for the value that arrived at
+    /// `at`.
+    fn record(&self, (index, running_hash): (u64, [u8; 32])) -> ArrivalRecord {
+        ArrivalRecord {
+            member_id: self.seat.to_vec(),
+            namespace: self.log.namespace.clone(),
+            key: self.log.key,
+            index,
+            running_hash,
+        }
+    }
+
+    /// Whether `commit` is a ByteCommit of the seat's that commits `record`
+    /// against the values read from the seat (§14).
+    fn commits(&self, record: &ArrivalRecord, commit: Option<&CommittedAt>) -> bool {
+        commit.is_some_and(|c| c.commits(record, self.log))
     }
 }
 
@@ -546,28 +802,37 @@ fn record_of(seat: &[u8], namespace: &[u8], key: &[u8; 32], log: &[Vec<u8>]) -> 
 pub fn leader_copy_record(
     cell: &RoutedCell,
     value: &[u8],
-    leader_log: &[Vec<u8>],
+    leader_log: &HeldLog,
 ) -> Option<ArrivalRecord> {
-    let copy = RouteEntry::at_leader(
+    let copy = leader_copy(cell, value);
+    copy_record(cell.route.leader(), &copy, leader_log)
+}
+
+/// The position-0 copy of `value` at `cell`: what a writer puts at the
+/// leader, and what it keeps of the leader's log to find it again.
+pub fn leader_copy(cell: &RoutedCell, value: &[u8]) -> RouteEntry {
+    RouteEntry::at_leader(
         cell.namespace.clone(),
         cell.key,
         value.to_vec(),
         &cell.route,
     )
-    .encode();
-    let n = leader_log.iter().position(|bytes| *bytes == copy)?;
-    Some(record_of(
-        cell.route.leader(),
-        &cell.namespace,
-        &cell.key,
-        &leader_log[..=n],
-    ))
 }
 
-/// Whether `commit` is a ByteCommit of `record`'s seat that commits the
-/// record against the values read from that seat (§14).
-fn committed_by(record: &ArrivalRecord, log: &[Vec<u8>], commit: Option<&CommittedAt>) -> bool {
-    commit.is_some_and(|c| c.commits(record, log))
+/// `seat`'s arrival record for the first arrival of the copy `copy`,
+/// recomputed from the seat's arrival log `log` at the copy's cell: the
+/// record the seat returns when it takes that copy. `None` when the log
+/// holds no such copy, or was not read keeping it ([`copies_of`]). A record
+/// a seat returns that is not this one is not a link: carried into later
+/// copies, it makes every later link invalid. An entry has one encoding
+/// ([`RouteEntry::decode`]), so the copy is the bytes the writer put there.
+pub fn copy_record(seat: &[u8], copy: &RouteEntry, log: &HeldLog) -> Option<ArrivalRecord> {
+    if copy.namespace != log.namespace || copy.key != log.key {
+        return None;
+    }
+    let log = SeatLog::of(seat, log);
+    let arrived = log.log.arrivals().find(|(entry, ..)| entry == copy);
+    arrived.map(|(_, at)| log.record(at))
 }
 
 /// Whether a route entry is this cell's copy for route position `position`:
@@ -580,62 +845,50 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
-/// The cell's position-0 copies in the leader's arrival log, in arrival
-/// order, each with its index in that log: the values the leader link is
-/// chosen from (§9 route chains, rule 3). Nothing when the leader is unread.
-fn leader_log_copies<'e>(
-    cell: &'e RoutedCell,
-    ev: &'e CellEvidence,
-) -> impl Iterator<Item = (usize, RouteEntry)> + 'e {
-    ev.seats
-        .first()
-        .and_then(|leader| leader.values.as_ref())
-        .into_iter()
-        .flatten()
-        .enumerate()
-        .filter_map(|(n, bytes)| RouteEntry::decode(bytes).map(|entry| (n, entry)))
-        .filter(move |(.., entry)| is_cell_copy_at(entry, cell, 0))
-}
-
 /// The leader link of a cell: the first recognized value in the leader's
 /// arrival log, stored there as the cell's position-0 copy, with the record
-/// the leader returned for it (§9 route chains, rule 3).
-struct LeaderLink<T> {
+/// the leader returned for it (§9 route chains, rule 3), and the leader's
+/// log every later seat's mirror of the leader link is checked against.
+struct LeaderLink<'l, T> {
     value: Vec<u8>,
     id: [u8; 32],
     object: T,
     record: ArrivalRecord,
+    log: SeatLog<'l>,
 }
 
 /// The leader link of `cell`, or `None` when the leader holds no recognized
 /// value. `Missing` when the leader is unread, or when no closed ByteCommit
 /// of the leader's covers the record yet (§9 rule 7).
-fn leader_link<T, F>(
-    cell: &RoutedCell,
-    ev: &CellEvidence,
+fn leader_link<'l, T, F>(
+    cell: &'l RoutedCell,
+    ev: &'l CellEvidence,
     recognize: F,
-) -> Result<Option<LeaderLink<T>>, Missing>
+) -> Result<Option<LeaderLink<'l, T>>, Missing>
 where
     F: Fn(&[u8]) -> Option<([u8; 32], T)>,
 {
     let leader = ev.seats.first().ok_or(Missing::LeaderUnread)?;
-    let log = leader.values.as_ref().ok_or(Missing::LeaderUnread)?;
-    for (n, entry) in leader_log_copies(cell, ev) {
-        let Some((id, object)) = recognize(&entry.value) else {
-            continue;
-        };
-        let record = record_of(cell.route.leader(), &cell.namespace, &cell.key, &log[..=n]);
-        if !committed_by(&record, log, leader.committed.as_ref()) {
-            return Err(Missing::LeaderLinkUncommitted);
-        }
-        return Ok(Some(LeaderLink {
-            value: entry.value,
-            id,
-            object,
-            record,
-        }));
+    let log = SeatLog::of(
+        cell.route.leader(),
+        leader.values.as_ref().ok_or(Missing::LeaderUnread)?,
+    );
+    let Some((entry, at, id, object)) = log.copies(cell, 0).find_map(|(entry, at)| {
+        recognize(&entry.value).map(|(id, object)| (entry, at, id, object))
+    }) else {
+        return Ok(None);
+    };
+    let record = log.record(at);
+    if !log.commits(&record, leader.committed.as_ref()) {
+        return Err(Missing::LeaderLinkUncommitted);
     }
-    Ok(None)
+    Ok(Some(LeaderLink {
+        value: entry.value,
+        id,
+        object,
+        record,
+        log,
+    }))
 }
 
 /// One valid link after the leader: the position it holds, the record its
@@ -661,17 +914,10 @@ impl Link {
 
 /// Whether the seat at `position` has seen the leader link: its own mirror
 /// of the leader's ByteCommits covers the record (§9 route chains, rule 4).
-fn leader_seen_at(
-    cell: &RoutedCell,
-    ev: &CellEvidence,
-    seat: &SeatEvidence,
-    leader_record: &ArrivalRecord,
-) -> bool {
-    let Some(leader_log) = ev.seats.first().and_then(|leader| leader.values.as_ref()) else {
-        return false;
-    };
+fn leader_seen_at<T>(cell: &RoutedCell, seat: &SeatEvidence, leader: &LeaderLink<'_, T>) -> bool {
     seat.leader_seen.as_ref().is_some_and(|c| {
-        c.commit.member_id.as_slice() == cell.route.leader() && c.commits(leader_record, leader_log)
+        c.commit.member_id.as_slice() == cell.route.leader()
+            && c.commits(&leader.record, leader.log.log)
     })
 }
 
@@ -684,9 +930,14 @@ fn leader_seen_at(
 ///   exactly the positions before it, so that together they are ONE chain;
 /// - its seat's ByteCommit commits its record;
 /// - its seat's own mirror of the leader's ByteCommits covers the leader link.
-fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) -> Vec<Link> {
+fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<'_, T>) -> Vec<Link> {
     let leader_slot = ChainSlot::Link(leader.record.clone());
     let mut links: Vec<Link> = Vec::new();
+    // Each valid link by its position and its record's index: a seat gives
+    // every arrival its own index, so a carried link is found at once rather
+    // than by a scan of every link before it (SA-137).
+    let mut at_index: std::collections::HashMap<(usize, u64), usize> =
+        std::collections::HashMap::new();
     for (position, seat_id) in cell.route.seats().iter().enumerate().skip(1) {
         let Some(seat) = ev.seats.get(position) else {
             continue;
@@ -694,17 +945,12 @@ fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) 
         let Some(log) = seat.values.as_ref() else {
             continue;
         };
-        if !leader_seen_at(cell, ev, seat, &leader.record) {
+        if !leader_seen_at(cell, seat, leader) {
             continue;
         }
-        for (m, bytes) in log.iter().enumerate() {
-            let Some(entry) = RouteEntry::decode(bytes) else {
-                continue;
-            };
-            if !is_cell_copy_at(&entry, cell, position)
-                || entry.value != leader.value
-                || entry.chain.first() != Some(&leader_slot)
-            {
+        let log = SeatLog::of(seat_id, log);
+        for (entry, at) in log.copies(cell, position) {
+            if entry.value != leader.value || entry.chain.first() != Some(&leader_slot) {
                 continue;
             }
             // An empty is never a link (§9 rule 5): it neither counts nor
@@ -717,18 +963,21 @@ fn valid_links<T>(cell: &RoutedCell, ev: &CellEvidence, leader: &LeaderLink<T>) 
                     .enumerate()
                     .skip(1)
                     .all(|(earlier, slot)| match slot {
-                        ChainSlot::Link(record) => links.iter().any(|link| {
-                            link.position == earlier
-                                && link.record == *record
-                                && link.chain.as_slice() == &entry.chain[..earlier]
-                        }),
+                        ChainSlot::Link(record) => at_index
+                            .get(&(earlier, record.index))
+                            .and_then(|&n| links.get(n))
+                            .is_some_and(|link| {
+                                link.record == *record
+                                    && link.chain.as_slice() == &entry.chain[..earlier]
+                            }),
                         ChainSlot::Taken(..) | ChainSlot::NoResponse => true,
                     });
             if !one_chain {
                 continue;
             }
-            let record = record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]);
-            if committed_by(&record, log, seat.committed.as_ref()) {
+            let record = log.record(at);
+            if log.commits(&record, seat.committed.as_ref()) {
+                at_index.insert((position, record.index), links.len());
                 links.push(Link {
                     position,
                     record,
@@ -904,21 +1153,19 @@ where
             .route
             .seat(position)
             .ok_or(ProofRefusal::Invalid(ProofInvalid::NotThreeLinks))?;
-        let returned_here = log.iter().enumerate().any(|(m, bytes)| {
-            RouteEntry::decode(bytes).is_some_and(|entry| {
-                is_cell_copy_at(&entry, cell, position)
-                    && entry.value == leader.value
-                    && entry.chain.as_slice() == &proof.slots[..position]
-                    && record_of(seat_id, &cell.namespace, &cell.key, &log[..=m]) == *record
-            })
+        let log = SeatLog::of(seat_id, log);
+        let returned_here = log.copies(cell, position).any(|(entry, at)| {
+            entry.value == leader.value
+                && entry.chain.as_slice() == &proof.slots[..position]
+                && log.record(at) == *record
         });
         if !returned_here {
             return Err(ProofRefusal::Invalid(ProofInvalid::NoSuchLink { position }));
         }
-        if !committed_by(record, log, seat.committed.as_ref()) {
+        if !log.commits(record, seat.committed.as_ref()) {
             return Err(ProofRefusal::Missing(Missing::LinkUncommitted { position }));
         }
-        if !leader_seen_at(cell, ev, seat, &leader.record) {
+        if !leader_seen_at(cell, seat, &leader) {
             return Err(ProofRefusal::Missing(Missing::LeaderLinkUnseen {
                 position,
             }));
@@ -997,6 +1244,26 @@ pub(crate) mod fixtures {
     /// The id of [`committed_set`].
     pub(crate) fn committed_set_id() -> [u8; 32] {
         crate::ccb::storage_set_id(&committed_set()).expect("set id")
+    }
+
+    /// The arrival record a seat returns for the last value of `log`, its
+    /// arrival order through that value.
+    pub(crate) fn record_of(
+        seat: &[u8],
+        namespace: &[u8],
+        key: &[u8; 32],
+        log: &[Vec<u8>],
+    ) -> ArrivalRecord {
+        let (index, running_hash) = *crate::storage_cell::replay(namespace, key, log)
+            .last()
+            .expect("the seat holds a value");
+        ArrivalRecord {
+            member_id: seat.to_vec(),
+            namespace: namespace.to_vec(),
+            key: *key,
+            index,
+            running_hash,
+        }
     }
 
     /// One cell across its five seats.
@@ -1149,12 +1416,18 @@ pub(crate) mod fixtures {
         /// What a verifier holds once it has read every seat and obtained
         /// every seat's ByteCommit, each seat having mirrored the leader's
         /// latest one.
+        ///
+        /// Each log keeps every copy of the cell, recognized or not, so a
+        /// test sees evaluation pass over what a verifier's own read would
+        /// not have kept ([`recognized_copies`]).
         pub(crate) fn evidence(&self) -> CellEvidence {
             let leader = self.commit(0);
+            let cell = self.routed();
+            let every_copy = |entry: &RouteEntry| is_cell_copy_at(entry, &cell, entry.position);
             CellEvidence {
                 seats: (0..ROUTE_LEN)
                     .map(|position| SeatEvidence {
-                        values: Some(self.logs[position].clone()),
+                        values: Some(HeldLog::of(&cell, &self.logs[position], &every_copy)),
                         committed: self.commit(position),
                         leader_seen: leader.clone(),
                     })
@@ -1403,7 +1676,7 @@ mod tests {
 
     // ── evaluate: storage spec §9 ──────────────────────────────────────────
 
-    use super::fixtures::{recognize_ok, Cell};
+    use super::fixtures::{record_of, recognize_ok, Cell};
 
     const NS: &[u8] = b"DSM/test-cell";
 
@@ -1461,6 +1734,60 @@ mod tests {
         assert_eq!(
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::Final, b"ok-x")
+        );
+    }
+
+    /// SA-67. What a verifier keeps of each seat's log, the copies its
+    /// reading can count ([`recognized_copies`]), reads exactly what the
+    /// whole log reads: the same holder, state and completion proof, over
+    /// junk, copies of values nothing recognizes, a second recognized value
+    /// behind the first, and repeated copies at later seats. Nothing that is
+    /// no copy of a recognized value is held: junk at a seat costs a reader
+    /// a hash and none of what it holds.
+    /// MUTATION CONTROL: keeping only copies of the leader's own position in
+    /// `recognized_copies` (dropping the later seats' copies) leaves the
+    /// kept read short of Final and turns this red.
+    #[test]
+    fn a_log_kept_by_what_can_count_reads_what_the_whole_log_reads() {
+        let mut c = cell();
+        for n in 0..64u8 {
+            c.put(0, vec![n; 1024]);
+        }
+        c.write(b"junk", 2, &[]);
+        c.write(b"ok-x", ROUTE_LEN - 1, &[1]);
+        c.write(b"ok-y", ROUTE_LEN - 1, &[]);
+        let leader = ChainSlot::Link(c.record_at(0, 66));
+        for _ in 0..8 {
+            put_copy(
+                &mut c,
+                b"ok-x",
+                2,
+                vec![leader.clone(), ChainSlot::NoResponse],
+            );
+        }
+        let routed = c.routed();
+        let whole = c.evidence();
+        let keep = recognized_copies(&routed, |value: &[u8]| recognize_ok(value).is_some());
+        let mut kept = c.evidence();
+        for (position, seat) in kept.seats.iter_mut().enumerate() {
+            seat.values = Some(HeldLog::of(&routed, &c.logs[position], &keep));
+        }
+        let reading = evaluate(&routed, &whole, recognize_ok);
+        assert_eq!(reading, held(ChainState::Final, b"ok-x"));
+        assert_eq!(evaluate(&routed, &kept, recognize_ok), reading);
+        let proof = completion_proof(&routed, &whole, recognize_ok);
+        assert_eq!(completion_proof(&routed, &kept, recognize_ok), proof);
+        let (_, proof) = proof.expect("read").expect("final");
+        assert_eq!(
+            check_completion_proof(&routed, &kept, &proof, recognize_ok),
+            Ok(b"ok-x".to_vec())
+        );
+        let leader_log = kept.seats[0].values.as_ref().expect("read");
+        assert_eq!(leader_log.count(), 64 + 3, "every entry is folded");
+        assert!(
+            leader_log.kept_bytes() < 1024,
+            "the junk is not held: {} bytes kept",
+            leader_log.kept_bytes()
         );
     }
 
@@ -1667,17 +1994,28 @@ mod tests {
         let copy = RouteEntry::at_leader(NS.to_vec(), c.key, b"ok-x".to_vec(), &c.route).encode();
         let first = c.put(0, copy.clone());
         c.put(0, copy);
+        let routed = c.routed();
+        // What a writer keeps of the leader's log: its own copy, and nothing
+        // else, however much else the leader holds.
+        let held = |value: &[u8], log: &[Vec<u8>]| {
+            let copy = leader_copy(&routed, value);
+            let log = HeldLog::of(&routed, log, &copies_of(&copy));
+            log
+        };
         assert_eq!(
-            leader_copy_record(&c.routed(), b"ok-x", &c.logs[0]),
+            leader_copy_record(&routed, b"ok-x", &held(b"ok-x", &c.logs[0])),
             Some(first),
             "the first copy's record, not the second's"
         );
         assert_eq!(
-            leader_copy_record(&c.routed(), b"ok-y", &c.logs[0]),
+            leader_copy_record(&routed, b"ok-y", &held(b"ok-y", &c.logs[0])),
             None,
             "no copy of another value"
         );
-        assert_eq!(leader_copy_record(&c.routed(), b"ok-x", &[]), None);
+        assert_eq!(
+            leader_copy_record(&routed, b"ok-x", &held(b"ok-x", &[])),
+            None
+        );
     }
 
     /// Put a copy of `value` at `position` carrying `chain`, as a writer does,
@@ -1738,6 +2076,61 @@ mod tests {
         assert_eq!(
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::Preserved, b"ok-x")
+        );
+    }
+
+    /// Run `work`, and count the values this thread's folds hashed while it
+    /// ran.
+    fn folds<R>(work: impl FnOnce() -> R) -> (R, usize) {
+        FOLDED.with(|folded| folded.set(0));
+        let done = work();
+        (done, FOLDED.with(|folded| folded.get()))
+    }
+
+    /// SA-137. A seat's log is folded from `h_0` once, as it is read, however
+    /// many copies of the value the seat holds, and evaluating the cell folds
+    /// nothing again: repeated copies of a chain's links cost one pass over
+    /// each log, and the chain rules read them exactly as before (still
+    /// `Final`, the same proof).
+    /// MUTATION CONTROL: folding a seat's log up to each copy again, as
+    /// evaluation once did per copy, turns the evaluation counts red.
+    #[test]
+    fn each_seat_log_is_folded_once_however_many_copies_it_holds() {
+        const COPIES: usize = 200;
+        let mut c = cell();
+        c.write(b"ok-x", 2, &[]);
+        let leader = ChainSlot::Link(c.record_at(0, 1));
+        let first = ChainSlot::Link(c.record_at(1, 1));
+        for _ in 0..COPIES {
+            put_copy(&mut c, b"ok-x", 1, vec![leader.clone()]);
+            put_copy(&mut c, b"ok-x", 2, vec![leader.clone(), first.clone()]);
+        }
+        let routed = c.routed();
+        let held_values: usize = c.logs.iter().map(Vec::len).sum();
+        assert_eq!(held_values, 1 + 2 * (COPIES + 1));
+        let (ev, folded) = folds(|| c.evidence());
+        assert_eq!(folded, held_values, "the read folds each value once");
+
+        let (reading, folded) = folds(|| evaluate(&routed, &ev, recognize_ok));
+        assert_eq!(reading, held(ChainState::Final, b"ok-x"));
+        assert_eq!(folded, 0, "evaluate folded {folded} values again");
+
+        let (built, folded) = folds(|| completion_proof(&routed, &ev, recognize_ok));
+        let (_, proof) = built
+            .expect("every seat read and committed")
+            .expect("a chain of three links");
+        assert_eq!(
+            proof.slots,
+            vec![leader, first, ChainSlot::Link(c.record_at(2, 1))]
+        );
+        assert_eq!(folded, 0, "completion_proof folded {folded} values again");
+
+        let (checked, folded) =
+            folds(|| check_completion_proof(&routed, &ev, &proof, recognize_ok));
+        assert_eq!(checked, Ok(b"ok-x".to_vec()));
+        assert_eq!(
+            folded, 0,
+            "check_completion_proof folded {folded} values again"
         );
     }
 

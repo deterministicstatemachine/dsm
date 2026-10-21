@@ -10,8 +10,9 @@
     Kept(L, o)  ⟺  o is the first candidate under L whose recomputed
                    identity is L; every other candidate is nothing
 
-  RUST CORRESPONDENCE  `dsm/src/sofi/storage.rs`: `stored`, `merge_index_reads`,
-  `keep_verifying`. Every theorem below has a Rust test of the same name in
+  RUST CORRESPONDENCE  `dsm/src/sofi/storage.rs`: `stored`, `judge` (here
+  `Cand`), `merge_index_reads` (its coverage, here `Coverage`), `keep_verifying`
+  (here `keep`, and `keepIn` with the coverage). Every theorem below has a Rust test of the same name in
   that module. The address model is `storage_object::immutable_addr`:
   `addr(ns, p) = H(storage-object; ns ‖ H(ns; p))`, here `H [0, ns, H [1, ns, p]]`.
 
@@ -40,6 +41,19 @@
                                      established may be the object: a scan
                                      that keeps nothing past it is never None
                                      (storage §4, MR-STOR-0021)
+    - bytes_seen_that_are_no_object_under_the_locator_are_nothing
+                                     (SA-85) bytes seen at fewer than three
+                                     members that are no object under the
+                                     locator are nothing: the address binds
+                                     them, so they never stand between a scan
+                                     and None
+    - an_object_seen_short_of_stored_is_never_none
+                                     (SA-85, storage §4) an object seen at
+                                     fewer than three members is not Stored:
+                                     never kept, and never None
+    - a_read_too_few_members_ended_is_never_none
+                                     (SA-130) a read that does not cover the
+                                     locator never concludes there is nothing
     - acquired_bytes_are_stored      (R5) acquisition holds only Stored bytes,
                                      at the addresses the preimage needs
     - nothing_is_defaulted           (R5) nothing needed, or nothing read ⇒ the
@@ -86,6 +100,12 @@
     7. (R8) `publish` without `appendIndex`      -> published_is_found,
                                                     published_is_found_past_foreign_candidates
     8. (R8) `keepAll` stopping at the first match -> every_published_match_is_discovered
+    9. seen bytes read as unestablished         -> bytes_seen_that_are_no_object_under_the_locator_are_nothing
+       (`| .seen _ :: cs, b + 1 =>` as the `.unestablished` arm in `keep`)
+   11. seen bytes that recognize kept, or passed -> an_object_seen_short_of_stored_is_never_none
+       (`if id = L then .kept o` in the `.seen` arm, or `keep R L cs b`)
+   10. `keepIn` ignoring the coverage           -> a_read_too_few_members_ended_is_never_none
+       (`| r, _ => r` alone)
   Run: `lean -DwarningAsError=true DSMSofiStorage.lean`
 -/
 
@@ -250,28 +270,49 @@ from them — or nothing. -/
 structure Recognizer (α : Type) where
   recognize : Nat → Option (Nat × α)
 
-/-- Keep the first candidate whose bytes are Stored (`some`) and whose
-recomputed identity is the locator; examining a candidate spends one unit of
-budget; running out of budget is Unavailable. A candidate whose bytes were not
-established (`none`) may be the object: past it, a verifying candidate is
-still kept (the identity is the locator), and nothing kept is Unavailable. -/
+/-- What the reads of one candidate address establish (`Candidate` in Rust):
+its Stored bytes; `seen` bytes, which re-hash to the address but fewer than
+three members returned — not Stored, and what is at the address all the same,
+for the address binds them; or `unestablished`, no bytes at all. How many
+members answered that they hold nothing decides nothing (storage §4). -/
+inductive Cand where
+  | stored (bytes : Nat)
+  | seen (bytes : Nat)
+  | unestablished
+
+/-- Keep the first candidate whose bytes are Stored and whose recomputed
+identity is the locator; examining a candidate spends one unit of budget;
+running out of budget is Unavailable. Seen bytes that are no object under the
+locator are nothing. A candidate that was not established, or seen bytes that
+are the object short of Stored, may be the object: past it, a verifying
+candidate is still kept (the identity is the locator), and nothing kept is
+Unavailable. -/
 def keep {α : Type} (R : Recognizer α) (L : Nat) :
-    List (Option Nat) → Nat → Resolved α
+    List Cand → Nat → Resolved α
   | [], _ => .none
   | _ :: _, 0 => .unavailable
-  | none :: cs, b + 1 =>
+  | .unestablished :: cs, b + 1 =>
     match keep R L cs b with
     | .kept o => .kept o
     | _ => .unavailable
-  | some bytes :: cs, b + 1 =>
+  | .seen bytes :: cs, b + 1 =>
+    match R.recognize bytes with
+    | some (id, _) =>
+      if id = L then
+        match keep R L cs b with
+        | .kept o => .kept o
+        | _ => .unavailable
+      else keep R L cs b
+    | none => keep R L cs b
+  | .stored bytes :: cs, b + 1 =>
     match R.recognize bytes with
     | some (id, o) => if id = L then .kept o else keep R L cs b
     | none => keep R L cs b
 
 /-- What is kept recomputes to the locator and is one of the candidates. -/
 theorem kept_verifies {α : Type} (R : Recognizer α) (L : Nat) :
-    ∀ (cs : List (Option Nat)) (b : Nat) (o : α), keep R L cs b = .kept o →
-      ∃ bytes, some bytes ∈ cs ∧ R.recognize bytes = some (L, o) := by
+    ∀ (cs : List Cand) (b : Nat) (o : α), keep R L cs b = .kept o →
+      ∃ bytes, Cand.stored bytes ∈ cs ∧ R.recognize bytes = some (L, o) := by
   intro cs
   induction cs with
   | nil => intro b o hk; cases b <;> simp [keep] at hk
@@ -281,7 +322,7 @@ theorem kept_verifies {α : Type} (R : Recognizer α) (L : Nat) :
     | zero => simp [keep] at hk
     | succ b =>
       match c with
-      | none =>
+      | .unestablished =>
         have hrest : keep R L cs b = .kept o := by
           simp only [keep] at hk
           split at hk
@@ -291,7 +332,21 @@ theorem kept_verifies {α : Type} (R : Recognizer α) (L : Nat) :
           · cases hk
         obtain ⟨bytes, hm, hr⟩ := ih b o hrest
         exact ⟨bytes, List.mem_cons_of_mem _ hm, hr⟩
-      | some bytes =>
+      | .seen bytes =>
+        have hrest : keep R L cs b = .kept o := by
+          simp only [keep] at hk
+          split at hk
+          · split at hk
+            · split at hk
+              · rename_i o' heq
+                cases hk
+                exact heq
+              · cases hk
+            · exact hk
+          · exact hk
+        obtain ⟨bytes', hm, hr⟩ := ih b o hrest
+        exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+      | .stored bytes =>
         simp only [keep] at hk
         split at hk
         · rename_i id o' hrec
@@ -307,8 +362,8 @@ theorem kept_verifies {α : Type} (R : Recognizer α) (L : Nat) :
 
 /-- Nothing under the locator verifies ⇒ nothing is kept. -/
 theorem garbage_is_never_kept {α : Type} (R : Recognizer α) (L : Nat)
-    (cs : List (Option Nat)) (b : Nat)
-    (hg : ∀ bytes o, some bytes ∈ cs → R.recognize bytes ≠ some (L, o)) :
+    (cs : List Cand) (b : Nat)
+    (hg : ∀ bytes o, Cand.stored bytes ∈ cs → R.recognize bytes ≠ some (L, o)) :
     ∀ o, keep R L cs b ≠ .kept o := by
   intro o hk
   obtain ⟨bytes, hm, hr⟩ := kept_verifies R L cs b o hk
@@ -317,31 +372,44 @@ theorem garbage_is_never_kept {α : Type} (R : Recognizer α) (L : Nat)
 /-- Running out of budget before a verifying candidate is Unavailable, never
 None: with no budget and a candidate left, the scan says so. -/
 theorem over_budget_is_unavailable_never_none {α : Type} (R : Recognizer α) (L : Nat)
-    (c : Option Nat) (cs : List (Option Nat)) :
+    (c : Cand) (cs : List Cand) :
     keep R L (c :: cs) 0 = .unavailable := by
   simp [keep]
 
 /-- Every candidate examined within the budget and established, none
-verifying, is None. -/
+verifying, is None: bytes seen short of Stored among them, none the object. -/
 theorem within_budget_exhausted_is_none {α : Type} (R : Recognizer α) (L : Nat) :
-    ∀ (cs : List (Option Nat)) (b : Nat), cs.length ≤ b → none ∉ cs →
-      (∀ bytes o, some bytes ∈ cs → R.recognize bytes ≠ some (L, o)) →
+    ∀ (cs : List Cand) (b : Nat), cs.length ≤ b → Cand.unestablished ∉ cs →
+      (∀ bytes o, Cand.stored bytes ∈ cs → R.recognize bytes ≠ some (L, o)) →
+      (∀ bytes o, Cand.seen bytes ∈ cs → R.recognize bytes ≠ some (L, o)) →
       keep R L cs b = .none := by
   intro cs
   induction cs with
-  | nil => intro b _ _ _; cases b <;> rfl
+  | nil => intro b _ _ _ _; cases b <;> rfl
   | cons c cs ih =>
-    intro b hlen hs hg
+    intro b hlen hs hg hn
     cases b with
     | zero => simp at hlen
     | succ b =>
       have hlen' : cs.length ≤ b := Nat.le_of_succ_le_succ hlen
-      have hs' : none ∉ cs := fun hm => hs (List.mem_cons_of_mem _ hm)
-      have hg' : ∀ bytes o, some bytes ∈ cs → R.recognize bytes ≠ some (L, o) :=
+      have hs' : Cand.unestablished ∉ cs := fun hm => hs (List.mem_cons_of_mem _ hm)
+      have hg' : ∀ bytes o, Cand.stored bytes ∈ cs → R.recognize bytes ≠ some (L, o) :=
         fun bytes o hm => hg bytes o (List.mem_cons_of_mem _ hm)
+      have hn' : ∀ bytes o, Cand.seen bytes ∈ cs → R.recognize bytes ≠ some (L, o) :=
+        fun bytes o hm => hn bytes o (List.mem_cons_of_mem _ hm)
       match c with
-      | none => exact (hs (List.mem_cons_self ..)).elim
-      | some bytes =>
+      | .unestablished => exact (hs (List.mem_cons_self ..)).elim
+      | .seen bytes =>
+        simp only [keep]
+        split
+        · rename_i id o hrec
+          split
+          · rename_i hid
+            subst hid
+            exact absurd hrec (hn bytes o (List.mem_cons_self ..))
+          · exact ih b hlen' hs' hg' hn'
+        · exact ih b hlen' hs' hg' hn'
+      | .stored bytes =>
         simp only [keep]
         split
         · rename_i id o hrec
@@ -349,14 +417,14 @@ theorem within_budget_exhausted_is_none {α : Type} (R : Recognizer α) (L : Nat
           · rename_i hid
             subst hid
             exact absurd hrec (hg bytes o (List.mem_cons_self ..))
-          · exact ih b hlen' hs' hg'
-        · exact ih b hlen' hs' hg'
+          · exact ih b hlen' hs' hg' hn'
+        · exact ih b hlen' hs' hg' hn'
 
 /-- A candidate whose bytes were not established may be the object, so a scan
 that keeps nothing past it is Unavailable, never None: an unestablished
 storage fact is never read as its negation (storage §4, MR-STOR-0021). -/
 theorem an_unestablished_candidate_is_never_none {α : Type} (R : Recognizer α) (L : Nat) :
-    ∀ (cs : List (Option Nat)) (b : Nat), none ∈ cs → keep R L cs b ≠ .none := by
+    ∀ (cs : List Cand) (b : Nat), Cand.unestablished ∈ cs → keep R L cs b ≠ .none := by
   intro cs
   induction cs with
   | nil => intro b h; simp at h
@@ -366,11 +434,19 @@ theorem an_unestablished_candidate_is_never_none {α : Type} (R : Recognizer α)
     | zero => simp [keep]
     | succ b =>
       match c with
-      | none =>
+      | .unestablished =>
         simp only [keep]
         split <;> intro h <;> cases h
-      | some bytes =>
-        have hm' : none ∈ cs := by simpa using hm
+      | .seen bytes =>
+        have hm' : Cand.unestablished ∈ cs := by simpa using hm
+        simp only [keep]
+        split
+        · split
+          · split <;> intro h <;> cases h
+          · exact ih b hm'
+        · exact ih b hm'
+      | .stored bytes =>
+        have hm' : Cand.unestablished ∈ cs := by simpa using hm
         simp only [keep]
         split
         · split
@@ -378,6 +454,63 @@ theorem an_unestablished_candidate_is_never_none {α : Type} (R : Recognizer α)
           · exact ih b hm'
         · exact ih b hm'
 
+/-- SA-85. Bytes seen at fewer than three members that are no object under the
+locator are nothing: the address binds them, so whatever is at the address
+is not the object, and the candidate never stands between the scan and None —
+decided from the bytes, never from members answering that they hold nothing. -/
+theorem bytes_seen_that_are_no_object_under_the_locator_are_nothing {α : Type}
+    (R : Recognizer α) (L bytes : Nat) (cs : List Cand) (b : Nat)
+    (hno : ∀ o, R.recognize bytes ≠ some (L, o)) :
+    keep R L (.seen bytes :: cs) (b + 1) = keep R L cs b := by
+  simp only [keep]
+  split
+  · rename_i id o hrec
+    split
+    · rename_i hid
+      subst hid
+      exact absurd hrec (hno o)
+    · rfl
+  · rfl
+
+/-- SA-85, the other side (storage §4, MR-STOR-0021): an object seen at fewer
+than three members is not Stored, so it is never kept from those bytes, and a
+scan that meets it is never None — it may yet be published. -/
+theorem an_object_seen_short_of_stored_is_never_none {α : Type}
+    (R : Recognizer α) (L bytes : Nat) (o : α) (cs : List Cand) (b : Nat)
+    (hrec : R.recognize bytes = some (L, o)) :
+    keep R L (.seen bytes :: cs) (b + 1) ≠ .none ∧
+      keep R L [.seen bytes] 1 = .unavailable := by
+  constructor
+  · simp only [keep, hrec, if_pos]
+    split <;> intro h <;> cases h
+  · simp [keep, hrec]
+
+/-- Whether an index read covers the locator (`Coverage` in Rust): enough
+members' indexes read to their end that an object published under it is
+among the candidates, or not. -/
+inductive Coverage where
+  | whole
+  | partly
+
+/-- The scan over a read that covers the locator or does not: a read that
+does not cover it never concludes there is nothing. -/
+def keepIn {α : Type} (R : Recognizer α) (L : Nat) (cs : List Cand) (cov : Coverage)
+    (b : Nat) : Resolved α :=
+  match keep R L cs b, cov with
+  | .none, .partly => .unavailable
+  | r, _ => r
+
+/-- SA-130. A read that does not cover the locator — too few members'
+indexes read to their end — is never None, whatever its candidates; one that
+covers it is the scan of its candidates. -/
+theorem a_read_too_few_members_ended_is_never_none {α : Type} (R : Recognizer α) (L : Nat)
+    (cs : List Cand) (b : Nat) :
+    keepIn R L cs .partly b ≠ .none ∧ keepIn R L cs .whole b = keep R L cs b := by
+  constructor
+  · unfold keepIn
+    split <;> simp_all
+  · unfold keepIn
+    split <;> simp_all
 
 -- ── §13 acquisition — rebuild step R5 ─────────────────────────────────────
 
@@ -510,14 +643,29 @@ def appendIndex (st : Store) (ns p L : Nat) : Store :=
 def publish (st : Store) (ns p L : Nat) : Store :=
   appendIndex h (putAll h st ns p) ns p L
 
+/-- What the reads at one address establish (`judge` in Rust): its Stored
+bytes; the bytes seen, when fewer than three members return them; or nothing
+established. -/
+def judge (a : Nat) (reads : List Read) : Cand :=
+  match stored h a reads with
+  | some p => .stored p
+  | none =>
+    match counted h a reads with
+    | p :: _ => .seen p
+    | [] => .unestablished
+
 /-- Fetch by locator (`sofi_publish::fetch_*`): every candidate under `L`, its
 `Stored` bytes or nothing, kept by the recognizer with budget `b`. -/
 def find {α : Type} (st : Store) (R : Recognizer α) (L b : Nat) : Resolved α :=
-  keep R L ((st.index L).map fun a => stored h a (st.held a)) b
+  keep R L ((st.index L).map fun a => judge h a (st.held a)) b
 
 theorem published_is_stored (st : Store) (ns p L : Nat) :
     stored h (addr h ns p) ((publish h st ns p L).held (addr h ns p)) = some p := by
   simp [publish, appendIndex, putAll, stored, counted, counts]
+
+theorem published_is_judged (st : Store) (ns p L : Nat) :
+    judge h (addr h ns p) ((publish h st ns p L).held (addr h ns p)) = .stored p := by
+  simp [judge, published_is_stored]
 
 theorem publish_indexes_the_address (st : Store) (ns p L : Nat) :
     (publish h st ns p L).index L = st.index L ++ [addr h ns p] := by
@@ -532,7 +680,7 @@ theorem published_is_found {α : Type} (st : Store) (R : Recognizer α) (ns p L 
     find h (publish h st ns p L) R L 1 = .kept o := by
   unfold find
   rw [publish_indexes_the_address, hfresh]
-  simp [List.map, published_is_stored, keep, hrec]
+  simp [List.map, published_is_judged, keep, hrec]
 
 /-- PUT WITHOUT THE INDEX IS NOT FOUND (`an_object_put_without_its_index_is_not_found`):
 the object is Stored, and no reader reaches it — a locator is the only way
@@ -551,7 +699,7 @@ reader with enough budget keeps, because the other candidates do not
 recompute to `L` — they are examined and passed over, never returned. -/
 theorem published_is_found_past_foreign_candidates {α : Type} (st : Store) (R : Recognizer α)
     (ns p L : Nat) (o : α) (hrec : R.recognize p = some (L, o))
-    (hforeign : ∀ a bytes o', a ∈ st.index L → stored h a (st.held a) = some bytes →
+    (hforeign : ∀ a bytes o', a ∈ st.index L → judge h a (st.held a) = .stored bytes →
       R.recognize bytes ≠ some (L, o'))
     (hnew : addr h ns p ∉ st.index L) :
     find h (publish h st ns p L) R L ((st.index L).length + 1) = .kept o := by
@@ -562,13 +710,13 @@ theorem published_is_found_past_foreign_candidates {α : Type} (st : Store) (R :
     have : a ≠ addr h ns p := fun e => hnew (e ▸ ha)
     simp [publish, appendIndex, putAll, this]
   rw [List.map_append]
-  have hlast : (List.map (fun a => stored h a ((publish h st ns p L).held a)) [addr h ns p])
-      = [some p] := by
-    simp [List.map, published_is_stored]
+  have hlast : (List.map (fun a => judge h a ((publish h st ns p L).held a)) [addr h ns p])
+      = [.stored p] := by
+    simp [List.map, published_is_judged]
   rw [hlast]
   -- walk past every foreign candidate, one unit of budget each
   have : ∀ (l : List Nat), (∀ a ∈ l, a ∈ st.index L) →
-      keep R L ((l.map fun a => stored h a ((publish h st ns p L).held a)) ++ [some p])
+      keep R L ((l.map fun a => judge h a ((publish h st ns p L).held a)) ++ [.stored p])
         (l.length + 1) = .kept o := by
     intro l
     induction l with
@@ -579,11 +727,21 @@ theorem published_is_found_past_foreign_candidates {α : Type} (st : Store) (R :
       have hl' : ∀ x ∈ l, x ∈ st.index L := fun x hx => hl x (List.mem_cons_of_mem _ hx)
       simp only [List.map, List.cons_append, List.length_cons]
       rw [hheld a ha]
-      cases hs : stored h a (st.held a) with
-      | none =>
+      cases hs : judge h a (st.held a) with
+      | unestablished =>
         simp only [keep]
         rw [ih hl']
-      | some bytes =>
+      | seen bytes =>
+        simp only [keep]
+        cases hr : R.recognize bytes with
+        | none => exact ih hl'
+        | some io =>
+          obtain ⟨id, o'⟩ := io
+          by_cases hid : id = L
+          · subst hid
+            simp [ih hl']
+          · simp [hid, ih hl']
+      | stored bytes =>
         simp only [keep]
         cases hr : R.recognize bytes with
         | none => exact ih hl'
@@ -622,28 +780,33 @@ theorem Discovered.objects_markIncomplete {α : Type} (d : Discovered α) :
 
 /-- Discovery under an index of references (`keep_all_verifying`,
 `fetch_setup_for`, `fetch_vault_genesis`): every candidate that is Stored and
-recognizes to `L`, in order. It selects nothing. Running out of budget, or a
-candidate whose bytes were not established, makes it incomplete: what is
-missing from it is not thereby absent. -/
+recognizes to `L`, in order. It selects nothing. Running out of budget, a
+candidate whose bytes were not established, or bytes seen short of Stored that
+recognize to `L`, makes it incomplete: what is missing from it is not thereby
+absent. -/
 def keepAll {α : Type} (R : Recognizer α) (L : Nat) :
-    List (Option Nat) → Nat → Discovered α
+    List Cand → Nat → Discovered α
   | [], _ => .complete []
   | _ :: _, 0 => .incomplete []
-  | none :: cs, b + 1 => (keepAll R L cs b).markIncomplete
-  | some bytes :: cs, b + 1 =>
+  | .unestablished :: cs, b + 1 => (keepAll R L cs b).markIncomplete
+  | .seen bytes :: cs, b + 1 =>
+    match R.recognize bytes with
+    | some (id, _) => if id = L then (keepAll R L cs b).markIncomplete else keepAll R L cs b
+    | none => keepAll R L cs b
+  | .stored bytes :: cs, b + 1 =>
     match R.recognize bytes with
     | some (id, o) => if id = L then (keepAll R L cs b).prepend o else keepAll R L cs b
     | none => keepAll R L cs b
 
 def findAll {α : Type} (st : Store) (R : Recognizer α) (L b : Nat) : Discovered α :=
-  keepAll R L ((st.index L).map fun a => stored h a (st.held a)) b
+  keepAll R L ((st.index L).map fun a => judge h a (st.held a)) b
 
 /-- Whatever `keepAll` keeps, it kept the objects that recognize to `L` and
 nothing else (the twin of `kept_verifies` for discovery). -/
 theorem discovered_recognizes_to_the_locator {α : Type} (R : Recognizer α) (L : Nat) :
-    ∀ (cs : List (Option Nat)) (b : Nat) (o : α),
+    ∀ (cs : List Cand) (b : Nat) (o : α),
       o ∈ (keepAll R L cs b).objects →
-      ∃ bytes, some bytes ∈ cs ∧ R.recognize bytes = some (L, o) := by
+      ∃ bytes, Cand.stored bytes ∈ cs ∧ R.recognize bytes = some (L, o) := by
   intro cs
   induction cs with
   | nil =>
@@ -655,11 +818,22 @@ theorem discovered_recognizes_to_the_locator {α : Type} (R : Recognizer α) (L 
     | zero => simp [keepAll, Discovered.objects] at ho
     | succ b =>
       match c with
-      | none =>
+      | .unestablished =>
         simp only [keepAll, Discovered.objects_markIncomplete] at ho
         obtain ⟨bytes, hm, hr⟩ := ih b o ho
         exact ⟨bytes, List.mem_cons_of_mem _ hm, hr⟩
-      | some bytes =>
+      | .seen bytes =>
+        simp only [keepAll] at ho
+        split at ho
+        · split at ho
+          · rw [Discovered.objects_markIncomplete] at ho
+            obtain ⟨bytes', hm, hr⟩ := ih b o ho
+            exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+          · obtain ⟨bytes', hm, hr⟩ := ih b o ho
+            exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+        · obtain ⟨bytes', hm, hr⟩ := ih b o ho
+          exact ⟨bytes', List.mem_cons_of_mem _ hm, hr⟩
+      | .stored bytes =>
         simp only [keepAll] at ho
         split at ho
         · rename_i id o' hrec
@@ -682,7 +856,7 @@ incomplete: the list it returns is what verified, never a claim that nothing
 else is published (storage §4, MR-STOR-0021). -/
 theorem an_unestablished_candidate_makes_discovery_partial {α : Type} (R : Recognizer α)
     (L : Nat) :
-    ∀ (cs : List (Option Nat)) (b : Nat), none ∈ cs →
+    ∀ (cs : List Cand) (b : Nat), Cand.unestablished ∈ cs →
       ∃ os, keepAll R L cs b = .incomplete os := by
   intro cs
   induction cs with
@@ -693,12 +867,21 @@ theorem an_unestablished_candidate_makes_discovery_partial {α : Type} (R : Reco
     | zero => exact ⟨[], by simp [keepAll]⟩
     | succ b =>
       match c with
-      | none =>
+      | .unestablished =>
         cases hk : keepAll R L cs b with
         | complete os => exact ⟨os, by simp [keepAll, hk, Discovered.markIncomplete]⟩
         | incomplete os => exact ⟨os, by simp [keepAll, hk, Discovered.markIncomplete]⟩
-      | some bytes =>
-        have hm' : none ∈ cs := by simpa using hm
+      | .seen bytes =>
+        have hm' : Cand.unestablished ∈ cs := by simpa using hm
+        obtain ⟨os, hos⟩ := ih b hm'
+        simp only [keepAll]
+        split
+        · split
+          · exact ⟨os, by rw [hos]; rfl⟩
+          · exact ⟨os, hos⟩
+        · exact ⟨os, hos⟩
+      | .stored bytes =>
+        have hm' : Cand.unestablished ∈ cs := by simpa using hm
         obtain ⟨os, hos⟩ := ih b hm'
         simp only [keepAll]
         split
@@ -720,17 +903,17 @@ theorem every_published_match_is_discovered {α : Type} (st : Store) (R : Recogn
     findAll h (publish h (publish h st ns₁ p₁ L) ns₂ p₂ L) R L 2 = .complete [o₁, o₂] := by
   unfold findAll
   rw [publish_indexes_the_address, publish_indexes_the_address, hfresh]
-  have hsecond : stored h (addr h ns₂ p₂)
-      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₂ p₂)) = some p₂ :=
-    published_is_stored h _ ns₂ p₂ L
-  have hfirst : stored h (addr h ns₁ p₁)
-      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₁ p₁)) = some p₁ := by
+  have hsecond : judge h (addr h ns₂ p₂)
+      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₂ p₂)) = .stored p₂ :=
+    published_is_judged h _ ns₂ p₂ L
+  have hfirst : judge h (addr h ns₁ p₁)
+      ((publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₁ p₁)) = .stored p₁ := by
     have : (publish h (publish h st ns₁ p₁ L) ns₂ p₂ L).held (addr h ns₁ p₁)
         = (publish h st ns₁ p₁ L).held (addr h ns₁ p₁) := by
       simp [publish, appendIndex, putAll]
       exact fun e => absurd e hne
     rw [this]
-    exact published_is_stored h st ns₁ p₁ L
+    exact published_is_judged h st ns₁ p₁ L
   simp [List.map, hfirst, hsecond, keepAll, h₁, h₂, Discovered.prepend]
 
 #print axioms published_is_found
@@ -750,6 +933,9 @@ theorem every_published_match_is_discovered {α : Type} (st : Store) (R : Recogn
 #print axioms within_budget_exhausted_is_none
 #print axioms an_unestablished_candidate_is_never_none
 #print axioms an_unestablished_candidate_makes_discovery_partial
+#print axioms bytes_seen_that_are_no_object_under_the_locator_are_nothing
+#print axioms an_object_seen_short_of_stored_is_never_none
+#print axioms a_read_too_few_members_ended_is_never_none
 #print axioms acquired_bytes_are_stored
 #print axioms nothing_is_defaulted
 #print axioms missing_evidence_is_unavailable_never_invalid

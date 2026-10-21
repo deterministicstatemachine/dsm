@@ -8,7 +8,8 @@
 //!
 //! - **Queries** are routed to the installed [`AppRouter`] (or handled inline for
 //!   special-case paths like `system.genesis`).
-//! - **Recovery operations** are delegated to the [`RecoveryHandler`].
+//! - **Recovery operations** are not taken here: they run only as the router's
+//!   `recovery.*` routes, behind the gates those routes hold (SA-119, SA-120).
 //!
 //! Handlers are installed at runtime via `install_*` functions, stored in global `RwLock`
 //! slots, and retrieved on each dispatch. This allows the SDK to upgrade from a bootstrap
@@ -26,8 +27,6 @@ use crate::DsmError;
 
 /// Core app router storage. Uses RwLock to allow replacement (bootstrap → full router).
 static APP_ROUTER: Lazy<RwLock<Option<Arc<dyn AppRouter>>>> = Lazy::new(|| RwLock::new(None));
-static RECOVERY_HANDLER: Lazy<RwLock<Option<Arc<dyn RecoveryHandler>>>> =
-    Lazy::new(|| RwLock::new(None));
 
 /// Application-level routing trait for query and invoke dispatch.
 ///
@@ -49,34 +48,6 @@ pub trait AppRouter: Send + Sync {
     fn handle_invoke(&self, method: &str, args_proto: &[u8]) -> Result<Vec<u8>, String>;
 }
 
-/// Recovery operation handler trait for core recovery transaction processing.
-pub trait RecoveryHandler: Send + Sync {
-    fn handle_recovery_capsule_decrypt(
-        &self,
-        operation: gp::RecoveryCapsuleDecryptRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    fn handle_nfc_tag(&self, operation: gp::ExternalCommit) -> Result<gp::OpResult, String>;
-
-    /// Create a tombstone receipt marking the lost device as TOMBSTONED in the Device Tree.
-    fn handle_recovery_tombstone(
-        &self,
-        operation: gp::RecoveryTombstoneRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    /// Create a succession receipt binding a new device after tombstone.
-    fn handle_recovery_succession(
-        &self,
-        operation: gp::RecoverySuccessionRequest,
-    ) -> Result<gp::OpResult, String>;
-
-    /// Resume a bilateral relationship from a recovered chain tip.
-    fn handle_recovery_resume(
-        &self,
-        operation: gp::RecoveryResumeRequest,
-    ) -> Result<gp::OpResult, String>;
-}
-
 /// Install the application router the core bridge routes to. It is installed
 /// once: a second install is refused, never a silent replacement.
 pub fn install_app_router(router: Arc<dyn AppRouter>) -> Result<(), DsmError> {
@@ -96,31 +67,9 @@ pub fn get_app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
 }
 
-/// Install a recovery operation handler for core recovery transaction processing.
-pub fn install_recovery_handler(handler: Arc<dyn RecoveryHandler>) {
-    let mut guard = match RECOVERY_HANDLER.write() {
-        Ok(g) => g,
-        Err(_) => {
-            log::warn!("[CORE] Recovery handler lock poisoned");
-            return;
-        }
-    };
-    if guard.is_none() {
-        *guard = Some(handler);
-        log::info!("[CORE] Recovery handler installed successfully");
-    } else {
-        log::warn!("[CORE] Recovery handler already installed (idempotent call)");
-    }
-}
-
 #[inline]
 fn app_router() -> Option<Arc<dyn AppRouter>> {
     APP_ROUTER.read().ok()?.clone()
-}
-
-#[inline]
-fn recovery_handler() -> Option<Arc<dyn RecoveryHandler>> {
-    RECOVERY_HANDLER.read().ok()?.clone()
 }
 
 #[inline]
@@ -320,90 +269,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                         }
                     }
 
-                    // -------- Recovery ops are SDK-only --------
-                    Some(gp::universal_op::Kind::RecoveryCapsuleDecrypt(req)) => {
-                        if let Some(handler) = recovery_handler() {
-                            match handler.handle_recovery_capsule_decrypt(req) {
-                                Ok(result) => result,
-                                Err(e) => op_error(
-                                    op_id,
-                                    500,
-                                    &format!("Recovery capsule decrypt failed: {e}"),
-                                ),
-                            }
-                        } else {
-                            op_error(
-                                op_id,
-                                501,
-                                "Recovery operations require a handler to be installed",
-                            )
-                        }
-                    }
-
-                    Some(gp::universal_op::Kind::ExternalCommit(commit)) => {
-                        match (commit.source_id.as_ref(), commit.commit_id.as_ref()) {
-                            (Some(source_h), Some(commit_h))
-                                if source_h.v.len() == 32 && commit_h.v.len() == 32 =>
-                            {
-                                let mut source_id = [0u8; 32];
-                                source_id.copy_from_slice(&source_h.v);
-                                let mut commit_id = [0u8; 32];
-                                commit_id.copy_from_slice(&commit_h.v);
-
-                                let evidence_bytes = commit
-                                    .evidence
-                                    .as_ref()
-                                    .map(|e| e.encode_to_vec())
-                                    .unwrap_or_default();
-                                let evidence_hash =
-                                    crate::commitments::external_evidence_hash(&evidence_bytes);
-                                let expected_commit_id =
-                                    crate::commitments::create_external_commitment(
-                                        &commit.payload,
-                                        &source_id,
-                                        &evidence_hash,
-                                    );
-                                if expected_commit_id != commit_id {
-                                    op_error(op_id, 400, "ExternalCommit commit_id mismatch")
-                                } else {
-                                    let expected_source_id =
-                                        crate::commitments::external_source_id("nfc:recovery");
-                                    let source_id_matches = source_id == expected_source_id;
-
-                                    if source_id_matches {
-                                        if let Some(handler) = recovery_handler() {
-                                            match handler.handle_nfc_tag(commit) {
-                                                Ok(result) => result,
-                                                Err(e) => op_error(
-                                                    op_id,
-                                                    500,
-                                                    &format!("NFC tag processing failed: {e}"),
-                                                ),
-                                            }
-                                        } else {
-                                            op_error(
-                                                op_id,
-                                                501,
-                                                "Recovery operations require a handler to be installed",
-                                            )
-                                        }
-                                    } else {
-                                        op_error(
-                                            op_id,
-                                            501,
-                                            "ExternalCommit source not supported by core bridge",
-                                        )
-                                    }
-                                }
-                            }
-                            _ => op_error(
-                                op_id,
-                                400,
-                                "ExternalCommit source_id or commit_id missing or invalid",
-                            ),
-                        }
-                    }
-
                     Some(gp::universal_op::Kind::FaucetClaim(req)) => {
                         // Faucet claim is an application-level policy decision.
                         // The core bridge MUST NOT mint or otherwise perform claims.
@@ -460,63 +325,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
                             }
                         } else {
                             op_error(op_id, 501, "Faucet operations require the DSM SDK runtime")
-                        }
-                    }
-
-                    Some(gp::universal_op::Kind::RecoveryTombstone(req)) => {
-                        if let Some(handler) = recovery_handler() {
-                            match handler.handle_recovery_tombstone(req) {
-                                Ok(result) => result,
-                                Err(e) => op_error(
-                                    op_id,
-                                    500,
-                                    &format!("Recovery tombstone failed: {e}"),
-                                ),
-                            }
-                        } else {
-                            op_error(
-                                op_id,
-                                501,
-                                "Recovery operations require a handler to be installed",
-                            )
-                        }
-                    }
-
-                    Some(gp::universal_op::Kind::RecoverySuccession(req)) => {
-                        if let Some(handler) = recovery_handler() {
-                            match handler.handle_recovery_succession(req) {
-                                Ok(result) => result,
-                                Err(e) => op_error(
-                                    op_id,
-                                    500,
-                                    &format!("Recovery succession failed: {e}"),
-                                ),
-                            }
-                        } else {
-                            op_error(
-                                op_id,
-                                501,
-                                "Recovery operations require a handler to be installed",
-                            )
-                        }
-                    }
-
-                    Some(gp::universal_op::Kind::RecoveryResume(req)) => {
-                        if let Some(handler) = recovery_handler() {
-                            match handler.handle_recovery_resume(req) {
-                                Ok(result) => result,
-                                Err(e) => op_error(
-                                    op_id,
-                                    500,
-                                    &format!("Recovery resume failed: {e}"),
-                                ),
-                            }
-                        } else {
-                            op_error(
-                                op_id,
-                                501,
-                                "Recovery operations require a handler to be installed",
-                            )
                         }
                     }
 
@@ -827,20 +635,56 @@ mod tests {
 
     /// The single result of invoking `method` with `body` through the bridge.
     fn invoke_result(method: &str, body: Vec<u8>) -> gp::OpResult {
+        op_result(gp::universal_op::Kind::Invoke(gp::Invoke {
+            method: method.to_string(),
+            args: Some(gp::ArgPack {
+                body,
+                ..Default::default()
+            }),
+            program: None,
+            cosigners: vec![],
+            evidence: None,
+            nonce: None,
+        }))
+    }
+
+    /// SA-119, SA-120. No recovery operation runs through the envelope
+    /// bridge. Its arms called the recovery handler around the router's
+    /// gates: a capsule decrypted under a key the request carried and staged,
+    /// and a resume that skipped the tombstone-acknowledgement gate. Recovery
+    /// runs only as the router's `recovery.*` routes, so each is answered as
+    /// an operation the bridge does not take.
+    #[test]
+    fn no_recovery_operation_runs_through_the_bridge() {
+        let kinds = [
+            gp::universal_op::Kind::RecoveryCapsuleDecrypt(gp::RecoveryCapsuleDecryptRequest {
+                encrypted_capsule: vec![1; 64],
+                mnemonic_key: vec![2; 32],
+            }),
+            gp::universal_op::Kind::RecoveryTombstone(gp::RecoveryTombstoneRequest::default()),
+            gp::universal_op::Kind::RecoverySuccession(gp::RecoverySuccessionRequest::default()),
+            gp::universal_op::Kind::RecoveryResume(gp::RecoveryResumeRequest::default()),
+        ];
+        for kind in kinds {
+            let label = format!("{kind:?}");
+            let result = op_result(kind);
+            assert!(!result.accepted, "{label} was taken");
+            let error = result.error.expect("a refusal");
+            assert_eq!(error.code, 501, "{label}");
+            assert!(
+                error.message.contains("not supported by the core bridge"),
+                "{label}: {}",
+                error.message
+            );
+        }
+    }
+
+    /// The single result of the operation `kind` through the bridge.
+    fn op_result(kind: gp::universal_op::Kind) -> gp::OpResult {
         let op = gp::UniversalOp {
             op_id: Some(gp::Hash32 { v: vec![7; 32] }),
             actor: vec![0xEE; 32],
-            kind: Some(gp::universal_op::Kind::Invoke(gp::Invoke {
-                method: method.to_string(),
-                args: Some(gp::ArgPack {
-                    body,
-                    ..Default::default()
-                }),
-                program: None,
-                cosigners: vec![],
-                evidence: None,
-                nonce: None,
-            })),
+            kind: Some(kind),
         };
         let envelope = gp::Envelope {
             version: 3,

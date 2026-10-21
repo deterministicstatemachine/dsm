@@ -46,12 +46,26 @@ use dsm::utils::text_id;
 
 const CYCLE_HEADER: &str = "x-cycle";
 const ECHO_HEADER: &str = "x-dsm-node-id";
-/// Upper bound on cycles fetched from one member in one sync, so one request
-/// does bounded work; a later sync continues where this one stopped, since
-/// every cycle is kept as it is fetched. At this bound one sync of a member
-/// far behind is 128 fetches, well inside what a client waits for one
-/// request (the SDK's member client waits 30 s).
-const MAX_SYNC_CYCLES: u64 = 128;
+/// The newest cycles of a member one sync mirrors, before its `/latest`,
+/// however far behind the mirror is: a reader verifies a seat at the cycle
+/// it has just closed there and at that cycle's parent, both against these
+/// mirrors (storage spec §14 rule 5), and anyone can close a cycle whenever
+/// one entry has arrived. A mirror that only caught up from its oldest gap
+/// would stay behind a member closing cycles faster than syncs fetch them,
+/// and no reader could verify that member. Missing them now takes that
+/// member closing this many cycles between a reader's close and the sync,
+/// each one a durable commit under the member's one close lock.
+pub const NEWEST_CYCLES: u64 = 512;
+/// The oldest cycles not yet mirrored that one sync fetches, from the first
+/// gap on, so the mirror comes to hold every cycle of the member (storage
+/// spec §14, mirror provenance) whatever it skipped to reach the newest.
+pub const BACKFILL_CYCLES: usize = 512;
+/// Cycles one look at the mirror covers while a sync finds the gaps below
+/// the newest cycles, and the looks one sync takes: a sync after a restart
+/// finds the first gap of a long mirror over several syncs, never by
+/// reading the whole mirror in one.
+const GAP_SCAN_CYCLES: u64 = 4096;
+const GAP_SCANS: usize = 16;
 /// Cycles of one member fetched at once in a sync. The fetches are reads of
 /// a set-mate's own ByteCommits; what is kept, and in what order, does not
 /// depend on how many are in flight.
@@ -130,7 +144,10 @@ async fn by_cycle(
 
 /// The proof that this node's ByteCommit for `x-cycle` commits the cell's
 /// latest entry as of that cycle. `404` when the cycle does not exist or the
-/// cell had nothing committed by then.
+/// cell had nothing committed by then. `503` when the proof needs a tree
+/// built and [`db::TREE_BUILDS_QUEUED`] proofs already hold or wait for the
+/// node's one build: the node is busy, and the proof is answered when asked
+/// again.
 async fn proof(
     Extension(state): Extension<Arc<AppState>>,
     Path(key): Path<String>,
@@ -145,12 +162,11 @@ async fn proof(
     let key: [u8; 32] = digest32(&key)?
         .try_into()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    match db::cell_commit_proof(&state.db_pool, &state.committed, &namespace, &key, cycle)
-        .await
-        .map_err(internal("proof"))?
-    {
-        Some(p) => Ok(octets(p.to_proto().encode_to_vec())),
-        None => Err(StatusCode::NOT_FOUND),
+    match db::cell_commit_proof(&state.db_pool, &state.committed, &namespace, &key, cycle).await {
+        Ok(Some(p)) => Ok(octets(p.to_proto().encode_to_vec())),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(busy) if busy.is::<db::TreeBuildsFull>() => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(e) => Err(internal("proof")(e)),
     }
 }
 
@@ -173,7 +189,9 @@ async fn mirror_read(
 }
 
 /// Fetch every set-mate's new ByteCommits from the set-mate itself, at the
-/// endpoint this node's own configuration names for it. Anyone may ask;
+/// endpoint this node's own configuration names for it: its newest cycles
+/// and the oldest it has not mirrored, at most [`NEWEST_CYCLES`] and
+/// [`BACKFILL_CYCLES`] of them per sync ([`sync_one`]). Anyone may ask;
 /// nothing the caller sends chooses a peer or supplies a byte. Set-mates are
 /// synced concurrently, each one sync at a time, and a caller is answered by
 /// a sync of each set-mate that started after it asked ([`MirrorSyncs`]).
@@ -199,10 +217,9 @@ async fn mirror_sync(
         .map(|(member, endpoint)| {
             let state = &state;
             async move {
-                state
-                    .mirror_syncs
-                    .of(member)
-                    .run(|| sync_one(state, client, endpoint, member.as_bytes()))
+                let syncs = state.mirror_syncs.of(member);
+                syncs
+                    .run(|| sync_one(state, client, endpoint, member.as_bytes(), &syncs.frontier))
                     .await
                     .map_err(|e| log::warn!("bytecommit mirror: {member} at {endpoint}: {e}"))
             }
@@ -259,48 +276,101 @@ async fn fetch_commit(
     Ok(Some(commit))
 }
 
+/// One sync of `member`'s ByteCommits into this node's mirror: its
+/// `/latest`, the [`NEWEST_CYCLES`] before it, and the first
+/// [`BACKFILL_CYCLES`] cycles below those that the mirror does not hold,
+/// each fetched only if not held. `frontier` is the cycle through which the
+/// mirror is known to hold every cycle of the member; this sync moves it up
+/// as it finds them held.
+///
+/// The cycles are fetched several at once and checked and kept in cycle
+/// order as they come back, as one fetch after another would be: the first
+/// that fails ends the sync with every cycle before it kept and none after
+/// it, `/latest` included. `/latest` is kept whatever its cycle: at or below
+/// a cycle already mirrored, a different ByteCommit is how a rewritten
+/// history shows.
 async fn sync_one(
     state: &AppState,
     client: &reqwest::Client,
     endpoint: &str,
     member: &[u8],
+    frontier: &AtomicU64,
 ) -> anyhow::Result<u64> {
     let Some(latest) = fetch_commit(client, endpoint, "/api/v2/bytecommit/latest", member).await?
     else {
         return Ok(0);
     };
-    let have = db::mirror_last_cycle(&state.db_pool, member).await?;
-    let reach = have.saturating_add(MAX_SYNC_CYCLES);
-    let mut added = 0u64;
-    // Up to SYNC_FETCHES_IN_FLIGHT cycles are fetched at once, and each is
-    // checked and kept in cycle order as it comes back, exactly as one
-    // fetch after another: the first that fails ends the sync with every
-    // cycle before it kept and none after it.
-    let mut fetched =
-        futures::stream::iter(have + 1..=latest.cycle_index.saturating_sub(1).min(reach))
-            .map(|t| async move {
-                let path = format!("/api/v2/bytecommit/cycle/{t}");
-                (t, fetch_commit(client, endpoint, &path, member).await)
-            })
-            .buffered(SYNC_FETCHES_IN_FLIGHT);
-    while let Some((t, answer)) = fetched.next().await {
-        let commit = answer?
-            .ok_or_else(|| anyhow::anyhow!("member has a latest ByteCommit but none at {t}"))?;
-        if commit.cycle_index != t {
-            anyhow::bail!(
-                "member answered cycle {t} with cycle {}",
-                commit.cycle_index
-            );
+    let pool = &state.db_pool;
+    let newest = latest.cycle_index.saturating_sub(NEWEST_CYCLES).max(1);
+    let mut through = frontier.load(Ordering::SeqCst);
+    let mut wanted = Vec::new();
+    // The oldest gaps, from the frontier up to the newest cycles. The
+    // frontier moves over every cycle held before the first that is not.
+    let mut from = through + 1;
+    for _ in 0..GAP_SCANS {
+        if from >= newest || wanted.len() >= BACKFILL_CYCLES {
+            break;
         }
-        added += u64::from(db::mirror_put(&state.db_pool, &commit).await?);
+        let to = from.saturating_add(GAP_SCAN_CYCLES - 1).min(newest - 1);
+        let held = db::mirror_cycles_held(pool, member, from, to).await?;
+        for t in from..=to {
+            if held.contains(&t) {
+                if t == through + 1 {
+                    through = t;
+                }
+            } else if wanted.len() < BACKFILL_CYCLES {
+                wanted.push(t);
+            }
+        }
+        from = to + 1;
     }
-    // `/latest` is kept whatever its cycle: at or below what is already
-    // mirrored, a different ByteCommit is how a rewritten history shows.
-    // Beyond this sync's reach it waits, so no cycle in between is skipped.
-    if latest.cycle_index <= reach {
-        added += u64::from(db::mirror_put(&state.db_pool, &latest).await?);
+    frontier.store(through, Ordering::SeqCst);
+    // The newest cycles before `/latest`.
+    let newest = newest.max(through + 1);
+    if newest < latest.cycle_index {
+        let held = db::mirror_cycles_held(pool, member, newest, latest.cycle_index - 1).await?;
+        wanted.extend((newest..latest.cycle_index).filter(|t| !held.contains(t)));
     }
-    Ok(added)
+
+    let mut fetched = futures::stream::iter(wanted)
+        .map(|t| async move {
+            let path = format!("/api/v2/bytecommit/cycle/{t}");
+            (t, fetch_commit(client, endpoint, &path, member).await)
+        })
+        .buffered(SYNC_FETCHES_IN_FLIGHT);
+    let mut kept = Vec::new();
+    let mut failed = None;
+    while let Some((t, answer)) = fetched.next().await {
+        let commit = answer.and_then(|commit| {
+            let commit = commit
+                .ok_or_else(|| anyhow::anyhow!("member has a latest ByteCommit but none at {t}"))?;
+            if commit.cycle_index != t {
+                anyhow::bail!(
+                    "member answered cycle {t} with cycle {}",
+                    commit.cycle_index
+                );
+            }
+            Ok(commit)
+        });
+        match commit {
+            Ok(commit) => kept.push(commit),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    drop(fetched);
+    match failed {
+        Some(e) => {
+            db::mirror_put(pool, &kept).await?;
+            Err(e)
+        }
+        None => {
+            kept.push(latest);
+            db::mirror_put(pool, &kept).await
+        }
+    }
 }
 
 /// The mirror syncs of each set-mate: one at a time per set-mate, and shared
@@ -329,11 +399,15 @@ impl MirrorSyncs {
 }
 
 /// One set-mate's syncs: how many callers have asked, and, held while a sync
-/// runs, how many of them the last finished sync answers and its answer.
+/// runs, how many of them the last finished sync answers and its answer; and
+/// the cycle through which this node's mirror is known to hold every cycle
+/// of the set-mate, which only a sync moves ([`sync_one`]). It starts at 0
+/// in each process, and the syncs after a restart find it again.
 #[derive(Default)]
 struct MemberSync {
     asked: AtomicU64,
     last: tokio::sync::Mutex<Option<(u64, Result<u64, String>)>>,
+    frontier: AtomicU64,
 }
 
 impl MemberSync {

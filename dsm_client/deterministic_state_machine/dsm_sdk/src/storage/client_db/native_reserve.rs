@@ -34,9 +34,12 @@ fn i64_of(v: u64, what: &str) -> Result<i64> {
 
 // ── Frozen releases ──────────────────────────────────────────────────────────
 
-/// Freeze the release this device wrote at `parent_root`. `INSERT OR IGNORE`:
-/// the FIRST bytes win forever, exactly like the cell they are sent to.
-pub fn put_frozen_release(
+/// Freeze the release this device writes at `parent_root`, in place of one
+/// frozen there for another target position. The claim reuses the frozen
+/// bytes for every retry at that position; a release for an earlier
+/// position, which a later admission made one this device can no longer
+/// credit, is replaced rather than sent (SA-70).
+pub fn freeze_release(
     reserve_id: &[u8; 32],
     parent_root: &[u8; 32],
     envelope: &[u8],
@@ -44,9 +47,10 @@ pub fn put_frozen_release(
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
-        "INSERT OR IGNORE INTO native_reserve_release_local
+        "INSERT INTO native_reserve_release_local
            (reserve_id, parent_root, envelope)
-         VALUES (?1, ?2, ?3)",
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT (reserve_id, parent_root) DO UPDATE SET envelope = excluded.envelope",
         params![reserve_id.as_slice(), parent_root.as_slice(), envelope],
     )?;
     Ok(())

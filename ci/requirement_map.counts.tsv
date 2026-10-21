@@ -6,25 +6,34 @@
 # build's edges name that the map holds no definition of: other crates'
 # (OUTSIDE_SYMBOL), and the workspace's generated or macro-written code
 # (WORKSPACE_SYMBOL), which no check can read; a jump in either fails too.
+#
+# 2026-10-19, PR #1142 (CI map at 5c5f884f): OUTSIDE_SYMBOL android 2181 -> 2403
+# and node 2107 -> 2330. 203 and 204 were already read at 12269231 (drift since
+# #1118, under the tenth); this PR adds 19 to each: three `core` symbols from
+# the offline account, and tokio, axum, axum-server, tokio-postgres and anyhow items the
+# storage-node and app-host resource bounds (SA-96..152, SA-122/123) call.
+# Node IND_AMBIGUOUS_SELF_TYPE 10 -> 14: SA-152's per-peer cap implements
+# `PeerAddressed` on tokio's `TcpStream` (dsm_storage_node/src/liveness.rs), a
+# Self type outside the indexed workspace. The other rows move with the code.
 artifact	state	code	count
-android	dead	DEAD_NO_ROOT_PATH	1640
+android	dead	DEAD_NO_ROOT_PATH	1645
 android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
 android	indeterminate	IND_DISPATCH_SELF_TYPE	8
 android	indeterminate	IND_NOT_CONSTRUCTED	2
-android	indeterminate	IND_NOT_DISPATCHED	12
-android	indeterminate	IND_UNINDEXED_ARTIFACT	34
+android	indeterminate	IND_NOT_DISPATCHED	13
+android	indeterminate	IND_UNINDEXED_ARTIFACT	35
 android	indeterminate	IND_UNLINKED_IMPL	12
-android	indeterminate	IND_UNRESOLVED_CALL	65
-android	no-definition	OUTSIDE_SYMBOL	2181
-android	no-definition	WORKSPACE_SYMBOL	2823
-android	not-in-artifact	NOT_IN_ARTIFACT	4596
-android	reached	REACHED	3450
-android	reached	REACHED_VIA_DISPATCH	8322
-node	dead	DEAD_NO_ROOT_PATH	6628
-node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	10
+android	indeterminate	IND_UNRESOLVED_CALL	67
+android	no-definition	OUTSIDE_SYMBOL	2403
+android	no-definition	WORKSPACE_SYMBOL	2876
+android	not-in-artifact	NOT_IN_ARTIFACT	4901
+android	reached	REACHED	3229
+android	reached	REACHED_VIA_DISPATCH	9003
+node	dead	DEAD_NO_ROOT_PATH	6884
+node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
 node	indeterminate	IND_UNLINKED_IMPL	291
-node	no-definition	OUTSIDE_SYMBOL	2107
-node	no-definition	WORKSPACE_SYMBOL	2760
-node	not-in-artifact	NOT_IN_ARTIFACT	2361
-node	reached	REACHED	310
-node	reached	REACHED_VIA_DISPATCH	50
+node	no-definition	OUTSIDE_SYMBOL	2330
+node	no-definition	WORKSPACE_SYMBOL	2814
+node	not-in-artifact	NOT_IN_ARTIFACT	2463
+node	reached	REACHED	377
+node	reached	REACHED_VIA_DISPATCH	115

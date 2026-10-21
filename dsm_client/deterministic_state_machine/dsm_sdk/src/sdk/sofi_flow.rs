@@ -1544,9 +1544,10 @@ enum Walked {
     /// The live attempt: the walk's first unresolved key, advanced past keys
     /// an exercise still in flight holds.
     Live(u64),
-    /// A key the walk would have passed was held by an exercise whose pair
-    /// its trader withheld, and that pair is now registered from the
-    /// exercise. The walk is run again.
+    /// A key the walk would have passed was held by an exercise short of
+    /// final: its withheld pair is now registered from the exercise, or the
+    /// exercise of an already decided pair was carried to its keys. The walk
+    /// is run again.
     Registered,
     /// The vault moved under the draft: its parent was consumed, or every
     /// nearby key is held by an exercise still in flight. Nothing is
@@ -1619,7 +1620,51 @@ async fn walk_for_attempt(
         let Some(exercise) = read.exercise() else {
             return Ok(Walked::Live(attempt));
         };
-        if pair_withheld(verifier, exercise, attempt)? {
+        let standing = pair_standing(verifier, exercise, attempt)?;
+        let final_here = matches!(
+            read.fact(),
+            dsm::route_chain::CellFact::Held {
+                state: dsm::route_chain::ChainState::Final,
+                ..
+            }
+        );
+        // A pair already decided (registered, or lost to another claim)
+        // whose exercise holds this key short of final: Core decides the key
+        // only on a final cell, and stepping past it fenced this trader on a
+        // fulfillment that could not conform until someone else finished it.
+        // The exercise is carried to its keys and the walk runs again (SA-72).
+        if !final_here
+            && matches!(
+                standing,
+                Some(PairStanding::Registered | PairStanding::Lost | PairStanding::Misbodied)
+            )
+        {
+            crate::sdk::sofi_relay::carry_held_exercise(set, vault_id, parent_root, attempt)
+                .await?;
+            let finished = matches!(
+                verifier
+                    .read_attempt_cell(vault_id, parent_root, attempt)
+                    .map_err(verifier_error)?,
+                Ok(read) if matches!(
+                    read.fact(),
+                    dsm::route_chain::CellFact::Held {
+                        state: dsm::route_chain::ChainState::Final,
+                        ..
+                    }
+                )
+            );
+            log::info!(
+                "[sofi] carried the exercise held at attempt {attempt}, its pair {standing:?}; \
+                 final: {finished}"
+            );
+            // Final now: Core decides the key, and the walk runs again. Seats
+            // that do not take it leave it short of final, and the walk goes
+            // on past it as before.
+            if finished {
+                return Ok(Walked::Registered);
+            }
+        }
+        if standing == Some(PairStanding::Pending) {
             let relayed =
                 crate::sdk::sofi_relay::relay_exercise(set, vault_id, parent_root, attempt).await?;
             if !relayed.pair.iter().all(|report| report.reached_leader()) {
@@ -1645,15 +1690,15 @@ async fn walk_for_attempt(
     ))
 }
 
-/// Whether the position pair of the exercise holding `attempt` is still to
-/// be registered: neither registered nor lost, as its cells read now. Reads
-/// that do not decide the pair establish nothing, so the pair is not
-/// written on them.
-fn pair_withheld(
+/// Where the position pair of the exercise holding `attempt` stands, as its
+/// cells read now: `Pending` is a pair still to be registered. Reads that do
+/// not decide the pair establish nothing (`None`), so nothing is written on
+/// them.
+fn pair_standing(
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     exercise: &dsm::sofi::exercise::RecognizedExercise,
     attempt: u64,
-) -> Result<bool, DsmError> {
+) -> Result<Option<PairStanding>, DsmError> {
     let (precommit, fulfillment) = (&exercise.precommit().body, &exercise.fulfillment().body);
     let standing = match verifier
         .read_registration(
@@ -1673,7 +1718,7 @@ fn pair_withheld(
             None
         }
     };
-    Ok(standing == Some(PairStanding::Pending))
+    Ok(standing)
 }
 
 /// The live attempt of a leg at `parent_root` (§31 stage 6), every withheld
@@ -2513,14 +2558,15 @@ mod tests {
     }
 
     /// MR-STOR-0021 (storage §4): a setup candidate whose bytes no member
-    /// holds may be this device's setup, so a relationship-index scan that
-    /// met one is a network failure; only a scan whose every candidate was
-    /// established says no admitted setup is published. On the storage node's
-    /// own code, on Postgres.
+    /// returns — listed by a hostile member, for an honest one appends only
+    /// what it holds — may be this device's setup, so a relationship-index
+    /// scan that met one is a network failure; only a scan whose every
+    /// candidate was established says no admitted setup is published. On the
+    /// storage node's own code, on Postgres.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
     async fn a_setup_scan_that_met_an_unestablished_candidate_is_not_a_refusal() {
-        let _fleet = crate::test_support::one_device::Fleet::start();
+        let fleet = crate::test_support::one_device::Fleet::start();
         let set = crate::sdk::storage_set::canonical_set(crate::economic_fixtures::NETWORK)
             .expect("the pinned set");
         let client = SetClient::new(&set).expect("a client of the set");
@@ -2540,10 +2586,16 @@ mod tests {
             Err(DsmError::InvalidOperation(_))
         ));
 
-        // An address whose bytes no member holds: not established.
+        // An address whose bytes no member holds, listed by a hostile member:
+        // not established.
         let unknown_vault = [0x64; 32];
         let locator = derive::relationship_index_key(&genesis, &device_id, &unknown_vault);
-        assert_eq!(client.append_index(index, &locator, &[0x98; 32]).await, 5);
+        assert_eq!(client.append_index(index, &locator, &[0x98; 32]).await, 0);
+        let hostile = fleet.nodes().nodes[0].member_id.clone();
+        fleet
+            .nodes()
+            .list_unheld(&hostile, index, &locator, &[0x98; 32])
+            .await;
         assert!(matches!(
             own_setup_ref(&set, &genesis, &device_id, &unknown_vault).await,
             Err(DsmError::Storage { .. })

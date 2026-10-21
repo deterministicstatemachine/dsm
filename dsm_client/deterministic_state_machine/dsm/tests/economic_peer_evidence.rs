@@ -175,7 +175,6 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
                 amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
             }],
             None,
-            None,
         )
         .unwrap()
         .new_device_state
@@ -192,7 +191,6 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
                 direction: BalanceDirection::Debit,
                 amount,
             }],
-            None,
             None,
         )
         .unwrap();

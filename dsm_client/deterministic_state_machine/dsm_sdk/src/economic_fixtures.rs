@@ -449,3 +449,31 @@ pub fn pending_state(
         .and_then(|h| h.pending_economic_admission().cloned())
         .map(|p| p.state)
 }
+
+/// A foreign walk of `position` of this device's lineage. A device records
+/// no frontier for itself, so the walk starts at its activation root, as a
+/// verifier meeting it first would, and nothing below reads local admission
+/// state.
+pub async fn foreign_walk(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> dsm::economic::provenance::ValidatedPeerTransition {
+    let handle = tokio::runtime::Handle::current();
+    let walked = tokio::task::spawn_blocking(move || {
+        use dsm::economic::provenance::ProvenanceResolver;
+        let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+            set: &set,
+            runtime: handle,
+            expected_network_id: NETWORK.to_vec(),
+        };
+        resolver.validated_peer_transition(&genesis, &devid, position)
+    })
+    .await
+    .expect("join");
+    match walked {
+        Ok(transition) => transition,
+        Err(e) => panic!("position {position} MUST be foreign-walkable: {e:?}"),
+    }
+}

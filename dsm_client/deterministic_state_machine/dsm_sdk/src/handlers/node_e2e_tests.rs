@@ -1985,8 +1985,8 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
         .expect("acquire")
     {
         dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
-        dsm::sofi::resolve::Acquired::Exhausted(missing) => {
-            panic!("the evidence is published: {missing:?}")
+        dsm::sofi::resolve::Acquired::Exhausted(..) => {
+            panic!("the conformance evidence is published, and some of it was not found")
         }
     };
     let claim = {
@@ -2101,6 +2101,185 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SA-86. A trader that signs a fulfillment whose attempts name a vault its
+/// `P` has no leg for, and leaves that exercise only at the leader of a
+/// vault's key, holds the key: Core refutes the exercise in hand
+/// (conformance item 4) but skips the key only once its cell is final. The
+/// relay that carries such an exercise to finality refused it outright,
+/// so the next operation at the vault failed and the vault stayed frozen.
+/// The relay carries it to the keys `P` names; A's close walks past the
+/// refuted exercise and closes the vault with its reserves.
+/// MUTATION CONTROL: refusing the relay for an attempt `P` has no leg for,
+/// as it did, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_exercise_naming_a_vault_its_precommit_has_no_leg_for_does_not_freeze_the_vault() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+
+    // B trades with its pair refused, so nothing of it is written; B's P,
+    // P(E) and F are published.
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+
+    p.b.enter();
+    let head = p.b.router().core_sdk.device_head().expect("B's head");
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
+        other => panic!("B's pending admission is its fulfillment: {other:?}"),
+    };
+    let honest = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(&set, honest.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+    let preimage = match fetch_preimage(&set, precommit.body.external_commitment())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(preimage) => preimage,
+        other => panic!("P(E) is stored under its locator: {other:?}"),
+    };
+
+    // B signs another F over the same P, its attempts naming one more vault
+    // than P has legs for.
+    let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let mut attempts = honest.body.attempts().to_vec();
+    attempts.push(dsm::sofi::wire::AttemptEntry {
+        vault_id: [0xFF; 32],
+        attempt: 0,
+    });
+    attempts.sort_by_key(|a| a.vault_id);
+    let bent = dsm::sofi::wire::TraderFulfillmentBody::new(
+        *honest.body.precommit_id(),
+        honest.body.policy_fulfillment_set().to_vec(),
+        attempts,
+        honest.body.position(),
+        honest.body.signature_alg(),
+        &pk,
+        att_a,
+    )
+    .expect("a canonical F");
+    let bent_signature =
+        dsm::crypto::sphincs::sphincs_sign(&sk, &derive::fulfillment_signing_digest(&bent))
+            .expect("B signs it");
+    let own_objects =
+        crate::sdk::sofi_advance::own_closure_objects(&set, &precommit.body, &preimage)
+            .await
+            .expect("B's own closure objects");
+    let request = crate::sdk::sofi_register::InstallRequest {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage: &preimage,
+        fulfillment: &bent,
+        fulfillment_signature: &bent_signature,
+        own_objects: &own_objects,
+    };
+    let evidence = match ctx
+        .verifier()
+        .acquire_conformance_evidence(&request.objects())
+        .expect("acquire")
+    {
+        dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
+        dsm::sofi::resolve::Acquired::Exhausted(..) => {
+            panic!("the conformance evidence is published, and some of it was not found")
+        }
+    };
+    let claim = dsm::sofi::signature::sign_resolution_claim(
+        derive::resolution_claim(&precommit.body, &bent),
+        bent.signature_alg(),
+        &pk,
+        att_a,
+        &sk,
+    )
+    .expect("B signs its C_q")
+    .encode();
+    let exercise =
+        dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
+            .expect("B's exercise");
+    recognize_exercise(&exercise.encode()).expect("Core recognizes it");
+
+    // Only the leader of the vault's first key takes it.
+    let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the vault's first key");
+    let seats: Vec<String> = key.routed().route().seats()[1..]
+        .iter()
+        .map(|id| member_name(id))
+        .collect();
+    for seat in &seats {
+        p.nodes
+            .refuse_cell_writes(seat, &[*key.routed().key()])
+            .await;
+    }
+    // The honest writer would not write it; B writes the bytes itself.
+    let written = crate::sdk::route_seats::write_recorded(&set, key.routed(), &exercise.encode())
+        .await
+        .expect("the nodes keep whatever they are given");
+    assert!(written.reached_leader());
+    for seat in &seats {
+        p.nodes.accept_cell_writes(seat).await;
+    }
+
+    // A closes the vault: the relay carries B's exercise to finality, Core
+    // skips the key it refutes, and A takes the reserves.
+    p.a.enter();
+    let era_before = balance(&p.a, &m.era);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 100,
+        "A closed the vault with its own reserve: B's refuted exercise moved nothing"
+    );
+}
+
 /// Pre-audit 12e, the owner's ruling (2026-10-01): a pair that is already
 /// registered is not written again. B's trade registers its pair, and its
 /// exercise reaches only the leader of the vault's first key, so the key is
@@ -2148,7 +2327,7 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
     let held_at = |cell: &dsm::route_chain::RoutedCell| {
         let (namespace, key) = (cell.namespace().to_vec(), *cell.key());
         let client = &client;
-        async move { client.get_cell(&namespace, &key).await }
+        async move { client.held_at(&namespace, &key).await }
     };
     let ful_before = held_at(pair.fulfillment()).await;
     let root_before = held_at(pair.root().routed()).await;
@@ -2190,6 +2369,85 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
     assert!(r.success, "A's close is taken: {:?}", r.error_message);
     assert_eq!(held_at(pair.fulfillment()).await, ful_before);
     assert_eq!(held_at(pair.root().routed()).await, root_before);
+}
+
+/// SA-72. A key held short of final by an exercise whose pair is already
+/// registered is carried to its keys before the walk goes on, not stepped
+/// past: Core decides a key only on a final cell, and a trader whose walk
+/// stepped past it drafted on an attempt whose skip could not conform until
+/// someone else finished the key. B's pair registers and its exercise reaches
+/// only the key's leader; the other seats then take writes again, and A's
+/// close carries B's exercise until the key is final, and is taken.
+/// MUTATION CONTROL: stepping past a held key whose pair is decided, as the
+/// walk did, leaves the key short of final and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk_goes_on() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+    let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
+    let seats: Vec<String> = attempt.routed().route().seats()[1..]
+        .iter()
+        .map(|id| member_name(id))
+        .collect();
+    for seat in &seats {
+        p.nodes
+            .refuse_cell_writes(seat, &[*attempt.routed().key()])
+            .await;
+    }
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    for seat in &seats {
+        p.nodes.accept_cell_writes(seat).await;
+    }
+    let final_at_first_key = |device: &TestDevice| {
+        device.enter();
+        let (own, parents) = standing_of(device);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let held = ctx
+            .verifier()
+            .read_attempt_cell(&m.vault_id, &r0, 0)
+            .expect("read")
+            .expect("decided");
+        assert!(
+            held.exercise().is_some(),
+            "B's exercise holds the first key"
+        );
+        matches!(
+            held.fact(),
+            CellFact::Held {
+                state: dsm::route_chain::ChainState::Final,
+                ..
+            }
+        )
+    };
+    assert!(!final_at_first_key(&p.a), "the key is held short of final");
+
+    let r = invoke(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert!(r.success, "A's close is taken: {:?}", r.error_message);
+    assert!(
+        final_at_first_key(&p.a),
+        "A's walk carried B's exercise to final"
+    );
 }
 
 /// SoFi Amendment S20 (12j), Amendment S15: a position whose root cell
@@ -2399,7 +2657,8 @@ fn signed_by_b(
 /// else at the key, or after that value in the leader's log, cannot stop the
 /// registration being read. B trades and realizes at `q`. Fulfillments B
 /// signed naming a precommit that can never be read — the one candidate
-/// under its locator is an object one member alone holds — are then written
+/// under its locator is a precommit B signed that one member alone holds, so
+/// it is the precommit and never `Stored` — are then written
 /// at the leader of `K_ful(q)`, after B's own, and at a member that does not
 /// lead `K_ful(q + 1)`, where nothing else is. The vault's owner, walking the
 /// vault afresh, reads B's registration and reaches the generation B's trade
@@ -2430,7 +2689,6 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
     let next = position_cells(&set, &p.b.genesis, &p.b.device_id, q + 1, &realized_root)
         .expect("B's position pair at q + 1");
 
-    // A precommit nobody can read: its one candidate is held by one member.
     let clients = SetClient::new(&set).expect("the set's members");
     let member = |id: &[u8]| {
         clients
@@ -2444,27 +2702,6 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         .iter()
         .find(|member| member.member_id().as_bytes() != next.fulfillment().route().leader())
         .expect("a member that does not lead K_ful(q + 1)");
-    let unreadable = [0x5C; 32];
-    let lone = b"bytes one member holds";
-    not_leading
-        .put_immutable(TAG_DSM_SOFI_PRECOMMIT_OBJECT, lone)
-        .await
-        .expect("the member keeps what it is given");
-    not_leading
-        .append_index(
-            TAG_DSM_SOFI_TRADER_PRECOMMIT_ID.source_bytes(),
-            &unreadable,
-            &dsm::storage_object::immutable_addr(TAG_DSM_SOFI_PRECOMMIT_OBJECT, lone),
-        )
-        .await
-        .expect("the member appends what it holds");
-    assert!(
-        matches!(
-            fetch_precommit(&set, &unreadable).await.expect("read"),
-            Resolved::Unavailable
-        ),
-        "the precommit can never be read"
-    );
 
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
@@ -2478,6 +2715,61 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         Registration::Registered(signed) => signed.body.clone(),
         other => panic!("B's fulfillment is registered at q: {other:?}"),
     };
+
+    // A precommit nobody can read: B signed it, and one member alone holds
+    // it, so its one candidate is the precommit and never Stored.
+    let Resolved::Kept(own_precommit) = fetch_precommit(&set, registered.precommit_id())
+        .await
+        .expect("read")
+    else {
+        panic!("B's precommit is published");
+    };
+    let ours = &own_precommit.body;
+    let lone = TraderPrecommitBody::new(
+        *ours.genesis(),
+        *ours.device_id(),
+        ours.position(),
+        *ours.parent_claim_ref(),
+        *ours.external_commitment(),
+        ours.legs().to_vec(),
+        [0x5E; 32],
+        *ours.void_root(),
+        *ours.storage_set_id(),
+        ours.signature_alg(),
+        ours.claimant_public_key(),
+    )
+    .expect("a well-formed P");
+    p.b.enter();
+    let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's signing key");
+    let lone_signature =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &derive::precommit_signing_digest(&lone))
+            .expect("B signs");
+    let lone_bytes = Publication::Precommit {
+        body: &lone,
+        signature: &lone_signature,
+    }
+    .object_bytes()
+    .expect("a P envelope");
+    let unreadable = derive::precommit_id(&lone);
+    not_leading
+        .put_immutable(TAG_DSM_SOFI_PRECOMMIT_OBJECT, &lone_bytes)
+        .await
+        .expect("the member keeps what it is given");
+    not_leading
+        .append_index(
+            TAG_DSM_SOFI_TRADER_PRECOMMIT_ID.source_bytes(),
+            &unreadable,
+            &dsm::storage_object::immutable_addr(TAG_DSM_SOFI_PRECOMMIT_OBJECT, &lone_bytes),
+        )
+        .await
+        .expect("the member appends what it holds");
+    assert!(
+        matches!(
+            fetch_precommit(&set, &unreadable).await.expect("read"),
+            Resolved::Unavailable
+        ),
+        "the precommit can never be read"
+    );
 
     // After B's own fulfillment, in the leader's log at K_ful(q).
     let at_q = pair.fulfillment();
@@ -3164,13 +3456,14 @@ async fn a_vault_traded_through_closes_for_its_owner() {
     );
 }
 
-/// DSM Amendment A14, conditional positions back to back: a trader trades
+/// Conditional positions back to back (DSM Amendment A19, restoring A8's
+/// SoFi positions in the chain): a trader trades
 /// three times in a row, so each trade's `P` names the trader's previous
 /// trade, a conditional position, as its parent. Every trade resolves
 /// Realized, and the owner's close, which judges each of the trader's
-/// exercises as a peer's, resolves too: a conditional parent on a conditional
-/// parent is found one position back, among the roots the claim there
-/// commits, never by reading further.
+/// exercises as a peer's, resolves too: each conditional position in the
+/// walked segment is resolved from SoFi's public objects, and the next is
+/// read at the cell routed from the root it selected.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn trades_back_to_back_resolve_and_the_owner_closes_after_them() {
@@ -3238,7 +3531,6 @@ async fn a_vault_walk_over_settled_history_closes_no_cycle() {
         )
         .expect("forget the vault's generations");
     }
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
     for node in &p.nodes.nodes {
         node.forget_requests();
@@ -3298,7 +3590,6 @@ fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
             .expect("forget the vault's witness, baseline and quarantine");
         }
     }
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
 }
 
@@ -3455,7 +3746,6 @@ async fn a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history() 
     realized_trade(&p, &m, 5).await;
     // The tests' devices share one process: what B's trade left in the
     // process's memory is not A's.
-    crate::sdk::economic_registers::validated_peers().forget();
     crate::sdk::final_reads::forget_everything();
     crate::sdk::sofi_reads::forget_judgements();
     let chain = chain_at_a();
@@ -3637,6 +3927,86 @@ async fn a_contradicting_witness_is_refused_and_a_missing_baseline_is_walked() {
         rows.first().map(|r| r.generation),
         Some(0),
         "B walked from the genesis"
+    );
+}
+
+/// SA-132. The baseline locator is predictable, and anyone may put and append
+/// there. Behind the owner's baseline sit more baseline-shaped copies than one
+/// read examines: the owner's presentation and frontier, under authentication
+/// that does not hold. They are nothing, for only a baseline Core
+/// authenticates as the owner's is recognized under the locator. B's first
+/// adoption reads the owner's baseline and the read's budget's worth of the
+/// copies, and adopts nothing: the read is not all of the locator, and one
+/// more baseline of the owner's there would be an equivocation. B's next
+/// adoption, in the same process, reads on past what the first decided
+/// nothing, and adopts.
+/// MUTATION CONTROL: adopting from a read that is not complete turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
+    use dsm::common::domain_tags::{
+        TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+    };
+    use dsm::sofi::storage::Discovered;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..2 {
+        realized_trade(&p, &m, 5).await;
+    }
+    let offered = offered_to_b(&p, &m).await;
+    let generation = offered[0].generation;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let index = TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes();
+    let locator = derive::vault_baseline_locator(&m.vault_id, generation);
+    let owners = match crate::sdk::storage_io::resolve_locator_all(&set, index, &locator, 8, |b| {
+        Some((locator, b.to_vec()))
+    })
+    .await
+    .expect("the owner's baseline")
+    {
+        Discovered::Complete(found) => found,
+        other => panic!("the owner's baseline is all there is: {other:?}"),
+    };
+    assert_eq!(owners.len(), 1, "the owner published one baseline");
+    let owner = crate::generated::VaultBaselineV1::decode(owners[0].as_slice())
+        .expect("the owner's baseline decodes");
+    for n in 0..9u8 {
+        let mut copy = owner.clone();
+        copy.auth_ccb.push(n);
+        let (addr, ..) = crate::sdk::storage_io::put_immutable(
+            &set,
+            TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+            &copy.encode_to_vec(),
+        )
+        .await
+        .expect("anyone may put an object");
+        crate::sdk::storage_io::append_to_index(&set, index, &locator, &addr)
+            .await
+            .expect("anyone may append what the members hold");
+    }
+
+    // Both adoptions in one process of B's: entering a device again is a
+    // fresh process, which keeps nothing it read.
+    forget_the_vault(&p.b, &m.vault_id);
+    p.b.enter();
+    let adopt = || crate::sdk::sofi_flow::adopt_offered(&p.b.router().core_sdk, &set, &offered);
+    adopt()
+        .await
+        .expect("a read that is not all of the locator refuses nothing");
+    assert!(
+        crate::storage::client_db::sofi_vault_head::head(&m.vault_id)
+            .expect("B's store")
+            .is_none(),
+        "nothing is adopted from a read that is not complete"
+    );
+    adopt().await.expect("B adopts the baseline");
+    let rows = crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
+        .expect("B's record");
+    assert_eq!(
+        rows.iter().map(|r| r.generation).collect::<Vec<_>>(),
+        vec![generation],
+        "B's record starts at the owner's baseline"
     );
 }
 
@@ -4439,8 +4809,9 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     fn cell(
         &self,
         cell: &dsm::route_chain::RoutedCell,
+        keep: &(dyn Fn(&dsm::route_chain::RouteEntry) -> bool + Sync),
     ) -> Result<dsm::route_chain::CellEvidence, dsm::sofi::resolve::ReadFailure> {
-        self.live.cell(cell)
+        self.live.cell(cell, keep)
     }
     fn precommit(
         &self,
@@ -4496,7 +4867,7 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         &self,
         vault_id: &[u8; 32],
         root: &[u8; 32],
-    ) -> Result<Vec<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+    ) -> Result<dsm::sofi::storage::Discovered<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
         self.live.history_leaf_candidates(vault_id, root)
     }
     fn token_policy_bytes(
@@ -4872,10 +5243,33 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             crate::util::text_id::encode_base32_crockford(next.routed().key())
         ));
     }
+    // A trader's register key at a position is where Core looks for its
+    // claims there: every check of the trader's step reads it afresh, since a
+    // second claim final from another parent is a fork (SA-92). It is
+    // discovery, never a final cell kept.
+    let probes: std::collections::BTreeSet<String> = [&p.a, &p.b]
+        .iter()
+        .flat_map(|device| {
+            (0..=64u64).map(move |position| {
+                format!(
+                    "GET /api/v2/cell/{}",
+                    crate::util::text_id::encode_base32_crockford(
+                        &dsm::economic::register::economic_root_register_key(
+                            &device.genesis,
+                            &device.device_id,
+                            position,
+                        )
+                    )
+                )
+            })
+        })
+        .collect();
     for (member, asked) in &asked {
         let again: Vec<_> = asked
             .iter()
-            .filter(|(request, times)| **times > 1 && !open.contains(request))
+            .filter(|(request, times)| {
+                **times > 1 && !open.contains(request) && !probes.contains(*request)
+            })
             .collect();
         assert!(
             again.is_empty(),
@@ -4934,5 +5328,148 @@ async fn a_pair_named_in_either_order_holds_each_reserve_against_its_own_token()
     assert!(
         message.contains("a pair is two different tokens"),
         "{message}"
+    );
+}
+
+/// A succession proof naming `predecessor` as the device it tombstones and
+/// `successor` as the device it binds, signed under `secret`, whose public
+/// key is `authority`.
+fn succession_proof_under(
+    authority: &[u8],
+    secret: &[u8],
+    predecessor: &[u8; 32],
+    successor: &[u8; 32],
+) -> dsm::recovery::RecoverySuccessionProof {
+    let named = crate::util::text_id::encode_base32_crockford(predecessor);
+    let tombstone =
+        dsm::recovery::create_tombstone_receipt(&[0x11; 32], 7, &[0x22; 32], &named, secret)
+            .expect("a tombstone");
+    let succession = dsm::recovery::create_succession_receipt(
+        &tombstone.tombstone_hash,
+        successor,
+        &named,
+        secret,
+    )
+    .expect("a succession");
+    dsm::recovery::RecoverySuccessionProof {
+        authority_pubkey: authority.to_vec(),
+        tombstone,
+        succession,
+    }
+}
+
+/// SA-121. A device that makes a genesis of its own, anchors an authority of
+/// its own under it, and posts a succession proof under that authority naming
+/// one of B's contacts as the device it succeeds, is not that contact's
+/// successor to B: the authority a recovery acts under is the one the
+/// predecessor anchored, read under the genesis B pinned for it. The proof
+/// under A's own anchored K_A is the one that counts.
+/// MUTATION CONTROL: anchoring the proof's authority to the successor's own
+/// genesis and device, as the guard did, admits M's proof and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_succession_proof_counts_only_under_the_authority_its_predecessor_anchored() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, k_a_secret) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+    m.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("M anchors an authority of its own");
+    let (k_m, k_m_secret) = RecoverySDK::get_cached_authority_keypair().expect("M's authority");
+
+    let cell = dsm::recovery::RecoveryCell::SuccessionProof {
+        genesis: m.genesis,
+        a_new: m.device_id,
+    };
+    let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&cell, &forged.to_bytes())
+        .await
+        .expect("M posts its proof");
+
+    p.b.enter();
+    let refused = RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
+        .await
+        .expect_err("no proof under the authority A anchored is posted");
+    assert!(refused.to_string().contains("none posted"), "{refused}");
+
+    let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&cell, &honest.to_bytes())
+        .await
+        .expect("the proof under K_A");
+    let (found, predecessor) =
+        RecoverySDK::succession_proof_anchored_by_predecessor(&m.genesis, &m.device_id)
+            .await
+            .expect("the proof under the authority A anchored");
+    assert_eq!(predecessor, p.a.device_id);
+    assert_eq!(found.to_bytes(), honest.to_bytes());
+}
+
+/// `device` takes in the tombstone notices posted for it, and whether it then
+/// records `tombstoned` as tombstoned.
+async fn records_tombstone_of(device: &TestDevice, tombstoned: &[u8; 32]) -> bool {
+    let r = device
+        .invoke("recovery.checkTombstones", &generated::ArgPack::default())
+        .await;
+    assert!(r.success, "{:?}", r.error_message);
+    device.enter();
+    crate::storage::client_db::recovery::is_device_tombstoned(tombstoned)
+        .expect("the tombstone record")
+}
+
+/// SA-117. A tombstone is signed under the recovery authority K_A, and a
+/// contact verifies it under the authority the tombstoned device anchored. B
+/// takes in a notice whose tombstone of A is signed under K_A and records A
+/// as tombstoned; a notice signed under an authority M anchored for itself is
+/// passed over. Verified under A's AK, as the check did, no tombstone the
+/// recovery signs is ever taken in.
+/// MUTATION CONTROL: verifying the tombstone under the contact's AK leaves A
+/// unrecorded and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
+    use crate::sdk::recovery_sdk::RecoverySDK;
+    let p = Pair::boot(0, 0).await;
+    let mut m = TestDevice::create("M", 0x4D);
+    m.boot(&p.fleet).await;
+
+    p.a.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("A anchors its recovery authority");
+    let (k_a, k_a_secret) = RecoverySDK::get_cached_authority_keypair().expect("A's K_A");
+    m.enter();
+    RecoverySDK::publish_authority_anchor()
+        .await
+        .expect("M anchors an authority of its own");
+    let (k_m, k_m_secret) = RecoverySDK::get_cached_authority_keypair().expect("M's authority");
+
+    let notices = dsm::recovery::RecoveryCell::TombstoneNotice {
+        contact_device_id: p.b.device_id,
+    };
+
+    let forged = succession_proof_under(&k_m, &k_m_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&notices, &forged.to_bytes())
+        .await
+        .expect("M's notice");
+    assert!(
+        !records_tombstone_of(&p.b, &p.a.device_id).await,
+        "a tombstone under M's authority is not taken in"
+    );
+
+    let honest = succession_proof_under(&k_a, &k_a_secret, &p.a.device_id, &m.device_id);
+    crate::sdk::recovery_store::put(&notices, &honest.to_bytes())
+        .await
+        .expect("the notice under K_A");
+    assert!(
+        records_tombstone_of(&p.b, &p.a.device_id).await,
+        "the tombstone under K_A is taken in"
     );
 }

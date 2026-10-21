@@ -176,6 +176,25 @@ pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_DSM: TaggedHashDomain<'static> =
 /// domain two meanings; hence `/v2`, and `/v1` is never reused.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-id/dsm/v2");
+/// Identity of an offline boundary (a load into, or an unload out of, an
+/// offline account): `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ kind ‖ B ‖ asset ‖
+/// u64_be(amount) ‖ R_A ‖ R_off)`, over the device root and the account root
+/// the boundary starts from. It is the value of the account's origin leaf, so
+/// its preimage holds no root the boundary produces.
+pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-id/offline-boundary/v1");
+/// Digest of an offline boundary body for economic binding:
+/// `operation_digest = H(tag ‖ 0x00 ‖ exact body bytes)`.
+pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-digest/offline-boundary/v1");
+/// Immutable-store namespace of the exact offline boundary body bytes the
+/// manifest's offline-boundary substrate slot names.
+pub const TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-offline-boundary-evidence/v1");
+/// `SourceId` an unload's online credit consumes (`0x0075`):
+/// `H(tag ‖ 0x00 ‖ G ‖ DevID ‖ boundary id)`. One per unload.
+pub const TAG_DSM_ECON_SOURCE_OFFLINE_BOUNDARY_DEBIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/econ-source/offline-boundary-debit/v1");
 
 /// Digest of the exact `EconomicRootClaimV1` envelope bytes a register member
 /// stores and compares: `H(tag ‖ 0x00 ‖ envelope_bytes)`. The settlement

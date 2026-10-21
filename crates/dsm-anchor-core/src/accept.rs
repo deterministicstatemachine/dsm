@@ -16,8 +16,7 @@
 //! forks are position collisions exposed by Tripwire on reconciliation, not prevented here.
 
 use crate::root_advance::{
-    anchor_root_advance, anchor_state_leaf, root_advance_message, transition_digest, Certificate,
-    OfflineRelease,
+    anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,
 };
 use crate::tropic::{ChipSig, PartitionSig};
 use crate::util::ct_eq_32;
@@ -26,8 +25,19 @@ use crate::util::ct_eq_32;
 /// these checks are implemented by the dsm layer (SMT inclusion + DSM transition validity,
 /// the latter carrying `σ^DSM`).
 pub trait DsmVerifier {
-    /// The device SMT `root` commits the anchor-state `leaf` (`= H(B ‖ h ‖ u)`) via `proof`.
-    fn verify_smt_leaf(&self, root: &[u8; 32], proof: &[u8], leaf: &[u8; 32]) -> bool;
+    /// The device SMT `root` commits the offline account of `bundle` with its software
+    /// counter at `counter` and its frontier at `frontier`, via `proof`. The account is its
+    /// own SMT whose root is one device-SMT leaf; the counter in it is the authority the
+    /// hardware counter mirrors. The verifier records why a proof is refused;
+    /// the predicate needs only that it was.
+    fn verify_offline_state(
+        &self,
+        root: &[u8; 32],
+        bundle: &[u8; 32],
+        frontier: &[u8; 32],
+        counter: u64,
+        proof: &[u8],
+    ) -> Result<(), OfflineStateRefused>;
     /// The DSM transition (`σ^DSM` + whole-state consumption `R_i → R_{i+1}`) verifies. The
     /// transition is located by its canonical digest `D` plus the frontier pair so the dsm
     /// layer can check it without re-borrowing the wire `Transition`.
@@ -67,6 +77,11 @@ pub struct VerifierContext<'a> {
     /// `true` for the first transfer to this holder (requires the upgrade certificate).
     pub is_genesis: bool,
 }
+
+/// The DSM verifier refused an offline-state proof: the device root does not
+/// commit the offline account at the frontier and counter named.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OfflineStateRefused;
 
 /// Which Def. 12 check failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -196,15 +211,15 @@ where
         }
     }
 
-    // (3) Π_i proves R_i commits the anchor-state leaf (B, h_i, u_i).
-    let leaf_i = anchor_state_leaf(ctx.pinned_bundle, &cert.prev_frontier, cert.anchor_counter);
-    if !dsm.verify_smt_leaf(
+    // (3) Π_i proves R_i commits the offline account of B at (h_i, u_i).
+    dsm.verify_offline_state(
         &cert.sender_device_root_before,
-        &rel.anchor_smt_proof_before,
-        &leaf_i,
-    ) {
-        return Err(AcceptError::PrevStateUncommitted);
-    }
+        ctx.pinned_bundle,
+        &cert.prev_frontier,
+        cert.anchor_counter,
+        &rel.offline_state_proof_before,
+    )
+    .map_err(|OfflineStateRefused| AcceptError::PrevStateUncommitted)?;
 
     // (4) u_{i+1} = u_i + 1 (checked).
     if t.anchor_counter.checked_add(1) != Some(t.next_anchor_counter) {
@@ -245,19 +260,15 @@ where
         return Err(AcceptError::NotDeliveredToReceiver);
     }
 
-    // (14) Π_{i+1} proves R_{i+1} commits (B, h_{i+1}, u_i+1).
-    let leaf_next = anchor_state_leaf(
+    // (14) Π_{i+1} proves R_{i+1} commits the offline account of B at (h_{i+1}, u_i+1).
+    dsm.verify_offline_state(
+        &cert.sender_device_root_after,
         ctx.pinned_bundle,
         &cert.next_frontier,
         cert.next_anchor_counter,
-    );
-    if !dsm.verify_smt_leaf(
-        &cert.sender_device_root_after,
-        &rel.anchor_smt_proof_after,
-        &leaf_next,
-    ) {
-        return Err(AcceptError::NextStateUncommitted);
-    }
+        &rel.offline_state_proof_after,
+    )
+    .map_err(|OfflineStateRefused| AcceptError::NextStateUncommitted)?;
 
     // (15) Authority policy hash matches the previous state.
     if !ct_eq_32(t.authority_policy_hash, ctx.expected_policy_hash) {
@@ -336,8 +347,19 @@ mod tests {
         }
     }
     impl DsmVerifier for MockDsm {
-        fn verify_smt_leaf(&self, _r: &[u8; 32], _p: &[u8], _l: &[u8; 32]) -> bool {
-            self.smt_ok
+        fn verify_offline_state(
+            &self,
+            _r: &[u8; 32],
+            _b: &[u8; 32],
+            _f: &[u8; 32],
+            _u: u64,
+            _p: &[u8],
+        ) -> Result<(), OfflineStateRefused> {
+            if self.smt_ok {
+                Ok(())
+            } else {
+                Err(OfflineStateRefused)
+            }
         }
         fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
             self.transition_ok
@@ -422,8 +444,8 @@ mod tests {
 
         OfflineRelease {
             transition: owned,
-            anchor_smt_proof_before: alloc::vec![0xCC],
-            anchor_smt_proof_after: alloc::vec![0xDD],
+            offline_state_proof_before: alloc::vec![0xCC],
+            offline_state_proof_after: alloc::vec![0xDD],
             cert,
             branch_proof: Vec::new(),
         }

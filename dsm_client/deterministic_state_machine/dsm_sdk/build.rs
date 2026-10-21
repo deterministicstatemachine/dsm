@@ -53,17 +53,6 @@ fn main() {
         eprintln!("{refusal}");
         std::process::exit(1);
     }
-    // Safety check: prevent release builds with test-only flags
-    if std::env::var("PROFILE").as_deref() == Ok("release") {
-        // Check if FORCE_NO_BACKEND is accessible in release builds
-        // This would indicate the cfg guards were incorrectly removed
-        if std::env::var("CARGO_FEATURE_test").is_ok() {
-            eprintln!("ERROR: Building release with test/debug features enabled!");
-            eprintln!("The FORCE_NO_BACKEND flag must not be available in release builds.");
-            std::process::exit(1);
-        }
-    }
-
     // Emit DT_SONAME on the Android cdylib so consumers (e.g. libsiliconfp.so)
     // record `libdsm_sdk.so` as DT_NEEDED instead of the absolute build-time path.
     // Without this, the NDK linker bakes the host filesystem path into the

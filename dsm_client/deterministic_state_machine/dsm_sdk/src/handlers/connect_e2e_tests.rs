@@ -53,12 +53,18 @@ pub(super) struct Held {
     serve: Serve,
     /// Whether the relay takes answers, or is down and refuses every one, as an unreachable application's would.
     answers: Reach,
+    /// What a stalled answer waits on.
+    stalled: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Reach {
     Up,
     Down,
+    /// It takes the wallet's notices that it ended a session, and holds
+    /// every other answer unanswered until the test lets it go: an
+    /// application's endpoint that stalls.
+    Stall,
 }
 
 type Shared = Arc<Mutex<Held>>;
@@ -109,14 +115,24 @@ async fn serve_requests(
 }
 
 async fn keep_response(State(held): State<Shared>, body: Bytes) -> StatusCode {
-    let mut held = held.lock().expect("the relay");
-    match held.answers {
-        Reach::Down => StatusCode::SERVICE_UNAVAILABLE,
-        Reach::Up => {
-            held.responses.push(body.to_vec());
-            StatusCode::OK
+    let stalled = {
+        let mut kept = held.lock().expect("the relay");
+        let seq = generated::AppResponseV1::decode(body.as_ref())
+            .and_then(|r| generated::AppResponseBodyV1::decode(r.body.as_slice()))
+            .map(|b| b.seq);
+        match (kept.answers, seq) {
+            (Reach::Down, _) => return StatusCode::SERVICE_UNAVAILABLE,
+            (Reach::Stall, Ok(seq)) if seq != crate::handlers::connect_routes::DISCONNECT_SEQ => {
+                kept.stalled.clone()
+            }
+            (Reach::Up | Reach::Stall, _) => {
+                kept.responses.push(body.to_vec());
+                return StatusCode::OK;
+            }
         }
-    }
+    };
+    stalled.notified().await;
+    StatusCode::SERVICE_UNAVAILABLE
 }
 
 impl ForwardRelay {
@@ -139,6 +155,7 @@ impl ForwardRelay {
             responses: Vec::new(),
             answers: Reach::Up,
             serve: Serve::Above,
+            stalled: Arc::new(tokio::sync::Notify::new()),
         }));
         let app = axum::Router::new()
             .route("/connect/offer/{digest}", get(serve_offer))
@@ -162,6 +179,12 @@ impl ForwardRelay {
     /// The relay taking answers again, or down (the application unreachable).
     pub(super) fn answers(&self, reach: Reach) {
         self.held().answers = reach;
+    }
+
+    /// Let the stalled answer go, now or as soon as it arrives: it is
+    /// refused.
+    pub(super) fn release_stalled(&self) {
+        self.held().stalled.notify_one();
     }
 
     pub(super) fn held(&self) -> std::sync::MutexGuard<'_, Held> {
@@ -914,6 +937,53 @@ async fn holdings_of_an_object_never_held_are_covered_only_if_the_game_issued_it
     assert_eq!(fact(&waiting), generated::ConnectFact::None);
 }
 
+/// SA-124. An application's request to accept an object another device
+/// created is refused for that before anything is rooted: the wallet adopts
+/// nothing. It rooted the object first and refused after, so another
+/// creator's object stayed adopted, under the grant and without the player.
+/// MUTATION CONTROL: rooting the object before its creator is checked, as
+/// the wallet did, leaves it in the registry and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_object_another_device_created_is_never_adopted_for_an_application() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    let theirs = create_token(&c, "THIRD", 5).await;
+
+    let asked = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::AcceptIssued(
+            generated::ConnectAcceptIssuedV1 {
+                anchor: theirs.to_vec(),
+            },
+        ),
+    )
+    .await;
+    sync_and_deliver(&p, &relay).await;
+    let answered = status(&p.a, &session, asked).await;
+    assert_ne!(
+        outcome(&answered),
+        generated::ConnectOutcome::CarriedOut,
+        "{}",
+        answered.reason
+    );
+    p.b.enter();
+    assert!(
+        crate::storage::client_db::token_registry::get_token_by_policy_commit(&theirs)
+            .expect("the registry")
+            .is_none(),
+        "another creator's object is adopted"
+    );
+}
+
 /// DSM Amendment A16, end to end: the game asks the wallet which of its
 /// contacts are who, and the wallet, under the grant's contacts scope and
 /// without asking its player, answers with each contact's device id and
@@ -1049,6 +1119,102 @@ async fn a_payment_approved_by_hand_waits_while_the_relationship_settles() {
         generated::ConnectFact::Paid,
         "{}",
         paid.fact_detail
+    );
+}
+
+/// SA-127. An application's endpoint that stalls holds nothing else: a
+/// request outside the grant waits for the player, and the notice that it
+/// waits goes to an endpoint that never answers; meanwhile the player's
+/// disconnect of that very session completes. The notice is sent once the
+/// session's lock is released, never under it.
+/// MUTATION CONTROL: sending the waiting notice under the session's lock, as
+/// `process` did under one lock for every application, holds the disconnect
+/// behind the stalled endpoint and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_stalled_application_holds_no_disconnect_of_its_session() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: "outside the grant".into(),
+        }),
+    )
+    .await;
+    relay.answers(Reach::Stall);
+    let synced = invoke(&p.b, "connect.sync", Vec::new());
+    let disconnected = async {
+        // The sync reaches the request and stalls on its notice first.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let done = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            invoke(
+                &p.b,
+                "connect.disconnect",
+                args(&generated::ConnectSessionRefV1 {
+                    session_id: session.to_vec(),
+                }),
+            ),
+        )
+        .await;
+        relay.release_stalled();
+        done
+    };
+    let (_, disconnected) = tokio::join!(synced, disconnected);
+    let disconnected =
+        disconnected.expect("the disconnect is not held behind the stalled endpoint");
+    assert!(disconnected.success, "{:?}", disconnected.error_message);
+}
+
+/// SA-81. An accept for a session the application already holds is
+/// answered from what it holds, before its signature is checked or the
+/// wallet's directory read: the same bytes again are that session, and the
+/// same accept with its signature changed is refused as another accept for
+/// it, not as a bad signature — nothing was verified for it.
+/// MUTATION CONTROL: verifying the accept before the session is looked up,
+/// as `connect.app.accept` did, answers the changed accept with a signature
+/// failure and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_replayed_accept_is_answered_before_it_is_verified() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    p.a.enter();
+    let accept = crate::storage::client_db::connect::app_session(&session)
+        .expect("the application's sessions")
+        .expect("the session")
+        .accept;
+
+    let again = invoke(&p.a, "connect.app.accept", args_raw(accept.clone())).await;
+    let Reply::Session(view) = reply(&again) else {
+        panic!("connect.app.accept answered another reply");
+    };
+    assert_eq!(view.session_id, session.to_vec());
+
+    let mut changed = generated::AppConnectAcceptV1::decode(accept.as_slice()).expect("an accept");
+    changed.signature[0] ^= 0x01;
+    let refused = invoke(
+        &p.a,
+        "connect.app.accept",
+        args_raw(changed.encode_to_vec()),
+    )
+    .await;
+    assert!(!refused.success, "a changed accept is not taken");
+    let why = refused.error_message.expect("a refusal says why");
+    assert!(
+        why.contains("holds another accept"),
+        "refused before its signature is checked: {why}"
     );
 }
 
@@ -1567,4 +1733,189 @@ async fn a_request_whose_record_failed_after_it_paid_is_never_paid_again() {
         1_000_000 - 20 + 3,
         "the game was paid once"
     );
+}
+
+/// SA-123. A read of the requests of a session this account never made is
+/// refused at once, so the relay answers it `404` rather than holding it
+/// open for its whole wait; a read of a session it made is answered.
+/// MUTATION CONTROL: answering a read for any session with the requests
+/// stored under it, as the account did, answers this one with an empty batch
+/// and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_read_of_requests_for_no_session_is_refused() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let read = |session_id: [u8; 32]| {
+        args(&generated::ConnectAppRequestsQueryV1 {
+            session_id: session_id.to_vec(),
+            after: 0,
+        })
+    };
+
+    let Reply::Requests(batch) = reply(&query(&p.a, "connect.app.requests", read(session)).await)
+    else {
+        panic!("connect.app.requests answered another reply");
+    };
+    assert!(batch.requests.is_empty(), "{batch:?}");
+
+    let unknown = query(&p.a, "connect.app.requests", read([0x5E; 32])).await;
+    assert!(
+        !unknown.success,
+        "a read for no session was answered: {:?}",
+        unknown.data
+    );
+    assert!(
+        unknown
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("no such session")),
+        "{:?}",
+        unknown.error_message
+    );
+}
+
+/// SA-126. A payment the application asks for first takes in what the
+/// wallet's inbox holds (the send's own sync). A transfer another contact
+/// sent, accepted there, is that contact's operation: only the payment's
+/// debit is bound to the request, and the grant counts the request's spend
+/// with the debit, never with the transfer taken in.
+/// MUTATION CONTROL: running the send's sync inside the request's binding,
+/// as the wallet did, binds the transfer taken in as the request's first
+/// operation and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_taken_in_while_a_request_pays_is_not_the_requests() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+
+    // Another contact pays the wallet; the transfer waits in its inbox.
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    c.add_contact(&p.b).await;
+    p.b.add_contact(&c).await;
+    let era_before = p.b.era_balance();
+    let paid_in = c.send(&p.b, 500).await;
+    assert!(paid_in.success, "{:?}", paid_in.error_message);
+    assert_eq!(p.b.era_balance(), era_before, "nothing taken in yet");
+
+    let pay = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 3,
+            memo: String::new(),
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    carried_out(&p.b, &session, pay).await;
+    assert_eq!(balance(&p.b, &wild), 17);
+    assert_eq!(
+        p.b.era_balance(),
+        era_before + 500,
+        "the payment's own sync took the transfer in"
+    );
+
+    p.b.enter();
+    let bound = crate::storage::client_db::connect::bound_operations(&session, pay)
+        .expect("the request's operations");
+    // The debit alone: the transfer taken in before it is not bound.
+    assert_eq!(bound.len(), 1, "the request committed one debit: {bound:?}");
+    assert_eq!(
+        crate::storage::client_db::connect::spent_all(&session).expect("the grant's spend"),
+        vec![(wild, 3)]
+    );
+}
+
+/// SA-129. A request approved by hand whose run committed its payment and
+/// then failed to record it, declined afterwards, is recorded carried out:
+/// the payment committed, and declining it changes nothing about that. The
+/// decline recorded a refusal over a committed payment.
+/// MUTATION CONTROL: declining without reading what the request already
+/// committed, as the wallet did, records it declined and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn declining_a_request_its_crashed_run_carried_out_records_it_carried_out() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    settle(&p).await;
+
+    // Outside the grant: ERA was never payable to the game.
+    let outside = request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: era().to_vec(),
+            amount: 1,
+            memo: "approved by hand".into(),
+        }),
+    )
+    .await;
+    sync_clean(&p, &relay).await;
+    let era_held = balance(&p.b, &era());
+    let wallet_db = |sql: &str| {
+        p.b.enter();
+        crate::storage::client_db::get_connection()
+            .expect("the wallet's database")
+            .lock()
+            .expect("the connection")
+            .execute_batch(sql)
+            .expect("the wallet's database answers");
+    };
+    wallet_db(&format!(
+        "CREATE TRIGGER the_record_fails BEFORE INSERT ON connect_log WHEN NEW.seq = {outside} \
+         BEGIN SELECT RAISE(ABORT, 'the record write failed'); END;"
+    ));
+    let respond = |decision: generated::ConnectDecision| {
+        invoke(
+            &p.b,
+            "connect.respond",
+            args(&generated::ConnectRespondRequestV1 {
+                session_id: session.to_vec(),
+                seq: outside,
+                decision: decision as i32,
+            }),
+        )
+    };
+    let crashed = respond(generated::ConnectDecision::Approve).await;
+    wallet_db("DROP TRIGGER the_record_fails");
+    assert!(!crashed.success, "the approved run's record failed");
+    assert_eq!(balance(&p.b, &era()), era_held - 1, "the payment committed");
+
+    let declined = respond(generated::ConnectDecision::Decline).await;
+    let Reply::Decided(decided) = reply(&declined) else {
+        panic!("connect.respond answered another reply");
+    };
+    assert_eq!(
+        generated::ConnectOutcome::try_from(decided.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "{}",
+        decided.line
+    );
+    let entry = wallet_log(&p.b, &session, outside).await;
+    assert_eq!(
+        generated::ConnectOutcome::try_from(entry.outcome),
+        Ok(generated::ConnectOutcome::CarriedOut),
+        "{}",
+        entry.detail
+    );
+    assert_eq!(balance(&p.b, &era()), era_held - 1, "nothing more was paid");
 }

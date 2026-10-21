@@ -725,28 +725,6 @@ fn with_sender_signature(confirm: &[u8], signature: Vec<u8>) -> Vec<u8> {
     envelope.encode_to_vec()
 }
 
-/// The request a confirm carries.
-fn confirm_request(confirm: &[u8]) -> crate::generated::BilateralConfirmRequest {
-    use prost::Message;
-    let envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm decodes");
-    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload else {
-        panic!("a confirm is a universal transaction");
-    };
-    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
-        panic!("a confirm invokes bilateral.confirm");
-    };
-    let args = invoke.args.as_ref().expect("the confirm's arguments");
-    crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes")
-}
-
-/// The stitched receipt a confirm carries.
-fn confirm_receipt(confirm: &[u8]) -> dsm::types::receipt_types::StitchedReceiptV2 {
-    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
-        &confirm_request(confirm).stitched_receipt,
-    )
-    .expect("the confirm's receipt decodes")
-}
-
 /// A bearer pair: A funded and its offline allocation of 20 ERA loaded under
 /// its anchor — the real anchor-core appliance on a software chip, whose
 /// seed is the appliance's only typed-in value — and the transfer of 7 ERA
@@ -813,11 +791,11 @@ fn with_terms(prepare: &[u8], terms: Vec<u8>) -> Vec<u8> {
 }
 
 /// Pre-audit item 4 (owner ruling 2026-10-02): a bearer transfer's terms ride
-/// beside its operation over BLE, and the receiver takes the proposal only
-/// when they open the operation's signed commitment. A prepare whose terms
-/// are missing, name a memo the sender never signed, or do not decode, is
-/// refused before any session exists. The honest prepare is then taken, and
-/// the receiver keeps the terms beside the operation.
+/// beside its operation over BLE, and a prepare whose terms are missing, name
+/// a memo the sender never signed, or do not decode, is refused before any
+/// session exists. Offline-bearer receipt is disabled (SA-61; owner,
+/// 2026-10-18), so the honest prepare is refused too, for that, and no
+/// session exists either.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
@@ -841,6 +819,7 @@ async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
         (Vec::new(), "carries no terms"),
         (tampered.to_bytes(), "do not open"),
         (vec![0x01, 0x02], "transfer terms"),
+        (terms.to_bytes(), "offline-bearer receipt is disabled"),
     ] {
         let refused = b
             .handler
@@ -855,339 +834,75 @@ async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
             "{why}: B holds no session"
         );
     }
+}
 
-    b.handler
+/// A's bearer transfer to B, prepared by A and delivered to B, which refuses
+/// it: offline-bearer receipt is disabled (SA-61). B writes nothing for it.
+/// Returns the step's commitment.
+async fn refused_at_the_receiver(
+    a: &OfflineDevice,
+    b: &OfflineDevice,
+    operation: &Proposal,
+) -> [u8; 32] {
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    let refused = b
+        .handler
         .handle_prepare_request(&prepare, None)
         .await
-        .expect("the honest prepare is taken");
-    let held = crate::storage::client_db::get_bilateral_session(&commitment)
-        .expect("B's sessions")
-        .expect("B holds the proposal");
-    assert_eq!(held.terms_bytes, Some(terms.to_bytes()));
-}
-
-/// A bearer step between two devices, every frame carried as bytes, the
-/// sender's anchor the real anchor-core appliance on a software chip. A loads
-/// an offline allocation from its admitted ERA under that anchor and spends
-/// from it to B. A's receipt proves the three leaves the spend writes — its
-/// relationship tip, its anchor-state leaf and its allocation — and it is built
-/// and checked before the appliance commits a counter step; B derives the
-/// anchor leaves from the release, pins A's anchor and commits; A commits on
-/// B's acknowledgment.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_bearer_step_proves_its_whole_write_set_and_commits_on_both() {
-    use dsm::types::receipt_types::ReceiptLeaf;
-
-    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
-    let (commitment, confirm) = to_the_confirm(&a, &b, operation).await;
-
-    let receipt = confirm_receipt(&confirm);
-    let kinds: Vec<ReceiptLeaf> = receipt.step_writes.iter().map(|w| w.leaf).collect();
-    assert_eq!(kinds.len(), 3, "the spend writes three leaves: {kinds:?}");
-    assert!(kinds.contains(&ReceiptLeaf::Relationship), "{kinds:?}");
-    assert!(kinds.contains(&ReceiptLeaf::AnchorState), "{kinds:?}");
+        .expect_err("B refuses the bearer transfer");
     assert!(
-        kinds.contains(&ReceiptLeaf::OfflineAllocation {
-            pre_amount: crate::economic_fixtures::whole_era(20),
-            pre_sequence: 1,
-        }),
-        "the allocation's pre-state is the load: {kinds:?}"
-    );
-
-    b.device.enter();
-    let ack = b
-        .handler
-        .handle_confirm_request(&confirm)
-        .await
-        .expect("B commits and acknowledges");
-    a.device.enter();
-    a.handler
-        .handle_commit_response(&ack)
-        .await
-        .expect("A takes the acknowledgment and commits");
-    assert_committed_on_both(&a, &b, &commitment);
-    b.device.enter();
-    assert_eq!(b.device.era_balance(), 7, "B holds the spend");
-}
-
-/// The bearer arm of the receipt's state rules, on a real spend. A's receipt,
-/// judged as B judges it — under A's pinned genesis and Device Tree, the
-/// operation, and the anchor leaves B derives from the release under its own
-/// challenge — holds. Each forgery is refused for its own rule: the forger
-/// holds A's keys and recomputes the child root over what it keeps, so only
-/// the named rule stands.
-///
-/// MUTATION CONTROLS (run 2026-09-27): deleting the write-count check (with it
-/// gone, the receipt that omits the allocation's debit is accepted), the
-/// refusal of an allocation smaller than the spend, the refusal of anchor
-/// leaves that do not move, the key-order check, the refusal of a bearer spend
-/// judged without its anchor leaves, or `bearer_leaves_of_release`'s successor
-/// check each turns its named assertion red.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_bearer_receipt_holds_only_for_the_write_set_its_spend_makes() {
-    use dsm::core::bilateral_transaction_manager::{anchor_state_leaf_key, compute_smt_key};
-    use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
-    use dsm::merkle::sparse_merkle_tree::DeviceSmtHashes;
-    use dsm::types::offline_allocation_leaf::{offline_allocation_key, offline_allocation_value};
-    use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
-    use dsm::verification::receipt_verification::{
-        verify_receipt_state, BearerLeaves, ReceiptStateContext,
-    };
-
-    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
-    let (commitment, confirm) = to_the_confirm(&a, &b, operation.clone()).await;
-    let request = confirm_request(&confirm);
-    let receipt = confirm_receipt(&confirm);
-
-    b.device.enter();
-    let challenge: [u8; 32] = crate::storage::client_db::get_bilateral_session(&commitment)
-        .expect("read B's session")
-        .expect("B's session")
-        .receiver_challenge
-        .expect("B's challenge")
-        .try_into()
-        .expect("32 bytes");
-    let bundle: [u8; 32] = request
-        .anchor_disclosure
-        .as_ref()
-        .expect("the confirm discloses A's anchor")
-        .bundle
-        .as_slice()
-        .try_into()
-        .expect("32 bytes");
-    let leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
-        &request.offline_release,
-        &bundle,
-        &challenge,
-    )
-    .expect("the leaves B derives from the release");
-    // A release whose carried successor is not the one B derives names no
-    // leaves: the counter's successor, or the frontier's.
-    {
-        use prost::Message;
-        let bent = |bend: &dyn Fn(&mut anchor_core::proto::pb::TransitionPackage)| {
-            let mut release =
-                anchor_core::proto::pb::OfflineRelease::decode(request.offline_release.as_slice())
-                    .expect("the release decodes");
-            bend(
-                release
-                    .transition
-                    .as_mut()
-                    .expect("the release's transition"),
-            );
-            release.encode_to_vec()
-        };
-        for (why, release) in [
-            ("a counter successor", bent(&|t| t.next_anchor_counter += 1)),
-            (
-                "a frontier successor",
-                bent(&|t| t.next_root = leaves.anchor_before.to_vec()),
-            ),
-        ] {
-            assert!(
-                crate::bluetooth::anchor_accept::bearer_leaves_of_release(
-                    &release, &bundle, &challenge
-                )
-                .is_err(),
-                "a release carrying {why} it does not derive"
-            );
-        }
-        let mut another_challenge = challenge;
-        another_challenge[0] ^= 1;
-        assert!(
-            crate::bluetooth::anchor_accept::bearer_leaves_of_release(
-                &request.offline_release,
-                &bundle,
-                &another_challenge,
-            )
-            .is_err(),
-            "the release under another challenge"
-        );
-    }
-    let tree = DeviceTreeAcceptanceCommitment::from_root(
-        dsm::common::device_tree::DeviceTree::single(a.device.device_id).root(),
-    );
-    let context = ReceiptStateContext {
-        device_tree_commitment: &tree,
-        author_genesis: a.device.genesis,
-        operation: &operation.operation,
-        bearer: Some(leaves),
-    };
-    verify_receipt_state(&receipt, &context).expect("the honest bearer receipt holds");
-
-    let refusal = |r: &StitchedReceiptV2, context: &ReceiptStateContext<'_>| {
-        verify_receipt_state(r, context)
-            .expect_err("a forged receipt is refused")
+        refused
             .to_string()
-    };
-    let refused_for = |why: &str, r: &StitchedReceiptV2, context: &ReceiptStateContext<'_>| {
-        let reason = refusal(r, context);
-        assert!(reason.contains(why), "refused for another reason: {reason}");
-    };
-
-    // The forger's fold: the writes it keeps, each with the values the rules
-    // derive, folded from the receipt's parent root.
-    let (amount, asset) = match &operation.operation {
-        Operation::Transfer {
-            amount,
-            policy_commit,
-            ..
-        } => (amount.value(), *policy_commit),
-        _ => unreachable!("a bearer transfer"),
-    };
-    let refold = |r: &mut StitchedReceiptV2| {
-        let mut entries: Vec<FoldEntry> = r
-            .step_writes
-            .iter()
-            .map(|w| {
-                let (key, pre, post) = match w.leaf {
-                    ReceiptLeaf::Relationship => (
-                        compute_smt_key(&r.devid_a, &r.devid_b),
-                        r.parent_tip,
-                        r.child_tip,
-                    ),
-                    ReceiptLeaf::AnchorState => (
-                        anchor_state_leaf_key(&bundle),
-                        leaves.anchor_before,
-                        leaves.anchor_after,
-                    ),
-                    ReceiptLeaf::OfflineAllocation {
-                        pre_amount,
-                        pre_sequence,
-                    } => (
-                        offline_allocation_key(&r.genesis, &r.devid_a, &bundle, &asset),
-                        offline_allocation_value(pre_amount, pre_sequence),
-                        offline_allocation_value(pre_amount - amount, pre_sequence + 1),
-                    ),
-                };
-                FoldEntry {
-                    key,
-                    pre: Some(pre),
-                    post: Some(post),
-                    path: dsm::merkle::smt_path::decode::<DeviceSmtHashes>(
-                        &w.path.explicit_heights,
-                        &w.path.siblings,
-                    )
-                    .expect("the path decodes"),
-                }
-            })
-            .collect();
-        entries.sort_by_key(|e| e.key);
-        r.child_root = verify_batch::<DeviceSmtHashes>(&r.parent_root, &entries)
-            .expect("the kept writes fold from the parent root");
-    };
-    let without = |leaf: fn(&ReceiptLeaf) -> bool| {
-        let mut r = receipt.clone();
-        r.step_writes.retain(|w| !leaf(&w.leaf));
-        refold(&mut r);
-        r
-    };
-
-    refused_for(
-        "the step writes 3 leaves; the receipt proves 2",
-        &without(|l| matches!(l, ReceiptLeaf::OfflineAllocation { .. })),
-        &context,
+            .contains("offline-bearer receipt is disabled"),
+        "{refused}"
     );
-    refused_for(
-        "the step writes 3 leaves; the receipt proves 2",
-        &without(|l| matches!(l, ReceiptLeaf::AnchorState)),
-        &context,
-    );
-
-    let mut understated = receipt.clone();
-    for w in understated.step_writes.iter_mut() {
-        if let ReceiptLeaf::OfflineAllocation { pre_sequence, .. } = w.leaf {
-            w.leaf = ReceiptLeaf::OfflineAllocation {
-                pre_amount: amount - 1,
-                pre_sequence,
-            };
-        }
-    }
-    refused_for(
-        "holds less than the operation spends",
-        &understated,
-        &context,
-    );
-
-    let mut reordered = receipt.clone();
-    reordered.step_writes.reverse();
-    refused_for("not in the order of their keys", &reordered, &context);
-
-    let mut doubled = receipt.clone();
-    let again = doubled.step_writes[0].clone();
-    doubled.step_writes.push(again);
-    refused_for(
-        "the step writes 3 leaves; the receipt proves 4",
-        &doubled,
-        &context,
-    );
-
-    refused_for(
-        "moves its anchor-state leaf",
-        &receipt,
-        &ReceiptStateContext {
-            bearer: Some(BearerLeaves {
-                anchor_after: leaves.anchor_before,
-                ..leaves
-            }),
-            ..context
-        },
-    );
-    refused_for(
-        "is verified against its anchor-state leaves",
-        &receipt,
-        &ReceiptStateContext {
-            bearer: None,
-            ..context
-        },
-    );
-    for (why, other) in [
-        (
-            "an anchor pre-state that is not the release's",
-            BearerLeaves {
-                anchor_before: leaves.anchor_after,
-                anchor_after: leaves.anchor_before,
-                ..leaves
-            },
-        ),
-        (
-            "another bundle",
-            BearerLeaves {
-                bundle: a.device.genesis,
-                ..leaves
-            },
-        ),
-    ] {
-        assert!(
-            verify_receipt_state(
-                &receipt,
-                &ReceiptStateContext {
-                    bearer: Some(other),
-                    ..context
-                }
-            )
-            .is_err(),
-            "{why}"
-        );
-    }
+    commitment
 }
 
-/// A bearer confirm whose receipt does not hold spends no counter step: the
-/// sender checks its receipt before the appliance's COMMIT, so a refused
-/// receipt leaves the chip's counter and frontier where they were. Here A's
-/// Device Tree commitment is not the one its receipt's device proof is under.
-/// MUTATION CONTROL: building the receipt after the release (the order this
-/// replaced) moves the counter and turns this red.
+/// SA-61, offline-bearer receipt disabled (owner, 2026-10-18: "Disable the
+/// vulnerable acceptance path until the complete proof is implemented"). A
+/// loads an offline allocation under its anchor, the real anchor-core
+/// appliance on a software chip, and proposes a bearer transfer to B; B
+/// refuses it at the prepare. B holds no session for it, keeps no history
+/// row, and holds no ERA: nothing is credited on an allocation its sender
+/// asserts.
+/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
+/// hold the proposal for its user and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_bearer_receipt_that_does_not_hold_spends_no_counter_step() {
-    use crate::anchor::AnchorAppliance;
+async fn a_bearer_transfer_is_refused_at_its_receiver_and_credits_nothing() {
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
+    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
+    b.device.enter();
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("B's sessions")
+            .is_none(),
+        "B holds no session for the refused step"
+    );
+    assert_eq!(history_rows(&commitment), 0, "B keeps no history of it");
+    assert_eq!(b.device.era_balance(), 0, "B is credited nothing");
+}
 
-    let (_pair, a, b, appliance, operation) = bearer_pair().await;
-    let before = appliance.clone().status().expect("the chip's status");
-
+/// SA-61. A bearer transfer delivered again is refused the same way: the
+/// refusal is decided on the operation each time, and nothing the first
+/// delivery left lets the second one in.
+/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
+/// hold the proposal and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_transfer_delivered_again_is_refused_again() {
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
     a.device.enter();
     let (prepare, commitment) = a
         .handler
@@ -1195,32 +910,55 @@ async fn a_bearer_receipt_that_does_not_hold_spends_no_counter_step() {
         .await
         .expect("A prepares");
     b.device.enter();
-    b.handler
-        .handle_prepare_request(&prepare, None)
-        .await
-        .expect("B takes the proposal");
-    let response = b
-        .handler
-        .create_prepare_accept_envelope(commitment)
-        .await
-        .expect("B's user accepts");
+    for delivery in 1..=2 {
+        let refused = b
+            .handler
+            .handle_prepare_request(&prepare, None)
+            .await
+            .expect_err("B refuses the bearer transfer");
+        assert!(
+            refused
+                .to_string()
+                .contains("offline-bearer receipt is disabled"),
+            "delivery {delivery}: {refused}"
+        );
+        assert!(
+            crate::storage::client_db::get_bilateral_session(&commitment)
+                .expect("B's sessions")
+                .is_none(),
+            "delivery {delivery}: B holds no session"
+        );
+    }
+}
 
-    a.device.enter();
-    crate::sdk::app_state::AppState::set_device_tree_root(
-        dsm::common::device_tree::DeviceTree::single(b.device.device_id).root(),
-    )
-    .expect("set A's Device Tree root");
-    a.handler
-        .handle_prepare_response(&response)
-        .await
-        .expect_err("a receipt that does not hold is not confirmed");
+/// SA-61. A bearer transfer its receiver refuses spends no counter step on
+/// the sender's appliance: nothing irreversible runs before an acceptance,
+/// and none comes. A ends its proposal, and the relationship takes its next
+/// step.
+/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
+/// hold the proposal and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_refused_bearer_transfer_spends_no_counter_step_and_frees_the_relationship() {
+    use crate::anchor::AnchorAppliance;
 
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = appliance.clone().status().expect("the chip's status");
+    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
     let after = appliance.clone().status().expect("the chip's status");
     assert_eq!(
         after.anchor_counter, before.anchor_counter,
         "no counter step was spent"
     );
     assert_eq!(after.root, before.root, "the frontier did not move");
+
+    a.device.enter();
+    a.handler
+        .cancel_proposal(commitment, "refused by its receiver".to_string())
+        .await
+        .expect("A ends its proposal");
+    let next = offline_step(&a, &b, marked(0x61)).await;
+    assert_committed_on_both(&a, &b, &next);
 }
 
 /// The history rows the entered device holds for the step.
@@ -1617,6 +1355,60 @@ async fn a_receiver_that_rejected_answers_the_prepare_again_with_its_rejection()
         .frames_owed_to(&b.device.device_id)
         .await
         .is_empty());
+}
+
+/// SA-114. A proposal its receiver never saw, delivered after the
+/// relationship moved past the tip it was made on, is refused as stale and
+/// changes nothing else: the tip it claims is one this relationship has
+/// passed, so it is not kept as the sender's tip. Kept, it tripped the
+/// divergence check, and online sends to the contact stopped for good.
+/// MUTATION CONTROL: keeping every claimed tip that its commitment
+/// recomputes on, as the receiver did, records the passed tip and turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_old_proposal_delivered_after_the_tip_moved_is_not_kept_as_the_senders_tip() {
+    let pair = Pair::boot(0, 0).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let old_tip = b.tip_with(&a);
+
+    a.device.enter();
+    let (old_prepare, old_commitment) = a
+        .handler
+        .prepare_bilateral_transaction(b.device.device_id, marked(0x51))
+        .await
+        .expect("a proposal its receiver never sees");
+    a.handler
+        .cancel_proposal(old_commitment, "never sent".to_string())
+        .await
+        .expect("the proposer ends it");
+    offline_step(&a, &b, marked(0x52)).await;
+    assert_ne!(b.tip_with(&a), old_tip, "the relationship moved");
+
+    b.device.enter();
+    let (answer, _) = b
+        .handler
+        .handle_prepare_request(&old_prepare, None)
+        .await
+        .expect("the old proposal is answered");
+    let reply = crate::envelope::from_canonical_bytes(&answer).expect("decode the reply");
+    match reply.payload {
+        Some(crate::generated::envelope::Payload::BilateralPrepareReject(reject)) => {
+            assert!(
+                reject.reason.contains("Chain tip mismatch"),
+                "{}",
+                reject.reason
+            )
+        }
+        other => panic!("the old proposal is refused as stale, not {other:?}"),
+    }
+    let observed = crate::storage::client_db::get_observed_remote_tip_record(&a.device.device_id)
+        .expect("read the observed tip");
+    assert!(
+        observed.as_ref().map(|record| record.tip) != Some(old_tip),
+        "the passed tip is kept as the sender's: {observed:?}"
+    );
 }
 
 /// An operation of its own for a step: two steps on one tip are two steps
@@ -2042,14 +1834,13 @@ async fn an_offline_proposal_waits_for_an_online_send_in_progress() {
         .expect("A proposes once the online send is done");
 }
 
-/// SA-54. A device whose identity recovery is under way moves no value out,
-/// and for an offline-bearer step the gate stands before the step's
-/// irreversible parts, not only at its commit after the ack: recovery under
-/// way before a proposal stops the proposal, and recovery begun after it
-/// stops the release before the anchor's COMMIT spends a counter step.
-/// MUTATION CONTROLS: dropping the gate before the prepare lets A propose
-/// while recovering and turns the first refusal red; dropping it before the
-/// release lets the anchor commit and turns the second red.
+/// SA-54. A device whose identity recovery is under way moves no value out:
+/// recovery under way before a proposal stops the proposal. The release gate
+/// after the receiver's acceptance is not reached while offline-bearer
+/// receipt is disabled (SA-61): the receiver refuses the proposal first, and
+/// the sender's appliance spends nothing.
+/// MUTATION CONTROL: dropping the gate before the prepare lets A propose
+/// while recovering and turns the first refusal red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_recovering_device_neither_proposes_nor_releases_an_offline_spend() {
@@ -2076,35 +1867,7 @@ async fn a_recovering_device_neither_proposes_nor_releases_an_offline_spend() {
     set_recovery_state(RecoveryState::None).expect("A's recovery is not under way");
 
     let before = appliance.clone().status().expect("the chip's status");
-    let (prepare, commitment) = a
-        .handler
-        .prepare_bilateral_step(b.device.device_id, operation.operation, operation.terms)
-        .await
-        .expect("A prepares");
-    b.device.enter();
-    b.handler
-        .handle_prepare_request(&prepare, None)
-        .await
-        .expect("B takes the proposal");
-    let response = b
-        .handler
-        .create_prepare_accept_envelope(commitment)
-        .await
-        .expect("B's user accepts");
-
-    a.device.enter();
-    set_recovery_state(RecoveryState::Polling).expect("A's recovery begins");
-    let refused = a
-        .handler
-        .handle_prepare_response(&response)
-        .await
-        .expect_err("no release while recovering");
-    assert!(
-        refused
-            .to_string()
-            .contains("refused before the anchor commits"),
-        "{refused}"
-    );
+    refused_at_the_receiver(&a, &b, &operation).await;
     let after = appliance.clone().status().expect("the chip's status");
     assert_eq!(
         after.anchor_counter, before.anchor_counter,
@@ -2253,150 +2016,31 @@ async fn a_confirm_does_not_overwrite_a_cancellation_made_meanwhile() {
     assert_eq!(stored_phase(&commitment), "rejected");
 }
 
-/// SA-54. An offline release is accepted only against the confirm Core
-/// verified: the predicate's step 12 is the consumption that receipt proves,
-/// and the release's device roots and anchor leaves are the receipt's. B
-/// verifies A's genuine bearer confirm and commits it (pinning A's anchor);
-/// the release then holds against B's verified confirm, and is refused
-/// without A's pinned anchor, under another bundle than the receipt's spend,
-/// or with a certificate naming other device roots.
-/// MUTATION CONTROLS: dropping the tie of the certificate's roots to the
-/// receipt's, or of the pinned bundle to the receipt's spend, turns the
-/// named refusal red.
+/// SA-61, offline-bearer receipt disabled (owner, 2026-10-18): the receiver
+/// never holds a step it could take a release in against. B refuses A's bearer
+/// transfer at the prepare, so it issues no challenge, keeps no session for
+/// the step, and never pins A's anchor, which only a confirm B verified could
+/// admit. Before, the release was accepted against the confirm Core verified;
+/// that path is kept, unreached, for the complete proof.
+/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
+/// hold the proposal and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn an_offline_release_is_accepted_only_against_the_confirm_core_verified() {
-    use crate::bluetooth::anchor_accept::{accept_offline_release, OfflineRecover, PinnedAnchor};
-    use prost::Message;
-
+async fn no_offline_release_is_taken_in_while_bearer_receipt_is_disabled() {
     let (_pair, a, b, _appliance, operation) = bearer_pair().await;
-    let (commitment, confirm) = to_the_confirm(&a, &b, operation).await;
-    let request = confirm_request(&confirm);
-
+    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
     b.device.enter();
-    let session = crate::storage::client_db::get_bilateral_session(&commitment)
-        .expect("read B's session")
-        .expect("B's session");
-    let challenge: [u8; 32] = session
-        .receiver_challenge
-        .expect("B's challenge")
-        .try_into()
-        .expect("32 bytes");
-    let step_operation = Operation::from_bytes(&session.operation_bytes).expect("the operation");
-    let a_contact = crate::storage::client_db::get_contact_by_device_id(&a.device.device_id)
-        .expect("read A's contact")
-        .expect("A is B's contact");
-    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-        &b.device.device_id,
-        &a.device.device_id,
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("B's sessions")
+            .is_none(),
+        "B holds no step to take a release in against"
     );
-    let a_chain_head = crate::storage::client_db::load_cert_chain_head_pubkey(
-        &rel_key,
-        crate::storage::client_db::CertChainSide::Counterparty,
-    )
-    .expect("A's cert-chain head");
-    let disclosed_bundle: [u8; 32] = request
-        .anchor_disclosure
-        .as_ref()
-        .expect("the confirm discloses A's anchor")
-        .bundle
-        .as_slice()
-        .try_into()
-        .expect("32 bytes");
-    let leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
-        &request.offline_release,
-        &disclosed_bundle,
-        &challenge,
-    )
-    .expect("the leaves B derives from the release");
-    let verified = dsm::bilateral::offline::decide_confirm(
-        dsm::bilateral::offline::ConfirmClaims {
-            signature: &request.sender_signature,
-            receipt: &request.stitched_receipt,
-            pre_entropy: &request.pre_entropy,
-            successor_tip: request
-                .shared_chain_tip_new
-                .as_ref()
-                .map(|h| <[u8; 32]>::try_from(h.v.as_slice()).expect("32 bytes")),
-        },
-        dsm::bilateral::offline::AcceptedStep {
-            commitment_hash: commitment,
-            operation: &step_operation,
-            held_tip: b.tip_with(&a),
-            receiver_device_id: b.device.device_id,
-            sender_device_tree_root: crate::storage::client_db::get_contact_device_tree_root(
-                &a.device.device_id,
-            )
-            .expect("read A's Device Tree root")
-            .expect("A's Device Tree root"),
-            sender_chain_head: a_chain_head.as_deref(),
-            bearer: Some(leaves),
-        },
-        &dsm::bilateral::offline::PinnedPeer {
-            device_id: a.device.device_id,
-            genesis: a_contact
-                .genesis_hash
-                .as_slice()
-                .try_into()
-                .expect("32 bytes"),
-            signing_key: &a_contact.public_key,
-            kyber_public_key: &a_contact.kyber_public_key,
-        },
-    )
-    .expect("B verifies A's confirm");
-
-    b.handler
-        .handle_confirm_request(&confirm)
-        .await
-        .expect("B commits and pins A's anchor");
-    let pinned = PinnedAnchor::from_fused(
-        &crate::bridge::anchor_enrollment_store()
+    assert!(
+        crate::bridge::anchor_enrollment_store()
             .expect("the enrollment store")
             .get(&a.device.device_id)
-            .expect("A's anchor is pinned")
-            .pin,
+            .is_none(),
+        "B pins no anchor of A's"
     );
-    let policy = dsm::types::operations::canonical_offline_bearer_policy().policy_id;
-    let accept = |release: &[u8], pinned: Option<&PinnedAnchor>| {
-        accept_offline_release(
-            &verified,
-            release,
-            pinned,
-            None,
-            &b.device.device_id,
-            &challenge,
-            &policy,
-        )
-    };
-
-    accept(&request.offline_release, Some(&pinned)).expect("the release holds");
-    assert!(matches!(
-        accept(&request.offline_release, None),
-        Err(OfflineRecover::AnchorNotEnrolled)
-    ));
-    let other_bundle = PinnedAnchor {
-        bundle: [0x0Bu8; 32],
-        ..PinnedAnchor::from_fused(
-            &crate::bridge::anchor_enrollment_store()
-                .expect("the enrollment store")
-                .get(&a.device.device_id)
-                .expect("A's anchor is pinned")
-                .pin,
-        )
-    };
-    assert!(matches!(
-        accept(&request.offline_release, Some(&other_bundle)),
-        Err(OfflineRecover::NotTheStepsSpend)
-    ));
-    let mut bent =
-        anchor_core::proto::pb::OfflineRelease::decode(request.offline_release.as_slice())
-            .expect("the release decodes");
-    bent.cert
-        .as_mut()
-        .expect("the release's certificate")
-        .sender_device_root_after[0] ^= 0x01;
-    assert!(matches!(
-        accept(&bent.encode_to_vec(), Some(&pinned)),
-        Err(OfflineRecover::RootsNotTheReceipts)
-    ));
 }

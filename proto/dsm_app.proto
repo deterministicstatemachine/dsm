@@ -2008,10 +2008,10 @@ message StepWriteSet {
 // whose sibling is not the tree's default there, and those siblings, lowest
 // height first). The writes are ordered by their derived key.
 message StepWrite {
+  reserved 2, 3;
   oneof leaf {
     StepWriteRelationship relationship = 1;
-    StepWriteAnchorState anchor_state = 2;
-    StepWriteOfflineAllocation offline_allocation = 3;
+    StepWriteOfflineAccount offline_account = 6;
   }
   bytes path_heights = 4 [(dsm_fixed_len)=32];
   bytes path_siblings = 5 [(dsm_max_len)=8192];
@@ -2021,16 +2021,38 @@ message StepWrite {
 // child_tip after (child_tip recomputed from the operation and the entropy).
 message StepWriteRelationship {}
 
-// The anchor-state leaf of the pinned bundle B: before and after are the
-// anchor-state leaves the release's signed counter pair and frontiers name.
-message StepWriteAnchorState {}
+// The offline account of the pinned bundle B, the one device-SMT leaf an
+// offline-bearer spend writes besides its relationship: the account as it
+// stood before the step. The account is its own SMT; after is derived — the
+// allocation of the operation's asset less its amount, the counter plus one,
+// and the frontier the release advances to — by folding account_paths (one per
+// account leaf the spend writes, in key order) from pre_account_root.
+message StepWriteOfflineAccount {
+  bytes pre_account_root = 1 [(dsm_fixed_len)=32];
+  uint64 pre_allocation = 2;
+  uint64 pre_counter = 3;
+  bytes pre_frontier = 4 [(dsm_fixed_len)=32];
+  bytes next_frontier = 5 [(dsm_fixed_len)=32];
+  repeated SmtPath account_paths = 6;
+}
 
-// The offline allocation leaf of (genesis, device, B, asset): the allocation as
-// it stood before the step. After is derived: amount less the operation's
-// amount, sequence plus one.
-message StepWriteOfflineAllocation {
-  uint64 pre_amount = 1;
-  uint64 pre_sequence = 2;
+// A leaf-to-root path in the one canonical encoding: the 256-bit set of heights
+// whose sibling is not the tree's default there, and those siblings, lowest
+// height first.
+message SmtPath {
+  bytes heights = 1 [(dsm_fixed_len)=32];
+  bytes siblings = 2 [(dsm_max_len)=8192];
+}
+
+// Proves a device root commits the offline account of a bundle B at a frontier
+// and a software counter: the account's leaf in the device SMT (value
+// account_root), and the counter and frontier leaves in the account's own SMT.
+// Carried in an offline release beside each of its two device roots.
+message OfflineStateProof {
+  bytes account_root = 1 [(dsm_fixed_len)=32];
+  SmtPath account_leaf = 2;
+  SmtPath counter = 3;
+  SmtPath frontier = 4;
 }
 
 // Bilateral event notifications for frontend

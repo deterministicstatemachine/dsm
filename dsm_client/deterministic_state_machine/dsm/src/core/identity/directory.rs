@@ -226,6 +226,14 @@ impl DirectoryEntry {
     }
 }
 
+/// Whether `bytes` are a directory entry naming `genesis` and `device_id`: a
+/// candidate [`select_entry`] ranks. Whether it proves itself is decided
+/// there, best first, never here.
+pub fn names_directory_entry(genesis: &[u8; 32], device_id: &[u8; 32], bytes: &[u8]) -> bool {
+    DirectoryEntry::decode(bytes)
+        .is_ok_and(|entry| &entry.body.genesis == genesis && &entry.body.device_id == device_id)
+}
+
 /// From everything read at a device's cell, across every member, the entry to
 /// use: one that names this genesis and device and proves itself, with the
 /// highest counter. Ties (only the device itself could sign two) go to the
@@ -236,29 +244,50 @@ pub fn select_entry<'a>(
     device_id: &[u8; 32],
     values: impl IntoIterator<Item = &'a [u8]>,
 ) -> Option<DirectoryEntry> {
-    let mut best: Option<(DirectoryEntry, Vec<u8>)> = None;
+    select_proven(genesis, device_id, values, DirectoryEntry::verify).0
+}
+
+/// [`select_entry`] with `proves` as the entry's proof of itself: what it
+/// chose, and why each candidate ranked above the choice did not prove
+/// itself, best first. The
+/// candidates are ordered as the choice orders them — highest counter, then
+/// smallest encoding — and each distinct encoding is proven once, best
+/// first, until one proves itself: every member returns the same entry, and
+/// proving every copy read, and every junk value, before comparing counters
+/// let one member force hundreds of SPHINCS+ verifications per read (SA-142).
+fn select_proven<'a, E>(
+    genesis: &[u8; 32],
+    device_id: &[u8; 32],
+    values: impl IntoIterator<Item = &'a [u8]>,
+    proves: impl Fn(&DirectoryEntry) -> Result<(), E>,
+) -> (Option<DirectoryEntry>, Vec<E>) {
+    let mut candidates: Vec<(DirectoryEntry, &'a [u8])> = Vec::new();
     for bytes in values {
+        if candidates.iter().any(|(_, held)| *held == bytes) {
+            continue;
+        }
         let Ok(entry) = DirectoryEntry::decode(bytes) else {
             continue;
         };
         if &entry.body.genesis != genesis || &entry.body.device_id != device_id {
             continue;
         }
-        if entry.verify().is_err() {
-            continue;
-        }
-        let better = match &best {
-            None => true,
-            Some((b, b_bytes)) => {
-                entry.body.counter > b.body.counter
-                    || (entry.body.counter == b.body.counter && bytes < b_bytes.as_slice())
-            }
-        };
-        if better {
-            best = Some((entry, bytes.to_vec()));
+        candidates.push((entry, bytes));
+    }
+    candidates.sort_by(|(a, a_bytes), (b, b_bytes)| {
+        b.body
+            .counter
+            .cmp(&a.body.counter)
+            .then_with(|| a_bytes.cmp(b_bytes))
+    });
+    let mut refused = Vec::new();
+    for (entry, _) in candidates {
+        match proves(&entry) {
+            Ok(()) => return (Some(entry), refused),
+            Err(why) => refused.push(why),
         }
     }
-    best.map(|(entry, ..)| entry)
+    (None, refused)
 }
 
 #[cfg(test)]
@@ -463,6 +492,42 @@ mod tests {
             elsewhere.verify(),
             Err(DirectoryError::GenesisNotProven(..))
         ));
+    }
+
+    /// SA-142. Every member returns the same entry, and a hostile member
+    /// adds entries naming the device with higher counters that do not prove
+    /// themselves. Each distinct encoding is proven once, best first, and the
+    /// choice stops at the first that proves itself: three forgeries and one
+    /// of the five copies of the device's own entry, four proofs where every
+    /// value read was proven before.
+    /// MUTATION CONTROL: proving every value read before the choice, as the
+    /// selection did, makes eight proofs and turns this red.
+    #[test]
+    fn each_distinct_entry_is_proven_once_and_the_best_that_proves_itself_stops_the_choice() {
+        let (body, sk) = identity(11, 1);
+        let (_, forger_sk) = identity(12, 1);
+        let (g, id) = (body.genesis, body.device_id);
+        let own = DirectoryEntry::sign(body.clone(), &sk).unwrap();
+        let mut values = vec![own.encode(); 5];
+        for counter in [7, 8, 9] {
+            let forged = DirectoryEntry::sign(
+                DirectoryEntryBody {
+                    counter,
+                    ..body.clone()
+                },
+                &forger_sk,
+            )
+            .unwrap();
+            values.push(forged.encode());
+        }
+        let proofs = std::cell::Cell::new(0usize);
+        let (chosen, refused) = select_proven(&g, &id, values.iter().map(Vec::as_slice), |entry| {
+            proofs.set(proofs.get() + 1);
+            entry.verify()
+        });
+        assert_eq!(chosen, Some(own));
+        assert_eq!(refused, vec![DirectoryError::SignatureDoesNotVerify; 3]);
+        assert_eq!(proofs.get(), 4);
     }
 
     #[test]

@@ -58,13 +58,14 @@ message RootAdvanceCertificate {
 }
 
 // The exported release package Pkg = (Δ, Π_i, Π_{i+1}, Cert, BranchProof) (§10, Def. 9).
-// The SMT inclusion proofs are attached by the SDK (which owns the device tree). branch_proof
+// The offline-state proofs are attached by the SDK (which owns the device tree): each proves the
+// sender's device root commits its offline account at the release's frontier and counter. branch_proof
 // is an ordered list of prior certificates for forward-only frontier catch-up (Def. 10);
 // empty for a direct-from-frontier release.
 message OfflineRelease {
   TransitionPackage transition               = 1;
-  bytes anchor_smt_proof_before              = 2;  // Π_i
-  bytes anchor_smt_proof_after               = 3;  // Π_{i+1}
+  bytes offline_state_proof_before          = 2;  // Π_i
+  bytes offline_state_proof_after           = 3;  // Π_{i+1}
   RootAdvanceCertificate cert                = 4;
   repeated RootAdvanceCertificate branch_proof = 5;
 }

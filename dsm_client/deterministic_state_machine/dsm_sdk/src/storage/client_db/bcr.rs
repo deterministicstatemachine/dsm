@@ -26,9 +26,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
-use dsm::types::device_state::{
-    DeviceState, OfflineAllocation, RelChainTip, RelationshipChainState, ValueCapability,
-};
+use dsm::types::device_state::{DeviceState, RelChainTip, RelationshipChainState, ValueCapability};
+use dsm::types::offline_account::OfflineAccount;
 use dsm::types::operations::Operation;
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -87,7 +86,11 @@ const REL_CHAIN_STATE_VERSION: u8 = 0x03;
 // `rel_key -> chain_tip`, never the state. Breaking bump with NO back-compat reader.
 // v0x07 drops the `vault_reserves` section: the old market's reserve leaves are gone from
 // `DeviceState`, so a head has nothing to persist there. Breaking bump, NO back-compat reader.
-const DEVICE_STATE_VERSION: u8 = 0x07;
+// v0x08 replaces the v0x04 offline-allocations section with the offline accounts: each account
+// is its own SMT whose root is one device leaf, and the section carries what rebuilds it — its
+// bundle, counter, frontier, funding chain and allocations. The fused anchor-state and flat
+// allocation leaves are gone from `extra_leaves`. Breaking bump, NO back-compat reader.
+const DEVICE_STATE_VERSION: u8 = 0x08;
 
 #[inline]
 fn put_len_u32(out: &mut Vec<u8>, n: usize) {
@@ -276,15 +279,26 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.extend_from_slice(value);
     }
 
-    // v0x04: offline-cash allocations — the extractable (amount, sequence) behind each allocation leaf.
-    // The leaf HASH is already in `extra_leaves` (commits into the root); this section carries the
-    // amounts, which are not recoverable from the hash. BTreeMap iteration is sorted.
-    let allocations = head.offline_allocations_snapshot();
-    put_len_u32(&mut out, allocations.len());
-    for (key, alloc) in allocations {
-        out.extend_from_slice(key);
-        out.extend_from_slice(&alloc.amount.to_le_bytes());
-        out.extend_from_slice(&alloc.sequence.to_le_bytes());
+    // v0x08: the offline accounts, by bundle. Each rebuilds its own SMT, whose root is the device
+    // leaf `restore` writes for it. BTreeMap iteration is sorted.
+    let accounts = head.offline_accounts();
+    put_len_u32(&mut out, accounts.len());
+    for (bundle, account) in accounts {
+        out.extend_from_slice(bundle);
+        out.extend_from_slice(&account.counter().to_le_bytes());
+        out.extend_from_slice(&account.frontier());
+        match account.funding_chain() {
+            Some(chain) => {
+                out.push(1u8);
+                out.extend_from_slice(&chain);
+            }
+            None => out.push(0u8),
+        }
+        put_len_u32(&mut out, account.allocations().len());
+        for (asset, amount) in account.allocations() {
+            out.extend_from_slice(asset);
+            out.extend_from_slice(&amount.to_le_bytes());
+        }
     }
 
     out
@@ -382,23 +396,48 @@ pub fn decode_device_state(
         extra_leaves.insert(key, value);
     }
 
-    // v0x04: offline-cash allocations — extractable (amount, sequence) behind each allocation leaf.
-    let allocation_count =
-        read_len_u32(&mut cursor).map_err(|e| anyhow!("allocation count: {e}"))?;
-    let mut offline_allocations: BTreeMap<[u8; 32], OfflineAllocation> = BTreeMap::new();
-    for _ in 0..allocation_count {
-        let key: [u8; 32] = take::<32>(&mut cursor).map_err(|e| anyhow!("allocation key: {e}"))?;
-        let amount_bytes: [u8; 8] =
-            take::<8>(&mut cursor).map_err(|e| anyhow!("allocation amount: {e}"))?;
-        let seq_bytes: [u8; 8] =
-            take::<8>(&mut cursor).map_err(|e| anyhow!("allocation sequence: {e}"))?;
-        offline_allocations.insert(
-            key,
-            OfflineAllocation {
-                amount: u64::from_le_bytes(amount_bytes),
-                sequence: u64::from_le_bytes(seq_bytes),
-            },
+    // v0x08: the offline accounts, by bundle.
+    let account_count = read_len_u32(&mut cursor).map_err(|e| anyhow!("account count: {e}"))?;
+    let mut offline_accounts: BTreeMap<[u8; 32], OfflineAccount> = BTreeMap::new();
+    for _ in 0..account_count {
+        let bundle: [u8; 32] =
+            take::<32>(&mut cursor).map_err(|e| anyhow!("account bundle: {e}"))?;
+        let counter = u64::from_le_bytes(
+            take::<8>(&mut cursor).map_err(|e| anyhow!("account counter: {e}"))?,
         );
+        let frontier: [u8; 32] =
+            take::<32>(&mut cursor).map_err(|e| anyhow!("account frontier: {e}"))?;
+        let funding_chain = match read_u8(&mut cursor)
+            .map_err(|e| anyhow!("account funding-chain flag: {e}"))?
+        {
+            0 => None,
+            1 => Some(take::<32>(&mut cursor).map_err(|e| anyhow!("account funding chain: {e}"))?),
+            other => return Err(anyhow!("account funding-chain flag invalid: {other}")),
+        };
+        let allocation_count =
+            read_len_u32(&mut cursor).map_err(|e| anyhow!("allocation count: {e}"))?;
+        let mut allocations: BTreeMap<[u8; 32], u64> = BTreeMap::new();
+        for _ in 0..allocation_count {
+            let asset: [u8; 32] =
+                take::<32>(&mut cursor).map_err(|e| anyhow!("allocation asset: {e}"))?;
+            let amount = u64::from_le_bytes(
+                take::<8>(&mut cursor).map_err(|e| anyhow!("allocation amount: {e}"))?,
+            );
+            if let Some(prior) = allocations.insert(asset, amount) {
+                return Err(anyhow!(
+                    "an offline account names one asset twice ({prior}, then {amount})"
+                ));
+            }
+        }
+        if let Some(prior) = offline_accounts.insert(
+            bundle,
+            OfflineAccount::restore(allocations, counter, frontier, funding_chain),
+        ) {
+            return Err(anyhow!(
+                "two offline accounts name one bundle (the first at counter {})",
+                prior.counter()
+            ));
+        }
     }
 
     // Replay tips + non-tip leaves into the SMT to rebuild the canonical root.
@@ -410,7 +449,7 @@ pub fn decode_device_state(
         balances,
         tips_in_order,
         extra_leaves,
-        offline_allocations,
+        offline_accounts,
         pending_economic_admission,
     )
     .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
@@ -689,8 +728,7 @@ mod tests {
             post_economic_root: [2u8; 32],
             accepted_substrate_addr: [4u8; 32],
             admission_manifest_addr: [5u8; 32],
-            embedded_parent: [0x5E; 32],
-            c_dsm_plus: [6u8; 32],
+            substrate: dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary,
         })
         .expect("prepared -> accepted");
         {
@@ -833,7 +871,6 @@ mod tests {
                 },
                 &[],
                 None,
-                None,
             )
             .expect("adoption precedes receipt");
         let self_loop_tip = RelChainTip {
@@ -869,7 +906,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 7,
                 }],
-                None,
                 None,
             )
             .expect("advance relationship");
@@ -913,10 +949,7 @@ mod tests {
             outcome.new_device_state.balances_snapshot().clone(),
             tips_in_order,
             outcome.new_device_state.extra_leaves_snapshot().clone(),
-            outcome
-                .new_device_state
-                .offline_allocations_snapshot()
-                .clone(),
+            outcome.new_device_state.offline_accounts().clone(),
             None, // no admission pending in this fixture
         )
         .expect("restore head with signed rel state");
@@ -943,7 +976,6 @@ mod tests {
                     direction: BalanceDirection::Credit,
                     amount: 9,
                 }],
-                None,
                 None,
             )
             .expect("second advance");
@@ -1029,7 +1061,6 @@ mod tests {
                     amount: 11,
                 }],
                 None,
-                None,
             )
             .expect("third advance");
         update_bcr_device_head(
@@ -1054,7 +1085,7 @@ mod tests {
     fn device_head_codec_rejects_invalid_value_capability_byte() {
         // An entropy-less tip serializes as [..value_capability, entropy_len:u32],
         // followed by one u32 count per trailing section — v0x03 extra_leaves and
-        // v0x04 offline-allocations — both empty here. Derived from those counts
+        // v0x08 offline accounts — both empty here. Derived from those counts
         // rather than hardcoded, so adding the next section is a one-line change
         // instead of a puzzling off-by-four in an unrelated test.
         const TRAILING_COUNT_SECTIONS: usize = 2;

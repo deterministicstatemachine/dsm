@@ -177,6 +177,102 @@ fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
     }
 }
 
+/// This receiver's latest frontier for a peer strictly below `position`
+/// (DSM Amendment A19): a coordinate it validated itself, with the claim it
+/// accepted there.
+pub fn frontier_below(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let read = |r: &rusqlite::Row<'_>| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, Vec<u8>>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
+    };
+    // A position past what a row can hold is above every recorded one.
+    let row = match i64::try_from(position) {
+        Ok(below) => conn
+            .query_row(
+                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
+                 WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
+                 ORDER BY economic_position DESC LIMIT 1",
+                params![peer_genesis.as_slice(), peer_devid.as_slice(), below],
+                read,
+            )
+            .optional()?,
+        Err(..) => conn
+            .query_row(
+                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
+                 WHERE peer_genesis = ?1 AND peer_devid = ?2
+                 ORDER BY economic_position DESC LIMIT 1",
+                params![peer_genesis.as_slice(), peer_devid.as_slice()],
+                read,
+            )
+            .optional()?,
+    };
+    row.map(|(recorded, root, accepted)| {
+        Ok(
+            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
+                *peer_genesis,
+                *peer_devid,
+                u64::try_from(recorded)
+                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
+                digest32(root, "frontier root")?,
+                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
+                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
+            ),
+        )
+    })
+    .transpose()
+}
+
+/// Record, inside the transaction that accepts a step from the peer or in a
+/// contact add's own, a frontier a verification reached (DSM Amendment A19).
+/// The activation root is every receiver's frontier and is never recorded.
+pub fn record_frontier_in_tx(
+    tx: &Transaction<'_>,
+    frontier: &dsm::economic::peer_lineage::PeerFrontier,
+) -> Result<()> {
+    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
+        anyhow!("the activation root is every receiver's frontier and is never recorded")
+    })?;
+    tx.execute(
+        "INSERT OR IGNORE INTO peer_frontier(
+             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![
+            frontier.genesis().as_slice(),
+            frontier.device_id().as_slice(),
+            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
+            root.as_slice(),
+            accepted.encode()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record frontiers a verification reached, in a transaction of their own:
+/// a contact add's validation, which accepts nothing (DSM Amendment A19).
+pub fn record_frontiers(frontiers: &[dsm::economic::peer_lineage::PeerFrontier]) -> Result<()> {
+    let binding = get_connection()?;
+    let mut conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let tx = conn.transaction()?;
+    for frontier in frontiers {
+        record_frontier_in_tx(&tx, frontier)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// The admitted economic position, if any — WITH its claim kind.
 pub fn get_admitted() -> Result<Option<AdmittedEconomicPosition>> {
     let binding = get_connection()?;

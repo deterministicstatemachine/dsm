@@ -47,7 +47,7 @@ fn a_proof_for_a_cell_the_cycle_does_not_commit_builds_no_tree() {
         let pool = one_committed_cell("pt_absent", [0x61; 32]).await;
         // A node that keeps no tree for cycle 1, as after a restart.
         let node = db::CommittedCells::default();
-        let building = node.hold_tree_build().await;
+        let building = common::ok_or_panic(node.hold_tree_build().await, "the tree build");
         let answer = match tokio::time::timeout(
             Duration::from_secs(5),
             proof_bytes(&pool, &node, &[0x62; 32]),
@@ -83,7 +83,7 @@ fn trees_are_built_one_at_a_time() {
         assert!(rebuilt_alone.is_some(), "cycle 1 commits the cell");
 
         let node = Arc::new(db::CommittedCells::default());
-        let building = node.hold_tree_build().await;
+        let building = common::ok_or_panic(node.hold_tree_build().await, "the tree build");
         let waiting = {
             let (pool, node) = (pool.clone(), node.clone());
             tokio::spawn(async move { proof_bytes(&pool, &node, &key).await })
@@ -102,5 +102,81 @@ fn trees_are_built_one_at_a_time() {
         };
         assert_eq!(built, rebuilt_alone, "the built tree's proof");
         assert_eq!(node.kept_cycles(), vec![1], "the built tree is kept");
+    });
+}
+
+/// The proof route's answer for `key` at cycle 1: its status and body.
+async fn route_proof(app: &axum::Router, key: &[u8; 32]) -> (axum::http::StatusCode, Vec<u8>) {
+    let uri = format!(
+        "/api/v2/bytecommit/proof/{}",
+        dsm::utils::text_id::encode_base32_crockford(key)
+    );
+    let namespace = common::ok_or_panic(std::str::from_utf8(NS), "the namespace");
+    common::call(
+        app,
+        "GET",
+        &uri,
+        &[("x-namespace", namespace), ("x-cycle", "1")],
+        Vec::new(),
+    )
+    .await
+}
+
+/// Proofs at a cycle whose tree is not kept queue for the node's one build
+/// only up to [`db::TREE_BUILDS_QUEUED`]: with one build held and the rest of
+/// the queue waiting behind it, one more such proof on the served route is
+/// answered `503` at once, holding nothing, instead of waiting with the
+/// others. Once the build is let go, every queued proof is answered.
+#[test]
+fn proofs_past_the_queued_tree_builds_are_answered_busy_at_once() {
+    common::runtime().block_on(async {
+        let key = [0x64; 32];
+        let pool = one_committed_cell("pt_queued", key).await;
+        // A node that keeps no tree for cycle 1, as after a restart.
+        let state = Arc::new(common::ok_or_panic(
+            dsm_storage_node::AppState::new(
+                String::from_utf8_lossy(MEMBER).into_owned(),
+                pool,
+                common::set_client(),
+            ),
+            "app state",
+        ));
+        let app = common::served(state.clone());
+        let building =
+            common::ok_or_panic(state.committed.hold_tree_build().await, "the tree build");
+        let queued: Vec<_> = (1..db::TREE_BUILDS_QUEUED)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move { route_proof(&app, &key).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            queued.iter().all(|proof| !proof.is_finished()),
+            "a queued proof was answered while the build was held"
+        );
+
+        match tokio::time::timeout(Duration::from_secs(2), route_proof(&app, &key)).await {
+            Ok((status, _)) => assert_eq!(
+                status,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "a proof past the queue is answered busy"
+            ),
+            Err(elapsed) => panic!("a proof past the queue waited for the build: {elapsed}"),
+        }
+
+        drop(building);
+        for proof in queued {
+            let answered = match tokio::time::timeout(Duration::from_secs(10), proof).await {
+                Ok(joined) => common::ok_or_panic(joined, "task"),
+                Err(elapsed) => panic!("a queued proof was never answered: {elapsed}"),
+            };
+            assert_eq!(answered.0, axum::http::StatusCode::OK, "a queued proof");
+        }
+        assert_eq!(
+            state.committed.kept_cycles(),
+            vec![1],
+            "the built tree is kept"
+        );
     });
 }

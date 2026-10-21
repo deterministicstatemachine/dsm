@@ -19,6 +19,16 @@ value class ScreenGuards(val bits: Int) {
     val secret: Boolean get() = (bits and SECRET) != 0
     val confirm: Boolean get() = (bits and CONFIRM) != 0
 
+    /**
+     * Whether a touch with these [MotionEvent] flags is dropped. One through another app's window
+     * drawn over the wallet always is. While a guard is held, one that came while any part of the
+     * window was covered is dropped too: a partial overlay can leave the button visible while it
+     * hides what the button confirms (SA-108).
+     */
+    fun dropsTouch(flags: Int): Boolean =
+        (flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED) != 0 ||
+            (bits != 0 && (flags and MotionEvent.FLAG_WINDOW_IS_PARTIALLY_OBSCURED) != 0)
+
     companion object {
         const val SECRET = 1
         const val CONFIRM = 2
@@ -38,6 +48,8 @@ value class ScreenGuards(val bits: Int) {
  *
  * A touch that reaches it through another app's window drawn over it is dropped, as
  * `filterTouchesWhenObscured` drops it: an overlay cannot press the wallet's buttons for the user.
+ * While the page holds a guard, a touch that came while the window was partly covered is dropped
+ * too ([ScreenGuards.dropsTouch]).
  *
  * While the page holds the [ScreenGuards.SECRET] guard (a recovery phrase on screen or typed), the
  * keyboard is told not to learn from what is typed and to offer no suggestions from it.
@@ -46,7 +58,7 @@ class WalletWebView(context: Context) : WebView(context) {
     private var guards = ScreenGuards.NONE
 
     override fun onFilterTouchEventForSecurity(event: MotionEvent): Boolean =
-        (event.flags and MotionEvent.FLAG_WINDOW_IS_OBSCURED) == 0 && super.onFilterTouchEventForSecurity(event)
+        !guards.dropsTouch(event.flags) && super.onFilterTouchEventForSecurity(event)
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
         val connection = super.onCreateInputConnection(outAttrs)

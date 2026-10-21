@@ -393,19 +393,13 @@ impl RecoverySDK {
     ///                 K_A  = Expand(PRK_w, "DSM/recovery-authority/v2")
     ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
     ///
-    /// Both the encryption key and the authority keypair are cached in memory; every
+    /// Both the encryption key and the authority keypair are cached in memory, and the
+    /// wallet seed is cached and sealed at rest: this is the wallet's unlock, used where
+    /// the phrase is the wallet's own (genesis, restore, the session unlock). Every
     /// intermediate secret is zeroized when it goes out of scope.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
         let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
-        let key = Zeroizing::new(derive_recovery_key(wallet_seed.as_slice())?);
-        let authority_seed =
-            Zeroizing::new(derive_recovery_authority_seed(wallet_seed.as_slice())?);
-        {
-            let mut guard = RECOVERY_KEY
-                .lock()
-                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
-            *guard = Some(key);
-        }
+        Self::install_recovery_keys(wallet_seed.as_slice())?;
 
         // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
         // (mnemonic -> wallet_seed -> s0 -> Smaster). Lives for the unlocked session so
@@ -423,6 +417,52 @@ impl RecoverySDK {
         // means the next cold start will require the mnemonic again).
         if let Err(e) = Self::persist_wallet_seed(wallet_seed.as_slice()) {
             log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
+        }
+        Ok(())
+    }
+
+    /// Cache the NFC backup key K_R and the recovery authority keypair of `mnemonic`, and
+    /// nothing else. The wallet seed in memory and the one sealed at rest are untouched:
+    /// since Genesis v2 the seed is the identity's root (AK, Smaster, per-step keys), and
+    /// a recovery route that wrote it re-rooted the wallet to whatever phrase it was given
+    /// (SA-64). Reading a ring with a phrase, this wallet's or a lost one's, needs only
+    /// these two keys.
+    pub fn cache_recovery_keys(mnemonic: &str) -> Result<(), DsmError> {
+        let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
+        Self::install_recovery_keys(wallet_seed.as_slice())
+    }
+
+    /// Refuse `mnemonic` unless it is this wallet's own phrase: its seed must derive the
+    /// AK this identity's genesis installed, the check cold-start init makes. Arming NFC
+    /// backup, or sealing a capsule, under any other phrase produces a backup that does
+    /// not restore this wallet (SA-64).
+    pub fn require_this_wallets_phrase(mnemonic: &str) -> Result<(), DsmError> {
+        let genesis = Self::require_self_id32(
+            crate::sdk::app_state::AppState::get_genesis_hash(),
+            "genesis_hash",
+        )?;
+        let installed = crate::sdk::app_state::AppState::get_public_key()
+            .ok_or_else(|| DsmError::InvalidState("the identity holds no signing key".into()))?;
+        let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
+        let derived = crate::init::derive_device_signing_keypair(wallet_seed.as_slice(), &genesis)?;
+        if derived.public_key != installed {
+            return Err(DsmError::invalid_parameter(
+                "this phrase is not this wallet's recovery phrase",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Derive K_R and the recovery authority keypair from `wallet_seed` (KS1) and cache
+    /// both, each zeroized when replaced or cleared.
+    fn install_recovery_keys(wallet_seed: &[u8]) -> Result<(), DsmError> {
+        let key = Zeroizing::new(derive_recovery_key(wallet_seed)?);
+        let authority_seed = Zeroizing::new(derive_recovery_authority_seed(wallet_seed)?);
+        {
+            let mut guard = RECOVERY_KEY
+                .lock()
+                .map_err(|_| DsmError::InvalidState("Recovery key mutex poisoned".into()))?;
+            *guard = Some(key);
         }
 
         // Derive and cache the recovery authority SPHINCS+ keypair. The key pair zeroizes
@@ -446,18 +486,16 @@ impl RecoverySDK {
     }
 
     /// Clear the cached recovery key and authority keypair from memory (each is zeroized as
-    /// it is dropped), and the sealed wallet seed from storage.
-    pub fn clear_cached_key() {
+    /// it is dropped). The wallet seed, in memory and sealed at rest, stays: turning NFC
+    /// backup off is not a logout, and the sealed seed is the wallet's only copy on this
+    /// device (SA-65).
+    pub fn clear_recovery_keys() {
         if let Ok(mut guard) = RECOVERY_KEY.lock() {
             *guard = None;
         }
         if let Ok(mut guard) = RECOVERY_AUTHORITY_KEYPAIR.lock() {
             *guard = None;
         }
-        // Full wipe (logout / mnemonic change): drop the in-memory seed and the sealed
-        // bundle. (Temporary lock uses `clear_wallet_seed_cache`, which keeps the blob.)
-        Self::clear_wallet_seed_cache();
-        let _ = crate::storage::client_db::recovery::delete_encrypted_wallet_seed();
     }
 
     /// Check if a recovery key is currently cached in memory.
@@ -1506,37 +1544,88 @@ impl RecoverySDK {
         Ok(())
     }
 
-    /// A_new's posted recovery succession proof under `authority_pubkey`: the one
-    /// distinct proof that names that authority. The CALLER runs the
-    /// accept-guard over its receipts before trusting it.
-    pub async fn fetch_recovery_succession_proof(
-        genesis_id: &[u8; 32],
+    /// The device `proof` tombstones, once its authority is the one that
+    /// device anchored. The device is a contact of this one, and its anchor is
+    /// read under the genesis this device pinned for it. A recovery acts under
+    /// the predecessor's authority, anchored by the predecessor: an authority
+    /// the successor bound under a genesis of its own is any device's, and let
+    /// any device claim to succeed any contact (SA-121); a tombstone is signed
+    /// under that authority, never under the tombstoned device's AK (SA-117).
+    pub async fn predecessor_anchoring(
+        proof: &dsm::recovery::RecoverySuccessionProof,
+    ) -> Result<[u8; 32], DsmError> {
+        let named = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
+            .ok_or_else(|| {
+                DsmError::verification(
+                    "recovery: the tombstone's device id is not Base32 Crockford",
+                )
+            })?;
+        let a_old = <[u8; 32]>::try_from(named.as_slice()).map_err(|e| {
+            DsmError::verification(format!("recovery: the tombstone's device id: {e}"))
+        })?;
+        let contact = crate::storage::client_db::get_contact_by_device_id(&a_old)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("the tombstoned device's contact: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?
+            .ok_or_else(|| {
+                DsmError::verification("recovery: the tombstoned device is not a contact")
+            })?;
+        let genesis = <[u8; 32]>::try_from(contact.genesis_hash.as_slice()).map_err(|e| {
+            DsmError::verification(format!(
+                "recovery: the tombstoned device's pinned genesis: {e}"
+            ))
+        })?;
+        Self::fetch_and_verify_authority_anchor(&genesis, &a_old, &proof.authority_pubkey).await?;
+        Ok(a_old)
+    }
+
+    /// The succession proof `a_new` posted under `a_new_genesis` whose
+    /// authority its tombstoned predecessor anchored
+    /// ([`Self::predecessor_anchoring`]), with that predecessor. The CALLER runs
+    /// the accept-guard over its receipts before trusting it.
+    pub async fn succession_proof_anchored_by_predecessor(
+        a_new_genesis: &[u8; 32],
         a_new: &[u8; 32],
-        authority_pubkey: &[u8],
-    ) -> Result<dsm::recovery::RecoverySuccessionProof, DsmError> {
+    ) -> Result<(dsm::recovery::RecoverySuccessionProof, [u8; 32]), DsmError> {
         let cell = dsm::recovery::RecoveryCell::SuccessionProof {
-            genesis: *genesis_id,
+            genesis: *a_new_genesis,
             a_new: *a_new,
         };
-        let mut named: Vec<dsm::recovery::RecoverySuccessionProof> = Vec::new();
+        let mut anchored: Vec<(dsm::recovery::RecoverySuccessionProof, [u8; 32])> = Vec::new();
+        // Why each proof that was not anchored by its predecessor was passed
+        // over: the refusal names them.
+        let mut passed_over: Vec<String> = Vec::new();
         for bytes in crate::sdk::recovery_store::entries(&cell).await? {
+            // Anyone can write a cell: bytes that are not a proof are nothing.
             let Ok(proof) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
                 continue;
             };
-            if proof.authority_pubkey == authority_pubkey
-                && !named.iter().any(|held| held.to_bytes() == proof.to_bytes())
-            {
-                named.push(proof);
+            match Self::predecessor_anchoring(&proof).await {
+                Ok(a_old) => {
+                    if !anchored
+                        .iter()
+                        .any(|(held, _)| held.to_bytes() == proof.to_bytes())
+                    {
+                        anchored.push((proof, a_old));
+                    }
+                }
+                Err(e) => passed_over.push(e.to_string()),
             }
         }
-        match named.len() {
-            0 | 1 => named.pop().ok_or_else(|| {
-                DsmError::verification(
-                    "recovery succession proof: none posted names the anchored authority",
-                )
+        match anchored.len() {
+            0 | 1 => anchored.pop().ok_or_else(|| {
+                DsmError::verification(format!(
+                    "recovery succession proof: none posted names an authority its predecessor \
+                     anchored ({})",
+                    passed_over.join("; ")
+                ))
             }),
             n => Err(DsmError::verification(format!(
-                "recovery succession proof: {n} distinct proofs name the anchored authority"
+                "recovery succession proof: {n} distinct proofs name an authority their \
+                 predecessor anchored"
             ))),
         }
     }
@@ -1612,14 +1701,16 @@ impl RecoverySDK {
     /// owner from a mnemonic thief (gate 2 / P5 handles double-spend safety). See
     /// [`dsm::recovery::verify_recovery_reestablish_request`] for the exact security property.
     ///
-    /// Gathers everything from authenticated sources: A_new's genesis + recovery authority from
-    /// its posted, genesis-anchored PDSMT head; the [`dsm::recovery::RecoverySuccessionProof`]
-    /// (bound to that same anchored authority); A_old from the tombstone; and C's own
-    /// `(A_old,C)` frontier (ordered post-floor segment from its BCR archive). Then runs the
+    /// Gathers everything from authenticated sources: `a_new_genesis` is the genesis this
+    /// device pinned for the sender; the [`dsm::recovery::RecoverySuccessionProof`] is the one
+    /// whose authority A_old anchored under the genesis this device pinned for A_old
+    /// ([`Self::succession_proof_anchored_by_predecessor`]); A_old from the tombstone; and C's
+    /// own `(A_old,C)` frontier (ordered post-floor segment from its BCR archive). Then runs the
     /// pure [`dsm::recovery::verify_recovery_reestablish_request`].
     pub async fn verify_incoming_recovery_reestablish(
         op: &dsm::types::operations::Operation,
         a_new: &[u8; 32],
+        a_new_genesis: &[u8; 32],
     ) -> Result<(), DsmError> {
         let h_cap = dsm::recovery::recovery_establishment_floor(op).ok_or_else(|| {
             DsmError::verification(
@@ -1631,29 +1722,10 @@ impl RecoverySDK {
             "device_id",
         )?;
 
-        // A_new's genesis + recovery authority, from A_new's posted head under
-        // its genesis-anchored authority.
-        let a_new_head = Self::anchored_pdsmt_head(None, a_new).await?;
-        let a_new_genesis = a_new_head.genesis_id;
-
-        // The pre-co-sign succession proof, under the SAME anchored authority.
-        let proof = Self::fetch_recovery_succession_proof(
-            &a_new_genesis,
-            a_new,
-            &a_new_head.authority_pubkey,
-        )
-        .await?;
-
-        // A_old is the tombstoned predecessor (authenticated by the receipts under K_A).
-        let a_old_v = crate::util::text_id::decode_base32_crockford(&proof.tombstone.device_id)
-            .ok_or_else(|| {
-                DsmError::verification(
-                    "recovery reestablish: tombstone device_id is not Base32 Crockford",
-                )
-            })?;
-        let a_old = <[u8; 32]>::try_from(a_old_v.as_slice()).map_err(|_| {
-            DsmError::verification("recovery reestablish: tombstone device_id is not 32 bytes")
-        })?;
+        // The pre-co-sign succession proof, under the authority A_old anchored;
+        // A_old is the predecessor its tombstone names.
+        let (proof, a_old) =
+            Self::succession_proof_anchored_by_predecessor(a_new_genesis, a_new).await?;
         let old_rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&a_old, &c_self);
 

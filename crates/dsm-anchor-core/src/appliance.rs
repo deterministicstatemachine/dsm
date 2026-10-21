@@ -103,6 +103,17 @@ pub enum RecoverOutcome {
     OnlineCancelOrResolve,
 }
 
+/// Why [`Appliance::recover_at_boot`] refused to let the appliance serve.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BootRecoveryRefusal {
+    /// §26 recovery returned an outcome the appliance cannot serve from.
+    Outcome(RecoverOutcome),
+    /// The boot-time reset of a prepared record could not cancel it.
+    PreparedReset(ApplianceError),
+    /// After the reset, recovery did not return `Accept`.
+    OutcomeAfterReset(RecoverOutcome),
+}
+
 /// The v2 software-authority / hardware-identity appliance for one active frontier.
 pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub h0: u32,
@@ -284,8 +295,8 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
         let release = OfflineRelease {
             transition: p.txn.clone(),
-            anchor_smt_proof_before: Vec::new(),
-            anchor_smt_proof_after: Vec::new(),
+            offline_state_proof_before: Vec::new(),
+            offline_state_proof_after: Vec::new(),
             cert: p.cert.clone(),
             branch_proof: Vec::new(),
         };
@@ -436,16 +447,14 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 }
             }
             Status::Ready => {
-                // The chip's monotonic counter is the source of truth (it can only fall). If it
-                // reads LOWER than our model (`active < live_u` — more steps consumed than we
-                // tracked), ADOPT the live position rather than downgrading: it only shrinks the
-                // remaining budget, never mints value, and restores `active.u == live_u` so
-                // prepare's counter check passes. `active > live_u` is impossible for a real
-                // down-counter -> fail closed.
-                if self.active.anchor_counter < live_u {
-                    self.active.anchor_counter = live_u;
-                }
-                if self.active.anchor_counter > live_u {
+                // The software counter `active.u` is the authority; the TROPIC01 counter is its
+                // hardware mirror. With no durable transaction, the two must agree exactly. A chip
+                // counter ahead of `active.u` means a transition advanced the mirror that this
+                // frontier never recorded, so pairing the advanced counter with the old frontier
+                // would re-spend it; a chip counter behind `active.u` is impossible for a real
+                // down-counter. Either way the transition is missing or inconsistent -> fail
+                // closed, leaving the active state untouched.
+                if self.active.anchor_counter != live_u {
                     return RecoverOutcome::FailClosed;
                 }
                 let h = match self.tropic.counter_get() {
@@ -457,6 +466,28 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                 }
                 RecoverOutcome::Accept(self.active.root)
             }
+        }
+    }
+
+    /// §26 recovery at boot, for a device that serves the appliance itself: decide whether it
+    /// may serve.
+    ///
+    /// `Accept` (no durable transaction, counters agree) and `ReemitCommitted` (a committed
+    /// release whose counter already moved; the host re-emits and finalizes the same successor)
+    /// serve. `AcceptPreparedCanComplete` (prepared, counter unchanged) takes the reset rule: no
+    /// host session can own a prepared record across a reboot, so the record is cancelled and
+    /// recovery must then return `Accept`. Every other outcome refuses.
+    pub fn recover_at_boot(&mut self) -> Result<(), BootRecoveryRefusal> {
+        match self.recover() {
+            RecoverOutcome::Accept(_) | RecoverOutcome::ReemitCommitted(_) => Ok(()),
+            RecoverOutcome::AcceptPreparedCanComplete => {
+                self.cancel().map_err(BootRecoveryRefusal::PreparedReset)?;
+                match self.recover() {
+                    RecoverOutcome::Accept(_) => Ok(()),
+                    other => Err(BootRecoveryRefusal::OutcomeAfterReset(other)),
+                }
+            }
+            other => Err(BootRecoveryRefusal::Outcome(other)),
         }
     }
 }

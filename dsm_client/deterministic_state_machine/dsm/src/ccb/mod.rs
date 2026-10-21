@@ -123,6 +123,21 @@ pub mod class {
     /// supply, released in the transition that creates the token
     /// (`ReleaseRule::AllAtCreation`, SoFi §51).
     pub const CREDIT_SOURCE_GENESIS_RELEASE: u16 = 0x005F;
+    /// `0x0075` — the online credit of an offline unload, funded by the equal
+    /// debit of the device's own offline account that the verified unload
+    /// body proves. Valid only on an unload boundary; consumed exactly once.
+    pub const CREDIT_SOURCE_OFFLINE_BOUNDARY_DEBIT: u16 = 0x0075;
+
+    // ── Offline boundaries ──────────────────────────────────────────────
+    //
+    // A load moves value from the online balance into the device's offline
+    // account; an unload moves it back. Each is the substrate of its
+    // economic admission: the body states the device root and the offline
+    // account it starts from, and its paths; Core folds both trees from it.
+    /// `0x002A` — an offline load boundary body.
+    pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
+    /// `0x002B` — an offline unload boundary body.
+    pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -327,8 +342,6 @@ pub mod class {
 /// it. Reaching into `reserved` from a `CcbObject` impl is caught by
 /// `reserved_classes_have_no_encoder`.
 pub mod reserved {
-    pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
-    pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
     pub const OFFLINE_SPEND_STEP_EVIDENCE: u16 = 0x002C;
     pub const OFFLINE_BRANCH_EVIDENCE: u16 = 0x002D;
     pub const PORTABLE_ANCHOR_ENROLLMENT_BODY: u16 = 0x002E;
@@ -337,8 +350,6 @@ pub mod reserved {
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
     pub const ALL: &[u16] = &[
-        OFFLINE_LOAD_BOUNDARY_BODY,
-        OFFLINE_UNLOAD_BOUNDARY_BODY,
         OFFLINE_SPEND_STEP_EVIDENCE,
         OFFLINE_BRANCH_EVIDENCE,
         PORTABLE_ANCHOR_ENROLLMENT_BODY,
@@ -515,6 +526,10 @@ pub mod schema {
     /// silent divergence §2.8 exists to prevent, and it is why a bump
     /// propagates upward through every enclosing object.
     pub const BURNED: &[(u16, u16)] = &[
+        // Schema 1 had no arm for an offline unload's credit, so an unload
+        // could not be witnessed at all. Schema 2 adds `0x0075`; the source
+        // sequence of schema 1 bytes is not that of schema 2.
+        (super::class::ECONOMIC_TRANSITION_WITNESS, 1),
         (super::class::VAULT_STATE_V2, 1),
         (super::class::VAULT_STATE_V2, 2),
         // Schema 3 nested `0x0002` at schema 2, i.e. a storage set of bare

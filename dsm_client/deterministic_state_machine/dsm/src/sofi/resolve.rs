@@ -51,9 +51,9 @@ use super::exercise::{
     attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
 };
 use super::facts::{
-    establish, establish_ground, refuted_in_hand, Established, EstablishedFacts, ExerciseReads,
-    GroundFacts, GroundReads, InHandRefutation, LegReads, NotEstablished, ResolvedParent,
-    TraderAtParent,
+    establish, establish_ground, establish_key_ground, refuted_in_hand, Established,
+    EstablishedFacts, ExerciseReads, GroundFacts, GroundReads, InHandRefutation, KeyGroundReads,
+    LegReads, NotEstablished, ResolvedParent, TraderAtParent,
 };
 use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,
@@ -134,6 +134,9 @@ enum BelowBaseline {
     HeadNotInHand,
     /// No candidate the locator gave is proven: each, and why.
     NotProven(Vec<(u64, history::NotProven)>),
+    /// No candidate read so far is proven, and the read of the locator is
+    /// not complete: the leaf may be among those not read yet (SA-87).
+    LeavesNotEstablished(Vec<(u64, history::NotProven)>),
 }
 
 impl core::fmt::Display for BelowBaseline {
@@ -150,6 +153,11 @@ impl core::fmt::Display for BelowBaseline {
                 write!(f, "the history head the baseline commits is not in hand")
             }
             Self::NotProven(unproven) => write!(f, "no candidate is proven: {unproven:?}"),
+            Self::LeavesNotEstablished(unproven) => write!(
+                f,
+                "no candidate read so far is proven ({unproven:?}), and the history leaves \
+                 under the root are not all read"
+            ),
         }
     }
 }
@@ -162,11 +170,14 @@ impl core::fmt::Display for BelowBaseline {
 struct Extending(D32);
 
 impl Extending {
-    /// `None` when this thread is extending `vault`'s chain already.
+    /// `None` when this thread is extending `vault`'s chain already. The
+    /// guard is built only when this entry marked the vault: a guard built
+    /// for a refused entry would unmark the vault when dropped, while the
+    /// extension that marked it is still running.
     fn enter(vault: D32) -> Option<Self> {
         EXTENDING
             .with(|extending| extending.borrow_mut().insert(vault))
-            .then_some(Self(vault))
+            .then(|| Self(vault))
     }
 }
 
@@ -232,8 +243,14 @@ pub struct RecordedGenerationRow {
 pub trait SofiReads {
     /// Every seat's reads of `cell` (storage spec §9): what each seat holds,
     /// its committed state from a mirror, and each later seat's own mirror
-    /// of the leader. The verifier evaluates the route chains.
-    fn cell(&self, cell: &RoutedCell) -> Result<CellEvidence, ReadFailure>;
+    /// of the leader. Each seat's log is read keeping what `keep` keeps,
+    /// the copies the verifier's reading of the cell can count. The verifier
+    /// evaluates the route chains.
+    fn cell(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&crate::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<CellEvidence, ReadFailure>;
     /// `P` by `PrecommitId`: the one stored envelope under the id whose body
     /// re-derives it (R8).
     fn precommit(&self, id: &D32) -> Result<Resolved<Signed<TraderPrecommitBody>>, ReadFailure>;
@@ -307,7 +324,7 @@ pub trait SofiReads {
         &self,
         vault_id: &D32,
         root: &D32,
-    ) -> Result<Vec<Vec<u8>>, ReadFailure>;
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure>;
     /// The owner baseline this device adopted for `genesis`'s vault, as Core
     /// authenticates it from this device's record now (SoFi Amendment
     /// S24), or `None` when it adopted none.
@@ -757,6 +774,20 @@ enum Known {
     Facts(Box<EstablishedFacts>),
 }
 
+/// The walked key is dead on `ground`: its leg there is skipped on the facts
+/// that need no validation evidence.
+fn dead_at(ground: &GroundFacts, key: WalkedKey<'_>) -> bool {
+    ground
+        .leg_at(
+            key.read.vault_id(),
+            key.read.parent_root(),
+            key.read.attempt(),
+        )
+        .is_some_and(|leg| {
+            skip_without_evidence(&ground.route_ground(), &leg).0 == AttemptClass::Skipped
+        })
+}
+
 /// One key the walk classified: the read that found the exercise holding
 /// it, and what is known about that exercise.
 #[derive(Debug, Clone)]
@@ -892,7 +923,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         verdict_cell: &D32,
     ) -> Result<Result<VerdictCellRead, CellMissing>, VerifierFailure> {
         let cell = self.verdict_cell(verdict_cell)?;
-        let evidence = self.reads.cell(cell.routed())?;
+        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match verdict_resolution(&cell, &evidence) {
             Ok(read) => read,
             Err(missing) => return Ok(Err(missing)),
@@ -929,7 +960,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     ) -> Result<Result<ComputedCellRead, NotEstablished>, VerifierFailure> {
         let cells = ComputedCells::new(terms, self.members, &self.set_id)
             .map_err(|e| VerifierFailure::Refused(format!("computed cells: {e:?}")))?;
-        let start_evidence = self.reads.cell(cells.start_routed())?;
+        let start_evidence = self
+            .reads
+            .cell(cells.start_routed(), &cells.keeps_start())?;
         let start = match start_resolution(&cells, &start_evidence) {
             Ok(read) => read,
             Err(missing) => {
@@ -962,7 +995,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             (Some(super::wire::StartKind::Start), CellFact::Held { .. })
         );
         let matched = if started {
-            let evidence = self.reads.cell(cells.match_routed())?;
+            let evidence = self
+                .reads
+                .cell(cells.match_routed(), &cells.keeps_match(&self.programs))?;
             let read = match match_resolution(&cells, &evidence, &self.programs) {
                 Ok(read) => read,
                 Err(MatchUnread::ProgramNotRegistered { program }) => {
@@ -1057,7 +1092,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         attempt: u64,
     ) -> Result<Result<AttemptCellRead, CellMissing>, VerifierFailure> {
         let cell = self.attempt_cell(vault_id, parent_root, attempt)?;
-        let evidence = self.reads.cell(cell.routed())?;
+        let evidence = self.reads.cell(cell.routed(), &cell.keeps())?;
         let read = match attempt_resolution(&cell, &evidence) {
             Ok(read) => read,
             Err(missing) => return Ok(Err(missing)),
@@ -1101,8 +1136,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         parent_root: &D32,
     ) -> Result<Result<RegistrationRead, CellMissing>, VerifierFailure> {
         let cells = self.position_cells(genesis, device_id, position, parent_root)?;
-        let ful_evidence = self.reads.cell(cells.fulfillment())?;
-        let root_evidence = self.reads.cell(cells.root().routed())?;
+        let ful_evidence = self
+            .reads
+            .cell(cells.fulfillment(), &cells.keeps_fulfillment())?;
+        let root_evidence = self
+            .reads
+            .cell(cells.root().routed(), &cells.root().keeps())?;
         let registration = match fulfillment_registered(&cells, &ful_evidence, &root_evidence) {
             Ok(registration) => registration,
             Err(missing) => return Ok(Err(missing)),
@@ -1202,7 +1241,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             }
         };
         let cells = self.position_cells(genesis, device_id, position, &routing)?;
-        let evidence = self.reads.cell(cells.root().routed())?;
+        let evidence = self
+            .reads
+            .cell(cells.root().routed(), &cells.root().keeps())?;
         Ok(
             match crate::economic::register::read_root_cell(cells.root(), &evidence) {
                 Ok(crate::route_chain::CellReading::Held {
@@ -1927,7 +1968,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             )));
         }
         let mut unproven = Vec::new();
-        for candidate in self.reads.history_leaf_candidates(vault_id, root)? {
+        let found = self.reads.history_leaf_candidates(vault_id, root)?;
+        let complete = matches!(found, Discovered::Complete(..));
+        let candidates = match found {
+            Discovered::Complete(leaves) | Discovered::Partial(leaves) => leaves,
+        };
+        for candidate in candidates {
             let Some((named, generation, leaf_root)) = history::decode_leaf(&candidate) else {
                 continue;
             };
@@ -1945,7 +1991,11 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 Err(why) => unproven.push((generation, why)),
             }
         }
-        Ok(BelowBaseline::NotProven(unproven))
+        Ok(if complete {
+            BelowBaseline::NotProven(unproven)
+        } else {
+            BelowBaseline::LeavesNotEstablished(unproven)
+        })
     }
 
     /// The chain this device recorded of `vault_id`, anchored and linked
@@ -2383,7 +2433,53 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             );
             return Ok(Ok(Known::RefutedInHand(refutation)));
         }
-        let read = match self.read_legs(chains, exercise, Some(key), depth, None)? {
+
+        // A key dead on facts that stand on it alone — the position's
+        // registration, the trader's parent, a Release's verdict, and the
+        // walked leg's own cell and walk — is skipped before any other leg is
+        // read. Another leg's liveness can need walks past `depth`, and a key
+        // held by an exercise whose pair was lost stayed unclassified for good
+        // behind them (SA-83).
+        let precommit = &exercise.precommit().body;
+        let registration = match self.read_registration(
+            precommit.genesis(),
+            precommit.device_id(),
+            exercise.fulfillment().body.position(),
+            precommit.void_root(),
+        )? {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(NotEstablished::Registration(missing))),
+        };
+        let verdict = match exercise.preimage().settlement() {
+            SettlementBody::Release {
+                vault_id,
+                verdict_cell,
+                ..
+            } => match self.read_release_cells(vault_id, verdict_cell)? {
+                Ok(read) => Some(read),
+                Err(why) => return Ok(Err(why)),
+            },
+            SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
+        };
+        let key_ground = match establish_key_ground(&KeyGroundReads {
+            exercise,
+            registration: &registration,
+            parent: self.parent_for(exercise),
+            key: LegReads {
+                cell: key.read,
+                chain: chains.get(key.read.vault_id()),
+                walk: Some(key.reached),
+            },
+            verdict: verdict.as_ref(),
+        }) {
+            Ok(ground) => ground,
+            Err(why) => return Ok(Err(why)),
+        };
+        if dead_at(&key_ground, key) {
+            return Ok(Ok(Known::Ground(Box::new(key_ground))));
+        }
+
+        let read = match self.read_legs(chains, exercise, Some(key), depth, Some(&registration))? {
             Ok(read) => read,
             Err(why) => return Ok(Err(why)),
         };
@@ -2402,16 +2498,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Ok(ground) => ground,
             Err(why) => return Ok(Err(why)),
         };
-        let dead = ground
-            .leg_at(
-                key.read.vault_id(),
-                key.read.parent_root(),
-                key.read.attempt(),
-            )
-            .is_some_and(|leg| {
-                skip_without_evidence(&ground.route_ground(), &leg).0 == AttemptClass::Skipped
-            });
-        if dead {
+        if dead_at(&ground, key) {
             return Ok(Ok(Known::Ground(Box::new(ground))));
         }
         Ok(self
@@ -2929,6 +3016,32 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An extension stays marked while it runs, however many entries for
+    /// the same vault are refused inside it. A refused entry that unmarked the
+    /// vault let a third, nested one extend the chain the first was extending:
+    /// a walk of a trader whose positions each resolve through this vault
+    /// asked for the chain again without end, until the stack overflowed
+    /// (`node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history`
+    /// under DSM Amendment A19).
+    /// MUTATION CONTROL: building the guard for a refused entry
+    /// (`then_some(Self(vault))`) turns this red.
+    #[test]
+    fn a_refused_entry_leaves_the_running_extension_marked() {
+        let vault = [0x5E; 32];
+        let running = Extending::enter(vault).expect("the first entry marks the vault");
+        for nested in 1..=3 {
+            assert!(
+                Extending::enter(vault).is_none(),
+                "nested entry {nested}: the vault's chain is being extended"
+            );
+        }
+        drop(running);
+        assert!(
+            Extending::enter(vault).is_some(),
+            "once the extension ends, the vault can be extended again"
+        );
+    }
 
     /// SoFi Amendment S16: another trader's conditional parent resolves only
     /// to the position `P` names, held by the fulfillment `P` names.

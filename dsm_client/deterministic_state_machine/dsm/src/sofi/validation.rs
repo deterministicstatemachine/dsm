@@ -1554,6 +1554,16 @@ fn check_settlement_core_references(
                     field: "B°.dlv_core",
                 },
             )?;
+            // The one core is the vault B° names. Decided from the operation
+            // alone: beside B°'s vault state only, an attempt whose core names
+            // another vault was never refuted, since its evidence is read for
+            // the core's vault, and it held B°'s vault's key for good (SA-84).
+            require(
+                *core.vault_id() == *vault_id,
+                Invalid::SettlementCoreReferenceMismatch {
+                    field: "B°.dlv_core.vault_id",
+                },
+            )?;
             // Its own parent must be the leg P names, and the core's.
             let leg = precommit
                 .legs()
@@ -1799,6 +1809,14 @@ fn dlv_fold_entries(
                 require(
                     genesis == core.trader_genesis() && device_id == core.trader_device_id(),
                     Invalid::RelationshipIdentityMismatch,
+                )?;
+                // Both sides advance from the same h_j: the entry's base is
+                // the core's relationship base, which is compared with T°'s.
+                // Beside an absent vault-side leaf nothing else binds it, and
+                // the vault's leaf became H(anything ‖ E) (SA-131).
+                require(
+                    *base == *core.relationship_base(),
+                    Invalid::RelationshipBaseMismatch,
                 )?;
                 let held = evidence.vault_leaf(core.vault_id(), &key)?;
                 let pre = match held {
@@ -2422,6 +2440,14 @@ fn validate_close(
                 Invalid::CoreIdentityMismatch,
             ));
             if let Some(core) = core {
+                // V° is this trader's, as a swap requires: a core marked for
+                // another trader advanced that trader's relationship key in
+                // the vault being retired (SA-131).
+                verdict.note(require(
+                    core.trader_genesis() == precommit.genesis()
+                        && core.trader_device_id() == precommit.device_id(),
+                    Invalid::CoreIdentityMismatch,
+                ));
                 verdict.note(require(
                     *core.relationship_base() == *base,
                     Invalid::RelationshipBaseMismatch,
@@ -2555,6 +2581,12 @@ fn validate_release(verdict: &mut Verdict, r: &ReleaseCheck<'_>) {
                 Invalid::CoreIdentityMismatch,
             ));
             if let Some(core) = core {
+                // V° is this trader's (SA-131), as in a close.
+                verdict.note(require(
+                    core.trader_genesis() == r.precommit.genesis()
+                        && core.trader_device_id() == r.precommit.device_id(),
+                    Invalid::CoreIdentityMismatch,
+                ));
                 verdict.note(require(
                     *core.relationship_base() == *base,
                     Invalid::RelationshipBaseMismatch,
@@ -3901,6 +3933,170 @@ mod tests {
     }
 
     /// A relationship advancing from a base the cores do not agree on.
+    /// SA-131. On a first swap against a vault no relationship leaf is held
+    /// there, and the vault core's Relationship entry carried a base nothing
+    /// compared: T° advanced from h0 while the vault's leaf became H(X ‖ E),
+    /// and the two chains parted for good. The entry's base is the core's
+    /// relationship base, which is T°'s.
+    /// MUTATION CONTROL: removing the base check in `dlv_fold_entries` turns
+    /// this red.
+    #[test]
+    fn a_vault_core_advancing_from_another_base_is_invalid() {
+        let f = swap_fixture();
+        let core = f.preimage.dlv_cores()[0].clone();
+        let entries = core
+            .entries()
+            .iter()
+            .map(|e| match e {
+                CoreEntry::Relationship {
+                    genesis,
+                    device_id,
+                    vault_id,
+                    path,
+                    ..
+                } => CoreEntry::Relationship {
+                    genesis: *genesis,
+                    device_id: *device_id,
+                    vault_id: *vault_id,
+                    base: token(0x03),
+                    path: path.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        let bent_core = DlvCore::new(
+            *core.vault_id(),
+            *core.pre_root(),
+            *core.trader_genesis(),
+            *core.trader_device_id(),
+            *core.relationship_base(),
+            entries,
+        )
+        .unwrap();
+        let SettlementBody::Swap {
+            token_in,
+            amount_in,
+            token_out,
+            exact_out,
+            hops,
+            trader_core,
+            closure,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a swap fixture")
+        };
+        let bent = SettlementPreimage::new(
+            SettlementBody::Swap {
+                token_in,
+                amount_in,
+                token_out,
+                exact_out,
+                hops,
+                trader_core,
+                dlv_cores: vec![derive::dlv_core_digest(&bent_core.encode().unwrap())],
+                closure,
+            },
+            f.preimage.trader_core().clone(),
+            vec![bent_core],
+        )
+        .unwrap();
+        let precommit = rebind(&f, &bent);
+        let no_vault_relationship = Evidence {
+            vault_leaves: f
+                .evidence
+                .vault_leaves
+                .iter()
+                .filter(|(_, leaf)| !matches!(leaf, VaultLeafPre::Relationship(_)))
+                .map(|(k, v)| (*k, v.clone()))
+                .collect(),
+            ..f.evidence.clone()
+        };
+        assert_eq!(
+            validate(&precommit, &bent, &no_vault_relationship),
+            Err(Refusal::Invalid(Invalid::RelationshipBaseMismatch))
+        );
+    }
+
+    /// SA-131. A close whose vault core is marked for another trader would
+    /// advance that trader's relationship key in the vault it retires. V° is
+    /// the trader's own, as a swap requires.
+    /// MUTATION CONTROL: removing the core identity check from
+    /// `validate_close` turns this red.
+    #[test]
+    fn a_close_whose_vault_core_names_another_trader_is_invalid() {
+        let f = close_fixture(OwnerAuthority::Origin);
+        let core = f.preimage.dlv_cores()[0].clone();
+        let other = token(0x6D);
+        let mut entries: Vec<CoreEntry> = core
+            .entries()
+            .iter()
+            .map(|e| match e {
+                CoreEntry::Relationship {
+                    genesis,
+                    vault_id,
+                    base,
+                    path,
+                    ..
+                } => CoreEntry::Relationship {
+                    genesis: *genesis,
+                    device_id: other,
+                    vault_id: *vault_id,
+                    base: *base,
+                    path: path.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        // The relationship entry's key derives from the device it names, so
+        // the entries are put back in the key order every core carries.
+        entries.sort_by_key(CoreEntry::key);
+        let bent_core = DlvCore::new(
+            *core.vault_id(),
+            *core.pre_root(),
+            *core.trader_genesis(),
+            other,
+            *core.relationship_base(),
+            entries,
+        )
+        .unwrap();
+        let SettlementBody::Close {
+            vault_id,
+            parent_root,
+            setup_ref,
+            owner_authority,
+            reserve_a,
+            reserve_b,
+            trader_core,
+            closure,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a close fixture")
+        };
+        let bent = SettlementPreimage::new(
+            SettlementBody::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                owner_authority,
+                reserve_a,
+                reserve_b,
+                trader_core,
+                dlv_core: derive::dlv_core_digest(&bent_core.encode().unwrap()),
+                closure,
+            },
+            f.preimage.trader_core().clone(),
+            vec![bent_core],
+        )
+        .unwrap();
+        let precommit = rebind(&f, &bent);
+        assert_eq!(
+            validate(&precommit, &bent, &f.evidence),
+            Err(Refusal::Invalid(Invalid::CoreIdentityMismatch))
+        );
+    }
+
     #[test]
     fn a_wrong_relationship_base_is_invalid() {
         let f = swap_fixture();
@@ -4173,6 +4369,69 @@ mod tests {
             evidence,
             parent_claim,
         }
+    }
+
+    /// SA-84. A close whose one vault core names a vault other than B°'s is
+    /// refuted from the operation alone, with nothing about either vault in
+    /// hand. The vault id was compared only beside B°'s vault state, which
+    /// the acquisition reads for the core's vault, so such an attempt was never
+    /// refuted and held B°'s vault's attempt key for good.
+    /// MUTATION CONTROL: removing the vault-id check from
+    /// `check_settlement_core_references` turns this red.
+    #[test]
+    fn a_close_whose_core_names_another_vault_is_invalid_in_hand() {
+        let f = close_fixture(OwnerAuthority::Origin);
+        let core = f.preimage.dlv_cores()[0].clone();
+        let elsewhere = DlvCore::new(
+            token(0x5E),
+            *core.pre_root(),
+            *core.trader_genesis(),
+            *core.trader_device_id(),
+            *core.relationship_base(),
+            core.entries().to_vec(),
+        )
+        .unwrap();
+        let SettlementBody::Close {
+            vault_id,
+            parent_root,
+            setup_ref,
+            owner_authority,
+            reserve_a,
+            reserve_b,
+            trader_core,
+            closure,
+            ..
+        } = f.preimage.settlement().clone()
+        else {
+            panic!("a close fixture")
+        };
+        let bent = SettlementPreimage::new(
+            SettlementBody::Close {
+                vault_id,
+                parent_root,
+                setup_ref,
+                owner_authority,
+                reserve_a,
+                reserve_b,
+                trader_core,
+                dlv_core: derive::dlv_core_digest(&elsewhere.encode().unwrap()),
+                closure,
+            },
+            f.preimage.trader_core().clone(),
+            vec![elsewhere],
+        )
+        .unwrap();
+        let precommit = rebind(&f, &bent);
+        let no_vault_leaves = Evidence {
+            vault_leaves: BTreeMap::new(),
+            ..f.evidence.clone()
+        };
+        assert_eq!(
+            validate(&precommit, &bent, &no_vault_leaves),
+            Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                field: "B°.dlv_core.vault_id",
+            }))
+        );
     }
 
     #[test]

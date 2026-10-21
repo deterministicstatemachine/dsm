@@ -37,6 +37,9 @@ struct ServerConfig {
     concurrency_limit: usize,
     /// `[network] max_open_connections`: connections held open at once.
     max_open_connections: usize,
+    /// `[network] max_open_connections_per_peer`: connections one peer holds
+    /// open at once.
+    max_open_connections_per_peer: usize,
     tls_cert_path: String,
     tls_key_path: String,
     /// The storage set's CA certificate: the one anchor this node pins its
@@ -85,6 +88,8 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
 
     let concurrency_limit = optional_positive(&settings, "network.max_connections", 256)?;
     let max_open_connections = optional_positive(&settings, "network.max_open_connections", 4096)?;
+    let max_open_connections_per_peer =
+        optional_positive(&settings, "network.max_open_connections_per_peer", 128)?;
     let body_limit_bytes = optional_positive(&settings, "http.body_limit_bytes", 1_048_576)?;
     let request_timeout_secs = optional_positive(&settings, "http.request_timeout_secs", 60)?;
     let header_read_timeout_secs =
@@ -170,6 +175,7 @@ fn load_server_config(opts: &Opts) -> Result<ServerConfig> {
         node_id,
         concurrency_limit,
         max_open_connections,
+        max_open_connections_per_peer,
         tls_cert_path,
         tls_key_path,
         set_ca_path,
@@ -353,6 +359,7 @@ async fn async_main() -> Result<()> {
         idle: dsm_storage_node::CONNECTION_IDLE,
         write_stall: dsm_storage_node::WRITE_STALL,
         max_open: server_config.max_open_connections,
+        max_per_peer: server_config.max_open_connections_per_peer,
     };
     dsm_storage_node::node_server(
         axum_server::bind(server_config.bind_addr),
@@ -452,6 +459,7 @@ url = "postgresql://127.0.0.1:5432/node"
         let whole = load(WHOLE_CONFIG).expect("the whole config loads");
         assert_eq!(whole.concurrency_limit, 256);
         assert_eq!(whole.max_open_connections, 4096);
+        assert_eq!(whole.max_open_connections_per_peer, 128);
         assert_eq!(whole.body_limit_bytes, 1_048_576);
         assert_eq!(whole.request_timeout_secs, 60);
         assert_eq!(whole.header_read_timeout_secs, 10);

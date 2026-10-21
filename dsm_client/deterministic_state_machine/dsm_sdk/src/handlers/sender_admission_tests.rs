@@ -12,7 +12,7 @@ use prost::Message;
 use serial_test::serial;
 
 use crate::bridge::{AppInvoke, AppResult, AppRouter};
-use crate::economic_fixtures::{self, NETWORK};
+use crate::economic_fixtures::{self, foreign_walk, NETWORK};
 use crate::handlers::app_router_impl::AppRouterImpl;
 use crate::sdk::economic_admission_flow::resume_pending_admission;
 use crate::storage::client_db;
@@ -91,31 +91,6 @@ fn admitted_position() -> u64 {
     economic_fixtures::admitted_position().expect("the device is activated")
 }
 
-/// A foreign walk of `position` of this device's lineage. A device records
-/// no frontier for itself, so the walk starts at its activation root, as a
-/// verifier meeting it first would, and nothing below reads local admission
-/// state.
-async fn foreign_walk(
-    genesis: [u8; 32],
-    devid: [u8; 32],
-    position: u64,
-) -> dsm::economic::provenance::ValidatedPeerTransition {
-    let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        use dsm::economic::provenance::ProvenanceResolver;
-        let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
-        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
-            set: &set,
-            runtime: handle,
-            expected_network_id: NETWORK.to_vec(),
-        };
-        resolver.validated_peer_transition(&genesis, &devid, position)
-    })
-    .await
-    .expect("join")
-    .unwrap_or_else(|e| panic!("position {position} MUST be foreign-walkable: {e:?}"))
-}
-
 /// Every envelope the fleet holds in its spools, over every node.
 async fn fleet_spool_count(p: &Pair) -> usize {
     let mut count = 0;
@@ -164,7 +139,7 @@ async fn an_admitted_burn_advances_the_lineage_and_is_foreign_walkable() {
     assert_eq!(peer.validated_root().economic_root(), admitted_root);
     assert!(matches!(
         peer.verified_operation(),
-        dsm::types::operations::Operation::Burn { .. }
+        Some(dsm::types::operations::Operation::Burn { .. })
     ));
 }
 
@@ -835,7 +810,6 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
                     amount: 25,
                 }],
                 None,
-                None,
             )
             .expect("A's head advances over its own transfer");
     let mut receipt = StitchedReceiptV2::of_step(
@@ -1054,7 +1028,7 @@ async fn a_transfer_registers_the_senders_root_at_the_next_position() {
     assert!(
         matches!(
             peer.verified_operation(),
-            dsm::types::operations::Operation::Transfer { .. }
+            Some(dsm::types::operations::Operation::Transfer { .. })
         ),
         "the walked operation is the transfer itself"
     );
@@ -1080,7 +1054,7 @@ async fn a_token_creation_is_foreign_walkable() {
     assert!(
         matches!(
             peer.verified_operation(),
-            dsm::types::operations::Operation::CreateToken { .. }
+            Some(dsm::types::operations::Operation::CreateToken { .. })
         ),
         "the walked operation is the creation itself"
     );

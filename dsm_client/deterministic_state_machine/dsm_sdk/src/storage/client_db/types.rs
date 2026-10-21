@@ -165,13 +165,12 @@ pub struct BilateralSessionRecord {
     pub sent_child_root: Option<Vec<u8>>,
     /// Sender, bearer steps: the fused-anchor leaf update the confirm's
     /// proofs were built from (key and new value, both or neither).
-    pub anchor_leaf_key: Option<Vec<u8>>,
-    pub anchor_leaf_value: Option<Vec<u8>>,
     /// Sender, bearer steps: the offline-cash allocation debit (all three or
     /// none).
     pub spend_anchor_bundle: Option<Vec<u8>>,
     pub spend_asset: Option<Vec<u8>>,
     pub spend_amount: Option<i64>,
+    pub spend_next_frontier: Option<Vec<u8>>,
     /// The frame the session owes its counterparty, delivered again when the
     /// link returns.
     pub owed_frame: Option<Vec<u8>>,

@@ -41,6 +41,15 @@ const FOREGROUND_POLL_INTERVAL_MS: u64 = 5_000;
 /// Number of consecutive eager-interval polls before reverting to default.
 const EAGER_POLL_CYCLES: u32 = 5;
 
+/// Cycles in a row that settlement work may hold the poller at the settlement
+/// cadence while none of them takes anything (SA-138). Much of that work waits
+/// on the counterparty alone — its acceptance, its certificate — and a
+/// counterparty that withholds them would otherwise hold the device at the
+/// settlement cadence for good. An honest one answers well within this; past
+/// it, the poller keeps its ordinary cadence, an arrival still wakes a sync,
+/// and a cycle that takes anything restores the settlement cadence.
+const SETTLEMENT_PATIENCE_CYCLES: u32 = 30;
+
 /// Poll interval while settlement work is outstanding and the inbox waiter's
 /// waits cover the fleet ([`crate::sdk::inbox_waiter::covers_fleet`]): a
 /// reply or a certificate wakes a sync the moment it lands, and this poll
@@ -54,6 +63,8 @@ const COVERED_FOREGROUND_POLL_INTERVAL_MS: u64 = 30_000;
 
 /// Poller cycles completed in this process, and the signal each one gives.
 static CYCLES_COMPLETED: AtomicU64 = AtomicU64::new(0);
+/// Poller cycles in this process whose sync processed something.
+static CYCLES_THAT_TOOK: AtomicU64 = AtomicU64::new(0);
 static CYCLE_DONE: once_cell::sync::Lazy<Notify> = once_cell::sync::Lazy::new(Notify::new);
 
 /// Global poller state.
@@ -191,7 +202,7 @@ pub fn start_poller() {
         // Initial delay before first poll (let bootstrap settle).
         tokio::time::sleep(std::time::Duration::from_millis(5_000)).await;
 
-        let mut eager_remaining: u32 = 0;
+        let mut cadence = Cadence::new();
 
         loop {
             if POLLER_STOP.load(Ordering::SeqCst) {
@@ -199,6 +210,9 @@ pub fn start_poller() {
             }
 
             let (processed, pulled, more_pending) = run_inbox_sync_cycle_counted("poll").await;
+            if processed > 0 {
+                CYCLES_THAT_TOOK.fetch_add(1, Ordering::SeqCst);
+            }
             CYCLES_COMPLETED.fetch_add(1, Ordering::SeqCst);
             CYCLE_DONE.notify_waiters();
             #[cfg(test)]
@@ -218,26 +232,15 @@ pub fn start_poller() {
                 }
             };
 
-            if enters_eager_mode(processed, pulled, more_pending) {
-                eager_remaining = EAGER_POLL_CYCLES;
-                log::info!(
-                    "[inbox_poller] Entering eager mode ({} cycles at {}ms)",
-                    EAGER_POLL_CYCLES,
-                    EAGER_POLL_INTERVAL_MS
-                );
-            } else {
-                eager_remaining = eager_remaining.saturating_sub(1);
-            }
-
-            let activity = if pending_gate_active {
-                Activity::Settling
-            } else if crate::sdk::session_manager::app_in_foreground() {
-                Activity::OnScreen
-            } else if eager_remaining > 0 {
-                Activity::Eager
-            } else {
-                Activity::Idle
-            };
+            let activity = cadence.after_cycle(
+                Cycle {
+                    processed,
+                    pulled,
+                    routes_pending: more_pending,
+                },
+                pending_gate_active,
+                crate::sdk::session_manager::app_in_foreground(),
+            );
             let waits = if crate::sdk::inbox_waiter::covers_fleet() {
                 Waits::CoverFleet
             } else {
@@ -272,6 +275,75 @@ pub(crate) enum Activity {
     Idle,
 }
 
+/// One completed cycle, as the cadence reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cycle {
+    pub(crate) processed: u32,
+    pub(crate) pulled: u32,
+    pub(crate) routes_pending: usize,
+}
+
+/// What the poller's cadence remembers from one cycle to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cadence {
+    /// Eager cycles left after one that took something.
+    eager_remaining: u32,
+    /// Cycles in a row in which settlement work was outstanding and the
+    /// cycle took nothing.
+    settling_unanswered: u32,
+}
+
+impl Cadence {
+    pub(crate) fn new() -> Self {
+        Self {
+            eager_remaining: 0,
+            settling_unanswered: 0,
+        }
+    }
+
+    /// What the device is doing after `cycle`, with settlement work
+    /// outstanding or not (`settling`) and the app on screen or not.
+    /// Settlement holds the settlement cadence for at most
+    /// [`SETTLEMENT_PATIENCE_CYCLES`] cycles in a row that take nothing.
+    pub(crate) fn after_cycle(
+        &mut self,
+        cycle: Cycle,
+        settling: bool,
+        on_screen: bool,
+    ) -> Activity {
+        if enters_eager_mode(cycle.processed, cycle.pulled, cycle.routes_pending) {
+            self.eager_remaining = EAGER_POLL_CYCLES;
+            log::info!(
+                "[inbox_poller] Entering eager mode ({} cycles at {}ms)",
+                EAGER_POLL_CYCLES,
+                EAGER_POLL_INTERVAL_MS
+            );
+        } else {
+            self.eager_remaining = self.eager_remaining.saturating_sub(1);
+        }
+        self.settling_unanswered = if settling && cycle.processed == 0 {
+            self.settling_unanswered.saturating_add(1)
+        } else {
+            0
+        };
+        if self.settling_unanswered == SETTLEMENT_PATIENCE_CYCLES + 1 {
+            log::warn!(
+                "[inbox_poller] settlement work has waited {SETTLEMENT_PATIENCE_CYCLES} cycles \
+                 with nothing taken; polling at the ordinary cadence until something arrives"
+            );
+        }
+        if settling && self.settling_unanswered <= SETTLEMENT_PATIENCE_CYCLES {
+            Activity::Settling
+        } else if on_screen {
+            Activity::OnScreen
+        } else if self.eager_remaining > 0 {
+            Activity::Eager
+        } else {
+            Activity::Idle
+        }
+    }
+}
+
 /// Whether the inbox waiter's waits cover the fleet
 /// ([`crate::sdk::inbox_waiter::covers_fleet`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +371,11 @@ pub(crate) fn poll_interval_ms(activity: Activity, waits: Waits) -> u64 {
 /// Poller cycles completed in this process.
 pub(crate) fn cycles_completed() -> u64 {
     CYCLES_COMPLETED.load(Ordering::SeqCst)
+}
+
+/// Poller cycles in this process whose sync processed something.
+pub(crate) fn cycles_that_took() -> u64 {
+    CYCLES_THAT_TOOK.load(Ordering::SeqCst)
 }
 
 /// Resolves when the next poller cycle completes.
@@ -918,6 +995,74 @@ mod tests {
         assert_eq!(poll_interval_ms(Eager, CoverFleet), 8_000);
         assert_eq!(poll_interval_ms(Idle, DoNotCover), 60_000);
         assert_eq!(poll_interval_ms(Idle, CoverFleet), 60_000);
+    }
+
+    /// SA-138: A sends B 10 and then withholds its finality certificate for
+    /// good — A never syncs again. B, awaiting it, owes settlement work that
+    /// only A can end, and every sync B runs takes nothing. B's poller keeps
+    /// the settlement cadence for SETTLEMENT_PATIENCE_CYCLES such syncs, then
+    /// the ordinary one while the work is still outstanding. Once A posts the
+    /// certificate, B's sync takes it and the work is done.
+    /// MUTATION CONTROL: holding the settlement cadence while any settlement
+    /// work is outstanding turns this red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_contact_withholding_its_certificate_cannot_hold_the_settlement_cadence() {
+        let p = crate::test_support::two_device::Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let mut cadence = Cadence::new();
+        // (what the sync processed, the activity after it), until
+        // SETTLEMENT_PATIENCE_CYCLES + 1 syncs in a row have taken nothing.
+        let mut cycles = Vec::new();
+        let mut taking_nothing = 0;
+        while taking_nothing <= SETTLEMENT_PATIENCE_CYCLES {
+            assert!(
+                cycles.len() < 2 * SETTLEMENT_PATIENCE_CYCLES as usize,
+                "B's syncs keep taking something: {cycles:?}"
+            );
+            let synced = p.b.sync().await;
+            assert!(synced.success, "{:?}", synced.errors);
+            let settling = has_pending_settlement_work().expect("B's settlement state");
+            let activity = cadence.after_cycle(
+                Cycle {
+                    processed: synced.processed,
+                    pulled: synced.pulled,
+                    routes_pending: synced.more_pending.len(),
+                },
+                settling,
+                crate::sdk::session_manager::app_in_foreground(),
+            );
+            taking_nothing = match synced.processed {
+                0 => taking_nothing + 1,
+                _ => 0,
+            };
+            cycles.push((synced.processed, activity));
+        }
+        assert_eq!(p.b.era_balance(), 10, "B took the transfer");
+        assert!(
+            has_pending_settlement_work().expect("B's settlement state"),
+            "B still awaits A's certificate"
+        );
+        let (last, held) = cycles.split_last().expect("B synced");
+        assert!(
+            held[held.len() - SETTLEMENT_PATIENCE_CYCLES as usize..]
+                .iter()
+                .all(|(_, activity)| *activity == Activity::Settling),
+            "{cycles:?}"
+        );
+        assert_ne!(
+            last.1,
+            Activity::Settling,
+            "the withheld certificate still holds the settlement cadence: {cycles:?}"
+        );
+
+        let finalized = p.a.sync().await;
+        assert!(finalized.success, "{:?}", finalized.errors);
+        let synced = p.b.sync().await;
+        assert!(synced.success, "{:?}", synced.errors);
+        assert!(synced.processed > 0, "B takes the certificate");
+        assert!(!has_pending_settlement_work().expect("B's settlement state"));
     }
 
     #[test]

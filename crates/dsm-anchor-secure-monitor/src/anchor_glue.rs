@@ -19,7 +19,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use anchor_core::appliance::Appliance;
+use anchor_core::appliance::{Appliance, BootRecoveryRefusal};
 use anchor_core::enrollment::{birth, Birth, BirthInputs};
 use anchor_core::hash::h;
 use anchor_core::proto::{decode_request, encode_response, pb};
@@ -191,16 +191,83 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
     Ok((ENROLL_H0, b))
 }
 
-/// Bring up the TROPIC01 from Secure and build the live appliance, storing it in `MONITOR_APP`.
-/// Returns `true` on success. Fail-closed: any chip/session/enroll error leaves `MONITOR_APP =
-/// None` and the SG handler refuses every authority op (`SG_ERR_INTERNAL`). Steals the peripherals
-/// it needs (CLOCKS/PLL/XOSC/ROSC/TIMER0/SPI0 + GP16-19); `main` must not re-init clocks after.
+/// The TROPIC01 driver error on the monitor's bus: rp235x SPI and GPIO are infallible, and the
+/// driver manages no CS pin of its own (`ExclusiveDevice` owns GP17).
+type ChipError = tropic01::Error<
+    embedded_hal_bus::spi::DeviceError<core::convert::Infallible, core::convert::Infallible>,
+    core::convert::Infallible,
+>;
+
+/// The bring-up stage at which [`init`] refused to install the appliance. The discriminant is
+/// what `main` records in `DSM_SECURE_HEARTBEAT[1]`; `1` there means the appliance is installed,
+/// so no stage uses `0` or `1`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum InitStage {
+    Clocks = 2,
+    ChipId = 3,
+    CertStore = 4,
+    CertStoreKey = 5,
+    Session = 6,
+    Enroll = 7,
+    Recovery = 8,
+}
+
+/// Why [`init`] refused to install the appliance: the failing stage and the cause it reported.
+/// Its `Debug` rendering is what `main` copies into `DSM_SECURE_INIT_CAUSE`.
+pub enum InitFailure {
+    Clocks(hal::clocks::InitError),
+    ChipId(ChipError),
+    CertStore(ChipError),
+    /// tropic01 does not export its `PublicKeyError`, so the cause is carried type-erased.
+    CertStoreKey(Box<dyn core::fmt::Debug>),
+    Session(ChipError),
+    Enroll(()),
+    /// §26 boot recovery refused ([`Appliance::recover_at_boot`]).
+    Recovery(BootRecoveryRefusal),
+}
+
+impl InitFailure {
+    pub fn stage(&self) -> InitStage {
+        match self {
+            Self::Clocks(_) => InitStage::Clocks,
+            Self::ChipId(_) => InitStage::ChipId,
+            Self::CertStore(_) => InitStage::CertStore,
+            Self::CertStoreKey(_) => InitStage::CertStoreKey,
+            Self::Session(_) => InitStage::Session,
+            Self::Enroll(_) => InitStage::Enroll,
+            Self::Recovery(_) => InitStage::Recovery,
+        }
+    }
+}
+
+impl core::fmt::Debug for InitFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let stage = self.stage();
+        match self {
+            Self::Clocks(cause) => write!(f, "{stage:?}: {cause:?}"),
+            Self::ChipId(cause) | Self::CertStore(cause) | Self::Session(cause) => {
+                write!(f, "{stage:?}: {cause:?}")
+            }
+            Self::CertStoreKey(cause) => write!(f, "{stage:?}: {cause:?}"),
+            Self::Enroll(cause) => write!(f, "{stage:?}: {cause:?}"),
+            Self::Recovery(cause) => write!(f, "{stage:?}: {cause:?}"),
+        }
+    }
+}
+
+/// Bring up the TROPIC01 from Secure and build the live appliance, storing it in `MONITOR_APP`
+/// only once §26 boot recovery says it may serve ([`Appliance::recover_at_boot`]). Fail-closed:
+/// any chip/session/enroll/recovery failure returns the failing stage and leaves `MONITOR_APP =
+/// None`, so the SG handler refuses every authority op (`SG_ERR_INTERNAL`). Steals the
+/// peripherals it needs (CLOCKS/PLL/XOSC/ROSC/TIMER0/SPI0 + GP16-19); `main` must not re-init
+/// clocks after.
 ///
 /// SAFETY: single-threaded reset context, called once from `main` before the Non-secure launch.
-pub unsafe fn init() -> bool {
+pub unsafe fn init() -> Result<(), InitFailure> {
     let mut pac = hal::pac::Peripherals::steal();
     let mut watchdog = hal::watchdog::Watchdog::new(pac.WATCHDOG);
-    let clocks = match hal::clocks::init_clocks_and_plls(
+    let clocks = hal::clocks::init_clocks_and_plls(
         XTAL_HZ,
         pac.XOSC,
         pac.CLOCKS,
@@ -208,10 +275,8 @@ pub unsafe fn init() -> bool {
         pac.PLL_USB,
         &mut pac.RESETS,
         &mut watchdog,
-    ) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+    )
+    .map_err(InitFailure::Clocks)?;
 
     // Let the TROPIC01 settle after cold power-up before the first SPI transaction (~1 s @150 MHz).
     cortex_m::asm::delay(150_000_000);
@@ -240,10 +305,8 @@ pub unsafe fn init() -> bool {
         1_000_000u32.Hz(),
         embedded_hal::spi::MODE_0,
     );
-    let mut spi_dev = match ExclusiveDevice::new(spi_bus, cs, timer) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
+    // Asserting GP17 cannot fail (rp235x GPIO is infallible), so the device always forms.
+    let Ok(mut spi_dev) = ExclusiveDevice::new(spi_bus, cs, timer);
 
     // Cold-start SPI warm-up (mirrors the pico anchor's Phase 1): clock the TROPIC01 with a few real
     // transactions so it is ready for the first L2 read after a cold power-up.
@@ -257,17 +320,14 @@ pub unsafe fn init() -> bool {
     // Phase 2: read the REAL chip identity (chip_id + device-cert stpub) BEFORE session_start
     // consumes the NoSession handle. Fail closed if the chip will not disclose a real identity.
     let mut tropic = Tropic01::new(spi_dev);
-    let chip_id_hash = match tropic.get_info_chip_id() {
-        Ok(id) => h("DSM/anchor/chip-id/v1", &[id]),
-        Err(_) => return false,
-    };
-    let stpub: [u8; 32] = match tropic.get_info_cert_store() {
-        Ok(cs) => match cs.public_key() {
-            Ok(k) => *k,
-            Err(_) => return false,
-        },
-        Err(_) => return false,
-    };
+    let chip_id = tropic.get_info_chip_id().map_err(InitFailure::ChipId)?;
+    let chip_id_hash = h("DSM/anchor/chip-id/v1", &[chip_id]);
+    let cert_store = tropic
+        .get_info_cert_store()
+        .map_err(InitFailure::CertStore)?;
+    let stpub: [u8; 32] = *cert_store
+        .public_key()
+        .map_err(|cause| InitFailure::CertStoreKey(Box::new(cause)))?;
     // Space the cert-store read from session_start's own internal cert read — the TROPIC needs a gap
     // between back-to-back L2 reads (the pico gets this implicitly from USB polling).
     cortex_m::asm::delay(15_000_000); // ~100 ms @150 MHz
@@ -285,15 +345,12 @@ pub unsafe fn init() -> bool {
         0,
     ) {
         Ok(s) => s,
-        Err(_) => return false,
+        Err((_, cause)) => return Err(InitFailure::Session(cause)),
     };
 
     // Phase 4: enroll (resident chip key + birth fuse -> bundle B, frontier h_0).
     let policy_hash = h(POLICY_ID_DOMAIN, &[&[0u8][..]]);
-    let (h0, b) = match enroll(&mut sess, &ident, &policy_hash) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
+    let (h0, b) = enroll(&mut sess, &ident, &policy_hash).map_err(InitFailure::Enroll)?;
 
     // Erase the concrete session behind `Box<dyn Tropic>` and construct the appliance.
     let chip: Box<dyn Tropic> = Box::new(RealChip { sess });
@@ -304,12 +361,13 @@ pub unsafe fn init() -> bool {
         ident.partition_device_id,
         b,
     );
-    // §26 recovery before serving (no boot fence — offline is enabled once born).
-    let _ = app.recover();
+    // §26 recovery before serving (no boot fence — offline is enabled once born). An appliance
+    // recovery will not serve from is never installed.
+    app.recover_at_boot().map_err(InitFailure::Recovery)?;
 
     let slot = &mut *core::ptr::addr_of_mut!(MONITOR_APP);
     *slot = Some(app);
-    true
+    Ok(())
 }
 
 /// Authority ops (`σ`-minting / counter-moving / frontier-advancing) that the §2 measurement seal

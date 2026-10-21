@@ -100,9 +100,12 @@ async fn carry_pair(
     let derived = dsm::sofi::derive::resolution_claim(&precommit.body, &fulfillment.body);
     let seats = NodeSeats::new(set)?;
     // A claim final at K_root holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
-        root_claim_final(cells.root(), evidence)
-    })
+    let evidence = read_cell_kept(
+        &seats,
+        cells.root().routed(),
+        &cells.root().keeps(),
+        |evidence| root_claim_final(cells.root(), evidence),
+    )
     .await;
     let claim = match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {
@@ -144,13 +147,20 @@ fn leg_cells(
 ) -> Result<Vec<(D32, D32, u64, AttemptCell)>, DsmError> {
     let mut cells = Vec::new();
     for attempt in fulfillment.body.attempts() {
+        // An attempt naming a vault P has no leg for names no key: P gives
+        // no parent for it. Core refutes such an F in hand (conformance item
+        // 4), and skips the key it holds once that cell is final, so the
+        // relay carries the exercise to the keys P does name. Refusing the
+        // whole relay left a leader-held copy unfinished and the vault's key
+        // held for good (SA-86).
         let Some(leg) = precommit
             .body
             .legs()
             .iter()
             .find(|l| l.vault_id == attempt.vault_id)
         else {
-            return Err(refuse("an attempt names a vault P has no leg for"));
+            log::info!("[sofi relay] an attempt names a vault P has no leg for; it names no key");
+            continue;
         };
         cells.push((
             leg.vault_id,
@@ -172,7 +182,7 @@ async fn held_exercise(
 ) -> Result<Option<(RecognizedExercise, Vec<u8>)>, DsmError> {
     let seats = NodeSeats::new(set)?;
     for (.., cell) in cells {
-        let evidence = read_cell(&seats, cell.routed()).await;
+        let evidence = read_cell(&seats, cell.routed(), &cell.keeps()).await;
         let read = match attempt_resolution(cell, &evidence) {
             Ok(read) => read,
             Err(undecided) => {
@@ -265,6 +275,31 @@ pub async fn relay_fulfillment(
     })
 }
 
+/// Carry the exercise holding `attempt`'s key along every leg key its `F`
+/// names, and nothing else. For an exercise whose pair is already decided
+/// (registered, or lost to another claim) that still holds a key it has not
+/// made final: Core skips or consumes a key only on a final cell, and no
+/// other party finishes this one (SA-72). The pair is not written.
+pub async fn carry_held_exercise(
+    set: &StorageSet,
+    vault_id: &D32,
+    parent_root: &D32,
+    attempt: u64,
+) -> Result<Vec<LegWrite>, DsmError> {
+    let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
+    let seats = NodeSeats::new(set)?;
+    let evidence = read_cell(&seats, cell.routed(), &cell.keeps()).await;
+    let read = attempt_resolution(&cell, &evidence)
+        .map_err(|undecided| refuse(format!("the key is not decided yet: {undecided:?}")))?;
+    let (Some(exercise), Some(bytes)) = (read.exercise(), read.value()) else {
+        return Err(refuse(
+            "no exercise holds the key; there is nothing to carry",
+        ));
+    };
+    let cells = leg_cells(set, exercise.fulfillment(), exercise.precommit())?;
+    carry_exercise(set, cells, bytes).await
+}
+
 /// Register the fulfillment whose exercise holds `vault_id`'s key
 /// `K^(attempt)` at `parent_root`, from that exercise's bytes alone (SoFi
 /// Amendment S20), and carry the exercise to every key its `F` names.
@@ -284,7 +319,7 @@ pub async fn relay_exercise(
     let cell = attempt_cell(set, vault_id, parent_root, attempt)?;
     let seats = NodeSeats::new(set)?;
     // An exercise final at the key holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cell.routed(), |evidence| {
+    let evidence = read_cell_kept(&seats, cell.routed(), &cell.keeps(), |evidence| {
         attempt_resolution(&cell, evidence).is_ok_and(|read| {
             matches!(
                 read.fact(),

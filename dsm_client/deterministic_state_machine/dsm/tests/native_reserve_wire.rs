@@ -316,6 +316,7 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
         canonical_storage_set_id: SET_ID,
         substrate_b_pair: None,
         verified_operation: None,
+        offline_boundary: None,
     }
 }
 
@@ -596,14 +597,7 @@ fn conservation_refuses_anything_but_the_derived_payout() {
         },
     ] {
         let err = head
-            .advance(
-                rel,
-                devid,
-                op.clone(),
-                std::slice::from_ref(&delta),
-                None,
-                None,
-            )
+            .advance(rel, devid, op.clone(), std::slice::from_ref(&delta), None)
             .expect_err("conservation must refuse");
         assert!(
             err.to_string().contains("conservation"),

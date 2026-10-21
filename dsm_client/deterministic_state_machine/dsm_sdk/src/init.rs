@@ -427,7 +427,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
                 _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
             ) -> Result<dsm::types::device_state::AdvanceOutcome, DsmError> {
                 Err(requires_genesis("simulate_advance_for_confirm"))
@@ -453,8 +452,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _receiver_challenge: [u8; 32],
                 _sender_device_root_before: [u8; 32],
                 _sender_device_root_after: [u8; 32],
-                _anchor_smt_proof_before: Vec<u8>,
-                _anchor_smt_proof_after: Vec<u8>,
+                _offline_state_proof_before: Vec<u8>,
+                _offline_state_proof_after: Vec<u8>,
             ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
                 Err(requires_genesis("release_offline_bearer"))
             }
@@ -469,7 +468,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _counterparty_devid: [u8; 32],
                 _operation: dsm::types::operations::Operation,
                 _deltas: &[dsm::types::device_state::BalanceDelta],
-                _anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
                 _offline_spend: Option<dsm::types::device_state::OfflineSpend>,
                 _before_commit: Option<
                     &dyn Fn(&dsm::types::device_state::AdvanceOutcome) -> Result<(), DsmError>,
@@ -495,11 +493,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
         log::info!("[SDK Init] Minimal bootstrap router installed (awaiting genesis)");
     }
 
-    // 5) Install recovery handler into core layer
-    let recovery_impl = Arc::new(crate::handlers::RecoveryImpl::new());
-    dsm::core::bridge::install_recovery_handler(recovery_impl);
-
-    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral, Recovery) installed successfully");
+    log::info!("[SDK Init] Core handlers (Unilateral, Bilateral) installed successfully");
 
     // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
     // identity exists; the core handlers above stay installed so bootstrap queries work before

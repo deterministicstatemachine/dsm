@@ -69,6 +69,24 @@ impl AppRouterImpl {
                             ))
                         }
                     };
+                    // The list is of offline transfers. A step that is not one
+                    // (a recovery re-establish, or anything a contact proposes)
+                    // is passed over, not reported as the whole list's failure:
+                    // one such row from a contact made every read of the list
+                    // fail for good (SA-111).
+                    if !matches!(
+                        operation,
+                        dsm::types::operations::Operation::Transfer { .. }
+                    ) {
+                        log::info!(
+                            "bilateral.pending_list: session {} carries a {} step, not a transfer",
+                            crate::util::text_id::encode_base32_crockford(
+                                &commitment_hash_arr[..8]
+                            ),
+                            operation.get_operation_type()
+                        );
+                        continue;
+                    }
                     // The token is the one the step's terms name, and they open
                     // its operation (pre-audit item 4).
                     let terms = match crate::bluetooth::bilateral_session::step_terms(
@@ -255,8 +273,7 @@ mod pending_list_tests {
             parent_tip: None,
             receiver_challenge: None,
             sent_child_root: None,
-            anchor_leaf_key: None,
-            anchor_leaf_value: None,
+            spend_next_frontier: None,
             spend_anchor_bundle: None,
             spend_asset: None,
             spend_amount: None,

@@ -727,7 +727,9 @@ pub fn genesis_accepted(
             genesis: owner.peer_genesis(),
             device_id: owner.peer_devid(),
             position: owner.validated_root().economic_position(),
-            operation: owner.verified_operation(),
+            operation: owner.verified_operation().ok_or(GenesisRefusal::Invalid(
+                GenesisInvalid::NotTheCreationTheOwnerMade,
+            ))?,
         },
         token_policies,
     )

@@ -158,17 +158,23 @@ pub fn recipient(request: &pb::ReceiptEmailRequestV1) -> Result<lettre::Address,
 }
 
 /// The mailbox an address names, as a rate counts it: the domain and the
-/// user in lower case, the user without a `+` subaddress. Every spelling
-/// that reaches one inbox at the providers that read addresses this way
-/// counts as that inbox, so a sender cannot spread one person's receipts
-/// over spellings of their address.
+/// user in lower case, the user without a `+` subaddress, and at Gmail
+/// (`gmail.com`, `googlemail.com`) the user without its dots, which Gmail
+/// ignores. Every spelling that reaches one inbox at the providers that read
+/// addresses this way counts as that inbox, so a sender cannot spread one
+/// person's receipts over spellings of their address (SA-153). The mail
+/// itself goes to the address as given.
 pub fn counted_as(address: &lettre::Address) -> String {
     let user = address.user().to_lowercase();
     let mailbox = match user.split_once('+') {
         Some((mailbox, _subaddress)) => mailbox.to_string(),
         None => user,
     };
-    format!("{mailbox}@{}", address.domain().to_lowercase())
+    let domain = address.domain().to_lowercase();
+    match domain.as_str() {
+        "gmail.com" | "googlemail.com" => format!("{}@gmail.com", mailbox.replace('.', "")),
+        _ => format!("{mailbox}@{domain}"),
+    }
 }
 
 /// An email as the service may say it back: its first character, then `…`,
@@ -442,6 +448,10 @@ mod tests {
         assert_eq!(counted("jane@example.com"), "jane@example.com");
         assert_eq!(counted("Jane@Example.COM"), "jane@example.com");
         assert_eq!(counted("jane+receipts@example.com"), "jane@example.com");
+        // Gmail ignores the dots in a user and answers at both of its domains.
+        assert_eq!(counted("j.ane@gmail.com"), "jane@gmail.com");
+        assert_eq!(counted("ja.ne+x@GoogleMail.com"), "jane@gmail.com");
+        assert_eq!(counted("j.ane@example.com"), "j.ane@example.com");
     }
 
     #[test]

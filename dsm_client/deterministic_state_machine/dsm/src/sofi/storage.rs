@@ -97,35 +97,129 @@ pub fn stored(addr: &D32, reads: &[ObjectRead]) -> StoredFact {
     }
 }
 
+/// What the reads of one candidate address establish about its bytes (§10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Candidate {
+    /// `Stored(o)`: these are its bytes.
+    Stored(Vec<u8>),
+    /// Fewer than three members returned bytes that re-hash to the address,
+    /// and at least one did: `Stored(o)` is not established, but these are
+    /// the bytes of whatever is at the address — the address binds them —
+    /// so what the candidate is, is decided from them. Bytes that are no
+    /// object under the locator are nothing, however few hold them; bytes
+    /// that are one are not `Stored`, and may yet be.
+    Seen(Vec<u8>),
+    /// No member returned bytes that re-hash to the address: nothing about
+    /// the candidate is established, and it may be the object. An answer
+    /// that a member holds nothing is no verdict (storage §4).
+    Unestablished,
+}
+
+/// §10: what `reads`, one answer per member of the set, establish about the
+/// candidate `addr`: `Stored` when three members return its exact bytes,
+/// `Seen` when fewer do and one does, and otherwise nothing. How many
+/// members answered that they hold nothing decides nothing.
+pub fn judge(addr: &D32, reads: &[ObjectRead]) -> Candidate {
+    match stored(addr, reads) {
+        StoredFact::Stored(bytes) => Candidate::Stored(bytes),
+        StoredFact::Unavailable => match reads.iter().find_map(|read| counts(addr, read)) {
+            Some(payload) => Candidate::Seen(payload.to_vec()),
+            None => Candidate::Unestablished,
+        },
+    }
+}
+
+/// How many members hold a candidate's bytes, as a scan weighs them.
+enum Held {
+    /// Three: `Stored(o)`.
+    Stored,
+    /// Fewer, one at least.
+    Seen,
+}
+
+/// One member's answer to an index read: the addresses it holds under the
+/// locator, in append order, and where the read stopped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberIndex {
+    pub addrs: Vec<D32>,
+    pub end: IndexEnd,
+}
+
+/// Where a read of one member's index stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexEnd {
+    /// At the end of the member's index: these are all it holds.
+    Ended,
+    /// At the read's own bound, with more possibly after.
+    Cut,
+}
+
+/// Whether an index read can show every address the locator holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Enough members' indexes were read to their end that every address
+    /// appended at the members an object is stored at is among the
+    /// candidates.
+    Whole,
+    /// Not so: an address may sit only at members not read whole, so the
+    /// candidates are not shown to be all.
+    Partial,
+}
+
 /// The candidates an index read produced, in the order Core will examine
-/// them: each member's appends in append order, members in set order,
-/// duplicates dropped at their first occurrence.
+/// them, and whether they are all there are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexCandidates {
-    /// At least one member answered; these are the addresses.
-    Candidates(Vec<D32>),
+    /// At least one member answered: the addresses, each once, and what the
+    /// read covers.
+    Candidates { addrs: Vec<D32>, coverage: Coverage },
     /// No member answered the index read.
     Unavailable,
 }
 
-/// §11: merge one index read per member (`None` where a member did not
-/// answer) into the candidate order.
-pub fn merge_index_reads(reads: &[Option<Vec<D32>>]) -> IndexCandidates {
-    let mut answered = false;
-    let mut out: Vec<D32> = Vec::new();
-    for read in reads.iter().flatten() {
-        answered = true;
-        for addr in read {
-            if !out.contains(addr) {
-                out.push(*addr);
+/// §11: merge one index read per member of the set, in set order (`None`
+/// where a member did not answer), into the candidate order: round by round,
+/// each member's next address in its append order, members in set order,
+/// each address at its first occurrence. One member's appends take one place
+/// in each round, so no member's index — however long, whatever it names —
+/// pushes another's past a scan's budget (SA-88).
+///
+/// The read covers the locator when at least `members − STORAGE_FINALITY_COUNT
+/// + 1` members' indexes were read to their end: an object is `Stored` at
+/// three members and published under the locator at each, so that many whole
+/// reads must include one of them (SA-130). Fewer, and an object published
+/// under the locator can be among no candidate: the read is `Partial`.
+pub fn merge_index_reads(reads: &[Option<MemberIndex>]) -> IndexCandidates {
+    let answered: Vec<&MemberIndex> = reads.iter().flatten().collect();
+    if answered.is_empty() {
+        return IndexCandidates::Unavailable;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let mut addrs: Vec<D32> = Vec::new();
+    let longest = answered
+        .iter()
+        .map(|read| read.addrs.len())
+        .fold(0, usize::max);
+    for rank in 0..longest {
+        for read in &answered {
+            if let Some(addr) = read.addrs.get(rank) {
+                if seen.insert(*addr) {
+                    addrs.push(*addr);
+                }
             }
         }
     }
-    if answered {
-        IndexCandidates::Candidates(out)
+    let whole = answered
+        .iter()
+        .filter(|read| read.end == IndexEnd::Ended)
+        .count();
+    let needed = reads.len().saturating_sub(STORAGE_FINALITY_COUNT) + 1;
+    let coverage = if whole >= needed {
+        Coverage::Whole
     } else {
-        IndexCandidates::Unavailable
-    }
+        Coverage::Partial
+    };
+    IndexCandidates::Candidates { addrs, coverage }
 }
 
 /// §11: what a scan of the candidates under a locator established.
@@ -135,66 +229,77 @@ pub enum Resolved<T> {
     /// the locator. The identity is the locator, so any one that verifies is
     /// the object, whatever else is still unknown.
     Kept(T),
-    /// Every candidate was examined within the budget, every one's bytes were
-    /// established, and none verifies.
+    /// The read covers the locator, every candidate was examined within the
+    /// budget, every one was decided, and none verifies.
     None,
     /// Nothing verified and the scan cannot say there is nothing: a
-    /// candidate's bytes were not established (storage §4: a fact not
-    /// established from the reads in hand is never read as its negation), the
-    /// budget ran out, or no member answered. Never `Invalid`.
+    /// candidate was not decided (storage §4: a fact not established from
+    /// the reads in hand is never read as its negation), the read does not
+    /// cover the locator, the budget ran out, or no member answered. Never
+    /// `Invalid`.
     Unavailable,
 }
 
 /// §11: what a discovery scan under an index of references established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Discovered<T> {
-    /// Every candidate was examined within the budget and every one's bytes
-    /// were established: these are all the objects that verify, possibly
-    /// none.
+    /// The read covers the locator, every candidate was examined within the
+    /// budget and every one was decided: these are all the objects that
+    /// verify, possibly none.
     Complete(Vec<T>),
-    /// These verify, and others may: a candidate's bytes were not
-    /// established, the budget ran out, or no member answered the index
-    /// read. An object missing from the list is not thereby absent.
+    /// These verify, and others may: a candidate was not decided, the read
+    /// does not cover the locator, the budget ran out, or no member answered
+    /// the index read. An object missing from the list is not thereby absent.
     Partial(Vec<T>),
 }
 
 /// §11: keep the one candidate that verifies.
 ///
-/// `candidates` are the `Stored` bytes of each candidate address in
-/// examination order, `None` where the bytes are not `Stored`. `recognize`
-/// is Core's recognition of an object from its bytes: the object and the
-/// identity Core recomputes from the bytes, or nothing. A candidate is kept
-/// only when that identity is `locator`. Examining a candidate — verifying
-/// or not, fetched or not — spends one unit of `budget`; a scan that would
-/// examine more than `budget` candidates is `Unavailable`, and so is a scan
-/// that kept nothing while a candidate's bytes were not established: that
-/// candidate may be the object.
+/// `candidates` are what the reads establish of each candidate address, in
+/// examination order ([`judge`]), and `coverage` what the index read covers.
+/// `recognize` is Core's recognition of an object from its bytes: the object
+/// and the identity Core recomputes from the bytes, or nothing. A candidate
+/// is kept only when that identity is `locator`. Examining a candidate —
+/// verifying or not, fetched or not — spends one unit of `budget`; a scan
+/// that would examine more than `budget` candidates is `Unavailable`, and so
+/// is a scan that kept nothing while a candidate was not decided — that
+/// candidate may be the object — or over a read that does not cover the
+/// locator. A `Seen` candidate is decided by its bytes: nothing when they are
+/// no object under the locator, and not decided when they are one, for it is
+/// not `Stored`.
 pub fn keep_verifying<T>(
     locator: &D32,
-    candidates: &[Option<Vec<u8>>],
+    candidates: &[Candidate],
+    coverage: Coverage,
     budget: usize,
     recognize: impl Fn(&[u8]) -> Option<(D32, T)>,
 ) -> Resolved<T> {
-    let mut unestablished = false;
+    let mut decided = coverage;
     for (examined, candidate) in candidates.iter().enumerate() {
         if examined >= budget {
             return Resolved::Unavailable;
         }
-        let Some(bytes) = candidate else {
-            unestablished = true;
-            continue;
+        let (bytes, stored) = match candidate {
+            Candidate::Stored(bytes) => (bytes, Held::Stored),
+            Candidate::Seen(bytes) => (bytes, Held::Seen),
+            Candidate::Unestablished => {
+                decided = Coverage::Partial;
+                continue;
+            }
         };
         let Some((identity, object)) = recognize(bytes) else {
             continue;
         };
         if identity == *locator {
-            return Resolved::Kept(object);
+            match stored {
+                Held::Stored => return Resolved::Kept(object),
+                Held::Seen => decided = Coverage::Partial,
+            }
         }
     }
-    if unestablished {
-        Resolved::Unavailable
-    } else {
-        Resolved::None
+    match decided {
+        Coverage::Whole => Resolved::None,
+        Coverage::Partial => Resolved::Unavailable,
     }
 }
 
@@ -207,35 +312,43 @@ pub fn keep_verifying<T>(
 /// nothing about which of them applies: that is Core's, by the identity the
 /// operation names (`ρ` in a precommit leg) and the leaf the trader's tree
 /// admitted. Order of arrival confers nothing. The budget is spent as in
-/// [`keep_verifying`]; running out of it, or meeting a candidate whose bytes
-/// are not established, makes the discovery `Partial`.
+/// [`keep_verifying`]; running out of it, meeting a candidate that was not
+/// decided — an object `Seen` and not `Stored` among them — or a read that
+/// does not cover the locator makes the discovery `Partial`.
 pub fn keep_all_verifying<T>(
     locator: &D32,
-    candidates: &[Option<Vec<u8>>],
+    candidates: &[Candidate],
+    coverage: Coverage,
     budget: usize,
     recognize: impl Fn(&[u8]) -> Option<(D32, T)>,
 ) -> Discovered<T> {
     let mut kept = Vec::new();
-    let mut complete = true;
+    let mut decided = coverage;
     for (examined, candidate) in candidates.iter().enumerate() {
         if examined >= budget {
             return Discovered::Partial(kept);
         }
-        let Some(bytes) = candidate else {
-            complete = false;
-            continue;
+        let (bytes, stored) = match candidate {
+            Candidate::Stored(bytes) => (bytes, Held::Stored),
+            Candidate::Seen(bytes) => (bytes, Held::Seen),
+            Candidate::Unestablished => {
+                decided = Coverage::Partial;
+                continue;
+            }
         };
         let Some((identity, object)) = recognize(bytes) else {
             continue;
         };
         if identity == *locator {
-            kept.push(object);
+            match stored {
+                Held::Stored => kept.push(object),
+                Held::Seen => decided = Coverage::Partial,
+            }
         }
     }
-    if complete {
-        Discovered::Complete(kept)
-    } else {
-        Discovered::Partial(kept)
+    match decided {
+        Coverage::Whole => Discovered::Complete(kept),
+        Coverage::Partial => Discovered::Partial(kept),
     }
 }
 
@@ -382,21 +495,208 @@ mod tests {
 
     // ── §11 the index ─────────────────────────────────────────────────────
 
+    fn whole(addrs: Vec<D32>) -> Option<MemberIndex> {
+        Some(MemberIndex {
+            addrs,
+            end: IndexEnd::Ended,
+        })
+    }
+
+    fn cut(addrs: Vec<D32>) -> Option<MemberIndex> {
+        Some(MemberIndex {
+            addrs,
+            end: IndexEnd::Cut,
+        })
+    }
+
     #[test]
-    fn index_reads_merge_in_member_then_append_order_without_duplicates() {
+    fn index_reads_merge_by_rank_then_member_without_duplicates() {
         let (x, y, z) = ([1u8; 32], [2u8; 32], [3u8; 32]);
-        let reads = [Some(vec![x, y]), None, Some(vec![y, z, x])];
+        let reads = [whole(vec![x, y]), None, whole(vec![y, z, x]), whole(vec![])];
         assert_eq!(
             merge_index_reads(&reads),
-            IndexCandidates::Candidates(vec![x, y, z])
+            IndexCandidates::Candidates {
+                addrs: vec![x, y, z],
+                coverage: Coverage::Whole,
+            }
         );
         assert_eq!(
             merge_index_reads(&[None, None]),
             IndexCandidates::Unavailable
         );
         assert_eq!(
-            merge_index_reads(&[None, Some(Vec::new())]),
-            IndexCandidates::Candidates(Vec::new())
+            merge_index_reads(&[None, whole(Vec::new()), None, None, None]),
+            IndexCandidates::Candidates {
+                addrs: Vec::new(),
+                coverage: Coverage::Partial,
+            }
+        );
+    }
+
+    /// SA-88. One member's index, however long and whatever it names, takes
+    /// one place in each round of the merge: an honest address a member
+    /// holds at the front of its own index is examined within the first
+    /// round, however many addresses the member before it in set order
+    /// fabricated.
+    /// MUTATION CONTROL: joining the members' indexes one after another, as
+    /// the merge did, puts the honest address past the hostile member's 300
+    /// and turns this red.
+    #[test]
+    fn index_reads_interleave_by_rank_so_no_member_starves_another() {
+        let honest = [0x0A; 32];
+        let fabricated: Vec<D32> = (0..300u16)
+            .map(|n| {
+                let mut a = [0xF0; 32];
+                a[..2].copy_from_slice(&n.to_be_bytes());
+                a
+            })
+            .collect();
+        let reads = [
+            whole(fabricated),
+            whole(vec![honest]),
+            whole(vec![honest]),
+            whole(vec![honest]),
+            None,
+        ];
+        let IndexCandidates::Candidates { addrs, .. } = merge_index_reads(&reads) else {
+            panic!("members answered");
+        };
+        let at = addrs.iter().position(|a| *a == honest);
+        assert_eq!(
+            at,
+            Some(1),
+            "the honest address is second, after one fabricated one"
+        );
+    }
+
+    /// SA-130. "Nothing is published under the locator" needs the indexes of
+    /// at least `members − 3 + 1` members read to their end: an object is
+    /// stored at three members and published at each, so fewer whole reads
+    /// can miss it. One member's index, or reads cut at their bound, never
+    /// conclude it is not there.
+    /// MUTATION CONTROL: taking any one answering member's read as covering
+    /// the locator turns this red.
+    #[test]
+    fn a_read_too_few_members_ended_is_never_none() {
+        let locator = *blake3::hash(b"P").as_bytes();
+        let partial = [whole(Vec::new()), None, None, None, None];
+        let IndexCandidates::Candidates { addrs, coverage } = merge_index_reads(&partial) else {
+            panic!("a member answered");
+        };
+        assert_eq!(coverage, Coverage::Partial);
+        assert_eq!(
+            keep_verifying(&locator, &judged(&addrs), coverage, 16, recognize),
+            Resolved::Unavailable
+        );
+        let cut_short = [
+            cut(Vec::new()),
+            cut(Vec::new()),
+            cut(Vec::new()),
+            whole(Vec::new()),
+            None,
+        ];
+        assert!(matches!(
+            merge_index_reads(&cut_short),
+            IndexCandidates::Candidates {
+                coverage: Coverage::Partial,
+                ..
+            }
+        ));
+        let enough = [
+            whole(Vec::new()),
+            whole(Vec::new()),
+            whole(Vec::new()),
+            None,
+            None,
+        ];
+        let IndexCandidates::Candidates { coverage, .. } = merge_index_reads(&enough) else {
+            panic!("members answered");
+        };
+        assert_eq!(coverage, Coverage::Whole);
+        assert_eq!(
+            keep_verifying(&locator, &[], coverage, 16, recognize),
+            Resolved::None
+        );
+    }
+
+    /// Candidates no member answered for: not decided.
+    fn judged(addrs: &[D32]) -> Vec<Candidate> {
+        addrs.iter().map(|_| Candidate::Unestablished).collect()
+    }
+
+    /// SA-85. A candidate whose bytes fewer than three members return is
+    /// decided by the bytes, which the address binds: bytes that are no
+    /// object under the locator are nothing, so junk put at one member and
+    /// appended there no longer leaves every later scan of the locator
+    /// undecided. Members answering that they hold nothing decide nothing,
+    /// however many: with no bytes returned, the candidate may be the object.
+    /// MUTATION CONTROL: reading `Seen` bytes as not established, as the
+    /// scan did, turns this red.
+    #[test]
+    fn bytes_seen_that_are_no_object_under_the_locator_are_nothing() {
+        let junk = b"junk at one member";
+        let a = addr_of(junk);
+        let one = [
+            bytes(junk),
+            ObjectRead::Absent,
+            ObjectRead::Absent,
+            ObjectRead::Absent,
+            ObjectRead::Absent,
+        ];
+        assert_eq!(judge(&a, &one), Candidate::Seen(junk.to_vec()));
+        let locator = *blake3::hash(b"P").as_bytes();
+        let candidates = [judge(&a, &one), Candidate::Stored(b"ok:Q".to_vec())];
+        assert_eq!(
+            keep_verifying(&locator, &candidates, Coverage::Whole, 16, recognize),
+            Resolved::None
+        );
+        assert_eq!(
+            keep_all_verifying(&locator, &candidates, Coverage::Whole, 16, recognize),
+            Discovered::<Vec<u8>>::Complete(Vec::new())
+        );
+        let none_returned = vec![ObjectRead::Absent; 5];
+        assert_eq!(
+            judge(&addr_of(b"never stored"), &none_returned),
+            Candidate::Unestablished
+        );
+        let o = b"the object";
+        let stored_three = [
+            bytes(o),
+            bytes(o),
+            bytes(o),
+            ObjectRead::Absent,
+            ObjectRead::Absent,
+        ];
+        assert_eq!(
+            judge(&addr_of(o), &stored_three),
+            Candidate::Stored(o.to_vec())
+        );
+    }
+
+    /// SA-85, the other side (storage §4, MR-STOR-0021): an object seen at
+    /// fewer than three members is not `Stored`, so it is never kept, and a
+    /// scan that meets it is never None — it may yet be published.
+    /// MUTATION CONTROL: keeping `Seen` bytes that recognize, or passing over
+    /// them, turns this red.
+    #[test]
+    fn an_object_seen_short_of_stored_is_never_none() {
+        let locator = *blake3::hash(b"P").as_bytes();
+        let seen = [Candidate::Seen(b"ok:P".to_vec())];
+        assert_eq!(
+            keep_verifying(&locator, &seen, Coverage::Whole, 16, recognize),
+            Resolved::Unavailable
+        );
+        assert_eq!(
+            keep_all_verifying(&locator, &seen, Coverage::Whole, 16, recognize),
+            Discovered::<Vec<u8>>::Partial(Vec::new())
+        );
+        let then_stored = [
+            Candidate::Seen(b"ok:P".to_vec()),
+            Candidate::Stored(b"ok:P".to_vec()),
+        ];
+        assert_eq!(
+            keep_verifying(&locator, &then_stored, Coverage::Whole, 16, recognize),
+            Resolved::Kept(b"P".to_vec())
         );
     }
 
@@ -413,14 +713,14 @@ mod tests {
     fn kept_verifies() {
         let locator = *blake3::hash(b"P").as_bytes();
         let candidates = [
-            Some(b"garbage".to_vec()),
-            Some(b"ok:Q".to_vec()),
-            None,
-            Some(b"ok:P".to_vec()),
-            Some(b"ok:P".to_vec()),
+            Candidate::Stored(b"garbage".to_vec()),
+            Candidate::Stored(b"ok:Q".to_vec()),
+            Candidate::Unestablished,
+            Candidate::Stored(b"ok:P".to_vec()),
+            Candidate::Stored(b"ok:P".to_vec()),
         ];
         assert_eq!(
-            keep_verifying(&locator, &candidates, 16, recognize),
+            keep_verifying(&locator, &candidates, Coverage::Whole, 16, recognize),
             Resolved::Kept(b"P".to_vec())
         );
     }
@@ -431,12 +731,12 @@ mod tests {
     fn garbage_is_never_kept() {
         let locator = *blake3::hash(b"P").as_bytes();
         let candidates = [
-            Some(b"garbage".to_vec()),
-            Some(b"ok:Q".to_vec()),
-            Some(b"ok:R".to_vec()),
+            Candidate::Stored(b"garbage".to_vec()),
+            Candidate::Stored(b"ok:Q".to_vec()),
+            Candidate::Stored(b"ok:R".to_vec()),
         ];
         assert_eq!(
-            keep_verifying(&locator, &candidates, 16, recognize),
+            keep_verifying(&locator, &candidates, Coverage::Whole, 16, recognize),
             Resolved::None
         );
     }
@@ -447,26 +747,26 @@ mod tests {
     fn over_budget_is_unavailable_never_none() {
         let locator = *blake3::hash(b"P").as_bytes();
         let candidates = [
-            Some(b"garbage".to_vec()),
-            Some(b"garbage".to_vec()),
-            Some(b"ok:P".to_vec()),
+            Candidate::Stored(b"garbage".to_vec()),
+            Candidate::Stored(b"garbage".to_vec()),
+            Candidate::Stored(b"ok:P".to_vec()),
         ];
         assert_eq!(
-            keep_verifying(&locator, &candidates, 2, recognize),
+            keep_verifying(&locator, &candidates, Coverage::Whole, 2, recognize),
             Resolved::Unavailable
         );
         assert_eq!(
-            keep_verifying(&locator, &candidates, 3, recognize),
+            keep_verifying(&locator, &candidates, Coverage::Whole, 3, recognize),
             Resolved::Kept(b"P".to_vec())
         );
         // Garbage beyond the budget with nothing verifying is Unavailable too.
         let garbage = [
-            Some(b"g".to_vec()),
-            Some(b"g".to_vec()),
-            Some(b"g".to_vec()),
+            Candidate::Stored(b"g".to_vec()),
+            Candidate::Stored(b"g".to_vec()),
+            Candidate::Stored(b"g".to_vec()),
         ];
         assert_eq!(
-            keep_verifying(&locator, &garbage, 2, recognize),
+            keep_verifying(&locator, &garbage, Coverage::Whole, 2, recognize),
             Resolved::Unavailable
         );
     }
@@ -476,12 +776,18 @@ mod tests {
     #[test]
     fn within_budget_exhausted_is_none() {
         let locator = *blake3::hash(b"P").as_bytes();
-        let garbage = [Some(b"g".to_vec()), Some(b"ok:Q".to_vec())];
+        let garbage = [
+            Candidate::Stored(b"g".to_vec()),
+            Candidate::Stored(b"ok:Q".to_vec()),
+        ];
         assert_eq!(
-            keep_verifying(&locator, &garbage, 2, recognize),
+            keep_verifying(&locator, &garbage, Coverage::Whole, 2, recognize),
             Resolved::None
         );
-        assert_eq!(keep_verifying(&locator, &[], 0, recognize), Resolved::None);
+        assert_eq!(
+            keep_verifying(&locator, &[], Coverage::Whole, 0, recognize),
+            Resolved::None
+        );
     }
 
     /// `an_unestablished_candidate_is_never_none` (Lean): a candidate whose
@@ -491,14 +797,21 @@ mod tests {
     #[test]
     fn an_unestablished_candidate_is_never_none() {
         let locator = *blake3::hash(b"P").as_bytes();
-        let unknown = [Some(b"g".to_vec()), None, Some(b"ok:Q".to_vec())];
+        let unknown = [
+            Candidate::Stored(b"g".to_vec()),
+            Candidate::Unestablished,
+            Candidate::Stored(b"ok:Q".to_vec()),
+        ];
         assert_eq!(
-            keep_verifying(&locator, &unknown, 3, recognize),
+            keep_verifying(&locator, &unknown, Coverage::Whole, 3, recognize),
             Resolved::Unavailable
         );
-        let found = [None, Some(b"ok:P".to_vec())];
+        let found = [
+            Candidate::Unestablished,
+            Candidate::Stored(b"ok:P".to_vec()),
+        ];
         assert_eq!(
-            keep_verifying(&locator, &found, 2, recognize),
+            keep_verifying(&locator, &found, Coverage::Whole, 2, recognize),
             Resolved::Kept(b"P".to_vec())
         );
     }
@@ -516,23 +829,23 @@ mod tests {
             }
         };
         let candidates = vec![
-            Some(vec![0xAB, 1]),
-            Some(vec![0xCD, 9]),
-            Some(b"garbage".to_vec()),
-            Some(vec![0xAB, 2]),
+            Candidate::Stored(vec![0xAB, 1]),
+            Candidate::Stored(vec![0xCD, 9]),
+            Candidate::Stored(b"garbage".to_vec()),
+            Candidate::Stored(vec![0xAB, 2]),
         ];
         assert_eq!(
-            keep_all_verifying(&locator, &candidates, 4, recognize),
+            keep_all_verifying(&locator, &candidates, Coverage::Whole, 4, recognize),
             Discovered::Complete(vec![1, 2])
         );
         // The same scan, kept singly, is the first — which is exactly why an
         // index of references must not be read through it.
         assert_eq!(
-            keep_verifying(&locator, &candidates, 4, recognize),
+            keep_verifying(&locator, &candidates, Coverage::Whole, 4, recognize),
             Resolved::Kept(1)
         );
         assert_eq!(
-            keep_all_verifying(&locator, &candidates[1..3], 2, recognize),
+            keep_all_verifying(&locator, &candidates[1..3], Coverage::Whole, 2, recognize),
             Discovered::<u8>::Complete(Vec::new())
         );
     }
@@ -551,22 +864,22 @@ mod tests {
             }
         };
         let candidates = vec![
-            Some(vec![0xAB, 1]),
-            None,
-            Some(vec![0xCD, 9]),
-            Some(vec![0xAB, 2]),
+            Candidate::Stored(vec![0xAB, 1]),
+            Candidate::Unestablished,
+            Candidate::Stored(vec![0xCD, 9]),
+            Candidate::Stored(vec![0xAB, 2]),
         ];
         assert_eq!(
-            keep_all_verifying(&locator, &candidates, 4, recognize),
+            keep_all_verifying(&locator, &candidates, Coverage::Whole, 4, recognize),
             Discovered::Partial(vec![1, 2])
         );
         assert_eq!(
-            keep_all_verifying(&locator, &candidates[1..3], 2, recognize),
+            keep_all_verifying(&locator, &candidates[1..3], Coverage::Whole, 2, recognize),
             Discovered::<u8>::Partial(Vec::new())
         );
         // Over budget: what was examined, and no claim about the rest.
         assert_eq!(
-            keep_all_verifying(&locator, &candidates, 1, recognize),
+            keep_all_verifying(&locator, &candidates, Coverage::Whole, 1, recognize),
             Discovered::Partial(vec![1])
         );
     }

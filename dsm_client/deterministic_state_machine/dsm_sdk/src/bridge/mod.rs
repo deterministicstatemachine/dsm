@@ -118,7 +118,6 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
     ) -> Result<dsm::types::device_state::AdvanceOutcome, dsm::types::error::DsmError>;
 
@@ -150,8 +149,8 @@ pub trait AppRouter: Send + Sync {
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        anchor_smt_proof_before: Vec<u8>,
-        anchor_smt_proof_after: Vec<u8>,
+        offline_state_proof_before: Vec<u8>,
+        offline_state_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
 
     /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
@@ -188,7 +187,6 @@ pub trait AppRouter: Send + Sync {
         counterparty_devid: [u8; 32],
         operation: dsm::types::operations::Operation,
         deltas: &[dsm::types::device_state::BalanceDelta],
-        anchor_leaf: Option<dsm::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<dsm::types::device_state::OfflineSpend>,
         before_commit: Option<
             &dyn Fn(

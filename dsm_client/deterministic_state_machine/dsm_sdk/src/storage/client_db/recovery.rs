@@ -59,8 +59,21 @@ pub fn ensure_recovery_tables() -> Result<()> {
         "#,
     )?;
 
+    // Builds before SA-17's fix stored K_R here wrapped under a key derived from the
+    // device id and genesis hash, both public. That fix stopped writing it but left the
+    // row on upgraded devices, still opening every ring capsule to anyone who reads the
+    // database (SA-118). Nothing reads the row; it is removed whenever the tables open.
+    conn.execute(
+        "DELETE FROM recovery_prefs WHERE key = ?1",
+        params![STALE_PUBLICLY_WRAPPED_RECOVERY_KEY],
+    )?;
+
     Ok(())
 }
+
+/// The `recovery_prefs` key under which builds before SA-17's fix kept K_R wrapped under
+/// public values.
+const STALE_PUBLICLY_WRAPPED_RECOVERY_KEY: &str = "encrypted_recovery_key";
 
 /// Store an encrypted recovery capsule.
 pub fn store_recovery_capsule(
@@ -653,19 +666,6 @@ pub fn store_encrypted_wallet_seed(blob: &[u8]) -> Result<()> {
 /// Load the hardware-sealed wallet-seed bundle.
 pub fn load_encrypted_wallet_seed() -> Result<Option<Vec<u8>>> {
     get_recovery_pref("encrypted_wallet_seed")
-}
-
-/// Delete the persisted sealed wallet-seed bundle (wallet lock / mnemonic change).
-pub fn delete_encrypted_wallet_seed() -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    conn.execute(
-        "DELETE FROM recovery_prefs WHERE key = ?1",
-        params!["encrypted_wallet_seed"],
-    )?;
-    Ok(())
 }
 
 /// Check if NFC backup is enabled.

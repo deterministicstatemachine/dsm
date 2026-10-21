@@ -62,6 +62,7 @@ pub mod keys;
 pub mod lineage;
 pub mod mutation;
 pub mod native_reserve;
+pub mod offline_boundary;
 pub mod peer_acceptance;
 pub mod peer_lineage;
 pub mod provenance;

@@ -677,6 +677,25 @@ impl NodeSet {
         self.ddl(member_id, statement).await;
     }
 
+    /// List `addr` under `locator` in member `member_id`'s index of
+    /// `namespace`, whether or not it holds the object: a hostile member's
+    /// index, written into its store past the append the node refuses for an
+    /// address it holds no object at (storage spec §7).
+    pub async fn list_unheld(
+        &self,
+        member_id: &str,
+        namespace: &[u8],
+        locator: &[u8; 32],
+        addr: &[u8; 32],
+    ) {
+        let mut scoped = namespace.to_vec();
+        scoped.push(0);
+        scoped.extend_from_slice(locator);
+        if let Err(e) = db::append_index(&self.node(member_id).state.db_pool, &scoped, addr).await {
+            panic!("the hostile member's listing: {e}");
+        }
+    }
+
     /// Refuse every write of `keys` at member `member_id`: the member's store
     /// raises on the insert, so the put fails whole (§6) and the member
     /// answers an error — a member whose storage failed the write. Every

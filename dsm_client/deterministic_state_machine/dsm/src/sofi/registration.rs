@@ -114,6 +114,17 @@ impl PositionCells {
         &self.fulfillment
     }
 
+    /// What a reader keeps of a seat's log at `K_ful(q)`: the copies of
+    /// fulfillments naming the key, the only ones its reading can count
+    /// ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps_fulfillment(
+        &self,
+    ) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.fulfillment, move |bytes| {
+            fulfillment_at(self)(bytes).is_some()
+        })
+    }
+
     /// `K_root(q)`.
     pub fn root(&self) -> &RootCell {
         &self.root

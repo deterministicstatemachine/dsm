@@ -35,7 +35,7 @@ use dsm::types::error::DsmError;
 
 use crate::sdk::lineage_discovery::{self, Candidates};
 use crate::sdk::route_seats::{
-    keep_completion, read_cell, read_cell_kept, write_recorded, NodeSeats, RouteSeats, WriteReport,
+    keep_completion, read_cell, read_cell_kept, write_recorded, NodeSeats, WriteReport,
 };
 use crate::sdk::storage_set::StorageSet;
 use crate::storage::client_db::native_reserve as memo;
@@ -92,7 +92,7 @@ async fn read_successor_cell(
     seats: &NodeSeats,
     cell: &SuccessorCell,
 ) -> dsm::route_chain::CellEvidence {
-    read_cell_kept(seats, cell.routed(), |evidence| {
+    read_cell_kept(seats, cell.routed(), &cell.keeps(), |evidence| {
         matches!(
             resolve_successor(cell, evidence),
             SuccessorRead::Final { .. }
@@ -130,9 +130,17 @@ async fn locate_ahead(
                 continue;
             }
         }
-        let Some(held) = seats
-            .read_values(routed.route().leader(), routed.namespace(), routed.key())
-            .await
+        // Only a leader copy holding a release that succeeds the state is
+        // kept from the leader's log; anything else there costs the read.
+        let succeeds = |bytes: &[u8]| next_state(&state, routed, bytes).is_some();
+        let Some(held) = crate::sdk::route_seats::kept_values(
+            seats,
+            routed.route().leader(),
+            routed.namespace(),
+            routed.key(),
+            &succeeds,
+        )
+        .await
         else {
             break;
         };
@@ -258,16 +266,20 @@ async fn read_named(
             // A cell this process already read final is read from what it
             // kept, and is not asked for again.
             if crate::sdk::final_reads::final_cell(&cell).is_none() {
-                cells.push(cell);
+                cells.push((cell, *root));
             }
         }
     }
-    let seats = NodeSeats::new(set)?;
+    let seats = &NodeSeats::new(set)?;
     let mut ahead = ReadAhead::default();
     for chunk in cells.chunks(CELLS_AT_ONCE) {
-        let reads =
-            futures::future::join_all(chunk.iter().map(|cell| read_cell(&seats, cell))).await;
-        for (cell, evidence) in chunk.iter().zip(reads) {
+        let reads = futures::future::join_all(chunk.iter().map(|(cell, root)| async move {
+            let keep =
+                dsm::economic::native_reserve::named_successor_keeps(cell, &start.reserve_id, root);
+            read_cell(seats, cell, &keep).await
+        }))
+        .await;
+        for ((cell, _), evidence) in chunk.iter().zip(reads) {
             ahead.cells.insert(*cell.key(), evidence);
         }
     }

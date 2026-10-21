@@ -183,6 +183,7 @@ async fn cycles_close_over_new_entries_and_commit_their_records() {
     assert!(c2.follows(&c1), "cycle 2 links to cycle 1");
 
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p1 = proof(&a, key, 1).await.expect("proof at cycle 1");
     let p2 = proof(&a, key, 2).await.expect("proof at cycle 2");
     assert!(dsm::storage_cell::record_is_committed(&r1, &held, &c1, &p1));
@@ -251,6 +252,7 @@ async fn a_set_mate_mirrors_by_fetching_from_the_member_itself() {
 
     // The verifier's check: A's record, A's values, B's mirror of A, A's proof.
     let held = values(&a, key).await;
+    let held = dsm::storage_cell::replay(NS.as_bytes(), &key, &held);
     let p = proof(&a, key, 1).await.unwrap();
     assert!(dsm::storage_cell::record_is_committed(
         &rec,
@@ -594,6 +596,100 @@ async fn a_sync_keeps_cycles_in_order_and_stops_at_the_first_it_cannot_fetch() {
             mirrored(&b, b"dsm-node-a", t).await,
             vec![commit.clone()],
             "cycle {t}"
+        );
+    }
+}
+
+/// The distinct cycles from `from` through `through` that `node`'s store
+/// mirrors for `member`, counted by the store itself.
+async fn mirrored_count(node: &AppState, member: &[u8], from: u64, through: u64) -> i64 {
+    node.db_pool
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(DISTINCT cycle_index) FROM bytecommit_mirror
+             WHERE member_id = $1 AND cycle_index BETWEEN $2 AND $3",
+            &[
+                &member,
+                &i64::try_from(from).unwrap(),
+                &i64::try_from(through).unwrap(),
+            ],
+        )
+        .await
+        .unwrap()
+        .get(0)
+}
+
+/// A member that closed far more cycles than one sync fetches (anyone can
+/// close a cycle once one entry has arrived) is mirrored at its newest
+/// cycles by the first sync: the cycle a reader verifies at and its parent
+/// are mirrored byte for byte, with the oldest cycles beside them and the
+/// gap between left for the next sync, which fills it, so the mirror holds
+/// every cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_inflated_past_one_sync_is_mirrored_at_its_newest_cycles_at_once() {
+    use dsm_storage_node::api::objects::bytecommit::{BACKFILL_CYCLES, NEWEST_CYCLES};
+    let ((la, ua), (lb, ub)) = (listener().await, listener().await);
+    let set = ["dsm-node-a", "dsm-node-b"];
+    let sa = node_state("bc_inflated_a", "dsm-node-a", &set, &[("dsm-node-b", &ub)]).await;
+    let sb = node_state("bc_inflated_b", "dsm-node-b", &set, &[("dsm-node-a", &ua)]).await;
+    let (a, b) = (app(sa.clone()), app(sb.clone()));
+    common::serve_tls(la, a).await;
+    common::serve_tls(lb, b.clone()).await;
+
+    let backfill = u64::try_from(BACKFILL_CYCLES).unwrap();
+    let cycles = backfill + NEWEST_CYCLES + 300;
+    let mut commits = Vec::new();
+    for t in 1..=cycles {
+        db::put_cell(&sa.db_pool, NS.as_bytes(), &[0x5A; 32], &t.to_be_bytes())
+            .await
+            .unwrap();
+        let commit = db::close_cycle(&sa.db_pool, &sa.committed, b"dsm-node-a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(commit.cycle_index, t);
+        commits.push(commit);
+    }
+
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    for t in [cycles, cycles - 1] {
+        assert_eq!(
+            mirrored(&b, b"dsm-node-a", t).await,
+            vec![commits[usize::try_from(t - 1).unwrap()].clone()],
+            "one sync mirrors A's cycle {t}, of {cycles}"
+        );
+    }
+    let newest = cycles - NEWEST_CYCLES;
+    let member = b"dsm-node-a".as_slice();
+    assert_eq!(
+        mirrored_count(&sb, member, newest, cycles).await,
+        i64::try_from(NEWEST_CYCLES + 1).unwrap(),
+        "the newest cycles"
+    );
+    assert_eq!(
+        mirrored_count(&sb, member, 1, backfill).await,
+        i64::try_from(backfill).unwrap(),
+        "the oldest cycles"
+    );
+    assert_eq!(
+        mirrored_count(&sb, member, backfill + 1, newest - 1).await,
+        0,
+        "the gap between, for the next sync"
+    );
+
+    assert_eq!(sync(&b).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        mirrored_count(&sb, member, 1, cycles).await,
+        i64::try_from(cycles).unwrap(),
+        "the next sync fills the gap"
+    );
+    for t in [1, backfill + 1, newest - 1, cycles] {
+        assert_eq!(
+            mirrored(&b, member, t).await,
+            vec![commits[usize::try_from(t - 1).unwrap()].clone()],
+            "cycle {t} byte for byte"
         );
     }
 }

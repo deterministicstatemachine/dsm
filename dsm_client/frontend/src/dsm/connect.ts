@@ -8,6 +8,14 @@
 import * as pb from '../proto/dsm_app_pb';
 import { routerInvokeBin, routerQueryBin } from './WebViewBridge';
 import { decodeFramedEnvelopeV3 } from './decoding';
+import { visibleText } from '../domain/displayName';
+
+// Every string here an application chose (its name, its memo inside a
+// summary, the reasons and lines Rust renders around them) is shown without
+// its bidirectional controls and invisible characters, as contact names are:
+// a right-to-left override in a memo reversed an approval's summary and
+// amount on screen (SA-157).
+const shown = (text: string): string => visibleText(text);
 
 type Reply = pb.ConnectReplyV1['reply'];
 
@@ -85,14 +93,14 @@ export interface LogEntry {
 function session(s: pb.ConnectSessionV1): Session {
   return {
     sessionId: s.sessionId,
-    displayName: s.displayName,
+    displayName: shown(s.displayName),
     peerDeviceId: s.peerDeviceId,
-    endpoint: s.endpoint,
-    scopeLines: s.scopeLines,
+    endpoint: shown(s.endpoint),
+    scopeLines: s.scopeLines.map(shown),
     lastSeq: s.lastSeq,
     connected: s.status === pb.ConnectSessionStatus.CONNECTED,
-    spent: s.spent.map((x) => ({ symbol: x.symbol, spent: x.spentDisplay, total: x.totalDisplay })),
-    lastError: s.lastError,
+    spent: s.spent.map((x) => ({ symbol: shown(x.symbol), spent: x.spentDisplay, total: x.totalDisplay })),
+    lastError: shown(s.lastError),
   };
 }
 
@@ -112,10 +120,10 @@ export async function preview(code: string): Promise<Preview> {
   if (r.case !== 'preview') throw new Error(`connect.preview answered ${r.case ?? 'nothing'}`);
   return {
     offerDigest: r.value.offerDigest,
-    displayName: r.value.displayName,
+    displayName: shown(r.value.displayName),
     appDeviceId: r.value.appDeviceId,
-    endpoint: r.value.endpoint,
-    scopeLines: r.value.scopeLines,
+    endpoint: shown(r.value.endpoint),
+    scopeLines: r.value.scopeLines.map(shown),
   };
 }
 
@@ -148,9 +156,9 @@ export async function pending(): Promise<Pending[]> {
   return r.value.pending.map((p) => ({
     sessionId: p.sessionId,
     seq: p.seq,
-    displayName: p.displayName,
-    summary: p.summary,
-    reason: p.reason,
+    displayName: shown(p.displayName),
+    summary: shown(p.summary),
+    reason: shown(p.reason),
     approved: p.approved,
   }));
 }
@@ -162,7 +170,7 @@ export async function respond(sessionId: Uint8Array, seq: bigint, choice: 'appro
   if (r.case !== 'decided') throw new Error(`connect.respond answered ${r.case ?? 'nothing'}`);
   const s = r.value.session;
   if (s === undefined) throw new Error('connect.respond answered no session');
-  return { session: session(s), outcome: decidedOutcome(r.value.outcome), line: r.value.line };
+  return { session: session(s), outcome: decidedOutcome(r.value.outcome), line: shown(r.value.line) };
 }
 
 function decidedOutcome(o: pb.ConnectOutcome): Decided['outcome'] {
@@ -186,5 +194,5 @@ export async function disconnect(sessionId: Uint8Array): Promise<Session> {
 export async function log(sessionId: Uint8Array): Promise<LogEntry[]> {
   const r = await query('connect.log', new pb.ConnectSessionRefV1({ sessionId: new Uint8Array(sessionId) }).toBinary());
   if (r.case !== 'log') throw new Error(`connect.log answered ${r.case ?? 'nothing'}`);
-  return r.value.entries.map((e) => ({ seq: e.seq, summary: e.summary, outcome: outcome(e.outcome), detail: e.detail }));
+  return r.value.entries.map((e) => ({ seq: e.seq, summary: shown(e.summary), outcome: outcome(e.outcome), detail: shown(e.detail) }));
 }

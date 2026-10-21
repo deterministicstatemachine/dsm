@@ -4,17 +4,18 @@
 //! Hardware-Identity predicate (`anchor_core::accept::accept_offline`, Def. 12).
 //!
 //! The DSM app supplies three adapters and NEVER reimplements anchor crypto:
-//!   - [`DsmStateVerifier`] (`DsmVerifier`): device-SMT inclusion of the anchor-state leaf
-//!     `L = H("DSM/anchor-state/v2" ‖ B ‖ h ‖ u)` in `R_i`/`R_{i+1}` (reuses the DSM SMT), the DSM
-//!     transition (handler-gated), delivery, and the genesis upgrade cert (dormant in Stage 3).
+//!   - [`DsmStateVerifier`] (`DsmVerifier`): that `R_i`/`R_{i+1}` commit the sender's offline
+//!     account at the release's frontier and counter (the account's leaf in the device SMT, and
+//!     its counter and frontier leaves in its own SMT), the DSM transition (handler-gated),
+//!     delivery, and the genesis upgrade cert (dormant in Stage 3).
 //!   - [`Ed25519ChipSig`] (`ChipSig`): the resident-chip signature `σ^chip`, verified with the
 //!     enrolled `pk_chip` via `dsm::crypto::classical_verify::verify_ed25519`.
 //!   - SPHINCS+ `PartitionSig` (`σ^host`): reuses `dsm::crypto::sphincs` under the pinned `pk_host`.
 //!
 //! Fail-closed: an absent/malformed release, an un-enrolled anchor, or ANY failed predicate check
 //! releases no value and recovers online. There is **no** live counter read, no relay, no boot
-//! fence, and no MACANDD on this path — uniqueness is the software device-SMT frontier; the SMT
-//! inclusion proofs `Π_i`/`Π_{i+1}` ride inside the release.
+//! fence, and no MACANDD on this path — uniqueness is the software counter in the device's
+//! offline account; the offline-state proofs `Π_i`/`Π_{i+1}` ride inside the release.
 
 use anchor_core::accept::{accept_offline, AcceptError, DsmVerifier, VerifierContext};
 use anchor_core::proto::pb;
@@ -114,31 +115,42 @@ impl anchor_core::tropic::PartitionSig for SphincsPart {
     }
 }
 
-/// Device-SMT verifier (`DsmVerifier`). Delegates to the DSM SMT anchor-state leaf inclusion check;
-/// never reimplements anchor crypto. The inclusion proofs `Π_i`/`Π_{i+1}` are carried IN the release
-/// and passed to `verify_smt_leaf` by the predicate.
+/// Device-SMT verifier (`DsmVerifier`). Delegates to the DSM offline-account check; never
+/// reimplements anchor crypto. The offline-state proofs `Π_i`/`Π_{i+1}` are carried IN the release
+/// and passed to `verify_offline_state` by the predicate.
 struct DsmStateVerifier<'a> {
     receiver_device_id: &'a [u8; 32],
-    /// The pinned bundle `B` — the SMT leaf key is `anchor_state_leaf_key(B)`.
+    /// The pinned bundle `B` — the device leaf of its offline account is
+    /// `offline_account_leaf_key(B)`.
     bundle: &'a [u8; 32],
-    /// The anchor-state leaves, before and after, that the step's verified
-    /// receipt proves its write set moved.
+    /// The counter and frontiers of the account spend the step's verified
+    /// receipt proves its write set made.
     verified: &'a dsm::verification::receipt_verification::BearerLeaves,
     /// The release's anchor counter `u_i`.
     anchor_counter: u64,
 }
 
 impl DsmVerifier for DsmStateVerifier<'_> {
-    fn verify_smt_leaf(&self, root: &[u8; 32], proof: &[u8], leaf: &[u8; 32]) -> bool {
-        // `leaf` = anchor_state_leaf(B, h, u) (computed by the predicate). Check the SMT inclusion
-        // proof binds exactly this leaf value, at key anchor_state_leaf_key(B), under `root` (= R_i
-        // or R_{i+1}). An empty/absent proof (producer has not attached Π yet) fails closed.
-        dsm::core::bilateral_transaction_manager::verify_anchor_state_leaf(
-            root,
-            self.bundle,
-            leaf,
-            proof,
-        )
+    fn verify_offline_state(
+        &self,
+        root: &[u8; 32],
+        bundle: &[u8; 32],
+        frontier: &[u8; 32],
+        counter: u64,
+        proof: &[u8],
+    ) -> Result<(), anchor_core::accept::OfflineStateRefused> {
+        // `root` (= R_i or R_{i+1}) commits the offline account of the pinned bundle at the
+        // release's frontier and counter. An empty/absent proof (producer has not attached Π yet)
+        // fails closed.
+        if bundle != self.bundle {
+            log::warn!("[anchor-accept] an offline state proof for another bundle");
+            return Err(anchor_core::accept::OfflineStateRefused);
+        }
+        dsm::types::offline_account::verify_offline_state(root, bundle, frontier, counter, proof)
+            .map_err(|e| {
+                log::warn!("[anchor-accept] the offline state proof does not verify: {e}");
+                anchor_core::accept::OfflineStateRefused
+            })
     }
 
     fn verify_transition(
@@ -151,26 +163,15 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // `cert.prev_frontier` and `cert.next_frontier`, anchor frontiers. Def. 12 step 12 asks
         // for `σ^DSM` over the transition and the whole-state consumption `R_i → R_{i+1}`. Both
         // are in the stitched receipt `decide_confirm` verified, which this verifier holds: its
-        // A-side EK signature is `σ^DSM`, and its write set folds `R_i` to `R_{i+1}`, moving this
-        // anchor-state leaf from `verified.anchor_before` to `verified.anchor_after`. The
-        // transition is that consumption when its frontiers, at the release's counter and its
-        // successor under the pinned bundle, are exactly those two leaves. The digest is bound
-        // through the successor frontier, `H(h_i ‖ D)`, which checks 7-11 tie to the transition.
-        self.anchor_counter
-            .checked_add(1)
-            .is_some_and(|next_counter| {
-                self.verified.bundle == *self.bundle
-                    && anchor_core::root_advance::anchor_state_leaf(
-                        self.bundle,
-                        prev_frontier,
-                        self.anchor_counter,
-                    ) == self.verified.anchor_before
-                    && anchor_core::root_advance::anchor_state_leaf(
-                        self.bundle,
-                        next_frontier,
-                        next_counter,
-                    ) == self.verified.anchor_after
-            })
+        // A-side EK signature is `σ^DSM`, and its write set folds `R_i` to `R_{i+1}`, spending
+        // the pinned bundle's offline account from counter `verified.counter` and frontier
+        // `verified.frontier` to `verified.next_frontier`. The transition is that consumption when
+        // the release's counter and frontiers are exactly those. The digest is bound through the
+        // successor frontier, `H(h_i ‖ D)`, which checks 7-11 tie to the transition.
+        self.verified.bundle == *self.bundle
+            && self.verified.counter == self.anchor_counter
+            && self.verified.frontier == *prev_frontier
+            && self.verified.next_frontier == *next_frontier
     }
 
     fn delivers_to_receiver(&self, _transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool {
@@ -242,11 +243,11 @@ pub(crate) fn pin_admit_decision(
     PinAdmitDecision::NoChange
 }
 
-/// The anchor-state leaves a sender's offline-bearer step moves, DERIVED — never read — from its
-/// release: the counter's successor is `u_i + 1`, and the frontier's successor is
-/// `anchor_root_advance(h_i, D_{i+1})` with `D_{i+1}` recomputed from the release's transition
-/// under this receiver's own challenge `r_R`. Both leaves are under `bundle`, the one this
-/// receiver pins (or is admitting) for the sender. A release whose carried successor is not the
+/// The offline-account spend a sender's offline-bearer step makes, DERIVED — never read — from
+/// its release: from the release's counter `u_i` and frontier `h_i` to the frontier's successor
+/// `anchor_root_advance(h_i, D_{i+1})`, with `D_{i+1}` recomputed from the release's transition
+/// under this receiver's own challenge `r_R`, and a successor counter of `u_i + 1`. The account is
+/// the one under `bundle`, which this receiver pins (or is admitting) for the sender. A release whose carried successor is not the
 /// derived one is refused. The release's signatures are checked by [`accept_offline_release`]
 /// before anything commits; these leaves are what the step's receipt must prove it moved.
 pub fn bearer_leaves_of_release(
@@ -254,7 +255,7 @@ pub fn bearer_leaves_of_release(
     bundle: &[u8; 32],
     receiver_challenge: &[u8; 32],
 ) -> Result<dsm::verification::receipt_verification::BearerLeaves, OfflineRecover> {
-    use anchor_core::root_advance::{anchor_root_advance, anchor_state_leaf, transition_digest};
+    use anchor_core::root_advance::{anchor_root_advance, transition_digest};
     let rel = decode_release(offline_release)?;
     let t = rel.transition.as_transition();
     let next_counter = t
@@ -270,8 +271,9 @@ pub fn bearer_leaves_of_release(
     }
     Ok(dsm::verification::receipt_verification::BearerLeaves {
         bundle: *bundle,
-        anchor_before: anchor_state_leaf(bundle, t.prev_root, t.anchor_counter),
-        anchor_after: anchor_state_leaf(bundle, &next_frontier, next_counter),
+        counter: t.anchor_counter,
+        frontier: *t.prev_root,
+        next_frontier,
     })
 }
 
@@ -297,7 +299,7 @@ pub struct AdoptedAnchorState {
 ///
 /// `accepted_frontier`: the frontier adopted from the holder's last accepted release. `None` =
 /// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
-/// authenticity rests on the anchor-state inclusion proofs + the three signatures, the same trust
+/// authenticity rests on the offline-state proofs + the three signatures, the same trust
 /// root as the first-transfer pin admit.
 pub fn accept_offline_release(
     verified: &dsm::bilateral::offline::VerifiedConfirm,
@@ -398,8 +400,9 @@ mod tests {
         let bundle = [9u8; 32];
         let leaves = dsm::verification::receipt_verification::BearerLeaves {
             bundle,
-            anchor_before: [0x0Au8; 32],
-            anchor_after: [0x0Bu8; 32],
+            counter: 4,
+            frontier: [0x0Au8; 32],
+            next_frontier: [0x0Bu8; 32],
         };
         let dsm = DsmStateVerifier {
             receiver_device_id: &receiver,
@@ -415,21 +418,21 @@ mod tests {
     }
 
     /// SA-54. Def. 12 step 12 is the consumption the verified receipt proves: the transition's
-    /// frontier pair, at the release's counter and its successor under the pinned bundle, must
-    /// be the anchor-state leaves the receipt's write set moves. Any other frontier, counter or
-    /// bundle is not that consumption.
-    /// MUTATION CONTROL: answering the hook without the leaves (any constant answer, or one
+    /// frontier pair and the release's counter, under the pinned bundle, must be the account
+    /// spend the receipt's write set makes. Any other frontier, counter or bundle is not that
+    /// consumption.
+    /// MUTATION CONTROL: answering the hook without the spend (any constant answer, or one
     /// that ignores a frontier) turns this red.
     #[test]
     fn the_transition_is_only_the_consumption_the_verified_receipt_proves() {
-        use anchor_core::root_advance::anchor_state_leaf;
         let receiver = [7u8; 32];
         let bundle = [9u8; 32];
         let (prev, next, counter) = ([0x21u8; 32], [0x22u8; 32], 41u64);
         let leaves = dsm::verification::receipt_verification::BearerLeaves {
             bundle,
-            anchor_before: anchor_state_leaf(&bundle, &prev, counter),
-            anchor_after: anchor_state_leaf(&bundle, &next, counter + 1),
+            counter,
+            frontier: prev,
+            next_frontier: next,
         };
         let digest = [0x23u8; 32];
         let check = |bundle: &[u8; 32], counter: u64, prev: &[u8; 32], next: &[u8; 32]| {
@@ -482,7 +485,7 @@ mod tests {
         ));
         // Non-empty bytes with no transition/cert: decodes as a proto but fails `to_release`.
         let bytes = pb::OfflineRelease {
-            anchor_smt_proof_before: vec![0x01],
+            offline_state_proof_before: vec![0x01],
             ..Default::default()
         }
         .encode_to_vec();

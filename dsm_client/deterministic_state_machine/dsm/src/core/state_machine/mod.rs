@@ -132,7 +132,6 @@ impl StateMachine {
         counterparty_devid: [u8; 32],
         operation: Operation,
         deltas: &[crate::types::device_state::BalanceDelta],
-        anchor_leaf: Option<crate::types::device_state::AnchorLeafUpdate>,
         offline_spend: Option<crate::types::device_state::OfflineSpend>,
     ) -> Result<crate::types::device_state::AdvanceOutcome, DsmError> {
         let ds = self.device_state.as_ref().ok_or_else(|| {
@@ -148,7 +147,6 @@ impl StateMachine {
             counterparty_devid,
             operation,
             deltas,
-            anchor_leaf,
             offline_spend,
         )
     }
@@ -194,7 +192,6 @@ impl StateMachine {
             counterparty_devid,
             operation,
             deltas,
-            None, // anchor_leaf — this convenience path is for ordinary transitions
             None, // offline_spend — ordinary (online) transition, no allocation draw
         )?;
         self.commit_advance(&outcome);

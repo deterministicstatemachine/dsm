@@ -24,7 +24,7 @@ pub mod crypto_error;
 pub mod device_state; // §2.2, §4, §8: Per-Device SMT head + relationship chains
 pub mod error;
 pub mod identifiers; // New type-safe identifiers
-pub mod offline_allocation_leaf; // offline-cash device-bound allocation leaf (load/unload)
+pub mod offline_account; // the offline account: a smaller SMT whose root is one device-SMT leaf
 pub mod operations;
 pub mod policy_types;
 pub mod proto; // generated OUT_DIR include (dsm.rs)

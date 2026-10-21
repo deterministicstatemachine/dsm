@@ -347,12 +347,15 @@ lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.without_evidence_a_registered_fulfi
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.witness_encoding_does_not_change_policy_fulfillment_id	(none)
 lean4/DSMSofiStorage.lean	DSMSofiStorage.Discovered.objects_markIncomplete	(none)
 lean4/DSMSofiStorage.lean	DSMSofiStorage.Discovered.objects_prepend	(none)
+lean4/DSMSofiStorage.lean	DSMSofiStorage.a_read_too_few_members_ended_is_never_none	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.a_wrong_namespace_never_counts	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.acquired_bytes_are_stored	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.acquisition_decides_nothing	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.addr_inj	propext
+lean4/DSMSofiStorage.lean	DSMSofiStorage.an_object_seen_short_of_stored_is_never_none	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.an_unestablished_candidate_is_never_none	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.an_unestablished_candidate_makes_discovery_partial	Quot.sound,propext
+lean4/DSMSofiStorage.lean	DSMSofiStorage.bytes_seen_that_are_no_object_under_the_locator_are_nothing	(none)
 lean4/DSMSofiStorage.lean	DSMSofiStorage.counted_mem	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.counting_reads_agree	propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.counts_some	propext
@@ -368,6 +371,7 @@ lean4/DSMSofiStorage.lean	DSMSofiStorage.over_budget_is_unavailable_never_none	p
 lean4/DSMSofiStorage.lean	DSMSofiStorage.publish_indexes_the_address	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.published_is_found	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.published_is_found_past_foreign_candidates	Quot.sound,propext
+lean4/DSMSofiStorage.lean	DSMSofiStorage.published_is_judged	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.published_is_stored	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.silence_acquires_nothing	Quot.sound,propext
 lean4/DSMSofiStorage.lean	DSMSofiStorage.silence_never_counts	(none)

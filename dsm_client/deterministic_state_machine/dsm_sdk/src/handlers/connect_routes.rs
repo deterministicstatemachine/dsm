@@ -127,6 +127,13 @@ impl Executed {
     }
 }
 
+/// The request a signed answer answers.
+fn interim_seq(answer: &generated::AppResponseV1) -> Result<u64, String> {
+    generated::AppResponseBodyV1::decode(answer.body.as_slice())
+        .map(|body| body.seq)
+        .map_err(|e| format!("the waiting notice just signed: {e}"))
+}
+
 /// How far one fetched request got.
 enum Flow {
     /// Processed (carried out, declined or failed): the next may follow.
@@ -134,8 +141,10 @@ enum Flow {
     /// Already processed earlier: skipped.
     Seen,
     /// Outside its grant: it waits for the player, and so does every later
-    /// request of the session.
-    Waiting,
+    /// request of the session. The signed notice that it waits, for the
+    /// application, is sent once the session's lock is released: the
+    /// application's endpoint never holds the lock (SA-127).
+    Waiting(Box<generated::AppResponseV1>),
     /// Inside its grant but not yet constructible: its relationship with the
     /// application is catching up (a transfer the wallet received awaits the
     /// application's finality). Nothing is answered or spent; the next sync
@@ -143,11 +152,23 @@ enum Flow {
     NotYet(String),
 }
 
-/// One processor at a time: the replay guard is read and a request carried
-/// out under it as one step, whichever of the listener's sync, a sync the
-/// player starts, the player's own decision or a disconnect reaches it first.
-static PROCESSING: once_cell::sync::Lazy<tokio::sync::Mutex<()>> =
-    once_cell::sync::Lazy::new(|| tokio::sync::Mutex::new(()));
+/// One processor at a time for each session: a session's replay guard is
+/// read and a request carried out under it as one step, whichever of the
+/// listener's sync, a sync the player starts, the player's own decision or a
+/// disconnect reaches it first. The guard is per session (DSM Amendment
+/// A11), so the lock is too: no application's requests, and no application's
+/// endpoint, hold another application or the player (SA-127).
+static PROCESSING: once_cell::sync::Lazy<
+    std::sync::Mutex<BTreeMap<[u8; 32], std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(BTreeMap::new()));
+
+/// The processing lock of the session `session_id` ([`PROCESSING`]).
+fn session_lock(session_id: &[u8; 32]) -> Result<std::sync::Arc<tokio::sync::Mutex<()>>, String> {
+    let mut locks = PROCESSING
+        .lock()
+        .map_err(|e| format!("the sessions' processing locks: {e}"))?;
+    Ok(locks.entry(*session_id).or_default().clone())
+}
 
 /// What became of a request the player approved.
 enum Approved {
@@ -663,7 +684,8 @@ impl AppRouterImpl {
         const ROUTE: &str = "connect.respond";
         let req: generated::ConnectRespondRequestV1 = body(args, ROUTE)?;
         let sid = d32(&req.session_id, "the session")?;
-        let one = PROCESSING.lock().await;
+        let lock = session_lock(&sid)?;
+        let one = lock.lock().await;
         let session = store::session(&sid)
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .filter(|s| s.connected == store::SessionStatus::Connected)
@@ -694,16 +716,29 @@ impl AppRouterImpl {
                 }
             }
             Ok(generated::ConnectDecision::Decline) => {
-                let declined = Executed {
-                    outcome: generated::ConnectOutcome::Declined,
-                    reason: "the player declined it".into(),
-                    result: None,
-                };
-                self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
-                (
-                    generated::ConnectOutcome::Declined,
-                    format!("{name}: {summary}, declined."),
-                )
+                // A run approved earlier that committed before its record was
+                // written carried the request out: declining it now records
+                // what happened, never a refusal over a committed payment
+                // (SA-129).
+                if let Some(committed) =
+                    self.finish_committed(&session, request_body.seq, &summary)?
+                {
+                    (
+                        generated::ConnectOutcome::CarriedOut,
+                        format!("{name}: {summary}, {committed}."),
+                    )
+                } else {
+                    let declined = Executed {
+                        outcome: generated::ConnectOutcome::Declined,
+                        reason: "the player declined it".into(),
+                        result: None,
+                    };
+                    self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
+                    (
+                        generated::ConnectOutcome::Declined,
+                        format!("{name}: {summary}, declined."),
+                    )
+                }
             }
             _ => return Err(format!("{ROUTE}: approve or decline")),
         };
@@ -856,7 +891,8 @@ impl AppRouterImpl {
             if held.state != store::PendingState::Approved {
                 return Ok(());
             }
-            let one = PROCESSING.lock().await;
+            let lock = session_lock(&session.session_id)?;
+            let one = lock.lock().await;
             let current = connected(&session.session_id)?;
             let approved = self.carry_out_approved(&current, &held).await?;
             drop(one);
@@ -867,18 +903,26 @@ impl AppRouterImpl {
         }
         let after = connected(&session.session_id)?.last_seq;
         let batch = relay.requests(&session.session_id, after).await?;
+        let lock = session_lock(&session.session_id)?;
         for request in &batch.requests {
-            let one = PROCESSING.lock().await;
+            let one = lock.lock().await;
             // Re-read under the lock: each processed request moves the guard.
             let current = connected(&session.session_id)?;
-            let flow = self
-                .process(&current, &relay, &request.encode_to_vec())
-                .await?;
+            let flow = self.process(&current, &request.encode_to_vec()).await?;
             drop(one);
             match flow {
                 Flow::Processed => deliver_owed(&current).await?,
                 Flow::Seen => {}
-                Flow::Waiting => break,
+                Flow::Waiting(interim) => {
+                    let seq = interim_seq(&interim)?;
+                    relay.respond(&interim).await.map_err(|e| {
+                        format!(
+                            "request {seq} waits for the player; telling the application \
+                             failed: {e}"
+                        )
+                    })?;
+                    break;
+                }
                 Flow::NotYet(why) => return Err(why),
             }
         }
@@ -888,7 +932,6 @@ impl AppRouterImpl {
     async fn process(
         &self,
         session: &store::WalletSession,
-        relay: &Relay,
         request_bytes: &[u8],
     ) -> Result<Flow, String> {
         let (request_body, request) = match read_request(request_bytes, session) {
@@ -976,12 +1019,7 @@ impl AppRouterImpl {
                 })?;
                 let interim = generated::AppResponseV1::decode(interim.as_slice())
                     .map_err(|e| format!("the waiting notice just signed: {e}"))?;
-                relay.respond(&interim).await.map_err(|e| {
-                    format!(
-                        "request {seq} waits for the player; telling the application failed: {e}"
-                    )
-                })?;
-                Ok(Flow::Waiting)
+                Ok(Flow::Waiting(Box::new(interim)))
             }
         }
     }
@@ -1061,6 +1099,28 @@ impl AppRouterImpl {
         }
         match request {
             Request::AcceptIssued { anchor } => {
+                // Whose object it is is read from its committed policy before
+                // anything is rooted: rooting first left another creator's
+                // object adopted after the refusal (SA-124).
+                let creator = match self.verified_policy(*anchor).await {
+                    Ok(parsed) => match parsed.release {
+                        dsm::economic::token_policy::Release::AllAtCreation {
+                            creator_device_id,
+                            ..
+                        } => creator_device_id,
+                        _ => {
+                            return Executed::failed(
+                                "the object's committed policy names no creating device",
+                            )
+                        }
+                    },
+                    Err(e) => return Executed::failed(format!("the object's policy: {e}")),
+                };
+                if creator != session.app_device_id {
+                    return Executed::failed(
+                        "the object's committed policy names another creator than this application",
+                    );
+                }
                 if let Err(e) = self.root_anchor(anchor).await {
                     return Executed::failed(format!("rooting the object: {e}"));
                 }
@@ -1677,6 +1737,26 @@ impl AppRouterImpl {
             .map_err(|e| format!("{ROUTE}: {e}"))?
             .ok_or_else(|| format!("{ROUTE}: this account made no such offer"))?;
         let network = own_network()?;
+        // A session's id is the offer and the wallet's device id, both named
+        // by the accept before anything about it is checked. An accept for a
+        // session this account already holds is answered from what it holds,
+        // before any signature is checked or the wallet's directory read: the
+        // same bytes again are that session, any other bytes are refused.
+        // Replayed over the public relay, one accept cost a SPHINCS+
+        // verification and a directory read every time (SA-81).
+        if let Some(card) = probe.wallet_card.as_ref() {
+            let named =
+                crate::sdk::connect::signed::card_identity(card, &probe.wallet_att_a, &network)
+                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let sid = session_id(&digest, &named.device_id);
+            if let Some(held) = store::app_session(&sid).map_err(|e| format!("{ROUTE}: {e}"))? {
+                return if held.accept == accept.encode_to_vec() {
+                    Ok(Reply::Session(app_session_view(&held)?))
+                } else {
+                    Err(format!("{ROUTE}: this session holds another accept"))
+                };
+            }
+        }
         let verified =
             app::verify_accept(&accept, &offer, &network).map_err(|e| format!("{ROUTE}: {e}"))?;
         let resolved = resolve_counterparty_via_transport(&verified.wallet_card)
@@ -2594,7 +2674,8 @@ async fn connect_disconnect(args: &[u8]) -> Result<Reply, String> {
     let req: generated::ConnectSessionRefV1 = body(args, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
     // A request being carried out finishes first; none starts after.
-    let one = PROCESSING.lock().await;
+    let lock = session_lock(&sid)?;
+    let one = lock.lock().await;
     store::disconnect(&sid).map_err(|e| format!("{ROUTE}: {e}"))?;
     drop(one);
     let session = store::session(&sid)
@@ -2710,6 +2791,11 @@ fn connect_app_requests(params: &[u8]) -> Result<Reply, String> {
     const ROUTE: &str = "connect.app.requests";
     let req: generated::ConnectAppRequestsQueryV1 = body(params, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
+    // A read for a session this account never made has nothing to wait for:
+    // refused at once, so the relay does not hold it (SA-123).
+    store::app_session(&sid)
+        .map_err(|e| format!("{ROUTE}: {e}"))?
+        .ok_or_else(|| format!("{ROUTE}: no such session"))?;
     let mut requests = Vec::new();
     for bytes in store::app_requests_after(&sid, req.after).map_err(|e| format!("{ROUTE}: {e}"))? {
         requests.push(

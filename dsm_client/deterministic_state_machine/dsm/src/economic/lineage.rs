@@ -163,11 +163,10 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// The parent a peer's step is validated from (DSM Amendment A14): the
-    /// root that step's own witness was built on, taken only because the
-    /// step's claim is final at the cell routed from it and the step is then
-    /// validated from it, where `advance_validated` refuses a witness built
-    /// on any other root.
+    /// A root of a peer this verifier validated itself (DSM Amendment A19):
+    /// a frontier the receiver recorded, or the end of a step its walk
+    /// validated from the root before it, where `advance_validated` refuses
+    /// a witness built on any other root. Never a root a peer merely states.
     /// **Only the peer step verifier may call this**, from one place
     /// (`peer_lineage::authenticated_root`).
     pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
@@ -474,7 +473,7 @@ impl EconomicActivationSnapshot {
         }
         Ok(Self {
             online_balances_empty: held.is_empty(),
-            outstanding_offline_allocation: !head.offline_allocations_snapshot().is_empty(),
+            outstanding_offline_allocation: head.holds_offline_value(),
         })
     }
 }
@@ -597,10 +596,11 @@ pub struct AcceptedDsmSuccessor {
     evidence_addr: [u8; 32],
 }
 
-/// A verified offline-boundary acceptance.
+/// A verified offline-boundary acceptance: the boundary its body folds to, and
+/// the address of the exact body bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedOfflineBoundary {
-    operation_digest: [u8; 32],
+    verified: crate::economic::offline_boundary::VerifiedOfflineBoundary,
     evidence_addr: [u8; 32],
 }
 
@@ -612,11 +612,11 @@ pub struct AcceptedOfflineBoundary {
 /// whenever the digests happened to agree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcceptedSubstrate {
-    // Boxed: the successor arm carries the verified operation (~500B) while
-    // the boundary arm is two digests; an unboxed enum would make every
-    // substrate the size of the largest.
+    // Boxed, both: the successor arm carries the verified operation (~500B)
+    // and the boundary arm the verified boundary's roots; unboxed, every
+    // substrate would be the size of the largest.
     DsmSuccessor(Box<AcceptedDsmSuccessor>),
-    OfflineBoundary(AcceptedOfflineBoundary),
+    OfflineBoundary(Box<AcceptedOfflineBoundary>),
 }
 
 impl AcceptedSubstrate {
@@ -640,23 +640,33 @@ impl AcceptedSubstrate {
         }))
     }
 
-    /// Call only after the exact `OfflineBoundaryAttestationV1` at
-    /// `evidence_addr` has been verified and found to commit
-    /// `operation_digest`.
+    /// The boundary body `OfflineBoundaryBody::verify` established, at the
+    /// address of its exact bytes. `VerifiedOfflineBoundary` has no other
+    /// constructor, so the boundary cannot be asserted here.
     pub fn from_verified_offline_boundary(
-        operation_digest: [u8; 32],
+        verified: crate::economic::offline_boundary::VerifiedOfflineBoundary,
         evidence_addr: [u8; 32],
     ) -> Self {
-        Self::OfflineBoundary(AcceptedOfflineBoundary {
-            operation_digest,
+        Self::OfflineBoundary(Box::new(AcceptedOfflineBoundary {
+            verified,
             evidence_addr,
-        })
+        }))
+    }
+
+    /// The verified offline boundary, for an offline-boundary substrate.
+    pub fn offline_boundary(
+        &self,
+    ) -> Option<&crate::economic::offline_boundary::VerifiedOfflineBoundary> {
+        match self {
+            Self::DsmSuccessor(_) => None,
+            Self::OfflineBoundary(b) => Some(&b.verified),
+        }
     }
 
     pub fn operation_digest(&self) -> [u8; 32] {
         match self {
             Self::DsmSuccessor(s) => s.operation_digest,
-            Self::OfflineBoundary(b) => b.operation_digest,
+            Self::OfflineBoundary(b) => b.verified.operation_digest(),
         }
     }
 
@@ -742,9 +752,12 @@ pub enum EconomicValidationError {
         manifest: [u8; 32],
         accepted: [u8; 32],
     },
-    /// Offline-boundary admissions have no specified write-set semantics yet
-    /// (Step 5); fail closed rather than validate an unchecked boundary.
-    OfflineBoundaryWriteSetNotYetSpecified,
+    /// The witness names an economic operation id that is not the identity
+    /// of the verified offline boundary.
+    OfflineBoundaryIdMismatch {
+        expected: [u8; 32],
+        witness: [u8; 32],
+    },
     /// The witness is not the exact economic effect of the accepted
     /// operation.
     WriteSet(crate::economic::write_set::WriteSetError),
@@ -819,10 +832,10 @@ impl core::fmt::Display for EconomicValidationError {
                 "economic validation: the manifest names different substrate evidence than the \
                  acceptance actually used — the evidence DAG would no longer be the evidence"
             ),
-            Self::OfflineBoundaryWriteSetNotYetSpecified => write!(
+            Self::OfflineBoundaryIdMismatch { .. } => write!(
                 f,
-                "economic validation: offline-boundary write-set semantics are not yet \
-                 specified; failing closed"
+                "economic validation: the witness's economic operation id is not the identity \
+                 of the offline boundary its substrate verifies to"
             ),
             Self::WriteSet(e) => write!(f, "economic validation: {e}"),
             Self::ManifestAddrMismatch { .. } => write!(
@@ -955,9 +968,24 @@ pub fn advance_validated(
                     accepted: b.evidence_addr,
                 });
             }
-            // Step 5 owes the boundary write-set semantics; an unchecked
-            // boundary admission must not validate meanwhile.
-            return Err(EconomicValidationError::OfflineBoundaryWriteSetNotYetSpecified);
+            // The boundary's identity is hashed from the roots it starts
+            // from; the witness must name exactly that boundary.
+            if b.verified.operation_id() != witness.economic_operation_id {
+                return Err(EconomicValidationError::OfflineBoundaryIdMismatch {
+                    expected: b.verified.operation_id(),
+                    witness: witness.economic_operation_id,
+                });
+            }
+            // The boundary ↔ write-set binding: a load is its exact debit,
+            // an unload its exact credit funded by the offline debit, and the
+            // consumption of that debit.
+            crate::economic::write_set::verify_boundary_write_set(
+                &b.verified,
+                genesis,
+                device_id,
+                witness,
+            )
+            .map_err(EconomicValidationError::WriteSet)?;
         }
         _ => return Err(EconomicValidationError::SubstrateKindMismatch),
     }
@@ -1052,14 +1080,22 @@ pub fn advance_validated(
         canonical_storage_set_id: canonical_set,
         substrate_b_pair: accepted.dsm_successor_pair(),
         verified_operation: accepted.dsm_verified_operation(),
+        offline_boundary: accepted.offline_boundary(),
     };
-    // THE MARKET-LEG TOKEN-POLICY CONJUNCT: a DLV successor's legs must
-    // satisfy the applicable token policy (SoFi Def 4.1 / Req 4.4 / Req 4.6).
-    // Central, on the VERIFIED operation, so fund and close are bound even
-    // though their SameTransitionMove credits carry no evidence channel.
-    // Non-DLV operations pass vacuously.
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
+
+    // THE TRANSFER CONJUNCT: a Transfer moves a token only when its committed
+    // policy transfers (SoFi §49, "on every transfer, online and offline").
+    // Checked here, on the verified operation, so every verifier of the
+    // step — not only the two endpoints — refuses a non-transferable token
+    // moved by a sender that skips its own check (SA-136).
+    if let Some(crate::types::operations::Operation::Transfer { policy_commit, .. }) =
+        accepted.dsm_verified_operation()
+    {
+        crate::economic::provenance::check_transfer_policy(policy_commit, resolver)
+            .map_err(EconomicValidationError::Provenance)?;
+    }
 
     // A SoFi operation cannot reach here — `verify_operation_write_set`
     // refuses it by name above — and if it ever did, "no DLV transition"

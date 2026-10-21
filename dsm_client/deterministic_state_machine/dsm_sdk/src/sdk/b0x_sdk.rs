@@ -491,11 +491,14 @@ pub(crate) const RECEIPT_COUNTERSIGN_B_METHOD: &str = "receipt.countersign.b";
 pub(crate) const RELATIONSHIP_FINALIZED_METHOD: &str = "relationship.finalized.v1";
 
 /// One finality certificate as it came off the wire: the node message id it
-/// is ACKed under and the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`).
+/// is ACKed under, the raw `ArgPack.body` (unvalidated `RelationshipFinalizedV1`),
+/// and the content key of the copy it came in, by which one that never will be
+/// taken is passed over.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationshipFinalizedMessage {
     pub message_id: String,
     pub body: Vec<u8>,
+    pub copy_key: String,
 }
 
 /// One B-side countersign delta as it came off the wire, kept whole so the
@@ -509,6 +512,9 @@ pub struct CountersignDelta {
     pub envelope_bytes: Vec<u8>,
     /// `ArgPack.body`: the `ReceiptCountersignB` wire bytes, unvalidated.
     pub body: Vec<u8>,
+    /// This copy's `envelope_merge_key`, by which a delta that never will be
+    /// taken is passed over.
+    pub copy_key: String,
 }
 
 /// Members whose last request failed. A failed member stays failed until a
@@ -617,6 +623,37 @@ pub(crate) fn spool_end(address: &str, endpoint: &str) -> Option<u64> {
     spool_ends()
         .get(&(address.to_string(), endpoint.to_string()))
         .copied()
+}
+
+/// Each distinct copy the members returned once, by its merge key, taken
+/// from the members in turn: every member's first copy, then every member's
+/// second, and so on. Each member's own copies keep its spool's order, so a
+/// consumer that takes only some takes each member's oldest. No member's
+/// answer gets ahead of another's: a member that returns nothing but fresh
+/// junk takes at most its turn of any budget the consumer spends on the
+/// merged copies, and the copies the other members hold are read within
+/// the rest (SA-101).
+fn merge_member_copies<T>(member_copies: Vec<Vec<(String, T)>>) -> Vec<(String, T)> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    let mut members: Vec<std::vec::IntoIter<(String, T)>> =
+        member_copies.into_iter().map(Vec::into_iter).collect();
+    loop {
+        let mut took_a_turn = Vec::new();
+        for member in &mut members {
+            if let Some(copy) = member.next() {
+                took_a_turn.push(copy);
+            }
+        }
+        if took_a_turn.is_empty() {
+            return merged;
+        }
+        for (copy_key, copy) in took_a_turn {
+            if seen.insert(copy_key.clone()) {
+                merged.push((copy_key, copy));
+            }
+        }
+    }
 }
 
 /// How long a member holds a wait before answering that nothing landed: the
@@ -2445,6 +2482,22 @@ impl B0xSDK {
     /// The next call continues from the stored position.
     const MAX_RETRIEVE_PAGES_PER_NODE: usize = 16;
 
+    /// The bytes of the pages read from one node in one retrieval: one page
+    /// at its largest ([`spool_page_limit`]). A member answering pages of the
+    /// largest envelopes is read one page a call, not sixteen, so what one
+    /// route's read holds is bounded by bytes as well as pages (SA-97). Pages
+    /// of honest envelopes, far smaller, still reach the page cap first. The
+    /// next call continues from the stored position.
+    fn retrieve_bytes_per_node() -> usize {
+        spool_page_limit()
+    }
+
+    /// Whether one retrieval reads another page from a node it has read
+    /// `pages` pages of, `fetched` bytes in all.
+    fn reads_on(pages: usize, fetched: usize) -> bool {
+        pages < Self::MAX_RETRIEVE_PAGES_PER_NODE && fetched < Self::retrieve_bytes_per_node()
+    }
+
     /// The position after `seq` on a node's spool, when `seq` is one the node
     /// could hold. A spool position is the node's database sequence number,
     /// so it and the one after it are at most `i64::MAX`; a number past that
@@ -2486,7 +2539,8 @@ impl B0xSDK {
     }
 
     /// The pages of `epc`'s spool at `b0x_address` from `start`, as the member
-    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`]: fetched only,
+    /// answers them, up to [`Self::MAX_RETRIEVE_PAGES_PER_NODE`] and
+    /// [`Self::retrieve_bytes_per_node`]: fetched only,
     /// nothing opened or recorded. The read stops at the spool's end, at the
     /// page cap, at a page whose next position no spool can hold (the caller
     /// refuses it), or at a member that does not answer. No client for the
@@ -2499,7 +2553,8 @@ impl B0xSDK {
     ) -> Result<MemberPages, DsmError> {
         let mut pages = Vec::new();
         let mut cursor = start;
-        while pages.len() < Self::MAX_RETRIEVE_PAGES_PER_NODE {
+        let mut fetched = 0usize;
+        while Self::reads_on(pages.len(), fetched) {
             let client = self.client_for(epc)?;
             let url = format!("{}/api/v2/b0x/retrieve/{}", epc, cursor);
             let resp = client
@@ -2547,6 +2602,7 @@ impl B0xSDK {
                 });
             }
             let next = batch.next_seq;
+            fetched = fetched.saturating_add(batch.encoded_len());
             pages.push(batch);
             if next > Self::MAX_SPOOL_POSITION {
                 // Not a position a spool can hold: the reader refuses this
@@ -2598,11 +2654,9 @@ impl B0xSDK {
         // This device's key, once for the whole read: without it nothing can
         // be opened, which is this device's state and not the envelopes'.
         let kyber_secret = local_kyber_secret()?;
-        // Each distinct copy once, by `envelope_merge_key`, in the order the
-        // spools hold them: a consumer that takes only some takes the oldest,
-        // and nothing spooled later gets ahead of them.
-        let mut copies: Vec<(String, dsm::types::proto::Envelope)> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // What each member's spool holds that this device has not consumed or
+        // passed over, in that spool's order. They are merged below.
+        let mut member_copies: Vec<Vec<(String, dsm::types::proto::Envelope)>> = Vec::new();
         // Members whose spool was read to an answer. None is not an empty
         // inbox: nothing was read (storage spec §4).
         let mut answered = 0usize;
@@ -2653,6 +2707,7 @@ impl B0xSDK {
                 PagesEnded::End => ReadStop::End,
                 PagesEnded::PageCap | PagesEnded::Failed => ReadStop::PageCap,
             };
+            let mut copies = Vec::new();
             'pages: for batch in member.pages {
                 if batch.next_seq > Self::MAX_SPOOL_POSITION {
                     malformed = Some(format!(
@@ -2712,9 +2767,7 @@ impl B0xSDK {
                                 continue;
                             }
                             consumed_run = false;
-                            if seen.insert(copy_key.clone()) {
-                                copies.push((copy_key, inner));
-                            }
+                            copies.push((copy_key, inner));
                         }
                         Err(e) => {
                             warn!("b0x envelope {} does not open: {}", id, e);
@@ -2726,6 +2779,7 @@ impl B0xSDK {
                 }
                 cursor = batch.next_seq;
             }
+            member_copies.push(copies);
             b0x_consumed::advance_read_position(b0x_address, &epc, position).map_err(local)?;
             // A read that failed leaves the cursor where it was: what it did
             // not reach is read from there again.
@@ -2761,6 +2815,7 @@ impl B0xSDK {
         }
         let members = self.storage_node_endpoints.len();
         let coverage = SpoolCoverage::of(answered, members, self.quorum_k);
+        let copies = merge_member_copies(member_copies);
 
         let mut entries = Vec::new();
         let mut unknown = Vec::new();
@@ -2792,6 +2847,7 @@ impl B0xSDK {
                     message_id: text_id::encode_base32_crockford(&env.message_id),
                     envelope_bytes: env.encode_to_vec(),
                     body,
+                    copy_key,
                 });
                 continue;
             }
@@ -2805,6 +2861,7 @@ impl B0xSDK {
                     .push(RelationshipFinalizedMessage {
                         message_id: text_id::encode_base32_crockford(&env.message_id),
                         body,
+                        copy_key,
                     });
                 continue;
             }
@@ -4369,6 +4426,34 @@ mod member_answer_bounds {
         let full = page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES);
         let read = spool_page(answer(200, full.encode_to_vec().into()).await).await;
         assert_eq!(read, Ok(full));
+    }
+
+    /// SA-97. One retrieval reads a node's pages up to one page at its
+    /// largest in bytes: a member answering full pages of the largest
+    /// envelopes is read one page a call, so a route's read never holds
+    /// sixteen of them, while sixteen pages of honest envelopes are all read.
+    /// MUTATION CONTROL: dropping the byte bound from `B0xSDK::reads_on`
+    /// turns this red.
+    #[test]
+    fn a_retrieval_reads_a_node_within_one_page_of_bytes() {
+        use super::B0xSDK;
+        let largest = page(MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES).encoded_len();
+        assert!(B0xSDK::reads_on(0, 0), "the first page is read");
+        assert!(
+            !B0xSDK::reads_on(1, largest),
+            "nothing past one page of the largest envelopes"
+        );
+        let honest = page(MAX_BATCH_RETRIEVE, 4 * 1024).encoded_len();
+        for read in 0..16 {
+            assert!(
+                B0xSDK::reads_on(read, read * honest),
+                "page {read} of honest envelopes is read"
+            );
+        }
+        assert!(
+            !B0xSDK::reads_on(16, 16 * honest),
+            "the page cap still ends a read"
+        );
     }
 
     /// A wait's answer names spools among those asked about, each once; one

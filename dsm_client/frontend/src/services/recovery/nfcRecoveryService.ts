@@ -158,11 +158,6 @@ export function capsulePreviewFromBase32(base32: string, maxBytes = 20): string 
   return `${encodeBase32Crockford(shown)}${bytes.length > shown.length ? '…' : ''}`;
 }
 
-export async function generateMnemonic(): Promise<string> {
-  const res = await routerInvokeBin('recovery.generateMnemonic', new Uint8Array(0));
-  return extractAppStateValue(res);
-}
-
 export async function enableNfcBackup(mnemonic: string): Promise<void> {
   const res = await routerInvokeBin('recovery.enable', packStringArg(normalizeMnemonic(mnemonic)));
   extractAppStateValue(res);

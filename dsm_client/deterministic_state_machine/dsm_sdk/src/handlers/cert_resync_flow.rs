@@ -66,6 +66,21 @@ fn not_recognized<T>(msg: &str) -> Result<T, CertResyncRefusal> {
     ))
 }
 
+/// The epoch this device's next resync of `rel_key` takes: one past the last.
+/// A contact's resync request can raise the stored epoch as far as it likes; at
+/// the top there is no next one, which is an error for that relationship
+/// alone, never an overflow panic inside the sync every route runs through
+/// (SA-146).
+pub(crate) fn next_resync_epoch(rel_key: &[u8; 32]) -> Result<i64, DsmError> {
+    let (_state, current) = cert_resync_status(rel_key)
+        .map_err(|e| DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>))?;
+    current.checked_add(1).ok_or_else(|| {
+        DsmError::invalid_operation(
+            "cert resync: this relationship's epochs are spent; it cannot be resynced",
+        )
+    })
+}
+
 /// Derive the deterministic fresh EK for a resync epoch. Re-derivable, so the
 /// ack handler reconstructs the exact key the request advertised.
 fn derive_resync_ek(
@@ -157,10 +172,7 @@ impl super::app_router_impl::AppRouterImpl {
         let commitment = proposal.commitment;
         let agreed_tip = proposal.projection_target; // the address both sides converge on
 
-        let epoch = cert_resync_status(&rel_key)
-            .map_err(|e| DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>))?
-            .1
-            + 1;
+        let epoch = next_resync_epoch(&rel_key)?;
         client_db::begin_cert_resync(&rel_key, epoch)
             .map_err(|e| DsmError::invalid_operation(format!("begin resync: {e}")))?;
 

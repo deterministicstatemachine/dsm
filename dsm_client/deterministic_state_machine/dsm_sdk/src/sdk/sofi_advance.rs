@@ -155,8 +155,10 @@ fn fulfillment_acceptance_coords(
         post_economic_root: predecessor_root,
         accepted_substrate_addr: fulfillment_addr,
         admission_manifest_addr: precommit_addr,
-        c_dsm_plus: chain_state.compute_chain_tip(),
-        embedded_parent: chain_state.embedded_parent,
+        substrate: dsm::economic::admission::AcceptedSubstrateCoords::Successor {
+            c_dsm_plus: chain_state.compute_chain_tip(),
+            embedded_parent: chain_state.embedded_parent,
+        },
     }
 }
 
@@ -461,9 +463,12 @@ async fn final_root_cell(
     let cells = position_cells(set, genesis, device_id, position, parent_root)?;
     let seats = NodeSeats::new(set)?;
     // A claim final at K_root holds it for good: kept once read final.
-    let evidence = read_cell_kept(&seats, cells.root().routed(), |evidence| {
-        root_claim_final(cells.root(), evidence)
-    })
+    let evidence = read_cell_kept(
+        &seats,
+        cells.root().routed(),
+        &cells.root().keeps(),
+        |evidence| root_claim_final(cells.root(), evidence),
+    )
     .await;
     Ok(match read_root_cell(cells.root(), &evidence) {
         Ok(CellReading::Held {

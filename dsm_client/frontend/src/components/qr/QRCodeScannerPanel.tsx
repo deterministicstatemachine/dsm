@@ -13,7 +13,7 @@ import type { ContactCard } from '../../dsm/types';
 import type { PersonProfile } from '../../domain/types';
 import { profileFromCard, withPhoneContact } from '../../domain/personProfile';
 import { bytesToDisplay } from '../../contexts/contacts/utils';
-import { contactsNamed, deviceFingerprint } from '../../domain/displayName';
+import { contactsNamed, deviceFingerprint, visibleText } from '../../domain/displayName';
 import { useBackButton, useConfirmButton } from '../../hooks/useBackButton';
 import { Notice } from '../common/ScreenFrame';
 import logger from '../../utils/logger';
@@ -107,7 +107,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
       return;
     }
     addingContactRef.current = true;
-    const alias = aliasInput.trim();
+    const alias = visibleText(aliasInput);
     setPhase({ status: 'adding', alias });
     try {
       const result = await addContact(alias, phase.card, { ...phase.profile, name: alias });
@@ -295,7 +295,7 @@ export default function QRCodeScannerPanel(props: QRCodeScannerProps = {}): Reac
               </div>
               {namesakes.length > 0 ? (
                 <Notice kind="error">
-                  You already have a contact named {aliasInput.trim()} ({namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
+                  You already have a contact named {visibleText(aliasInput)} ({namesakes.map((c) => deviceFingerprint(c.deviceId)).join(', ')}).
                   Give this device a name you can tell apart.
                 </Notice>
               ) : null}

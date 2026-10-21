@@ -11,7 +11,6 @@ import {
   createCapsule,
   disableNfcBackup,
   enableNfcBackup,
-  generateMnemonic,
   getCapsulePreview,
   getNfcBackupStatus,
   writeToNfcRing,
@@ -23,7 +22,7 @@ import { Notice, ScreenFrame, middleTruncate } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
 import { useScreenGuard } from '../../hooks/useScreenGuard';
 
-type SetupMode = 'idle' | 'choose' | 'generate' | 'enable' | 'refresh' | 'writing';
+type SetupMode = 'idle' | 'enable' | 'refresh' | 'writing';
 
 /** The backup status as Rust reported it, the failure of asking, or not asked yet. */
 type StatusRead = { status: NfcBackupStatus } | { error: string } | undefined;
@@ -43,7 +42,6 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
   const [read, setRead] = useState<StatusRead>(undefined);
   const [preview, setPreview] = useState<CapsulePreview>(null);
   const [setupMode, setSetupMode] = useState<SetupMode>('idle');
-  const [generatedMnemonic, setGeneratedMnemonic] = useState('');
   const [mnemonicInput, setMnemonicInput] = useState('');
   const [busy, setBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
@@ -125,7 +123,6 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
           await createCapsule(trimmed);
           setStatusMsg('Fresh capsule armed. Press write, then hold the ring to the phone until it vibrates.');
         }
-        setGeneratedMnemonic('');
         setMnemonicInput('');
         setSetupMode('idle');
         await refresh();
@@ -156,23 +153,10 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
       return;
     }
 
-    setSetupMode(status.configured ? 'enable' : 'choose');
+    setSetupMode('enable');
     setStatusMsg('');
   }, [busy, refresh, status]);
 
-  const onGenerateMnemonic = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const words = await generateMnemonic();
-      setGeneratedMnemonic(words);
-      setSetupMode('generate');
-    } catch (error: unknown) {
-      setStatusMsg(`Mnemonic generation failed: ${formatError(error)}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [busy]);
 
   const onWriteNow = useCallback(async () => {
     if (busy || !status) return;
@@ -267,56 +251,13 @@ const NfcRecoveryScreen: React.FC<NfcRecoveryScreenProps> = ({ onNavigate }) => 
         </section>
       )}
 
-      {/* First-time setup: choose flow */}
-      {setupMode === 'choose' && (
-        <section className="sb-card">
-          <div className="sb-card__title">First-time setup</div>
-          <div style={{ display: 'grid', gap: 8 }}>
-            <button type="button" className="sb-btn sb-btn--primary sb-btn--block" onClick={onGenerateMnemonic} disabled={busy}>
-              Generate new mnemonic
-            </button>
-            <button type="button" className="sb-btn sb-btn--block" onClick={() => setSetupMode('enable')}>
-              Enter existing mnemonic
-            </button>
-            <button type="button" className="sb-btn sb-btn--ghost sb-btn--block sb-btn--small" onClick={() => setSetupMode('idle')}>
-              Cancel
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* Generated mnemonic display */}
-      {setupMode === 'generate' && generatedMnemonic && (
-        <section className="sb-card sb-card--dark">
-          <div className="sb-card__title">Write these words down</div>
-          <p className="sb-hint">They are required to rebuild or recover. Nothing else can. Write them on paper: they are not copied anywhere.</p>
-          <ol className="sb-phrase sb-phrase--all" aria-label="Generated mnemonic">
-            {generatedMnemonic.trim().split(/\s+/).map((word, index) => (
-              <li key={index} className="sb-phrase__word">
-                <span className="sb-phrase__n">{index + 1}</span>
-                <span className="sb-phrase__w">{word}</span>
-              </li>
-            ))}
-          </ol>
-          <div className="sb-actions" style={{ marginTop: 8, marginBottom: 0 }}>
-            <button
-              type="button"
-              className="sb-btn sb-btn--primary"
-              onClick={() => void submitMnemonic('enable', generatedMnemonic)}
-              disabled={busy}
-            >
-              {busy ? 'Arming…' : 'I saved it: arm backup'}
-            </button>
-          </div>
-        </section>
-      )}
-
       {/* Mnemonic input (enable or refresh) */}
       {(setupMode === 'enable' || setupMode === 'refresh') && (
         <section className="sb-card">
           <div className="sb-card__title">
-            {setupMode === 'refresh' ? 'Rebuild the latest capsule' : 'Enter your mnemonic'}
+            {setupMode === 'refresh' ? 'Rebuild the latest capsule' : "Enter this wallet's recovery phrase"}
           </div>
+          <p className="sb-hint">The 24 words written down when this wallet was made. Backup is armed only with that phrase.</p>
           <div className="sb-field">
             <label htmlFor="nfc-mnemonic">Recovery mnemonic</label>
             <textarea

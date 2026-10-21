@@ -102,9 +102,27 @@ pub async fn read_entry(
     genesis: &[u8; 32],
     device_id: &[u8; 32],
 ) -> Result<Option<DirectoryRead>, DsmError> {
+    use crate::sdk::route_seats::RouteSeats;
     let key = directory_cell_key(genesis, device_id);
-    let client = SetClient::new(set)?;
-    let reads = client.get_cell(DIRECTORY_NAMESPACE, &key).await;
+    let seats = crate::sdk::route_seats::NodeSeats::new(set)?;
+    let members = seats.members();
+    // Only an entry naming this device under this genesis is a candidate;
+    // whether one proves itself is decided over the candidates, best first
+    // (`select_entry`). Anything else a member holds costs the read and is
+    // not kept, so junk under the predictable key wedges nothing (SA-67).
+    let names_device = |bytes: &[u8]| {
+        dsm::core::identity::directory::names_directory_entry(genesis, device_id, bytes)
+    };
+    let reads = futures::future::join_all(members.iter().map(|member| {
+        crate::sdk::route_seats::kept_values(
+            &seats,
+            member,
+            DIRECTORY_NAMESPACE,
+            &key,
+            &names_device,
+        )
+    }))
+    .await;
     let values: Vec<&[u8]> = reads
         .iter()
         .flatten()
@@ -115,12 +133,15 @@ pub async fn read_entry(
         return Ok(None);
     };
     let bytes = entry.encode();
-    let holders = client
-        .members()
+    let holders = members
         .iter()
         .zip(&reads)
         .filter(|(.., read)| read.as_ref().is_some_and(|held| held.contains(&bytes)))
-        .map(|(member, ..)| member.member_id().to_string())
-        .collect();
+        .map(|(member, ..)| {
+            String::from_utf8(member.clone()).map_err(|e| {
+                DsmError::invalid_parameter(format!("device directory: a member id: {e}"))
+            })
+        })
+        .collect::<Result<Vec<String>, DsmError>>()?;
     Ok(Some(DirectoryRead { entry, holders }))
 }

@@ -10,6 +10,7 @@ import {
   type TransactionInfo,
 } from '../proto/dsm_app_pb';
 import type { BilateralRelationshipDTO } from '../dsm/types';
+import { deviceFingerprint, visibleText } from './displayName';
 import type {
   DomainContact,
   DomainRelationshipSendBlockReason,
@@ -134,6 +135,20 @@ function txText(t: TransactionInfo, field: string, value: string): string {
 }
 
 /**
+ * Rust's label for a payment's counterparty (the contact's alias, else its
+ * device) shown as every name is, without what renders as nothing (SA-159).
+ * A label with nothing else in it is shown as the counterparty's fingerprint.
+ */
+function counterpartyLabel(t: TransactionInfo, counterparty: string | undefined): string {
+  const label = visibleText(txText(t, 'counterparty label', t.recipient));
+  if (label.length > 0) return label;
+  if (counterparty === undefined) {
+    throw new Error(`STRICT: transaction ${t.id} labels its counterparty with nothing visible and names no device`);
+  }
+  return deviceFingerprint(counterparty);
+}
+
+/**
  * `wallet.history` rows as Rust reports them. A row missing a field Rust
  * always writes, or of a type the wire does not name, is refused: nothing is
  * filled in or guessed.
@@ -165,6 +180,10 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
         })),
       };
     }
+    // A faucet row's source is the ERA reserve: Rust names no sender device,
+    // and a faucet row that names one is refused as corrupt.
+    const fromDeviceId = txType === 'faucet' ? noSender(t) : txBytes32(t, 'sender device id', t.fromDeviceId);
+    const toDeviceId = txBytes32(t, 'recipient device id', t.toDeviceId);
     return {
       txId: txText(t, 'id', t.id),
       txHash: txBytes32(t, 'tx hash', t.txHash),
@@ -173,12 +192,11 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
       amount: t.amountSigned,
       displayAmount: txText(t, 'display amount', t.displayAmount),
       tokenId: txText(t, 'token id', t.tokenId),
-      recipient: txText(t, 'counterparty label', t.recipient),
+      // Signed as Rust signed it: an outgoing row's counterparty is the recipient.
+      recipient: counterpartyLabel(t, t.amountSigned < 0n ? toDeviceId : fromDeviceId),
       status: txText(t, 'status', t.status),
-      // A faucet row's source is the ERA reserve: Rust names no sender device,
-      // and a faucet row that names one is refused as corrupt.
-      fromDeviceId: txType === 'faucet' ? noSender(t) : txBytes32(t, 'sender device id', t.fromDeviceId),
-      toDeviceId: txBytes32(t, 'recipient device id', t.toDeviceId),
+      fromDeviceId,
+      toDeviceId,
       memo: t.memo.length > 0 ? t.memo : undefined,
       stitchedReceipt: t.stitchedReceipt.length > 0 ? t.stitchedReceipt : undefined,
       receiptVerified: t.receiptVerified,

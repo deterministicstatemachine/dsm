@@ -103,21 +103,29 @@ pub(crate) fn authenticate(
     .map_err(|e| failure("authenticate", e))
 }
 
-/// The locator a baseline's bytes are published under, recomputed from its
-/// frontier, and the bytes themselves.
-fn recognize(bundle: &[u8]) -> Option<(D32, Vec<u8>)> {
-    // Bytes that are no baseline are nothing under the locator.
-    let frontier = match generated::VaultBaselineV1::decode(bundle) {
-        Ok(baseline) => match VaultFrontierV1::decode(&baseline.frontier_ccb) {
-            Ok(frontier) => frontier,
-            Err(..) => return None,
-        },
-        Err(..) => return None,
-    };
-    Some((
-        derive::vault_baseline_locator(&frontier.vault_id, frontier.generation),
-        bundle.to_vec(),
-    ))
+/// The locator an owner baseline of `genesis`'s vault is published under,
+/// recomputed from its authenticated frontier, with the frontier and the
+/// bytes. Only a baseline Core authenticates as the owner's is recognized:
+/// bytes that merely decode as a baseline are nothing under the locator, so
+/// baseline-shaped junk ahead of the owner's never takes a place the owner's
+/// needs (SA-132).
+fn recognize_owners(
+    bundle: &[u8],
+    genesis: &AcceptedVaultGenesis,
+) -> Option<(D32, (VerifiedFrontier, Vec<u8>))> {
+    match authenticate(bundle, genesis) {
+        Ok(verified) => {
+            let frontier = verified.frontier();
+            Some((
+                derive::vault_baseline_locator(&frontier.vault_id, frontier.generation),
+                (verified, bundle.to_vec()),
+            ))
+        }
+        Err(why) => {
+            log::debug!("[vault baseline] passed over a candidate: {why}");
+            None
+        }
+    }
 }
 
 // ── The owner ──────────────────────────────────────────────────────────────
@@ -527,31 +535,30 @@ async fn adopt_one(
         Err(e) => return unavailable("genesis", e),
     };
     let locator = derive::vault_baseline_locator(&vault_id, offered.generation);
-    let bundles = match crate::sdk::storage_io::resolve_locator_all(
+    let found = match crate::sdk::storage_io::resolve_locator_all(
         set,
         TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes(),
         &locator,
         BASELINES_PER_GENERATION,
-        recognize,
+        |bundle| recognize_owners(bundle, &genesis),
     )
     .await
     {
-        Ok(Discovered::Complete(bundles) | Discovered::Partial(bundles)) => bundles,
+        Ok(found) => found,
         Err(e) => return unavailable("the baseline locator", e),
     };
-    // Every candidate is authenticated; one that does not is passed over,
-    // and only an authenticated frontier counts.
+    // Only the owner's authenticated frontiers were recognized. Two are an
+    // equivocation however much else is unread; one is the owner's only once
+    // the read shows it is alone.
+    let complete = matches!(found, Discovered::Complete(..));
+    let authenticated = match found {
+        Discovered::Complete(found) | Discovered::Partial(found) => found,
+    };
     let mut frontiers: BTreeMap<D32, (VerifiedFrontier, Vec<u8>)> = BTreeMap::new();
-    let mut passed_over = Vec::new();
-    for bundle in bundles {
-        match authenticate(&bundle, &genesis) {
-            Ok(verified) => {
-                frontiers
-                    .entry(*verified.commitment())
-                    .or_insert((verified, bundle));
-            }
-            Err(why) => passed_over.push(why.to_string()),
-        }
+    for (verified, bundle) in authenticated {
+        frontiers
+            .entry(*verified.commitment())
+            .or_insert((verified, bundle));
     }
     if frontiers.len() > 1 {
         let why = format!(
@@ -564,12 +571,16 @@ async fn adopt_one(
             Err(e) => Adoption::Quarantined(format!("{why} (not recorded: {e})")),
         };
     }
+    if !complete {
+        return Adoption::NotAdopted(format!(
+            "the baselines at generation {} are not all read yet",
+            offered.generation
+        ));
+    }
     let Some((verified, bundle)) = frontiers.into_values().next() else {
         return Adoption::NotAdopted(format!(
-            "no baseline at generation {} authenticates ({} passed over: {})",
-            offered.generation,
-            passed_over.len(),
-            passed_over.join("; ")
+            "no baseline at generation {} authenticates",
+            offered.generation
         ));
     };
     let wire = match VaultFrontierWitnessV1::decode(&offered.witness_ccb) {

@@ -631,6 +631,33 @@ pub const CERT_RESYNC_ACK_METHOD: &str = "wallet.certResyncAck";
 mod tests {
     use super::*;
 
+    /// SA-146. A contact's request can set this relationship's epoch to the
+    /// largest there is. The next resync this device starts on it then has no
+    /// epoch, which is refused for this relationship; it used to overflow and
+    /// panic the storage sync before any route's inbox was taken in.
+    /// MUTATION CONTROL: computing the next epoch with an unchecked `+ 1`
+    /// turns this red (it panics).
+    #[test]
+    #[serial_test::serial]
+    fn a_relationship_whose_epochs_are_spent_cannot_be_resynced_and_panics_nothing() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let rel = [0x61u8; 32];
+        begin_cert_resync(&rel, i64::MAX).expect("a contact's request at the largest epoch");
+        let refused = crate::handlers::cert_resync_flow::next_resync_epoch(&rel)
+            .expect_err("no epoch follows the largest");
+        assert!(
+            refused.to_string().contains("epochs are spent"),
+            "{refused}"
+        );
+        assert_eq!(
+            crate::handlers::cert_resync_flow::next_resync_epoch(&[0x62u8; 32])
+                .expect("a fresh one"),
+            1
+        );
+    }
+
     /// B3 OLD-ARTIFACT REJECTION / NEW-ARTIFACT ACCEPTANCE, two-party, no fallback.
     ///
     /// The joint restart statement is signed by BOTH AKs over

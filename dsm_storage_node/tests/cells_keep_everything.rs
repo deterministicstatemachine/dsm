@@ -78,6 +78,24 @@ async fn append(app: &Router, locator: &str, addr: &[u8]) -> StatusCode {
     app.clone().oneshot(req).await.expect("oneshot").status()
 }
 
+/// Put `bytes` in the member's immutable store: the address it computes.
+async fn held(app: &Router, bytes: &[u8]) -> [u8; 32] {
+    let (status, addr) = common::call(
+        app,
+        "POST",
+        "/api/v2/immutable/put",
+        &[("x-namespace", NS)],
+        bytes.to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "the member takes the object");
+    let addr = common::some_or_panic(
+        text_id::decode_base32_crockford(&String::from_utf8_lossy(&addr)),
+        "a Base32 address",
+    );
+    common::ok_or_panic(addr.as_slice().try_into(), "a 32-byte address")
+}
+
 async fn page(app: &Router, locator: &str, query: &str) -> Vec<(i64, Vec<u8>)> {
     let req = Request::builder()
         .method("GET")
@@ -229,7 +247,11 @@ async fn a_namespace_scopes_the_key() {
 async fn an_index_pages_in_append_order_from_the_last_seq() {
     let app = member("cells_an_index_pages_in_append_order_from_the_last").await;
     let loc = key(0x10);
-    let addrs = [[0xA1u8; 32], [0xA2u8; 32], [0xA3u8; 32]];
+    let addrs = [
+        held(&app, b"first").await,
+        held(&app, b"second").await,
+        held(&app, b"third").await,
+    ];
     for a in &addrs {
         assert_eq!(append(&app, &loc, a).await, StatusCode::NO_CONTENT);
     }
@@ -248,6 +270,42 @@ async fn an_index_pages_in_append_order_from_the_last_seq() {
     assert!(
         none.is_empty(),
         "past the end is an empty page, not an error"
+    );
+}
+
+/// Storage spec §7: anyone may append the address of an object the member
+/// already holds. An address it holds no object at is not appended, and the
+/// index reads as it did; once the member holds the object, the same address
+/// is appended. Taking every address, a member's index carried appends of
+/// objects nobody held, and a reader had to decide each one.
+/// MUTATION CONTROL: dropping the holds check turns this red.
+#[tokio::test]
+async fn an_address_the_member_holds_no_object_at_is_not_appended() {
+    let app = member("cells_an_address_the_member_holds_no_object_at").await;
+    let loc = key(0x12);
+    let addrs = |entries: Vec<(i64, Vec<u8>)>| -> Vec<Vec<u8>> {
+        entries.into_iter().map(|(_, a)| a).collect()
+    };
+    let first = held(&app, b"held").await;
+    assert_eq!(append(&app, &loc, &first).await, StatusCode::NO_CONTENT);
+    // The address of an object another member holds, and this one does not.
+    let elsewhere = member("cells_an_address_the_member_holds_no_object_else").await;
+    let unheld = held(&elsewhere, b"not yet held").await;
+    assert_eq!(
+        append(&app, &loc, &unheld).await,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no object is held at the address"
+    );
+    assert_eq!(
+        addrs(page(&app, &loc, "").await),
+        vec![first.to_vec()],
+        "the index reads as it did"
+    );
+    assert_eq!(held(&app, b"not yet held").await, unheld);
+    assert_eq!(append(&app, &loc, &unheld).await, StatusCode::NO_CONTENT);
+    assert_eq!(
+        addrs(page(&app, &loc, "").await),
+        vec![first.to_vec(), unheld.to_vec()]
     );
 }
 

@@ -117,9 +117,16 @@ impl AppRouterImpl {
                     );
                 }
 
-                // Derive and cache the recovery key in memory
+                // Backup is armed with this wallet's own phrase, or not at all: a capsule
+                // under any other phrase restores nothing (SA-64). Only the recovery keys
+                // are cached; the wallet seed is the identity's root and is not written.
                 if let Err(e) =
-                    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+                    crate::sdk::recovery_sdk::RecoverySDK::require_this_wallets_phrase(&mnemonic)
+                {
+                    return err(format!("recovery.enable: {e}"));
+                }
+                if let Err(e) =
+                    crate::sdk::recovery_sdk::RecoverySDK::cache_recovery_keys(&mnemonic)
                 {
                     return err(format!("recovery.enable key derivation failed: {e}"));
                 }
@@ -190,8 +197,9 @@ impl AppRouterImpl {
 
             // -------- recovery.disable --------
             "recovery.disable" => {
-                // Clear cached key from memory first
-                crate::sdk::recovery_sdk::RecoverySDK::clear_cached_key();
+                // Drop the recovery keys. The wallet seed stays, in memory and sealed:
+                // backup off is not a logout (SA-65).
+                crate::sdk::recovery_sdk::RecoverySDK::clear_recovery_keys();
 
                 if let Err(e) = crate::sdk::recovery_sdk::RecoverySDK::disable_nfc_backup() {
                     return err(format!("recovery.disable failed: {e}"));
@@ -205,8 +213,9 @@ impl AppRouterImpl {
             }
 
             // -------- recovery.cacheMnemonic --------
-            // Derives the recovery key and keeps it in Rust memory for follow-on
-            // ring decrypt/import or lazy capsule refresh.
+            // Derives the recovery keys and keeps them in Rust memory for follow-on
+            // ring decrypt/import. The phrase may be a lost wallet's (reading its
+            // ring), so it never reaches the wallet seed (SA-64).
             "recovery.cacheMnemonic" => {
                 let mnemonic = match Self::decode_recovery_string_param(&i.args) {
                     Ok(m) => m,
@@ -223,7 +232,7 @@ impl AppRouterImpl {
                 }
 
                 if let Err(e) =
-                    crate::sdk::recovery_sdk::RecoverySDK::derive_and_cache_key(&mnemonic)
+                    crate::sdk::recovery_sdk::RecoverySDK::cache_recovery_keys(&mnemonic)
                 {
                     return err(format!("recovery.cacheMnemonic failed: {e}"));
                 }
@@ -242,6 +251,11 @@ impl AppRouterImpl {
                     Ok(m) => m,
                     Err(e) => return err(format!("recovery.createCapsule: {e}")),
                 };
+                if let Err(e) =
+                    crate::sdk::recovery_sdk::RecoverySDK::require_this_wallets_phrase(&mnemonic)
+                {
+                    return err(format!("recovery.createCapsule: {e}"));
+                }
 
                 match crate::sdk::recovery_sdk::RecoverySDK::create_capsule_from_current_state(
                     &mnemonic,
@@ -323,6 +337,23 @@ impl AppRouterImpl {
                 ) {
                     log::warn!("[RECOVERY] Failed to persist capsule rollup hash: {e}");
                 }
+                // The device and genesis the capsule was sealed by, which the
+                // tombstone and the recovery re-establish name. Only the Core
+                // bridge's decrypt staged them, under a key the request carried;
+                // that path is gone (SA-119), and this one decrypts under the
+                // cached K_R.
+                for (key, value) in [
+                    ("capsule_source_device_id", &decrypted.source_device_id),
+                    ("capsule_genesis_hash", &decrypted.genesis_hash),
+                ] {
+                    if !value.is_empty() {
+                        if let Err(e) =
+                            crate::storage::client_db::recovery::set_recovery_pref(key, value)
+                        {
+                            log::warn!("[RECOVERY] Failed to persist {key}: {e}");
+                        }
+                    }
+                }
 
                 if let Err(e) =
                     crate::storage::client_db::recovery::store_recovered_chain_tips(&recovered_tips)
@@ -370,7 +401,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_tombstone(&handler, req) {
+                match handler.handle_recovery_tombstone(req) {
                     Ok(op_result) => {
                         // Extract tombstone receipt from OpResult and persist it
                         if let Some(ref rp) = op_result.result {
@@ -451,8 +482,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_succession(&handler, req)
-                {
+                match handler.handle_recovery_succession(req) {
                     Ok(_op_result) => {
                         let resp = generated::AppStateResponse {
                             key: "recovery.succession".to_string(),
@@ -489,7 +519,7 @@ impl AppRouterImpl {
                 };
 
                 let handler = crate::handlers::recovery_impl::RecoveryImpl::new();
-                match dsm::core::bridge::RecoveryHandler::handle_recovery_resume(&handler, req) {
+                match handler.handle_recovery_resume(req) {
                     Ok(_op_result) => {
                         let resp = generated::AppStateResponse {
                             key: "recovery.resume".to_string(),
@@ -498,22 +528,6 @@ impl AppRouterImpl {
                         pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
                     }
                     Err(e) => err(format!("recovery.resume failed: {e}")),
-                }
-            }
-
-            // -------- recovery.generateMnemonic --------
-            // Generates a cryptographically secure 24-word BIP-39 mnemonic via CSPRNG.
-            // Crypto stays in Rust — TypeScript never generates mnemonics.
-            "recovery.generateMnemonic" => {
-                match crate::sdk::recovery_sdk::RecoverySDK::generate_mnemonic() {
-                    Ok(words) => {
-                        let resp = generated::AppStateResponse {
-                            key: "recovery.generateMnemonic".to_string(),
-                            value: Some(words),
-                        };
-                        pack_envelope_ok(generated::envelope::Payload::AppStateResponse(resp))
-                    }
-                    Err(e) => err(format!("recovery.generateMnemonic failed: {e}")),
                 }
             }
 
@@ -592,7 +606,8 @@ impl AppRouterImpl {
 
             // -------- recovery.checkTombstones --------
             // Contact side: tombstones posted for this device, verified under the
-            // tombstoned device's contact AK, recorded and acknowledged.
+            // recovery authority the tombstoned device anchored, recorded and
+            // acknowledged.
             "recovery.checkTombstones" => match check_tombstones().await {
                 Ok(value) => pack_envelope_ok(generated::envelope::Payload::AppStateResponse(
                     generated::AppStateResponse {
@@ -816,6 +831,8 @@ impl AppRouterImpl {
             "capsule_counterparty_ids",
             "capsule_smt_root",
             "capsule_rollup_hash",
+            "capsule_source_device_id",
+            "capsule_genesis_hash",
             "succession_receipt",
         ] {
             if let Err(e) = crate::storage::client_db::recovery::set_recovery_pref(key, &[]) {
@@ -995,17 +1012,22 @@ async fn check_tombstones() -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?
     {
-        // Anyone can write the cell: a notice counts only once it verifies
-        // under the tombstoned device's pinned contact AK.
-        let Ok(receipt) = dsm::recovery::TombstoneReceipt::from_bytes(&bytes) else {
+        // Anyone can write the cell: a notice counts only once its tombstone
+        // verifies under the recovery authority the tombstoned device anchored
+        // under the genesis this device pinned for it. The tombstone is signed
+        // under K_A, never under that device's AK (SA-117).
+        let Ok(notice) = dsm::recovery::RecoverySuccessionProof::from_bytes(&bytes) else {
             continue;
         };
-        let Ok(tombstoned) = tombstoned_device(&receipt) else {
-            continue;
-        };
-        let Ok(ak) = contact_ak(&tombstoned) else {
-            continue;
-        };
+        let tombstoned =
+            match crate::sdk::recovery_sdk::RecoverySDK::predecessor_anchoring(&notice).await {
+                Ok(tombstoned) => tombstoned,
+                Err(e) => {
+                    log::info!("[RECOVERY] a tombstone notice is passed over: {e}");
+                    continue;
+                }
+            };
+        let (receipt, ak) = (notice.tombstone, notice.authority_pubkey);
         if !matches!(
             dsm::recovery::tombstone::verify_tombstone(&receipt, &ak),
             Ok(true)

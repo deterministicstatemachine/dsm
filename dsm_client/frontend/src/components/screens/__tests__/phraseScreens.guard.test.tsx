@@ -40,36 +40,28 @@ function expectNonLearning(field: HTMLElement): void {
 }
 
 describe('the ring backup screen', () => {
-  it('guards the screen, lists a new mnemonic for paper only, and lets the guard go after', async () => {
+  it('guards the screen and lets the guard go after', async () => {
     const phone = installScriptedPhone({
       'recovery.status': NO_BACKUP,
       'recovery.capsulePreview': appState('none'),
-      'recovery.generateMnemonic': appState(WORDS.join(' ')),
     });
     const { unmount } = render(<NfcRecoveryScreen />);
     await act(settle);
     expect(phone.guards).toEqual([SECRET]);
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Set up' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Generate new mnemonic' }));
-    const words = await screen.findByRole('list', { name: 'Generated mnemonic' });
-    expect(Array.from(words.querySelectorAll('li')).map((li) => li.textContent)).toEqual(
-      WORDS.map((word, index) => `${index + 1}${word}`),
-    );
-    expect(screen.queryByRole('button', { name: /copy/i })).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Generated mnemonic' })).toBeNull();
-
     unmount();
     await act(settle);
     expect(phone.guards).toEqual([SECRET, 0]);
   });
 
-  it('takes an existing mnemonic in a field that learns nothing', async () => {
+  // SA-64: backup is armed with this wallet's own phrase. The screen offers
+  // no new phrase to arm it with, since a new phrase restores nothing.
+  it("takes this wallet's phrase in a field that learns nothing, and offers no new phrase", async () => {
     installScriptedPhone({ 'recovery.status': NO_BACKUP, 'recovery.capsulePreview': appState('none') });
     render(<NfcRecoveryScreen />);
     fireEvent.click(await screen.findByRole('button', { name: 'Set up' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Enter existing mnemonic' }));
     expectNonLearning(screen.getByLabelText('Recovery mnemonic'));
+    expect(screen.queryByRole('button', { name: /generate/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /copy/i })).toBeNull();
   });
 });
 

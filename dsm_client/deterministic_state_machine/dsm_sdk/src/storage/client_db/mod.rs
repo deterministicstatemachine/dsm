@@ -244,10 +244,6 @@ pub(crate) fn close_database_for_tests() {
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(clippy::panic)] // a reset that fails leaves the next test on stale rows; it must stop
 pub fn reset_database_for_tests() {
-    // A fresh world: tests reuse device identities on new nodes, so a peer
-    // position validated in an earlier world names another chain here.
-    #[cfg(test)]
-    crate::sdk::economic_registers::validated_peers().forget();
     #[cfg(test)]
     let lifecycle = TEST_DB_LIFECYCLE_LOCK
         .lock()
@@ -515,7 +511,15 @@ fn get_database_path() -> Result<PathBuf> {
 /// 31: an application account's session carries the wallet's status
 /// (`connect_app_sessions.status` NOT NULL): the wallet's signed disconnect
 /// ends it on the application's side too (DSM Amendment A11, MR-DSM-0292).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 31;
+///
+/// 32, unchanged: a receiver keeps its frontier for each peer again (DSM
+/// Amendment A19), `peer_frontier`, created on open; no existing table
+/// changes. A row is a coordinate this receiver validated itself, written in
+/// the transaction that accepts a step or by a contact add's validation, and
+/// nothing behind it is read again. A database made at 27 or 28 keeps the
+/// rows A8 recorded: each is a coordinate the receiver validated itself, in
+/// the same shape and encoding.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -846,6 +850,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- The digest of the claim the lineage accepted at the position:
             -- present for kinds 0 and 1, NULL for kind 2.
             claim_ref         BLOB          -- 32B or NULL
+        );
+
+        -- DSM Amendment A19: this receiver's frontier for a peer, a
+        -- coordinate it validated itself, with the claim it accepted there.
+        CREATE TABLE IF NOT EXISTS peer_frontier(
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            economic_root       BLOB NOT NULL,      -- 32B
+            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
+            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
         DROP TABLE IF EXISTS economic_admitted;
 
@@ -1556,15 +1571,18 @@ fn create_schema(conn: &Connection) -> Result<()> {
             operation_digest        BLOB NOT NULL,      -- 32B
             accepted_substrate_addr BLOB NOT NULL,      -- 32B
             admission_manifest_addr BLOB NOT NULL,      -- 32B
-            c_dsm_plus              BLOB NOT NULL,      -- 32B, the accepted
+            c_dsm_plus              BLOB,               -- 32B, the accepted
                                                         -- successor's chain-state
                                                         -- commitment (v2 econ-op-id
                                                         -- preimage) — recovery
-                                                        -- cannot re-derive it
-            embedded_parent         BLOB NOT NULL      -- 32B, the successor's own
+                                                        -- cannot re-derive it. NULL
+                                                        -- for an offline boundary,
+                                                        -- re-derived from its body
+            embedded_parent         BLOB               -- 32B, the successor's own
                                                         -- parent tip: with c_dsm_plus
                                                         -- the (parent, tip) pair the
-                                                        -- acceptance B-side binds to
+                                                        -- acceptance B-side binds to;
+                                                        -- NULL for an offline boundary
         );
 
         -- Device head storage is BCR-only (§4.3): no state counter and no
@@ -1586,13 +1604,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
             parent_tip                BLOB,
             receiver_challenge        BLOB,
             sent_child_root           BLOB,
-            anchor_leaf_key           BLOB,
-            anchor_leaf_value         BLOB,
             spend_anchor_bundle       BLOB,
             spend_asset               BLOB,
             spend_amount              INTEGER,
+            spend_next_frontier       BLOB,
             owed_frame                BLOB,
             terms_bytes               BLOB
+        );
+
+        -- The tips each relationship has moved past (SA-114): a proposal
+        -- made on one of them is an old one delivered again.
+        CREATE TABLE IF NOT EXISTS relationship_passed_tips(
+            counterparty_device_id BLOB NOT NULL,
+            tip                    BLOB NOT NULL,
+            PRIMARY KEY (counterparty_device_id, tip)
         );
 
         CREATE TABLE IF NOT EXISTS transactions(

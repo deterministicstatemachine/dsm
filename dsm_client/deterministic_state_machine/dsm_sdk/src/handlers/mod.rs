@@ -2,9 +2,9 @@
 
 //! # SDK Handler Implementations
 //!
-//! Concrete implementations of the core bridge traits (`AppRouter`,
-//! `RecoveryHandler`) that connect the JNI/FFI boundary to the pure
-//! `dsm` core library, installed during [`init_dsm_sdk`](crate::init::init_dsm_sdk),
+//! The core bridge's `AppRouter` implementation, which connects the JNI/FFI
+//! boundary to the pure `dsm` core library, the recovery receipts behind the
+//! router's `recovery.*` routes, installed during [`init_dsm_sdk`](crate::init::init_dsm_sdk),
 //! and the BLE runtime slot the offline carrier is injected into.
 
 pub mod app_router_impl;
@@ -46,14 +46,16 @@ pub mod escrow_routes;
 #[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
+#[cfg(test)]
+mod frontier_verification_tests;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
 #[cfg(test)]
 mod node_e2e_tests;
-pub mod offline_cash_routes;
 #[cfg(test)]
-mod one_hop_verification_tests;
+mod offline_boundary_tests;
+pub mod offline_cash_routes;
 pub mod online_finalize;
 pub mod prefs_routes;
 pub mod receipt_routes;

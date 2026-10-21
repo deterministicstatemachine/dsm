@@ -50,6 +50,42 @@ fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<u
     Ok(affected)
 }
 
+/// Whether `tip` is one the relationship with `counterparty` has moved past:
+/// a tip a step or a tip sync left, recorded where the tip moved
+/// ([`record_passed_tip_in_tx`]).
+pub fn relationship_passed_tip(counterparty: &[u8; 32], tip: &[u8; 32]) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow::anyhow!("the database lock: {e}"))?;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM relationship_passed_tips
+             WHERE counterparty_device_id = ?1 AND tip = ?2",
+            params![&counterparty[..], &tip[..]],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Record `parent` as a tip the relationship with `counterparty` has moved
+/// past, inside the transaction that moves the tip. A proposal made on it and
+/// delivered later is an old one, never evidence of where the sender stands
+/// (SA-114).
+pub(crate) fn record_passed_tip_in_tx(
+    conn: &Connection,
+    counterparty: &[u8; 32],
+    parent: &[u8; 32],
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO relationship_passed_tips (counterparty_device_id, tip)
+         VALUES (?1, ?2)",
+        params![&counterparty[..], &parent[..]],
+    )?;
+    Ok(())
+}
+
 /// How a relationship step's tip write ended when it did not refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TipAdvance {
@@ -89,6 +125,7 @@ pub(crate) fn advance_relationship_tip_in_tx(
         params![&child[..], &commitment[..], &counterparty[..], &parent[..]],
     )?;
     if moved == 1 {
+        record_passed_tip_in_tx(conn, counterparty, parent)?;
         return Ok(TipAdvance::Applied);
     }
     let (tip, bound): (Option<Vec<u8>>, Option<Vec<u8>>) = conn

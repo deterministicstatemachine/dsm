@@ -1678,7 +1678,6 @@ async fn trace_commit_prepared(
                 amount: TRACE_BILATERAL_AMOUNT,
             }],
             None,
-            None,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1688,7 +1687,6 @@ async fn trace_commit_prepared(
             prepared.counterparty_devid,
             prepared.operation.clone(),
             &prepared.deltas,
-            None,
             None,
         )
         .map_err(|e| format!("the sender's advance was refused: {e}"))?;
@@ -1730,7 +1728,6 @@ fn trace_receive(
                 direction: BalanceDirection::Credit,
                 amount: TRACE_BILATERAL_AMOUNT,
             }],
-            None,
             None,
         )
         .map_err(|e| format!("the receiver's advance was refused: {e}"))?;

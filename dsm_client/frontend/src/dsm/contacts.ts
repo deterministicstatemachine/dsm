@@ -20,6 +20,12 @@ const PAIRING: Partial<Record<pb.ContactPairingPhase, ContactPairing>> = {
   [pb.ContactPairingPhase.RETRYING]: 'retrying',
 };
 
+/** A contact's alias as names are shown; one that is nothing but invisible characters is shown as the device's fingerprint. */
+function shownAlias(alias: string, deviceId: Uint8Array): string {
+  const visible = visibleText(alias);
+  return visible.length > 0 ? visible : deviceFingerprint(deviceId);
+}
+
 /** A contact as contacts.list states it; a contact missing what Rust always writes is refused. */
 function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   const genesisHash = c.genesisHash?.v;
@@ -43,12 +49,10 @@ function mapContactToDTO(c: pb.ContactAddResponse): BilateralRelationshipDTO {
   if (!pairing) {
     throw new Error(`STRICT: contacts.list answered a contact in a pairing phase the wire does not name (${c.pairing})`);
   }
-  // An alias that is nothing but invisible characters is shown as the device's fingerprint.
-  const alias = visibleText(c.alias);
   return {
     deviceId: c.deviceId,
     publicKey: c.signingPublicKey,
-    alias: alias.length > 0 ? alias : deviceFingerprint(c.deviceId),
+    alias: shownAlias(c.alias, c.deviceId),
     genesisHash,
     chainTip,
     // The wire's empty string is "no address".
@@ -184,6 +188,8 @@ export async function addContact(args: AddContactArgs): Promise<AddContactResult
       throw new Error(`STRICT: contacts.addManual answered ${env.payload.case}`);
     }
     const added = env.payload.value;
+    // The alias Rust stored, shown as every name is (SA-159).
+    added.alias = shownAlias(added.alias, added.deviceId);
     return { accepted: true, contactId: encodeBase32Crockford(added.deviceId), alias: added.alias };
   } catch (e) {
     return {

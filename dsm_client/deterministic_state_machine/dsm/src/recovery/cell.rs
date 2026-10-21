@@ -45,6 +45,52 @@ pub enum RecoveryCell {
 }
 
 impl RecoveryCell {
+    /// Whether `bytes` are an object of the kind this cell holds, naming the
+    /// cell's coordinates where the object carries them. Anyone can write a
+    /// cell, so a reader keeps nothing else (storage spec §9, route chains,
+    /// rule 3: bytes that are no recognized object naming the key never
+    /// count). Whether the object verifies is the reader's to check.
+    pub fn holds(&self, bytes: &[u8]) -> bool {
+        use crate::recovery::{
+            decode_leaf_set, ContactTombstoneAck, PostedDbtcVaultIndex, PostedPdsmtHead,
+            RecoveryAuthorityAnchor, RecoveryEstablishmentReceipt, RecoverySuccessionProof,
+            RelationshipChainSegment,
+        };
+        match self {
+            Self::AuthorityAnchor { genesis } => RecoveryAuthorityAnchor::from_bytes(bytes)
+                .is_ok_and(|anchor| anchor.genesis_id == *genesis),
+            Self::PdsmtHead { device_id } => {
+                PostedPdsmtHead::from_bytes(bytes).is_ok_and(|head| head.device_id == *device_id)
+            }
+            Self::PdsmtLeaves {
+                genesis, device_id, ..
+            } => decode_leaf_set(bytes).is_ok_and(|leaves| {
+                leaves
+                    .iter()
+                    .all(|leaf| leaf.genesis_id == *genesis && leaf.owner_device_id == *device_id)
+            }),
+            Self::RelChainSegment { rel_key } => RelationshipChainSegment::from_bytes(bytes)
+                .is_ok_and(|segment| segment.rel_key == *rel_key),
+            Self::EstablishmentReceipt { new_rel_key } => {
+                RecoveryEstablishmentReceipt::from_bytes(bytes)
+                    .is_ok_and(|receipt| receipt.rel_key == *new_rel_key)
+            }
+            Self::DbtcVaultIndex { genesis, device_id } => PostedDbtcVaultIndex::from_bytes(bytes)
+                .is_ok_and(|index| index.genesis_id == *genesis && index.device_id == *device_id),
+            // A succession proof's receipt names the tombstone it succeeds.
+            Self::SuccessionProof { .. } | Self::TombstoneNotice { .. } => {
+                RecoverySuccessionProof::from_bytes(bytes).is_ok_and(|proof| {
+                    proof.succession.tombstone_hash == proof.tombstone.tombstone_hash
+                })
+            }
+            Self::TombstoneAck {
+                acknowledging_device_id,
+                ..
+            } => ContactTombstoneAck::from_bytes(bytes)
+                .is_ok_and(|ack| ack.acknowledging_device_id == *acknowledging_device_id),
+        }
+    }
+
     /// The keyed-cell namespace every recovery object lives under.
     pub fn namespace() -> &'static [u8] {
         TAG_DSM_RECOVERY_CELL.source_bytes()

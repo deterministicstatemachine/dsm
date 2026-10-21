@@ -831,6 +831,31 @@ impl ComputedCells {
     pub fn start_routed(&self) -> &RoutedCell {
         &self.start_cell
     }
+
+    /// What a reader keeps of a seat's log at the start cell: the copies of
+    /// Starts and Withdraws that prove their authority there, the only ones
+    /// its reading can count ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps_start(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.start_cell, move |bytes| {
+            let passed_over = std::cell::RefCell::new(Vec::new());
+            let recognize = start_at(self, &passed_over);
+            recognize(bytes).is_some()
+        })
+    }
+
+    /// What a reader keeps of a seat's log at the match cell: the copies of
+    /// occupants that prove their outcome under `programs`, the only ones
+    /// its reading can count ([`crate::route_chain::recognized_copies`]).
+    pub fn keeps_match<'c>(
+        &'c self,
+        programs: &'c ProgramRegistry,
+    ) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + 'c {
+        crate::route_chain::recognized_copies(&self.match_cell, move |bytes| {
+            let passed_over = std::cell::RefCell::new(Vec::new());
+            let recognize = match_at(self, programs, &passed_over);
+            recognize(bytes).is_some()
+        })
+    }
 }
 
 /// What a reader found at a start cell: open, or the Start or Withdraw

@@ -100,15 +100,40 @@ pub enum ValidatedPeerTransition {
     /// STILL refused as a debit source: P15-9 rules on lineage, not on whether
     /// resolution happened. A boolean `is_unresolved` would get this wrong.
     ///
-    /// **Nothing constructs this arm (E1c-3).** `validate_peer_step`
-    /// refuses every conditional claim, resolved or not, because a resolved
+    /// **Nothing constructs this arm (E1c-3).** `validate_peer_lineage`
+    /// answers a conditional claim at its target `Unresolved`, resolved or
+    /// not, and builds no transition for it, because a resolved
     /// position's register cell still holds `C_q` — resolution is
     /// verifier-local and never rewrites the cell. The arm exists so that when
-    /// the walk learns to traverse a resolved SoFi position, the refusal in
+    /// the walk learns to take a resolved SoFi position as its target, the
+    /// refusal in
     /// [`prevalidate_sender_debit`] is already there; until then no input can
     /// reach that refusal, and it has no test that performs the forbidden
     /// debit.
     ResolvedSofi(PeerTransitionFacts),
+}
+
+/// The verified substrate of a peer's step.
+#[derive(Debug, Clone)]
+pub(crate) enum PeerSubstrate {
+    Dsm {
+        /// The peer's verified successor commitment — what the acceptance
+        /// evidence's receipt `child_tip` must equal ("same bilateral step").
+        c_dsm_plus: [u8; 32],
+        /// The verified successor's own parent on the peer's bilateral chain
+        /// — the other half of the `(embedded_parent, C_dsm+)` pair CORR.1
+        /// compares with a bundle's `(trader_parent, trader_successor)`. From
+        /// the VERIFIED substrate, never from the bundle.
+        embedded_parent: [u8; 32],
+        /// The exact operation the peer's VERIFIED successor evidence
+        /// carried. The peer-debit predicate reasons about it directly
+        /// (Transfer-only, online mode, addressed to the consumer) instead of
+        /// trusting the descriptor's story about what the peer did.
+        verified_operation: crate::types::operations::Operation,
+    },
+    /// A load or an unload of the peer's offline account. It carries no
+    /// operation: it is never a peer debit a credit can name.
+    OfflineBoundary(crate::economic::offline_boundary::VerifiedOfflineBoundary),
 }
 
 /// The provenance a validated peer transition carries, whatever its lineage.
@@ -125,19 +150,9 @@ pub struct PeerTransitionFacts {
     /// The peer's P0–P6-proven AK, recovered during the walk — what the
     /// acceptance evidence's sender side must chain to.
     proven_ak: Vec<u8>,
-    /// The peer's verified successor commitment — what the acceptance
-    /// evidence's receipt `child_tip` must equal ("same bilateral step").
-    c_dsm_plus: [u8; 32],
-    /// The verified successor's own parent on the peer's bilateral chain —
-    /// the other half of the `(embedded_parent, C_dsm+)` pair CORR.1 compares
-    /// with a bundle's `(trader_parent, trader_successor)`. From the VERIFIED
-    /// substrate, never from the bundle.
-    embedded_parent: [u8; 32],
-    /// The exact operation the peer's VERIFIED successor evidence carried.
-    /// The peer-debit predicate reasons about it directly (Transfer-only,
-    /// online mode, addressed to the consumer) instead of trusting the
-    /// descriptor's story about what the peer did.
-    verified_operation: crate::types::operations::Operation,
+    /// What the step's VERIFIED substrate was: a DSM successor, or an
+    /// offline boundary.
+    substrate: PeerSubstrate,
     /// The admission manifest the registered claim at this position names,
     /// as the walk verified it. A release that names another manifest for
     /// the same root is refused against this, not against a re-read cell.
@@ -163,9 +178,7 @@ impl ValidatedPeerTransition {
         validated_root: ValidatedEconomicRoot,
         witness: EconomicTransitionWitness,
         proven_ak: Vec<u8>,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        verified_operation: crate::types::operations::Operation,
+        substrate: PeerSubstrate,
         admission_manifest_addr: [u8; 32],
         accepted_claim: AcceptedClaim,
     ) -> Self {
@@ -175,9 +188,7 @@ impl ValidatedPeerTransition {
             validated_root,
             witness,
             proven_ak,
-            c_dsm_plus,
-            embedded_parent,
-            verified_operation,
+            substrate,
             admission_manifest_addr,
             accepted_claim,
         })
@@ -224,16 +235,43 @@ impl ValidatedPeerTransition {
         &self.facts().proven_ak
     }
 
-    pub fn c_dsm_plus(&self) -> &[u8; 32] {
-        &self.facts().c_dsm_plus
+    /// The verified successor commitment, for a DSM-successor step.
+    pub fn c_dsm_plus(&self) -> Option<&[u8; 32]> {
+        match &self.facts().substrate {
+            PeerSubstrate::Dsm { c_dsm_plus, .. } => Some(c_dsm_plus),
+            PeerSubstrate::OfflineBoundary(_) => None,
+        }
     }
 
-    pub fn embedded_parent(&self) -> &[u8; 32] {
-        &self.facts().embedded_parent
+    /// The verified successor's own parent, for a DSM-successor step.
+    pub fn embedded_parent(&self) -> Option<&[u8; 32]> {
+        match &self.facts().substrate {
+            PeerSubstrate::Dsm {
+                embedded_parent, ..
+            } => Some(embedded_parent),
+            PeerSubstrate::OfflineBoundary(_) => None,
+        }
     }
 
-    pub fn verified_operation(&self) -> &crate::types::operations::Operation {
-        &self.facts().verified_operation
+    /// The exact operation the step's verified successor carried, for a
+    /// DSM-successor step. An offline boundary carries none.
+    pub fn verified_operation(&self) -> Option<&crate::types::operations::Operation> {
+        match &self.facts().substrate {
+            PeerSubstrate::Dsm {
+                verified_operation, ..
+            } => Some(verified_operation),
+            PeerSubstrate::OfflineBoundary(_) => None,
+        }
+    }
+
+    /// The verified offline boundary, for a boundary step.
+    pub fn offline_boundary(
+        &self,
+    ) -> Option<&crate::economic::offline_boundary::VerifiedOfflineBoundary> {
+        match &self.facts().substrate {
+            PeerSubstrate::Dsm { .. } => None,
+            PeerSubstrate::OfflineBoundary(b) => Some(b),
+        }
     }
 }
 
@@ -268,6 +306,10 @@ pub struct ProvenanceContext<'a> {
     /// reads the settle's own fields (`c_n`, `x`, amounts, owner
     /// coordinates) from here and cross-checks the descriptor against them.
     pub verified_operation: Option<&'a crate::types::operations::Operation>,
+    /// The offline boundary the VERIFIED substrate is — `None` on a DSM
+    /// successor. A `0x0075` credit requires it to be an unload, and is funded
+    /// by exactly the account debit its fold proves.
+    pub offline_boundary: Option<&'a crate::economic::offline_boundary::VerifiedOfflineBoundary>,
 }
 
 /// The release that installed one generation of the native reserve: the
@@ -425,12 +467,17 @@ pub enum ProvenanceError {
     /// genesis release: not fetched, or the bytes did not re-hash to the
     /// commit. The taxonomy survives, so an outage is retried.
     GenesisReleasePolicy(PeerLineageFailure),
-    /// A DLV successor's leg fails the applicable token policy — the SoFi
-    /// Def 4.1 / Req 4.4 / Req 4.6 conjunct on every market movement and
-    /// every release. The anchored bytes did not re-hash to the committed
-    /// leg, did not parse, or the parsed policy refuses the asset as a
-    /// market leg.
-    MarketLegPolicy(String),
+    /// A Transfer moves a token whose committed policy does not let it
+    /// transfer: SoFi §49 checks `transferable` "on every transfer, online
+    /// and offline", so a foreign verifier refuses it as the endpoints do.
+    AssetNotTransferable,
+    /// The committed policy of a transferred token could not be established:
+    /// not fetched, or the bytes did not re-hash to the commit. The taxonomy
+    /// survives, so an outage is retried.
+    TransferPolicy(PeerLineageFailure),
+    /// A `0x0075` credit on an admission whose substrate is not an offline
+    /// unload: there is no offline debit to fund it.
+    NotAnOfflineUnload,
     /// The verifier holds no validated transition for the named peer position.
     /// NOT a failure of the peer — a failure of *this* verifier to have
     /// established the prerequisite, and it fails closed.
@@ -522,6 +569,43 @@ pub enum ProvenanceError {
     RegisterNotEstablished(PeerLineageFailure),
 }
 
+/// The transfer conjunct of SoFi §49: a Transfer moves the token
+/// `policy_commit` names only when that token's committed policy transfers.
+/// The policy is read as every conjunct here reads one: ERA's from Core's
+/// own bytes (Amendment S11), any other from the bytes the resolver anchors,
+/// which must re-hash to the commit.
+pub fn check_transfer_policy(
+    policy_commit: &[u8; 32],
+    resolver: &dyn ProvenanceResolver,
+) -> Result<(), ProvenanceError> {
+    let bytes = if *policy_commit == crate::core::token::era_policy::era_policy_commit() {
+        crate::core::token::era_policy::era_policy_bytes().to_vec()
+    } else {
+        resolver
+            .anchored_policy_bytes(policy_commit)
+            .map_err(ProvenanceError::TransferPolicy)?
+    };
+    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
+        != *policy_commit
+    {
+        return Err(ProvenanceError::TransferPolicy(
+            PeerLineageFailure::Incomplete(
+                "policy bytes do not re-hash to the transferred token's policy commit".into(),
+            ),
+        ));
+    }
+    let policy = crate::economic::token_policy::parse_token_policy(&bytes).map_err(|e| {
+        ProvenanceError::TransferPolicy(PeerLineageFailure::Invalid(format!(
+            "the transferred token's committed policy does not parse: {e}"
+        )))
+    })?;
+    if policy.transferable {
+        Ok(())
+    } else {
+        Err(ProvenanceError::AssetNotTransferable)
+    }
+}
+
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -531,9 +615,15 @@ impl core::fmt::Display for ProvenanceError {
             Self::GenesisReleasePolicy(e) => {
                 write!(f, "genesis-release token policy: {e}")
             }
-            Self::MarketLegPolicy(m) => {
-                write!(f, "market leg token policy: {m}")
-            }
+            Self::AssetNotTransferable => write!(
+                f,
+                "the transferred token's committed policy does not let it transfer"
+            ),
+            Self::TransferPolicy(e) => write!(f, "transferred token policy: {e}"),
+            Self::NotAnOfflineUnload => write!(
+                f,
+                "an offline-boundary debit funds a credit only on an offline unload's admission"
+            ),
             Self::PeerTransitionNotValidated {
                 peer_economic_position,
                 failure,
@@ -871,13 +961,13 @@ pub fn prevalidate_sender_debit(
     // be the sender's ONLINE Transfer, addressed to THIS consumer, and the
     // named mutation must be THE debit that operation performed.
     let (op_recipient, op_amount, op_asset) = match peer.verified_operation() {
-        crate::types::operations::Operation::Transfer {
+        Some(crate::types::operations::Operation::Transfer {
             to_device_id,
             amount,
             policy_commit,
             authority_policy: Option::None,
             ..
-        } => (to_device_id.clone(), amount.value(), *policy_commit),
+        }) => (to_device_id.clone(), amount.value(), *policy_commit),
         _ => return Err(ProvenanceError::PeerDebitIsNotAnOnlineTransfer),
     };
     if op_recipient.as_slice() != consumer_devid.as_slice() {
@@ -965,6 +1055,27 @@ pub fn verify_credit_source(
         // release rule is `AllAtCreation`. No signer authorizes it.
         CreditSource::GenesisRelease(_) => verify_genesis_release(resolver, ctx)?,
 
+        // ── 0x0075: OFFLINE BOUNDARY DEBIT ───────────────────────────────
+        //
+        // The online credit of an unload, funded by the account debit the
+        // verified unload body proves: same asset, same amount, from the
+        // device's own offline account. The source is the boundary's own
+        // identity, consumed below from ZERO.
+        CreditSource::OfflineBoundaryDebit(_) => match ctx.offline_boundary {
+            Some(b) if b.kind() == crate::types::device_state::OfflineBoundaryKind::Unload => {
+                FundedCredit {
+                    source_id: crate::economic::offline_boundary::offline_boundary_debit_source_id(
+                        ctx.genesis,
+                        ctx.device_id,
+                        &b.operation_id(),
+                    ),
+                    policy_commit: b.asset(),
+                    amount: b.amount(),
+                }
+            }
+            _ => return Err(ProvenanceError::NotAnOfflineUnload),
+        },
+
         CreditSource::ValidatedPeerDebit(p) => {
             // The resolver returns a VALIDATED transition or nothing. It
             // cannot hand back an unvalidated one, because it would have to
@@ -1030,9 +1141,11 @@ pub fn verify_credit_source(
                 // comparing or the equality can never hold.
                 &peer
                     .verified_operation()
+                    .ok_or(ProvenanceError::PeerDebitIsNotAnOnlineTransfer)?
                     .with_cleared_signature()
                     .to_bytes(),
-                peer.c_dsm_plus(),
+                peer.c_dsm_plus()
+                    .ok_or(ProvenanceError::PeerDebitIsNotAnOnlineTransfer)?,
                 &expected_b_pair,
                 &ResolverEkSteps(resolver),
             )
@@ -1151,35 +1264,33 @@ pub fn verify_credit_source(
     Ok(funded)
 }
 
-/// Which arms must leave a persistent consumed-source record.
-///
-/// `SameTransitionMove` does not: its debit is inside the same write set, so
-/// it is consumed by construction and could never be presented again. The
-/// external arms can, so their consumption has to be written down.
-fn requires_consumed_source_record(source: &CreditSource) -> bool {
-    // NativeReserveRelease deliberately does NOT require one: non-reuse is
-    // the release's position + digest binding (the release commits ONE
-    // target position, itself a register cell that is final once, and ONE
-    // exact operation), and one generation of the reserve is final exactly
-    // once — so a consumed-source leaf would be bookkeeping for an
-    // impossibility.
-    // EXHAUSTIVE ON PURPOSE. As a `matches!` allowlist this defaulted a new
-    // arm to `false` — no consumed-source leaf, so the source stays
-    // re-spendable — with no compile error anywhere. Every other function
-    // over `CreditSource` in this module forces an arm; this one now does too,
-    // and the permissive answer has to be written down to be chosen.
+/// How a funded source is kept from funding a second credit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonReuse {
+    /// A consumed-source leaf written from ZERO in the same transition. An
+    /// external source can be presented again, so its consumption has to be
+    /// written down.
+    ConsumedSourceLeaf,
+    /// The source names the one position and operation it funds: a native
+    /// reserve release commits ONE target position (a register cell final
+    /// once) and ONE exact operation, and one generation of the reserve is
+    /// final exactly once — a consumed-source leaf would be bookkeeping for an
+    /// impossibility.
+    BoundToItsPosition,
+    /// Bound to the one `CreateToken` that carries it: creation happens once.
+    BoundToItsCreation,
+}
+
+/// How each arm is kept from funding twice. EXHAUSTIVE ON PURPOSE: a new arm
+/// has to say which mechanism keeps it single-use, or it does not compile.
+fn non_reuse(source: &CreditSource) -> NonReuse {
     match source {
-        CreditSource::ValidatedPeerDebit(_) => true,
-        CreditSource::NativeReserveRelease(_) => false,
-        // The remaining arms answer `false`, exactly as the allowlist did.
-        // Each is bound to a coordinate that cannot be replayed: a
-        // same-transition move is internal to the witness being verified, and
-        // an issuance names the position-and-root pair its evidence is
-        // proven against. Listing
-        // them is the point — the answer is now written down rather than
-        // inherited from whichever arm a `matches!` happened to omit.
-        // Bound to the one `CreateToken` that carries it: creation happens once.
-        CreditSource::GenesisRelease(_) => false,
+        CreditSource::ValidatedPeerDebit(_) => NonReuse::ConsumedSourceLeaf,
+        CreditSource::NativeReserveRelease(_) => NonReuse::BoundToItsPosition,
+        CreditSource::GenesisRelease(_) => NonReuse::BoundToItsCreation,
+        // One offline debit funds one online credit: the unload's source is
+        // recorded as consumed, so the same unload cannot fund a second credit.
+        CreditSource::OfflineBoundaryDebit(_) => NonReuse::ConsumedSourceLeaf,
     }
 }
 
@@ -1204,7 +1315,7 @@ pub fn verify_transition_provenance(
         }
         seen.push(f.source_id);
 
-        if requires_consumed_source_record(source) {
+        if non_reuse(source) == NonReuse::ConsumedSourceLeaf {
             let recorded = witness.mutations.iter().find_map(|m| match &m.post_state {
                 Some(EconomicLeafState::ConsumedSource(c)) if c.source_id == f.source_id => {
                     Some((m, c))

@@ -21,10 +21,18 @@ resource "google_compute_firewall" "dsm_api" {
   target_tags   = ["dsm-storage-node"]
 }
 
+# The nodes sit on the project's `default` network, whose pre-made rules
+# (`default-allow-ssh`, `default-allow-rdp`, priority 65534) let SSH and RDP in
+# from anywhere: an allow rule for `allowed_ssh_cidr` alone restricted nothing
+# (SA-151). SSH from `allowed_ssh_cidr` is allowed at priority 900, and SSH and
+# RDP from anywhere else are denied at 1000, ahead of the default rules, for
+# every node this module runs. Moving the nodes to a network of their own would
+# replace them, which `prevent_destroy` refuses.
 resource "google_compute_firewall" "dsm_ssh" {
-  name    = "${var.project_tag}-allow-ssh-${var.region}"
-  network = "default"
-  project = var.gcp_project
+  name     = "${var.project_tag}-allow-ssh-${var.region}"
+  network  = "default"
+  project  = var.gcp_project
+  priority = 900
 
   allow {
     protocol = "tcp"
@@ -32,6 +40,21 @@ resource "google_compute_firewall" "dsm_ssh" {
   }
 
   source_ranges = [var.allowed_ssh_cidr]
+  target_tags   = ["dsm-storage-node"]
+}
+
+resource "google_compute_firewall" "dsm_deny_remote_shells" {
+  name     = "${var.project_tag}-deny-remote-shells-${var.region}"
+  network  = "default"
+  project  = var.gcp_project
+  priority = 1000
+
+  deny {
+    protocol = "tcp"
+    ports    = ["22", "3389"]
+  }
+
+  source_ranges = ["0.0.0.0/0"]
   target_tags   = ["dsm-storage-node"]
 }
 
