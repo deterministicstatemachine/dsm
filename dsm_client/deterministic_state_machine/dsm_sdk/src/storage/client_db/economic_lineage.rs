@@ -233,10 +233,10 @@ pub fn frontier_below(
     .transpose()
 }
 
-/// Record, inside the transaction that accepts a step from the peer or in a
-/// contact add's own, a frontier a verification reached (DSM Amendment A19).
-/// The activation root is every receiver's frontier and is never recorded.
-pub fn record_frontier_in_tx(
+/// Record, inside `tx`, a frontier a verification reached (DSM Amendment
+/// A19). The activation root is every receiver's frontier and is never
+/// recorded.
+fn record_frontier_in_tx(
     tx: &Transaction<'_>,
     frontier: &dsm::economic::peer_lineage::PeerFrontier,
 ) -> Result<()> {
@@ -258,8 +258,10 @@ pub fn record_frontier_in_tx(
     Ok(())
 }
 
-/// Record frontiers a verification reached, in a transaction of their own:
-/// a contact add's validation, which accepts nothing (DSM Amendment A19).
+/// Record the frontiers one verification established, in one transaction
+/// (DSM Amendment A19, owner ruling 2026-10-20: "Persist those frontiers
+/// atomically"), whatever the verification was for. A row is only ever
+/// added, so a frontier never moves back.
 pub fn record_frontiers(frontiers: &[dsm::economic::peer_lineage::PeerFrontier]) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding

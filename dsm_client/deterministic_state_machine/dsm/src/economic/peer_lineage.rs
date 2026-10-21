@@ -296,11 +296,22 @@ pub struct StepCost {
     pub source_steps: u32,
 }
 
-/// An answer about a peer, with what establishing it cost.
+/// An answer about a peer, with what establishing it cost and every frontier
+/// the walk established on the way.
+///
+/// Each frontier stands at the end of a segment that passed whole, from a
+/// frontier this receiver held: the walked identity's own last coordinate and
+/// each credit source's (owner ruling 2026-10-01: "A frontier becomes trusted
+/// only after the complete segment to it has passed validation"). A walk that
+/// fails returns none. The receiver records them whatever the walk was for
+/// (owner ruling 2026-10-20, Amendment A19: "Record every successfully
+/// validated economic frontier, including those reached through read-only
+/// operations").
 #[derive(Debug)]
 pub struct Checked<T> {
     answer: T,
     cost: StepCost,
+    reached: Vec<PeerFrontier>,
 }
 
 impl<T> Checked<T> {
@@ -312,41 +323,14 @@ impl<T> Checked<T> {
         self.cost
     }
 
+    /// Every frontier this walk established, in the order it established
+    /// them.
+    pub fn reached(&self) -> &[PeerFrontier] {
+        &self.reached
+    }
+
     pub fn into_answer(self) -> T {
         self.answer
-    }
-}
-
-/// A peer's lineage validated to its target step, with the frontier each
-/// credit source's segment reached on the way.
-///
-/// Every source frontier here stands at a step whose whole segment, from a
-/// frontier this receiver held, passed validation (owner ruling 2026-10-01:
-/// "A frontier becomes trusted only after the complete segment to it has
-/// passed validation"). The receiver records them in the transaction that
-/// accepts the target, beside the target's own frontier, so a later credit
-/// from the same source validates only the suffix.
-#[derive(Debug)]
-pub struct ValidatedPeerLineage {
-    transition: ValidatedPeerTransition,
-    source_frontiers: Vec<PeerFrontier>,
-}
-
-impl ValidatedPeerLineage {
-    /// The target step's validated transition.
-    pub fn transition(&self) -> &ValidatedPeerTransition {
-        &self.transition
-    }
-
-    /// The frontier each credit source's segment reached, in the order the
-    /// walk validated them.
-    pub fn source_frontiers(&self) -> &[PeerFrontier] {
-        &self.source_frontiers
-    }
-
-    /// The target step's transition and the sources' frontiers.
-    pub fn into_parts(self) -> (ValidatedPeerTransition, Vec<PeerFrontier>) {
-        (self.transition, self.source_frontiers)
     }
 }
 
@@ -355,7 +339,6 @@ impl ValidatedPeerLineage {
 #[derive(Debug)]
 pub struct ValidatedPrefix {
     reached: Option<PeerFrontier>,
-    source_frontiers: Vec<PeerFrontier>,
     stop: PrefixStop,
 }
 
@@ -378,11 +361,6 @@ impl ValidatedPrefix {
         self.reached.as_ref()
     }
 
-    /// The frontier each credit source's segment reached on the way.
-    pub fn source_frontiers(&self) -> &[PeerFrontier] {
-        &self.source_frontiers
-    }
-
     /// Why the walk stopped.
     pub fn stop(&self) -> &PrefixStop {
         &self.stop
@@ -390,8 +368,8 @@ impl ValidatedPrefix {
 }
 
 /// Verify a peer's lineage from this receiver's frontier to
-/// `target_position`: the target step's validated transition, and the
-/// frontiers its credits' sources reached (DSM Amendment A19).
+/// `target_position`: the target step's validated transition (DSM Amendment
+/// A19).
 ///
 /// Every step from the frontier to the target is validated from the root the
 /// verifier validated before it; a credit's source is validated through its
@@ -407,7 +385,7 @@ pub fn validate_peer_lineage(
     target_position: u64,
     frontiers: &dyn PeerFrontiers,
     conditional: &dyn ConditionalPositionResolver,
-) -> Result<Checked<ValidatedPeerLineage>, PeerLineageFailure> {
+) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
     if target_position == 0 {
         return Err(invalid(
             "position 0 is the activation root; it has no transition to validate",
@@ -415,14 +393,8 @@ pub fn validate_peer_lineage(
     }
     let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
     let transition = verifier.segment(peer_genesis, peer_devid, target_position)?;
-    let cost = verifier.cost.get();
-    Ok(Checked {
-        answer: ValidatedPeerLineage {
-            transition,
-            source_frontiers: verifier.sources_reached.into_inner(),
-        },
-        cost,
-    })
+    let own = PeerFrontier::reached_by(&transition);
+    Ok(verifier.checked(transition, own))
 }
 
 /// Validate a peer's lineage from this receiver's frontier toward its head,
@@ -441,15 +413,8 @@ pub fn validate_peer_prefix(
 ) -> Result<Checked<ValidatedPrefix>, PeerLineageFailure> {
     let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
     let (reached, stop) = verifier.toward_head(peer_genesis, peer_devid)?;
-    let cost = verifier.cost.get();
-    Ok(Checked {
-        answer: ValidatedPrefix {
-            reached,
-            source_frontiers: verifier.sources_reached.into_inner(),
-            stop,
-        },
-        cost,
-    })
+    let own = reached.clone();
+    Ok(verifier.checked(ValidatedPrefix { reached, stop }, own))
 }
 
 /// The root a peer's lineage selected AT `position`, and the reference a
@@ -460,7 +425,8 @@ pub fn validate_peer_prefix(
 ///
 /// Not a debit source: it yields no [`ValidatedPeerTransition`]. Position 0
 /// is the activation root, where no claim was accepted for a `P` to name, and
-/// is `Invalid`. Nothing is recorded.
+/// is `Invalid`. The coordinate at `position` is a frontier like any other the
+/// walk reached.
 pub fn peer_root_at(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
@@ -490,10 +456,8 @@ pub fn peer_root_at(
              to name as its parent"
         ))
     })?;
-    Ok(Checked {
-        answer: (point.root, accepted),
-        cost: verifier.cost.get(),
-    })
+    let own = PeerFrontier::at_point(*peer_genesis, *peer_devid, &point);
+    Ok(verifier.checked((point.root, accepted), own))
 }
 
 /// The claim a peer's lineage accepted AT `position` (SoFi Amendment S15,
@@ -501,7 +465,8 @@ pub fn peer_root_at(
 /// segment from this receiver's frontier is validated in full as a payer's
 /// is, and `position` itself as its last step, or, when its claim is
 /// conditional, resolved through `conditional` exactly as an interior
-/// position is. Nothing is recorded.
+/// position is. The coordinate at `position` is a frontier like any other the
+/// walk reached.
 pub fn peer_claim_at(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
@@ -520,27 +485,40 @@ pub fn peer_claim_at(
     let frontier = verifier.frontier_below(peer_genesis, peer_devid, position)?;
     let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position - 1)?;
     verifier.spend_step()?;
-    let accepted = match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
-        RegisteredEconomicClaim::SingleRoot(claim) => *verifier
-            .full_step(
-                peer_genesis,
-                peer_devid,
-                position,
-                &point,
-                &claim,
-                StepRole::Segment,
-            )?
-            .accepted_claim(),
-        RegisteredEconomicClaim::ConditionalSofi(held) => {
-            let (.., accepted) =
-                verifier.resolve_conditional(peer_genesis, peer_devid, position, &point, &held)?;
-            accepted
-        }
-    };
-    Ok(Checked {
-        answer: accepted,
-        cost: verifier.cost.get(),
-    })
+    let (accepted, own) =
+        match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
+            RegisteredEconomicClaim::SingleRoot(claim) => {
+                let step = verifier.full_step(
+                    peer_genesis,
+                    peer_devid,
+                    position,
+                    &point,
+                    &claim,
+                    StepRole::Segment,
+                )?;
+                (*step.accepted_claim(), PeerFrontier::reached_by(&step))
+            }
+            RegisteredEconomicClaim::ConditionalSofi(held) => {
+                let (root, accepted) = verifier.resolve_conditional(
+                    peer_genesis,
+                    peer_devid,
+                    position,
+                    &point,
+                    &held,
+                )?;
+                let at = ChainPoint {
+                    root,
+                    accepted: Some(ParentClaimRef::Conditional {
+                        fulfillment_id: held.fulfillment_id,
+                    }),
+                };
+                (
+                    accepted,
+                    PeerFrontier::at_point(*peer_genesis, *peer_devid, &at),
+                )
+            }
+        };
+    Ok(verifier.checked(accepted, own))
 }
 
 /// A failure met inside a step, kept in its own class and located at the
@@ -705,9 +683,10 @@ struct Verifier<'a> {
     conditional: &'a dyn ConditionalPositionResolver,
     /// What this verification has cost so far, counted as it reads.
     cost: std::cell::Cell<StepCost>,
-    /// The frontier each credit source's segment reached in this walk, each
-    /// standing at a step whose whole segment passed.
-    sources_reached: std::cell::RefCell<Vec<PeerFrontier>>,
+    /// Every frontier this walk established besides the walked identity's own
+    /// last coordinate: the position before a target, and each credit source's
+    /// segment end, each standing at a step whose whole segment passed.
+    established: std::cell::RefCell<Vec<PeerFrontier>>,
 }
 
 impl<'a> Verifier<'a> {
@@ -728,12 +707,27 @@ impl<'a> Verifier<'a> {
                 routed_reads: 0,
                 source_steps: 0,
             }),
-            sources_reached: std::cell::RefCell::new(Vec::new()),
+            established: std::cell::RefCell::new(Vec::new()),
         })
     }
 }
 
 impl Verifier<'_> {
+    /// `answer`, with what this walk cost and every frontier it established:
+    /// `own`, the walked identity's last coordinate, and each source's.
+    fn checked<T>(self, answer: T, own: Option<PeerFrontier>) -> Checked<T> {
+        let cost = self.cost.get();
+        let reached = own
+            .into_iter()
+            .chain(self.established.into_inner())
+            .collect();
+        Checked {
+            answer,
+            cost,
+            reached,
+        }
+    }
+
     fn count(&self, add: impl FnOnce(&mut StepCost)) {
         let mut cost = self.cost.get();
         add(&mut cost);
@@ -1026,7 +1020,7 @@ impl Verifier<'_> {
     ) -> Result<PeerFrontier, PeerLineageFailure> {
         let recorded = self.recorded_frontier_below(genesis, device_id, position)?;
         let reached = self
-            .sources_reached
+            .established
             .borrow()
             .iter()
             .filter(|f| {
@@ -1191,6 +1185,12 @@ impl Verifier<'_> {
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
         let frontier = self.frontier_below(genesis, device_id, target)?;
         let point = self.chain_through(genesis, device_id, &frontier, target - 1)?;
+        // The position before the target stands at the end of a segment that
+        // passed whole: it is a frontier whether or not the target passes, and
+        // the receiver's later walk to the target starts from it.
+        if let Some(before) = PeerFrontier::at_point(*genesis, *device_id, &point) {
+            self.established.borrow_mut().push(before);
+        }
         self.spend_step()?;
         let claim = self.final_claim(genesis, device_id, target, &point.root)?;
         // The target is the step being presented, and a conditional position
@@ -1300,7 +1300,7 @@ impl Verifier<'_> {
         // a frontier for the rest of this walk, and for the receiver once it
         // accepts the target.
         if let Some(reached) = PeerFrontier::reached_by(&source) {
-            self.sources_reached.borrow_mut().push(reached);
+            self.established.borrow_mut().push(reached);
         }
         Ok(source)
     }

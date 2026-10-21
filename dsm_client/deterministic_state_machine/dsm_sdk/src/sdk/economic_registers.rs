@@ -23,7 +23,7 @@ use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
     peer_claim_at, peer_root_at, validate_peer_lineage, validate_peer_prefix, Checked,
     ConditionalPositionResolver, PeerEvidenceFetcher, PeerFrontier, PeerFrontiers, StepCost,
-    ValidatedPeerLineage, ValidatedPrefix,
+    ValidatedPrefix,
 };
 use dsm::sofi::wire::ParentClaimRef;
 use dsm::economic::provenance::{
@@ -400,10 +400,35 @@ fn log_cost(what: &str, devid: &[u8; 32], position: u64, cost: &StepCost) {
     );
 }
 
+/// Record every frontier a walk established, in one transaction, whatever
+/// the walk was for (DSM Amendment A19, owner ruling 2026-10-20: "Record every
+/// successfully validated economic frontier, including those reached through
+/// read-only operations ... Persist those frontiers atomically"). Core returns
+/// them only from a walk that passed, each at the end of a segment that
+/// passed whole, so nothing a peer sent, registered or signed becomes a
+/// frontier here. A store that cannot be written leaves the walk's answer not
+/// established, as a store that cannot be read does.
+fn record_established<T>(
+    what: &str,
+    devid: &[u8; 32],
+    position: u64,
+    checked: Checked<T>,
+) -> Result<T, PeerLineageFailure> {
+    log_cost(what, devid, position, &checked.cost());
+    crate::storage::client_db::economic_lineage::record_frontiers(checked.reached()).map_err(
+        |e| {
+            PeerLineageFailure::Incomplete(format!(
+                "recording the frontiers this walk validated: {e}"
+            ))
+        },
+    )?;
+    Ok(checked.into_answer())
+}
+
 /// A peer's step at `peer_economic_position`, validated from this
-/// receiver's frontier for the peer (DSM Amendment A19), for a caller that
-/// accepts nothing from the peer and so records none of the frontiers the
-/// walk reached.
+/// receiver's frontier for the peer (DSM Amendment A19), over WHATEVER
+/// fetcher the caller supplies. The frontiers the walk established are
+/// recorded.
 ///
 /// Core answers every time it is asked here. What a validation read is kept
 /// as evidence (`final_reads`: final cells and immutable objects), and the
@@ -417,30 +442,6 @@ pub(crate) fn resolve_peer<F: PeerEvidenceFetcher>(
     peer_economic_position: u64,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-    resolve_peer_lineage(
-        fetcher,
-        expected_network_id,
-        peer_genesis,
-        peer_devid,
-        peer_economic_position,
-        conditional,
-    )
-    .map(|lineage| lineage.into_parts().0)
-}
-
-/// A peer's lineage validated to `peer_economic_position` from this
-/// receiver's frontier (DSM Amendment A19), over WHATEVER fetcher the caller
-/// supplies, with the frontiers its credits' sources reached. Nothing is
-/// recorded here: a frontier, the peer's or a source's, is recorded only by
-/// the transaction that accepts a step, or by a contact add's validation.
-pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
-    fetcher: &F,
-    expected_network_id: &[u8],
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    peer_economic_position: u64,
-    conditional: &dyn ConditionalPositionResolver,
-) -> Result<ValidatedPeerLineage, PeerLineageFailure> {
     let checked = validate_peer_lineage(
         fetcher,
         expected_network_id,
@@ -450,18 +451,13 @@ pub(crate) fn resolve_peer_lineage<F: PeerEvidenceFetcher>(
         &StoredFrontiers,
         conditional,
     )?;
-    log_cost(
-        "lineage",
-        peer_devid,
-        peer_economic_position,
-        &checked.cost(),
-    );
-    Ok(checked.into_answer())
+    record_established("lineage", peer_devid, peer_economic_position, checked)
 }
 
 /// The root a trader selected at a position and the reference a later `P`
 /// names it by (`SofiReads::trader_root_at`), validated from this receiver's
-/// frontier (DSM Amendment A19). Nothing is recorded.
+/// frontier (DSM Amendment A19). The frontiers the walk established are
+/// recorded.
 pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -479,14 +475,14 @@ pub(crate) fn resolve_peer_root<F: PeerEvidenceFetcher>(
         &StoredFrontiers,
         conditional,
     )?;
-    log_cost("root", device_id, position, &checked.cost());
-    Ok(checked.into_answer())
+    record_established("root", device_id, position, checked)
 }
 
 /// The claim a trader accepted at a position (`SofiReads::accepted_claim_at`
 /// for another trader): what a setup naming that position is checked against
 /// (SoFi Amendment S15, MR-SOFI-0347), validated from this receiver's
-/// frontier (DSM Amendment A19). Nothing is recorded.
+/// frontier (DSM Amendment A19). The frontiers the walk established are
+/// recorded.
 pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -504,13 +500,13 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
         &StoredFrontiers,
         conditional,
     )?;
-    log_cost("claim", device_id, position, &checked.cost());
-    Ok(checked.into_answer())
+    record_established("claim", device_id, position, checked)
 }
 
 /// A contact's lineage validated from this receiver's frontier for it toward
-/// the head the register holds (DSM Amendment A19, contact add), with the
-/// frontiers its credits' sources reached. Nothing is recorded here.
+/// the head the register holds (DSM Amendment A19, contact add). The
+/// frontiers the walk established are recorded, a walk that stopped short
+/// included: what it validated before stopping stands.
 pub(crate) fn resolve_peer_prefix<F: PeerEvidenceFetcher>(
     fetcher: &F,
     expected_network_id: &[u8],
@@ -530,12 +526,11 @@ pub(crate) fn resolve_peer_prefix<F: PeerEvidenceFetcher>(
         .answer()
         .reached()
         .map_or(0, PeerFrontier::economic_position);
-    log_cost("prefix", peer_devid, reached, &checked.cost());
-    Ok(checked.into_answer())
+    record_established("prefix", peer_devid, reached, checked)
 }
 
 /// Validate a contact's lineage from this receiver's frontier for it toward
-/// the head the register holds, and record the frontiers it reached (DSM
+/// the head the register holds, recording the frontiers it reached (DSM
 /// Amendment A19, contact add), so the contact's first payment is one step.
 /// A walk that stops short records what it validated. One that meets a step
 /// that verifies as wrong records nothing, and the contact's payments are
@@ -568,14 +563,6 @@ pub(crate) async fn prevalidate_contact(
     })
     .await
     .map_err(|e| format!("the contact's validation did not finish: {e}"))??;
-    let frontiers: Vec<PeerFrontier> = prefix
-        .reached()
-        .into_iter()
-        .chain(prefix.source_frontiers())
-        .cloned()
-        .collect();
-    crate::storage::client_db::economic_lineage::record_frontiers(&frontiers)
-        .map_err(|e| format!("recording the contact's frontier: {e}"))?;
     log::info!(
         "[A19] contact {} validated to position {}: {:?}",
         text_id::encode_base32_crockford(&device_id),
@@ -611,32 +598,24 @@ impl<'a> RecordingResolver<'a> {
         }
     }
 
-    /// The peer's lineage validated from this receiver's frontier (DSM
-    /// Amendment A19), recorded at the fetch boundary, with what checking it
-    /// cost and the frontiers its credits' sources reached.
+    /// The peer's step validated from this receiver's frontier (DSM
+    /// Amendment A19), its evidence recorded at the fetch boundary and the
+    /// frontiers the walk established recorded in the frontier store.
     pub fn validated_peer_lineage(
         &self,
         peer_genesis: &[u8; 32],
         peer_devid: &[u8; 32],
         peer_economic_position: u64,
         conditional: &dyn ConditionalPositionResolver,
-    ) -> Result<Checked<ValidatedPeerLineage>, PeerLineageFailure> {
-        let checked = validate_peer_lineage(
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        resolve_peer(
             self,
             &self.inner.expected_network_id,
             peer_genesis,
             peer_devid,
             peer_economic_position,
-            &StoredFrontiers,
             conditional,
-        )?;
-        log_cost(
-            "offered step",
-            peer_devid,
-            peer_economic_position,
-            &checked.cost(),
-        );
-        Ok(checked)
+        )
     }
 }
 

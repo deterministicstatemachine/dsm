@@ -7,7 +7,8 @@
 //! position's claim is the one final at the cell routed from the root it
 //! validated before, and its step is validated from that root. A credit's
 //! source is validated the same way, from the verifier's frontier for it.
-//! Frontiers are recorded with each acceptance, so nothing is validated twice.
+//! Every frontier a walk establishes is recorded, whatever the walk was for, so
+//! nothing is validated twice.
 
 use serial_test::serial;
 
@@ -265,7 +266,7 @@ fn admitted_position(device: &TestDevice) -> u64 {
 /// A19). A pays B three times. Each acceptance records the frontier it
 /// reached for A, so the next reads A's paying position and nothing of A that
 /// B validated already.
-/// MUTATION CONTROL: recording no frontier with the acceptance turns this
+/// MUTATION CONTROL: recording no frontier after the walk turns this
 /// red: every acceptance walks A again from where B started.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
@@ -283,6 +284,17 @@ async fn each_acceptance_reads_only_what_is_new_since_the_last() {
             read.contains(&paid_at),
             "acceptance {round} validated A's paying position {paid_at}: {read:?}"
         );
+        // The walk that admits the payment and the walk that finishes the
+        // admission after it commits both reach the paying position, and no
+        // position before it is walked twice: the first records the position
+        // before the target as a frontier.
+        for position in (taken_through + 1)..paid_at {
+            assert_eq!(
+                asks(&asked, &key_at(&p.a, position)),
+                1,
+                "acceptance {round}: A's position {position} before the paying step is read once"
+            );
+        }
         assert!(
             read.iter().all(|position| *position > taken_through),
             "acceptance {round} read nothing of A at or before position {taken_through}, which B \
@@ -300,7 +312,7 @@ async fn each_acceptance_reads_only_what_is_new_since_the_last() {
 /// B again: B validates C's new paying step from that frontier, and reads
 /// nothing of C at or before the step it validated the first time, nor of A
 /// it took in already.
-/// MUTATION CONTROL: recording no source frontier with the acceptance turns
+/// MUTATION CONTROL: recording no source frontier after the walk turns
 /// this red: the second acceptance walks C again from where B's frontier for
 /// C stood before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -723,15 +735,18 @@ fn frontier_position(device: &TestDevice) -> Option<u64> {
         .map(|frontier| frontier.economic_position())
 }
 
-/// A read that accepts nothing records no frontier (DSM Amendment A19). A
-/// pays C, and B, which accepts nothing from A, validates A's paying step, as
-/// a SetupValid read or a holdings check reads a trader's root. B's frontier
-/// for A stays where it stood, so asked again B reads the same positions of A
-/// again.
-/// MUTATION CONTROL: recording the frontier a read reached turns this red.
+/// A read records the frontier it validated (DSM Amendment A19, owner ruling
+/// 2026-10-20: "Record every successfully validated economic frontier,
+/// including those reached through read-only operations"). A pays C twice,
+/// and B, which accepts nothing from A, validates A's first paying step, as a
+/// SetupValid read or a holdings check reads a trader's root. B's frontier for
+/// A moves to that step, so when B reads A's second paying step it validates
+/// that step alone.
+/// MUTATION CONTROL: recording nothing after a read turns this red: the
+/// second read walks A again from where B's frontier stood before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_read_that_accepts_nothing_records_no_frontier() {
+async fn a_read_records_the_frontier_it_validated() {
     let (p, c) = three_devices().await;
     let sent = p.a.send(&c, 5).await;
     assert!(sent.success, "{:?}", sent.error_message);
@@ -755,20 +770,191 @@ async fn a_read_that_accepts_nothing_records_no_frontier() {
     assert!(first.contains(&paid_at), "{first:?}");
     assert_eq!(
         frontier_position(&p.a),
-        stood,
-        "a read accepts nothing and records no frontier"
+        Some(paid_at),
+        "the read recorded the coordinate it validated"
     );
 
-    verify(p.a.genesis, p.a.device_id, paid_at)
+    // C takes in A's first payment, which A's relationship with C waits for
+    // before it sends again.
+    accept(&c).await;
+    let sent = p.a.send(&c, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_again = admitted_position(&p.a);
+    p.b.enter();
+    // A's own send logged the reads of its claim; only B's read counts.
+    crate::sdk::economic_registers::asked_cells::take();
+    verify(p.a.genesis, p.a.device_id, paid_again)
         .await
-        .expect("A's paying step is still valid");
+        .expect("A's second paying step is valid");
     let again = read_of(
         &crate::sdk::economic_registers::asked_cells::take(),
         &p.a,
-        paid_at,
+        paid_again,
     );
     assert_eq!(
-        again, first,
-        "nothing was recorded, so the same positions are read again"
+        again,
+        vec![paid_again],
+        "the second read validates A's new step alone"
+    );
+}
+
+/// A payment that follows the payer's transactions in another relationship is
+/// accepted (plan R05). A pays C, C takes it in, then A pays B. A's step for C
+/// lies between B's frontier for A and A's paying position, so B validates it
+/// as part of A's segment; the transactions of a relationship B is not a party
+/// to are neither a reason to refuse nor skipped.
+/// MUTATION CONTROL: a walk that refuses its second position (the budget cut
+/// to one) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_after_the_payers_dealings_with_others_is_accepted() {
+    let (p, c) = three_devices().await;
+    let sent = p.a.send(&c, 20).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let with_c_at = admitted_position(&p.a);
+    accept(&c).await;
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_at = admitted_position(&p.a);
+    assert!(
+        with_c_at < paid_at,
+        "A's step for C precedes its payment to B"
+    );
+
+    let asked = accept(&p.b).await;
+    assert_eq!(p.b.era_balance(), 10, "B takes the payment in");
+    let read = read_of(&asked, &p.a, paid_at + 1);
+    assert!(
+        read.contains(&with_c_at) && read.contains(&paid_at),
+        "B validated A's step for C and A's payment to B: {read:?}"
+    );
+}
+
+/// The same payment is accepted, with the same committed effect, whether the
+/// receiver is current with the payer or new to it (plan R06). D adds A after
+/// A's funding, so its contact add validated A to position 1; B added A
+/// before, and holds nothing of A. A pays D, then pays B the same amount. Both
+/// accept and both admit their credit as their first position; D reads only
+/// A's paying step, B reads A from its funding.
+/// MUTATION CONTROL: validating nothing at the add turns this red (D reads
+/// A's funding again).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_same_payment_is_accepted_whether_the_receiver_is_current_or_new_to_the_payer() {
+    let p = Pair::boot(100, 0).await;
+    let mut d = TestDevice::create("D", 0x0D);
+    d.boot(&p.fleet).await;
+    d.add_contact(&p.a).await;
+    p.a.add_contact(&d).await;
+
+    let sent = p.a.send(&d, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let to_d_at = admitted_position(&p.a);
+    let asked = accept(&d).await;
+    let d_read = read_of(&asked, &p.a, to_d_at + 1);
+
+    let sent = p.a.send(&p.b, 10).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let to_b_at = admitted_position(&p.a);
+    let asked = accept(&p.b).await;
+    let b_read = read_of(&asked, &p.a, to_b_at + 1);
+
+    assert_eq!(d.era_balance(), 10);
+    assert_eq!(p.b.era_balance(), 10);
+    assert_eq!(
+        admitted_position(&d),
+        admitted_position(&p.b),
+        "both admit the credit as the same position of their own"
+    );
+    assert_eq!(
+        d_read,
+        vec![to_d_at],
+        "D, current with A, validates one step"
+    );
+    assert_eq!(
+        b_read,
+        (1..=to_b_at).collect::<Vec<_>>(),
+        "B, new to A, validates A from its funding"
+    );
+}
+
+/// What an acceptance costs, as a function of the payer's history the receiver
+/// has not validated (plan Phase 5, current verifier only). A pays C `n`
+/// times, C taking each in, then pays B, which holds nothing of A. B's first
+/// acceptance validates every one of A's positions: the cost follows the
+/// unseen history. The next payment costs one position, and so does a second
+/// look at a position already accepted, because the acceptance recorded the
+/// frontier at the paying position and the one before it. `n` is
+/// `DSM_HISTORY_N`, six by default; the numbers print for the record.
+/// MUTATION CONTROL: recording no frontier after a walk turns this red (the
+/// warm and repeated costs grow with the history).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn acceptance_cost_follows_the_unseen_history_and_warm_costs_one_position() {
+    let unseen: u64 = match std::env::var("DSM_HISTORY_N") {
+        Ok(count) => count.parse().expect("DSM_HISTORY_N is a count"),
+        Err(std::env::VarError::NotPresent) => 6,
+        Err(e) => panic!("DSM_HISTORY_N is not readable: {e}"),
+    };
+    // Funding comes in multiples of the faucet payout.
+    let p = Pair::boot((unseen + 20).div_ceil(100) * 100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.a).await;
+    p.a.add_contact(&c).await;
+    for _ in 0..unseen {
+        let sent = p.a.send(&c, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        accept(&c).await;
+    }
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_at = admitted_position(&p.a);
+
+    let started = std::time::Instant::now();
+    let asked = accept(&p.b).await;
+    let cold_ms = started.elapsed().as_millis();
+    let cold_reads: usize = asked.values().sum();
+    let cold = read_of(&asked, &p.a, paid_at + 1);
+    assert_eq!(p.b.era_balance(), 1);
+    assert_eq!(
+        cold,
+        (1..=paid_at).collect::<Vec<_>>(),
+        "B, holding nothing of A, validates every position A reached"
+    );
+
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_again = admitted_position(&p.a);
+    let started = std::time::Instant::now();
+    let asked = accept(&p.b).await;
+    let warm_ms = started.elapsed().as_millis();
+    let warm_reads: usize = asked.values().sum();
+    assert_eq!(p.b.era_balance(), 2);
+    assert_eq!(
+        read_of(&asked, &p.a, paid_again + 1),
+        vec![paid_again],
+        "the next payment costs one position"
+    );
+
+    crate::sdk::economic_registers::asked_cells::take();
+    p.b.enter();
+    let started = std::time::Instant::now();
+    verify(p.a.genesis, p.a.device_id, paid_again)
+        .await
+        .expect("an accepted position verifies again");
+    let again_ms = started.elapsed().as_millis();
+    let again = crate::sdk::economic_registers::asked_cells::take();
+    let again_reads: usize = again.values().sum();
+    assert_eq!(
+        read_of(&again, &p.a, paid_again + 1),
+        vec![paid_again],
+        "a second look at an accepted position costs one position"
+    );
+    println!(
+        "[history] unseen={unseen} cold: positions={} reads={cold_reads} ms={cold_ms} | warm: \
+         positions=1 reads={warm_reads} ms={warm_ms} | repeated: positions=1 reads={again_reads} \
+         ms={again_ms}",
+        cold.len()
     );
 }
