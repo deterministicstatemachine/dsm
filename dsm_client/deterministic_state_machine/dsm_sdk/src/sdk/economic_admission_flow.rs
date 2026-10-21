@@ -1665,15 +1665,6 @@ pub(crate) struct RecipientAdmissionPrereqs {
     /// The wire's exact unsigned canonical operation bytes — the closure's
     /// verified transfer must be byte-identical to what was prevalidated.
     pub pinned_canonical_bytes: Vec<u8>,
-    /// The sender's coordinate this prevalidation validated: this device's
-    /// frontier for the sender once the transfer is accepted (DSM Amendment
-    /// A19), recorded in the accept transaction and never before it.
-    pub sender_frontier: dsm::economic::peer_lineage::PeerFrontier,
-    /// The frontier each of the sender's credit sources reached in this
-    /// prevalidation, each at a step whose whole segment passed: recorded in
-    /// the same accept transaction, so a later credit from that source
-    /// validates only the suffix.
-    pub source_frontiers: Vec<dsm::economic::peer_lineage::PeerFrontier>,
 }
 
 /// Prevalidate an inbound online transfer BEFORE any durable local state
@@ -1746,7 +1737,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     // the recorder observes exactly the closure this acceptance depends on.
     // A conditional position on the way is resolved from SoFi's public
     // objects for that position (SoFi Amendment S15).
-    let checked = {
+    let peer = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
         recorder.validated_peer_lineage(
@@ -1756,7 +1747,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
             &sofi.peer_position_resolver(),
         )
     };
-    let checked = checked.map_err(|e| match e {
+    let peer = peer.map_err(|e| match e {
         dsm::economic::provenance::PeerLineageFailure::Invalid(m) => {
             terminal(format!("sender lineage INVALID: {m}"))
         }
@@ -1775,15 +1766,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
             incomplete(format!("sender lineage is undecided: {m}"))
         }
     })?;
-    let cost = checked.cost();
-    log::info!(
-        "[acceptance] peer_step_position={sender_economic_position} steps_validated={} \
-         routed_reads={} source_steps={}",
-        cost.steps_validated,
-        cost.routed_reads,
-        cost.source_steps,
-    );
-    let (peer, source_frontiers) = checked.into_answer().into_parts();
 
     // ── The sender-side conjuncts — the SAME implementation the verifier's
     // credit arm runs post-accept, so the two can never drift ──────────────
@@ -1795,13 +1777,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         &devid,
     )
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;
-    // An eligible debit is a single-root transition, so it names the claim it
-    // accepted and reaches a frontier.
-    let sender_frontier =
-        dsm::economic::peer_lineage::PeerFrontier::reached_by(&peer).ok_or_else(|| {
-            terminal("the sender's debit is not a single-root transition".to_string())
-        })?;
-
     // ── Wire ↔ validated-operation binding ─────────────────────────────────
     let peer_operation = peer.verified_operation().ok_or_else(|| {
         terminal("the validated debit is an offline boundary, not a signed operation".to_string())
@@ -1884,8 +1859,6 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         authority,
         prepared,
         pinned_canonical_bytes: canonical_operation_bytes.to_vec(),
-        sender_frontier,
-        source_frontiers,
     })
 }
 
