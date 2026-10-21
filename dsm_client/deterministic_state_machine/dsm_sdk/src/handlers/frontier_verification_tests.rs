@@ -877,3 +877,84 @@ async fn the_same_payment_is_accepted_whether_the_receiver_is_current_or_new_to_
         "B, new to A, validates A from its funding"
     );
 }
+
+/// What an acceptance costs, as a function of the payer's history the receiver
+/// has not validated (plan Phase 5, current verifier only). A pays C `n`
+/// times, C taking each in, then pays B, which holds nothing of A. B's first
+/// acceptance validates every one of A's positions: the cost follows the
+/// unseen history. The next payment costs one position, and so does a second
+/// look at a position already accepted, because the acceptance recorded the
+/// frontier at the paying position and the one before it. `n` is
+/// `DSM_HISTORY_N`, six by default; the numbers print for the record.
+/// MUTATION CONTROL: recording no frontier after a walk turns this red (the
+/// warm and repeated costs grow with the history).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn acceptance_cost_follows_the_unseen_history_and_warm_costs_one_position() {
+    let unseen: u64 = match std::env::var("DSM_HISTORY_N") {
+        Ok(count) => count.parse().expect("DSM_HISTORY_N is a count"),
+        Err(std::env::VarError::NotPresent) => 6,
+        Err(e) => panic!("DSM_HISTORY_N is not readable: {e}"),
+    };
+    // Funding comes in multiples of the faucet payout.
+    let p = Pair::boot((unseen + 20).div_ceil(100) * 100, 0).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.add_contact(&p.a).await;
+    p.a.add_contact(&c).await;
+    for _ in 0..unseen {
+        let sent = p.a.send(&c, 1).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        accept(&c).await;
+    }
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_at = admitted_position(&p.a);
+
+    let started = std::time::Instant::now();
+    let asked = accept(&p.b).await;
+    let cold_ms = started.elapsed().as_millis();
+    let cold_reads: usize = asked.values().sum();
+    let cold = read_of(&asked, &p.a, paid_at + 1);
+    assert_eq!(p.b.era_balance(), 1);
+    assert_eq!(
+        cold,
+        (1..=paid_at).collect::<Vec<_>>(),
+        "B, holding nothing of A, validates every position A reached"
+    );
+
+    let sent = p.a.send(&p.b, 1).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    let paid_again = admitted_position(&p.a);
+    let started = std::time::Instant::now();
+    let asked = accept(&p.b).await;
+    let warm_ms = started.elapsed().as_millis();
+    let warm_reads: usize = asked.values().sum();
+    assert_eq!(p.b.era_balance(), 2);
+    assert_eq!(
+        read_of(&asked, &p.a, paid_again + 1),
+        vec![paid_again],
+        "the next payment costs one position"
+    );
+
+    crate::sdk::economic_registers::asked_cells::take();
+    p.b.enter();
+    let started = std::time::Instant::now();
+    verify(p.a.genesis, p.a.device_id, paid_again)
+        .await
+        .expect("an accepted position verifies again");
+    let again_ms = started.elapsed().as_millis();
+    let again = crate::sdk::economic_registers::asked_cells::take();
+    let again_reads: usize = again.values().sum();
+    assert_eq!(
+        read_of(&again, &p.a, paid_again + 1),
+        vec![paid_again],
+        "a second look at an accepted position costs one position"
+    );
+    println!(
+        "[history] unseen={unseen} cold: positions={} reads={cold_reads} ms={cold_ms} | warm: \
+         positions=1 reads={warm_reads} ms={warm_ms} | repeated: positions=1 reads={again_reads} \
+         ms={again_ms}",
+        cold.len()
+    );
+}
