@@ -310,9 +310,9 @@ pub enum BilateralPhase {
     /// the step is claimed, so a response delivered again cannot release it twice (SA-112), and a
     /// restart finds it here and settles it by the recovery table.
     Releasing,
-    ConfirmPending,    // Confirm sent; awaiting receiver acknowledgment before sender finalize
-    Committed,         // Transaction finalized on both sides after receiver acknowledgment
-    Failed,            // Error occurred
+    ConfirmPending, // Confirm sent; awaiting receiver acknowledgment before sender finalize
+    Committed,      // Transaction finalized on both sides after receiver acknowledgment
+    Failed,         // Error occurred
 }
 
 /// Event callback for bilateral transaction notifications

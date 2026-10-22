@@ -3638,6 +3638,54 @@ Found while fixing §6.87.
 | MR-SOFI-0346, MR-SOFI-0347, MR-SOFI-0356 | Partial, Met, Met | unchanged | Requirement text restored to S15 and S16's own wording (A8); evidence re-cited. |
 | MR-DSM-0017, MR-DSM-0039, MR-DSM-0046, MR-DSM-0242, MR-SOFI-0196, MR-STOR-0138 | unchanged | unchanged | Evidence re-cited: `validate_peer_step` is `validate_peer_lineage`. |
 
+### 6.92 The offline bearer sender commits its step when its anchor commits (offline account Phase 2, sender side; `feat/offline-spend-one-motion-recovery`, 2026-10-22)
+
+**Owner rulings (2026-10-22).** The sender commits its whole step when its chip commits, because the receiver's acceptance is already agreement: "at that stage, they both agreed... the value gets sent with that commitment already there." The acknowledgment only files the receiver's countersigned receipt. On the four open questions, the owner's answers the same day:
+- "Show a payment as pending while the appliance commitment is incomplete. Don't display final acceptance prematurely."
+- "Return to waiting only after confirming the appliance counter has not advanced. Otherwise recover the exact spend."
+- "Record the sender's account debit, counter and relationship advancement when the appliance commits, provided the required receiver authorization is already available."
+- "Retransmit the exact same signed payment. Never create a second payment or advance the chip again."
+
+The owner agreed the recovery table of §6.89, "subject to testing every crash boundary against the actual hardware and durable storage", and set how Phase 2 is tested: "Keep the receiver's production acceptance gate closed until Phase 4. In Phase 2, independently verify all sender-side state transitions, appliance commitments, durable preparation, deterministic recovery and retransmission using real code and cryptographic operations. Do not fake a receiver's acceptance or bypass production security checks." The owner also kept offline swaps apart: one-way sends establish nothing about the atomicity of a two-token offline swap.
+
+**The receiver authorization the commit needs.** Read from the code: the sender's step needs the receiver's acceptance signature σ_B over the receiver's challenge (`prepare_bilateral_advance`'s `ReceiverAcceptance`). It arrives with the receiver's accept, before the confirm is built and before the chip commits. The acknowledgment's countersigned receipt is the receiver's own record of its credit and carries the receiver's next EK. The sender files it, and its step does not depend on it. Until it is filed, the sender cannot check the receiver's next step against that EK, so the step stays in flight with that counterparty, and the one-step-at-a-time rule holds the relationship.
+
+**What changed (`dsm_sdk`).**
+- A new session phase, `Releasing`, shown to the wallet as pending (`OfflinePhaseConfirmPending`), never as accepted. A bearer step is written as releasing from `Prepared`, in one transaction with the EK it was signed with, before the appliance prepares. The record holds the acceptance, the challenge, this device's signed receipt, the root that receipt names and the account spend. A response delivered again finds the step releasing and is refused, so the anchor is not driven twice for it (SA-112's mechanism; still Open until Phase 4 exercises it).
+- The appliance prepares, commits and emits (`CoreSDK::release_offline_bearer`). The sender's step then commits in one transaction (`commit_released_bearer_step`): the debit from the offline account, the counter, the relationship advance and the history row (its proof empty until the acknowledgment), this device's EK head and EK step, and the session awaiting its acknowledgment with the confirm stored as the frame it owes. The anchor's frontier then advances to the committed successor (`finalize_offline_bearer`). The confirm's offline-state proofs come from the advance that commits.
+- The acknowledgment (`file_bearer_ack`) files the countersigned receipt into the history row, moves the receiver's EK head, records the receiver's EK step and ends the session, in one transaction. A step that moves no value still commits on its acknowledgment (`finalize_sender_step`).
+- Recovery by the table (`settle_release_on_appliance`, `advance_committed_frontier`, and on restart `recover_releasing_step`, `recover_committed_frontier`):
+  - prepared, counter unchanged: the prepared record is cancelled, and the step goes back to waiting only once the appliance reports no transaction with its counter unmoved;
+  - no transaction, counter unmoved: back to waiting (`reset_unreleased_step`: the EK stash dropped, the acceptance cleared, the prepare owed again);
+  - this step's release committed: emitted again, byte for byte, the counter not moved again, and the step commits;
+  - anything else, including a frontier already advanced for a step never committed and another step's release: fail closed. The step stays releasing and the relationship takes no other step.
+  - A restart never fails a releasing step whatever its recovery reports.
+- Staging is one function (`stage_bearer_spend`) that the confirm builder and the tests both call. The settlement takes the step's side (`BilateralSide`) instead of a boolean. One client-transaction helper refuses a poisoned lock instead of writing over it.
+
+**Verified (release, private storage nodes on Postgres).** On the real anchor-core appliance over a software chip, with the staging and the canonical advance simulation the sender runs, and no receiver acceptance (`bluetooth::offline_step_tests`):
+- `a_released_spend_moves_the_counter_once_and_is_emitted_again_unchanged`
+- `a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_counter_unmoved`
+- `a_spend_staged_but_never_released_goes_back_to_waiting`
+- `a_frontier_advanced_for_a_step_never_committed_fails_closed`
+- `another_steps_committed_release_is_not_taken_up_as_this_steps`
+- `a_committed_frontier_advances_only_to_its_own_successor`
+
+The `bluetooth::` and `handlers::bilateral` suites pass at this change on the release build, 164/0, the six above included. The 158 that predate them prove nothing about the new sender flow.
+
+**Mutations (2026-10-22).** One build with each check behind a `DSM_MUTANT` switch, in a scratch worktree outside the repository; the six mutants run in parallel, each on its own Postgres server. Each turned a named test red by the forbidden action, and the same binary with no mutant passed 6/0:
+- the prepared record not cancelled: settling failed closed with the appliance still prepared (`a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_counter_unmoved`);
+- a frontier already advanced to the step's successor read as nothing released (`a_frontier_advanced_for_a_step_never_committed_fails_closed`);
+- another step's committed release taken up as this step's (`another_steps_committed_release_is_not_taken_up_as_this_steps`);
+- the frontier advanced for another step's successor: the chip's root moved (`a_committed_frontier_advances_only_to_its_own_successor`);
+- a committed release read as nothing released (`a_released_spend_moves_the_counter_once_and_is_emitted_again_unchanged`, and the test above);
+- no transaction read as committed: a release emitted that did not exist (three of the tests).
+
+**Open.**
+- Owed in Phase 4, through the real receiver: the whole payment, the acknowledgment filed, a response delivered twice (SA-112), restart recovery of a releasing session through the handler, and the owed confirm retransmitted unchanged. None can run while bearer receipt is refused (SA-61), and none is made to run.
+- Two crash points inside the appliance's own commit are not tested at the SDK: the candidate written with the counter not yet moved, and the counter moved with the committed flag not yet written. `Appliance::recover` completes both. They need a power cut the software chip does not model; they are owed with the hardware phase (3).
+- The receive side: receiver proofs, SA-91's pending-credit reconciliation, SA-116's branch proof, and the owner's receive rule (a counterparty and its tokens seen online first).
+- Restart recovery runs once, when sessions are restored. A releasing step whose router is not yet installed then stays releasing, in flight and blocking its relationship, until the next restore.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

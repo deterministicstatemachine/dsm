@@ -167,6 +167,166 @@ struct SignedStepKey {
     used_root_ak: bool,
 }
 
+/// A bearer transfer staged on the sender's anchor before the anchor signs anything: the anchor
+/// transition and its successor frontier (no appliance mutation), and the offline-account spend
+/// the step draws its value from, built once from that successor for the simulation, the
+/// releasing record and the commit alike.
+pub(crate) struct StagedBearerSpend {
+    pub(crate) staged: crate::sdk::core_sdk::StagedBearerTransition,
+    pub(crate) spend: dsm::types::device_state::OfflineSpend,
+}
+
+/// Stage `operation`, a bearer transfer to `counterparty_device_id` opened by `terms`, on this
+/// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
+/// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
+/// and must be the asset the operation signs.
+pub(crate) fn stage_bearer_spend(
+    router: &dyn crate::bridge::AppRouter,
+    rel_key: [u8; 32],
+    counterparty_device_id: [u8; 32],
+    operation: &Operation,
+    terms: &dsm::types::operations::TransferTerms,
+    receiver_challenge: [u8; 32],
+) -> Result<StagedBearerSpend, DsmError> {
+    let Operation::Transfer {
+        authority_policy: Some(authority_policy),
+        amount,
+        policy_commit,
+        ..
+    } = operation
+    else {
+        return Err(DsmError::invalid_operation(
+            "a bearer transfer names its authority policy; this operation does not",
+        ));
+    };
+    let object_id = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/bearer-object/v1"),
+        &terms.token_id,
+    );
+    let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
+        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/bearer-payload/v1"),
+        &operation.to_bytes(),
+    );
+    let authority_policy_hash = authority_policy.policy_id;
+    // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
+    // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the proof is
+    // meaningless. Compared against the canonical value here.
+    info!(
+        "[BILATERAL][offline-bearer][sender] staging authority_policy_hash={} (canonical_match={})",
+        bytes_to_base32(&authority_policy_hash),
+        authority_policy_hash
+            == dsm::types::operations::canonical_offline_bearer_policy().policy_id
+    );
+    let staged = router
+        .stage_offline_bearer_transition(
+            rel_key,
+            counterparty_device_id,
+            object_id,
+            payload_hash,
+            authority_policy_hash,
+            0,
+            // action_fields: EMPTY. The operation is already bound into the transition via
+            // `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes` here is redundant
+            // AND overflows the appliance's `MAX_ACTION_FIELDS` (256) once the
+            // OfflineBearerRequired policy tail is appended (~266 B). The receiver recomputes the
+            // digest from the transition carried in the release, so empty is consistent
+            // end-to-end.
+            Vec::new(),
+            receiver_challenge,
+        )
+        .map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "offline-bearer staging failed — a bearer transfer cannot proceed without the \
+                 appliance transition: {e}"
+            ))
+        })?;
+    // §9.5: independently resolve the sender's installed policy_commit for the token the step's
+    // terms name; it must be the asset the operation signs. Unresolved is a REFUSAL — empty deltas
+    // without a spend would only die later in the conservation guard; fail at the seam instead.
+    let asset = router
+        .resolve_policy_commit_strict(&terms.token_id)
+        .map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "bearer transfer refused: policy_commit unresolved for token {} — {e}",
+                String::from_utf8_lossy(&terms.token_id)
+            ))
+        })?;
+    if asset != *policy_commit {
+        return Err(DsmError::invalid_operation(format!(
+            "bearer transfer refused: token {} is not the asset the operation signs",
+            String::from_utf8_lossy(&terms.token_id)
+        )));
+    }
+    let spend = dsm::types::device_state::OfflineSpend {
+        anchor_bundle_b: staged.pin.bundle,
+        asset,
+        amount: amount.value(),
+        next_frontier: staged.appliance_next_root,
+    };
+    Ok(StagedBearerSpend { staged, spend })
+}
+
+/// What a bearer step's anchor holds of its release, by the recovery table, once a prepared
+/// record whose counter did not move has been cancelled.
+#[derive(Debug)]
+pub(crate) enum ReleaseOnAppliance {
+    /// No transaction, and the counter unmoved for this step: nothing was released.
+    Unreleased,
+    /// This step's release, committed with the counter moved: emitted again — the same signed
+    /// release, the counter not moved again.
+    Committed(crate::sdk::core_sdk::OfflineBearerArtifacts),
+}
+
+/// Settle, on the anchor, the release of the bearer step whose staged successor frontier is
+/// `next_frontier`, by the recovery table:
+/// - prepared, counter unchanged: the prepared record is cancelled, and the appliance must then
+///   report no transaction with its counter unmoved;
+/// - no transaction, counter unmoved: nothing was released;
+/// - this step's release committed, counter moved: it is emitted again, never signed anew;
+/// - anything else — a finalized frontier the step never committed, another step's release, a
+///   counter that disagrees — fails closed.
+pub(crate) fn settle_release_on_appliance(
+    router: &dyn crate::bridge::AppRouter,
+    next_frontier: [u8; 32],
+) -> Result<ReleaseOnAppliance, DsmError> {
+    let observed = match router.observe_offline_bearer_recovery()? {
+        RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
+            router.cancel_offline_bearer_release()?;
+            router.observe_offline_bearer_recovery()?
+        }
+        other => other,
+    };
+    match observed {
+        RecoverOutcome::Accept(root) if root != next_frontier => Ok(ReleaseOnAppliance::Unreleased),
+        RecoverOutcome::ReemitCommitted(committed) if committed == next_frontier => Ok(
+            ReleaseOnAppliance::Committed(router.reemit_offline_bearer()?),
+        ),
+        other => Err(DsmError::state_machine(format!(
+            "the anchor reports {other:?}, not this step's prepared or committed release \
+             (fail closed)"
+        ))),
+    }
+}
+
+/// Advance the anchor's frontier for a committed bearer step whose successor is
+/// `next_frontier`: the appliance must hold this step's committed release, or have advanced to
+/// its successor already. Anything else fails closed.
+pub(crate) fn advance_committed_frontier(
+    router: &dyn crate::bridge::AppRouter,
+    next_frontier: [u8; 32],
+) -> Result<(), DsmError> {
+    match router.observe_offline_bearer_recovery()? {
+        RecoverOutcome::ReemitCommitted(committed) if committed == next_frontier => {
+            advance_released_frontier(router, next_frontier)
+        }
+        RecoverOutcome::Accept(root) if root == next_frontier => Ok(()),
+        other => Err(DsmError::state_machine(format!(
+            "the anchor reports {other:?}, not the committed step's release or its successor \
+             frontier (fail closed)"
+        ))),
+    }
+}
+
 /// How a bearer step recorded as releasing, whose release did not finish, was settled.
 enum UnfinishedRelease {
     /// The anchor's counter did not move: the step is waiting for its counterparty's answer
@@ -2591,148 +2751,40 @@ impl BilateralBleHandler {
                 "send_bilateral_confirm: app_router not installed; cannot simulate advance",
             )
         })?;
-        // v2 producer phase 1 (Software-Authority / Hardware-Identity): for offline-bearer
-        // transfers, STAGE the next anchor transition from the appliance's active state — the
-        // transition Δ, the successor frontier h_{i+1}, and the successor anchor-state leaf —
-        // with NO appliance mutation yet. The leaf is fed into the advance simulation below so the
-        // real device roots R_i/R_{i+1} and inclusion proofs Π_i/Π_{i+1} exist BEFORE the appliance
-        // signs anything (simulate-first: the release is born with the real roots, never stamped
-        // with placeholders and never re-stamped). A bearer transfer that cannot stage — no
-        // receiver challenge, or an appliance failure — is REFUSED here: value over this
+        // v2 producer phase 1 (Software-Authority / Hardware-Identity): a bearer transfer is
+        // STAGED on the appliance's active state with NO appliance mutation, and its offline-account
+        // spend is built from the staged successor (`stage_bearer_spend`). The leaf is fed into the
+        // advance simulation below so the real device roots R_i/R_{i+1} and inclusion proofs
+        // Π_i/Π_{i+1} exist BEFORE the appliance signs anything. A bearer transfer that cannot
+        // stage — no receiver challenge, or an appliance failure — is REFUSED here: value over this
         // transport only ever moves allocation-backed, so there is no online-debit path to fall
         // back to. Non-Transfer operations (predicate false) stage nothing and carry no value.
         let staged_bearer =
             if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 &session.operation,
             ) {
-                match (
-                    session.receiver_challenge,
-                    &session.operation,
-                    &session.terms,
-                ) {
-                    (
-                        Some(r_r),
-                        Operation::Transfer {
-                            authority_policy: Some(authority_policy),
-                            ..
-                        },
-                        Some(terms),
-                    ) => {
-                        let object_id = dsm::crypto::blake3::domain_hash_bytes(
-                            dsm::crypto::domain::TaggedHashDomain::from_static(
-                                b"DSM/bearer-object/v1",
-                            ),
-                            &terms.token_id,
-                        );
-                        let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
-                            dsm::crypto::domain::TaggedHashDomain::from_static(
-                                b"DSM/bearer-payload/v1",
-                            ),
-                            &op_bytes,
-                        );
-                        let authority_policy_hash = authority_policy.policy_id;
-                        // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
-                        // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the
-                        // proof is meaningless. Compared against the canonical value here.
-                        info!(
-                            "[BILATERAL][offline-bearer][sender] staging authority_policy_hash={} (canonical_match={})",
-                            bytes_to_base32(&authority_policy_hash),
-                            authority_policy_hash
-                                == dsm::types::operations::canonical_offline_bearer_policy().policy_id
-                        );
-                        let staged = router
-                            .stage_offline_bearer_transition(
-                                rel_key,
-                                session.counterparty_device_id,
-                                object_id,
-                                payload_hash,
-                                authority_policy_hash,
-                                0,
-                                // action_fields: EMPTY. The operation is already bound into the transition
-                                // via `payload_hash = H(op_bytes)` above, so carrying the full `op_bytes`
-                                // here is redundant AND overflows the appliance's `MAX_ACTION_FIELDS` (256)
-                                // once the OfflineBearerRequired policy tail is appended (~266 B). The
-                                // receiver recomputes the digest from the transition carried in the
-                                // release, so empty is consistent end-to-end.
-                                Vec::new(),
-                                r_r,
-                            )
-                            .map_err(|e| {
-                                DsmError::invalid_operation(format!(
-                                    "offline-bearer staging failed — a bearer transfer cannot \
-                                     proceed without the appliance transition: {e}"
-                                ))
-                            })?;
-                        Some((staged, r_r))
-                    }
-                    _ => {
-                        return Err(DsmError::invalid_operation(
-                            "offline-bearer transfer without a receiver challenge — the prepare \
-                             exchange did not establish r_R; refusing to build the confirm",
-                        ));
-                    }
-                }
+                let (Some(r_r), Some(terms)) = (session.receiver_challenge, session.terms.as_ref())
+                else {
+                    return Err(DsmError::invalid_operation(
+                        "offline-bearer transfer without a receiver challenge — the prepare \
+                         exchange did not establish r_R; refusing to build the confirm",
+                    ));
+                };
+                Some((
+                    stage_bearer_spend(
+                        router.as_ref(),
+                        rel_key,
+                        session.counterparty_device_id,
+                        &session.operation,
+                        terms,
+                        r_r,
+                    )?,
+                    r_r,
+                ))
             } else {
                 None
             };
-        // Offline-bearer transfer: draw value from the offline account, not the online balance.
-        // Build the account-spend descriptor ONCE here — it carries the anchor bundle B and the
-        // frontier the staged transition advances to — so it is stashed on the session (below) and
-        // threaded identically into the canonical commit. Empty deltas and Some(offline_spend) are
-        // ONE atomic decision (empty deltas without offline_spend is rejected by the conservation
-        // guard — the fail-closed case).
-        let offline_spend: Option<dsm::types::device_state::OfflineSpend> =
-            match (staged_bearer.as_ref(), &session.operation) {
-                (
-                    Some((staged, _)),
-                    dsm::types::operations::Operation::Transfer {
-                        amount,
-                        policy_commit,
-                        ..
-                    },
-                ) => {
-                    // §9.5: independently resolve the sender's installed policy_commit
-                    // for the token the step's terms name; it must be the asset the
-                    // operation signs. Unresolved is a REFUSAL — the deleted online-debit
-                    // fallback used to stand in here, and empty deltas without a spend
-                    // would only die later in the conservation guard; fail at the seam
-                    // instead.
-                    let terms = session.terms.as_ref().ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "bearer transfer refused: the session holds no transfer terms",
-                        )
-                    })?;
-                    let asset = crate::bridge::app_router()
-                        .map(|r| r.resolve_policy_commit_strict(&terms.token_id))
-                        .ok_or_else(|| {
-                            DsmError::state_machine(
-                                "send_bilateral_confirm: app_router not installed; cannot \
-                                 resolve the bearer asset",
-                            )
-                        })?
-                        .map_err(|e| {
-                            DsmError::invalid_operation(format!(
-                                "bearer transfer refused: policy_commit unresolved for token {} \
-                                 — {e}",
-                                String::from_utf8_lossy(&terms.token_id)
-                            ))
-                        })?;
-                    if asset != *policy_commit {
-                        return Err(DsmError::invalid_operation(format!(
-                            "bearer transfer refused: token {} is not the asset the operation \
-                             signs",
-                            String::from_utf8_lossy(&terms.token_id)
-                        )));
-                    }
-                    Some(dsm::types::device_state::OfflineSpend {
-                        anchor_bundle_b: staged.pin.bundle,
-                        asset,
-                        amount: amount.value(),
-                        next_frontier: staged.appliance_next_root,
-                    })
-                }
-                _ => None,
-            };
+        let offline_spend = staged_bearer.as_ref().map(|(staged, _)| staged.spend);
         // Sender deltas are ALWAYS empty on this transport: bearer value moves via the
         // allocation debit (`offline_spend`), and nothing else here moves value.
         let sim_outcome = router.simulate_advance_for_confirm(
@@ -2779,10 +2831,10 @@ impl BilateralBleHandler {
         // alignment.
         let sender_bearer_leaves = staged_bearer.as_ref().map(|(staged, _)| {
             dsm::verification::receipt_verification::BearerLeaves {
-                bundle: staged.pin.bundle,
-                counter: staged.transition.anchor_counter,
-                frontier: staged.appliance_prev_root,
-                next_frontier: staged.appliance_next_root,
+                bundle: staged.staged.pin.bundle,
+                counter: staged.staged.transition.anchor_counter,
+                frontier: staged.staged.appliance_prev_root,
+                next_frontier: staged.staged.appliance_next_root,
             }
         });
         let unsigned_receipt_bytes = crate::sdk::receipts::build_bilateral_receipt(
@@ -2894,7 +2946,7 @@ impl BilateralBleHandler {
         // 3. the step commits: the debit, the counter, the relationship advance and the history
         //    row, with the confirm it owes until the acknowledgment;
         // 4. the anchor's frontier advances to the committed successor.
-        let next_frontier = staged.appliance_next_root;
+        let next_frontier = staged.staged.appliance_next_root;
         let mut releasing = session;
         releasing.phase = BilateralPhase::Releasing;
         releasing.stitched_receipt_bytes = Some(receipt_bytes);
@@ -2916,19 +2968,19 @@ impl BilateralBleHandler {
             .await
             .insert(commitment_hash, releasing);
 
-        let artifacts = match router.release_offline_bearer(&staged, r_r, pre_root, sender_smt_root)
-        {
-            Ok(artifacts) => artifacts,
-            Err(release_err) => match self.settle_unfinished_release(&commitment_hash).await? {
-                UnfinishedRelease::Reset => {
-                    return Err(DsmError::state_machine(format!(
-                        "offline-bearer release failed before the anchor's counter moved; the \
+        let artifacts =
+            match router.release_offline_bearer(&staged.staged, r_r, pre_root, sender_smt_root) {
+                Ok(artifacts) => artifacts,
+                Err(release_err) => match self.settle_unfinished_release(&commitment_hash).await? {
+                    UnfinishedRelease::Reset => {
+                        return Err(DsmError::state_machine(format!(
+                            "offline-bearer release failed before the anchor's counter moved; the \
                          payment is waiting again: {release_err}"
-                    )));
-                }
-                UnfinishedRelease::Committed(artifacts) => artifacts,
-            },
-        };
+                        )));
+                    }
+                    UnfinishedRelease::Committed(artifacts) => artifacts,
+                },
+            };
         let confirmed = self
             .commit_released_bearer_step(&commitment_hash, &artifacts)
             .await?;
@@ -2968,26 +3020,17 @@ impl BilateralBleHandler {
                 "the app router is not installed: the releasing step waits for its recovery",
             )
         })?;
-        let observed = match router.observe_offline_bearer_recovery()? {
-            RecoverOutcome::AcceptPreparedCanComplete | RecoverOutcome::OnlineCancelOrResolve => {
-                router.cancel_offline_bearer_release()?;
-                router.observe_offline_bearer_recovery()?
-            }
-            other => other,
-        };
-        match observed {
-            RecoverOutcome::Accept(root) if root != next_frontier => {
+        match settle_release_on_appliance(router.as_ref(), next_frontier).map_err(|e| {
+            DsmError::state_machine(format!(
+                "offline-bearer step {}: {e}; the step stays releasing",
+                bytes_to_base32(&commitment_hash[..8])
+            ))
+        })? {
+            ReleaseOnAppliance::Unreleased => {
                 self.reset_unreleased_step(commitment_hash).await?;
                 Ok(UnfinishedRelease::Reset)
             }
-            RecoverOutcome::ReemitCommitted(committed) if committed == next_frontier => Ok(
-                UnfinishedRelease::Committed(router.reemit_offline_bearer()?),
-            ),
-            other => Err(DsmError::state_machine(format!(
-                "offline-bearer step {}: the appliance reports {other:?}, not this step's prepared \
-                 or committed release; the step stays releasing (fail closed)",
-                bytes_to_base32(&commitment_hash[..8])
-            ))),
+            ReleaseOnAppliance::Committed(artifacts) => Ok(UnfinishedRelease::Committed(artifacts)),
         }
     }
 
@@ -3400,16 +3443,7 @@ impl BilateralBleHandler {
                 "the app router is not installed: the anchor's frontier waits for its recovery",
             )
         })?;
-        match router.observe_offline_bearer_recovery()? {
-            RecoverOutcome::ReemitCommitted(committed) if committed == next_frontier => {
-                advance_released_frontier(router.as_ref(), next_frontier)
-            }
-            RecoverOutcome::Accept(root) if root == next_frontier => Ok(()),
-            other => Err(DsmError::state_machine(format!(
-                "the anchor reports {other:?}, not the committed step's release or its successor \
-                 frontier (fail closed)"
-            ))),
-        }
+        advance_committed_frontier(router.as_ref(), next_frontier)
     }
 
     /// Build the fused-anchor pin disclosure the sender attaches to EVERY bearer confirm.
