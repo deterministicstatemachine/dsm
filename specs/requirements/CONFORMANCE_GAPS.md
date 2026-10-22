@@ -3638,6 +3638,27 @@ Found while fixing §6.87.
 | MR-SOFI-0346, MR-SOFI-0347, MR-SOFI-0356 | Partial, Met, Met | unchanged | Requirement text restored to S15 and S16's own wording (A8); evidence re-cited. |
 | MR-DSM-0017, MR-DSM-0039, MR-DSM-0046, MR-DSM-0242, MR-SOFI-0196, MR-STOR-0138 | unchanged | unchanged | Evidence re-cited: `validate_peer_step` is `validate_peer_lineage`. |
 
+### 6.91 Counterfeit value against a receiver new to the payer: every enforcement check now has a test that performs the counterfeit (`test/counterfeit-enforcement-is-load-bearing`, 2026-10-22)
+
+**The finding.** An audit of the tests guarding online acceptance (main c69a3b72) found that they drove the production path on the network's storage nodes but fed it honest data. No test made a payer offer value no one debited to a receiver that held nothing of it. Three checks had no test that performed the counterfeit: the walk of the payer's unseen steps (`Verifier::chain_through` → `full_step`), the credit-source walk (`Verifier::source_step`) and the refusal of position 0 as a source. The transfer-policy conjunct in `advance_validated` (SA-136) and the debit-delta rule of `verify_operation_write_set` had none at acceptance.
+
+**What changed.** `dsm_sdk::handlers::counterfeit_acceptance_tests` builds each counterfeit with the producer's own builders, as software that skips its own checks would. It publishes the evidence to the network's storage nodes and registers the claim, which the nodes take as final: they store and do not validate. A receiver new to the payer then refuses it through the production resolver and, for the whole payment, through `prevalidate_incoming_transfer_admission`, the step every payment its sync picks up passes before anything is written. Nothing durable is left: no pending admission, no admitted credit, no balance. The cases:
+- a history whose first step credits value no one debited, followed by an ordinary debit of that value;
+- a credit sourced from a faucet claim;
+- a credit sourced from an activation root;
+- a transfer of a token whose committed policy forbids transfers;
+- a debit whose write set takes one base unit while the signed transfer sends a whole payout.
+
+**Mutation run** (one `DSM_MUTANT` build, the mutants in parallel, each on a Postgres of its own, a clean control beside them, none left in the tree):
+- **The walk of unseen steps.** The claim's stated root taken without `full_step` makes the receiver's acceptance prepare the counterfeit credit; both walk tests go red.
+- **The source-kind rule.** The rule that a source step be an online transfer, removed, still leaves the faucet-sourced credit refused: a source step whose write set names a credit is refused by `DebitHasNoSources`. The two checks cover each other; only the refusal's wording changes.
+- **The position-0 refusal.** Without it the source walk panics on an overflowed `position - 1`. The refusal is what keeps a hostile credit from crashing the verifier; nothing is accepted either way.
+- **The debit delta.** Skipped, the receiver accepts the debit that took one unit.
+- **The transfer-policy conjunct.** Skipped in `advance_validated`, the receiver accepts the transfer its policy forbids. Before this, no test went red with it skipped.
+- **The parent link.** Skipped, `a_claim_whose_witness_names_another_parent_is_never_accepted` goes red, as before.
+
+No requirement's status changes; the evidence is recorded in `VERIFICATION_MATRIX.md`.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

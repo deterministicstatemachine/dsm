@@ -61,38 +61,13 @@ fn payout() -> u64 {
 /// `from`'s online transfer of `amount` ERA to `to`, signed with `from`'s
 /// real key as its send signs one.
 fn signed_transfer(from: &TestDevice, to: &TestDevice, amount: u64) -> Operation {
-    from.enter();
-    let contact = client_db::get_contact_by_device_id(&to.device_id)
-        .expect("contacts")
-        .expect("the payee is a contact");
-    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
-        .expect("the relationship tip");
-    let terms = dsm::types::operations::TransferTerms::new(
-        b"ERA".to_vec(),
-        crate::handlers::app_router_impl::transfer_nonce(&tip, amount, "ERA", &to.device_id),
-        dsm::types::operations::TransactionMode::Unilateral,
-        String::new(),
-    );
-    let unsigned = Operation::Transfer {
-        to_device_id: to.device_id.to_vec(),
-        amount: dsm::types::token_types::Balance::amount(amount),
-        policy_commit: dsm::core::token::era_policy::era_policy_commit(),
-        terms_commitment: terms.commitment(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-    let canonical = unsigned.to_bytes();
-    let signature = dsm::crypto::sphincs::sphincs_sign(
-        &crate::sdk::signing_authority::current_secret_key().expect("the signing key"),
-        &canonical,
+    signed_token_transfer(
+        from,
+        to,
+        dsm::core::token::era_policy::era_policy_commit(),
+        "ERA",
+        amount,
     )
-    .expect("signs");
-    Operation::decode_and_bind_signed(
-        &canonical,
-        &signature,
-        &crate::sdk::signing_authority::current_public_key().expect("the public key"),
-    )
-    .expect("the signature binds")
 }
 
 /// `own`'s relationship step with `peer` over `operation`.
@@ -271,7 +246,157 @@ async fn three_parties() -> (Pair, TestDevice) {
     c.boot(&p.fleet).await;
     c.add_contact(&p.b).await;
     p.b.add_contact(&c).await;
+    c.add_contact(&p.a).await;
+    p.a.add_contact(&c).await;
     (p, c)
+}
+
+/// `payer`'s next step at its real admitted root: `operation`, with the write
+/// set `write_set_operation` produces. An honest producer builds the write
+/// set from the operation it signs; software that does not can build it from
+/// another. Published and registered along the cell routed from that root.
+/// Returns the position it was registered at.
+async fn next_step(
+    payer: &TestDevice,
+    payee: &TestDevice,
+    operation: &Operation,
+    write_set_operation: &Operation,
+) -> u64 {
+    use dsm::economic::admission::{
+        dsm_economic_operation_id, dsm_operation_digest, AcceptedAdmissionCoords,
+        AcceptedSubstrateCoords,
+    };
+    use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
+    use dsm::storage_object::immutable_inner;
+    let state = chain_state(payer, payee, operation, 0x33);
+    payer.enter();
+    let core = payer.router().core_sdk.clone();
+    let validated = validated_root_or_activate(&core).expect("the payer's admitted root");
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated).expect("the tree");
+    let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
+    let pre_root = tree.root();
+    let c_dsm_plus = state.compute_chain_tip();
+    let op_bytes = operation.to_bytes();
+    let econ_op_id = dsm_economic_operation_id(&payer.genesis, &payer.device_id, &c_dsm_plus);
+    let built = dsm::economic::write_set::build_write_set(
+        write_set_operation,
+        &payer.genesis,
+        &payer.device_id,
+        &econ_op_id,
+        &pre_state.as_write_set_pre_state(),
+        &mut tree,
+        &CreditSourceFacts::None,
+    )
+    .expect("the write set of the other operation");
+    let witness = dsm::economic::witness::EconomicTransitionWitness::new(
+        pre_root,
+        built.post_root,
+        econ_op_id,
+        dsm_operation_digest(&op_bytes),
+        built.mutations,
+        built.credit_sources,
+    )
+    .expect("a witness");
+    let witness_bytes = witness.encode().expect("the witness encodes");
+    let successor_bytes = dsm::economic::successor_evidence::sign_dsm_successor_evidence(
+        &state.rel_key,
+        &state.embedded_parent,
+        &state.counterparty_devid,
+        &op_bytes,
+        &state.entropy,
+        state.encapsulated_entropy.as_deref(),
+        &payer.genesis,
+        &payer.device_id,
+        &crate::sdk::signing_authority::current_secret_key().expect("the AK secret"),
+    )
+    .expect("the successor evidence");
+    let substrate_addr =
+        dsm::economic::successor_evidence::successor_evidence_addr(&successor_bytes);
+    let manifest = EconomicAdmissionManifest::new(
+        authority.position,
+        immutable_inner(TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ, &witness_bytes),
+        authority.addr,
+        AdmissionSubstrate::DsmSuccessor {
+            evidence_addr: substrate_addr,
+        },
+        witness.derived_provenance_index(),
+    )
+    .expect("a manifest");
+    let manifest_bytes = manifest.encode().expect("the manifest encodes");
+    let parts = DsmAdmissionParts {
+        coords: AcceptedAdmissionCoords {
+            post_economic_root: built.post_root,
+            accepted_substrate_addr: substrate_addr,
+            admission_manifest_addr: manifest.addr().expect("the manifest's address"),
+            substrate: AcceptedSubstrateCoords::Successor {
+                c_dsm_plus,
+                embedded_parent: state.embedded_parent,
+            },
+        },
+        witness,
+        manifest,
+        artifacts: vec![
+            (String::new(), witness_bytes, "economic-transition-witness"),
+            (String::new(), manifest_bytes, "economic-admission-manifest"),
+            (
+                String::new(),
+                successor_bytes,
+                "economic-dsm-successor-evidence",
+            ),
+            (
+                String::new(),
+                authority.bytes,
+                "economic-authority-evidence",
+            ),
+        ],
+        debit_mutation_index: None,
+    };
+    let position = pre_state.economic_position;
+    publish_and_register(payer, position, &validated.economic_root(), &parts).await;
+    position
+}
+
+/// `from`'s online transfer of `amount` of the token `policy_commit` to `to`,
+/// signed with `from`'s real key.
+fn signed_token_transfer(
+    from: &TestDevice,
+    to: &TestDevice,
+    policy_commit: [u8; 32],
+    ticker: &str,
+    amount: u64,
+) -> Operation {
+    from.enter();
+    let contact = client_db::get_contact_by_device_id(&to.device_id)
+        .expect("contacts")
+        .expect("the payee is a contact");
+    let tip = crate::handlers::app_router_impl::contact_relationship_tip(&contact)
+        .expect("the relationship tip");
+    let terms = dsm::types::operations::TransferTerms::new(
+        ticker.as_bytes().to_vec(),
+        crate::handlers::app_router_impl::transfer_nonce(&tip, amount, ticker, &to.device_id),
+        dsm::types::operations::TransactionMode::Unilateral,
+        String::new(),
+    );
+    let unsigned = Operation::Transfer {
+        to_device_id: to.device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(amount),
+        policy_commit,
+        terms_commitment: terms.commitment(),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let canonical = unsigned.to_bytes();
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("the signing key"),
+        &canonical,
+    )
+    .expect("signs");
+    Operation::decode_and_bind_signed(
+        &canonical,
+        &signature,
+        &crate::sdk::signing_authority::current_public_key().expect("the public key"),
+    )
+    .expect("the signature binds")
 }
 
 /// A payer's history that starts with a credit no one debited, followed by an
@@ -496,5 +621,84 @@ async fn a_credit_whose_source_is_an_activation_root_is_never_accepted() {
             "the activation root funds nothing: {why}"
         ),
         other => panic!("a credit sourced from an activation root is never accepted: {other:?}"),
+    }
+}
+
+/// A transfer of a token whose committed policy does not let it transfer is
+/// never accepted, however valid the payer's history and the step's write
+/// set. The payer created the token itself, honestly, with transfers turned
+/// off, and then debits some of it to a receiver new to it; its own wallet
+/// would refuse the send, so it builds the step itself.
+///
+/// MUTATION CONTROL: skipping `check_transfer_policy` in `advance_validated`
+/// turns this red: the receiver accepts the transfer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted() {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use prost::Message;
+    let (p, c) = three_parties().await;
+    let payer = &p.a;
+    payer.enter();
+    let created = payer
+        .router()
+        .invoke(AppInvoke {
+            method: "token.create".into(),
+            args: dsm::types::proto::ArgPack {
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: super::sender_admission_tests::non_transferable_request("BOUND")
+                    .encode_to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(
+        created.success,
+        "the token is created: {:?}",
+        created.error_message
+    );
+    payer.enter();
+    let bound = client_db::token_registry::get_token_by_ticker("BOUND")
+        .expect("registry read")
+        .expect("BOUND is registered")
+        .policy_commit;
+    let transfer = signed_token_transfer(payer, &c, bound, "BOUND", 5);
+    let position = next_step(payer, &c, &transfer, &transfer).await;
+
+    c.enter();
+    match verify(payer, position).await {
+        Err(PeerLineageFailure::Invalid(why)) => assert!(
+            why.contains("does not let it transfer"),
+            "refused by the token's committed policy: {why}"
+        ),
+        other => panic!("a transfer the token's policy forbids is never accepted: {other:?}"),
+    }
+}
+
+/// A debit that takes less from the payer than the transfer it signs sends
+/// is never accepted. The payer signs a transfer of all its ERA to a receiver
+/// new to it, and builds the step's write set from a transfer of one base
+/// unit: the receiver would be credited the whole amount while the payer
+/// keeps all but one unit of it.
+///
+/// MUTATION CONTROL: skipping the debit-delta check in the write-set
+/// verification turns this red: the receiver accepts the debit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_debit_that_takes_less_than_it_sends_is_never_accepted() {
+    let (p, c) = three_parties().await;
+    let payer = &p.a;
+    let whole = signed_transfer(payer, &c, payout());
+    let one = signed_transfer(payer, &c, 1);
+    let position = next_step(payer, &c, &whole, &one).await;
+
+    c.enter();
+    match verify(payer, position).await {
+        Err(PeerLineageFailure::Invalid(why)) => assert!(
+            why.contains("debit delta is not exactly the operation amount"),
+            "refused: the debit is not the amount sent: {why}"
+        ),
+        other => panic!("a debit smaller than the amount sent is never accepted: {other:?}"),
     }
 }
