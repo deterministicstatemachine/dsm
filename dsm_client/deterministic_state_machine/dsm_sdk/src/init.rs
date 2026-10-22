@@ -452,14 +452,31 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
                 _receiver_challenge: [u8; 32],
                 _sender_device_root_before: [u8; 32],
                 _sender_device_root_after: [u8; 32],
-                _offline_state_proof_before: Vec<u8>,
-                _offline_state_proof_after: Vec<u8>,
             ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
                 Err(requires_genesis("release_offline_bearer"))
             }
 
             fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
                 Err(requires_genesis("cancel_offline_bearer_release"))
+            }
+
+            fn reemit_offline_bearer(
+                &self,
+            ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, DsmError> {
+                Err(requires_genesis("reemit_offline_bearer"))
+            }
+
+            fn observe_offline_bearer_recovery(
+                &self,
+            ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
+                Err(requires_genesis("observe_offline_bearer_recovery"))
+            }
+
+            fn finalize_offline_bearer(
+                &self,
+                _appliance_next_root: [u8; 32],
+            ) -> Result<(), DsmError> {
+                Err(requires_genesis("finalize_offline_bearer"))
             }
 
             fn execute_on_relationship_for_bilateral(

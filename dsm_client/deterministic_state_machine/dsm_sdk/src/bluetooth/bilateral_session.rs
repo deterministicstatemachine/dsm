@@ -306,6 +306,10 @@ pub enum BilateralPhase {
     PendingUserAction, // Received proposal, awaiting local user accept/reject
     Accepted,          // Counterparty accepted, ready to commit
     Rejected,          // Counterparty rejected
+    /// An offline-bearer step whose software side is recorded and whose anchor is being driven:
+    /// the step is claimed, so a response delivered again cannot release it twice (SA-112), and a
+    /// restart finds it here and settles it by the recovery table.
+    Releasing,
     ConfirmPending,    // Confirm sent; awaiting receiver acknowledgment before sender finalize
     Committed,         // Transaction finalized on both sides after receiver acknowledgment
     Failed,            // Error occurred
@@ -325,6 +329,7 @@ pub fn is_inflight_phase(phase: &BilateralPhase) -> bool {
             | BilateralPhase::Prepared
             | BilateralPhase::PendingUserAction
             | BilateralPhase::Accepted
+            | BilateralPhase::Releasing
             | BilateralPhase::ConfirmPending
     )
 }
@@ -346,6 +351,7 @@ pub fn phase_to_str(phase: &BilateralPhase) -> &'static str {
         BilateralPhase::PendingUserAction => "pending_user_action",
         BilateralPhase::Accepted => "accepted",
         BilateralPhase::Rejected => "rejected",
+        BilateralPhase::Releasing => "releasing",
         BilateralPhase::ConfirmPending => "confirm_pending",
         BilateralPhase::Committed => "committed",
         BilateralPhase::Failed => "failed",
@@ -360,6 +366,7 @@ pub fn phase_from_str(s: &str) -> Result<BilateralPhase, DsmError> {
         "pending_user_action" => BilateralPhase::PendingUserAction,
         "accepted" => BilateralPhase::Accepted,
         "rejected" => BilateralPhase::Rejected,
+        "releasing" => BilateralPhase::Releasing,
         "confirm_pending" => BilateralPhase::ConfirmPending,
         "committed" => BilateralPhase::Committed,
         "failed" => BilateralPhase::Failed,
@@ -432,6 +439,7 @@ mod tests {
         );
         assert_eq!(phase_to_str(&BilateralPhase::Accepted), "accepted");
         assert_eq!(phase_to_str(&BilateralPhase::Rejected), "rejected");
+        assert_eq!(phase_to_str(&BilateralPhase::Releasing), "releasing");
         assert_eq!(
             phase_to_str(&BilateralPhase::ConfirmPending),
             "confirm_pending"
@@ -448,6 +456,7 @@ mod tests {
             BilateralPhase::PendingUserAction,
             BilateralPhase::Accepted,
             BilateralPhase::Rejected,
+            BilateralPhase::Releasing,
             BilateralPhase::ConfirmPending,
             BilateralPhase::Committed,
             BilateralPhase::Failed,
