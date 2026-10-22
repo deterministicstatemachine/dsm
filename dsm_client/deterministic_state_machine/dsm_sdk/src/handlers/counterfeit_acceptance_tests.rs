@@ -230,9 +230,7 @@ async fn counterfeit_credit(
         peer_devid: source.device_id,
         peer_economic_position: source_position,
         peer_debit_mutation_index: 0,
-        acceptance_evidence_addr: dsm::economic::peer_acceptance::acceptance_evidence_addr(
-            &bundle,
-        ),
+        acceptance_evidence_addr: dsm::economic::peer_acceptance::acceptance_evidence_addr(&bundle),
     };
     let artifacts = vec![(
         crate::sdk::economic_registers::immutable_object_key(
@@ -298,37 +296,15 @@ async fn a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_t
         .0;
     let amount = 10 * payout();
     let first = counterfeit_credit(payer, source, source_at + 1, amount).await;
-
-    // The payer's next step debits that value to the receiver, built on the
-    // root the counterfeit credit produced, exactly as an honest debit is.
-    let debit = signed_transfer(payer, &c, amount);
-    let state = chain_state(payer, &c, &debit, 0x32);
-    payer.enter();
-    let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
-    let mut tree = first.tree;
-    let pre_state = AdmittedPreState {
-        balances: [(dsm::core::token::era_policy::era_policy_commit(), amount)]
-            .into_iter()
-            .collect(),
-        economic_position: 2,
-    };
-    let second = build_dsm_admission(
-        &payer.genesis,
-        &payer.device_id,
-        &state,
-        &debit,
-        &pre_state,
-        &mut tree,
-        &CreditSourceFacts::None,
-        &authority,
-        Vec::new(),
-    )
-    .expect("an ordinary debit of the credited value");
-    publish_and_register(payer, 2, &first.parts.coords.post_economic_root, &second).await;
+    let (activation_root, credited_root) =
+        (first.activation_root, first.parts.coords.post_economic_root);
     assert_ne!(
-        first.activation_root, first.parts.coords.post_economic_root,
+        activation_root, credited_root,
         "the counterfeit credit moved the payer's root"
     );
+    // The payer's next step debits that value to the receiver, built on the
+    // root the counterfeit credit produced, exactly as an honest debit is.
+    counterfeit_debit(payer, &c, first, amount).await;
 
     c.enter();
     match verify(payer, 2).await {
@@ -345,6 +321,131 @@ async fn a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_t
             );
         }
     }
+}
+
+/// The payer's next step: an ordinary debit of `amount` ERA to `payee`,
+/// built on the root `first` produced, published and registered at position
+/// 2. Returns the debit, its relationship step and what it built.
+async fn counterfeit_debit(
+    payer: &TestDevice,
+    payee: &TestDevice,
+    first: Counterfeit,
+    amount: u64,
+) -> (Operation, RelationshipChainState, DsmAdmissionParts) {
+    let debit = signed_transfer(payer, payee, amount);
+    let state = chain_state(payer, payee, &debit, 0x32);
+    payer.enter();
+    let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
+    let mut tree = first.tree;
+    let pre_state = AdmittedPreState {
+        balances: [(dsm::core::token::era_policy::era_policy_commit(), amount)]
+            .into_iter()
+            .collect(),
+        economic_position: 2,
+    };
+    let parts = build_dsm_admission(
+        &payer.genesis,
+        &payer.device_id,
+        &state,
+        &debit,
+        &pre_state,
+        &mut tree,
+        &CreditSourceFacts::None,
+        &authority,
+        Vec::new(),
+    )
+    .expect("an ordinary debit of the credited value");
+    publish_and_register(payer, 2, &first.parts.coords.post_economic_root, &parts).await;
+    (debit, state, parts)
+}
+
+/// The whole acceptance. The counterfeiting payer hands a receiver that has
+/// never seen it a payment of value no one debited: its signed transfer, the
+/// locator of its registered debit and a receipt naming that debit's
+/// relationship step, which is what a payee's sync takes from each payment.
+/// The receiver's own acceptance (`prevalidate_incoming_transfer_admission`,
+/// the step every payment its sync picks up goes through before anything is
+/// written) refuses it, and nothing durable is left: no pending admission, no
+/// admitted credit, no balance.
+///
+/// MUTATION CONTROL: skipping `full_step` for the payer's unseen steps in
+/// `next_point` turns this red: the receiver's acceptance prepares the credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited() {
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let (p, c) = three_parties().await;
+    let (source, payer) = (&p.a, &p.b);
+    source.enter();
+    let source_at = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("the source's faucet claim")
+        .0;
+    let amount = 10 * payout();
+    let first = counterfeit_credit(payer, source, source_at + 1, amount).await;
+    let (debit, state, parts) = counterfeit_debit(payer, &c, first, amount).await;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        payer.genesis,
+        payer.device_id,
+        c.device_id,
+        state.embedded_parent,
+        state.compute_chain_tip(),
+        [0x51; 32],
+        [0x52; 32],
+        [0x32; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &debit else {
+        panic!("the debit is a transfer")
+    };
+
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &payer.genesis,
+        &payer.device_id,
+        &payer.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &debit.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: 2,
+                debit_mutation_index: parts.debit_mutation_index.expect("the debit's index"),
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(payer),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("a payment of value no one debited is never prepared for admission");
+    assert!(
+        format!("{refusal}").contains(&format!("{}", source_at + 1)),
+        "refused at the credit's source, the position the source never debited at: {refusal}"
+    );
+    c.enter();
+    assert!(
+        c.router()
+            .core_sdk
+            .device_head()
+            .expect("a head")
+            .pending_economic_admission()
+            .is_none(),
+        "no pending admission"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .is_none(),
+        "no admitted credit"
+    );
+    assert_eq!(c.era_balance(), 0, "no balance");
 }
 
 /// A credit whose source is the source's faucet claim, a step that debited
