@@ -2288,7 +2288,7 @@ pub(crate) async fn prepare_fulfillment(
             }),
             ToPublish::Precommit(signed) => PreparedObject::Precommit(signed.clone()),
             ToPublish::Preimage(preimage) => PreparedObject::Preimage(preimage.clone()),
-            ToPublish::PolicyFulfillment(body) => PreparedObject::PolicyFulfillment(body.clone()),
+            ToPublish::PolicyFulfillment(body) => PreparedObject::PolicyFulfillment(*body),
             ToPublish::Fulfillment(body) => PreparedObject::Fulfillment(Signed {
                 body: body.clone(),
                 signature: fulfillment_signature.clone(),
@@ -2482,9 +2482,9 @@ pub(crate) async fn draft_trade(
     for (vault_id, chain) in intent
         .vault_ids
         .iter()
-        .zip(chains_at_once(set, &verifier, &intent.vault_ids).await)
+        .zip(chains_at_once(set, verifier, &intent.vault_ids).await)
     {
-        chains.push(chain_past_withheld_pairs(set, &verifier, vault_id, chain?).await?);
+        chains.push(chain_past_withheld_pairs(set, verifier, vault_id, chain?).await?);
     }
     let verifier_ref = &verifier;
     let mut heads = Vec::with_capacity(intent.vault_ids.len());
@@ -2514,9 +2514,9 @@ pub(crate) async fn draft_trade(
     let mut cores = Vec::new();
     let mut vaults = Vec::new();
     for (index, ((vault, p), setup_ref)) in heads.iter().zip(&planned).zip(setup_refs).enumerate() {
-        let base = relationship_base(&standing, &vault.vault_id)?;
+        let base = relationship_base(standing, &vault.vault_id)?;
         let (hop, post) = price_hop(vault, p.token_in, p.amount_in, setup_ref, index)?;
-        cores.push(vault_core(&standing, vault, &post, base)?);
+        cores.push(vault_core(standing, vault, &post, base)?);
         vaults.push((vault.vault_id, base));
         hops.push(hop);
     }
@@ -2524,9 +2524,9 @@ pub(crate) async fn draft_trade(
         (token, amount, 0),
         (intent.token_in_policy_commit, 0, intent.amount_in),
     ];
-    let trader = trader_core(&standing, &movements, &vaults)?;
+    let trader = trader_core(standing, &movements, &vaults)?;
     let public_key = crate::sdk::signing_authority::current_public_key()?;
-    let ctx = context(&standing, set, &public_key, trader)?;
+    let ctx = context(standing, set, &public_key, trader)?;
     draft_route(hops, cores, &ctx, &standing.local).map_err(refuse)
 }
 
