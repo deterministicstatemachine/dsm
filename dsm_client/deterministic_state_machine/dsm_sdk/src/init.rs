@@ -103,7 +103,7 @@ pub fn current_smaster() -> Result<[u8; 32], dsm::types::error::DsmError> {
 /// (key schedule KS1), a sibling of `Smaster` under `s0`'s Extract. Rooted in `s0`
 /// (the recovery path) and domain-separated from authorship (`Smaster`): a copied database is
 /// undecryptable without the wallet seed, and a leak of the at-rest key does not expose the
-/// authorship root. Replaces the former C-DBRW binding key for SK-at-rest. Fails closed when
+/// authorship root. Fails closed when
 /// the wallet is locked.
 pub fn current_chain_head_at_rest_key() -> Result<[u8; 32], dsm::types::error::DsmError> {
     use dsm::core::identity::genesis_v2::derive_s0;
@@ -565,7 +565,7 @@ pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
 
     // Genesis v2: the device signing keypair is the AK keypair derived deterministically
     // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
-    // create_genesis_v2 registered. No DBRW / device secret. The wallet seed is the
+    // create_genesis_v2 registered. There is no device secret. The wallet seed is the
     // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
     // and sealed at rest, so on a cold start we first try the hardware seed vault before
     // demanding the mnemonic again. Either way init fails without it, and the failure is

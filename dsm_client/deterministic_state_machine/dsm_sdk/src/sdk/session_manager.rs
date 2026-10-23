@@ -30,9 +30,9 @@ use crate::sdk::app_state::AppState;
 /// Lives here (always compiled) rather than in the JNI module (cfg-gated).
 pub static SDK_READY: AtomicBool = AtomicBool::new(false);
 
-/// Set while C-DBRW bootstrap is in progress (between PHASE_STARTED and finalization).
-/// Forces phase = "securing_device" so the progress screen stays up during the 34-second
-/// SiliconFingerprint derivation, instead of falling back to "needs_genesis".
+/// Set while `system.createGenesisV2` creates this device's identity (cleared when it returns,
+/// success or error). Forces phase = "securing_device" so the progress screen stays up for the
+/// whole of it, instead of a mid-genesis read falling back to "needs_genesis".
 pub static BOOTSTRAP_SECURING: AtomicBool = AtomicBool::new(false);
 
 /// Latches once this device's identity has reached publication quorum.
@@ -338,10 +338,9 @@ impl SessionManager {
         let phase = if fatal {
             "error"
         } else if securing {
-            // If C-DBRW bootstrap is actively in progress (Kotlin sent BOOTSTRAP_PHASE_STARTED),
-            // show the securing screen even while SDK_READY is still false.  The 34-second
-            // SiliconFingerprint derivation window falls here; without this check the phase
-            // would stay "runtime_loading" the whole time and the progress screen would never show.
+            // While genesis is creating this device's identity, show the securing screen even
+            // before SDK_READY is set; without this check the phase would stay
+            // "runtime_loading" the whole time and the progress screen would never show.
             "securing_device"
         } else if !sdk_ready {
             "runtime_loading"
