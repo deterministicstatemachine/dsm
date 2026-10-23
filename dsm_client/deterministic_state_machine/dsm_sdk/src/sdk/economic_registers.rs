@@ -415,13 +415,13 @@ fn record_established<T>(
     checked: Checked<T>,
 ) -> Result<T, PeerLineageFailure> {
     log_cost(what, devid, position, &checked.cost());
-    crate::storage::client_db::economic_lineage::record_frontiers(checked.reached()).map_err(
-        |e| {
-            PeerLineageFailure::Incomplete(format!(
-                "recording the frontiers this walk validated: {e}"
-            ))
-        },
-    )?;
+    crate::storage::client_db::economic_lineage::record_validated(
+        checked.reached(),
+        checked.offline_accounts(),
+    )
+    .map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("recording what this walk validated: {e}"))
+    })?;
     Ok(checked.into_answer())
 }
 

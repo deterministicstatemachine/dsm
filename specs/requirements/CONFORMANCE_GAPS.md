@@ -3686,6 +3686,23 @@ The `bluetooth::` and `handlers::bilateral` suites pass at this change on the re
 - The receive side: receiver proofs, SA-91's pending-credit reconciliation, SA-116's branch proof, and the owner's receive rule (a counterparty and its tokens seen online first).
 - Restart recovery runs once, when sessions are restored. A releasing step whose router is not yet installed then stays releasing, in flight and blocking its relationship, until the next restore.
 
+### 6.93 A receiver records a contact's offline account from its own walk of the contact's online history (offline account Phase 2, receive side, first part; `feat/offline-spend-one-motion-recovery`, 2026-10-22)
+
+**Owner ruling (2026-10-22).** Offline payments come only from a counterparty, and in tokens, the receiver has seen online: "no new relationships and no new tokens can exist since you've seen them online last." How the receiver learns a contact's chip and offline account, in the owner's words the same day: "when someone sets one up, it automatically alerts their contacts and gives them a package to sync up with", "just part of the synchronization process ... automatically look through its contacts while you have it open". Approved design: chip setup and the offline load are online steps in the owner's history, contacts record them during normal sync, and offline acceptance only trusts what was recorded that way.
+
+**What the research found (read-only, 2026-10-22).** Every root the dormant receiver path checks today is supplied by the sender: `verify_receipt_state` checks `parent_root` only for being non-zero, and `accept_offline_release` ties the release's roots to the receipt's, which is consistency only. A receiver's walk of a peer already verified each offline boundary in full (`OfflineBoundaryBody::verify`), and kept nothing of it. The anchor bundle `B` a boundary names commits the anchor's identity, its chip and partition keys, its enrolled counter, the device, the policy and the owner's online key (`anchor_core::enrollment::anchor_bundle`). So a load, signed in the owner's online history, already names the owner's chip.
+
+**What changed.**
+- Core (`dsm::economic::peer_lineage`). `PeerOfflineAccount`: a peer's offline account as one of its boundaries left it. It holds the bundle, the account root and the funding chain, at the economic position of the step that admitted the boundary. Its fields are private, and it is built only in `full_step`, after the step passed `advance_validated`, from the boundary that step verified. `Checked::offline_accounts` returns them with the frontiers, only from a walk that passed.
+- SDK. `peer_offline_account`, created on open (schema 32 unchanged, as `peer_frontier` was). `record_validated` writes a walk's frontiers and offline accounts in one transaction (it replaces `record_frontiers`). `latest_offline_account` reads the account the latest recorded boundary left for a contact and bundle.
+
+**Verified (release, storage nodes on Postgres).** `handlers::offline_boundary_tests::a_contacts_walk_records_the_offline_account_each_boundary_left`: A loads and unloads through the wallet routes. B's own walk of A's history records, under A's bundle, exactly the account root and funding chain A's device holds after each, and nothing before B walks. Mutation: the keep step removed, B records nothing and the test is red ("B recorded the load"); restored byte for byte.
+
+**Open (for the owner, put 2026-10-22).**
+- Whether the load is enough as the chip's announcement, or chip setup gets its own online step as well.
+- How a receiver sees the payer's other offline payments since the load it recorded: the payer carries the chip-signed chain of them (SA-116's branch proof), or a payment must start exactly at the recorded state.
+- Not built yet: the anchor disclosure lacks the birth commitment, so a receiver cannot yet recompute `B` from the disclosed pin material; the offline check of a spend against the recorded account; received offline value held pending until validated online (SA-91). Bearer receipt stays refused until Phase 4 (SA-61).
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
