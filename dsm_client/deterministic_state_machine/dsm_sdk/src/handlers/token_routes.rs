@@ -30,11 +30,11 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 const TICKER_CHARS: std::ops::RangeInclusive<usize> = 2..=8;
 
 /// Why `ticker` is no token's ticker, if it is not. A token created or
-/// adopted on this device carries 2 to 8 printable ASCII characters with no
-/// space, the only text a balance row shows (SA-103), and never a built-in
-/// token's ticker in any letter case, so no token is shown or picked as ERA
-/// or dBTC (SA-104, SA-145). The policy commit stays the asset's identity;
-/// this keeps the ticker that names it locally from naming another.
+/// adopted on this device carries 2 to 8 characters (SoFi §47), never a
+/// built-in token's ticker in any letter case, so no token is shown or
+/// picked as ERA or dBTC (SA-104, SA-145). The policy commit stays the
+/// asset's identity; this keeps the ticker that names it locally from
+/// naming another.
 fn ticker_refusal(ticker: &str) -> Option<String> {
     let chars = ticker.chars().count();
     if !TICKER_CHARS.contains(&chars) {
@@ -42,11 +42,6 @@ fn ticker_refusal(ticker: &str) -> Option<String> {
             "a ticker is {} to {} characters, not {chars}",
             TICKER_CHARS.start(),
             TICKER_CHARS.end()
-        ));
-    }
-    if let Some(c) = ticker.chars().find(|c| !c.is_ascii_graphic()) {
-        return Some(format!(
-            "a ticker is printable ASCII with no space, not {c:?}"
         ));
     }
     dsm::core::token::token_state_manager::BUILTIN_TICKERS
@@ -2123,18 +2118,14 @@ mod tests {
         );
     }
 
-    /// SA-103, SA-104, SA-145. A policy whose ticker names a built-in token
-    /// in any letter case, or that a balance row cannot show, is not adopted,
-    /// and a create request naming one is refused at its ticker. A device
-    /// then holds no token shown or picked as ERA or dBTC, and no ticker that
-    /// breaks the balance list.
-    /// MUTATION CONTROL: dropping the built-in check, or the printable check,
-    /// turns this red.
+    /// SA-104, SA-145. A policy whose ticker names a built-in token in any
+    /// letter case is not adopted, and a create request naming one is
+    /// refused at its ticker: a device holds no token shown or picked as ERA
+    /// or dBTC.
+    /// MUTATION CONTROL: dropping the built-in check turns this red.
     #[test]
-    fn a_ticker_naming_a_builtin_or_unshowable_is_neither_adopted_nor_created() {
-        for ticker in [
-            "ERA", "era", "Era", "dBTC", "DBTC", "dbtc", "\u{c9}RA", "A B", "W\u{7}D", "X",
-        ] {
+    fn a_ticker_naming_a_builtin_is_neither_adopted_nor_created() {
+        for ticker in ["ERA", "era", "Era", "dBTC", "DBTC", "dbtc"] {
             let policy = ParsedTokenPolicy {
                 ticker: ticker.into(),
                 ..fungible_fixture()

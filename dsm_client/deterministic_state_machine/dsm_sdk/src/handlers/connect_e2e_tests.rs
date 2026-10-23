@@ -581,7 +581,7 @@ async fn a_relay_replaying_every_request_runs_nothing_twice() {
 /// grant pays in the coin the grant names, so the wallet's ERA never moves
 /// for it, and the request is not carried out while the wallet holds none of
 /// the coin. (No coin a device creates or adopts is named ERA in any case:
-/// `token_routes` `a_ticker_naming_a_builtin_or_unshowable_is_neither_adopted_nor_created`.)
+/// `token_routes` `a_ticker_naming_a_builtin_is_neither_adopted_nor_created`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_grant_payment_pays_in_the_coin_it_names_never_the_wallets_era() {
