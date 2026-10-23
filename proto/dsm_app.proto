@@ -3905,7 +3905,11 @@ message TransactionInfo {
   reserved 7;
   reserved "logical_index";
   bytes  tx_hash       = 8 [(dsm_fixed_len)=32];
-  sint64 amount_signed = 9; // signed amount for DLV/faucet: positive=incoming, negative=outgoing
+  // 9 was the signed amount: an amount of 2^63 base units or more has no
+  // signed form, so the history carries the magnitude (`amount`) and its
+  // direction (19) instead (SA-144).
+  reserved 9;
+  reserved "amount_signed";
   TransactionType tx_type = 10; // enumerated transaction type
   string status        = 11; // "completed", "confirmed", "pending", etc.
   string recipient     = 12; // alias or device ID text for UI display
@@ -3914,18 +3918,31 @@ message TransactionInfo {
   reserved "created_at";
   string memo = 15; // optional memo/note
   bool   receipt_verified = 16; // true iff stitched_receipt passes cryptographic verification (SMT roots, tripwire, proofs)
-  // Display form of `amount_signed`, rendered by Rust from the token's
-  // registry decimals. `amount`/`amount_signed` stay canonical base units.
+  // Display form of `amount` in its direction, rendered by Rust from the
+  // token's registry decimals. `amount` stays canonical base units.
   string display_amount = 17;
-  // A token or SoFi event: every token it moved, with its signed amount.
+  // A token or SoFi event: every token it moved, with its direction.
   // Empty for a transfer, which moves the one token above.
   repeated TokenMove moves = 18;
+  // A transfer's direction: credited to this wallet or debited from it. An
+  // event names none here; each of its moves names its own.
+  AmountDirection direction = 19;
+}
+// Which way an amount moved, seen from this wallet.
+enum AmountDirection {
+  AMOUNT_DIRECTION_UNSPECIFIED = 0;
+  AMOUNT_DIRECTION_CREDIT = 1;
+  AMOUNT_DIRECTION_DEBIT = 2;
 }
 message TokenMove {
   bytes  policy_commit  = 1 [(dsm_fixed_len)=32];
   string token_id       = 2; // the token's ticker
-  sint64 amount_signed  = 3; // base units: positive credited, negative debited
+  // 3 was the signed amount (SA-144): `amount` and `direction` replace it.
+  reserved 3;
+  reserved "amount_signed";
   string display_amount = 4; // rendered by Rust from the token's decimals
+  uint64 amount         = 5; // base units, the magnitude
+  AmountDirection direction = 6;
 }
 message WalletHistoryResponse { repeated TransactionInfo transactions = 1; }
 message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }

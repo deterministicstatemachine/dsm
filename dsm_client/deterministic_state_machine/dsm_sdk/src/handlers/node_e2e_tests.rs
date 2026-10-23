@@ -4277,7 +4277,15 @@ async fn a_realized_trade_shows_in_balances_and_history_at_once() {
     let moves = |row: &generated::TransactionInfo| -> Vec<(Vec<u8>, i64)> {
         row.moves
             .iter()
-            .map(|m| (m.policy_commit.clone(), m.amount_signed))
+            .map(|m| {
+                let amount = i64::try_from(m.amount).expect("this test's amounts are small");
+                let signed = match generated::AmountDirection::try_from(m.direction) {
+                    Ok(generated::AmountDirection::Credit) => amount,
+                    Ok(generated::AmountDirection::Debit) => -amount,
+                    other => panic!("a move names no direction: {other:?}"),
+                };
+                (m.policy_commit.clone(), signed)
+            })
             .collect()
     };
     let of = |rows: &[generated::TransactionInfo], kind: generated::TransactionType| {

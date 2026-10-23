@@ -124,7 +124,8 @@ async fn a_full_claim_credits_100_era_and_admits_position_1() {
         claim.tx_type,
         generated::TransactionType::TxTypeFaucet as i32
     );
-    assert_eq!(claim.amount_signed, whole_era(100) as i64);
+    assert_eq!(claim.amount, whole_era(100));
+    assert_eq!(claim.direction, generated::AmountDirection::Credit as i32);
     assert_eq!(claim.display_amount, "100.00");
     assert_eq!(claim.token_id, "ERA");
     assert!(claim.from_device_id.is_empty(), "the source is the reserve");

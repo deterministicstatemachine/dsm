@@ -1125,6 +1125,34 @@ proto3.util.setEnumType(BalanceHolding, "dsm.BalanceHolding", [
 ]);
 
 /**
+ * Which way an amount moved, seen from this wallet.
+ *
+ * @generated from enum dsm.AmountDirection
+ */
+export enum AmountDirection {
+  /**
+   * @generated from enum value: AMOUNT_DIRECTION_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * @generated from enum value: AMOUNT_DIRECTION_CREDIT = 1;
+   */
+  CREDIT = 1,
+
+  /**
+   * @generated from enum value: AMOUNT_DIRECTION_DEBIT = 2;
+   */
+  DEBIT = 2,
+}
+// Retrieve enum metadata with: proto3.getEnumType(AmountDirection)
+proto3.util.setEnumType(AmountDirection, "dsm.AmountDirection", [
+  { no: 0, name: "AMOUNT_DIRECTION_UNSPECIFIED" },
+  { no: 1, name: "AMOUNT_DIRECTION_CREDIT" },
+  { no: 2, name: "AMOUNT_DIRECTION_DEBIT" },
+]);
+
+/**
  * @generated from enum dsm.SdkEventKind
  */
 export enum SdkEventKind {
@@ -24246,13 +24274,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
   txHash = new Uint8Array(0);
 
   /**
-   * signed amount for DLV/faucet: positive=incoming, negative=outgoing
-   *
-   * @generated from field: sint64 amount_signed = 9;
-   */
-  amountSigned = protoInt64.zero;
-
-  /**
    * enumerated transaction type
    *
    * @generated from field: dsm.TransactionType tx_type = 10;
@@ -24295,20 +24316,28 @@ export class TransactionInfo extends Message<TransactionInfo> {
   receiptVerified = false;
 
   /**
-   * Display form of `amount_signed`, rendered by Rust from the token's
-   * registry decimals. `amount`/`amount_signed` stay canonical base units.
+   * Display form of `amount` in its direction, rendered by Rust from the
+   * token's registry decimals. `amount` stays canonical base units.
    *
    * @generated from field: string display_amount = 17;
    */
   displayAmount = "";
 
   /**
-   * A token or SoFi event: every token it moved, with its signed amount.
+   * A token or SoFi event: every token it moved, with its direction.
    * Empty for a transfer, which moves the one token above.
    *
    * @generated from field: repeated dsm.TokenMove moves = 18;
    */
   moves: TokenMove[] = [];
+
+  /**
+   * A transfer's direction: credited to this wallet or debited from it. An
+   * event names none here; each of its moves names its own.
+   *
+   * @generated from field: dsm.AmountDirection direction = 19;
+   */
+  direction = AmountDirection.UNSPECIFIED;
 
   constructor(data?: PartialMessage<TransactionInfo>) {
     super();
@@ -24324,7 +24353,6 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 4, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 5, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 8, name: "tx_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 9, name: "amount_signed", kind: "scalar", T: 18 /* ScalarType.SINT64 */ },
     { no: 10, name: "tx_type", kind: "enum", T: proto3.getEnumType(TransactionType) },
     { no: 11, name: "status", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 12, name: "recipient", kind: "scalar", T: 9 /* ScalarType.STRING */ },
@@ -24333,6 +24361,7 @@ export class TransactionInfo extends Message<TransactionInfo> {
     { no: 16, name: "receipt_verified", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
     { no: 17, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
     { no: 18, name: "moves", kind: "message", T: TokenMove, repeated: true },
+    { no: 19, name: "direction", kind: "enum", T: proto3.getEnumType(AmountDirection) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TransactionInfo {
@@ -24369,18 +24398,23 @@ export class TokenMove extends Message<TokenMove> {
   tokenId = "";
 
   /**
-   * base units: positive credited, negative debited
-   *
-   * @generated from field: sint64 amount_signed = 3;
-   */
-  amountSigned = protoInt64.zero;
-
-  /**
    * rendered by Rust from the token's decimals
    *
    * @generated from field: string display_amount = 4;
    */
   displayAmount = "";
+
+  /**
+   * base units, the magnitude
+   *
+   * @generated from field: uint64 amount = 5;
+   */
+  amount = protoInt64.zero;
+
+  /**
+   * @generated from field: dsm.AmountDirection direction = 6;
+   */
+  direction = AmountDirection.UNSPECIFIED;
 
   constructor(data?: PartialMessage<TokenMove>) {
     super();
@@ -24392,8 +24426,9 @@ export class TokenMove extends Message<TokenMove> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "policy_commit", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "amount_signed", kind: "scalar", T: 18 /* ScalarType.SINT64 */ },
     { no: 4, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 5, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 6, name: "direction", kind: "enum", T: proto3.getEnumType(AmountDirection) },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenMove {

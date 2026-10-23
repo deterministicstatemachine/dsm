@@ -1011,7 +1011,7 @@ mod tests {
             token_id: "ERA".to_string(),
             amount: 1,
             tx_hash: vec![0u8; 32],
-            amount_signed: 1,
+            direction: crate::generated::AmountDirection::Credit as i32,
             tx_type: crate::generated::TransactionType::TxTypeUnspecified as i32,
             status: "ok".to_string(),
             recipient: "someone".to_string(),
