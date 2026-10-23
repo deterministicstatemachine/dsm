@@ -101,6 +101,7 @@ pub mod receipts;
 pub mod contact_profile; // a person's details as the wallet shows them (DSM Amendment A17)
 pub mod contact_sdk;
 pub mod email_receipts; // a courtesy email receipt after a send (DSM Amendment A17)
+pub mod money_waiting; // the count on the app icon of money received and not yet looked at
 
 pub mod wallet_sdk;
 

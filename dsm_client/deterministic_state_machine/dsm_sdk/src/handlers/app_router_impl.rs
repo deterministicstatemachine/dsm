@@ -2649,7 +2649,7 @@ impl AppRouter for AppRouterImpl {
             // Prefs routes
             "prefs.get" => self.handle_prefs_query(q).await,
             // Inbox routes
-            "inbox.pull" => self.handle_inbox_query(q).await,
+            "inbox.pull" | "inbox.moneyWaiting" => self.handle_inbox_query(q).await,
             // Bilateral routes
             "bilateral.pending_list" => self.handle_bilateral_query(q).await,
             // Storage routes
@@ -2739,7 +2739,7 @@ impl AppRouter for AppRouterImpl {
             | "session.set_fatal_error"
             | "session.clear_fatal_error" => self.handle_session_invoke(i).await,
             // Inbox poller lifecycle
-            "inbox.startPoller" | "inbox.stopPoller" | "inbox.resume" => {
+            "inbox.startPoller" | "inbox.stopPoller" | "inbox.resume" | "inbox.moneySeen" => {
                 self.handle_inbox_invoke(i).await
             }
             // Recovery invoke routes (includes nfc.ring.write, nfc.ring.read)

@@ -2,7 +2,9 @@
 //! Inbox route handlers extracted from AppRouterImpl.
 //!
 //! Query: `inbox.pull` — fetch inbox items (on-demand).
+//! Query: `inbox.moneyWaiting` — the received transfers not yet looked at.
 //! Invoke: `inbox.startPoller` / `inbox.stopPoller` / `inbox.resume` — poller lifecycle.
+//! Invoke: `inbox.moneySeen` — the user was shown the received transfers.
 
 use prost::Message;
 
@@ -16,9 +18,32 @@ use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
 /// The most items one `inbox.pull` returns.
 const INBOX_PULL_MAX: u32 = 200;
 
+/// The received transfers waiting, each as the history reports it.
+fn money_waiting_response(device_id: &[u8]) -> Result<generated::MoneyWaitingResponse, String> {
+    let waiting = crate::storage::client_db::money_received::money_waiting()
+        .map_err(|e| format!("the received notices are unreadable: {e}"))?;
+    let me = crate::util::text_id::encode_base32_crockford(device_id);
+    let aliases = super::wallet_routes::contact_aliases()?;
+    let received = waiting
+        .received
+        .iter()
+        .map(|t| super::wallet_routes::history_info(t, &me, &aliases))
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::MoneyWaitingResponse {
+        received,
+        through: waiting.through,
+    })
+}
+
 impl AppRouterImpl {
     pub(crate) async fn handle_inbox_query(&self, q: AppQuery) -> AppResult {
         match q.path.as_str() {
+            "inbox.moneyWaiting" => match money_waiting_response(&self.device_id_bytes) {
+                Ok(resp) => {
+                    pack_envelope_ok(generated::envelope::Payload::MoneyWaitingResponse(resp))
+                }
+                Err(e) => err(format!("inbox.moneyWaiting: {e}")),
+            },
             "inbox.pull" => {
                 let pack = match generated::ArgPack::decode(&*q.params) {
                     Ok(pack) => pack,
@@ -223,6 +248,33 @@ impl AppRouterImpl {
                 log::info!("[DSM_SDK] inbox.resume called");
                 crate::sdk::inbox_poller::resume_poller();
                 pack_bytes_ok(Vec::new())
+            }
+            "inbox.moneySeen" => {
+                let pack = match generated::ArgPack::decode(&*i.args) {
+                    Ok(pack) => pack,
+                    Err(e) => return err(format!("inbox.moneySeen: decode ArgPack failed: {e}")),
+                };
+                if pack.codec != generated::Codec::Proto as i32 {
+                    return err("inbox.moneySeen: ArgPack.codec must be PROTO".into());
+                }
+                let seen = match generated::MoneySeenRequest::decode(&*pack.body) {
+                    Ok(seen) => seen,
+                    Err(e) => {
+                        return err(format!(
+                            "inbox.moneySeen: decode MoneySeenRequest failed: {e}"
+                        ))
+                    }
+                };
+                if let Err(e) = crate::storage::client_db::money_received::mark_seen(seen.through) {
+                    return err(format!("inbox.moneySeen: {e}"));
+                }
+                crate::sdk::money_waiting::publish();
+                match money_waiting_response(&self.device_id_bytes) {
+                    Ok(resp) => {
+                        pack_envelope_ok(generated::envelope::Payload::MoneyWaitingResponse(resp))
+                    }
+                    Err(e) => err(format!("inbox.moneySeen: {e}")),
+                }
             }
             other => err(format!("inbox invoke: unknown method '{other}'")),
         }
