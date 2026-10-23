@@ -1040,7 +1040,7 @@ async fn a_fulfillment_prepared_and_published_is_completed_never_signed_again() 
         "only the prepared trade moved B's ERA"
     );
     p.b.enter();
-    let still = prepared_fulfillment(&parent)
+    let still = prepared_fulfillment(position, &parent)
         .expect("read back")
         .expect("the prepared fulfillment stays frozen");
     assert_eq!(

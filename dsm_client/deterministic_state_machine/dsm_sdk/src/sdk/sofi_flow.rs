@@ -2003,8 +2003,8 @@ pub(crate) async fn exercise_draft_at_head(
     draft: UncheckedDraft,
     accepted: &AcceptedGeneses,
 ) -> Result<Drafted, DsmError> {
-    let parent = *draft.precommit().void_root();
-    if let Some(prepared) = prepared_fulfillment(&parent)? {
+    let (position, parent) = (draft.precommit().position(), *draft.precommit().void_root());
+    if let Some(prepared) = prepared_fulfillment(position, &parent)? {
         let id = derive::fulfillment_id(&prepared.fulfillment()?.body);
         let outcome = finish_prepared(core, set, accepted, &prepared).await?;
         return Err(refuse(format!(
@@ -2021,9 +2021,12 @@ pub(crate) async fn exercise_draft_at_head(
     }
 }
 
-/// The purpose a fulfillment's objects are frozen under before any is
-/// published (SA-71).
-const PREPARED_FULFILLMENT: &str = "sofi-prepared-fulfillment";
+/// The purpose a fulfillment built on position `position` freezes its
+/// objects under before any is published (SA-71). The position is part of
+/// it because a root can repeat: a Void position keeps its parent's root.
+fn prepared_purpose(position: u64) -> String {
+    format!("sofi-prepared-fulfillment/{position}")
+}
 
 /// One object of a prepared fulfillment, complete with its signature.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2147,13 +2150,17 @@ pub(crate) enum Prepared {
     HeadMoved(String),
 }
 
-/// The fulfillment this device prepared against `parent`, if it froze one:
-/// read back from its frozen objects, which must hold one precommit built
-/// on `parent`, one preimage and one fulfillment of that precommit.
-/// Anything else is state this device cannot reconcile, and is refused.
-pub(crate) fn prepared_fulfillment(parent: &D32) -> Result<Option<PreparedFulfillment>, DsmError> {
+/// The fulfillment this device prepared on position `position` at root
+/// `parent`, if it froze one: read back from its frozen objects, which must
+/// hold one precommit built there, one preimage and one fulfillment of that
+/// precommit. Anything else is state this device cannot reconcile, and is
+/// refused.
+pub(crate) fn prepared_fulfillment(
+    position: u64,
+    parent: &D32,
+) -> Result<Option<PreparedFulfillment>, DsmError> {
     let rows = crate::storage::client_db::frozen_publication_artifact::list_with_purpose_and_root(
-        PREPARED_FULFILLMENT,
+        &prepared_purpose(position),
         parent,
     )
     .map_err(|e| storage("prepared fulfillment", e))?;
@@ -2174,6 +2181,7 @@ pub(crate) fn prepared_fulfillment(parent: &D32) -> Result<Option<PreparedFulfil
     let prepared = PreparedFulfillment { objects };
     let precommit = prepared.precommit()?;
     if precommit.body.void_root() != parent
+        || precommit.body.position() != position
         || prepared.fulfillment()?.body.precommit_id() != &derive::precommit_id(&precommit.body)
     {
         return Err(refuse(
@@ -2189,9 +2197,11 @@ pub(crate) fn prepared_fulfillment(parent: &D32) -> Result<Option<PreparedFulfil
 /// before any is published.
 fn freeze_prepared(
     set: &StorageSet,
+    position: u64,
     parent: &D32,
     prepared: &PreparedFulfillment,
 ) -> Result<(), DsmError> {
+    let purpose = prepared_purpose(position);
     let binding = crate::storage::client_db::get_connection()
         .map_err(|e| storage("prepared fulfillment", e))?;
     let mut conn = binding.lock().map_err(|e| {
@@ -2216,7 +2226,7 @@ fn freeze_prepared(
             &key,
             &bytes,
             parent,
-            PREPARED_FULFILLMENT,
+            &purpose,
         )
         .map_err(|e| storage("prepared fulfillment", e))?;
     }
@@ -2290,7 +2300,12 @@ pub(crate) async fn prepare_fulfillment(
     prepared.fulfillment()?;
 
     // SA-71: frozen before anything is published.
-    freeze_prepared(set, checked.precommit().void_root(), &prepared)?;
+    freeze_prepared(
+        set,
+        checked.precommit().position(),
+        checked.precommit().void_root(),
+        &prepared,
+    )?;
     // Stages 4 and 5.
     publish_prepared(set, &prepared).await?;
     Ok(Prepared::Published(prepared))
