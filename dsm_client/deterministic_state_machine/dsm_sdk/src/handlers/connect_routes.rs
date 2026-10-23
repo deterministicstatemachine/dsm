@@ -570,17 +570,16 @@ impl AppRouterImpl {
         }))
     }
 
-    /// Root `anchor` through `tokens.addByAnchor`: the policy is fetched,
-    /// re-hashed to the anchor and adopted into this device's state.
+    /// Root `anchor` as `tokens.addByAnchor` does: the policy is fetched,
+    /// re-hashed to the anchor and adopted into this device's state. Called
+    /// directly, never through the router: a request carried out under a
+    /// grant is already inside the router's `connect.sync`, and entering the
+    /// router again from there stacked two of its dispatch frames on one
+    /// worker thread, which overflowed its stack in an unoptimized build.
     async fn root_anchor(&self, anchor: &[u8; 32]) -> Result<(), String> {
-        let rooted = crate::bridge::AppRouter::invoke(
-            self,
-            AppInvoke {
-                method: "tokens.addByAnchor".into(),
-                args: crate::util::text_id::encode_base32_crockford(anchor).into_bytes(),
-            },
-        )
-        .await;
+        let rooted = self
+            .add_by_anchor(&crate::util::text_id::encode_base32_crockford(anchor))
+            .await;
         match (rooted.success, rooted.error_message) {
             (ok, _) if ok => Ok(()),
             (_, Some(why)) => Err(why),
