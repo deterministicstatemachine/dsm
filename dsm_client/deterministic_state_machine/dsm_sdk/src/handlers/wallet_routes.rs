@@ -432,16 +432,15 @@ fn merge_balance_projections(
     }
 }
 
+/// A built-in token's name in its one spelling; any other ticker exactly as
+/// given, since a ticker is any 2 to 8 characters (SoFi §47) and no other
+/// token carries a built-in's (SA-104).
 pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
-    let trimmed = token_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    match trimmed.to_ascii_uppercase().as_str() {
+    match token_id.trim().to_ascii_uppercase().as_str() {
+        "" => String::new(),
         "ERA" => "ERA".to_string(),
         "DBTC" => "dBTC".to_string(),
-        _ => trimmed.to_string(),
+        _ => token_id.to_string(),
     }
 }
 
@@ -963,12 +962,12 @@ impl AppRouterImpl {
                              {{prefix}}|{{token}} key"
                         ));
                     };
+                    // A ticker is any 2 to 8 characters (SoFi §47): each is shown as
+                    // its token carries it, never refused for what it holds (SA-103).
                     let token_id = canonicalize_token_id(ticker);
-                    if token_id.is_empty()
-                        || token_id.chars().any(|c| c.is_control() || (c as u32) > 126)
-                    {
+                    if token_id.is_empty() {
                         return err(format!(
-                            "balance.list: balance key {token_key:?} names no printable token"
+                            "balance.list: balance key {token_key:?} names no token"
                         ));
                     }
                     if !items.iter().any(|i| i.token_id == token_id) {
@@ -1614,6 +1613,21 @@ mod tests {
         assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
         assert_eq!(canonicalize_token_id(" dBTC "), "dBTC");
         assert_eq!(canonicalize_token_id("ERA"), "ERA");
+        assert_eq!(canonicalize_token_id("era"), "ERA");
+        assert_eq!(canonicalize_token_id(""), "");
+        assert_eq!(canonicalize_token_id("   "), "");
+    }
+
+    /// SA-103: any other ticker is kept exactly as its token carries it
+    /// (SoFi §47: any 2 to 8 characters), spaces and all.
+    #[test]
+    fn canonicalize_token_id_keeps_any_other_ticker_exactly() {
+        assert_eq!(canonicalize_token_id("USDC"), "USDC");
+        assert_eq!(canonicalize_token_id(" WBTC "), " WBTC ");
+        assert_eq!(
+            canonicalize_token_id("\u{c5}\u{c4}\u{d6}"),
+            "\u{c5}\u{c4}\u{d6}"
+        );
     }
 
     #[test]

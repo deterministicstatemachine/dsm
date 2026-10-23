@@ -13,8 +13,8 @@
 //!
 //! What remains here is purely metadata extraction used by both bilateral BLE
 //! settlement and online Transfer paths: parsing `Operation::Transfer` bytes
-//! into a display-layer [`TransferFields`] plus the canonical ticker
-//! normaliser [`canonicalize_token_id`].
+//! into a display-layer [`TransferFields`]. The ticker normaliser is
+//! `handlers::wallet_routes::canonicalize_token_id`.
 //!
 //! All legacy `apply_transfer_*` helpers and their associated balance-map
 //! mutation code were removed as part of the Phase 4.1 BCR storage / device
@@ -28,43 +28,4 @@ pub struct TransferFields {
     pub amount: u64,
     pub token_id: String,
     pub to_device_id: Vec<u8>,
-}
-
-/// Normalize token ticker to canonical form.
-pub fn canonicalize_token_id(token_id: &str) -> String {
-    let trimmed = token_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    match trimmed.to_ascii_uppercase().as_str() {
-        "ERA" => "ERA".to_string(),
-        "DBTC" => "dBTC".to_string(),
-        _ => trimmed.to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::canonicalize_token_id;
-
-    #[test]
-    fn canonicalize_token_id_normalizes_era_and_dbtc() {
-        assert_eq!(canonicalize_token_id("ERA"), "ERA");
-        assert_eq!(canonicalize_token_id("era"), "ERA");
-        assert_eq!(canonicalize_token_id("DBTC"), "dBTC");
-        assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
-        assert_eq!(canonicalize_token_id("dBTC"), "dBTC");
-    }
-
-    #[test]
-    fn canonicalize_token_id_preserves_unknown_token() {
-        assert_eq!(canonicalize_token_id("USDC"), "USDC");
-        assert_eq!(canonicalize_token_id("  WBTC  "), "WBTC");
-    }
-
-    #[test]
-    fn canonicalize_token_id_returns_empty_for_blank_input() {
-        assert_eq!(canonicalize_token_id(""), "");
-        assert_eq!(canonicalize_token_id("   "), "");
-    }
 }
