@@ -28,6 +28,32 @@ pub(crate) type ParsedTokenPolicy = dsm::economic::token_policy::TokenPolicy;
 
 /// A ticker's length, in characters.
 const TICKER_CHARS: std::ops::RangeInclusive<usize> = 2..=8;
+
+/// Why `ticker` is no token's ticker, if it is not. A token created or
+/// adopted on this device carries 2 to 8 printable ASCII characters with no
+/// space, the only text a balance row shows (SA-103), and never a built-in
+/// token's ticker in any letter case, so no token is shown or picked as ERA
+/// or dBTC (SA-104, SA-145). The policy commit stays the asset's identity;
+/// this keeps the ticker that names it locally from naming another.
+fn ticker_refusal(ticker: &str) -> Option<String> {
+    let chars = ticker.chars().count();
+    if !TICKER_CHARS.contains(&chars) {
+        return Some(format!(
+            "a ticker is {} to {} characters, not {chars}",
+            TICKER_CHARS.start(),
+            TICKER_CHARS.end()
+        ));
+    }
+    if let Some(c) = ticker.chars().find(|c| !c.is_ascii_graphic()) {
+        return Some(format!(
+            "a ticker is printable ASCII with no space, not {c:?}"
+        ));
+    }
+    dsm::core::token::token_state_manager::BUILTIN_TICKERS
+        .iter()
+        .find(|builtin| builtin.eq_ignore_ascii_case(ticker))
+        .map(|builtin| format!("{builtin} is a protocol asset's ticker"))
+}
 /// The most decimals a token may carry.
 const DECIMALS_MAX: u32 = 18;
 
@@ -64,16 +90,8 @@ fn token_fields(
 ) -> Result<TokenFields, Vec<generated::TokenFieldRefusal>> {
     let mut refusals = Vec::new();
     let ticker = req.ticker.trim().to_uppercase();
-    let chars = ticker.chars().count();
-    if !TICKER_CHARS.contains(&chars) {
-        refusals.push(refusal(
-            "ticker",
-            format!(
-                "a ticker is {} to {} characters, not {chars}",
-                TICKER_CHARS.start(),
-                TICKER_CHARS.end()
-            ),
-        ));
+    if let Some(why) = ticker_refusal(&ticker) {
+        refusals.push(refusal("ticker", why));
     }
     let alias = req.alias.trim().to_string();
     if alias.is_empty() {
@@ -325,6 +343,9 @@ pub(crate) fn adoptable_policy(raw_proto: &[u8]) -> Result<ParsedTokenPolicy, St
              any other has no reserve behind it (Amendment S11)"
                 .into(),
         );
+    }
+    if let Some(why) = ticker_refusal(&parsed.ticker) {
+        return Err(format!("the policy's ticker {:?}: {why}", parsed.ticker));
     }
     Ok(parsed)
 }
@@ -2096,6 +2117,47 @@ mod tests {
         };
         let refused = adoptable_policy(&v3_policy(&lookalike)).expect_err("refused");
         assert!(refused.contains("network-anchored"), "{refused}");
+        assert_eq!(
+            adoptable_policy(&v3_policy(&fungible_fixture())).expect("adoptable"),
+            fungible_fixture()
+        );
+    }
+
+    /// SA-103, SA-104, SA-145. A policy whose ticker names a built-in token
+    /// in any letter case, or that a balance row cannot show, is not adopted,
+    /// and a create request naming one is refused at its ticker. A device
+    /// then holds no token shown or picked as ERA or dBTC, and no ticker that
+    /// breaks the balance list.
+    /// MUTATION CONTROL: dropping the built-in check, or the printable check,
+    /// turns this red.
+    #[test]
+    fn a_ticker_naming_a_builtin_or_unshowable_is_neither_adopted_nor_created() {
+        for ticker in [
+            "ERA", "era", "Era", "dBTC", "DBTC", "dbtc", "\u{c9}RA", "A B", "W\u{7}D", "X",
+        ] {
+            let policy = ParsedTokenPolicy {
+                ticker: ticker.into(),
+                ..fungible_fixture()
+            };
+            let refused = adoptable_policy(&v3_policy(&policy))
+                .expect_err("a ticker no token may carry is not adopted");
+            assert!(refused.contains("ticker"), "{ticker:?}: {refused}");
+            let request = generated::TokenCreateRequest {
+                ticker: ticker.into(),
+                alias: "Lookalike".into(),
+                decimals: 2,
+                genesis_supply_entered: "1000".to_string(),
+                threshold: 1,
+                ..Default::default()
+            };
+            let Err(refusals) = token_fields(&request) else {
+                panic!("{ticker:?} is accepted as a ticker");
+            };
+            assert!(
+                refusals.iter().any(|r| r.field == "ticker"),
+                "{ticker:?} is refused at its ticker: {refusals:?}"
+            );
+        }
         assert_eq!(
             adoptable_policy(&v3_policy(&fungible_fixture())).expect("adoptable"),
             fungible_fixture()

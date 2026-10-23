@@ -577,21 +577,20 @@ async fn a_relay_replaying_every_request_runs_nothing_twice() {
     assert_eq!(replayed.sessions[0].last_error, "");
 }
 
-/// A coin's identity is its policy commit, and its ticker is display only
-/// (SoFi §47): an application may name its coin "ERA". A payment under the
+/// A coin's identity is its policy commit (SoFi §47). A payment under the
 /// grant pays in the coin the grant names, so the wallet's ERA never moves
-/// for it, whatever the coin is called, and the request is not carried out
-/// while the wallet holds none of the coin.
+/// for it, and the request is not carried out while the wallet holds none of
+/// the coin. (No coin a device creates or adopts is named ERA in any case:
+/// `token_routes` `a_ticker_naming_a_builtin_or_unshowable_is_neither_adopted_nor_created`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn an_app_coin_named_era_never_pays_out_the_wallets_era() {
+async fn a_grant_payment_pays_in_the_coin_it_names_never_the_wallets_era() {
     let p = Pair::boot(500, 200).await;
-    let named_era = create_token(&p.a, "ERA", 1_000_000).await;
+    let named_era = create_token(&p.a, "GEMS", 1_000_000).await;
     assert_ne!(named_era, era(), "the app's coin is not ERA");
     let relay = ForwardRelay::start().await;
     let made = offer(&p.a, &relay, &named_era).await;
-    let session = connect_to_coin(&p, &relay, &made.code, "ERA").await;
-    // The wallet adopts the coin: its registry names it "ERA".
+    let session = connect_to_coin(&p, &relay, &made.code, "GEMS").await;
     adopt(&p.b, &named_era).await;
     let wallet_era = balance(&p.b, &era());
     let app_era = balance(&p.a, &era());
