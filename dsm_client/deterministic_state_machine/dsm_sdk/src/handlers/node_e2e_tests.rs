@@ -4015,12 +4015,12 @@ async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
 async fn walk_with_history(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<[u8; 32]> {
     let (own, parents) = standing_of(d);
     let set = canonical_set(NETWORK).expect("the pinned set");
-    let history = crate::sdk::vault_history::discover(&set, vault_id)
+    let mut history = crate::sdk::vault_history::discover(&set, vault_id)
         .await
         .expect("the history");
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
-    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &history))
+    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &mut history))
         .expect("the walk");
     crate::storage::client_db::sofi_vault_head::recorded_generations(vault_id)
         .expect("the record")

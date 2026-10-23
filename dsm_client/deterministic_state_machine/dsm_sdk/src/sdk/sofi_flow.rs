@@ -621,9 +621,10 @@ pub(crate) async fn vault_at_head(
 ) -> Result<(VaultAtHead, VaultChain), DsmError> {
     // The history others published is read ahead of the walk (SoFi
     // Amendment S23); the walk establishes the chain exactly as before.
-    let history = crate::sdk::vault_history::discover(set, vault_id).await?;
-    let chain =
-        tokio::task::block_in_place(|| crate::sdk::vault_history::walk(set, verifier, &history))?;
+    let mut history = crate::sdk::vault_history::discover(set, vault_id).await?;
+    let chain = tokio::task::block_in_place(|| {
+        crate::sdk::vault_history::walk(set, verifier, &mut history)
+    })?;
     head_of(set, verifier, vault_id, chain).await
 }
 
@@ -660,11 +661,11 @@ async fn chains_at_once(
 ) -> Vec<Result<VaultChain, DsmError>> {
     // Each vault's history is read from the epoch index first, at once
     // (SoFi Amendment S23), and read ahead of its walk.
-    let histories = crate::sdk::vault_history::discover_all(set, vault_ids).await;
+    let mut histories = crate::sdk::vault_history::discover_all(set, vault_ids).await;
     tokio::task::block_in_place(|| {
         std::thread::scope(|scope| {
             let walks: Vec<_> = histories
-                .iter()
+                .iter_mut()
                 .map(|history| {
                     scope.spawn(move || match history {
                         Ok(history) => crate::sdk::vault_history::walk(set, verifier, history),

@@ -439,7 +439,7 @@ fn forget_the_reserve() {
 
 /// The memoised lineage, generation by generation: what a walk established.
 fn walked_lineage() -> Vec<(u64, [u8; 32])> {
-    client_db::native_reserve::memoised_lineage(&reserve_genesis())
+    client_db::native_reserve::memoised_generations(&reserve_genesis())
         .expect("the memo")
         .into_iter()
         .map(|(state, _)| (state.generation, state.root()))
@@ -556,6 +556,78 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
         honest,
         "the walk established exactly what it established without the lies"
     );
+}
+
+/// SA-69. Anyone may append a checkpoint, and every root a walk is handed is
+/// a cell it reads. The reserve's epoch index holds a checkpoint naming 33
+/// roots the reserve never had, under a start digest no walk computed. A
+/// device that keeps nothing of the reserve walks to the head and reads the
+/// cell of none of them: a checkpoint names cells only for the segment that
+/// starts at a head the device established (S23, a fresh reader, step 2).
+/// MUTATION CONTROL: admitting checkpoints without `eligible_at` turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_checkpoint_no_walk_established_names_no_cell_the_walk_reads() {
+    use dsm::shared_lineage::{epoch_locator, CheckpointV1, LineageKind, EPOCH_GENERATIONS};
+    let d = Device::start(0xA8).await;
+    for _ in 0..2 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let reserve_id = reserve_genesis().reserve_id;
+    let made_up: Vec<[u8; 32]> = (0..=EPOCH_GENERATIONS)
+        .map(|i| {
+            let mut root = [0x6E; 32];
+            root[0] = i as u8;
+            root
+        })
+        .collect();
+    let lie = CheckpointV1::new(
+        LineageKind::Reserve,
+        reserve_id,
+        0,
+        [0x73; 32],
+        [0x74; 32],
+        made_up.clone(),
+        [0x75; 32],
+    )
+    .expect("a checkpoint anyone may write");
+    let (addr, took) = crate::sdk::storage_io::put_immutable(
+        &set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+        &lie.encode(),
+    )
+    .await
+    .expect("anyone may put an object");
+    assert!(took > 0);
+    crate::sdk::storage_io::append_to_index(
+        &set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+        &epoch_locator(LineageKind::Reserve, &reserve_id, 0),
+        &addr,
+    )
+    .await
+    .expect("anyone may append");
+
+    forget_the_reserve();
+    for node in &d.nodes.nodes {
+        node.forget_requests();
+    }
+    assert_eq!(reserve_head().await.generation, 2);
+    let asked: Vec<String> = d.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
+    for root in &made_up {
+        let read = format!(
+            "GET /api/v2/cell/{}",
+            crate::util::text_id::encode_base32_crockford(
+                &dsm::economic::native_reserve::reserve_cell_key(&reserve_id, root)
+            )
+        );
+        assert!(
+            !asked.contains(&read),
+            "the walk read the cell of a root only the checkpoint named"
+        );
+    }
 }
 
 /// The epoch index is predictable and anyone may append to it. Flooded past

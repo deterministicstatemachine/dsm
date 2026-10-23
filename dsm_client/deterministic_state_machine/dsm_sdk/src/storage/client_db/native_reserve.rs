@@ -9,7 +9,8 @@
 //!   retry replays them and never re-signs (deterministic SPHINCS+ makes a
 //!   regenerated envelope indistinguishable from a replayed one).
 //! - **The lineage memo**: every final release a walk established, with the
-//!   state it succeeded. Finality is permanent, so a memoised state is a
+//!   state it succeeded and its step digest (the release's evidence address,
+//!   SoFi Amendment S23). Finality is permanent, so a memoised state is a
 //!   sound start for the next walk. A cache of Core's conclusions, never
 //!   authority over a cell.
 //!
@@ -19,7 +20,7 @@
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
-use dsm::economic::native_reserve::{NativeReserveState, VerifiedRelease};
+use dsm::economic::native_reserve::{release_evidence_addr, NativeReserveState, VerifiedRelease};
 use dsm::economic::provenance::ReserveReleaseWin;
 
 use super::get_connection;
@@ -86,8 +87,8 @@ pub fn record_final_release(
     conn.execute(
         "INSERT OR IGNORE INTO native_reserve_lineage_memo
            (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-            recipient_devid, recipient_position, envelope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            recipient_devid, recipient_position, envelope, step_digest)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             parent.reserve_id.as_slice(),
             i64_of(child.generation, "generation")?,
@@ -100,6 +101,7 @@ pub fn record_final_release(
                 "recipient position"
             )?,
             release.envelope_bytes.as_slice(),
+            release_evidence_addr(&release.envelope_bytes).as_slice(),
         ],
     )?;
     Ok(())
@@ -130,35 +132,37 @@ pub fn latest_state(genesis: &NativeReserveState) -> Result<NativeReserveState> 
 
 /// Every memoised generation of the reserve whose genesis is `genesis`, in
 /// generation order: the state each final release installed, and the
-/// release's envelope. What this device's own walks established.
-pub fn memoised_lineage(
+/// release's step digest. What this device's own walks established. No
+/// release envelope is read: a walk that only needs the generation chain
+/// holds 40 bytes a generation, not a release (SA-75).
+pub fn memoised_generations(
     genesis: &NativeReserveState,
-) -> Result<Vec<(NativeReserveState, Vec<u8>)>> {
+) -> Result<Vec<(NativeReserveState, [u8; 32])>> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("native reserve memo: the store is poisoned: {e}"))?;
     let mut stmt = conn.prepare(
-        "SELECT generation, remaining, envelope FROM native_reserve_lineage_memo
+        "SELECT generation, remaining, step_digest FROM native_reserve_lineage_memo
           WHERE reserve_id = ?1 ORDER BY generation ASC",
     )?;
     let rows = stmt.query_map(params![genesis.reserve_id.as_slice()], |r| {
         Ok((
             r.get::<_, i64>(0)?,
             r.get::<_, i64>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
+            super::column_32(r, 2)?,
         ))
     })?;
     let mut lineage = Vec::new();
     for row in rows {
-        let (generation, remaining, envelope) = row?;
+        let (generation, remaining, step_digest) = row?;
         lineage.push((
             NativeReserveState {
                 generation: u64_of(generation, "generation")?,
                 remaining_supply: u64_of(remaining, "remaining")?,
                 ..*genesis
             },
-            envelope,
+            step_digest,
         ));
     }
     Ok(lineage)
@@ -243,8 +247,8 @@ mod tests {
         conn.execute(
             "INSERT INTO native_reserve_lineage_memo
                (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-                recipient_devid, recipient_position, envelope)
-             VALUES (?1, ?2, ?3, 0, ?4, ?5, 0, ?6)",
+                recipient_devid, recipient_position, envelope, step_digest)
+             VALUES (?1, ?2, ?3, 0, ?4, ?5, 0, ?6, ?7)",
             params![
                 genesis.reserve_id.as_slice(),
                 generation,
@@ -252,6 +256,7 @@ mod tests {
                 [0x61u8; 32].as_slice(),
                 [0x62u8; 32].as_slice(),
                 [0x63u8; 8].as_slice(),
+                [0x64u8; 32].as_slice(),
             ],
         )
         .expect("memo row");
