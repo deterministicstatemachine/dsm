@@ -198,6 +198,8 @@ pub fn start_poller() {
     crate::runtime::get_runtime().spawn(async move {
         let _running = RunningFlag;
         log::info!("[inbox_poller] Background poller started");
+        // A new process draws the icon count it holds before anything lands.
+        crate::sdk::money_waiting::publish();
 
         // Initial delay before first poll (let bootstrap settle).
         tokio::time::sleep(std::time::Duration::from_millis(5_000)).await;

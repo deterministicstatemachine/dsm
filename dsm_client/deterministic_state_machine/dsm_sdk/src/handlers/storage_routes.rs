@@ -81,12 +81,15 @@ fn ensure_received_history(
         proof_data: Some(proof_data),
         metadata: meta,
     };
-    crate::storage::client_db::store_transaction(&rec)
+    // The row and its notice together: the count on the app icon is of
+    // transfers verified and applied here, and of nothing else.
+    crate::storage::client_db::money_received::store_received_transfer(&rec)
         .map_err(|e| format!("{name}: history row not stored: {e}"))?;
     wallet
         .reload_balance_cache_for_self()
         .map_err(|e| format!("{name}: balance cache not reloaded: {e}"))?;
     emit_authoritative_wallet_refresh();
+    crate::sdk::money_waiting::publish();
     Ok(())
 }
 

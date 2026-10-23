@@ -18,6 +18,8 @@ export type BridgeEventMap = {
   'bridge.error': { code?: number; message: string; debugB32: string };
   'inbox.open': { open: boolean };
   'inbox.updated': { newItems: number; source: string };
+  // Rust's count of received transfers not yet looked at may have changed.
+  'money.waiting': void;
   'visibility.change': { state: DocumentVisibilityState };
   'ble.permission.error': { message: string };
   'ble.deviceFound': { address: string; name: string; rssi: number };

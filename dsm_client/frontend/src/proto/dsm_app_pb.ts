@@ -18355,6 +18355,14 @@ export class Envelope extends Message<Envelope> {
     case: "receiptEmailResult";
   } | {
     /**
+     * Reply to `inbox.moneyWaiting` and `inbox.moneySeen`.
+     *
+     * @generated from field: dsm.MoneyWaitingResponse money_waiting_response = 139;
+     */
+    value: MoneyWaitingResponse;
+    case: "moneyWaitingResponse";
+  } | {
+    /**
      * Reply to `token.forget`.
      *
      * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
@@ -18487,6 +18495,7 @@ export class Envelope extends Message<Envelope> {
     { no: 136, name: "authored_objects_response", kind: "message", T: AuthoredObjectsResponse, oneof: "payload" },
     { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
+    { no: 139, name: "money_waiting_response", kind: "message", T: MoneyWaitingResponse, oneof: "payload" },
     { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
@@ -24447,6 +24456,96 @@ export class WalletHistoryResponse extends Message<WalletHistoryResponse> {
 
   static equals(a: WalletHistoryResponse | PlainMessage<WalletHistoryResponse> | undefined, b: WalletHistoryResponse | PlainMessage<WalletHistoryResponse> | undefined): boolean {
     return proto3.util.equals(WalletHistoryResponse, a, b);
+  }
+}
+
+/**
+ * The transfers this device received and verified that the user has not
+ * opened the b0x inbox on yet, newest first: the count on the app icon and on
+ * the b0x button is how many there are (owner, 2026-10-23). Outside the DSM
+ * protocol: it decides nothing. `through` is handed back to `inbox.moneySeen`
+ * once the user was shown them; with nothing waiting it is how far they have
+ * already looked.
+ *
+ * @generated from message dsm.MoneyWaitingResponse
+ */
+export class MoneyWaitingResponse extends Message<MoneyWaitingResponse> {
+  /**
+   * @generated from field: repeated dsm.TransactionInfo received = 1;
+   */
+  received: TransactionInfo[] = [];
+
+  /**
+   * @generated from field: uint64 through = 2;
+   */
+  through = protoInt64.zero;
+
+  constructor(data?: PartialMessage<MoneyWaitingResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.MoneyWaitingResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "received", kind: "message", T: TransactionInfo, repeated: true },
+    { no: 2, name: "through", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): MoneyWaitingResponse {
+    return new MoneyWaitingResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): MoneyWaitingResponse {
+    return new MoneyWaitingResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): MoneyWaitingResponse {
+    return new MoneyWaitingResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: MoneyWaitingResponse | PlainMessage<MoneyWaitingResponse> | undefined, b: MoneyWaitingResponse | PlainMessage<MoneyWaitingResponse> | undefined): boolean {
+    return proto3.util.equals(MoneyWaitingResponse, a, b);
+  }
+}
+
+/**
+ * inbox.moneySeen: the user was shown every received transfer up to
+ * `through`, as `inbox.moneyWaiting` answered it.
+ *
+ * @generated from message dsm.MoneySeenRequest
+ */
+export class MoneySeenRequest extends Message<MoneySeenRequest> {
+  /**
+   * @generated from field: uint64 through = 1;
+   */
+  through = protoInt64.zero;
+
+  constructor(data?: PartialMessage<MoneySeenRequest>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.MoneySeenRequest";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "through", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): MoneySeenRequest {
+    return new MoneySeenRequest().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): MoneySeenRequest {
+    return new MoneySeenRequest().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): MoneySeenRequest {
+    return new MoneySeenRequest().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: MoneySeenRequest | PlainMessage<MoneySeenRequest> | undefined, b: MoneySeenRequest | PlainMessage<MoneySeenRequest> | undefined): boolean {
+    return proto3.util.equals(MoneySeenRequest, a, b);
   }
 }
 
