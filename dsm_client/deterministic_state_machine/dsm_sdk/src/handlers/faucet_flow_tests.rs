@@ -440,11 +440,13 @@ fn forget_the_reserve() {
 
 /// The memoised lineage, generation by generation: what a walk established.
 fn walked_lineage() -> Vec<(u64, [u8; 32])> {
-    client_db::native_reserve::memoised_generations(&reserve_genesis())
-        .expect("the memo")
-        .into_iter()
-        .map(|(state, _)| (state.generation, state.root()))
-        .collect()
+    let mut walked = Vec::new();
+    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |state, _| {
+        walked.push((state.generation, state.root()));
+        Ok(std::ops::ControlFlow::Continue(()))
+    })
+    .expect("the memo");
+    walked
 }
 
 /// A walker owes the epoch index a hint for every generation it established

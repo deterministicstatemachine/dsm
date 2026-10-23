@@ -519,12 +519,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// nothing behind it is read again. A database made at 27 or 28 keeps the
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
 /// the same shape and encoding.
-///
-/// 33: a memoised reserve release carries its step digest
-/// (`native_reserve_lineage_memo.step_digest` NOT NULL), so the generation
-/// chain a walk owes hints and checkpoints from is read without loading a
-/// release envelope (SA-75).
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -779,7 +774,6 @@ fn create_schema(conn: &Connection) -> Result<()> {
             recipient_devid    BLOB NOT NULL CHECK (length(recipient_devid) = 32),
             recipient_position INTEGER NOT NULL,
             envelope           BLOB NOT NULL,
-            step_digest        BLOB NOT NULL CHECK (length(step_digest) = 32),
             PRIMARY KEY (reserve_id, generation)
         );
 

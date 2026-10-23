@@ -21,8 +21,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use dsm::economic::native_reserve::{
-    reserve_cell_key, reserve_cell_namespace, reserve_seed, resolve_successor,
-    successor_completion, walk_lineage, NativeReserveState, SuccessorCell, SuccessorRead, WalkStop,
+    release_evidence_addr, reserve_cell_key, reserve_cell_namespace, reserve_seed,
+    resolve_successor, successor_completion, walk_lineage, NativeReserveState, SuccessorCell,
+    SuccessorRead, WalkStop,
 };
 use dsm::route_chain::{CellEvidence, RoutedCell};
 use dsm::shared_lineage::{
@@ -416,17 +417,20 @@ fn established_chain(
 ) -> Result<(GenerationChain, BTreeMap<u64, [u8; 32]>), DsmError> {
     let mut chain = GenerationChain::from_genesis(&shared_genesis(genesis));
     let mut steps = BTreeMap::new();
-    for (state, step) in
-        memo::memoised_generations(genesis).map_err(|e| storage_err("reserve memo", e))?
-    {
+    // One memoised release at a time: its step digest is taken and the
+    // release let go before the next is read (SA-75).
+    memo::fold_memoised_lineage(genesis, |state, envelope| {
         if state.generation != chain.head().generation() + 1 {
-            break;
+            return Ok(std::ops::ControlFlow::Break(()));
         }
+        let step = release_evidence_addr(envelope);
         chain
             .push(state.root(), step)
-            .map_err(|e| storage_err("reserve generation chain", e))?;
+            .map_err(|e| anyhow::anyhow!("reserve generation chain: {e}"))?;
         steps.insert(state.generation, step);
-    }
+        Ok(std::ops::ControlFlow::Continue(()))
+    })
+    .map_err(|e| storage_err("reserve memo", e))?;
     Ok((chain, steps))
 }
 
@@ -560,16 +564,15 @@ pub async fn keep_release_completion(
 mod tests {
     use super::*;
 
-    /// A memoised final release, as a walk records it: its step digest
-    /// `step`, and envelope bytes whose evidence address is not `step`.
-    fn memo_row(genesis: &NativeReserveState, child: &NativeReserveState, step: [u8; 32]) {
+    /// A memoised final release at `child`, with `envelope` as its bytes.
+    fn memo_row(genesis: &NativeReserveState, child: &NativeReserveState, envelope: &[u8]) {
         let binding = crate::storage::client_db::get_connection().expect("the store");
         let conn = binding.lock().expect("the store is not poisoned");
         conn.execute(
             "INSERT INTO native_reserve_lineage_memo
                (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-                recipient_devid, recipient_position, envelope, step_digest)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
+                recipient_devid, recipient_position, envelope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
             rusqlite::params![
                 genesis.reserve_id.as_slice(),
                 child.generation as i64,
@@ -577,43 +580,41 @@ mod tests {
                 child.remaining_supply as i64,
                 [0x61u8; 32].as_slice(),
                 [0x62u8; 32].as_slice(),
-                b"not the release the step digest names".as_slice(),
-                step.as_slice(),
+                envelope,
             ],
         )
         .expect("a memo row");
     }
 
-    /// SA-75. The generation chain a walk owes hints and checkpoints from is
-    /// read from each memoised release's step digest, never by loading its
-    /// envelope: a walk once held every release since `R_0` at once, and the
-    /// memo only grows. The memo's envelopes here name other step digests
-    /// than the rows', and the chain is the one the rows' digests build.
-    /// MUTATION CONTROL: building the chain from each row's envelope turns
-    /// this red.
+    /// The generation chain a walk owes hints and checkpoints from is each
+    /// memoised release's evidence address, generation by generation from
+    /// the genesis, and stops at the first generation the memo skips: a
+    /// generation after a gap is not one this device's walks established.
     #[test]
     #[serial_test::serial]
-    fn the_generation_chain_is_read_from_step_digests_never_from_envelopes() {
+    fn the_generation_chain_is_the_memoised_releases_up_to_the_first_gap() {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]);
         let mut expected = GenerationChain::from_genesis(&shared_genesis(&genesis));
         let mut state = genesis;
-        for g in 1..=3u64 {
+        for g in [1u64, 2, 3, 5] {
             state = NativeReserveState {
                 generation: g,
                 remaining_supply: state.remaining_supply - 1_000,
                 ..genesis
             };
-            let step = [0xC0 | g as u8; 32];
-            memo_row(&genesis, &state, step);
-            expected
-                .push(state.root(), step)
-                .expect("the next generation");
+            let envelope = [0xC0 | g as u8; 40];
+            memo_row(&genesis, &state, &envelope);
+            if g <= 3 {
+                expected
+                    .push(state.root(), release_evidence_addr(&envelope))
+                    .expect("the next generation");
+            }
         }
         let (chain, steps) = established_chain(&genesis).expect("the chain");
         assert_eq!(chain.head(), expected.head());
-        assert_eq!(steps.get(&3), Some(&[0xC3; 32]));
+        assert_eq!(steps.len(), 3, "generation 5 follows a gap");
     }
 }
