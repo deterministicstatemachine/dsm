@@ -32,9 +32,11 @@ use crate::tla_trace_replay::{
 /// anti-skip tripwire is cheap, and a silently shrinking formal suite is the
 /// failure mode that looks most like success.
 ///
-/// 91 since the receipt's write set (`ReceiptWriteSet` and its two
-/// falsifications) and `OfflineAnchorSingleAppliance/release-before-receipt`.
-pub const EXPECTED_STANDARD_SPECS: usize = 91;
+/// 94 since the offline step's bearer order (owner ruling 2026-10-22: the
+/// sender commits when its anchor commits): `OfflineFinality/commit-on-ack`,
+/// `OfflineFinality/commit-without-owed-confirm` and
+/// `OfflineFinality/sender-ahead-reachable`.
+pub const EXPECTED_STANDARD_SPECS: usize = 94;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -296,6 +298,33 @@ impl TlaRunner {
 
     /// Return the standard set of specs to run for vertical validation.
     pub fn standard_specs() -> Vec<TlaSpec> {
+        // --- Offline finality: the offline step between two devices ---
+        // Both-or-neither across a lost link, frames delivered again, a
+        // restart, rejection and cancellation; one step at a time at both
+        // doors; every proposed step settles once the link stays up.
+        let offline_finality = TlaSpec {
+            label: "OfflineFinality".into(),
+            spec_file: "DSM_OfflineFinality.tla".into(),
+            config_file: "DSM_OfflineFinality.cfg".into(),
+            invariants: vec![
+                "TypeOK".into(),
+                "NoFork".into(),
+                "NoHalfCommit".into(),
+                "TripwireGuaranteesUniqueness".into(),
+                "CommitsExtendTheirParent".into(),
+                "OneStepInFlight".into(),
+                "TokenConservation".into(),
+                "BalancesNonNegative".into(),
+                "ConfirmFollowsDurableConfirm".into(),
+                "AckFollowsDurableCommit".into(),
+                "ConfirmFollowsSenderCommit".into(),
+            ],
+            properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
+            linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
+            supports_trace_replay: true,
+            expect_violation: None,
+            exhaustive: true,
+        };
         vec![
             TlaSpec {
                 label: "DSM_tiny".into(),
@@ -410,32 +439,15 @@ impl TlaRunner {
                 expect_violation: None,
                 exhaustive: false,
             },
-            // --- Offline finality: the offline step between two devices ---
-            // Both-or-neither across a lost link, frames delivered again, a
-            // restart, rejection and cancellation; one step at a time at both
-            // doors; every proposed step settles once the link stays up.
-            TlaSpec {
-                label: "OfflineFinality".into(),
-                spec_file: "DSM_OfflineFinality.tla".into(),
-                config_file: "DSM_OfflineFinality.cfg".into(),
-                invariants: vec![
-                    "TypeOK".into(),
-                    "NoFork".into(),
-                    "NoHalfCommit".into(),
-                    "TripwireGuaranteesUniqueness".into(),
-                    "CommitsExtendTheirParent".into(),
-                    "OneStepInFlight".into(),
-                    "TokenConservation".into(),
-                    "BalancesNonNegative".into(),
-                    "ConfirmFollowsDurableConfirm".into(),
-                    "AckFollowsDurableCommit".into(),
-                ],
-                properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
-                linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
-                supports_trace_replay: true,
-                expect_violation: None,
-                exhaustive: true,
-            },
+            offline_finality.clone(),
+            // The same step for one that moves no value: its proposer commits
+            // on the ack (finalize_sender_step), not when it confirms.
+            same_module_under(
+                &offline_finality,
+                "OfflineFinality/commit-on-ack",
+                "DSM_OfflineFinality_CommitOnAck.cfg",
+                &["ConfirmFollowsSenderCommit"],
+            ),
             // Each rule of the offline step removed, one at a time: the
             // invariant it holds up fails.
             expect_violation(
@@ -462,6 +474,12 @@ impl TlaRunner {
                 "DSM_OfflineFinality_CrossingProposals.cfg",
                 "NoFork",
             ),
+            expect_violation(
+                "OfflineFinality/commit-without-owed-confirm",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_CommitWithoutOwedConfirm.cfg",
+                "NoHalfCommit",
+            ),
             // Non-vacuity: both steps commit on both devices, and proposals
             // cross, in states the model config checks.
             expect_violation(
@@ -475,6 +493,12 @@ impl TlaRunner {
                 "DSM_OfflineFinality.tla",
                 "DSM_OfflineFinality_CrossingReachable.cfg",
                 "NeverCrossed",
+            ),
+            expect_violation(
+                "OfflineFinality/sender-ahead-reachable",
+                "DSM_OfflineFinality.tla",
+                "DSM_OfflineFinality_SenderAheadReachable.cfg",
+                "NeverSenderAhead",
             ),
             // --- Non-Interference (Paper Lemma 3.1, 3.2, Theorem 3.1) ---
             // Additive scaling: operations on one bilateral pair cannot affect
@@ -1419,6 +1443,25 @@ fn crashed_without_a_finding(result: &TlcResult) -> bool {
             .errors
             .iter()
             .any(|e| e.starts_with("Invariant violated:"))
+}
+
+/// `base`'s module checked under another of its configs: the module's own
+/// trace replay and exhaustiveness carry over, the invariants `without` (which
+/// the config does not state) are not checked, and the implementation traces
+/// linked to `base`'s behaviour are not replayed against it.
+fn same_module_under(base: &TlaSpec, label: &str, config_file: &str, without: &[&str]) -> TlaSpec {
+    TlaSpec {
+        label: label.into(),
+        config_file: config_file.into(),
+        invariants: base
+            .invariants
+            .iter()
+            .filter(|i| !without.contains(&i.as_str()))
+            .cloned()
+            .collect(),
+        linked_implementation_traces: Vec::new(),
+        ..base.clone()
+    }
 }
 
 /// A registry entry whose config must violate exactly `invariant`: a deliberate
