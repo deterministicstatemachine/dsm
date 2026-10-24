@@ -2044,3 +2044,442 @@ async fn no_offline_release_is_taken_in_while_bearer_receipt_is_disabled() {
         "B pins no anchor of A's"
     );
 }
+
+// --- Phase 2: the sender's release on its anchor, by the recovery table ---
+//
+// Offline-bearer receipt stays refused until Phase 4, so no receiver accepts a
+// bearer transfer and none is made to here. These drive the sender's half on
+// its own: the staging and the canonical advance simulation the confirm builder
+// runs (`stage_bearer_spend`, `simulate_advance_for_confirm`), the real
+// anchor-core appliance on a software chip, and the recovery rules the sender
+// settles a releasing step by. The receiver challenge is drawn the way a
+// receiver draws it. The whole payment, its acknowledgment and a response
+// delivered twice (SA-112) are exercised in Phase 4, through the receiver.
+
+/// A's bearer transfer to B staged on A's anchor under a fresh receiver
+/// challenge, and the device roots its canonical advance simulation produces:
+/// the sender's half of its confirm, up to the anchor's PREPARE.
+struct StagedRelease {
+    spend: crate::bluetooth::bilateral_ble_handler::StagedBearerSpend,
+    challenge: [u8; 32],
+    root_before: [u8; 32],
+    root_after: [u8; 32],
+    advance: dsm::types::device_state::AdvanceOutcome,
+}
+
+fn stage_release(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> StagedRelease {
+    a.device.enter();
+    let router = crate::bridge::app_router().expect("A's router");
+    let rel_key = a.device.rel_key_with(&b.device);
+    let challenge: [u8; 32] = dsm::crypto::rng::random_bytes(32)
+        .try_into()
+        .expect("a 32-byte challenge");
+    let spend = crate::bluetooth::bilateral_ble_handler::stage_bearer_spend(
+        router.as_ref(),
+        rel_key,
+        b.device.device_id,
+        &operation.operation,
+        operation.terms.as_ref().expect("a transfer's terms"),
+        challenge,
+    )
+    .expect("A stages the transfer on its anchor");
+    let advance = router
+        .simulate_advance_for_confirm(
+            rel_key,
+            b.device.device_id,
+            operation.operation.clone(),
+            &[],
+            Some(spend.spend),
+        )
+        .expect("A simulates the step's advance");
+    StagedRelease {
+        root_before: advance.transition.pre_root(),
+        root_after: advance.child_r_a,
+        spend,
+        challenge,
+        advance,
+    }
+}
+
+fn chip(
+    appliance: &crate::test_support::appliance::InstalledAppliance,
+) -> crate::anchor::ApplianceStatus {
+    use crate::anchor::AnchorAppliance;
+    (**appliance).clone().status().expect("the chip's status")
+}
+
+fn release(staged: &StagedRelease) -> crate::sdk::core_sdk::OfflineBearerArtifacts {
+    crate::bridge::app_router()
+        .expect("A's router")
+        .release_offline_bearer(
+            &staged.spend.staged,
+            staged.challenge,
+            staged.root_before,
+            staged.root_after,
+        )
+        .expect("A's anchor prepares, commits and emits")
+}
+
+fn settle(
+    staged: &StagedRelease,
+) -> Result<crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance, dsm::types::error::DsmError>
+{
+    crate::bluetooth::bilateral_ble_handler::settle_release_on_appliance(
+        crate::bridge::app_router().expect("A's router").as_ref(),
+        staged.spend.staged.appliance_next_root,
+    )
+}
+
+/// The owner's rulings: the anchor's counter moves once for a payment, and
+/// re-emit retransmits the exact same signed payment — never a second one, and
+/// the chip does not advance again. A releasing step whose release committed
+/// is settled by emitting that release again, byte for byte, with the counter
+/// where the commit left it; the frontier then advances to the step's own
+/// successor, once.
+/// MUTATION CONTROL: settling a committed release as if nothing were released
+/// (it would be reset and released again) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_released_spend_moves_the_counter_once_and_is_emitted_again_unchanged() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let staged = stage_release(&a, &b, &operation);
+    let released = release(&staged);
+    let committed = chip(&appliance);
+    assert_eq!(
+        committed.anchor_counter,
+        before.anchor_counter + 1,
+        "the commit moves the counter one step"
+    );
+    assert_eq!(
+        committed.root, before.root,
+        "the frontier waits for the step"
+    );
+
+    let crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Committed(again) =
+        settle(&staged).expect("the committed release is taken up")
+    else {
+        panic!("a committed release is emitted again, not reset");
+    };
+    assert_eq!(
+        again.offline_release, released.offline_release,
+        "the same signed release, byte for byte"
+    );
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        committed.anchor_counter,
+        "emitting again does not move the counter"
+    );
+
+    let next = staged.spend.staged.appliance_next_root;
+    let router = crate::bridge::app_router().expect("A's router");
+    crate::bluetooth::bilateral_ble_handler::advance_committed_frontier(router.as_ref(), next)
+        .expect("the frontier advances to the step's successor");
+    let advanced = chip(&appliance);
+    assert_eq!(advanced.root, next, "the frontier is the step's successor");
+    crate::bluetooth::bilateral_ble_handler::advance_committed_frontier(router.as_ref(), next)
+        .expect("an advanced frontier is the step's successor already");
+    assert_eq!(
+        chip(&appliance),
+        advanced,
+        "advancing again changes nothing"
+    );
+}
+
+/// The recovery table: prepared, and the counter unchanged — reset. A release
+/// cut off after its anchor prepared goes back to waiting only once the
+/// appliance reports no transaction with its counter unmoved: the prepared
+/// record is cancelled, and the counter and the frontier are where they were.
+/// MUTATION CONTROL: not cancelling the prepared record leaves the appliance
+/// prepared, so settling fails closed and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_cut_off_after_its_prepare_goes_back_to_waiting_with_the_counter_unmoved() {
+    use crate::anchor::AnchorAppliance;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let staged = stage_release(&a, &b, &operation);
+    (*appliance)
+        .clone()
+        .prepare(
+            &staged.spend.staged.transition.as_transition(),
+            &staged.challenge,
+            &staged.root_before,
+            &staged.root_after,
+        )
+        .expect("A's anchor prepares");
+    assert!(
+        matches!(
+            settle(&staged).expect("a prepared release is settled"),
+            crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Unreleased
+        ),
+        "nothing was released"
+    );
+    assert_eq!(chip(&appliance), before, "counter and frontier are unmoved");
+    assert_eq!(
+        (*appliance)
+            .clone()
+            .recover()
+            .expect("the appliance reports"),
+        anchor_core::appliance::RecoverOutcome::Accept(before.root),
+        "the appliance holds no transaction"
+    );
+}
+
+/// The recovery table: no durable transaction, and the counter unchanged —
+/// start again. A spend staged but never handed to the anchor released
+/// nothing.
+/// MUTATION CONTROL: settling an appliance with no transaction as committed
+/// turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_spend_staged_but_never_released_goes_back_to_waiting() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let staged = stage_release(&a, &b, &operation);
+    assert!(
+        matches!(
+            settle(&staged).expect("an unreleased spend is settled"),
+            crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Unreleased
+        ),
+        "nothing was released"
+    );
+    assert_eq!(chip(&appliance), before, "counter and frontier are unmoved");
+}
+
+/// The recovery table: missing or inconsistent, and the counter advanced —
+/// fail closed. An anchor whose frontier already advanced to the step's
+/// successor, for a step recorded as releasing and never committed, is not
+/// read as "nothing released": the counter moved for that step.
+/// MUTATION CONTROL: dropping the check that an accepted frontier is not the
+/// step's successor reads it as unreleased and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_frontier_advanced_for_a_step_never_committed_fails_closed() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let staged = stage_release(&a, &b, &operation);
+    release(&staged);
+    let router = crate::bridge::app_router().expect("A's router");
+    router
+        .finalize_offline_bearer(staged.spend.staged.appliance_next_root)
+        .expect("the anchor's frontier advances");
+    let advanced = chip(&appliance);
+    let refused = settle(&staged).expect_err("an advanced counter is never reset");
+    assert!(refused.to_string().contains("fail closed"), "{refused}");
+    assert_eq!(chip(&appliance), advanced, "settling changed nothing");
+}
+
+/// The recovery table: a committed release is this step's only if it is this
+/// step's successor. Two spends staged from the same frontier under different
+/// challenges have different successors; with the first released, the second
+/// step neither takes the first's release up nor goes back to waiting.
+/// MUTATION CONTROL: dropping the check that a committed release is the step's
+/// own successor takes the first's release up as the second's and turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn another_steps_committed_release_is_not_taken_up_as_this_steps() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let first = stage_release(&a, &b, &operation);
+    let second = stage_release(&a, &b, &operation);
+    assert_ne!(
+        first.spend.staged.appliance_next_root, second.spend.staged.appliance_next_root,
+        "different challenges stage different successors"
+    );
+    release(&first);
+    let committed = chip(&appliance);
+    let refused = settle(&second).expect_err("another step's release is not this step's");
+    assert!(refused.to_string().contains("fail closed"), "{refused}");
+    assert_eq!(chip(&appliance), committed, "settling changed nothing");
+    assert!(
+        matches!(
+            settle(&first).expect("the first step's release is its own"),
+            crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Committed(_)
+        ),
+        "the first step takes up its own release"
+    );
+}
+
+/// A committed step's frontier advances only to that step's successor: the
+/// anchor holding the first step's committed release refuses to advance for
+/// another step's successor, and changes nothing.
+/// MUTATION CONTROL: dropping the successor check in
+/// `advance_committed_frontier` advances the frontier for the wrong step and
+/// turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_committed_frontier_advances_only_to_its_own_successor() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let first = stage_release(&a, &b, &operation);
+    let second = stage_release(&a, &b, &operation);
+    release(&first);
+    let committed = chip(&appliance);
+    let router = crate::bridge::app_router().expect("A's router");
+    crate::bluetooth::bilateral_ble_handler::advance_committed_frontier(
+        router.as_ref(),
+        second.spend.staged.appliance_next_root,
+    )
+    .expect_err("another step's successor is refused");
+    assert_eq!(chip(&appliance), committed, "the refusal changed nothing");
+    crate::bluetooth::bilateral_ble_handler::advance_committed_frontier(
+        router.as_ref(),
+        first.spend.staged.appliance_next_root,
+    )
+    .expect("the step's own successor");
+    assert_eq!(
+        chip(&appliance).root,
+        first.spend.staged.appliance_next_root
+    );
+}
+
+/// A's staged spend as A's device signs it over to B: the stitched receipt of
+/// the step's write set, built and held to its state rules exactly as A's
+/// confirm builds and holds it before the anchor commits, and the anchor-state
+/// leaves the receipt moves.
+fn spend_receipt(
+    a: &OfflineDevice,
+    b: &OfflineDevice,
+    operation: &Proposal,
+    staged: &StagedRelease,
+) -> (
+    dsm::types::receipt_types::StitchedReceiptV2,
+    dsm::verification::receipt_verification::BearerLeaves,
+) {
+    a.device.enter();
+    let leaves = dsm::verification::receipt_verification::BearerLeaves {
+        bundle: staged.spend.staged.pin.bundle,
+        counter: staged.spend.staged.transition.anchor_counter,
+        frontier: staged.spend.staged.appliance_prev_root,
+        next_frontier: staged.spend.staged.appliance_next_root,
+    };
+    let device_tree = crate::sdk::app_state::AppState::get_device_tree_commitment()
+        .expect("A's Device Tree commitment");
+    let bytes = crate::sdk::receipts::build_bilateral_receipt(
+        a.device.device_id,
+        b.device.device_id,
+        &staged.advance,
+        Some(leaves),
+        &device_tree,
+    )
+    .expect("A builds the step's receipt");
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&bytes)
+        .expect("the receipt decodes");
+    let genesis = a
+        .device
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("A's head")
+        .genesis_digest();
+    dsm::verification::receipt_verification::verify_receipt_state(
+        &receipt,
+        &dsm::verification::receipt_verification::ReceiptStateContext {
+            device_tree_commitment: &device_tree,
+            author_genesis: genesis,
+            operation: &operation.operation,
+            bearer: Some(leaves),
+        },
+    )
+    .expect("the receipt holds its state rules");
+    (receipt, leaves)
+}
+
+/// The owner's receive rule (2026-10-22): an offline payment is taken only
+/// from the offline account its receiver validated itself, from the sender's
+/// online history. B walks A's history through A's load; a spend A stages from
+/// the account the load left starts from B's record. After A's unload, a spend
+/// from the account the unload left is refused against B's stale record, and
+/// taken once B's next walk records the unload — when the spend from the
+/// load's account is refused in turn. A record of another sender, or under
+/// another anchor bundle, is no origin for A's spend.
+/// MUTATION CONTROL: dropping the pre-root comparison from Core's
+/// `spend_starts_at_the_record` takes the spend from the unload's account
+/// against B's record of the load and turns this red; dropping its sender and
+/// bundle check takes the record under another bundle and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded() {
+    use crate::anchor::AnchorAppliance;
+    use dsm::bilateral::offline::spend_starts_at_the_record;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    a.device.enter();
+    let (genesis, devid) = {
+        let head = a.device.router().core_sdk.device_head().expect("A's head");
+        (head.genesis_digest(), head.devid())
+    };
+    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
+    let recorded = |position: u64| {
+        b.device.enter();
+        crate::storage::client_db::economic_lineage::latest_offline_account(
+            &genesis,
+            &devid,
+            &appliance.pin().bundle,
+        )
+        .expect("B's store reads")
+        .filter(|account| account.economic_position() == position)
+        .expect("B recorded the boundary it walked")
+    };
+
+    b.device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    let after_load = recorded(loaded_at);
+    let from_load = stage_release(&a, &b, &operation);
+    let (load_receipt, load_leaves) = spend_receipt(&a, &b, &operation, &from_load);
+    spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_load)
+        .expect("a spend from the account B recorded is taken");
+
+    a.device.enter();
+    let unloaded = a
+        .device
+        .invoke(
+            "wallet.unloadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "5.00".to_string(),
+            },
+        )
+        .await;
+    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    let from_unload = stage_release(&a, &b, &operation);
+    let (unload_receipt, unload_leaves) = spend_receipt(&a, &b, &operation, &from_unload);
+    let refused =
+        spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_load)
+            .expect_err("a spend from an account B has not validated");
+    assert!(
+        refused
+            .to_string()
+            .contains("does not start from the offline account"),
+        "{refused}"
+    );
+
+    b.device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at + 1).await;
+    let after_unload = recorded(loaded_at + 1);
+    spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_unload)
+        .expect("taken once B recorded the unload");
+    spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_unload)
+        .expect_err("the spend from the load's account starts from a state B moved past");
+
+    let mut other_bundle = unload_leaves;
+    other_bundle.bundle[0] ^= 0x01;
+    let refused =
+        spend_starts_at_the_record(&unload_receipt, &other_bundle, &genesis, &after_unload)
+            .expect_err("a record under another bundle");
+    assert!(
+        refused.to_string().contains("is not the sender's"),
+        "{refused}"
+    );
+    let refused = spend_starts_at_the_record(
+        &unload_receipt,
+        &unload_leaves,
+        &b.device.genesis,
+        &after_unload,
+    )
+    .expect_err("a record of another sender");
+    assert!(
+        refused.to_string().contains("is not the sender's"),
+        "{refused}"
+    );
+}

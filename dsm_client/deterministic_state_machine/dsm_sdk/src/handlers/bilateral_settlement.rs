@@ -27,6 +27,7 @@ use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::error::DsmError;
+use dsm::verification::receipt_verification::BilateralSide;
 use dsm::types::operations::{Operation, TransferTerms};
 
 /// `(amount, token_id)` of a step for display: a transfer's amount from its
@@ -105,7 +106,8 @@ pub(crate) struct StepSettlement {
     operation_bytes: Vec<u8>,
     /// A transfer's terms, kept in its history row beside the operation.
     terms_bytes: Option<Vec<u8>>,
-    is_sender: bool,
+    /// This device's side of the step: its sender (A) or its receiver (B).
+    side: BilateralSide,
     transfer: Option<SettledTransfer>,
 }
 
@@ -121,7 +123,7 @@ impl StepSettlement {
         parent_tip: [u8; 32],
         operation_bytes: Vec<u8>,
         terms: Option<&TransferTerms>,
-        is_sender: bool,
+        side: BilateralSide,
     ) -> Result<Self, String> {
         let operation = Operation::from_bytes(&operation_bytes)
             .map_err(|e| format!("bilateral settle: the step's operation does not decode: {e}"))?;
@@ -152,7 +154,7 @@ impl StepSettlement {
             parent_tip,
             operation_bytes,
             terms_bytes: terms.map(TransferTerms::to_bytes),
-            is_sender,
+            side,
             transfer,
         })
     }
@@ -171,13 +173,16 @@ impl StepSettlement {
     /// Write the step's relationship tip (`parent_tip` → `child_tip`, bound to
     /// the step's commitment), its balance projection from `outcome`'s head,
     /// and its history row with the step's signed `receipt`, in `tx` — the
-    /// transaction the advance commits in.
+    /// transaction the advance commits in. An offline-bearer sender commits its
+    /// step when its anchor commits, before the receiver's counter-signed
+    /// receipt exists: its row is written with no proof, and the receipt is
+    /// written into it when the acknowledgment verifies.
     pub(crate) fn write_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
         outcome: &dsm::types::device_state::AdvanceOutcome,
         child_tip: [u8; 32],
-        receipt: &[u8],
+        receipt: Option<&[u8]>,
     ) -> Result<(), DsmError> {
         let local_txt = encode_base32_crockford(&self.local_device_id);
         let head = &outcome.new_device_state;
@@ -210,10 +215,9 @@ impl StepSettlement {
             None => None,
         };
         let counterparty_txt = encode_base32_crockford(&self.counterparty_device_id);
-        let (from_device, to_device) = if self.is_sender {
-            (local_txt, counterparty_txt)
-        } else {
-            (counterparty_txt, local_txt)
+        let (from_device, to_device) = match self.side {
+            BilateralSide::A => (local_txt, counterparty_txt),
+            BilateralSide::B => (counterparty_txt, local_txt),
         };
         let record = crate::storage::client_db::TransactionRecord {
             tx_id: encode_base32_crockford(&self.commitment_hash),
@@ -224,7 +228,7 @@ impl StepSettlement {
             tx_type: "bilateral_offline".to_string(),
             status: "completed".to_string(),
             commitment_hash: Some(encode_base32_crockford(&self.commitment_hash).into_bytes()),
-            proof_data: Some(receipt.to_vec()),
+            proof_data: receipt.map(<[u8]>::to_vec),
             metadata: {
                 let mut m = std::collections::HashMap::new();
                 if let Some(t) = &self.transfer {
@@ -389,7 +393,7 @@ mod tests {
             [0x71u8; 32],
             Operation::Noop.to_bytes(),
             None,
-            false,
+            dsm::verification::receipt_verification::BilateralSide::B,
         )
         .expect("resolve");
         let err = core
@@ -404,7 +408,7 @@ mod tests {
                 None,
                 None,
                 // The settlement refuses at the tip, before a receipt is kept.
-                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], &[]),
+                &|tx, o| settlement.write_in_tx(tx, o, [0x72u8; 32], None),
             )
             .expect_err("a step whose settlement refuses does not commit");
         assert!(err.to_string().contains("conflict"), "{err}");

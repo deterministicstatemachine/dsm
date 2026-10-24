@@ -246,7 +246,7 @@ QRB_BAN_PATTERN='\bcrypto_verification\b|\bQuantumResistantBinding\b|\bMpcIdenti
 for scope in "${PEDERSEN_BAN_SCOPES[@]}"; do
   if [ -d "$scope" ]; then
     fail_if_found \
-      "crypto_verification reintroduction in ${scope} (use crypto::cdbrw_binding for hardware-bound attestation — Issue #185)" \
+      "crypto_verification reintroduction in ${scope} (Issue #185)" \
       "${EXCLUDES[@]}" \
       -e "$QRB_BAN_PATTERN" \
       "$scope"

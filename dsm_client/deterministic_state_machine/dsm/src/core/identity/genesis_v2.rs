@@ -153,7 +153,7 @@ pub fn derive_devid(ak_pk: &[u8], atta: &[u8; 32]) -> [u8; 32] {
 /// Device-birth attestation digest `AttA = Expand(PRK_w, "DSM/atta/v3" ‖ G ‖ device_slot)` (KS1).
 ///
 /// `AttA` folds into `DevID`. Deriving it from the wallet seed makes `DevID` reproducible from the
-/// mnemonic alone (recovery), with no silicon fingerprint and no random root. It is a NON-load-bearing
+/// mnemonic alone (recovery), with no random root. It is a NON-load-bearing
 /// lineage tag; anti-clone is the fused anchor alone (a seed copy reproduces it, which is
 /// acceptable). Public — may be stored in the GenesisRecord.
 pub fn derive_atta(wallet_seed: &[u8], g: &[u8; 32], device_slot: u32) -> [u8; 32] {

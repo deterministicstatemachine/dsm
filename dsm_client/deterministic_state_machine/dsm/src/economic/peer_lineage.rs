@@ -255,6 +255,99 @@ impl PeerFrontier {
     }
 }
 
+/// What a receiver validated itself of a peer's offline account: the account
+/// as one of the peer's offline boundaries (a load or an unload) left it, at
+/// the economic position of the step that admitted the boundary (the owner's
+/// receive rule, 2026-10-22: offline acceptance only trusts what the receiver
+/// recorded from the peer's online history).
+///
+/// The account is named by its anchor bundle `B`, which commits the anchor's
+/// identity and keys and the peer's online identity. The fields are private:
+/// one is built only from a boundary this module's walk verified, in a step
+/// that passed, and the only constructor from outside rehydrates what the
+/// receiver recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerOfflineAccount {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    bundle: [u8; 32],
+    account_root: [u8; 32],
+    funding_chain: [u8; 32],
+}
+
+impl PeerOfflineAccount {
+    /// The account `boundary` left, validated in the step at `position`.
+    fn validated(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        position: u64,
+        boundary: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position: position,
+            bundle: boundary.bundle(),
+            account_root: boundary.post_account_root(),
+            funding_chain: boundary.operation_id(),
+        }
+    }
+
+    /// An offline account this device recorded, read back from its own store.
+    ///
+    /// **Only the receiver's store may call this**, with exactly the fields of
+    /// an account this module produced and the receiver recorded. Anything
+    /// read from a network or taken from a peer is not a validated account,
+    /// and feeding it here is the fabrication the private fields exist to
+    /// prevent.
+    pub fn rehydrate_recorded(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        bundle: [u8; 32],
+        account_root: [u8; 32],
+        funding_chain: [u8; 32],
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            bundle,
+            account_root,
+            funding_chain,
+        }
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+
+    /// The economic position of the step that admitted the boundary.
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+
+    /// The anchor bundle `B` that names the account.
+    pub fn bundle(&self) -> &[u8; 32] {
+        &self.bundle
+    }
+
+    /// The account's root after the boundary.
+    pub fn account_root(&self) -> &[u8; 32] {
+        &self.account_root
+    }
+
+    /// The account's funding chain after the boundary: the boundary's id.
+    pub fn funding_chain(&self) -> &[u8; 32] {
+        &self.funding_chain
+    }
+}
+
 /// The receiver's frontiers: the coordinates it recorded for each peer.
 pub trait PeerFrontiers {
     /// This receiver's latest recorded frontier for `(genesis, device_id)`
@@ -312,6 +405,7 @@ pub struct Checked<T> {
     answer: T,
     cost: StepCost,
     reached: Vec<PeerFrontier>,
+    offline_accounts: Vec<PeerOfflineAccount>,
 }
 
 impl<T> Checked<T> {
@@ -327,6 +421,13 @@ impl<T> Checked<T> {
     /// them.
     pub fn reached(&self) -> &[PeerFrontier] {
         &self.reached
+    }
+
+    /// Every offline account this walk validated: what each offline boundary
+    /// it passed left, in the order it passed them. Like the frontiers, they
+    /// come only from a walk that passed, each from a step that passed whole.
+    pub fn offline_accounts(&self) -> &[PeerOfflineAccount] {
+        &self.offline_accounts
     }
 
     pub fn into_answer(self) -> T {
@@ -687,6 +788,9 @@ struct Verifier<'a> {
     /// last coordinate: the position before a target, and each credit source's
     /// segment end, each standing at a step whose whole segment passed.
     established: std::cell::RefCell<Vec<PeerFrontier>>,
+    /// Every offline account a step this walk validated left: each boundary
+    /// in a step that passed.
+    offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
 }
 
 impl<'a> Verifier<'a> {
@@ -708,6 +812,7 @@ impl<'a> Verifier<'a> {
                 source_steps: 0,
             }),
             established: std::cell::RefCell::new(Vec::new()),
+            offline_accounts: std::cell::RefCell::new(Vec::new()),
         })
     }
 }
@@ -725,6 +830,7 @@ impl Verifier<'_> {
             answer,
             cost,
             reached,
+            offline_accounts: self.offline_accounts.into_inner(),
         }
     }
 
@@ -984,6 +1090,15 @@ impl Verifier<'_> {
             &facts.proven_ak,
         )
         .map_err(|e| step_failure(position, e))?;
+        // The step passed whole: the offline account its boundary left is one
+        // this receiver validated.
+        if let PeerSubstrate::OfflineBoundary(boundary) = &substrate {
+            self.offline_accounts
+                .borrow_mut()
+                .push(PeerOfflineAccount::validated(
+                    *genesis, *device_id, position, boundary,
+                ));
+        }
         Ok(ValidatedPeerTransition::single_root_from_walk(
             *genesis,
             *device_id,

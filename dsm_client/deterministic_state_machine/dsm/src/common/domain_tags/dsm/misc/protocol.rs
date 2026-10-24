@@ -183,8 +183,6 @@ pub const TAG_DSM_RELATIONSHIP_FINALIZED: TaggedHashDomain<'static> =
 /// like the evidence tags above).
 pub const TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-finalized-artifact/v1");
-pub const TAG_DSM_SILICON_FP_V4: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/silicon_fp/v4");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");
 pub const TAG_DSM_SPARSE_IDX: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/sparse-idx");
 pub const TAG_DSM_STATE_ENTROPY: TaggedHashDomain<'static> =

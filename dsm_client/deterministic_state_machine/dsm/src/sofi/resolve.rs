@@ -26,11 +26,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::ccb::StorageSetMembers;
 use crate::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use crate::economic::provenance::{PeerLineageFailure, ValidatedPeerTransition};
-use crate::economic::register::root_completion;
+use crate::economic::register::{check_root_completion, root_completion};
 use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::EconomicSmt;
 use crate::route_chain::{
-    CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing, RoutedCell,
+    completion_digest, CellEvidence, CellFact, ChainState, CompletionProof, Missing as CellMissing,
+    ProofInvalid, ProofRefusal, RouteEntry, RoutedCell,
 };
 
 use super::conformance::{
@@ -40,15 +41,17 @@ use super::conformance::{
 use super::derive;
 use super::history;
 use super::computed::{
-    match_completion, match_resolution, start_completion, start_resolution, ComputedCellRead,
-    ComputedCells, MatchUnread, ProgramRegistry,
+    check_match_completion, check_start_completion, match_completion, match_resolution,
+    start_completion, start_resolution, ComputedCellRead, ComputedCells, MatchUnread,
+    ProgramRegistry,
 };
 use super::escrow::{
-    verdict_completion, verdict_resolution, EscrowCellRead, UnboundCell, VerdictCell,
-    VerdictCellRead,
+    check_verdict_completion, verdict_completion, verdict_resolution, EscrowCellRead, UnboundCell,
+    VerdictCell, VerdictCellRead,
 };
 use super::exercise::{
-    attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead, RecognizedExercise,
+    attempt_completion, check_attempt_completion, attempt_resolution, AttemptCell, AttemptCellRead,
+    RecognizedExercise,
 };
 use super::facts::{
     establish, establish_ground, establish_key_ground, refuted_in_hand, Established,
@@ -61,7 +64,8 @@ use super::lineage::{
 };
 use super::publication::{recognize_setup, Signed};
 use super::registration::{
-    fulfillment_completion, fulfillment_registered, PositionCells, Registration, RegistrationRead,
+    check_fulfillment_completion, fulfillment_completion, fulfillment_registered, PositionCells,
+    Registration, RegistrationRead,
 };
 use super::resolution::{
     skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, RecordedGeneration,
@@ -368,12 +372,36 @@ pub trait SofiReads {
     /// §9 rule 11), with the reads `evidence` that showed it final. A final
     /// value holds the cell for good, so those reads answer for the cell
     /// again for as long as the reads are kept; nothing else read at a cell
-    /// does.
+    /// does. A proof kept for a value is never replaced by another.
     fn keep_completion(
         &self,
         cell: &RoutedCell,
         evidence: &CellEvidence,
         proof: &CompletionProof,
+    ) -> Result<(), ReadFailure>;
+    /// What this device keeps for `value` at `cell` (storage spec §9 rule
+    /// 11): its completion proof, the record that fresh reads refuted it, or
+    /// nothing.
+    fn kept_completion(
+        &self,
+        cell: &RoutedCell,
+        value: &[u8],
+    ) -> Result<KeptCompletion, ReadFailure>;
+    /// `cell` read from its seats now, never from anything kept: the fresh,
+    /// independent reads a kept completion proof is checked against before a
+    /// final value is relied on (SoFi Amendment S10; owner ruling 2026-10-24).
+    fn fresh_cell(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&crate::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<CellEvidence, ReadFailure>;
+    /// Record that fresh reads refuted `proof` at `cell`, and why: the value
+    /// it names is never relied on through it again.
+    fn refute_completion(
+        &self,
+        cell: &RoutedCell,
+        proof: &CompletionProof,
+        why: &ProofInvalid,
     ) -> Result<(), ReadFailure>;
     /// The judgement an earlier walk kept for `key` ([`Self::keep_judgement`]),
     /// or `None`.
@@ -387,6 +415,25 @@ pub trait SofiReads {
     /// reads keep it; nothing else a walk establishes is kept.
     fn keep_judgement(&self, key: JudgedKey, judgement: KeptJudgement) -> Result<(), ReadFailure>;
 }
+
+/// What a device keeps for a value final at a cell (storage spec §9 rule 11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptCompletion {
+    /// Nothing: the value has not been relied on here.
+    None,
+    /// The completion proof kept when the value was first relied on.
+    Kept(CompletionProof),
+    /// Fresh reads refuted the proof kept for the value.
+    Refuted,
+}
+
+/// A final value this verification relied on: the routed cell and the
+/// completion digest of the proof its fresh reads checked.
+type ProvenKey = (Vec<u8>, D32, D32, D32, D32);
+
+/// The finals one verification has checked against fresh reads, so a cell
+/// relied on twice in one verification is read fresh once.
+type ProvenFinals = std::sync::Mutex<BTreeSet<ProvenKey>>;
 
 /// An attempt key as a walk judged it: the pinned set its cell is routed
 /// over, the vault, the parent root and the attempt, and the exact bytes of
@@ -654,6 +701,9 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// ([`Verifier::with_programs`]); a computed escrow vault whose program
     /// is not here has no established outcome.
     programs: ProgramRegistry,
+    /// The finals this verifier checked against fresh reads
+    /// ([`Verifier::rely_on_final`]).
+    proven: ProvenFinals,
 }
 
 /// Vault geneses one operation accepted from the network, keyed by the vault
@@ -705,6 +755,7 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
             parent,
             accepted,
             programs: ProgramRegistry::new(),
+            proven: ProvenFinals::default(),
         }
     }
 
@@ -911,12 +962,82 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             .map_err(|e| VerifierFailure::Refused(format!("verdict cell: {e:?}")))
     }
 
+    /// Rely on the value final at `cell` (SoFi Amendment S10; owner ruling
+    /// 2026-10-24). `built` is the completion proof of the value from the
+    /// reads `evidence` that showed it final. The proof relied on is the one
+    /// kept for the value, or `built`, kept now when nothing is. It is checked
+    /// by `check` against the cell read fresh from its seats, never against
+    /// the reads it was built from:
+    ///
+    /// - the proof holds over the fresh reads: the value is relied on, and the
+    ///   proof is kept with those reads;
+    /// - the fresh reads do not show it yet: the inner `Err`, a network
+    ///   status. Nothing is decided and the kept proof stands;
+    /// - the fresh reads show it is not a proof of the value: the refutation
+    ///   is recorded, and the value is never relied on through that proof.
+    ///   That too is the inner `Err`: failing to establish a value final is
+    ///   not proof that anything relying on it is invalid.
+    fn rely_on_final(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+        evidence: &CellEvidence,
+        built: CompletionProof,
+        check: impl Fn(&CellEvidence, &CompletionProof) -> Result<(), ProofRefusal>,
+    ) -> Result<Result<(), CellMissing>, VerifierFailure> {
+        let proof = match self.reads.kept_completion(cell, &built.value)? {
+            KeptCompletion::Refuted => return Ok(Err(CellMissing::CompletionRefuted)),
+            KeptCompletion::Kept(kept) => kept,
+            KeptCompletion::None => {
+                self.reads.keep_completion(cell, evidence, &built)?;
+                built
+            }
+        };
+        let refute = |why: ProofInvalid| -> Result<Result<(), CellMissing>, VerifierFailure> {
+            self.reads.refute_completion(cell, &proof, &why)?;
+            Ok(Err(CellMissing::CompletionRefuted))
+        };
+        let digest = match completion_digest(cell, &proof) {
+            Ok(digest) => digest,
+            Err(why) => return refute(why),
+        };
+        let key = (
+            cell.namespace().to_vec(),
+            *cell.key(),
+            *cell.seed(),
+            *cell.committed_set_id(),
+            digest,
+        );
+        let proven = |what: &str| {
+            let failure = |e: &dyn core::fmt::Display| {
+                VerifierFailure::Read(format!("{what}: the proven finals: {e}"))
+            };
+            self.proven.lock().map_err(|e| failure(&e))
+        };
+        if proven("rely on a final")?.contains(&key) {
+            return Ok(Ok(()));
+        }
+        let fresh = self.reads.fresh_cell(cell, keep)?;
+        match check(&fresh, &proof) {
+            Ok(()) => {
+                // Kept with the fresh reads that hold it: those reads answer
+                // for the cell again, and the proof is checked afresh each time.
+                self.reads.keep_completion(cell, &fresh, &proof)?;
+                proven("rely on a final")?.insert(key);
+                Ok(Ok(()))
+            }
+            Err(ProofRefusal::Missing(missing)) => Ok(Err(missing)),
+            Err(ProofRefusal::Invalid(why)) => refute(why),
+        }
+    }
+
     // ── reads ───────────────────────────────────────────────────────────
 
     /// The verdict cell at `verdict_cell` as a Release reads it (SoFi
     /// Amendment S21): its route chains evaluated from every seat's reads into
-    /// a read bound to the key. A verdict final at the cell has its
-    /// completion proof kept (Amendment S10). Reads that do not decide the
+    /// a read bound to the key. A verdict final at the cell is relied on only
+    /// through its completion proof, checked against fresh reads (Amendment
+    /// S10, [`Self::rely_on_final`]). Reads that do not decide the
     /// cell yet are the inner `Err`: a network status, never an open cell.
     pub fn read_verdict_cell(
         &self,
@@ -942,8 +1063,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         "verdict completion: a final verdict has no completion proof".to_string(),
                     )
                 })?;
-            self.reads
-                .keep_completion(cell.routed(), &evidence, &proof)?;
+            if let Err(missing) =
+                self.rely_on_final(cell.routed(), &cell.keeps(), &evidence, proof, |ev, p| {
+                    check_verdict_completion(&cell, &read, ev, p).map(drop)
+                })?
+            {
+                return Ok(Err(missing));
+            }
         }
         Ok(Ok(read))
     }
@@ -951,7 +1077,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// The start and match cells of a computed escrow vault as a Release
     /// reads them (SoFi Amendment S22): the start cell first, and the match
     /// cell only once a Start holds it. A Start, a Withdraw or an occupant
-    /// final at its cell has its completion proof kept (Amendment S10).
+    /// final at its cell is relied on only through its completion proof,
+    /// checked against fresh reads (Amendment S10, [`Self::rely_on_final`]).
     /// Reads that do not decide a cell yet, and a program this verifier has
     /// not registered, are the inner `Err`: nothing is established.
     pub fn read_computed_cells(
@@ -985,8 +1112,18 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                             .to_string(),
                     )
                 })?;
-            self.reads
-                .keep_completion(cells.start_routed(), &start_evidence, &proof)?;
+            if let Err(missing) = self.rely_on_final(
+                cells.start_routed(),
+                &cells.keeps_start(),
+                &start_evidence,
+                proof,
+                |ev, p| check_start_completion(&cells, &start, ev, p).map(drop),
+            )? {
+                return Ok(Err(NotEstablished::StartCell {
+                    start_cell: *cells.start_key(),
+                    missing,
+                }));
+            }
         }
         // The match cell counts for nothing until a Start holds the start
         // cell, and is not read before.
@@ -1025,8 +1162,18 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                                 .to_string(),
                         )
                     })?;
-                self.reads
-                    .keep_completion(cells.match_routed(), &evidence, &proof)?;
+                if let Err(missing) = self.rely_on_final(
+                    cells.match_routed(),
+                    &cells.keeps_match(&self.programs),
+                    &evidence,
+                    proof,
+                    |ev, p| check_match_completion(&cells, &read, ev, p).map(drop),
+                )? {
+                    return Ok(Err(NotEstablished::VerdictCell {
+                        verdict_cell: *cells.match_key(),
+                        missing,
+                    }));
+                }
             }
             Some(read)
         } else {
@@ -1081,8 +1228,9 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// `SuccessorResolution(K^(attempt))` of `vault_id` at `parent_root`, as
     /// the ladder reads it (Section 23.1): the cell's route chains evaluated
     /// from every seat's reads into a read bound to the key. An exercise
-    /// final at the cell has its completion proof kept (storage spec §9 rule
-    /// 11). Reads that do not decide the cell yet — its leader unread, or its
+    /// final at the cell is relied on only through its completion proof,
+    /// checked against fresh reads (storage spec §9 rule 11, SoFi Amendment
+    /// S10, [`Self::rely_on_final`]). Reads that do not decide the cell yet — its leader unread, or its
     /// leader link not yet committed — are the inner `Err`: a network status
     /// for the caller to retry, never an open cell.
     pub fn read_attempt_cell(
@@ -1111,8 +1259,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         "attempt completion: a final exercise has no completion proof".to_string(),
                     )
                 })?;
-            self.reads
-                .keep_completion(cell.routed(), &evidence, &proof)?;
+            if let Err(missing) =
+                self.rely_on_final(cell.routed(), &cell.keeps(), &evidence, proof, |ev, p| {
+                    check_attempt_completion(&cell, ev, p).map(drop)
+                })?
+            {
+                return Ok(Err(missing));
+            }
         }
         Ok(Ok(read))
     }
@@ -1121,8 +1274,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// device_id)`, derived from the route-chain reads of the two cells
     /// (Part II §13, rebuild step R10). `parent_root` is `R_p`, the root the
     /// verifier validated itself, from which `s(q)` and the route follow.
-    /// Once registered, the completion proofs of both cells are kept (SoFi
-    /// Amendment S10).
+    /// It reads as registered only once the completion proofs of both cells
+    /// hold over fresh reads (SoFi Amendment S10, [`Self::rely_on_final`]).
     ///
     /// Both cells are decided from their bytes alone (SoFi Amendment S20):
     /// no precommit is read, so nothing a fulfillment names can make this
@@ -1156,8 +1309,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         "fulfillment completion: a final value has no proof".to_string(),
                     )
                 })?;
-            self.reads
-                .keep_completion(cells.fulfillment(), &ful_evidence, &ful_proof)?;
+            if let Err(missing) = self.rely_on_final(
+                cells.fulfillment(),
+                &cells.keeps_fulfillment(),
+                &ful_evidence,
+                ful_proof,
+                |ev, p| check_fulfillment_completion(&cells, ev, p).map(drop),
+            )? {
+                return Ok(Err(missing));
+            }
             let (.., root_proof) = root_completion(cells.root(), &root_evidence)
                 .map_err(|missing| {
                     VerifierFailure::Read(format!("root claim completion: {missing:?}"))
@@ -1167,8 +1327,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                         "root claim completion: a final value has no proof".to_string(),
                     )
                 })?;
-            self.reads
-                .keep_completion(cells.root().routed(), &root_evidence, &root_proof)?;
+            if let Err(missing) = self.rely_on_final(
+                cells.root().routed(),
+                &cells.root().keeps(),
+                &root_evidence,
+                root_proof,
+                |ev, p| check_root_completion(cells.root(), ev, p).map(drop),
+            )? {
+                return Ok(Err(missing));
+            }
         }
         Ok(Ok(registration))
     }

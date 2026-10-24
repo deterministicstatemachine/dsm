@@ -219,6 +219,29 @@ pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
     Ok(())
 }
 
+/// The receipt of the step `tx_id`, written into its history row inside `conn`
+/// — the transaction its acknowledgment is recorded in. The row must exist and
+/// hold no receipt yet: an offline-bearer sender's row is written with none
+/// when its anchor commits, and its receiver's counter-signed receipt is the
+/// one the acknowledgment brings.
+pub(crate) fn backfill_transaction_proof_with_conn(
+    conn: &Connection,
+    tx_id: &str,
+    proof_data: &[u8],
+) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE transactions SET proof_data = ?1
+         WHERE tx_id = ?2 AND (proof_data IS NULL OR length(proof_data) = 0)",
+        params![proof_data, tx_id],
+    )?;
+    if affected != 1 {
+        return Err(anyhow::anyhow!(
+            "the step {tx_id} has no history row awaiting its receipt"
+        ));
+    }
+    Ok(())
+}
+
 /// Backfill receipt bytes into an existing transaction record.
 ///
 /// Only updates if the current `proof_data` is NULL or empty, so this is safe
