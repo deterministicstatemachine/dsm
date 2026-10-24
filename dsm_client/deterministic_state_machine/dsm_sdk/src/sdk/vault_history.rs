@@ -203,12 +203,14 @@ fn read_ahead(
     if named(history.from + 1) {
         roots.insert(*start_root);
     }
-    for generation in history
+    // At most as many as one walk reads ahead (SA-69).
+    for (_, root) in history
         .candidates
-        .generations()
-        .filter(|g| *g > history.from && named(g + 1))
+        .named_from(history.from + 1)
+        .into_iter()
+        .filter(|(generation, _)| named(generation + 1))
     {
-        roots.extend(history.candidates.roots_at(generation).copied());
+        roots.insert(root);
     }
     let roots: Vec<D32> = roots.into_iter().collect();
     let mut report = ReadAhead::default();
@@ -251,7 +253,7 @@ fn read_ahead(
 pub(crate) fn walk(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
-    history: &VaultHistory,
+    history: &mut VaultHistory,
 ) -> Result<VaultChain, DsmError> {
     let genesis = match verifier
         .vault_genesis(&history.vault_id)
@@ -261,6 +263,10 @@ pub(crate) fn walk(
         // Not established: the walk itself says what that means.
         _ => return verifier.chain(&history.vault_id).map_err(verifier_error),
     };
+    // A checkpoint names cells to read only for the segment that starts
+    // where this device's recorded walks stand (SA-69).
+    let (established, _) = recorded_chain(verifier, &history.vault_id, &genesis)?;
+    history.candidates.admit_checkpoints(&established.head());
     let start_root = match sofi_vault_head::head(&history.vault_id)
         .map_err(|e| DsmError::storage(format!("vault head: {e}"), None::<std::io::Error>))?
     {
@@ -286,13 +292,34 @@ fn owe_hints(
     history: &VaultHistory,
     genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
 ) -> Result<usize, DsmError> {
+    let (chain, steps) = recorded_chain(verifier, &history.vault_id, genesis)?;
+    let owed = lineage_discovery::owe_missing_hints(
+        &set.id(),
+        &chain,
+        &steps,
+        &history.candidates,
+        history.from,
+    )?;
+    if owed > 0 {
+        crate::handlers::artifact_republish::spawn_frozen_artifact_republish("vault history");
+    }
+    Ok(owed)
+}
+
+/// The generation chain of what this device's walks recorded for
+/// `vault_id`, from its accepted genesis, and each generation's step digest.
+fn recorded_chain(
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    vault_id: &D32,
+    genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
+) -> Result<(GenerationChain, BTreeMap<u64, D32>), DsmError> {
     let preimage = genesis
         .preimage()
         .encode()
         .map_err(|e| DsmError::storage(format!("vault genesis: {e}"), None::<std::io::Error>))?;
     let shared = SharedGenesisV1::new(
         LineageKind::Vault,
-        history.vault_id,
+        *vault_id,
         *genesis.genesis_root(),
         dsm::storage_object::immutable_addr(
             dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
@@ -301,15 +328,12 @@ fn owe_hints(
     );
     let mut chain = GenerationChain::from_genesis(&shared);
     let mut steps = BTreeMap::new();
-    let rows = verifier
-        .reads
-        .recorded_generations(&history.vault_id)
-        .map_err(|e| {
-            DsmError::storage(
-                format!("recorded generations: {e:?}"),
-                None::<std::io::Error>,
-            )
-        })?;
+    let rows = verifier.reads.recorded_generations(vault_id).map_err(|e| {
+        DsmError::storage(
+            format!("recorded generations: {e:?}"),
+            None::<std::io::Error>,
+        )
+    })?;
     for row in rows.iter().filter(|row| row.generation > 0) {
         if row.generation != chain.head().generation() + 1 {
             break;
@@ -326,15 +350,5 @@ fn owe_hints(
         })?;
         steps.insert(row.generation, step);
     }
-    let owed = lineage_discovery::owe_missing_hints(
-        &set.id(),
-        &chain,
-        &steps,
-        &history.candidates,
-        history.from,
-    )?;
-    if owed > 0 {
-        crate::handlers::artifact_republish::spawn_frozen_artifact_republish("vault history");
-    }
-    Ok(owed)
+    Ok((chain, steps))
 }

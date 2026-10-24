@@ -3,7 +3,7 @@ import {
   mapContactList,
   mapTransactions,
 } from '../mappers';
-import { TokenMove, TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
+import { AmountDirection, TokenMove, TransactionInfo, TransactionType } from '../../proto/dsm_app_pb';
 import { toBase32Crockford } from '../../dsm/decoding';
 import { deviceFingerprint } from '../displayName';
 
@@ -38,7 +38,7 @@ describe('domain mappers', () => {
         tokenId: 'ERA',
         amount: 500n,
         txHash: b(0x33),
-        amountSigned: -500n,
+        direction: AmountDirection.DEBIT,
         txType: TransactionType.TX_TYPE_ONLINE,
         status: 'confirmed',
         recipient: 'alice',
@@ -77,8 +77,8 @@ describe('domain mappers', () => {
       const [padded, overridden, blankOut, blankIn] = mapTransactions([
         row({ recipient: `alice${HANGUL_FILLER}` }),
         row({ recipient: `${RLO}ecila` }),
-        row({ recipient: `${HANGUL_FILLER}\uFFA0`, amountSigned: -500n }),
-        row({ recipient: `${HANGUL_FILLER}\uFFA0`, amountSigned: 500n, displayAmount: '5.00' }),
+        row({ recipient: `${HANGUL_FILLER}\uFFA0`, direction: AmountDirection.DEBIT }),
+        row({ recipient: `${HANGUL_FILLER}\uFFA0`, direction: AmountDirection.CREDIT, displayAmount: '5.00' }),
       ]);
       expect(padded.recipient).toBe('alice');
       expect(overridden.recipient).toBe('ecila');
@@ -113,7 +113,8 @@ describe('domain mappers', () => {
           txType: TransactionType.TX_TYPE_FAUCET,
           fromDeviceId: new Uint8Array(0),
           recipient: 'ERA reserve (faucet)',
-          amountSigned: 10000n,
+          amount: 10000n,
+          direction: AmountDirection.CREDIT,
           displayAmount: '100.00',
         }),
       ]);
@@ -138,12 +139,24 @@ describe('domain mappers', () => {
           txType: TransactionType.TX_TYPE_SOFI_TRADE,
           tokenId: '',
           amount: 0n,
-          amountSigned: 0n,
+          direction: AmountDirection.UNSPECIFIED,
           displayAmount: '',
           recipient: 'VAULTID',
           moves: [
-            new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -1000n, displayAmount: '-10.00' }),
-            new TokenMove({ policyCommit: b(0x42), tokenId: 'TKN', amountSigned: 90n, displayAmount: '90' }),
+            new TokenMove({
+              policyCommit: b(0x41),
+              tokenId: 'ERA',
+              amount: 1000n,
+              direction: AmountDirection.DEBIT,
+              displayAmount: '-10.00',
+            }),
+            new TokenMove({
+              policyCommit: b(0x42),
+              tokenId: 'TKN',
+              amount: 90n,
+              direction: AmountDirection.CREDIT,
+              displayAmount: '90',
+            }),
           ],
         }),
       ]);
@@ -168,10 +181,43 @@ describe('domain mappers', () => {
         mapTransactions([
           row({
             txType: TransactionType.TX_TYPE_VAULT_CREATE,
-            moves: [new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amountSigned: -100n, displayAmount: '' })],
+            moves: [
+              new TokenMove({
+                policyCommit: b(0x41),
+                tokenId: 'ERA',
+                amount: 100n,
+                direction: AmountDirection.DEBIT,
+                displayAmount: '',
+              }),
+            ],
           }),
         ]),
       ).toThrow(/carries no moved amount/);
+    });
+
+    // Audit 2026-10-18, SA-144: an amount of 2^63 base units or more has no
+    // signed 64-bit form; Rust carries the magnitude with its direction.
+    it('carries an amount past the signed range whole, signed by its direction', () => {
+      const [out, inbound] = mapTransactions([
+        row({ amount: 1n << 63n, direction: AmountDirection.DEBIT }),
+        row({ amount: 18446744073709551615n, direction: AmountDirection.CREDIT }),
+      ]);
+      expect(out.amount).toBe(-(1n << 63n));
+      expect(inbound.amount).toBe(18446744073709551615n);
+    });
+
+    it('refuses a transfer or a moved token that names no direction', () => {
+      expect(() => mapTransactions([row({ direction: AmountDirection.UNSPECIFIED })])).toThrow(
+        /names no direction for its amount/,
+      );
+      expect(() =>
+        mapTransactions([
+          row({
+            txType: TransactionType.TX_TYPE_SOFI_TRADE,
+            moves: [new TokenMove({ policyCommit: b(0x41), tokenId: 'ERA', amount: 1n, displayAmount: '0.01' })],
+          }),
+        ]),
+      ).toThrow(/names no direction for its moved amount/);
     });
 
     it('refuses a row missing a field Rust always writes', () => {

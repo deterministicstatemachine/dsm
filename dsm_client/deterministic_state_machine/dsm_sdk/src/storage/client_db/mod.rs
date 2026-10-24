@@ -519,7 +519,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// nothing behind it is read again. A database made at 27 or 28 keeps the
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
 /// the same shape and encoding.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
+///
+/// 33, no table changed: a database an earlier build wrote may hold rows no
+/// current build writes, such as a contact under this device's own id
+/// (SA-141) or an own directory entry without an authority position
+/// (SA-143). Beta keeps no legacy: such a database is refused at open and
+/// the wallet is reprovisioned, never read with those rows in place.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.

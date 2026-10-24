@@ -970,6 +970,101 @@ async fn a_sofi_trade_executes_end_to_end() {
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SA-71. A trader that signed and published a fulfillment, and stopped
+/// before its transition, completes that fulfillment when it trades again:
+/// it signs no second fulfillment against the same parent. The position
+/// registers the fulfillment it prepared, the trade asked for in that call is
+/// not made, and only the prepared trade moved its balances.
+/// MUTATION CONTROL: drafting anew past a prepared fulfillment turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_prepared_and_published_is_completed_never_signed_again() {
+    use crate::sdk::sofi_flow::{draft_trade, prepare_fulfillment, prepared_fulfillment, Prepared};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let era_before = balance(&p.b, &m.era);
+    let position = admitted_position(&p.b);
+    let q = position + 1;
+
+    // B prepares and publishes a trade of 10, and stops before its
+    // transition: the head has not moved.
+    p.b.enter();
+    let (.., parent) = economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("an admitted position");
+    let prepared_id = {
+        let core = &p.b.router().core_sdk;
+        let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+        let kept = crate::sdk::sofi_reads::KeptReadings::default();
+        let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+        let verifying = standing
+            .context_kept(&set, &accepted, &kept)
+            .expect("a verifier");
+        let intent = crate::sdk::sofi_flow::TradeIntent {
+            vault_ids: vec![m.vault_id],
+            token_in_policy_commit: m.era,
+            token_out_policy_commit: m.tkn,
+            amount_in: 10,
+            min_amount_out: 1,
+        };
+        let draft = draft_trade(core, &set, &intent, &standing, &verifying.verifier())
+            .await
+            .expect("a draft");
+        let Prepared::Published(prepared) = prepare_fulfillment(&set, &verifying, draft)
+            .await
+            .expect("prepared")
+        else {
+            panic!("the vault moved under a test that trades alone");
+        };
+        derive::fulfillment_id(&prepared.fulfillment().expect("its fulfillment").body)
+    };
+    assert_eq!(pending_position(&p.b), None, "the transition was not made");
+
+    // Asked for another trade, B completes the one it prepared instead.
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 7))).await;
+    assert!(!r.success, "the trade asked for in this call is not made");
+    assert!(
+        r.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("prepared fulfillment")),
+        "{:?}",
+        r.error_message
+    );
+    assert_eq!(admitted_position(&p.b), q, "the prepared position resolved");
+    assert_eq!(
+        balance(&p.b, &m.era),
+        era_before - 10,
+        "only the prepared trade moved B's ERA"
+    );
+    p.b.enter();
+    let still = prepared_fulfillment(position, &parent)
+        .expect("read back")
+        .expect("the prepared fulfillment stays frozen");
+    assert_eq!(
+        derive::fulfillment_id(&still.fulfillment().expect("one fulfillment").body),
+        prepared_id,
+        "one fulfillment against that parent, the prepared one"
+    );
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let registration = ctx
+        .verifier()
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &parent)
+        .expect("read")
+        .expect("decided");
+    match registration.registration() {
+        Registration::Registered(signed) => assert_eq!(
+            derive::fulfillment_id(&signed.body),
+            prepared_id,
+            "position {q} registers the prepared fulfillment"
+        ),
+        other => panic!("position {q} is not registered: {other:?}"),
+    }
+}
+
 /// MR-SOFI-0241, SoFi Amendment S14: a vault key held final by an exercise
 /// whose fulfillment can never register — another claim of the trader's own
 /// took its position first — is skipped on that fact alone. The walk reads the key's
@@ -4015,12 +4110,12 @@ async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
 async fn walk_with_history(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<[u8; 32]> {
     let (own, parents) = standing_of(d);
     let set = canonical_set(NETWORK).expect("the pinned set");
-    let history = crate::sdk::vault_history::discover(&set, vault_id)
+    let mut history = crate::sdk::vault_history::discover(&set, vault_id)
         .await
         .expect("the history");
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
-    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &history))
+    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &mut history))
         .expect("the walk");
     crate::storage::client_db::sofi_vault_head::recorded_generations(vault_id)
         .expect("the record")
@@ -4277,7 +4372,15 @@ async fn a_realized_trade_shows_in_balances_and_history_at_once() {
     let moves = |row: &generated::TransactionInfo| -> Vec<(Vec<u8>, i64)> {
         row.moves
             .iter()
-            .map(|m| (m.policy_commit.clone(), m.amount_signed))
+            .map(|m| {
+                let amount = i64::try_from(m.amount).expect("this test's amounts are small");
+                let signed = match generated::AmountDirection::try_from(m.direction) {
+                    Ok(generated::AmountDirection::Credit) => amount,
+                    Ok(generated::AmountDirection::Debit) => -amount,
+                    other => panic!("a move names no direction: {other:?}"),
+                };
+                (m.policy_commit.clone(), signed)
+            })
             .collect()
     };
     let of = |rows: &[generated::TransactionInfo], kind: generated::TransactionType| {

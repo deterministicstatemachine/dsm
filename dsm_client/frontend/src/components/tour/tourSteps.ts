@@ -355,8 +355,8 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     id: 'token-actions',
     screen: 'accounts',
     target: '.token-card.is-open',
-    title: 'Burn and Forget',
-    body: "A token someone created shows more here. Burn destroys some of what you hold, when its rules allow it. Forget stops listing it; adding it again brings it back. ERA is the protocol's own, so it has neither. In practice, both are switched off.",
+    title: 'Burn',
+    body: "A token someone created shows more here. Burn destroys some of what you hold, when its rules allow it. ERA is the protocol's own, so it has no Burn. In practice, Burn is switched off.",
   },
   {
     id: 'token-share',
