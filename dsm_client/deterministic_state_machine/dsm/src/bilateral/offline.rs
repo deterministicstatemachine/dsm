@@ -375,7 +375,7 @@ impl VerifiedConfirm {
 /// (its pre-root, which `verify_receipt_state` folds under the sender's device
 /// root): a spend from another sender's or another bundle's account, or from
 /// any other state of this one, is refused.
-pub fn spend_starts_from_recorded(
+pub fn spend_starts_at_the_record(
     receipt: &StitchedReceiptV2,
     leaves: &BearerLeaves,
     sender_genesis: &[u8; 32],
@@ -472,7 +472,7 @@ pub fn decide_confirm(
                  account online, so no offline payment from it is taken",
             )
         })?;
-        spend_starts_from_recorded(&receipt, leaves, &sender.genesis, &recorded)?;
+        spend_starts_at_the_record(&receipt, leaves, &sender.genesis, &recorded)?;
     }
 
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {

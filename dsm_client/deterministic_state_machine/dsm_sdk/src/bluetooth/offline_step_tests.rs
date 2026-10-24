@@ -2394,14 +2394,14 @@ fn spend_receipt(
 /// load's account is refused in turn. A record of another sender, or under
 /// another anchor bundle, is no origin for A's spend.
 /// MUTATION CONTROL: dropping the pre-root comparison from Core's
-/// `spend_starts_from_recorded` takes the spend from the unload's account
+/// `spend_starts_at_the_record` takes the spend from the unload's account
 /// against B's record of the load and turns this red; dropping its sender and
 /// bundle check takes the record under another bundle and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded() {
     use crate::anchor::AnchorAppliance;
-    use dsm::bilateral::offline::spend_starts_from_recorded;
+    use dsm::bilateral::offline::spend_starts_at_the_record;
 
     let (_pair, a, b, appliance, operation) = bearer_pair().await;
     a.device.enter();
@@ -2427,7 +2427,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
     let after_load = recorded(loaded_at);
     let from_load = stage_release(&a, &b, &operation);
     let (load_receipt, load_leaves) = spend_receipt(&a, &b, &operation, &from_load);
-    spend_starts_from_recorded(&load_receipt, &load_leaves, &genesis, &after_load)
+    spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_load)
         .expect("a spend from the account B recorded is taken");
 
     a.device.enter();
@@ -2445,7 +2445,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
     let from_unload = stage_release(&a, &b, &operation);
     let (unload_receipt, unload_leaves) = spend_receipt(&a, &b, &operation, &from_unload);
     let refused =
-        spend_starts_from_recorded(&unload_receipt, &unload_leaves, &genesis, &after_load)
+        spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_load)
             .expect_err("a spend from an account B has not validated");
     assert!(
         refused
@@ -2457,21 +2457,21 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
     b.device.enter();
     crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at + 1).await;
     let after_unload = recorded(loaded_at + 1);
-    spend_starts_from_recorded(&unload_receipt, &unload_leaves, &genesis, &after_unload)
+    spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_unload)
         .expect("taken once B recorded the unload");
-    spend_starts_from_recorded(&load_receipt, &load_leaves, &genesis, &after_unload)
+    spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_unload)
         .expect_err("the spend from the load's account starts from a state B moved past");
 
     let mut other_bundle = unload_leaves;
     other_bundle.bundle[0] ^= 0x01;
     let refused =
-        spend_starts_from_recorded(&unload_receipt, &other_bundle, &genesis, &after_unload)
+        spend_starts_at_the_record(&unload_receipt, &other_bundle, &genesis, &after_unload)
             .expect_err("a record under another bundle");
     assert!(
         refused.to_string().contains("is not the sender's"),
         "{refused}"
     );
-    let refused = spend_starts_from_recorded(
+    let refused = spend_starts_at_the_record(
         &unload_receipt,
         &unload_leaves,
         &b.device.genesis,
