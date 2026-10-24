@@ -488,6 +488,7 @@ mod tests {
     #[test]
     #[serial]
     fn a_rejected_reply_is_recoverable_and_still_finalizes() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().unwrap();
         let p = fixture();
@@ -535,6 +536,7 @@ mod tests {
     #[test]
     #[serial]
     fn awaiting_valid_reply_does_not_free_the_canonical_slot() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().unwrap();
         let p = fixture();
@@ -564,6 +566,7 @@ mod tests {
     #[test]
     #[serial]
     fn awaiting_valid_reply_refuses_finalized_and_unsubmitted_steps() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().unwrap();
         let p = fixture();
@@ -596,6 +599,7 @@ mod tests {
     #[test]
     #[serial]
     fn proposal_lifecycle_and_one_per_canonical_step() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().unwrap();
         let p = fixture();
@@ -644,6 +648,7 @@ mod tests {
     #[test]
     #[serial]
     fn rolled_back_proposal_is_superseded_by_a_fresh_one() {
+        crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().unwrap();
 

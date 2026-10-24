@@ -8,7 +8,7 @@
 //! recovery-authority anchoring), so the key re-derived here is byte-identical to the
 //! one `create_genesis_v2` registered.
 //!
-//! There is no persisted device secret and no C-DBRW binding key: the wallet seed lives
+//! There is no persisted device secret: the wallet seed lives
 //! only in the session cache populated at unlock ([`crate::sdk::recovery_sdk`]). Every
 //! consumer therefore fails closed when the wallet is locked.
 

@@ -29,8 +29,8 @@ use crate::common::domain_tags::{
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::route_chain::{
-    completion_proof, evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState,
-    CompletionProof, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 use crate::storage_object::immutable_addr;
 
@@ -542,6 +542,18 @@ pub fn verdict_completion(
     evidence: &CellEvidence,
 ) -> Result<Option<(EscrowVerdict, CompletionProof)>, Missing> {
     completion_proof(&cell.cell, evidence, held_verdict(read))
+}
+
+/// Check a kept completion proof of the verdict `read` found at the cell
+/// against the reads in `evidence` (SoFi Amendment S10): the verdict it
+/// proves final.
+pub fn check_verdict_completion(
+    cell: &VerdictCell,
+    read: &VerdictCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<EscrowVerdict, ProofRefusal> {
+    check_completion_proof(&cell.cell, evidence, proof, held_verdict(read))
 }
 
 #[cfg(test)]

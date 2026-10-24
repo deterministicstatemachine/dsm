@@ -392,7 +392,6 @@ class SinglePathWebViewBridge(private val context: Context) {
                     Unified.cancelBilateralByCommitment(parsed.commitment, parsed.reason ?: "")
                 }
 
-                // Generic Envelope v3 processing (online transfers, DBRW export, etc.)
                  else -> throw IllegalArgumentException("Unknown binary RPC method: $method")
             }
         }

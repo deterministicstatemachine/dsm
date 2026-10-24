@@ -415,13 +415,13 @@ fn record_established<T>(
     checked: Checked<T>,
 ) -> Result<T, PeerLineageFailure> {
     log_cost(what, devid, position, &checked.cost());
-    crate::storage::client_db::economic_lineage::record_frontiers(checked.reached()).map_err(
-        |e| {
-            PeerLineageFailure::Incomplete(format!(
-                "recording the frontiers this walk validated: {e}"
-            ))
-        },
-    )?;
+    crate::storage::client_db::economic_lineage::record_validated(
+        checked.reached(),
+        checked.offline_accounts(),
+    )
+    .map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("recording what this walk validated: {e}"))
+    })?;
     Ok(checked.into_answer())
 }
 
@@ -835,6 +835,9 @@ pub(crate) fn missing_text(missing: Missing) -> String {
         }
         Missing::LeaderLinkUnseen { position } => {
             format!("the seat at position {position} has not seen the leader link yet")
+        }
+        Missing::CompletionRefuted => {
+            "fresh reads refuted the completion proof kept for the value final here".into()
         }
     }
 }

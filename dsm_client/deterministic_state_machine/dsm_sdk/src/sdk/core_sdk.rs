@@ -1897,19 +1897,33 @@ impl CoreSDK {
     }
 }
 
-/// Producer-side offline-bearer artifacts from driving the device fused-anchor appliance for one
-/// transfer: the wire release + the appliance frontier lineage the receiver pins/adopts + the pin
-/// material to admit the anchor.
+/// The release the device fused-anchor appliance committed and emitted for one bearer transfer,
+/// and the pin material the receiver admits the anchor by. The release's offline-state proof
+/// fields are empty: the proofs come from the step's committed advance and are attached with
+/// [`attach_offline_state_proofs`].
 #[derive(Clone, Debug)]
 pub struct OfflineBearerArtifacts {
-    /// prost-encoded `dsm.anchor.OfflineRelease` (goes on `BilateralConfirmRequest.offline_release`).
+    /// prost-encoded `dsm.anchor.OfflineRelease`, as the appliance emitted it.
     pub offline_release: Vec<u8>,
-    /// The appliance frontier `h_i` this transfer consumes (the receiver's accepted frontier).
-    pub appliance_prev_root: [u8; 32],
-    /// The successor frontier `h_{i+1}` the receiver adopts after acceptance.
-    pub appliance_next_root: [u8; 32],
     /// The pin material (B, anchor_id, H0, pk_host, pk_chip) the receiver admits for this anchor.
     pub pin: crate::anchor::AnchorPin,
+}
+
+/// `release` with the offline-state proofs `Π_i`/`Π_{i+1}` attached. They sit OUTSIDE all three
+/// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
+/// them mutates no signed bytes.
+pub fn attach_offline_state_proofs(
+    release: &[u8],
+    offline_state_proof_before: Vec<u8>,
+    offline_state_proof_after: Vec<u8>,
+) -> Result<Vec<u8>, DsmError> {
+    use prost::Message;
+    let mut rel = anchor_core::proto::pb::OfflineRelease::decode(release).map_err(|e| {
+        DsmError::serialization_error("OfflineRelease", "protobuf", Some(e.to_string()), Some(e))
+    })?;
+    rel.offline_state_proof_before = offline_state_proof_before;
+    rel.offline_state_proof_after = offline_state_proof_after;
+    Ok(rel.encode_to_vec())
 }
 
 /// A STAGED offline-bearer transition (v2 producer phase 1): the transition `Δ` and its successor
@@ -2159,26 +2173,23 @@ impl CoreSDK {
         })
     }
 
-    /// v2 producer phase 2: drive the appliance PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT →
-    /// FINALIZE for a staged transition, with the REAL device SMT roots the caller's advance
-    /// simulation produced. The release is emitted with those roots inside the signed transcript
-    /// (σ^DSM binding is the caller's; σ^chip + σ^host are produced here) — there is no placeholder
-    /// stamping and no post-hoc re-stamp. The offline-state proofs `Π_i`/`Π_{i+1}` (from
-    /// the same simulation) are attached to the release package here — they sit OUTSIDE all three
-    /// signatures (the receiver verifies them independently against `R_i`/`R_{i+1}`), so attaching
-    /// them mutates no signed bytes. Fails closed if the appliance's post-finalize frontier
-    /// diverges from the staged successor.
+    /// v2 producer phase 2, the hardware half of the one motion: drive the appliance
+    /// PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT for a staged transition, with the REAL device
+    /// SMT roots the caller's advance simulation produced. The caller has already recorded the
+    /// software step durably as releasing; the step commits next, and only then is the appliance's
+    /// frontier advanced ([`finalize_offline_bearer`](Self::finalize_offline_bearer)), so a crash
+    /// anywhere between leaves a state the recovery table names.
+    ///
+    /// The release is emitted with those roots inside the signed transcript (σ^DSM binding is the
+    /// caller's; σ^chip + σ^host are produced here), signed once over the real roots and never
+    /// re-stamped.
     pub fn release_offline_bearer(
         &self,
         staged: &StagedBearerTransition,
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        offline_state_proof_before: Vec<u8>,
-        offline_state_proof_after: Vec<u8>,
     ) -> Result<OfflineBearerArtifacts, DsmError> {
-        use prost::Message;
-
         let mut guard = self.anchor_appliance.lock();
         let app = guard.as_mut().ok_or_else(|| {
             DsmError::state_machine("offline-bearer: anchor appliance not birthed")
@@ -2191,33 +2202,65 @@ impl CoreSDK {
             &sender_device_root_after,
         )?;
         app.commit()?;
-        let emitted = app.emit()?;
-        let new_frontier = app.finalize()?;
-        if new_frontier != staged.appliance_next_root {
-            return Err(DsmError::state_machine(
-                "offline-bearer: post-finalize frontier diverged from the staged successor (fail closed)",
-            ));
-        }
-
-        // Attach Π_i/Π_{i+1} to the package (unsigned carrier fields; see method doc).
-        let mut rel =
-            anchor_core::proto::pb::OfflineRelease::decode(&emitted[..]).map_err(|e| {
-                DsmError::serialization_error(
-                    "OfflineRelease",
-                    "protobuf",
-                    Some(e.to_string()),
-                    Some(e),
-                )
-            })?;
-        rel.offline_state_proof_before = offline_state_proof_before;
-        rel.offline_state_proof_after = offline_state_proof_after;
-
         Ok(OfflineBearerArtifacts {
-            offline_release: rel.encode_to_vec(),
-            appliance_prev_root: staged.appliance_prev_root,
-            appliance_next_root: staged.appliance_next_root,
+            offline_release: app.emit()?,
             pin: staged.pin.clone(),
         })
+    }
+
+    /// The committed release the appliance holds, emitted again: the same signed release, never a
+    /// new one, and the counter does not move (§26). For a step recorded as releasing whose
+    /// counter moved before its software side committed.
+    pub fn reemit_offline_bearer(&self) -> Result<OfflineBearerArtifacts, DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let app = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
+        })?;
+        Ok(OfflineBearerArtifacts {
+            offline_release: app.emit()?,
+            pin: app.pin(),
+        })
+    }
+
+    /// The appliance's recovery state (§26), observed: what it holds and whether its counter moved.
+    /// Attaches the appliance first when none is attached. Observes only — the caller settles the
+    /// outcome against the step it recorded, by the recovery table.
+    pub fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
+        let dev = self.device_info.device_id;
+        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
+        let mut guard = self.anchor_appliance.lock();
+        if guard.is_none() {
+            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
+                match crate::bridge::anchor_appliance_factory() {
+                    Some(factory) => factory()?,
+                    None => hardware_appliance_or_fail(&seed, dev)?,
+                };
+            *guard = Some(a);
+        }
+        let app = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
+        })?;
+        app.recover()
+    }
+
+    /// Advance the appliance's frontier to the committed successor, once the step that spends it
+    /// is committed in software. Fails closed if the appliance's frontier is not the successor the
+    /// step names.
+    pub fn finalize_offline_bearer(&self, appliance_next_root: [u8; 32]) -> Result<(), DsmError> {
+        let mut guard = self.anchor_appliance.lock();
+        let app = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
+        })?;
+        let new_frontier = app.finalize()?;
+        if new_frontier != appliance_next_root {
+            return Err(DsmError::state_machine(
+                "offline-bearer: post-finalize frontier diverged from the committed successor \
+                 (fail closed)",
+            ));
+        }
+        Ok(())
     }
 
     /// Cleanup: drive an ABANDONED prepared release back to `Ready` (e.g. the confirm build failed

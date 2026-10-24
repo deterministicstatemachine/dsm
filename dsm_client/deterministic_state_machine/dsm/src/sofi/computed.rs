@@ -35,8 +35,8 @@ use crate::common::domain_tags::{
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::crypto::domain::TaggedHashDomain;
 use crate::route_chain::{
-    completion_proof, evaluate, CellError, CellEvidence, CellFact, CellReading, ChainState,
-    CompletionProof, Missing, RoutedCell,
+    check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellFact,
+    CellReading, ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
 
 use super::escrow::VerdictStanding;
@@ -1154,6 +1154,24 @@ pub fn start_completion(
     Ok(completion_proof(&cells.start_cell, evidence, held)?.map(|(_, proof)| proof))
 }
 
+/// Check a kept completion proof of the Start or Withdraw `read` found at the
+/// start cell against the reads in `evidence` (SoFi Amendment S10): which it
+/// proves final.
+pub fn check_start_completion(
+    cells: &ComputedCells,
+    read: &StartCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<StartKind, ProofRefusal> {
+    let held = |bytes: &[u8]| match &read.held {
+        Some((kind, value)) if value.as_slice() == bytes => {
+            Some((occupant_id(&cells.start_key, start_label(*kind)), *kind))
+        }
+        Some(..) | None => None,
+    };
+    check_completion_proof(&cells.start_cell, evidence, proof, held)
+}
+
 /// The completion proof of the occupant `read` found final at the match
 /// cell; `None` while no chain of it has three links, or when the cell is
 /// open.
@@ -1170,6 +1188,25 @@ pub fn match_completion(
         Some(..) | None => None,
     };
     Ok(completion_proof(&cells.match_cell, evidence, held)?.map(|(_, proof)| proof))
+}
+
+/// Check a kept completion proof of the occupant `read` found at the match
+/// cell against the reads in `evidence` (SoFi Amendment S10): the occupant
+/// it proves final.
+pub fn check_match_completion(
+    cells: &ComputedCells,
+    read: &MatchCellRead,
+    evidence: &CellEvidence,
+    proof: &CompletionProof,
+) -> Result<MatchOccupant, ProofRefusal> {
+    let held = |bytes: &[u8]| match &read.held {
+        Some((occupant, value)) if value.as_slice() == bytes => Some((
+            occupant_id(&cells.match_key, occupant.label()),
+            occupant.clone(),
+        )),
+        Some(..) | None => None,
+    };
+    check_completion_proof(&cells.match_cell, evidence, proof, held)
 }
 
 #[cfg(test)]

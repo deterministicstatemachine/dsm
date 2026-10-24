@@ -971,6 +971,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn pairing_smoke_identity_before_connection() {
+        crate::economic_fixtures::use_test_storage_dir();
         // Fresh DB + orchestrator
         client_db::reset_database_for_tests();
         client_db::init_database().expect("init db");
@@ -1060,6 +1061,7 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn pairing_smoke_identity_mismatch_no_promotion() {
+        crate::economic_fixtures::use_test_storage_dir();
         // Fresh DB + orchestrator
         client_db::reset_database_for_tests();
         client_db::init_database().expect("init db");
