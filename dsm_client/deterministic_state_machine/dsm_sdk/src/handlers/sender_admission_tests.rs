@@ -73,7 +73,7 @@ fn create_request(
 }
 
 /// A token whose policy refuses every transfer.
-fn non_transferable_request(ticker: &str) -> crate::generated::TokenCreateRequest {
+pub(super) fn non_transferable_request(ticker: &str) -> crate::generated::TokenCreateRequest {
     let mut request = create_request(ticker, 2, 1_000);
     request.transferable = false;
     request

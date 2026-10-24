@@ -697,6 +697,22 @@ pub fn stash_pending_local_head_with_conn(
     Ok(())
 }
 
+/// Drop the Local chain-head advance stashed for the step `commitment_hash`,
+/// inside `conn`: the step was reset before anything it signed was delivered,
+/// so the head it would have moved to is never promoted.
+pub fn discard_pending_local_head_with_conn(
+    conn: &Connection,
+    relationship_key: &[u8; 32],
+    commitment_hash: &[u8; 32],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM pending_local_cert_heads
+         WHERE relationship_key = ?1 AND commitment_hash = ?2",
+        params![relationship_key.as_slice(), commitment_hash.as_slice()],
+    )?;
+    Ok(())
+}
+
 /// Promote a pending Local chain-head advance into `cert_chain_heads`, inside
 /// the transaction the accepted step commits in (§16.6 defect 1). The
 /// encrypted SK blob moves verbatim (it is never decrypted here). Returns the
@@ -1504,6 +1520,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_accepts_an_unchanged_head_and_a_declared_first_step() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC1);
@@ -1546,6 +1563,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_fails_closed_when_the_head_moved_after_signing() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC2);
@@ -1587,6 +1605,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn cas_refuses_to_treat_an_unexplained_absence_as_genesis() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let r = rel(0xC3);

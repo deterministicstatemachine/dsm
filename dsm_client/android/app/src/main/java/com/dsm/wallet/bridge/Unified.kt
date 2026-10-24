@@ -24,7 +24,7 @@ import androidx.annotation.Keep
 //   - All payloads are protobuf ByteArray. No serialization libraries.
 //   - All responses carry 0x03 framing prefix + Envelope v3 protobuf.
 //   - DO NOT use wall-clock APIs in protocol logic -- clockless.
-//   - All crypto (SPHINCS+, ML-KEM-768, DBRW) handled in Rust beneath.
+//   - All crypto (SPHINCS+, ML-KEM-768) handled in Rust beneath.
 //
 // DOMAIN GROUPS:
 //   Protocol:  processEnvelopeV3
@@ -465,11 +465,6 @@ object Unified {
         android.util.Log.d("Unified", "isBluetoothDeviceReady($deviceAddress): $ready")
         return ready
     }
-
-    // getCdbrwRuntimeSnapshot() was removed with the Protocol 6.2 collapse.
-    // Kotlin no longer computes trust/entropy/Wasserstein on its own — the
-    // `cdbrw.measure_trust` router query publishes a live CdbrwTrustSnapshot
-    // with the same data, and frontend/UI consume that directly.
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)

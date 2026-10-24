@@ -2162,7 +2162,7 @@ pub(crate) fn record_ble_ek_steps_in_tx(
     set_id: &[u8; 32],
     bound_root: &[u8; 32],
     rel_key: &[u8; 32],
-    steps: [EkStep<'_>; 2],
+    steps: &[EkStep<'_>],
 ) -> Result<(), DsmError> {
     use prost::Message;
     for step in steps {

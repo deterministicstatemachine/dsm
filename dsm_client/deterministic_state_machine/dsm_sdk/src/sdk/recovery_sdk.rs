@@ -519,7 +519,7 @@ impl RecoverySDK {
     /// is the SOLE canonical derivation), uses the cached mnemonic-derived authority
     /// keypair, and produces the doubly-signed declaration committing `H(K_A_pub)`.
     ///
-    /// Fail-closed: requires AppState identity (device_id + genesis_hash), K_DBRW, and a
+    /// Fail-closed: requires AppState identity (device_id + genesis_hash) and a
     /// cached authority keypair — i.e. the mnemonic must already be cached (call
     /// `derive_and_cache_key` first, as `recovery.enable` does).
     pub fn build_authority_anchor() -> Result<dsm::recovery::RecoveryAuthorityAnchor, DsmError> {
@@ -540,7 +540,7 @@ impl RecoverySDK {
         })?;
 
         // Re-derive the device signing keypair — byte-identical to the one create_genesis_v2
-        // registered (the AK keypair rooted in the BIP39 wallet seed; Genesis v2). No DBRW.
+        // registered (the AK keypair rooted in the BIP39 wallet seed; Genesis v2).
         let device_kp = crate::init::derive_device_signing_keypair(&wallet_seed, &genesis_id)?;
 
         let (authority_pk, authority_sk) =

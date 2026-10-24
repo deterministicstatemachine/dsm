@@ -1317,7 +1317,7 @@ impl AppRouterImpl {
                     Ok(mut receipt) => match receipt.compute_commitment() {
                         Ok(commitment) => {
                             // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
-                            // unlocked wallet; no C-DBRW) + root AK keypair. The per-step EK seed +
+                            // unlocked wallet) + root AK keypair. The per-step EK seed +
                             // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
                             let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
                                 Ok(k) => k,
@@ -2596,21 +2596,36 @@ impl AppRouter for AppRouterImpl {
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        offline_state_proof_before: Vec<u8>,
-        offline_state_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
         self.core_sdk.release_offline_bearer(
             staged,
             receiver_challenge,
             sender_device_root_before,
             sender_device_root_after,
-            offline_state_proof_before,
-            offline_state_proof_after,
         )
     }
 
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
         self.core_sdk.cancel_offline_bearer_release()
+    }
+
+    fn reemit_offline_bearer(
+        &self,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        self.core_sdk.reemit_offline_bearer()
+    }
+
+    fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, dsm::types::error::DsmError> {
+        self.core_sdk.observe_offline_bearer_recovery()
+    }
+
+    fn finalize_offline_bearer(
+        &self,
+        appliance_next_root: [u8; 32],
+    ) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.finalize_offline_bearer(appliance_next_root)
     }
 
     // ====================== QUERY ======================
@@ -2681,23 +2696,29 @@ impl AppRouter for AppRouterImpl {
 
     // ====================== INVOKE ======================
     async fn invoke(&self, i: AppInvoke) -> AppResult {
-        self.ensure_bitcoin_tap_restored().await;
+        Box::pin(self.ensure_bitcoin_tap_restored()).await;
 
+        // This step's future and each route's are boxed: a debug build gives
+        // every awaited future here its own stack slot, so the dispatch would
+        // reserve the sum of all of them, and a route that runs another route
+        // (DSM Connect) stacks that sum twice on one 2 MiB runtime thread.
         match i.method.as_str() {
             // The canonical mnemonic-rooted genesis: creates this device's identity.
-            "system.createGenesisV2" => self.handle_system_invoke(i).await,
+            "system.createGenesisV2" => Box::pin(self.handle_system_invoke(i)).await,
             // Wallet invoke routes
-            "wallet.sendSmart" | "wallet.sendOffline" => self.handle_wallet_invoke(i).await,
+            "wallet.sendSmart" | "wallet.sendOffline" => {
+                Box::pin(self.handle_wallet_invoke(i)).await
+            }
             // Offline-cash load/unload (two-regime money model)
             "wallet.loadOffline" | "wallet.unloadOffline" => {
-                self.handle_offline_cash_invoke(i).await
+                Box::pin(self.handle_offline_cash_invoke(i)).await
             }
             // Contacts invoke routes
             "contacts.addManual" | "contacts.setProfile" | "contacts.setOwnProfile" => {
-                self.handle_contacts_invoke(i).await
+                Box::pin(self.handle_contacts_invoke(i)).await
             }
             // Email receipts (DSM Amendment A17): outside the protocol.
-            "receipts.email" => self.handle_receipts_invoke(i).await,
+            "receipts.email" => Box::pin(self.handle_receipts_invoke(i)).await,
             // DSM Connect (DSM Amendment A11)
             "connect.approve"
             | "connect.respond"
@@ -2707,48 +2728,50 @@ impl AppRouter for AppRouterImpl {
             | "connect.app.accept"
             | "connect.app.request"
             | "connect.app.respond"
-            | "connect.app.status" => self.handle_connect_invoke(i).await,
+            | "connect.app.status" => Box::pin(self.handle_connect_invoke(i)).await,
             // Token
             "token.create"
             | "token.forget"
             | "token.burn"
             | "tokens.publishPolicy"
-            | "tokens.addByAnchor" => self.handle_token_invoke(i).await,
+            | "tokens.addByAnchor" => Box::pin(self.handle_token_invoke(i)).await,
             // Preferences
-            "prefs.set" => self.handle_prefs_invoke(i).await,
+            "prefs.set" => Box::pin(self.handle_prefs_invoke(i)).await,
             // Pull the inbox, apply it and push what is owed.
-            "storage.sync" => self.handle_storage_invoke(i).await,
+            "storage.sync" => Box::pin(self.handle_storage_invoke(i)).await,
             // SoFi (SoFi §27): the only way the app reaches SoFi.
             "sofi.createVault" | "sofi.findRoute" | "sofi.trade" | "sofi.route" | "sofi.close"
-            | "sofi.relay" | "sofi.resolve" | "sofi.vaults" => self.handle_sofi_invoke(i).await,
+            | "sofi.relay" | "sofi.resolve" | "sofi.vaults" => {
+                Box::pin(self.handle_sofi_invoke(i)).await
+            }
             // Escrow vaults (SoFi §19.9, Amendment S21).
             "escrow.party" | "escrow.create" | "escrow.lock" | "escrow.sign"
             | "escrow.adjudicate" | "escrow.verdict" | "escrow.release" | "escrow.locked"
-            | "escrow.vaults" => self.handle_escrow_invoke(i).await,
+            | "escrow.vaults" => Box::pin(self.handle_escrow_invoke(i)).await,
             // BLE
             // Bilateral reconcile
             // Faucet
-            "faucet.claim" => self.handle_faucet_invoke(i).await,
+            "faucet.claim" => Box::pin(self.handle_faucet_invoke(i)).await,
             // Publish an object of this account's under a topic of its own.
-            "authored.publish" => self.handle_authored_invoke(i).await,
+            "authored.publish" => Box::pin(self.handle_authored_invoke(i)).await,
             // Session invoke routes
             "session.lock"
             | "session.unlock"
             | "session.configure_lock"
             | "session.hardware_update"
             | "session.set_fatal_error"
-            | "session.clear_fatal_error" => self.handle_session_invoke(i).await,
+            | "session.clear_fatal_error" => Box::pin(self.handle_session_invoke(i)).await,
             // Inbox poller lifecycle
             "inbox.startPoller" | "inbox.stopPoller" | "inbox.resume" | "inbox.moneySeen" => {
-                self.handle_inbox_invoke(i).await
+                Box::pin(self.handle_inbox_invoke(i)).await
             }
             // Recovery invoke routes (includes nfc.ring.write, nfc.ring.read)
             m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
-                self.handle_recovery_invoke(i).await
+                Box::pin(self.handle_recovery_invoke(i)).await
             }
             // Secondary-device admission invoke routes (gated additional-device enrollment)
             // Bitcoin invoke routes
-            m if m.starts_with("bitcoin.") => self.handle_bitcoin_invoke(i).await,
+            m if m.starts_with("bitcoin.") => Box::pin(self.handle_bitcoin_invoke(i)).await,
             _ => err(format!(
                 "unknown invoke method: '{}' bytes={:?}",
                 i.method,

@@ -26,8 +26,8 @@ use dsm::sofi::derive;
 use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
-    AcceptedGeneses, JudgedKey, KeptJudgement, LocalLeaves, PeerPositionResolver, ReadFailure,
-    RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
+    AcceptedGeneses, JudgedKey, KeptCompletion, KeptJudgement, LocalLeaves, PeerPositionResolver,
+    ReadFailure, RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -46,7 +46,7 @@ use crate::sdk::route_seats::{keep_completion, read_cell, NodeSeats};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_setup_bytes, LOCATOR_BUDGET};
 use crate::sdk::storage_io::{fetch_immutable, read_stored_bytes_kept, resolve_locator_all};
 use crate::sdk::storage_set::{as_ccb_members, StorageSet};
-use crate::storage::client_db::{economic_lineage, sofi_vault_head};
+use crate::storage::client_db::{completion_proofs, economic_lineage, sofi_vault_head};
 
 type D32 = [u8; 32];
 
@@ -408,6 +408,14 @@ impl SofiReads for LiveSofiReads<'_> {
         if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
             return Ok(kept);
         }
+        self.fresh_cell(cell, keep)
+    }
+
+    fn fresh_cell(
+        &self,
+        cell: &RoutedCell,
+        keep: &(dyn Fn(&dsm::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<CellEvidence, ReadFailure> {
         let seats = NodeSeats::new(self.set).map_err(|e| ReadFailure(format!("seats: {e}")))?;
         Ok(self.block(read_cell(&seats, cell, keep)))
     }
@@ -723,6 +731,49 @@ impl SofiReads for LiveSofiReads<'_> {
             .map_err(|e| ReadFailure::from(Unkept(e.to_string())))?
             .insert(cell_id(cell), evidence.clone());
         Ok(())
+    }
+
+    fn kept_completion(
+        &self,
+        cell: &RoutedCell,
+        value: &[u8],
+    ) -> Result<KeptCompletion, ReadFailure> {
+        let unreadable = |e: anyhow::Error| ReadFailure(format!("kept completion: {e}"));
+        if completion_proofs::refuted(cell, value)
+            .map_err(unreadable)?
+            .is_some()
+        {
+            return Ok(KeptCompletion::Refuted);
+        }
+        Ok(
+            match completion_proofs::get(cell, value).map_err(unreadable)? {
+                Some(kept) => KeptCompletion::Kept(kept.proof),
+                None => KeptCompletion::None,
+            },
+        )
+    }
+
+    fn refute_completion(
+        &self,
+        cell: &RoutedCell,
+        proof: &CompletionProof,
+        why: &dsm::route_chain::ProofInvalid,
+    ) -> Result<(), ReadFailure> {
+        // A proof too malformed to have a completion digest is refuted by
+        // its shape, and recorded without one, the shape in its reason.
+        let (digest, reason) = match dsm::route_chain::completion_digest(cell, proof) {
+            Ok(digest) => (Some(digest), format!("{why:?}")),
+            Err(shape) => (
+                None,
+                format!("{why:?}; the proof has no completion digest: {shape:?}"),
+            ),
+        };
+        log::warn!(
+            "[sofi] fresh reads refuted the completion proof kept at a {} cell: {reason}",
+            String::from_utf8_lossy(cell.namespace())
+        );
+        completion_proofs::refute(cell, &proof.value, digest.as_ref(), &reason)
+            .map_err(|e| ReadFailure(format!("refute completion: {e}")))
     }
 
     fn kept_judgement(&self, key: &JudgedKey) -> Result<Option<KeptJudgement>, ReadFailure> {

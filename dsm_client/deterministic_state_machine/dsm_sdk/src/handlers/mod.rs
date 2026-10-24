@@ -41,6 +41,8 @@ mod connect_escrow_e2e_tests;
 pub mod connect_routes;
 pub mod contacts_routes;
 #[cfg(test)]
+mod counterfeit_acceptance_tests;
+#[cfg(test)]
 mod escrow_e2e_tests;
 pub mod escrow_routes;
 #[cfg(test)]
