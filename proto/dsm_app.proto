@@ -858,18 +858,6 @@ message TokenCreateRequest {
   repeated bytes allowlist_device_ids = 13 [(dsm_max_len)=32];
 }
 
-// Drop a token's IDENTITY from this device. Canonical balances are not
-// touched: forgetting is refused unless the balance is zero, because a device
-// must not be able to make an asset it holds unnameable.
-message TokenForgetRequest {
-  string token_id = 1;   // token id or ticker; either names one identity
-}
-message TokenForgetResponse {
-  bool   success  = 1;
-  string token_id = 2;
-  string message  = 3 [(dsm_max_len)=1024];
-}
-
 // Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
 // guard's checked_sub on every advance.
 message TokenBurnRequest {
@@ -2797,9 +2785,6 @@ message Envelope {
     ReceiptEmailResultV1              receipt_email_result             = 138;
 
 
-    // Reply to `token.forget`.
-    TokenForgetResponse token_forget_response = 118;
-
     // Reply to `token.adoptionQr`.
     TokenAdoptionQrResponse token_adoption_qr_response = 119;
   }
@@ -2827,6 +2812,10 @@ message Envelope {
   // received what it sent (online messages deleted, 2026-09-28).
   reserved 41;
   reserved "online_message_response";
+  // 118 was token_forget_response: adoption is permanent, so a device never
+  // drops a token's identity (SA-148, 2026-10-23).
+  reserved 118;
+  reserved "token_forget_response";
 }
 
 // ===================== Sealed spool payloads (DSM Amendment A7) =====================

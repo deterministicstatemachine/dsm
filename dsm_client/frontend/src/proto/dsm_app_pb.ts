@@ -7683,98 +7683,6 @@ export class TokenCreateRequest extends Message<TokenCreateRequest> {
 }
 
 /**
- * Drop a token's IDENTITY from this device. Canonical balances are not
- * touched: forgetting is refused unless the balance is zero, because a device
- * must not be able to make an asset it holds unnameable.
- *
- * @generated from message dsm.TokenForgetRequest
- */
-export class TokenForgetRequest extends Message<TokenForgetRequest> {
-  /**
-   * token id or ticker; either names one identity
-   *
-   * @generated from field: string token_id = 1;
-   */
-  tokenId = "";
-
-  constructor(data?: PartialMessage<TokenForgetRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenForgetRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenForgetRequest {
-    return new TokenForgetRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenForgetRequest {
-    return new TokenForgetRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenForgetRequest {
-    return new TokenForgetRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenForgetRequest | PlainMessage<TokenForgetRequest> | undefined, b: TokenForgetRequest | PlainMessage<TokenForgetRequest> | undefined): boolean {
-    return proto3.util.equals(TokenForgetRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.TokenForgetResponse
- */
-export class TokenForgetResponse extends Message<TokenForgetResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: string token_id = 2;
-   */
-  tokenId = "";
-
-  /**
-   * @generated from field: string message = 3;
-   */
-  message = "";
-
-  constructor(data?: PartialMessage<TokenForgetResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.TokenForgetResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "token_id", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 3, name: "message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): TokenForgetResponse {
-    return new TokenForgetResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): TokenForgetResponse {
-    return new TokenForgetResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): TokenForgetResponse {
-    return new TokenForgetResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: TokenForgetResponse | PlainMessage<TokenForgetResponse> | undefined, b: TokenForgetResponse | PlainMessage<TokenForgetResponse> | undefined): boolean {
-    return proto3.util.equals(TokenForgetResponse, a, b);
-  }
-}
-
-/**
  * Burn supply the caller holds. Burn ≤ balance is enforced by the conservation
  * guard's checked_sub on every advance.
  *
@@ -18383,14 +18291,6 @@ export class Envelope extends Message<Envelope> {
     case: "receiptEmailResult";
   } | {
     /**
-     * Reply to `token.forget`.
-     *
-     * @generated from field: dsm.TokenForgetResponse token_forget_response = 118;
-     */
-    value: TokenForgetResponse;
-    case: "tokenForgetResponse";
-  } | {
-    /**
      * Reply to `token.adoptionQr`.
      *
      * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
@@ -18515,7 +18415,6 @@ export class Envelope extends Message<Envelope> {
     { no: 136, name: "authored_objects_response", kind: "message", T: AuthoredObjectsResponse, oneof: "payload" },
     { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
-    { no: 118, name: "token_forget_response", kind: "message", T: TokenForgetResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
