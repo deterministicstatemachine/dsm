@@ -73,8 +73,8 @@ crates/dsm-sphincs/src/refinement_vectors.rs	149	SphincsVariant::SPX192f,
 crates/dsm-sphincs/src/refinement_vectors.rs	150	SphincsVariant::SPX256s,
 crates/dsm-sphincs/src/refinement_vectors.rs	151	SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	53	if !sphincs::sphincs_verify(signing_public_key, &digest, binding_sig)? {
-dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	560	let binding_sig = crate::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	581	crate::crypto::sphincs::sphincs_sign(self.party.signing_secret_key(), message)
+dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	618	let binding_sig = crate::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	639	crate::crypto::sphincs::sphincs_sign(self.party.signing_secret_key(), message)
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	21	/// SPHINCS+ SPX256f, construction version 2 (`dsm_sphincs`: the FIPS 205
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	130	use crate::crypto::sphincs::{public_key_bytes, SphincsVariant, CONSTRUCTION_VERSION};
 dsm_client/deterministic_state_machine/dsm/src/ccb/genesis.rs	139	Some(public_key_bytes(SphincsVariant::SPX256f))
@@ -329,7 +329,7 @@ dsm_client/deterministic_state_machine/dsm/tests/sofi_v8_operations.rs	306	sphin
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	28	const PARTITION_VARIANT: dsm::crypto::sphincs::SphincsVariant =
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	29	dsm::crypto::sphincs::SphincsVariant::SPX128f;
 dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	114	dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig).unwrap_or(false)
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	5940	dsm::crypto::sphincs::sphincs_sign(sender.signing_secret_key(), &signed)
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/bilateral_ble_handler.rs	5958	dsm::crypto::sphincs::sphincs_sign(sender.signing_secret_key(), &signed)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/app_router_impl.rs	882	match dsm::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	113	use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	184	let kp = generate_keypair(SphincsVariant::SPX256f).expect("a key");

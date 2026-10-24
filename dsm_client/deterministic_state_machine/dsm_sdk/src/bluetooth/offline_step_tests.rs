@@ -2064,6 +2064,7 @@ struct StagedRelease {
     challenge: [u8; 32],
     root_before: [u8; 32],
     root_after: [u8; 32],
+    advance: dsm::types::device_state::AdvanceOutcome,
 }
 
 fn stage_release(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> StagedRelease {
@@ -2096,6 +2097,7 @@ fn stage_release(a: &OfflineDevice, b: &OfflineDevice, operation: &Proposal) -> 
         root_after: advance.child_r_a,
         spend,
         challenge,
+        advance,
     }
 }
 
@@ -2328,5 +2330,156 @@ async fn a_committed_frontier_advances_only_to_its_own_successor() {
     assert_eq!(
         chip(&appliance).root,
         first.spend.staged.appliance_next_root
+    );
+}
+
+/// A's staged spend as A's device signs it over to B: the stitched receipt of
+/// the step's write set, built and held to its state rules exactly as A's
+/// confirm builds and holds it before the anchor commits, and the anchor-state
+/// leaves the receipt moves.
+fn spend_receipt(
+    a: &OfflineDevice,
+    b: &OfflineDevice,
+    operation: &Proposal,
+    staged: &StagedRelease,
+) -> (
+    dsm::types::receipt_types::StitchedReceiptV2,
+    dsm::verification::receipt_verification::BearerLeaves,
+) {
+    a.device.enter();
+    let leaves = dsm::verification::receipt_verification::BearerLeaves {
+        bundle: staged.spend.staged.pin.bundle,
+        counter: staged.spend.staged.transition.anchor_counter,
+        frontier: staged.spend.staged.appliance_prev_root,
+        next_frontier: staged.spend.staged.appliance_next_root,
+    };
+    let device_tree = crate::sdk::app_state::AppState::get_device_tree_commitment()
+        .expect("A's Device Tree commitment");
+    let bytes = crate::sdk::receipts::build_bilateral_receipt(
+        a.device.device_id,
+        b.device.device_id,
+        &staged.advance,
+        Some(leaves),
+        &device_tree,
+    )
+    .expect("A builds the step's receipt");
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&bytes)
+        .expect("the receipt decodes");
+    let genesis = a
+        .device
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("A's head")
+        .genesis_digest();
+    dsm::verification::receipt_verification::verify_receipt_state(
+        &receipt,
+        &dsm::verification::receipt_verification::ReceiptStateContext {
+            device_tree_commitment: &device_tree,
+            author_genesis: genesis,
+            operation: &operation.operation,
+            bearer: Some(leaves),
+        },
+    )
+    .expect("the receipt holds its state rules");
+    (receipt, leaves)
+}
+
+/// The owner's receive rule (2026-10-22): an offline payment is taken only
+/// from the offline account its receiver validated itself, from the sender's
+/// online history. B walks A's history through A's load; a spend A stages from
+/// the account the load left starts from B's record. After A's unload, a spend
+/// from the account the unload left is refused against B's stale record, and
+/// taken once B's next walk records the unload — when the spend from the
+/// load's account is refused in turn. A record of another sender, or under
+/// another anchor bundle, is no origin for A's spend.
+/// MUTATION CONTROL: dropping the pre-root comparison from Core's
+/// `spend_starts_from_recorded` takes the spend from the unload's account
+/// against B's record of the load and turns this red; dropping its sender and
+/// bundle check takes the record under another bundle and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded() {
+    use crate::anchor::AnchorAppliance;
+    use dsm::bilateral::offline::spend_starts_from_recorded;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    a.device.enter();
+    let (genesis, devid) = {
+        let head = a.device.router().core_sdk.device_head().expect("A's head");
+        (head.genesis_digest(), head.devid())
+    };
+    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
+    let recorded = |position: u64| {
+        b.device.enter();
+        crate::storage::client_db::economic_lineage::latest_offline_account(
+            &genesis,
+            &devid,
+            &appliance.pin().bundle,
+        )
+        .expect("B's store reads")
+        .filter(|account| account.economic_position() == position)
+        .expect("B recorded the boundary it walked")
+    };
+
+    b.device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    let after_load = recorded(loaded_at);
+    let from_load = stage_release(&a, &b, &operation);
+    let (load_receipt, load_leaves) = spend_receipt(&a, &b, &operation, &from_load);
+    spend_starts_from_recorded(&load_receipt, &load_leaves, &genesis, &after_load)
+        .expect("a spend from the account B recorded is taken");
+
+    a.device.enter();
+    let unloaded = a
+        .device
+        .invoke(
+            "wallet.unloadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "5.00".to_string(),
+            },
+        )
+        .await;
+    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    let from_unload = stage_release(&a, &b, &operation);
+    let (unload_receipt, unload_leaves) = spend_receipt(&a, &b, &operation, &from_unload);
+    let refused =
+        spend_starts_from_recorded(&unload_receipt, &unload_leaves, &genesis, &after_load)
+            .expect_err("a spend from an account B has not validated");
+    assert!(
+        refused
+            .to_string()
+            .contains("does not start from the offline account"),
+        "{refused}"
+    );
+
+    b.device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at + 1).await;
+    let after_unload = recorded(loaded_at + 1);
+    spend_starts_from_recorded(&unload_receipt, &unload_leaves, &genesis, &after_unload)
+        .expect("taken once B recorded the unload");
+    spend_starts_from_recorded(&load_receipt, &load_leaves, &genesis, &after_unload)
+        .expect_err("the spend from the load's account starts from a state B moved past");
+
+    let mut other_bundle = unload_leaves;
+    other_bundle.bundle[0] ^= 0x01;
+    let refused =
+        spend_starts_from_recorded(&unload_receipt, &other_bundle, &genesis, &after_unload)
+            .expect_err("a record under another bundle");
+    assert!(
+        refused.to_string().contains("is not the sender's"),
+        "{refused}"
+    );
+    let refused = spend_starts_from_recorded(
+        &unload_receipt,
+        &unload_leaves,
+        &b.device.genesis,
+        &after_unload,
+    )
+    .expect_err("a record of another sender");
+    assert!(
+        refused.to_string().contains("is not the sender's"),
+        "{refused}"
     );
 }

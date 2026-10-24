@@ -4006,6 +4006,23 @@ impl BilateralBleHandler {
             } else {
                 None
             };
+        // The owner's receive rule (2026-10-22): the sender's offline account
+        // under the release's bundle as this device last validated it from the
+        // sender's online history; Core takes the spend only from it.
+        let bearer_origin = match &sender_bearer_leaves {
+            Some(leaves) => crate::storage::client_db::economic_lineage::latest_offline_account(
+                &sender_genesis,
+                &session.counterparty_device_id,
+                &leaves.bundle,
+            )
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("bilateral confirm: the sender's recorded offline account: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?,
+            None => None,
+        };
         let verified = dsm::bilateral::offline::decide_confirm(
             dsm::bilateral::offline::ConfirmClaims {
                 signature: &confirm_request.sender_signature,
@@ -4024,6 +4041,7 @@ impl BilateralBleHandler {
                 sender_device_tree_root: sender_device_tree,
                 sender_chain_head: sender_chain_head.as_deref(),
                 bearer: sender_bearer_leaves,
+                bearer_origin,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: session.counterparty_device_id,
