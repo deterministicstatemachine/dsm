@@ -4542,8 +4542,11 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
     // Each reading asks every seat of the head's route once, and the leader
     // is also asked by the writer's pre-read. With each walk's reading of the
     // key it stopped on handed on, no seat is asked more than seven times in
-    // this trade; reading that key again after each walk asked every seat
-    // eleven times, the leader twelve.
+    // this trade for the walks; reading that key again after each walk asked
+    // every seat eleven times, the leader twelve. Once B's exercise holds the
+    // key final, the resolution relying on it reads it once more, afresh, for
+    // the check of its completion proof (SoFi Amendment S10; owner ruling
+    // 2026-10-24): eight.
     let per_seat = p
         .nodes
         .nodes
@@ -4552,7 +4555,7 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
         .max()
         .expect("a set has members");
     assert!(
-        per_seat <= 7,
+        per_seat <= 8,
         "a seat was asked for the head {per_seat} times ({} requests in all)",
         asked.iter().filter(|r| **r == head).count()
     );
