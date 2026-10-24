@@ -80,7 +80,7 @@ android {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
         }
 
-        // CMake build flags for Silicon Fingerprint NDK library
+        // CMake build flags for the native build, which imports libdsm_sdk.so
         externalNativeBuild {
             cmake {
                 cppFlags += "-std=c++17"
@@ -205,7 +205,7 @@ android {
         }
     }
 
-    // NDK C++ build for Silicon Fingerprint (hardware PUF for DBRW)
+    // NDK build: imports the Rust SDK's libdsm_sdk.so (src/main/cpp/CMakeLists.txt)
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
@@ -503,12 +503,6 @@ dependencies {
     // Reverted upgrades: latest versions require AGP >=8.6 & compileSdk 36.
     // Keep previous stable versions until AGP/toolchain bump planned.
     implementation("androidx.core:core-ktx:1.12.0")
-    // Phase 13: androidx.security:security-crypto dependency removed.
-    // The only consumer was `security/CdbrwKeystoreSalt.kt` which
-    // wrapped the now-defunct random DBRW salt in
-    // EncryptedSharedPreferences.  K_DBRW is now derived
-    // deterministically from (hw_entropy, env_fingerprint) — no
-    // Keystore-bound master key needed.
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.10.0")
     implementation("androidx.webkit:webkit:1.8.0")

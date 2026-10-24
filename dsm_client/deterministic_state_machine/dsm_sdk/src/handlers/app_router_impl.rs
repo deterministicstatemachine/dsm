@@ -1317,7 +1317,7 @@ impl AppRouterImpl {
                     Ok(mut receipt) => match receipt.compute_commitment() {
                         Ok(commitment) => {
                             // Resolve the chain-head at-rest key (s0-rooted, re-derived from the
-                            // unlocked wallet; no C-DBRW) + root AK keypair. The per-step EK seed +
+                            // unlocked wallet) + root AK keypair. The per-step EK seed +
                             // ML-KEM coins re-derive Smaster inside `sign_receipt_with_per_step_ek`.
                             let at_rest_key = match crate::init::current_chain_head_at_rest_key() {
                                 Ok(k) => k,

@@ -296,7 +296,7 @@ pub fn initialize_sdk_context(
 /// Production entropy derivation (deterministic, wallet-seed-rooted).
 ///
 /// SDK-context entropy roots in the BIP39 wallet seed (the canonical Genesis v2 root
-/// secret, re-derived from the session-cached mnemonic — never persisted, no C-DBRW).
+/// secret, re-derived from the session-cached mnemonic — never persisted).
 ///
 /// `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ DevID ‖ G)` (key schedule KS1): the wallet seed
 /// enters only the wallet-root Extract. `device_id`/`genesis_hash` are 32 bytes (anything
