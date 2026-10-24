@@ -836,6 +836,9 @@ pub(crate) fn missing_text(missing: Missing) -> String {
         Missing::LeaderLinkUnseen { position } => {
             format!("the seat at position {position} has not seen the leader link yet")
         }
+        Missing::CompletionRefuted => {
+            "fresh reads refuted the completion proof kept for the value final here".into()
+        }
     }
 }
 
