@@ -2000,6 +2000,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_genesis_store_and_read() {
+        crate::economic_fixtures::use_test_storage_dir();
         let _ = init_database();
         cleanup_test_genesis();
 
