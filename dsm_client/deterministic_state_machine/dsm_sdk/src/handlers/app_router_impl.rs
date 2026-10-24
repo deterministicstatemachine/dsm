@@ -2596,21 +2596,36 @@ impl AppRouter for AppRouterImpl {
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        offline_state_proof_before: Vec<u8>,
-        offline_state_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
         self.core_sdk.release_offline_bearer(
             staged,
             receiver_challenge,
             sender_device_root_before,
             sender_device_root_after,
-            offline_state_proof_before,
-            offline_state_proof_after,
         )
     }
 
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError> {
         self.core_sdk.cancel_offline_bearer_release()
+    }
+
+    fn reemit_offline_bearer(
+        &self,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError> {
+        self.core_sdk.reemit_offline_bearer()
+    }
+
+    fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, dsm::types::error::DsmError> {
+        self.core_sdk.observe_offline_bearer_recovery()
+    }
+
+    fn finalize_offline_bearer(
+        &self,
+        appliance_next_root: [u8; 32],
+    ) -> Result<(), dsm::types::error::DsmError> {
+        self.core_sdk.finalize_offline_bearer(appliance_next_root)
     }
 
     // ====================== QUERY ======================

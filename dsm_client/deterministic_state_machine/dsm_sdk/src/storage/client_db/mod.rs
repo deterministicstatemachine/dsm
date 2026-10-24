@@ -518,7 +518,9 @@ fn get_database_path() -> Result<PathBuf> {
 /// the transaction that accepts a step or by a contact add's validation, and
 /// nothing behind it is read again. A database made at 27 or 28 keeps the
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
-/// the same shape and encoding.
+/// the same shape and encoding. `peer_offline_account` is created on open
+/// the same way: a peer's offline account as a boundary the receiver
+/// validated left it (the owner's receive rule, 2026-10-22).
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -861,6 +863,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
             economic_root       BLOB NOT NULL,      -- 32B
             accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
             PRIMARY KEY(peer_genesis, peer_devid, economic_position)
+        );
+
+        -- The owner's receive rule (2026-10-22): a peer's offline account as
+        -- one of its offline boundaries left it, validated by this receiver's
+        -- own walk of the peer's online history, named by the anchor bundle.
+        -- Offline acceptance trusts only what is recorded here.
+        CREATE TABLE IF NOT EXISTS peer_offline_account(
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            bundle              BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            account_root        BLOB NOT NULL,      -- 32B
+            funding_chain       BLOB NOT NULL,      -- 32B
+            PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
         );
         DROP TABLE IF EXISTS economic_admitted;
 

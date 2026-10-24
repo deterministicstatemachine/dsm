@@ -139,23 +139,42 @@ pub trait AppRouter: Send + Sync {
         receiver_challenge: [u8; 32],
     ) -> Result<crate::sdk::core_sdk::StagedBearerTransition, dsm::types::error::DsmError>;
 
-    /// v2 producer phase 2: PREPARE(t, r_R, R_i, R_{i+1}) → COMMIT → EMIT → FINALIZE with the real
-    /// device SMT roots from the caller's advance simulation, attaching `Π_i`/`Π_{i+1}` to the
-    /// release package. Delegates to [`CoreSDK::release_offline_bearer`].
+    /// v2 producer phase 2, the hardware half of the one motion: PREPARE(t, r_R, R_i, R_{i+1}) →
+    /// COMMIT → EMIT with the real device SMT roots from the caller's advance simulation. The
+    /// frontier advances only after the step commits
+    /// ([`finalize_offline_bearer`](Self::finalize_offline_bearer)). Delegates to
+    /// [`CoreSDK::release_offline_bearer`].
     fn release_offline_bearer(
         &self,
         staged: &crate::sdk::core_sdk::StagedBearerTransition,
         receiver_challenge: [u8; 32],
         sender_device_root_before: [u8; 32],
         sender_device_root_after: [u8; 32],
-        offline_state_proof_before: Vec<u8>,
-        offline_state_proof_after: Vec<u8>,
     ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
 
     /// Cleanup: release an ABANDONED prepared bearer (e.g. the confirm build failed between
     /// PREPARE and COMMIT) so the appliance returns to `Ready` and future offline-bearer sends do
     /// not fail closed. Delegates to [`CoreSDK::cancel_offline_bearer_release`].
     fn cancel_offline_bearer_release(&self) -> Result<(), dsm::types::error::DsmError>;
+
+    /// The committed release the appliance holds, emitted again — the same release, the counter
+    /// unmoved (§26). Delegates to [`CoreSDK::reemit_offline_bearer`].
+    fn reemit_offline_bearer(
+        &self,
+    ) -> Result<crate::sdk::core_sdk::OfflineBearerArtifacts, dsm::types::error::DsmError>;
+
+    /// The appliance's recovery state (§26), observed. Delegates to
+    /// [`CoreSDK::observe_offline_bearer_recovery`].
+    fn observe_offline_bearer_recovery(
+        &self,
+    ) -> Result<anchor_core::appliance::RecoverOutcome, dsm::types::error::DsmError>;
+
+    /// Advance the appliance's frontier to the committed successor once the step that spends it
+    /// is committed. Delegates to [`CoreSDK::finalize_offline_bearer`].
+    fn finalize_offline_bearer(
+        &self,
+        appliance_next_root: [u8; 32],
+    ) -> Result<(), dsm::types::error::DsmError>;
 
     /// Execute a prepared bilateral advance through the canonical
     /// [`CoreSDK::execute_on_relationship`] chokepoint.
