@@ -744,6 +744,12 @@ pub enum Missing {
     /// A completion proof names a link at this position, and that seat's own
     /// mirror of the leader's ByteCommits does not yet cover the leader link.
     LeaderLinkUnseen { position: usize },
+    /// The completion proof this device keeps for the value final here was
+    /// refuted by fresh reads of the seats ([`ProofInvalid`]): the value is
+    /// never relied on through it. That establishes nothing about the value,
+    /// the position or the trade (owner ruling 2026-10-24: failure to
+    /// establish validity is not proof of invalidity).
+    CompletionRefuted,
 }
 
 /// A seat's arrival log at a cell as the reader folded it ([`HeldLog`]):

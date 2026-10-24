@@ -498,16 +498,17 @@ impl AppRouterImpl {
     }
 
     pub(crate) async fn handle_connect_invoke(&self, i: AppInvoke) -> AppResult {
+        // Boxed as the router boxes its routes (`AppRouterImpl::invoke`).
         let result = match i.method.as_str() {
-            "connect.approve" => self.connect_approve(&i.args).await,
-            "connect.respond" => self.connect_respond(&i.args).await,
-            "connect.disconnect" => connect_disconnect(&i.args).await,
-            "connect.sync" => self.connect_sync().await,
+            "connect.approve" => Box::pin(self.connect_approve(&i.args)).await,
+            "connect.respond" => Box::pin(self.connect_respond(&i.args)).await,
+            "connect.disconnect" => Box::pin(connect_disconnect(&i.args)).await,
+            "connect.sync" => Box::pin(self.connect_sync()).await,
             "connect.app.offer" => connect_app_offer(&i.args),
-            "connect.app.accept" => self.connect_app_accept(&i.args).await,
-            "connect.app.request" => self.connect_app_request(&i.args).await,
+            "connect.app.accept" => Box::pin(self.connect_app_accept(&i.args)).await,
+            "connect.app.request" => Box::pin(self.connect_app_request(&i.args)).await,
             "connect.app.respond" => connect_app_respond(&i.args),
-            "connect.app.status" => self.connect_app_status(&i.args).await,
+            "connect.app.status" => Box::pin(self.connect_app_status(&i.args)).await,
             other => Err(format!("unknown connect invoke: {other}")),
         };
         match result {
@@ -832,7 +833,7 @@ impl AppRouterImpl {
             session.session_id,
             seq,
             None,
-            self.execute(session, seq, &request),
+            Box::pin(self.execute(session, seq, &request)),
         )
         .await;
         let outcome = executed.outcome;
@@ -862,7 +863,7 @@ impl AppRouterImpl {
             .into_iter()
             .filter(|s| s.connected == store::SessionStatus::Connected)
             .collect();
-        let cycles = sessions.iter().map(|s| self.sync_session(s));
+        let cycles = sessions.iter().map(|s| Box::pin(self.sync_session(s)));
         let outcomes = futures::future::join_all(cycles).await;
         let mut views = Vec::with_capacity(sessions.len());
         for (session, outcome) in sessions.iter().zip(outcomes) {
@@ -893,7 +894,7 @@ impl AppRouterImpl {
             let lock = session_lock(&session.session_id)?;
             let one = lock.lock().await;
             let current = connected(&session.session_id)?;
-            let approved = self.carry_out_approved(&current, &held).await?;
+            let approved = Box::pin(self.carry_out_approved(&current, &held)).await?;
             drop(one);
             if let Approved::Waits(why) = approved {
                 return Err(format!("request {} is approved and waits: {why}", held.seq));
@@ -907,7 +908,7 @@ impl AppRouterImpl {
             let one = lock.lock().await;
             // Re-read under the lock: each processed request moves the guard.
             let current = connected(&session.session_id)?;
-            let flow = self.process(&current, &request.encode_to_vec()).await?;
+            let flow = Box::pin(self.process(&current, &request.encode_to_vec())).await?;
             drop(one);
             match flow {
                 Flow::Processed => deliver_owed(&current).await?,
@@ -991,7 +992,7 @@ impl AppRouterImpl {
                     session.session_id,
                     seq,
                     spend,
-                    self.execute(session, seq, &request),
+                    Box::pin(self.execute(session, seq, &request)),
                 )
                 .await;
                 let spend = executed.spend(spend);
@@ -1096,12 +1097,14 @@ impl AppRouterImpl {
         if let Err(why) = duel_belongs_to(session, request) {
             return Executed::failed(why);
         }
+        // Each request's work is boxed, as the router boxes its routes
+        // (`AppRouterImpl::invoke`): this runs inside a routed call.
         match request {
             Request::AcceptIssued { anchor } => {
                 // Whose object it is is read from its committed policy before
                 // anything is rooted: rooting first left another creator's
                 // object adopted after the refusal (SA-124).
-                let creator = match self.verified_policy(*anchor).await {
+                let creator = match Box::pin(self.verified_policy(*anchor)).await {
                     Ok(parsed) => match parsed.release {
                         dsm::economic::token_policy::Release::AllAtCreation {
                             creator_device_id,
@@ -1120,7 +1123,7 @@ impl AppRouterImpl {
                         "the object's committed policy names another creator than this application",
                     );
                 }
-                if let Err(e) = self.root_anchor(anchor).await {
+                if let Err(e) = Box::pin(self.root_anchor(anchor)).await {
                     return Executed::failed(format!("rooting the object: {e}"));
                 }
                 match crate::storage::client_db::token_registry::get_token_by_policy_commit(anchor)
@@ -1142,14 +1145,13 @@ impl AppRouterImpl {
             } => {
                 // Paid in the token the grant names, by its commit: never by a
                 // ticker, which an application may give its own coin.
-                let sent = self
-                    .send_online(OnlineSendIntent {
-                        to_device_id: session.app_device_id,
-                        policy_commit: *policy_commit,
-                        amount: *amount,
-                        memo: payment_memo(&session.session_id, seq, memo),
-                    })
-                    .await;
+                let sent = Box::pin(self.send_online(OnlineSendIntent {
+                    to_device_id: session.app_device_id,
+                    policy_commit: *policy_commit,
+                    amount: *amount,
+                    memo: payment_memo(&session.session_id, seq, memo),
+                }))
+                .await;
                 match sent {
                     // A committed debit is paid, delivered or not: it stands
                     // and the sweep carries it forward (§16.6), so it counts
@@ -1172,7 +1174,7 @@ impl AppRouterImpl {
                 token_out,
                 amount_in,
                 witnesses,
-            } => match self.quote(token_in, token_out, *amount_in, witnesses).await {
+            } => match Box::pin(self.quote(token_in, token_out, *amount_in, witnesses)).await {
                 Ok(found) => match found.ends {
                     Some(ends) => {
                         Executed::carried_out(Some(generated::app_response_body_v1::Result::Quote(
@@ -1195,7 +1197,7 @@ impl AppRouterImpl {
                 min_amount_out,
                 witnesses,
             } => {
-                self.swap(token_in, token_out, *amount_in, *min_amount_out, witnesses)
+                Box::pin(self.swap(token_in, token_out, *amount_in, *min_amount_out, witnesses))
                     .await
             }
             Request::Holdings { policy_commits } => {
@@ -1212,13 +1214,15 @@ impl AppRouterImpl {
                 )),
                 Err(e) => Executed::failed(e),
             },
-            Request::EscrowLock(lock) => match self.lock_stake(session, lock).await {
+            Request::EscrowLock(lock) => match Box::pin(self.lock_stake(session, lock)).await {
                 Ok(locked) => Executed::carried_out(Some(
                     generated::app_response_body_v1::Result::EscrowLock(locked),
                 )),
                 Err(e) => Executed::failed(e),
             },
-            Request::EscrowRelease { vault_ids } => self.collect(session, vault_ids).await,
+            Request::EscrowRelease { vault_ids } => {
+                Box::pin(self.collect(session, vault_ids)).await
+            }
             Request::DuelSessionKey { match_nonce } => {
                 match crate::sdk::computed_flow::session_public_key(match_nonce) {
                     Ok(key) => Executed::carried_out(Some(
@@ -1232,7 +1236,7 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(format!("the session key: {e}")),
                 }
             }
-            Request::DuelLock(lock) => match self.duel_lock(lock).await {
+            Request::DuelLock(lock) => match Box::pin(self.duel_lock(lock)).await {
                 Ok(locked) => Executed::carried_out(Some(
                     generated::app_response_body_v1::Result::DuelLock(locked),
                 )),
@@ -1253,7 +1257,7 @@ impl AppRouterImpl {
                     .await
                     .map_err(|e| format!("readying: {e}"))
                 };
-                match readied.await {
+                match Box::pin(readied).await {
                     Ok(r) => Executed::carried_out(Some(
                         generated::app_response_body_v1::Result::DuelReady(
                             generated::ConnectDuelReadyResultV1 {
@@ -1272,7 +1276,7 @@ impl AppRouterImpl {
                         .await
                         .map_err(|e| format!("withdrawing: {e}"))
                 };
-                match withdrawn.await {
+                match Box::pin(withdrawn).await {
                     Ok(view) => Executed::carried_out(Some(
                         generated::app_response_body_v1::Result::DuelCells(duel_cells(&view)),
                     )),

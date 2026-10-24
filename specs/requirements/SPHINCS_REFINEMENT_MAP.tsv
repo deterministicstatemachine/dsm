@@ -75,10 +75,10 @@ dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	42	derive
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	121	derive_ek_cert_hash	ekCertInput / cert_preimage_binding	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	130	sign_ek_cert	sign(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
 dsm_client/deterministic_state_machine/dsm/src/crypto/ephemeral_key.rs	141	verify_ek_cert	verify(.spx256f) on hash of ekCertInput	0c72673052df00fa8cc5cfcf328e198b89500860
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
-dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	5b329323b641dcb1c1ed8dab1c6154b0abeab8c7
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	120	derive_ak_seed	KS1 Expand under PRK_d: akInfo_inj (C68); refinement unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	131	derive_device_ak_keypair	seed-to-AK call path; unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	146	derive_devid	devidInput / devid_preimage_binding	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
+dsm_client/deterministic_state_machine/dsm/src/core/identity/genesis_v2.rs	167	derive_smaster	KS1 Expand under PRK_s0: snode_info_inj (C68), modeled in ks1_forge_256f (C69), vectors executed by KeyScheduleChecks; refinement unproved	e8fb6c371da0ba3bf00c833417b9a1dc5d1de6e6
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	19	binding_digest	identityBindingInput / identity_preimage_binding	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/bilateral/identity_binding.rs	33	verify_kyber_identity_binding	key width + verify; tested by existing suite, not proved	0aa0f212cfa0c7a82277da2d1df5b1e9366c3462
 dsm_client/deterministic_state_machine/dsm/src/sofi/derive.rs	184	setup_signing_digest	domainInput + opaque CCB; unproved CCB refinement	68f73b32f99648205dec063362f75479f8de997e
@@ -90,16 +90,16 @@ dsm_client/deterministic_state_machine/dsm/src/economic/claim_envelope.rs	166	si
 dsm_client/deterministic_state_machine/dsm/src/economic/successor_evidence.rs	72	substrate_signing_digest	substrate-bound digest; unproved	2044d5bba745f4c77676bfd63ea0c5cff005ca75
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2218	signing_bytes	operation-specific canonical signing bytes; unproved	0feab922b9a69d621f1edda30bfe8055b94e7698
 dsm_client/deterministic_state_machine/dsm/src/types/receipt_types.rs	498	relationship_finalized_signing_target	finalized relationship digest; unproved	e48b0069a258548bc21c6eabe48242c5eedf1c47
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	817	process_envelope_v3	JNI → ingress; unproved	9ba548e790bb28d3dae683d14f14bf35e6a53718
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	212	dispatch_envelope_via_ingress	ingress dispatch; unproved	9ba548e790bb28d3dae683d14f14bf35e6a53718
-dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	986	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	9ba548e790bb28d3dae683d14f14bf35e6a53718
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	817	process_envelope_v3	JNI → ingress; unproved	f719b4eb5d2a15ddc1c3b404c6e47df8d9efb951
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	212	dispatch_envelope_via_ingress	ingress dispatch; unproved	f719b4eb5d2a15ddc1c3b404c6e47df8d9efb951
+dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	986	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	f719b4eb5d2a15ddc1c3b404c6e47df8d9efb951
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters.rs	100	install_app_router_adapter	router installation; unproved	e8c13660a518419c200f790a980030300b4528ee
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	46	signing_digest	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	51	sign_own	AK sphincs_sign on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	60	verify	sphincs_verify on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	298c03a7ac40940619af84c55235940913190c9d
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	298c03a7ac40940619af84c55235940913190c9d
-dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	298c03a7ac40940619af84c55235940913190c9d
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	878a7e9c4730bda4ce3992163886cbea227757c1
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	878a7e9c4730bda4ce3992163886cbea227757c1
+dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	878a7e9c4730bda4ce3992163886cbea227757c1
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	bdd3e26ac0e87b5aed4efa25d679e9bcb8e75481
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	9723773f5c61435e072df51b49a2d206b3714034
 crates/dsm-anchor-pico/src/main.rs	1	module boundary	unproved	fb0687d62f305afa7651ddf9cae981350853d91b

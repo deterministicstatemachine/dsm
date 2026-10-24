@@ -392,7 +392,9 @@ fn recorded(
 }
 
 /// Keep the completion proof of the value final at `cell` (storage spec §9
-/// rule 11), keyed by the cell and the value it proves.
+/// rule 11), keyed by the cell and the value it proves. A proof already kept
+/// for the value stands: later reads may build another proof of it, and the
+/// kept one is never replaced.
 pub(crate) fn keep_completion(
     cell: &RoutedCell,
     proof: &dsm::route_chain::CompletionProof,
@@ -400,9 +402,15 @@ pub(crate) fn keep_completion(
     let storage = |what: &str, e: &dyn core::fmt::Display| {
         DsmError::storage(format!("{what}: {e}"), None::<std::io::Error>)
     };
+    if crate::storage::client_db::completion_proofs::get(cell, &proof.value)
+        .map_err(|e| storage("kept completion proof", &e))?
+        .is_some()
+    {
+        return Ok(());
+    }
     let digest = dsm::route_chain::completion_digest(cell, proof)
         .map_err(|e| storage("completion digest", &format!("{e:?}")))?;
-    crate::storage::client_db::completion_proofs::keep(cell.namespace(), cell.key(), &digest, proof)
+    crate::storage::client_db::completion_proofs::keep(cell, &digest, proof)
         .map_err(|e| storage("keep completion proof", &e))
 }
 

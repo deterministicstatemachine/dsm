@@ -124,9 +124,8 @@ echo "✓ identical dsm_env_config.toml on both devices (md5=$OWNER_CFG_MD5)"
 #    Android-system clean install whenever the APK changes between
 #    runs (signature/binary delta).  bmgr disable + allowBackup=false
 #    do NOT prevent this on Samsung devices — observed empirically
-#    that A54 + A16 both lose `dsm_silicon_fp_v4.bin` + `dsm_client.db`
-#    on every code-change install cycle, forcing a ~15min M=3
-#    re-enrollment per device.  This loop runs `run-as tar` against
+#    that A54 + A16 both lose `dsm_client.db` on every code-change
+#    install cycle, forcing a new wallet on each device.  This loop runs `run-as tar` against
 #    each wallet's private files dir BEFORE the gradle install
 #    spawns, stashes the archive to /sdcard, then restores after
 #    the install completes.  The wallet's app is debuggable in the
@@ -163,14 +162,8 @@ backup_wallet() {
     # backup if this attempt produces trivial output (e.g. wallet
     # files dir empty post-wipe).  Tar EVERY persistent wallet state
     # location, not just `files/`:
-    #   - `files/`        → dsm_silicon_fp_v4.bin + dsm_client.db
-    #                       + bilateral_storage/ etc.
-    #   - `shared_prefs/` → Keystore-wrapped DBRW salt
-    #                       (EncryptedSharedPreferences master key
-    #                       lives in Android Keystore — only valid
-    #                       across `adb install -r`, NOT across full
-    #                       uninstall).  Captures dsm_cutover.xml,
-    #                       dsm_system.xml.
+    #   - `files/`        → dsm_client.db + bilateral_storage/ etc.
+    #   - `shared_prefs/` → dsm_cutover.xml, dsm_system.xml.
     #   - `databases/`    → any SQLite DBs the wallet writes outside
     #                       `files/` (Android-managed location).
     # Tarring all three keeps the bundle self-consistent — any partial
@@ -231,7 +224,7 @@ restore_wallet() {
     # Without retry the tar pipeline silently no-ops (the underlying
     # command exits 0 even when `run-as` fails) and we end up with
     # the install's empty data dir.  Verify the canonical wallet
-    # files (`dsm_silicon_fp_v4.bin` + `dsm_client.db`) actually
+    # file (`dsm_client.db`) actually
     # landed before declaring success.
     local TRIES=3
     local i
@@ -239,13 +232,13 @@ restore_wallet() {
         adb -s "$SERIAL" shell "cat $BACKUP_PATH | base64 -d | run-as com.dsm.wallet tar -xf - -C /data/data/com.dsm.wallet" >/dev/null 2>&1 || true
         # Verify expected files present.
         local CHECK
-        CHECK=$(adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'ls files/dsm_silicon_fp_v4.bin files/dsm_client.db 2>/dev/null | wc -l'" 2>&1 | tr -d '\r')
-        if [[ "$CHECK" == "2" ]]; then
+        CHECK=$(adb -s "$SERIAL" shell "run-as com.dsm.wallet sh -c 'ls files/dsm_client.db 2>/dev/null | wc -l'" 2>&1 | tr -d '\r')
+        if [[ "$CHECK" == "1" ]]; then
             echo "  ✓ restored wallet on $SERIAL (size=$DEV_SIZE bytes, $((i+1)) attempt$([ $i -gt 0 ] && echo s)) <- $BACKUP_PATH"
             return
         fi
         if (( i + 1 < TRIES )); then
-            echo "  · restore attempt $((i+1))/$TRIES on $SERIAL verified $CHECK/2 canonical files — retrying"
+            echo "  · restore attempt $((i+1))/$TRIES on $SERIAL verified $CHECK/1 canonical files — retrying"
             sleep 2
         fi
     done
