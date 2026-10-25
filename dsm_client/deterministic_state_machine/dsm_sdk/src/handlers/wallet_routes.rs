@@ -1230,8 +1230,7 @@ pub(crate) fn history_info(
         .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
     {
         Some(operation) => {
-            let op = dsm::types::operations::Operation::from_bytes(operation)
-                .map_err(|e| {
+            let op = dsm::types::operations::Operation::from_bytes(operation).map_err(|e| {
                 format!(
                     "wallet.history: transaction {}'s operation does \
                          not decode: {e}",
@@ -1248,32 +1247,24 @@ pub(crate) fn history_info(
                         t.tx_id
                     )
                 })?;
-            let opened =
-                dsm::types::operations::TransferTerms::from_bytes(kept)
-                    .map_err(|e| {
-                        format!(
-                            "wallet.history: transaction {}'s terms do not \
-                             decode: {e}",
-                            t.tx_id
-                        )
-                    })?;
-            let terms = super::recipient_accept::transfer_terms(&op, &opened)
-                .map_err(|e| {
-                format!("wallet.history: transaction {}: {e}", t.tx_id)
-            })?;
-            let (token, decimals) = token_of_commit(&terms.policy_commit)
-                .map_err(|e| {
-                    format!("wallet.history: transaction {}: {e}", t.tx_id)
-                })?;
-            (terms.amount, token, terms.memo, decimals)
-        }
-        None => {
-            let token = t.metadata.get("token_id").ok_or_else(|| {
+            let opened = dsm::types::operations::TransferTerms::from_bytes(kept).map_err(|e| {
                 format!(
-                    "wallet.history: transaction {} names no token",
+                    "wallet.history: transaction {}'s terms do not \
+                             decode: {e}",
                     t.tx_id
                 )
             })?;
+            let terms = super::recipient_accept::transfer_terms(&op, &opened)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            let (token, decimals) = token_of_commit(&terms.policy_commit)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            (terms.amount, token, terms.memo, decimals)
+        }
+        None => {
+            let token = t
+                .metadata
+                .get("token_id")
+                .ok_or_else(|| format!("wallet.history: transaction {} names no token", t.tx_id))?;
             let token = String::from_utf8(token.clone()).map_err(|e| {
                 format!(
                     "wallet.history: transaction {}'s token is not text: {e}",
@@ -1283,20 +1274,17 @@ pub(crate) fn history_info(
             // A row with no memo has none; one whose memo is
             // not text is corrupt.
             let memo = match t.metadata.get("memo") {
-                Some(bytes) => {
-                    String::from_utf8(bytes.clone()).map_err(|e| {
-                        format!(
+                Some(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
+                    format!(
                         "wallet.history: transaction {}'s memo is not text: \
                          {e}",
                         t.tx_id
                     )
-                    })?
-                }
+                })?,
                 None => String::new(),
             };
             let token = canonicalize_token_id(&token);
-            let decimals = token_decimals(&token)
-                .map_err(|e| format!("wallet.history: {e}"))?;
+            let decimals = token_decimals(&token).map_err(|e| format!("wallet.history: {e}"))?;
             (t.amount, token, memo, decimals)
         }
     };
@@ -1334,9 +1322,7 @@ pub(crate) fn history_info(
     // never an unspecified one.
     let tx_type_enum = match t.tx_type.as_str() {
         "faucet" => generated::TransactionType::TxTypeFaucet,
-        "bilateral_offline" => {
-            generated::TransactionType::TxTypeBilateralOffline
-        }
+        "bilateral_offline" => generated::TransactionType::TxTypeBilateralOffline,
         "online" => generated::TransactionType::TxTypeOnline,
         "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
         "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
@@ -1350,9 +1336,7 @@ pub(crate) fn history_info(
     };
 
     Ok(generated::TransactionInfo {
-        display_amount: format_directed_base_units_for_display(
-            amount, direction, decimals,
-        ),
+        display_amount: format_directed_base_units_for_display(amount, direction, decimals),
         id: safe_id,
         // Protocol/UI contract: device ids are binary 32-byte values.
         // We store canonical base32 in SQLite for indexing, but must return bytes here.

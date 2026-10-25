@@ -359,9 +359,9 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_finaliz
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	654	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	785	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/storage_routes.rs	747	cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	1822	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2131	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2132	let signature = dsm::crypto::sphincs::sphincs_sign(&sender_sk, &unsigned.to_bytes())
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	1806	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2115	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2116	let signature = dsm::crypto::sphincs::sphincs_sign(&sender_sk, &unsigned.to_bytes())
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/authored_objects.rs	101	match dsm::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/authored_objects.rs	155	let signature = dsm::crypto::sphincs::sphincs_sign(&secret, &statement(&body))
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/authored_objects.rs	209	use dsm::crypto::sphincs::{generate_keypair, sphincs_sign, SphincsVariant};
