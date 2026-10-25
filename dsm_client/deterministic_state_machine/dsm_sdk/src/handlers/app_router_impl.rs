@@ -2730,11 +2730,9 @@ impl AppRouter for AppRouterImpl {
             | "connect.app.respond"
             | "connect.app.status" => Box::pin(self.handle_connect_invoke(i)).await,
             // Token
-            "token.create"
-            | "token.forget"
-            | "token.burn"
-            | "tokens.publishPolicy"
-            | "tokens.addByAnchor" => Box::pin(self.handle_token_invoke(i)).await,
+            "token.create" | "token.burn" | "tokens.publishPolicy" | "tokens.addByAnchor" => {
+                Box::pin(self.handle_token_invoke(i)).await
+            }
             // Preferences
             "prefs.set" => Box::pin(self.handle_prefs_invoke(i)).await,
             // Pull the inbox, apply it and push what is owed.

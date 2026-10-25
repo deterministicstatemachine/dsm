@@ -525,7 +525,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
 /// whole route — namespace, key, seed and committed set — and the value, and
 /// `completion_proof_refuted`: a kept proof fresh reads refuted, never relied
-/// on again (SoFi Amendment S10; owner ruling 2026-10-24).
+/// on again (SoFi Amendment S10; owner ruling 2026-10-24). The same reset
+/// drops rows no current build writes, such as a contact under this device's
+/// own id (SA-141) or an own directory entry without an authority position
+/// (SA-143): beta keeps no legacy, so such a database is refused at open and
+/// the wallet is reprovisioned, never read with those rows in place.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —

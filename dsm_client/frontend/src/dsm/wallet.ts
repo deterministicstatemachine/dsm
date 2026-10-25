@@ -119,7 +119,7 @@ export async function getWalletHistory(): Promise<WalletHistory> {
       const first = rawTxList[0];
       logger.debug('[DSM:getWalletHistory] First tx', {
         amount: first.amount,
-        amountSigned: first.amountSigned,
+        direction: first.direction,
       });
     }
     // Map proto TransactionInfo → DomainTransaction at the envelope boundary.

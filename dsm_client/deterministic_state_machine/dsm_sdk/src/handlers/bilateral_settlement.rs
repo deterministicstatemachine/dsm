@@ -23,7 +23,8 @@
 //! NOT mutate `DeviceState.balances` itself.
 
 use crate::bluetooth::bilateral_ble_handler::BilateralSettlementDelegate;
-use crate::sdk::token_state::{canonicalize_token_id, TransferFields};
+use crate::handlers::wallet_routes::canonicalize_token_id;
+use crate::sdk::token_state::TransferFields;
 use crate::sdk::transfer_hooks::TransferMeta;
 use crate::util::text_id::encode_base32_crockford;
 use dsm::types::error::DsmError;
@@ -290,7 +291,7 @@ impl BilateralSettlementDelegate for DefaultBilateralSettlementDelegate {
 #[cfg(test)]
 mod tests {
     use super::parse_transfer_fields;
-    use crate::sdk::token_state::canonicalize_token_id;
+    use crate::handlers::wallet_routes::canonicalize_token_id;
     use dsm::types::operations::{Operation, TransactionMode};
     use dsm::types::token_types::Balance;
 

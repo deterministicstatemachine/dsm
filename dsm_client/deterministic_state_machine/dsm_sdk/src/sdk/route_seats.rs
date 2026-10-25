@@ -137,7 +137,7 @@ async fn leader_holds<S: RouteSeats>(seats: &S, cell: &RoutedCell, value: &[u8])
     let copy = dsm::route_chain::leader_copy(cell, value);
     let keep = dsm::route_chain::copies_of(&copy);
     let log = HeldLog::new(cell.namespace(), cell.key());
-    match fold_seat(seats, cell.route().leader(), log, &keep).await {
+    match fold_seat(seats, cell.route().leader(), log, &keep, None).await {
         Some(log) => match dsm::route_chain::leader_copy_record(cell, value, &log) {
             Some(record) => LeaderHolds::Record(record),
             None => LeaderHolds::Nothing,
@@ -301,7 +301,7 @@ async fn borne_out<S: RouteSeats>(
         |((namespace, key, _), copy)| async move {
             let copy = copy.as_ref()?;
             let keep = dsm::route_chain::copies_of(copy);
-            fold_seat(seats, seat, HeldLog::new(namespace, key), &keep).await
+            fold_seat(seats, seat, HeldLog::new(namespace, key), &keep, None).await
         },
     ))
     .await;
@@ -683,10 +683,31 @@ pub(crate) async fn read_cell_kept<S: RouteSeats>(
     keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
     is_final: impl FnOnce(&CellEvidence) -> bool,
 ) -> CellEvidence {
+    read_cell_kept_in(seats, cell, keep, None, is_final).await
+}
+
+/// [`read_cell_kept`], as one of reads made together within `window`.
+pub(crate) async fn read_cell_kept_within<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+    window: &ReadWindow,
+    is_final: impl FnOnce(&CellEvidence) -> bool,
+) -> CellEvidence {
+    read_cell_kept_in(seats, cell, keep, Some(window), is_final).await
+}
+
+async fn read_cell_kept_in<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+    window: Option<&ReadWindow>,
+    is_final: impl FnOnce(&CellEvidence) -> bool,
+) -> CellEvidence {
     if let Some(kept) = crate::sdk::final_reads::final_cell(cell) {
         return kept;
     }
-    let evidence = read_cell(seats, cell, keep).await;
+    let evidence = read_cell_in(seats, cell, keep, window).await;
     if is_final(&evidence) {
         crate::sdk::final_reads::keep_final_cell(cell, &evidence);
     }
@@ -713,20 +734,68 @@ pub(crate) fn root_claim_final(
 /// read past it is that seat not read, never a verdict.
 const HELD_LOG_BUDGET: usize = 8 * 1024 * 1024;
 
+/// What reads made together may keep between them: a read-ahead window
+/// (SA-76). Each seat's fold takes from it what its kept copies add, and a
+/// seat whose copies would take it past its total is not read, as a seat
+/// past [`HELD_LOG_BUDGET`] is not: a resource limit, never a verdict. A
+/// cell left unread here is read again by the walk that reaches it.
+pub(crate) struct ReadWindow {
+    left: std::sync::atomic::AtomicUsize,
+    refused: std::sync::atomic::AtomicUsize,
+}
+
+impl ReadWindow {
+    pub(crate) fn new(bytes: usize) -> Self {
+        Self {
+            left: std::sync::atomic::AtomicUsize::new(bytes),
+            refused: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Take `bytes` from what is left, or nothing, when fewer are left, and
+    /// say how many were.
+    fn take(&self, bytes: usize) -> Result<(), usize> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.left
+            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(bytes))
+            .map(drop)
+            .inspect_err(|_| {
+                self.refused.fetch_add(1, SeqCst);
+            })
+    }
+
+    /// Give back what a log that was dropped took.
+    fn give_back(&self, bytes: usize) {
+        self.left
+            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether a seat was left unread for want of the window: a further read
+    /// within it would read for nothing.
+    pub(crate) fn spent(&self) -> bool {
+        self.refused.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
 /// Fold `seat`'s log into `log` from the entry after the last one it holds,
 /// keeping what `keep` keeps. `None` when the seat did not answer every
-/// page, or what was kept passed [`HELD_LOG_BUDGET`]: the log is then not a
-/// read of the seat.
+/// page, or what was kept passed [`HELD_LOG_BUDGET`] or what is left of
+/// `window`: the log is then not a read of the seat.
 async fn fold_seat<S: RouteSeats>(
     seats: &S,
     seat: &[u8],
     mut log: HeldLog,
     keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+    window: Option<&ReadWindow>,
 ) -> Option<HeldLog> {
     let (namespace, key) = (log.namespace().to_vec(), *log.key());
     let from = log.count().saturating_add(1);
+    // What the log already holds was taken from `window` by the fold before
+    // this one; what this fold keeps is taken as it is kept.
+    let mut taken = log.kept_bytes();
     let held = {
         let mut take = |value: Vec<u8>| {
+            let before = log.kept_bytes();
             log.fold(&value, keep);
             if log.kept_bytes() > HELD_LOG_BUDGET {
                 return Err(format!(
@@ -735,13 +804,33 @@ async fn fold_seat<S: RouteSeats>(
                     log.kept_bytes()
                 ));
             }
+            if let Some(window) = window {
+                let added = log.kept_bytes().saturating_sub(before);
+                window.take(added).map_err(|left| {
+                    format!(
+                        "the seat's copies of the cell pass the {left} bytes left of the \
+                         reads made with it"
+                    )
+                })?;
+                taken = taken.saturating_add(added);
+            }
             Ok(())
         };
         seats
             .fold_values(seat, &namespace, &key, from, &mut take)
             .await
-    }?;
-    (held == log.count()).then_some(log)
+    };
+    match held {
+        Some(held) if held == log.count() => Some(log),
+        Some(..) | None => {
+            // The log is not a read of the seat and is dropped: what it took
+            // from the window is free again.
+            if let Some(window) = window {
+                window.give_back(taken);
+            }
+            None
+        }
+    }
 }
 
 /// The distinct values `member` holds at `(namespace, key)` that `keep`
@@ -790,6 +879,25 @@ pub async fn read_cell<S: RouteSeats>(
     cell: &RoutedCell,
     keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
 ) -> CellEvidence {
+    read_cell_in(seats, cell, keep, None).await
+}
+
+/// [`read_cell`], as one of reads made together within `window`.
+pub(crate) async fn read_cell_within<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+    window: &ReadWindow,
+) -> CellEvidence {
+    read_cell_in(seats, cell, keep, Some(window)).await
+}
+
+async fn read_cell_in<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    keep: &(dyn Fn(&RouteEntry) -> bool + Sync),
+    window: Option<&ReadWindow>,
+) -> CellEvidence {
     let (route, namespace, key) = (cell.route(), cell.namespace(), cell.key());
     // Each phase logs where it ends; the log's own timestamps time it. The
     // cell is named by its key's first five bytes (eight characters).
@@ -802,7 +910,7 @@ pub async fn read_cell<S: RouteSeats>(
             route
                 .seats()
                 .iter()
-                .map(|seat| fold_seat(seats, seat, HeldLog::new(namespace, key), keep)),
+                .map(|seat| fold_seat(seats, seat, HeldLog::new(namespace, key), keep, window)),
         ),
         futures::future::join_all(route.seats().iter().map(|seat| seats.latest_cycle(seat))),
     )
@@ -892,7 +1000,7 @@ pub async fn read_cell<S: RouteSeats>(
                     log.want(*index);
                 }
                 if wanted.iter().any(|index| *index > log.count()) {
-                    fold_seat(seats, seat, log, keep).await
+                    fold_seat(seats, seat, log, keep, window).await
                 } else {
                     Some(log)
                 }
@@ -1938,6 +2046,83 @@ mod tests {
             v_is_final(&cell, &evidence),
             "V reads Final behind the junk"
         );
+    }
+
+    /// SA-76. Reads made together keep between them no more than their
+    /// window. Every seat of a cell holds six distinct values the reader
+    /// keeps; read within a window of two seats' copies, the seats past it
+    /// are not read, never read with copies left out, and what is read fits
+    /// the window. Within a window that holds them all, and on their own,
+    /// every seat is read whole.
+    /// MUTATION CONTROL: a fold that takes nothing from the window turns
+    /// this red.
+    /// On the storage node's own code, on Postgres.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn reads_made_together_keep_no_more_than_their_window() {
+        const VALUES: usize = 6;
+        const VALUE_BYTES: usize = 64 * 1024;
+        let (_nodes, _config, set, cell) = pinned(0x39).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        for n in 0..VALUES {
+            let mut value = vec![0x57u8; VALUE_BYTES];
+            value[1] = n as u8;
+            let mut quiet = |_: &[WriteReport; 1]| Ok(());
+            from_leader(
+                &seats,
+                cell.route(),
+                [(&cell, value.as_slice())],
+                &mut quiet,
+            )
+            .await
+            .expect("a report");
+        }
+        let keep =
+            dsm::route_chain::recognized_copies(&cell, |bytes: &[u8]| bytes.first() == Some(&0x57));
+        let kept = |evidence: &CellEvidence| -> Vec<Option<usize>> {
+            evidence
+                .seats
+                .iter()
+                .map(|seat| seat.values.as_ref().map(HeldLog::kept_bytes))
+                .collect()
+        };
+
+        let alone = kept(&read_cell(&seats, &cell, &keep).await);
+        let whole: Vec<usize> = alone.iter().flatten().copied().collect();
+        assert_eq!(whole.len(), alone.len(), "read alone, every seat is read");
+        assert!(
+            whole.iter().all(|bytes| *bytes >= VALUES * VALUE_BYTES),
+            "each seat keeps every value"
+        );
+        let ample = ReadWindow::new(whole.iter().sum());
+        let within_ample = read_cell_within(&seats, &cell, &keep, &ample).await;
+        assert_eq!(kept(&within_ample), alone, "a window that holds every copy");
+        assert!(!ample.spent());
+
+        let budget = 2 * whole.iter().copied().max().expect("the cell has seats");
+        let window = ReadWindow::new(budget);
+        let within = kept(&read_cell_within(&seats, &cell, &keep, &window).await);
+        let read: Vec<(usize, usize)> = within
+            .iter()
+            .enumerate()
+            .filter_map(|(position, bytes)| bytes.map(|bytes| (position, bytes)))
+            .collect();
+        assert!(
+            read.len() < within.len(),
+            "a seat past the window is not read"
+        );
+        assert!(
+            read.iter().map(|(_, bytes)| bytes).sum::<usize>() <= budget,
+            "what is read fits the window"
+        );
+        for (position, bytes) in &read {
+            assert_eq!(
+                Some(*bytes),
+                alone[*position],
+                "a seat that is read is read whole"
+            );
+        }
+        assert!(window.spent());
     }
 
     #[test]
