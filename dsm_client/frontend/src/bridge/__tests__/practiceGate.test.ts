@@ -2,7 +2,7 @@
 //! While the tour's practice wallet stands in, the bridge lets only reads reach
 //! native code, whatever module makes the call. Practice mode used to patch the
 //! dsmClient object and nothing else, so a screen that imported a write
-//! directly (token creation, burn, forget, every SoFi action, the lock, NFC)
+//! directly (token creation, burn, every SoFi action, the lock, NFC)
 //! reached the real wallet during the tour. These tests drive such direct
 //! imports. Reads are answered from Rust's own record of the ingress, and every
 //! request that reaches the bridge is logged, so "blocked" means the bridge
@@ -99,7 +99,6 @@ describe('practice mode puts the bridge in its sandbox', () => {
   it('blocks a dsmClient write that practice does not answer', async () => {
     const burned = await client.burnToken({ tokenId: 'ERA', amount: '1' });
     expect(burned).toEqual(expect.objectContaining({ message: expect.stringContaining(PRACTICE_BLOCKED_MESSAGE) }));
-    await expect(client.forgetToken('PLAY')).rejects.toThrow(PRACTICE_BLOCKED_MESSAGE);
     expect(arrivals).toEqual([]);
   });
 

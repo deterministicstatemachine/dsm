@@ -20,8 +20,7 @@ import androidx.annotation.Keep
 //
 // VERIFICATION:
 //   nm -gU libdsm_sdk.so | grep -c Java_   -> must match `external fun` count
-//   nm -gU libdsm_sdk.so | grep -c cdbrw    -> must be 0 (router-only now)
-//   If either check fails after a Rust rebuild, a symbol was accidentally
+//   If the check fails after a Rust rebuild, a symbol was accidentally
 //   added or removed without updating the Kotlin side.
 //
 // ALL METHODS:
@@ -58,11 +57,6 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun getAllBalancesStrict(): ByteArray
     @Keep @JvmStatic external fun ensureAppRouterInstalled(): Boolean
     @Keep @JvmStatic external fun getAppRouterStatus(): Int
-    // C-DBRW JNI surface removed: Kotlin is transport-only. All C-DBRW state —
-    // enrollment (Algorithm 6.1), challenge/response (Algorithm 3), entropy
-    // health, signing, verifier key mgmt — is now reached exclusively through
-    // `NativeBoundaryBridge.routerQuery("cdbrw.*", ...)`. Do not re-add any
-    // `external fun cdbrw*` declarations here; they break the single-path rule.
     /** A link to the appliance deviceId, identity-anchored at address, came up or ended. */
     @Keep @JvmStatic external fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean)
     @Keep @JvmStatic external fun hasContactForDeviceId(deviceId: ByteArray): Boolean

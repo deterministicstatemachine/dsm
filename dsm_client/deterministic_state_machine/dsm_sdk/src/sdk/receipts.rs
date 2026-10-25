@@ -22,7 +22,7 @@ use dsm::verification::receipt_verification::{verify_per_step_ek_signing, Bilate
 ///   `(EK_pk_{n+1}, EK_sk_{n+1}) = SPHINCS+.KeyGen(E_{n+1})`
 ///
 /// All four context inputs MUST be 32 bytes; the secret root is the device master seed
-/// `Smaster` (re-derived from the wallet seed, never persisted — there is no C-DBRW).
+/// `Smaster` (re-derived from the wallet seed, never persisted).
 /// `k_step` comes from a Kyber exchange between the parties.
 #[derive(Debug, Clone, Copy)]
 pub struct PerStepEkContext {
@@ -248,8 +248,8 @@ pub fn sign_receipt_with_per_step_ek_target(
     use dsm::crypto::ephemeral_key::sign_ek_cert;
     use dsm::crypto::sphincs::sphincs_sign;
 
-    // 0. Re-derive the session secrets from the unlocked wallet (never persisted; no
-    //    C-DBRW). `Smaster` roots the per-step EK seed + ML-KEM coins; the chain-head
+    // 0. Re-derive the session secrets from the unlocked wallet (never persisted).
+    //    `Smaster` roots the per-step EK seed + ML-KEM coins; the chain-head
     //    at-rest key (s0-rooted, domain-separated) unlocks the prior signer SK. Both fail
     //    closed when the wallet is locked.
     let s_master = crate::init::current_smaster()?;
@@ -579,8 +579,8 @@ mod tests {
     // ── sign_receipt_with_per_step_ek + the committed head move ──
 
     /// Set up AppState identity (`G` + `DevID`) + a cached wallet seed so the per-step signing
-    /// helpers can re-derive `Smaster` (EK/coins) and the chain-head at-rest key internally
-    /// (replaces the old explicit K_DBRW argument). Returns the at-rest key the
+    /// helpers can re-derive `Smaster` (EK/coins) and the chain-head at-rest key internally.
+    /// Returns the at-rest key the
     /// committed head moves record the EK secret under.
     fn setup_signing_identity() -> [u8; 32] {
         crate::economic_fixtures::local_device(0x11);

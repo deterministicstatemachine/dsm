@@ -258,11 +258,39 @@ fn record_frontier_in_tx(
     Ok(())
 }
 
-/// Record the frontiers one verification established, in one transaction
-/// (DSM Amendment A19, owner ruling 2026-10-20: "Persist those frontiers
-/// atomically"), whatever the verification was for. A row is only ever
-/// added, so a frontier never moves back.
-pub fn record_frontiers(frontiers: &[dsm::economic::peer_lineage::PeerFrontier]) -> Result<()> {
+/// Record, inside `tx`, an offline account a verification validated (the
+/// owner's receive rule, 2026-10-22).
+fn record_offline_account_in_tx(
+    tx: &Transaction<'_>,
+    account: &dsm::economic::peer_lineage::PeerOfflineAccount,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO peer_offline_account(
+             peer_genesis, peer_devid, bundle, economic_position, account_root, funding_chain)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            account.genesis().as_slice(),
+            account.device_id().as_slice(),
+            account.bundle().as_slice(),
+            i64::try_from(account.economic_position())
+                .map_err(|e| anyhow!("position overflow: {e}"))?,
+            account.account_root().as_slice(),
+            account.funding_chain().as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Record what one verification validated, in one transaction (DSM
+/// Amendment A19, owner ruling 2026-10-20: "Persist those frontiers
+/// atomically"), whatever the verification was for: the frontiers it
+/// established, and the offline accounts the boundaries it passed left (the
+/// owner's receive rule, 2026-10-22). A row is only ever added, so nothing
+/// recorded moves back.
+pub fn record_validated(
+    frontiers: &[dsm::economic::peer_lineage::PeerFrontier],
+    offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
+) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
         .lock()
@@ -271,8 +299,58 @@ pub fn record_frontiers(frontiers: &[dsm::economic::peer_lineage::PeerFrontier])
     for frontier in frontiers {
         record_frontier_in_tx(&tx, frontier)?;
     }
+    for account in offline_accounts {
+        record_offline_account_in_tx(&tx, account)?;
+    }
     tx.commit()?;
     Ok(())
+}
+
+/// The peer's offline account under `bundle` as this receiver last
+/// validated it: the one the latest recorded boundary left. `None` when this
+/// receiver has validated no boundary of that account.
+pub fn latest_offline_account(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    bundle: &[u8; 32],
+) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT economic_position, account_root, funding_chain FROM peer_offline_account
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND bundle = ?3
+             ORDER BY economic_position DESC LIMIT 1",
+            params![
+                peer_genesis.as_slice(),
+                peer_devid.as_slice(),
+                bundle.as_slice()
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(position, root, chain)| {
+        Ok(
+            dsm::economic::peer_lineage::PeerOfflineAccount::rehydrate_recorded(
+                *peer_genesis,
+                *peer_devid,
+                u64::try_from(position)
+                    .map_err(|e| anyhow!("offline account position {position}: {e}"))?,
+                *bundle,
+                digest32(root, "offline account root")?,
+                digest32(chain, "offline account funding chain")?,
+            ),
+        )
+    })
+    .transpose()
 }
 
 /// The admitted economic position, if any — WITH its claim kind.

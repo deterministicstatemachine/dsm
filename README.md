@@ -107,7 +107,7 @@ SoFi is an AMM market that runs on the participants' own devices. A liquidity pr
 
 **Lifecycle, by route name.**
 
-1. `token.create` registers a token under a policy and adopts it for the creator; creation charges a fee in ERA (the builtin asset), read from `tokens.getFeeSchedule`. `token.mint` credits supply under an authorized-issuance operation (op `0x0029`); `token.burn` and `token.forget` are the inverses. `token.adoptionQr` and `tokens.addByAnchor` let another device adopt the token, which commits an `AdoptToken` advance on that device.
+1. `token.create` registers a token under a policy and adopts it for the creator; creation charges a fee in ERA (the builtin asset), read from `tokens.getFeeSchedule`. `token.mint` credits supply under an authorized-issuance operation (op `0x0029`); `token.burn` is its inverse; an adoption is permanent. `token.adoptionQr` and `tokens.addByAnchor` let another device adopt the token, which commits an `AdoptToken` advance on that device.
 2. `faucet.claim` credits 100 ERA to a fresh device from the beta emission schedule so it can pay fees.
 3. `dlv.create` funds the vault. The reserves leave the owner's projected balances at commit; the owner's wallet shows the debit immediately.
 4. `route.publishRoutingAdvertisement` publishes the pair, reserves, and fee to the fleet; `dlv.listOwnedAmmVaults` lists what this device runs.

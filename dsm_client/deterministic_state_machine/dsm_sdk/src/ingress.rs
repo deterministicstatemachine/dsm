@@ -284,7 +284,7 @@ fn initialize_sdk_core() -> Result<Vec<u8>, pb::Error> {
 fn prime_identity_app_state(device_id: &[u8], genesis_hash: &[u8]) -> Result<(), pb::Error> {
     // Re-derive the canonical device signing (AK) public key from the unlocked wallet seed
     // via the single Genesis v2 derivation (`derive_device_ak_keypair`, byte-identical to the
-    // key `create_genesis_v2` registered). No C-DBRW binding key. Fails closed if the wallet
+    // key `create_genesis_v2` registered). Fails closed if the wallet
     // is locked (the seed is re-derived from the session-cached mnemonic, never persisted).
     if device_id.len() != 32 {
         return Err(ingress_error(
@@ -602,13 +602,11 @@ pub fn dispatch_startup(request: StartupRequest) -> StartupResponse {
         }
         Some(startup_request::Operation::InitializeSdk(_)) => initialize_sdk_core(),
         Some(startup_request::Operation::InitializeIdentityContext(op)) => {
-            // op.binding_key is a reserved/ignored legacy C-DBRW field (Genesis v2 roots
-            // identity in the wallet seed).
+            // Genesis v2 roots identity in the wallet seed.
             initialize_identity_context_core(op.device_id, op.genesis_hash)
         }
         Some(startup_request::Operation::RestoreIdentityContext(op)) => {
-            // op.cdbrw_hw_entropy / op.cdbrw_env_fingerprint / op.cdbrw_salt are reserved/ignored
-            // legacy C-DBRW fields; identity restores deterministically from the wallet seed.
+            // Identity restores deterministically from the wallet seed.
             restore_identity_context_core(op.device_id, op.genesis_hash)
         }
         None => Err(ingress_error(
@@ -1314,11 +1312,13 @@ mod tests {
                 .encode_to_vec(),
             )
         };
-        let forget = || {
+        let burn = || {
             invoke(
-                "token.forget",
-                pb::TokenForgetRequest {
+                "token.burn",
+                pb::TokenBurnRequest {
                     token_id: "NONE".to_string(),
+                    amount_entered: "1".to_string(),
+                    ..Default::default()
                 }
                 .encode_to_vec(),
             )
@@ -1326,7 +1326,7 @@ mod tests {
         let asked = || {
             [
                 query("balance.list"),
-                forget(),
+                burn(),
                 IngressRequest {
                     operation: Some(ingress_request::Operation::Envelope(pb::EnvelopeOp {
                         envelope_bytes: vec![0x03, 0x0a, 0x00],
@@ -1368,9 +1368,9 @@ mod tests {
         expect_ok_bytes(dispatch_ingress(unlock("2468")));
         expect_ok_bytes(dispatch_ingress(query("balance.list")));
         // The write reaches its route, which answers for itself.
-        let reached = expect_error(dispatch_ingress(forget()));
+        let reached = expect_error(dispatch_ingress(burn()));
         assert!(
-            reached.message.contains("no token named NONE"),
+            reached.message.contains("unknown token NONE"),
             "{}",
             reached.message
         );
@@ -1836,11 +1836,13 @@ mod tests {
         let response = dispatch_ingress(IngressRequest {
             operation: Some(ingress_request::Operation::RouterInvoke(
                 pb::RouterInvokeOp {
-                    method: "token.forget".to_string(),
+                    method: "token.burn".to_string(),
                     args: pb::ArgPack {
                         codec: pb::Codec::Proto as i32,
-                        body: pb::TokenForgetRequest {
+                        body: pb::TokenBurnRequest {
                             token_id: "NOTHELD".to_string(),
+                            amount_entered: "1".to_string(),
+                            ..Default::default()
                         }
                         .encode_to_vec(),
                         ..Default::default()
@@ -1850,7 +1852,11 @@ mod tests {
             )),
         });
         let error = expect_error(response);
-        assert!(error.message.contains("token.forget"), "{}", error.message);
+        assert!(
+            error.message.contains("token.burn: unknown token NOTHELD"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

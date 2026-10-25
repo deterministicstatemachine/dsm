@@ -23,12 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Canonical mnemonic-rooted Genesis v2 identity handler (whitepaper §2.5).
  *
- * Genesis is driven by the BIP39 mnemonic, NOT by silicon enrollment: the frontend obtains a
+ * Genesis is driven by the BIP39 mnemonic: the frontend obtains a
  * mnemonic ([generateMnemonic]), shows it for backup, then calls [createGenesisV2], which routes
  * to the Rust `system.createGenesisV2` handler. Rust derives `wallet_seed`, caches it in the
  * unlocked session, runs `create_genesis_v2`, installs the state, persists the public GenesisV2
- * record, and initializes the SDK context. There is NO C-DBRW, NO AntiCloneGate/silicon
- * enrollment, NO random genesis entropy, and NO persisted s0/Smaster.
+ * record, and initializes the SDK context. There is NO random genesis entropy and NO
+ * persisted s0/Smaster.
  * Anti-clone (offline bearer only) is the Boot Fenced Fused Anchor, never this path.
  *
  * Cold start ([bootstrapFromPrefs]) re-primes the persisted identity via `restore_identity_context`;

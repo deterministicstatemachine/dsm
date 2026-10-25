@@ -444,6 +444,7 @@ impl LiveDevice {
                 sender_device_tree_root: DeviceTree::single(from.devid).root(),
                 sender_chain_head: self.peer_ek_heads.get(&from.devid).map(Vec::as_slice),
                 bearer: None,
+                bearer_origin: None,
             },
             &from.pinned(),
         ) {

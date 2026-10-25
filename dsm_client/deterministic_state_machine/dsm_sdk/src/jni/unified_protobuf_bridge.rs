@@ -546,7 +546,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
             // Three-state readiness gate for UI:
             // 0 = NO_IDENTITY (no persisted device_id/genesis)
             // 1 = RUNTIME_NOT_READY (identity present, but runtime not fully ready yet)
-            // 3 = READY (DBRW + SDK fully ready)
+            // 3 = READY (identity + SDK fully ready)
             // Before storage init nothing is readable: NO_IDENTITY, the fail-closed answer.
             let has_identity = crate::sdk::app_state::AppState::readable()
                 && crate::sdk::app_state::AppState::get_device_id()
@@ -581,7 +581,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getTransportH
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
-            // Do not gate header fetch on DBRW/SDK_READY. Headers may be required immediately
+            // Do not gate header fetch on SDK_READY. Headers may be required immediately
             // after genesis to avoid "identity not initialized" UI states. If the SDK context
             // isn't initialized yet, crate::get_transport_headers_v3_bytes will attempt to
             // bootstrap it from persisted AppState.
@@ -2694,7 +2694,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_getAppRouterS
             }
 
             // Genesis exists; the device signing key re-derives from the unlocked wallet seed
-            // (no persisted C-DBRW key). If the wallet is locked, report NOT_READY (reusing the
+            // (no persisted key). If the wallet is locked, report NOT_READY (reusing the
             // legacy status code) so the platform prompts an unlock before router install.
             let wallet_unlocked =
                 crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_some();

@@ -42,7 +42,9 @@ impl AppRouterImpl {
                             P::PendingUserAction => W::OfflinePhasePendingUserAction,
                             P::Accepted => W::OfflinePhaseAccepted,
                             P::Rejected => W::OfflinePhaseRejected,
-                            P::ConfirmPending => W::OfflinePhaseConfirmPending,
+                            // A releasing step's appliance commitment is incomplete: it is
+                            // pending, never shown as accepted before the anchor commits.
+                            P::Releasing | P::ConfirmPending => W::OfflinePhaseConfirmPending,
                             P::Committed => W::OfflinePhaseCommitted,
                             P::Failed => W::OfflinePhaseFailed,
                         }

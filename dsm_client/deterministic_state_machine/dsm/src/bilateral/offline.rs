@@ -15,7 +15,7 @@ use crate::core::bilateral_transaction_manager::{
     bilateral_accept_sign_message, bilateral_sign_message, compute_precommit,
     compute_successor_tip, operation_requires_offline_bearer, BilateralPreCommitment,
 };
-use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
+use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
 use crate::verification::receipt_verification::{
     verify_per_step_ek_signing, verify_receipt_state, BearerLeaves, BilateralSide,
     ReceiptStateContext,
@@ -331,6 +331,11 @@ pub struct AcceptedStep<'a> {
     /// device derived them from the step's release under the sender's pinned
     /// bundle.
     pub bearer: Option<BearerLeaves>,
+    /// For an offline-bearer step, the sender's offline account under the
+    /// release's bundle as this device last validated it from the sender's
+    /// online history (`economic_lineage::latest_offline_account`); `None`
+    /// when it has validated none.
+    pub bearer_origin: Option<crate::economic::peer_lineage::PeerOfflineAccount>,
 }
 
 /// A confirm the receiver may commit. Only [`decide_confirm`] makes one,
@@ -360,6 +365,50 @@ impl VerifiedConfirm {
     pub fn bearer(&self) -> Option<&BearerLeaves> {
         self.bearer.as_ref()
     }
+}
+
+/// The owner's receive rule (2026-10-22): an offline-bearer spend is taken
+/// only from the offline account its receiver validated itself, from the
+/// sender's online history. `recorded` is that account, as the sender's latest
+/// boundary the receiver walked left it, under the spend's anchor bundle. The
+/// receipt's offline-account write names the account the spend started from
+/// (its pre-root, which `verify_receipt_state` folds under the sender's device
+/// root): a spend from another sender's or another bundle's account, or from
+/// any other state of this one, is refused.
+pub fn spend_starts_at_the_record(
+    receipt: &StitchedReceiptV2,
+    leaves: &BearerLeaves,
+    sender_genesis: &[u8; 32],
+    recorded: &crate::economic::peer_lineage::PeerOfflineAccount,
+) -> Result<(), DsmError> {
+    if recorded.device_id() != &receipt.devid_a
+        || recorded.genesis() != sender_genesis
+        || recorded.bundle() != &leaves.bundle
+    {
+        return Err(DsmError::invalid_operation(
+            "offline-bearer spend: the recorded offline account is not the sender's under this \
+             spend's anchor bundle",
+        ));
+    }
+    let started_from = receipt
+        .step_writes
+        .iter()
+        .find_map(|write| match &write.leaf {
+            ReceiptLeaf::OfflineAccount(witness) => Some(witness.pre_account_root),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline-bearer spend: the receipt writes no offline account",
+            )
+        })?;
+    if &started_from != recorded.account_root() {
+        return Err(DsmError::invalid_operation(
+            "offline-bearer spend: it does not start from the offline account this device \
+             validated online for the sender",
+        ));
+    }
+    Ok(())
 }
 
 /// The receiver's decision on a confirm for a step it accepted: σ_A under
@@ -416,6 +465,15 @@ pub fn decide_confirm(
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
+    if let Some(leaves) = step.bearer.as_ref() {
+        let recorded = step.bearer_origin.ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline-bearer confirm: this device has validated none of the sender's offline \
+                 account online, so no offline payment from it is taken",
+            )
+        })?;
+        spend_starts_at_the_record(&receipt, leaves, &sender.genesis, &recorded)?;
+    }
 
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
         DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
@@ -1242,6 +1300,7 @@ mod tests {
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head,
                     bearer: None,
+                    bearer_origin: None,
                 },
                 &c.sender.pinned(),
             )
@@ -1365,6 +1424,7 @@ mod tests {
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head: None,
                     bearer: None,
+                    bearer_origin: None,
                 },
                 &c.sender.pinned(),
             )
