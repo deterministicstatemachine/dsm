@@ -14,11 +14,16 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
       ConfirmPending  -- confirm -->    Committed    (commits, then answers)
       Committed       <--- ack -----
 
-  The receiver commits on the confirm and the proposer on the ack: two
-  commits, on two devices, at two moments. Atomicity is therefore not "both
-  move in one step" but BOTH-OR-NEITHER: a step committed on one device is
-  committed on the other, or is still owed there by a proposer that can no
-  longer end it and can still commit it.
+  An offline-bearer step moves value, and its proposer commits when its
+  anchor commits, as it builds the confirm (owner ruling 2026-10-22: "the
+  value gets sent with that commitment already there"); the receiver commits
+  on the confirm, and the ack only files the receiver's countersigned
+  receipt. A step that moves no value still commits on its ack. Either way
+  it is two commits, on two devices, at two moments. Atomicity is therefore
+  not "both move in one step" but BOTH-OR-NEITHER: a step committed on one
+  device is committed on the other, or is still owed there — to the
+  receiver by a proposer past its confirm, or to the proposer by the ack —
+  by a side that can no longer end it and can still commit it.
 
   What the model holds the code to (dsm_sdk bluetooth/bilateral_ble_handler.rs):
 
@@ -67,6 +72,16 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
                                   takes the peer's proposal. Two proposals
                                   that cross each commit on its receiver: two
                                   successors of one tip -> NoFork
+    SenderCommitsAtRelease        TRUE for an offline-bearer step (the code's
+                                  value-moving steps): the proposer commits as
+                                  it confirms. FALSE: it commits on the ack
+                                  (DSM_OfflineFinality_CommitOnAck.cfg, the
+                                  code's steps that move no value).
+    ConfirmOwedWithCommit         FALSE: the proposer's commit and its owed
+                                  confirm are not one write; it commits and
+                                  restarts still Prepared, then cancels. Its
+                                  step is committed and the receiver's ended
+                                  -> NoHalfCommit
 
   Out of scope, recorded open in specs/requirements/CONFORMANCE_GAPS.md
   §6.28: a device whose head moves through ANOTHER relationship between its
@@ -81,13 +96,16 @@ CONSTANTS
     FramesAfterDurable,
     CancelOnlyBeforeConfirm,
     LinkLossFailsNothing,
-    ReceiverRefusesWhileInFlight
+    ReceiverRefusesWhileInFlight,
+    SenderCommitsAtRelease,
+    ConfirmOwedWithCommit
 
 ASSUME Cardinality(Device) = 2
 ASSUME StepsPerDevice \in Nat \ {0}
 ASSUME INITIAL_BALANCE \in Nat
 ASSUME {FramesAfterDurable, CancelOnlyBeforeConfirm, LinkLossFailsNothing,
-        ReceiverRefusesWhileInFlight} \subseteq BOOLEAN
+        ReceiverRefusesWhileInFlight, SenderCommitsAtRelease,
+        ConfirmOwedWithCommit} \subseteq BOOLEAN
 
 \* A step is named by its proposer and a number.
 Step == Device \X (1..StepsPerDevice)
@@ -226,19 +244,35 @@ RecvResponse(s) ==
     IN
     /\ link
     /\ m \in net
-    /\ CASE phase[p][s] = "Prepared" ->
+    /\ CASE phase[p][s] = "Prepared" /\ ~SenderCommitsAtRelease ->
               /\ phase' = [phase EXCEPT ![p][s] = "ConfirmPending"]
               /\ Answer(m, "confirm")
-         [] phase[p][s] = "ConfirmPending" ->
+              /\ UNCHANGED chain
+         \* An offline-bearer step: the proposer's anchor commits, and the
+         \* step commits with the confirm it owes in one write
+         \* (commit_released_bearer_step), guarded by the tripwire.
+         [] phase[p][s] = "Prepared" /\ SenderCommitsAtRelease
+              /\ ConfirmOwedWithCommit /\ Tip(p) = parent[s] ->
+              /\ chain' = [chain EXCEPT ![p] = Append(@, s)]
+              /\ phase' = [phase EXCEPT ![p][s] = "ConfirmPending"]
               /\ Answer(m, "confirm")
-              /\ UNCHANGED phase
-         [] phase[p][s] = "Rejected" ->
-              /\ Answer(m, "cancel")
-              /\ UNCHANGED phase
-         [] OTHER ->
+         \* ConfirmOwedWithCommit = FALSE: the commit lands, the owed
+         \* confirm does not, and the proposer restarts still Prepared.
+         [] phase[p][s] = "Prepared" /\ SenderCommitsAtRelease
+              /\ ~ConfirmOwedWithCommit /\ Tip(p) = parent[s] ->
+              /\ chain' = [chain EXCEPT ![p] = Append(@, s)]
               /\ Consume(m)
               /\ UNCHANGED phase
-    /\ UNCHANGED <<chain, parent, link>>
+         [] phase[p][s] = "ConfirmPending" ->
+              /\ Answer(m, "confirm")
+              /\ UNCHANGED <<chain, phase>>
+         [] phase[p][s] = "Rejected" ->
+              /\ Answer(m, "cancel")
+              /\ UNCHANGED <<chain, phase>>
+         [] OTHER ->
+              /\ Consume(m)
+              /\ UNCHANGED <<chain, phase>>
+    /\ UNCHANGED <<parent, link>>
 
 \* FramesAfterDurable = FALSE: the confirm leaves first and the proposer
 \* restarts before ConfirmPending is written. The confirm is out; the
@@ -315,8 +349,11 @@ RecvConfirm(s) ==
               /\ UNCHANGED <<chain, phase>>
     /\ UNCHANGED <<parent, link>>
 
-\* The proposer takes the ack (handle_commit_response): it commits the step
-\* its confirm was signed from. An ack that does not hold against its heads
+\* The proposer takes the ack (handle_commit_response). An offline-bearer
+\* step committed when its anchor committed: the ack files the receiver's
+\* countersigned receipt and ends the session (file_bearer_ack). A step that
+\* moves no value commits on the ack, the step its confirm was signed from
+\* (finalize_sender_step). An ack that does not hold against its heads
 \* commits nothing and leaves the step awaiting its ack.
 RecvAck(s) ==
     LET p == Proposer(s)
@@ -325,10 +362,14 @@ RecvAck(s) ==
     /\ link
     /\ m \in net
     /\ Consume(m)
-    /\ IF phase[p][s] = "ConfirmPending" /\ Tip(p) = parent[s]
-       THEN /\ chain' = [chain EXCEPT ![p] = Append(@, s)]
-            /\ phase' = [phase EXCEPT ![p][s] = "Committed"]
-       ELSE UNCHANGED <<chain, phase>>
+    /\ CASE phase[p][s] = "ConfirmPending" /\ InChain(p, s) ->
+              /\ phase' = [phase EXCEPT ![p][s] = "Committed"]
+              /\ UNCHANGED chain
+         [] phase[p][s] = "ConfirmPending" /\ ~InChain(p, s)
+              /\ Tip(p) = parent[s] ->
+              /\ chain' = [chain EXCEPT ![p] = Append(@, s)]
+              /\ phase' = [phase EXCEPT ![p][s] = "Committed"]
+         [] OTHER -> UNCHANGED <<chain, phase>>
     /\ UNCHANGED <<parent, link>>
 
 \* ------------------------------------------------------------------------
@@ -416,8 +457,11 @@ NoFork ==
             => SubSeq(chain[Peer(d)], 1, Len(chain[d])) = chain[d]
 
 \* Both-or-neither: a step committed on one device is committed on the other,
-\* or is owed there by a proposer that can no longer end it (it is past its
-\* confirm) and can still commit it (its tip is the step's parent).
+\* or is owed there by a side that can no longer end it and can still commit
+\* it: committed on the receiver, by a proposer past its confirm whose tip is
+\* the step's parent (its ack is owed); committed on the proposer at its
+\* anchor's commit, by the confirm it owes to a receiver that accepted and
+\* whose tip is the step's parent.
 NoHalfCommit ==
     \A d \in Device, s \in Step :
         InChain(d, s) =>
@@ -425,6 +469,10 @@ NoHalfCommit ==
             \/ /\ d = Receiver(s)
                /\ phase[Proposer(s)][s] = "ConfirmPending"
                /\ Tip(Proposer(s)) = parent[s]
+            \/ /\ d = Proposer(s)
+               /\ phase[Proposer(s)][s] = "ConfirmPending"
+               /\ phase[Receiver(s)][s] = "Accepted"
+               /\ Tip(Receiver(s)) = parent[s]
 
 \* Tripwire (spec §53): no two committed steps share a parent — on either
 \* device.
@@ -463,6 +511,12 @@ ConfirmFollowsDurableConfirm ==
 AckFollowsDurableCommit ==
     \A s \in Step : Msg("ack", s) \in net => InChain(Receiver(s), s)
 
+\* An offline-bearer step's confirm leaves only from a proposer that has
+\* committed it: the value is sent with the commitment already there.
+ConfirmFollowsSenderCommit ==
+    SenderCommitsAtRelease =>
+        \A s \in Step : Msg("confirm", s) \in net => InChain(Proposer(s), s)
+
 \* A committed step stays committed: each chain only grows.
 ChainsOnlyGrow ==
     [][\A d \in Device :
@@ -471,10 +525,16 @@ ChainsOnlyGrow ==
 
 \* Non-vacuity witnesses. Each is false in some reachable state, and its
 \* *Reachable config expects TLC to find one: both steps commit on both
-\* devices, and the two devices' proposals are in flight at once (they
-\* cross), so the invariants above are checked over those states.
+\* devices, the two devices' proposals are in flight at once (they cross),
+\* and a proposer is a commit ahead of its receiver, so the invariants above
+\* are checked over those states.
 NeverCommittedOnBoth == ~(\A s \in Step : \A d \in Device : InChain(d, s))
 NeverCrossed == ~(\A s \in Step : phase[Proposer(s)][s] = "Prepared")
+\* The bearer order's new half state is reached: a proposer has committed a
+\* step its receiver has not yet (its confirm is owed). NoHalfCommit's third
+\* clause is checked over these states.
+NeverSenderAhead ==
+    ~(\E s \in Step : InChain(Proposer(s), s) /\ ~InChain(Receiver(s), s))
 
 \* ========================================================================
 \* LIVENESS

@@ -269,6 +269,25 @@ pub fn list_unpublished_with_purpose(purpose: &str, limit: u32) -> Result<Vec<Fr
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Every artifact frozen under `purpose` bound to `bound_root`, whatever its
+/// publication state, oldest first.
+pub fn list_with_purpose_and_root(
+    purpose: &str,
+    bound_root: &[u8; 32],
+) -> Result<Vec<FrozenArtifact>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("frozen artifacts: the store is poisoned: {e}"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SELECT_COLS} FROM frozen_publication_artifact
+          WHERE purpose = ?1 AND bound_root = ?2
+          ORDER BY insertion_ordinal ASC"
+    ))?;
+    let rows = stmt.query_map(params![purpose, bound_root.as_slice()], row_to_artifact)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

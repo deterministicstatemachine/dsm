@@ -806,8 +806,7 @@ impl B0xSDK {
     /// (e.g. during initial registration before genesis is stored).
     fn derive_salt(domain_tag: &[u8], device_id_bytes: &[u8]) -> [u8; 32] {
         // §16.4: salt = BLAKE3("DSM/b0x-salt-{G|D}\0" || genesis_hash || device_id).
-        // The legacy C-DBRW (KDBRW) IKM fold has been removed (Genesis v2 has no silicon-bound
-        // secret). genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
+        // genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
         // gives per-device, domain-separated salts. (A future §16.4 hardening can fold the secret
         // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
         // Runtime domain: validated at construction, falling back to a fixed

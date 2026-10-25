@@ -76,6 +76,14 @@ jobs:
         run: npm ci
 
       - name: Generate Rust coverage artifacts
+        # Worker threads take their stack from RUST_MIN_STACK (the SDK runtime
+        # sets none), and the dsm-app-host processes the relay test starts
+        # inherit it. This instrumented, unoptimized build needs about 2.2 MB
+        # on the Connect path, measured from the crashed thread's frames, past
+        # the 2 MiB default; the release build the board and the phones run
+        # needs about 0.3 MB there. Production stacks are unchanged.
+        env:
+          RUST_MIN_STACK: "8388608"
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace

@@ -18,7 +18,7 @@ use dsm::types::error::DsmError;
 
 /// Active state read from the appliance (`OP_STATUS`) — the inputs the producer needs to build
 /// the next transition `Δ`. v2: the forward-only offline frontier `h_i` + the counter floor `u_i`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplianceStatus {
     /// The current offline frontier `h_i` (the transition's `prev_root`).
     pub root: [u8; 32],

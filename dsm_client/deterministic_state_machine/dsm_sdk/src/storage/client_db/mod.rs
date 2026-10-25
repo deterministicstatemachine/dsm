@@ -518,8 +518,19 @@ fn get_database_path() -> Result<PathBuf> {
 /// the transaction that accepts a step or by a contact add's validation, and
 /// nothing behind it is read again. A database made at 27 or 28 keeps the
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
-/// the same shape and encoding.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 32;
+/// the same shape and encoding. `peer_offline_account` is created on open
+/// the same way: a peer's offline account as a boundary the receiver
+/// validated left it (the owner's receive rule, 2026-10-22).
+///
+/// v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
+/// whole route — namespace, key, seed and committed set — and the value, and
+/// `completion_proof_refuted`: a kept proof fresh reads refuted, never relied
+/// on again (SoFi Amendment S10; owner ruling 2026-10-24). The same reset
+/// drops rows no current build writes, such as a contact under this device's
+/// own id (SA-141) or an own directory entry without an authority position
+/// (SA-143): beta keeps no legacy, so such a database is refused at open and
+/// the wallet is reprovisioned, never read with those rows in place.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -795,20 +806,37 @@ fn create_schema(conn: &Connection) -> Result<()> {
         -- 11): the client keeps each one; nothing else stores it. Each slot
         -- is the exact ChainSlotV1 bytes of one route position.
         CREATE TABLE IF NOT EXISTS completion_proof(
-            namespace      BLOB NOT NULL,
-            cell_key       BLOB NOT NULL CHECK (length(cell_key) = 32),
-            value_digest   BLOB NOT NULL CHECK (length(value_digest) = 32),
-            value          BLOB NOT NULL,
-            digest         BLOB NOT NULL CHECK (length(digest) = 32),
-            PRIMARY KEY (namespace, cell_key, value_digest)
+            namespace        BLOB NOT NULL,
+            cell_key         BLOB NOT NULL CHECK (length(cell_key) = 32),
+            seed             BLOB NOT NULL CHECK (length(seed) = 32),
+            committed_set_id BLOB NOT NULL CHECK (length(committed_set_id) = 32),
+            value_digest     BLOB NOT NULL CHECK (length(value_digest) = 32),
+            value            BLOB NOT NULL,
+            digest           BLOB NOT NULL CHECK (length(digest) = 32),
+            PRIMARY KEY (namespace, cell_key, seed, committed_set_id, value_digest)
         );
         CREATE TABLE IF NOT EXISTS completion_proof_slot(
-            namespace      BLOB NOT NULL,
-            cell_key       BLOB NOT NULL CHECK (length(cell_key) = 32),
-            value_digest   BLOB NOT NULL CHECK (length(value_digest) = 32),
-            position       INTEGER NOT NULL CHECK (position >= 0),
-            slot           BLOB NOT NULL,
-            PRIMARY KEY (namespace, cell_key, value_digest, position)
+            namespace        BLOB NOT NULL,
+            cell_key         BLOB NOT NULL CHECK (length(cell_key) = 32),
+            seed             BLOB NOT NULL CHECK (length(seed) = 32),
+            committed_set_id BLOB NOT NULL CHECK (length(committed_set_id) = 32),
+            value_digest     BLOB NOT NULL CHECK (length(value_digest) = 32),
+            position         INTEGER NOT NULL CHECK (position >= 0),
+            slot             BLOB NOT NULL,
+            PRIMARY KEY (namespace, cell_key, seed, committed_set_id, value_digest, position)
+        );
+        -- A kept completion proof fresh reads of the seats refuted, and why:
+        -- the value it names is never relied on through it again (SoFi
+        -- Amendment S10; owner ruling 2026-10-24).
+        CREATE TABLE IF NOT EXISTS completion_proof_refuted(
+            namespace        BLOB NOT NULL,
+            cell_key         BLOB NOT NULL CHECK (length(cell_key) = 32),
+            seed             BLOB NOT NULL CHECK (length(seed) = 32),
+            committed_set_id BLOB NOT NULL CHECK (length(committed_set_id) = 32),
+            value_digest     BLOB NOT NULL CHECK (length(value_digest) = 32),
+            digest           BLOB CHECK (digest IS NULL OR length(digest) = 32),
+            why              TEXT NOT NULL,
+            PRIMARY KEY (namespace, cell_key, seed, committed_set_id, value_digest)
         );
         CREATE TABLE IF NOT EXISTS route_chain_write_slot(
             namespace      BLOB NOT NULL,
@@ -861,6 +889,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
             economic_root       BLOB NOT NULL,      -- 32B
             accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
             PRIMARY KEY(peer_genesis, peer_devid, economic_position)
+        );
+
+        -- The owner's receive rule (2026-10-22): a peer's offline account as
+        -- one of its offline boundaries left it, validated by this receiver's
+        -- own walk of the peer's online history, named by the anchor bundle.
+        -- Offline acceptance trusts only what is recorded here.
+        CREATE TABLE IF NOT EXISTS peer_offline_account(
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            bundle              BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            account_root        BLOB NOT NULL,      -- 32B
+            funding_chain       BLOB NOT NULL,      -- 32B
+            PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
         );
         DROP TABLE IF EXISTS economic_admitted;
 
@@ -1984,6 +2026,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_genesis_store_and_read() {
+        crate::economic_fixtures::use_test_storage_dir();
         let _ = init_database();
         cleanup_test_genesis();
 

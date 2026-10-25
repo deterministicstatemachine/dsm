@@ -142,7 +142,7 @@ function makeBalancesFramedEnvelope(balances: Array<{ tokenId: string; available
 }
 
 /** Build FramedEnvelopeV3 containing a WalletHistoryResponse */
-function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }>): Uint8Array {
+function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; displayAmount: string }>): Uint8Array {
   // Complete rows, as wallet.history writes them: the boundary mapper refuses
   // a row missing any field Rust always sets.
   const txList = transactions.map((t, i) => new pb.TransactionInfo({
@@ -152,7 +152,8 @@ function makeHistoryFramedEnvelope(transactions: Array<{ amount: bigint; amountS
     tokenId: 'ERA',
     amount: t.amount,
     txHash: new Uint8Array(32).fill(0x30 + i),
-    amountSigned: t.amountSigned,
+    // Every row here is a payment this wallet received.
+    direction: pb.AmountDirection.CREDIT,
     txType: pb.TransactionType.TX_TYPE_BILATERAL_OFFLINE,
     status: 'completed',
     recipient: 'peer',
@@ -202,8 +203,8 @@ function makeRejectFramedEnvelope(): Uint8Array {
 let balancesState: Array<{ tokenId: string; available: bigint; displayAmount: string }> = [
   { tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' },
 ];
-let historyState: Array<{ amount: bigint; amountSigned: bigint; displayAmount: string }> = [
-  { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
+let historyState: Array<{ amount: bigint; displayAmount: string }> = [
+  { amount: 10000n, displayAmount: '100.00' },
 ];
 let capturedMethods: string[] = [];
 
@@ -630,7 +631,7 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
 
     // Reset balance and history state
     balancesState = [{ tokenId: 'ERA', available: 1000000n, displayAmount: '10000.00' }];
-    historyState = [{ amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' }];
+    historyState = [{ amount: 10000n, displayAmount: '100.00' }];
 
     // Re-install bridge mock (in case previous test modified it)
     installCallBinMock();
@@ -765,8 +766,8 @@ describe('INTEGRATED: Full chain with sendMessageBin-only mock', () => {
     // This simulates the balance updating in the native layer after transfer
     balancesState = [{ tokenId: 'ERA', available: 1030000n, displayAmount: '10300.00' }];
     historyState = [
-      { amount: 30000n, amountSigned: 30000n, displayAmount: '300.00' },
-      { amount: 10000n, amountSigned: 10000n, displayAmount: '100.00' },
+      { amount: 30000n, displayAmount: '300.00' },
+      { amount: 10000n, displayAmount: '100.00' },
     ];
 
     capturedMethods = [];
@@ -1065,7 +1066,7 @@ describe('INTEGRATED: Full bilateral transfer back-and-forth', () => {
 
     // ──── Step 6: TRANSFER_COMPLETE → refreshAll → sendMessageBin(getAllBalancesStrict with new balance) → DOM ────
     balancesState = [{ tokenId: 'ERA', available: 600000n, displayAmount: '6000.00' }];
-    historyState = [{ amount: 100000n, amountSigned: 100000n, displayAmount: '1000.00' }];
+    historyState = [{ amount: 100000n, displayAmount: '1000.00' }];
     capturedMethods = [];
 
     act(() => {

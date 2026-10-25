@@ -128,12 +128,15 @@ pub fn latest_state(genesis: &NativeReserveState) -> Result<NativeReserveState> 
     })
 }
 
-/// Every memoised generation of the reserve whose genesis is `genesis`, in
-/// generation order: the state each final release installed, and the
-/// release's envelope. What this device's own walks established.
-pub fn memoised_lineage(
+/// Fold every memoised generation of the reserve whose genesis is `genesis`,
+/// in generation order, into `step`: the state each final release installed,
+/// and the release's envelope. What this device's own walks established.
+/// One row is read at a time, so a walk holds one release, never the memo
+/// (SA-75). `step` answers whether to read on.
+pub fn fold_memoised_lineage(
     genesis: &NativeReserveState,
-) -> Result<Vec<(NativeReserveState, Vec<u8>)>> {
+    mut step: impl FnMut(NativeReserveState, &[u8]) -> Result<std::ops::ControlFlow<()>>,
+) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
@@ -142,26 +145,19 @@ pub fn memoised_lineage(
         "SELECT generation, remaining, envelope FROM native_reserve_lineage_memo
           WHERE reserve_id = ?1 ORDER BY generation ASC",
     )?;
-    let rows = stmt.query_map(params![genesis.reserve_id.as_slice()], |r| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-        ))
-    })?;
-    let mut lineage = Vec::new();
-    for row in rows {
-        let (generation, remaining, envelope) = row?;
-        lineage.push((
-            NativeReserveState {
-                generation: u64_of(generation, "generation")?,
-                remaining_supply: u64_of(remaining, "remaining")?,
-                ..*genesis
-            },
-            envelope,
-        ));
+    let mut rows = stmt.query(params![genesis.reserve_id.as_slice()])?;
+    while let Some(row) = rows.next()? {
+        let state = NativeReserveState {
+            generation: u64_of(row.get::<_, i64>(0)?, "generation")?,
+            remaining_supply: u64_of(row.get::<_, i64>(1)?, "remaining")?,
+            ..*genesis
+        };
+        let envelope = row.get_ref(2)?.as_blob()?;
+        if step(state, envelope)?.is_break() {
+            break;
+        }
     }
-    Ok(lineage)
+    Ok(())
 }
 
 /// The memoised final release at `generation`, with the state it succeeded.

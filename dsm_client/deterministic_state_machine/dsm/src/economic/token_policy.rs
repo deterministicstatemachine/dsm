@@ -65,7 +65,7 @@ pub const ALLOWLIST_KIND_INLINE: u8 = 1;
 /// Upper bound on the signer set, so a blob cannot force unbounded work.
 pub const MAX_POLICY_SIGNERS: usize = 16;
 
-/// Ticker length in bytes.
+/// Ticker length in characters (SoFi §47).
 pub const MIN_TICKER_LEN: usize = 2;
 pub const MAX_TICKER_LEN: usize = 8;
 
@@ -251,10 +251,11 @@ pub fn parse_token_policy_blob(blob: &[u8]) -> Result<TokenPolicy, String> {
 
     let ticker_len = r.u8()? as usize;
     let ticker = r.utf8(ticker_len)?;
-    if ticker.len() < MIN_TICKER_LEN || ticker.len() > MAX_TICKER_LEN {
+    // SoFi §47: a ticker is 2 to 8 characters, not bytes.
+    let chars = ticker.chars().count();
+    if !(MIN_TICKER_LEN..=MAX_TICKER_LEN).contains(&chars) {
         return Err(format!(
-            "policy blob ticker is {} bytes, outside {MIN_TICKER_LEN}..={MAX_TICKER_LEN}",
-            ticker.len()
+            "policy blob ticker is {chars} characters, outside {MIN_TICKER_LEN}..={MAX_TICKER_LEN}"
         ));
     }
     let alias_len = r.u16be()?;
@@ -456,6 +457,42 @@ mod tests {
         assert_eq!((p.ticker.as_str(), p.alias.as_str()), ("TKN", "Token"));
         assert_eq!((p.decimals, p.genesis_supply), (6, 1_000_000));
         assert!(p.burn_enabled && p.transferable);
+    }
+
+    /// SoFi §47: a ticker is 2 to 8 characters, counted as characters, not
+    /// bytes. Five letters in ten bytes parse; nine characters do not, however
+    /// they are encoded, and neither does one.
+    /// MUTATION CONTROL: counting bytes turns this red.
+    #[test]
+    fn a_ticker_is_counted_in_characters_not_bytes() {
+        let with_ticker = |ticker: &str| {
+            let mut b = network_anchored_blob();
+            let at = 5;
+            assert_eq!(
+                &b[at..at + 4],
+                b"\x03TKN",
+                "the ticker follows the release rule"
+            );
+            let mut field = vec![ticker.len() as u8];
+            field.extend_from_slice(ticker.as_bytes());
+            b.splice(at..at + 4, field);
+            b
+        };
+        let five = "\u{c5}\u{c4}\u{d6}\u{dc}\u{c9}";
+        assert_eq!(five.len(), 10);
+        let parsed = parse_token_policy_blob(&with_ticker(five)).expect("five characters parse");
+        assert_eq!(parsed.ticker, five);
+        for refused in [
+            "\u{c5}\u{c4}\u{d6}\u{dc}\u{c9}\u{c5}\u{c4}\u{d6}\u{dc}",
+            "NINELONGS",
+            "X",
+        ] {
+            assert!(
+                parse_token_policy_blob(&with_ticker(refused))
+                    .is_err_and(|why| why.contains("characters")),
+                "{refused:?} is refused"
+            );
+        }
     }
 
     /// A blob's shape follows its release rule: a device-created blob

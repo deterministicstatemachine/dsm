@@ -881,6 +881,12 @@ async fn realized_trade(p: &Pair, m: &Market, amount_in: u64) -> u64 {
 /// it stands on.
 fn standing_of(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
     d.enter();
+    standing_in(d)
+}
+
+/// [`standing_of`] for the device already entered: what it stands on, read in
+/// the process it is running.
+fn standing_in(d: &TestDevice) -> (([u8; 32], [u8; 32]), Option<AdmittedEconomicPosition>) {
     let admitted = economic_lineage::get_admitted()
         .expect("read admitted")
         .expect("an admitted position");
@@ -968,6 +974,101 @@ async fn a_sofi_trade_executes_end_to_end() {
         "the trader received what the vault priced"
     );
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
+}
+
+/// SA-71. A trader that signed and published a fulfillment, and stopped
+/// before its transition, completes that fulfillment when it trades again:
+/// it signs no second fulfillment against the same parent. The position
+/// registers the fulfillment it prepared, the trade asked for in that call is
+/// not made, and only the prepared trade moved its balances.
+/// MUTATION CONTROL: drafting anew past a prepared fulfillment turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_prepared_and_published_is_completed_never_signed_again() {
+    use crate::sdk::sofi_flow::{draft_trade, prepare_fulfillment, prepared_fulfillment, Prepared};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let era_before = balance(&p.b, &m.era);
+    let position = admitted_position(&p.b);
+    let q = position + 1;
+
+    // B prepares and publishes a trade of 10, and stops before its
+    // transition: the head has not moved.
+    p.b.enter();
+    let (.., parent) = economic_lineage::get_admitted_coordinate()
+        .expect("read admitted")
+        .expect("an admitted position");
+    let prepared_id = {
+        let core = &p.b.router().core_sdk;
+        let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+        let kept = crate::sdk::sofi_reads::KeptReadings::default();
+        let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+        let verifying = standing
+            .context_kept(&set, &accepted, &kept)
+            .expect("a verifier");
+        let intent = crate::sdk::sofi_flow::TradeIntent {
+            vault_ids: vec![m.vault_id],
+            token_in_policy_commit: m.era,
+            token_out_policy_commit: m.tkn,
+            amount_in: 10,
+            min_amount_out: 1,
+        };
+        let draft = draft_trade(core, &set, &intent, &standing, &verifying.verifier())
+            .await
+            .expect("a draft");
+        let Prepared::Published(prepared) = prepare_fulfillment(&set, &verifying, draft)
+            .await
+            .expect("prepared")
+        else {
+            panic!("the vault moved under a test that trades alone");
+        };
+        derive::fulfillment_id(&prepared.fulfillment().expect("its fulfillment").body)
+    };
+    assert_eq!(pending_position(&p.b), None, "the transition was not made");
+
+    // Asked for another trade, B completes the one it prepared instead.
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 7))).await;
+    assert!(!r.success, "the trade asked for in this call is not made");
+    assert!(
+        r.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("prepared fulfillment")),
+        "{:?}",
+        r.error_message
+    );
+    assert_eq!(admitted_position(&p.b), q, "the prepared position resolved");
+    assert_eq!(
+        balance(&p.b, &m.era),
+        era_before - 10,
+        "only the prepared trade moved B's ERA"
+    );
+    p.b.enter();
+    let still = prepared_fulfillment(position, &parent)
+        .expect("read back")
+        .expect("the prepared fulfillment stays frozen");
+    assert_eq!(
+        derive::fulfillment_id(&still.fulfillment().expect("one fulfillment").body),
+        prepared_id,
+        "one fulfillment against that parent, the prepared one"
+    );
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let registration = ctx
+        .verifier()
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &parent)
+        .expect("read")
+        .expect("decided");
+    match registration.registration() {
+        Registration::Registered(signed) => assert_eq!(
+            derive::fulfillment_id(&signed.body),
+            prepared_id,
+            "position {q} registers the prepared fulfillment"
+        ),
+        other => panic!("position {q} is not registered: {other:?}"),
+    }
 }
 
 /// MR-SOFI-0241, SoFi Amendment S14: a vault key held final by an exercise
@@ -1530,8 +1631,10 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     assert!(cells_read.contains(&k1), "the next key was read");
 
     // A later verifier in this process starts from the held key's kept
-    // final reads: the walk comes out the same, the held key is not asked
-    // for again, and the open next key is, since it may have been written.
+    // final reads: the walk comes out the same, the held key is read once
+    // more, afresh, for the check of the completion proof it is relied on
+    // through (SoFi Amendment S10; owner ruling 2026-10-24), and the open next
+    // key is read again, since it may have been written.
     for node in &p.nodes.nodes {
         node.forget_requests();
     }
@@ -1548,9 +1651,17 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
         .flat_map(|node| node.requests())
         .collect();
     assert!(
-        !asked_again.contains(&k0),
-        "the held key was asked for again: {asked_again:?}"
+        asked_again.contains(&k0),
+        "the held key was read afresh for its proof's check"
     );
+    for node in &p.nodes.nodes {
+        let held = node.requests().iter().filter(|r| **r == k0).count();
+        assert!(
+            held <= 1,
+            "{} was asked for the held key {held} times",
+            node.member_id
+        );
+    }
     assert!(
         asked_again.contains(&k1),
         "the open next key was read again"
@@ -4015,12 +4126,12 @@ async fn baseline_shaped_junk_behind_the_owners_baseline_is_read_past() {
 async fn walk_with_history(d: &TestDevice, vault_id: &[u8; 32]) -> Vec<[u8; 32]> {
     let (own, parents) = standing_of(d);
     let set = canonical_set(NETWORK).expect("the pinned set");
-    let history = crate::sdk::vault_history::discover(&set, vault_id)
+    let mut history = crate::sdk::vault_history::discover(&set, vault_id)
         .await
         .expect("the history");
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
-    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &history))
+    tokio::task::block_in_place(|| crate::sdk::vault_history::walk(&set, &verifier, &mut history))
         .expect("the walk");
     crate::storage::client_db::sofi_vault_head::recorded_generations(vault_id)
         .expect("the record")
@@ -4277,7 +4388,15 @@ async fn a_realized_trade_shows_in_balances_and_history_at_once() {
     let moves = |row: &generated::TransactionInfo| -> Vec<(Vec<u8>, i64)> {
         row.moves
             .iter()
-            .map(|m| (m.policy_commit.clone(), m.amount_signed))
+            .map(|m| {
+                let amount = i64::try_from(m.amount).expect("this test's amounts are small");
+                let signed = match generated::AmountDirection::try_from(m.direction) {
+                    Ok(generated::AmountDirection::Credit) => amount,
+                    Ok(generated::AmountDirection::Debit) => -amount,
+                    other => panic!("a move names no direction: {other:?}"),
+                };
+                (m.policy_commit.clone(), signed)
+            })
             .collect()
     };
     let of = |rows: &[generated::TransactionInfo], kind: generated::TransactionType| {
@@ -4526,8 +4645,11 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
     // Each reading asks every seat of the head's route once, and the leader
     // is also asked by the writer's pre-read. With each walk's reading of the
     // key it stopped on handed on, no seat is asked more than seven times in
-    // this trade; reading that key again after each walk asked every seat
-    // eleven times, the leader twelve.
+    // this trade for the walks; reading that key again after each walk asked
+    // every seat eleven times, the leader twelve. Once B's exercise holds the
+    // key final, the resolution relying on it reads it once more, afresh, for
+    // the check of its completion proof (SoFi Amendment S10; owner ruling
+    // 2026-10-24): eight.
     let per_seat = p
         .nodes
         .nodes
@@ -4536,7 +4658,7 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
         .max()
         .expect("a set has members");
     assert!(
-        per_seat <= 7,
+        per_seat <= 8,
         "a seat was asked for the head {per_seat} times ({} requests in all)",
         asked.iter().filter(|r| **r == head).count()
     );
@@ -4970,6 +5092,28 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
         self.live.keep_completion(cell, evidence, proof)
     }
+    fn kept_completion(
+        &self,
+        cell: &dsm::route_chain::RoutedCell,
+        value: &[u8],
+    ) -> Result<dsm::sofi::resolve::KeptCompletion, dsm::sofi::resolve::ReadFailure> {
+        self.live.kept_completion(cell, value)
+    }
+    fn fresh_cell(
+        &self,
+        cell: &dsm::route_chain::RoutedCell,
+        keep: &(dyn Fn(&dsm::route_chain::RouteEntry) -> bool + Sync),
+    ) -> Result<dsm::route_chain::CellEvidence, dsm::sofi::resolve::ReadFailure> {
+        self.live.fresh_cell(cell, keep)
+    }
+    fn refute_completion(
+        &self,
+        cell: &dsm::route_chain::RoutedCell,
+        proof: &dsm::route_chain::CompletionProof,
+        why: &dsm::route_chain::ProofInvalid,
+    ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
+        self.live.refute_completion(cell, proof, why)
+    }
     fn kept_judgement(
         &self,
         key: &dsm::sofi::resolve::JudgedKey,
@@ -5092,8 +5236,10 @@ async fn an_operations_verifiers_share_the_geneses_it_accepted() {
     );
 }
 
-/// One resolution asks each node once for a cell holding a final value, an
-/// index or an object. On the rig one settle read 33 cells, 6 of them
+/// One resolution asks each node once for an index or an object, and at most
+/// twice for a cell holding a final value: once to read it, and once afresh to
+/// check the completion proof the value is relied on through (SoFi Amendment
+/// S10; owner ruling 2026-10-24). On the rig one settle read 33 cells, 6 of them
 /// distinct: the walk of each leg's vault and the facts it established
 /// re-read what the resolution had read already, the precommit was fetched
 /// twice, each step of the vault owner's lineage fetched again an object the
@@ -5107,7 +5253,8 @@ async fn an_operations_verifiers_share_the_geneses_it_accepted() {
 /// order realizes and sets it up with both; its second is left pending —
 /// its position pair's leader refuses the pair — then the pair lands and
 /// the fulfillment completes. One resolution of it realizes the position and
-/// asks no node twice for anything but an open key.
+/// asks no node again for anything but an open key, beyond the fresh read
+/// each final cell's proof is checked against.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
@@ -5264,11 +5411,21 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             })
         })
         .collect();
+    // A final cell is read, then read afresh for its proof's check.
+    let allowed = |request: &str| {
+        if request.starts_with("GET /api/v2/cell/") {
+            2
+        } else {
+            1
+        }
+    };
     for (member, asked) in &asked {
         let again: Vec<_> = asked
             .iter()
             .filter(|(request, times)| {
-                **times > 1 && !open.contains(request) && !probes.contains(*request)
+                **times > allowed(request.as_str())
+                    && !open.contains(request)
+                    && !probes.contains(*request)
             })
             .collect();
         assert!(
@@ -5276,6 +5433,224 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
             "{member} was asked again for what the resolution had read: {again:?}"
         );
     }
+}
+
+/// What a new verifier of B's, in the process B is running, makes of the
+/// vault key B's own trade consumed: attempt 0 at the vault's first root.
+/// Nothing an earlier verification proved stands in for it.
+fn consumed_key_reading(
+    p: &Pair,
+    set: &crate::sdk::storage_set::StorageSet,
+    vault_id: &[u8; 32],
+    root: &[u8; 32],
+) -> Result<CellFact, dsm::route_chain::Missing> {
+    let (own, parents) = standing_in(&p.b);
+    let reading = VerifierContext::new(set, Some(own), parents.as_ref()).expect("a verifier");
+    reading
+        .verifier()
+        .read_attempt_cell(vault_id, root, 0)
+        .expect("the read runs")
+        .map(|read| read.fact())
+}
+
+/// B's kept completion proof at `cell`: its stored slots, by position.
+fn kept_slots(cell: &dsm::route_chain::RoutedCell) -> Vec<Vec<u8>> {
+    let conn = crate::storage::client_db::get_connection().expect("B's database");
+    let conn = conn.lock().expect("B's database lock");
+    let mut stmt = conn
+        .prepare(
+            "SELECT slot FROM completion_proof_slot
+              WHERE namespace = ?1 AND cell_key = ?2 AND seed = ?3 AND committed_set_id = ?4
+              ORDER BY position ASC",
+        )
+        .expect("the kept slots");
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                cell.namespace(),
+                cell.key().as_slice(),
+                cell.seed().as_slice(),
+                cell.committed_set_id().as_slice()
+            ],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .expect("the kept slots");
+    rows.map(|row| row.expect("a kept slot")).collect()
+}
+
+/// The value B's kept proof at `cell` proves final.
+fn kept_value(cell: &dsm::route_chain::RoutedCell) -> Vec<u8> {
+    let conn = crate::storage::client_db::get_connection().expect("B's database");
+    let conn = conn.lock().expect("B's database lock");
+    conn.query_row(
+        "SELECT value FROM completion_proof
+          WHERE namespace = ?1 AND cell_key = ?2 AND seed = ?3 AND committed_set_id = ?4",
+        rusqlite::params![
+            cell.namespace(),
+            cell.key().as_slice(),
+            cell.seed().as_slice(),
+            cell.committed_set_id().as_slice()
+        ],
+        |r| r.get(0),
+    )
+    .expect("B keeps the proof's value")
+}
+
+/// Why B's fresh reads refuted its kept proof at `cell`, if they did.
+fn refuted_at(cell: &dsm::route_chain::RoutedCell) -> Option<String> {
+    crate::storage::client_db::completion_proofs::refuted(cell, &kept_value(cell))
+        .expect("B's refutations")
+}
+
+/// B's kept proof at `cell` with the running hash of its last link changed:
+/// a record no seat ever returned there.
+fn corrupt_last_link(cell: &dsm::route_chain::RoutedCell) {
+    let slots = kept_slots(cell);
+    let last = slots.len() - 1;
+    let mut slot = generated::ChainSlotV1::decode(slots[last].as_slice()).expect("a kept slot");
+    let Some(generated::chain_slot_v1::Kind::Link(record)) = slot.kind.as_mut() else {
+        panic!("a completion proof ends with a link");
+    };
+    record.running_hash[0] ^= 0x01;
+    let conn = crate::storage::client_db::get_connection().expect("B's database");
+    let conn = conn.lock().expect("B's database lock");
+    let changed = conn
+        .execute(
+            "UPDATE completion_proof_slot SET slot = ?1
+              WHERE namespace = ?2 AND cell_key = ?3 AND seed = ?4 AND committed_set_id = ?5
+                AND position = ?6",
+            rusqlite::params![
+                slot.encode_to_vec(),
+                cell.namespace(),
+                cell.key().as_slice(),
+                cell.seed().as_slice(),
+                cell.committed_set_id().as_slice(),
+                i64::try_from(last).expect("a position")
+            ],
+        )
+        .expect("the kept slot is changed");
+    assert_eq!(changed, 1, "one kept slot changed");
+}
+
+/// SoFi Amendment S10 and the owner's ruling (2026-10-24): a final value a
+/// DLV unlock relies on is relied on only through its kept completion proof,
+/// checked against fresh reads of the seats, never against the reads it was
+/// built from or any kept since. Failure to establish validity is not proof
+/// of invalidity.
+///
+/// B trades. In the process B then runs, a verifier relies on the vault key
+/// the trade consumed: the proof holds over fresh reads, and those reads are
+/// kept. With every member down, a later verifier still finds the key final
+/// in the reads kept, and the fresh reads show nothing: the key is not
+/// established, and the kept proof stands, neither refuted nor replaced. With
+/// the members back the key is relied on again. Once B's kept proof names a
+/// link no seat returned, fresh reads refute it: the key is not established
+/// through it, the refutation is recorded, and a later verifier still does
+/// not rely on it. None of it moves B's trade: its position and its balances
+/// stand.
+/// MUTATION CONTROL: checking the kept proof against the reads that showed
+/// the key final rather than fresh ones relies on the key with every member
+/// down and turns this red; reading a refutation as not yet shown leaves
+/// nothing recorded and turns this red; reading a missing fresh read as a
+/// refutation records one with every member down and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_final_vault_key_is_relied_on_only_through_a_proof_fresh_reads_hold() {
+    let mut p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let traded = (
+        admitted_position(&p.b),
+        balance(&p.b, &m.era),
+        balance(&p.b, &m.tkn),
+    );
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    // B's process from here on: what one verifier keeps, the next reads.
+    p.b.enter();
+    let root = {
+        let (own, parents) = standing_in(&p.b);
+        let reading = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let chain = reading
+            .verifier()
+            .chain(&m.vault_id)
+            .expect("the vault's chain");
+        *chain.roots().first().expect("the vault's first root")
+    };
+    let cell = attempt_cell(&set, &m.vault_id, &root, 0).expect("the consumed key");
+    let relied = consumed_key_reading(&p, &set, &m.vault_id, &root);
+    assert!(
+        matches!(
+            relied,
+            Ok(CellFact::Held {
+                state: ChainState::Final,
+                ..
+            })
+        ),
+        "the key B's trade consumed is relied on through a proof fresh reads hold: {relied:?}"
+    );
+    let kept = kept_slots(cell.routed());
+    assert_ne!(
+        kept,
+        Vec::<Vec<u8>>::new(),
+        "B keeps the proof it relied on"
+    );
+
+    let members: Vec<String> = p
+        .nodes
+        .members()
+        .into_iter()
+        .map(|(member, ..)| member)
+        .collect();
+    p.nodes.take_down(&members).await;
+    let unread = consumed_key_reading(&p, &set, &m.vault_id, &root);
+    assert!(
+        matches!(&unread, Err(missing) if *missing != dsm::route_chain::Missing::CompletionRefuted),
+        "with every member down the key is not established: {unread:?}"
+    );
+    assert_eq!(
+        refuted_at(cell.routed()),
+        None,
+        "nothing is refuted for want of reads"
+    );
+    assert_eq!(kept_slots(cell.routed()), kept, "the kept proof stands");
+    p.nodes.bring_up(&members).await;
+    assert_eq!(
+        consumed_key_reading(&p, &set, &m.vault_id, &root),
+        relied,
+        "with the members back the key is relied on again"
+    );
+
+    corrupt_last_link(cell.routed());
+    let corrupted = kept_slots(cell.routed());
+    assert_eq!(
+        consumed_key_reading(&p, &set, &m.vault_id, &root),
+        Err(dsm::route_chain::Missing::CompletionRefuted),
+        "fresh reads refute a proof naming a link no seat returned"
+    );
+    assert_ne!(
+        refuted_at(cell.routed()),
+        None,
+        "the refutation is recorded"
+    );
+    assert_eq!(
+        consumed_key_reading(&p, &set, &m.vault_id, &root),
+        Err(dsm::route_chain::Missing::CompletionRefuted),
+        "a later verifier does not rely on the refuted proof"
+    );
+    assert_eq!(
+        kept_slots(cell.routed()),
+        corrupted,
+        "the refuted proof is not replaced"
+    );
+    assert_eq!(
+        (
+            admitted_position(&p.b),
+            balance(&p.b, &m.era),
+            balance(&p.b, &m.tkn),
+        ),
+        traded,
+        "B's trade stands"
+    );
 }
 
 /// The pair a vault commits is ordered bytewise (§28), and Rust orders it: a

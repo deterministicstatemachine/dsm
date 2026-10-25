@@ -98,6 +98,10 @@ pub fn derive_canonical_balance_key(
 /// string-keyed lookup.
 pub use crate::core::token::era_policy::era_policy_commit;
 
+/// The tickers of the tokens Core builds in. No token a device creates or
+/// adopts may carry one, in any letter case (SA-104, SA-145).
+pub const BUILTIN_TICKERS: [&str; 2] = ["ERA", "dBTC"];
+
 /// Deterministic policy_commit lookup for builtin token types.
 /// Used by state machine core to apply token operations deterministically.
 pub fn builtin_policy_commit_for_token(token_id: &str) -> Option<[u8; 32]> {
