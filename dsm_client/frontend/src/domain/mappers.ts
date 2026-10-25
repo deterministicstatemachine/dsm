@@ -4,6 +4,7 @@
 
 import { toBase32Crockford } from '../dsm/decoding';
 import {
+  AmountDirection,
   RelationshipSendBlockReason,
   RelationshipSendCheckState,
   TransactionType,
@@ -127,6 +128,22 @@ function noSender(t: TransactionInfo): undefined {
   return undefined;
 }
 
+/**
+ * Base units signed by the direction Rust names: a debit is negative. The
+ * magnitude is any u64 (SA-144); a row or move that names no direction is
+ * refused.
+ */
+function signedAmount(t: TransactionInfo, field: string, amount: bigint, direction: AmountDirection): bigint {
+  switch (direction) {
+    case AmountDirection.CREDIT:
+      return amount;
+    case AmountDirection.DEBIT:
+      return -amount;
+    default:
+      throw new Error(`STRICT: transaction ${t.id || '(no id)'} names no direction for its ${field}`);
+  }
+}
+
 function txText(t: TransactionInfo, field: string, value: string): string {
   if (typeof value !== 'string' || value.length === 0) {
     throw new Error(`STRICT: transaction ${t.id || '(no id)'} carries no ${field}`);
@@ -164,7 +181,9 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
         txId: txText(t, 'id', t.id),
         txHash: txBytes32(t, 'tx hash', t.txHash),
         txType,
-        amount: t.amountSigned,
+        // An event moves each token its own way (its moves); Rust names no
+        // direction for the row itself.
+        amount: t.amount,
         displayAmount: t.displayAmount,
         tokenId: t.tokenId,
         recipient: txText(t, 'subject', t.recipient),
@@ -175,7 +194,7 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
         moves: t.moves.map((m) => ({
           policyCommit: txBytes32(t, 'moved token', m.policyCommit),
           tokenId: txText(t, 'moved token id', m.tokenId),
-          amount: m.amountSigned,
+          amount: signedAmount(t, 'moved amount', m.amount, m.direction),
           displayAmount: txText(t, 'moved amount', m.displayAmount),
         })),
       };
@@ -184,16 +203,17 @@ export function mapTransactions(list: TransactionInfo[]): DomainTransaction[] {
     // and a faucet row that names one is refused as corrupt.
     const fromDeviceId = txType === 'faucet' ? noSender(t) : txBytes32(t, 'sender device id', t.fromDeviceId);
     const toDeviceId = txBytes32(t, 'recipient device id', t.toDeviceId);
+    const amount = signedAmount(t, 'amount', t.amount, t.direction);
     return {
       txId: txText(t, 'id', t.id),
       txHash: txBytes32(t, 'tx hash', t.txHash),
       txType,
       type: txType === 'bilateral_offline' ? 'offline' : txType === 'online' ? 'online' : undefined,
-      amount: t.amountSigned,
+      amount,
       displayAmount: txText(t, 'display amount', t.displayAmount),
       tokenId: txText(t, 'token id', t.tokenId),
       // Signed as Rust signed it: an outgoing row's counterparty is the recipient.
-      recipient: counterpartyLabel(t, t.amountSigned < 0n ? toDeviceId : fromDeviceId),
+      recipient: counterpartyLabel(t, amount < 0n ? toDeviceId : fromDeviceId),
       status: txText(t, 'status', t.status),
       fromDeviceId,
       toDeviceId,

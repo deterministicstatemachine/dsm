@@ -48,8 +48,17 @@ async fn money_seen(device: &TestDevice, through: u64) -> crate::bridge::AppResu
         .await
 }
 
-fn amounts(waiting: &generated::MoneyWaitingResponse) -> Vec<i64> {
-    waiting.received.iter().map(|t| t.amount_signed).collect()
+/// The amounts waiting, newest first. Every one is money in: a credit.
+fn amounts(waiting: &generated::MoneyWaitingResponse) -> Vec<u64> {
+    for t in &waiting.received {
+        assert_eq!(
+            t.direction,
+            generated::AmountDirection::Credit as i32,
+            "{} is waiting, and it is not money in",
+            t.id
+        );
+    }
+    waiting.received.iter().map(|t| t.amount).collect()
 }
 
 /// A transfer counts once B's own sync verified and applied it, and stops

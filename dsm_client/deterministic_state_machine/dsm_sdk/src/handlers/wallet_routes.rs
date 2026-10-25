@@ -72,7 +72,6 @@ fn event_transaction(
     kind: generated::TransactionType,
 ) -> Result<generated::TransactionInfo, String> {
     use crate::sdk::realized_records::{decode_moves, MOVES_KEY, SUBJECT_KEY};
-    use dsm::types::device_state::BalanceDirection;
     let corrupt = |what: String| format!("wallet.history: event {}: {what}", t.tx_id);
     let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
         crate::util::text_id::decode_base32_crockford(text)
@@ -86,17 +85,12 @@ fn event_transaction(
     let mut moves = Vec::new();
     for m in decode_moves(stored).map_err(corrupt)? {
         let (token_id, decimals) = token_of_commit(&m.policy_commit).map_err(corrupt)?;
-        let magnitude = i64::try_from(m.amount)
-            .map_err(|e| corrupt(format!("a movement exceeds a signed amount: {e}")))?;
-        let amount_signed = match m.direction {
-            BalanceDirection::Credit => magnitude,
-            BalanceDirection::Debit => -magnitude,
-        };
         moves.push(generated::TokenMove {
             policy_commit: m.policy_commit.to_vec(),
             token_id,
-            amount_signed,
-            display_amount: format_signed_base_units_for_display(amount_signed, decimals),
+            amount: m.amount,
+            direction: wire_direction(m.direction) as i32,
+            display_amount: format_directed_base_units_for_display(m.amount, m.direction, decimals),
         });
     }
     let subject = match t.metadata.get(SUBJECT_KEY) {
@@ -111,7 +105,6 @@ fn event_transaction(
         token_id: String::new(),
         amount: t.amount,
         tx_hash: bytes32("event id", &t.tx_hash)?,
-        amount_signed: 0,
         tx_type: kind as i32,
         status: t.status.clone(),
         recipient: subject,
@@ -127,6 +120,8 @@ fn event_transaction(
         }),
         display_amount: String::new(),
         moves,
+        // An event moves each token its own way: its moves name directions.
+        direction: generated::AmountDirection::Unspecified as i32,
     })
 }
 
@@ -150,33 +145,32 @@ pub(crate) fn token_of_commit(policy_commit: &[u8; 32]) -> Result<(String, u32),
     Ok((row.ticker, row.decimals))
 }
 
-/// A signed amount rendered for display, sign included.
+/// An amount rendered for display in its direction: a debit with its minus
+/// sign.
 ///
-/// Transaction history shows outgoing amounts negative. The magnitude is
-/// converted by the same function that renders balances, so a transfer and the
-/// balance it moved can never disagree about what a unit is.
-pub fn format_signed_base_units_for_display(amount: i64, decimals: u32) -> String {
-    let magnitude = amount.unsigned_abs();
-    let rendered = format_base_units_for_display(magnitude, decimals);
-    if amount < 0 {
-        format!("-{rendered}")
-    } else {
-        rendered
+/// Transaction history shows outgoing amounts negative. The magnitude is any
+/// `u64` (SA-144: one of 2^63 base units or more has no signed form), and it
+/// is converted by the same function that renders balances, so a transfer and
+/// the balance it moved can never disagree about what a unit is.
+pub fn format_directed_base_units_for_display(
+    amount: u64,
+    direction: dsm::types::device_state::BalanceDirection,
+    decimals: u32,
+) -> String {
+    let rendered = format_base_units_for_display(amount, decimals);
+    match direction {
+        dsm::types::device_state::BalanceDirection::Credit => rendered,
+        dsm::types::device_state::BalanceDirection::Debit => format!("-{rendered}"),
     }
 }
 
-/// A transfer's amount rendered for display at `decimals`, the decimals of
-/// the token it moved.
-///
-/// `amount` and `amount_signed` remain canonical base units; this is only the
-/// string a UI prints. Amounts that predate signed accounting carry
-/// `amount_signed == 0`, so fall back to the unsigned magnitude rather than
-/// rendering every historical row as zero.
-pub fn transfer_display_amount(amount: u64, amount_signed: i64, decimals: u32) -> String {
-    if amount_signed != 0 {
-        format_signed_base_units_for_display(amount_signed, decimals)
-    } else {
-        format_base_units_for_display(amount, decimals)
+/// A direction as the history wire names it.
+fn wire_direction(
+    direction: dsm::types::device_state::BalanceDirection,
+) -> generated::AmountDirection {
+    match direction {
+        dsm::types::device_state::BalanceDirection::Credit => generated::AmountDirection::Credit,
+        dsm::types::device_state::BalanceDirection::Debit => generated::AmountDirection::Debit,
     }
 }
 
@@ -438,16 +432,15 @@ fn merge_balance_projections(
     }
 }
 
+/// A built-in token's name in its one spelling; any other ticker exactly as
+/// given, since a ticker is any 2 to 8 characters (SoFi §47) and no other
+/// token carries a built-in's (SA-104).
 pub(crate) fn canonicalize_token_id(token_id: &str) -> String {
-    let trimmed = token_id.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-
-    match trimmed.to_ascii_uppercase().as_str() {
+    match token_id.trim().to_ascii_uppercase().as_str() {
+        "" => String::new(),
         "ERA" => "ERA".to_string(),
         "DBTC" => "dBTC".to_string(),
-        _ => trimmed.to_string(),
+        _ => token_id.to_string(),
     }
 }
 
@@ -756,12 +749,12 @@ impl AppRouterImpl {
                              {{prefix}}|{{token}} key"
                         ));
                     };
+                    // A ticker is any 2 to 8 characters (SoFi §47): each is shown as
+                    // its token carries it, never refused for what it holds (SA-103).
                     let token_id = canonicalize_token_id(ticker);
-                    if token_id.is_empty()
-                        || token_id.chars().any(|c| c.is_control() || (c as u32) > 126)
-                    {
+                    if token_id.is_empty() {
                         return err(format!(
-                            "balance.list: balance key {token_key:?} names no printable token"
+                            "balance.list: balance key {token_key:?} names no token"
                         ));
                     }
                     if !items.iter().any(|i| i.token_id == token_id) {
@@ -1237,7 +1230,8 @@ pub(crate) fn history_info(
         .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
     {
         Some(operation) => {
-            let op = dsm::types::operations::Operation::from_bytes(operation).map_err(|e| {
+            let op = dsm::types::operations::Operation::from_bytes(operation)
+                .map_err(|e| {
                 format!(
                     "wallet.history: transaction {}'s operation does \
                          not decode: {e}",
@@ -1254,24 +1248,32 @@ pub(crate) fn history_info(
                         t.tx_id
                     )
                 })?;
-            let opened = dsm::types::operations::TransferTerms::from_bytes(kept).map_err(|e| {
-                format!(
-                    "wallet.history: transaction {}'s terms do not \
+            let opened =
+                dsm::types::operations::TransferTerms::from_bytes(kept)
+                    .map_err(|e| {
+                        format!(
+                            "wallet.history: transaction {}'s terms do not \
                              decode: {e}",
-                    t.tx_id
-                )
-            })?;
+                            t.tx_id
+                        )
+                    })?;
             let terms = super::recipient_accept::transfer_terms(&op, &opened)
-                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+                .map_err(|e| {
+                format!("wallet.history: transaction {}: {e}", t.tx_id)
+            })?;
             let (token, decimals) = token_of_commit(&terms.policy_commit)
-                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+                .map_err(|e| {
+                    format!("wallet.history: transaction {}: {e}", t.tx_id)
+                })?;
             (terms.amount, token, terms.memo, decimals)
         }
         None => {
-            let token = t
-                .metadata
-                .get("token_id")
-                .ok_or_else(|| format!("wallet.history: transaction {} names no token", t.tx_id))?;
+            let token = t.metadata.get("token_id").ok_or_else(|| {
+                format!(
+                    "wallet.history: transaction {} names no token",
+                    t.tx_id
+                )
+            })?;
             let token = String::from_utf8(token.clone()).map_err(|e| {
                 format!(
                     "wallet.history: transaction {}'s token is not text: {e}",
@@ -1281,35 +1283,31 @@ pub(crate) fn history_info(
             // A row with no memo has none; one whose memo is
             // not text is corrupt.
             let memo = match t.metadata.get("memo") {
-                Some(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
-                    format!(
+                Some(bytes) => {
+                    String::from_utf8(bytes.clone()).map_err(|e| {
+                        format!(
                         "wallet.history: transaction {}'s memo is not text: \
                          {e}",
                         t.tx_id
                     )
-                })?,
+                    })?
+                }
                 None => String::new(),
             };
             let token = canonicalize_token_id(&token);
-            let decimals = token_decimals(&token).map_err(|e| format!("wallet.history: {e}"))?;
+            let decimals = token_decimals(&token)
+                .map_err(|e| format!("wallet.history: {e}"))?;
             (t.amount, token, memo, decimals)
         }
     };
 
-    // The signed amount: positive incoming, negative outgoing.
-    // One the signed field cannot hold is refused by name,
-    // never wrapped into another amount or direction.
-    let magnitude = i64::try_from(amount).map_err(|e| {
-        format!(
-            "wallet.history: transaction {}'s amount {amount} exceeds a \
-             signed amount: {e}",
-            t.tx_id
-        )
-    })?;
-    let amount_signed = if t.to_device == my_device_id_str {
-        magnitude
+    // Credited when this device received it, debited when
+    // it sent it: the magnitude goes on the wire whole,
+    // whatever its size (SA-144).
+    let direction = if t.to_device == my_device_id_str {
+        dsm::types::device_state::BalanceDirection::Credit
     } else {
-        -magnitude
+        dsm::types::device_state::BalanceDirection::Debit
     };
 
     // Determine recipient/sender for UI display - resolve aliases
@@ -1336,7 +1334,9 @@ pub(crate) fn history_info(
     // never an unspecified one.
     let tx_type_enum = match t.tx_type.as_str() {
         "faucet" => generated::TransactionType::TxTypeFaucet,
-        "bilateral_offline" => generated::TransactionType::TxTypeBilateralOffline,
+        "bilateral_offline" => {
+            generated::TransactionType::TxTypeBilateralOffline
+        }
         "online" => generated::TransactionType::TxTypeOnline,
         "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
         "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
@@ -1350,7 +1350,9 @@ pub(crate) fn history_info(
     };
 
     Ok(generated::TransactionInfo {
-        display_amount: transfer_display_amount(amount, amount_signed, decimals),
+        display_amount: format_directed_base_units_for_display(
+            amount, direction, decimals,
+        ),
         id: safe_id,
         // Protocol/UI contract: device ids are binary 32-byte values.
         // We store canonical base32 in SQLite for indexing, but must return bytes here.
@@ -1372,7 +1374,7 @@ pub(crate) fn history_info(
         amount,
         // tx_hash is stored as canonical base32 text in SQLite.
         tx_hash: bytes32("transaction hash", &t.tx_hash)?,
-        amount_signed,
+        direction: wire_direction(direction) as i32,
         tx_type: tx_type_enum as i32,
         status: t.status.clone(),
         recipient,
@@ -1463,7 +1465,7 @@ mod tests {
     use super::{
         canonicalize_token_id, encode_offline_transfer_operation_canonical,
         ensure_default_visible_balances, format_base_units_for_display,
-        format_signed_base_units_for_display, merge_balance_projections,
+        format_directed_base_units_for_display, merge_balance_projections,
         parse_display_amount_to_base_units, token_decimals, wallet_amount,
     };
     use crate::storage::client_db::BalanceProjectionRecord;
@@ -1486,15 +1488,20 @@ mod tests {
             format_base_units_for_display(u64::MAX, 2),
             "184467440737095516.15"
         );
+        use dsm::types::device_state::BalanceDirection::{Credit, Debit};
         assert_eq!(
-            format_signed_base_units_for_display(-100_000, 2),
+            format_directed_base_units_for_display(100_000, Debit, 2),
             "-1000.00"
         );
-        assert_eq!(format_signed_base_units_for_display(0, 2), "0.00");
-        // i64::MIN cannot be negated in place.
+        assert_eq!(format_directed_base_units_for_display(0, Credit, 2), "0.00");
+        // SA-144: amounts no signed 64-bit field holds render whole.
         assert_eq!(
-            format_signed_base_units_for_display(i64::MIN, 0),
-            "-9223372036854775808"
+            format_directed_base_units_for_display(1 << 63, Credit, 0),
+            "9223372036854775808"
+        );
+        assert_eq!(
+            format_directed_base_units_for_display(u64::MAX, Debit, 0),
+            "-18446744073709551615"
         );
     }
 
@@ -1617,6 +1624,21 @@ mod tests {
         assert_eq!(canonicalize_token_id("dbtc"), "dBTC");
         assert_eq!(canonicalize_token_id(" dBTC "), "dBTC");
         assert_eq!(canonicalize_token_id("ERA"), "ERA");
+        assert_eq!(canonicalize_token_id("era"), "ERA");
+        assert_eq!(canonicalize_token_id(""), "");
+        assert_eq!(canonicalize_token_id("   "), "");
+    }
+
+    /// SA-103: any other ticker is kept exactly as its token carries it
+    /// (SoFi §47: any 2 to 8 characters), spaces and all.
+    #[test]
+    fn canonicalize_token_id_keeps_any_other_ticker_exactly() {
+        assert_eq!(canonicalize_token_id("USDC"), "USDC");
+        assert_eq!(canonicalize_token_id(" WBTC "), " WBTC ");
+        assert_eq!(
+            canonicalize_token_id("\u{c5}\u{c4}\u{d6}"),
+            "\u{c5}\u{c4}\u{d6}"
+        );
     }
 
     #[test]
@@ -2048,7 +2070,12 @@ mod history_tests {
         );
         assert_eq!(claim.to_device_id, device.router.device_id_bytes.to_vec());
         assert_eq!(claim.recipient, "ERA reserve (faucet)");
-        assert_eq!(claim.amount_signed, 100, "incoming");
+        assert_eq!(claim.amount, 100);
+        assert_eq!(
+            claim.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
         assert_eq!(claim.display_amount, "1.00");
         assert_eq!(claim.token_id, "ERA");
 
@@ -2139,7 +2166,12 @@ mod history_tests {
         assert_eq!(reported.transactions.len(), 1);
         let received = &reported.transactions[0];
         assert_eq!(received.token_id, "ERA", "named by the signed commit");
-        assert_eq!(received.amount_signed, 100, "incoming");
+        assert_eq!(received.amount, 100);
+        assert_eq!(
+            received.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
         assert_eq!(received.display_amount, "1.00", "at ERA's decimals");
         assert_eq!(received.memo, "a label the sender chose");
     }
@@ -2177,7 +2209,12 @@ mod history_tests {
             generated::TransactionType::TxTypeOnline as i32
         );
         assert_eq!(online.status, "confirmed");
-        assert_eq!(online.amount_signed, 7, "incoming");
+        assert_eq!(online.amount, 7);
+        assert_eq!(
+            online.direction,
+            generated::AmountDirection::Credit as i32,
+            "incoming"
+        );
         assert_eq!(online.recipient, peer, "no contact: the sender's device id");
 
         store_transaction(&row("unnamed", "unilateral_send", 0x62)).expect("store the row");
@@ -2190,12 +2227,16 @@ mod history_tests {
         );
     }
 
-    /// A transfer amount the signed history field cannot hold is refused by
-    /// name (SA-52), never negated past the signed range into another amount
-    /// or the other direction.
+    /// SA-144. A transfer of 2^63 base units or more has no signed 64-bit
+    /// form. The history carries each amount whole with its direction, so
+    /// such a row is reported, never negated into another amount, and never
+    /// the reason the rest of the history cannot be read (as refusing it by
+    /// name, SA-52's form, made it).
+    /// MUTATION CONTROL: refusing an amount past the signed range turns this
+    /// red.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn history_refuses_an_amount_beyond_the_signed_range() {
+    async fn history_reports_amounts_beyond_the_signed_range_whole() {
         let device = crate::test_support::one_device::Device::start(0x73).await;
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
         let peer = crate::util::text_id::encode_base32_crockford(&[0x74u8; 32]);
@@ -2213,24 +2254,27 @@ mod history_tests {
                 .into_iter()
                 .collect(),
         };
-        let largest = u64::try_from(i64::MAX).expect("i64::MAX is a u64");
-
-        store_transaction(&sent("largest", largest, 0x63)).expect("store the row");
+        // SA-144: amounts no signed 64-bit field holds are reported whole,
+        // each with its direction, and the history beside them still reads.
+        for (id, amount, hash) in [("half", 1u64 << 63, 0x63), ("largest", u64::MAX, 0x64)] {
+            store_transaction(&sent(id, amount, hash)).expect("store the row");
+        }
         let reported = history_of(&device.router).await.expect("the history");
-        assert_eq!(reported.transactions.len(), 1);
+        assert_eq!(reported.transactions.len(), 2);
+        let mut amounts: Vec<(u64, i32, String)> = reported
+            .transactions
+            .iter()
+            .map(|t| (t.amount, t.direction, t.display_amount.clone()))
+            .collect();
+        amounts.sort();
+        let debit = generated::AmountDirection::Debit as i32;
         assert_eq!(
-            reported.transactions[0].amount_signed,
-            -i64::MAX,
-            "outgoing"
-        );
-
-        store_transaction(&sent("beyond", largest + 6, 0x64)).expect("store the row");
-        let refused = history_of(&device.router)
-            .await
-            .expect_err("an amount beyond the signed range is refused");
-        assert!(
-            refused.contains("beyond") && refused.contains("exceeds a signed amount"),
-            "{refused}"
+            amounts,
+            vec![
+                (1u64 << 63, debit, "-92233720368547758.08".to_string()),
+                (u64::MAX, debit, "-184467440737095516.15".to_string()),
+            ],
+            "outgoing, whole"
         );
     }
 }

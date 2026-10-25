@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Holding a token created on another device: adoption by its CPTA anchor,
-//! resolution of the adopted policy on the receiving device, and forgetting an
-//! identity so a superseded ticker can be adopted again.
+//! resolution of the adopted policy on the receiving device, and the
+//! permanence of an adoption: a ticker this device holds never names another
+//! token.
 //!
 //! Every token here is created through `token.create` on a device created as
 //! wallet creation creates it, on the network's pinned set of storage nodes;
@@ -27,23 +28,6 @@ async fn adopt(router: &AppRouterImpl, text: &str) -> AppResult {
         .invoke(AppInvoke {
             method: "tokens.addByAnchor".to_string(),
             args: text.as_bytes().to_vec(),
-        })
-        .await
-}
-
-async fn forget(router: &AppRouterImpl, key: &str) -> AppResult {
-    router
-        .invoke(AppInvoke {
-            method: "token.forget".to_string(),
-            args: crate::generated::ArgPack {
-                codec: crate::generated::Codec::Proto as i32,
-                body: crate::generated::TokenForgetRequest {
-                    token_id: key.to_string(),
-                }
-                .encode_to_vec(),
-                ..Default::default()
-            }
-            .encode_to_vec(),
         })
         .await
 }
@@ -417,91 +401,30 @@ async fn a_scanned_payload_adopts_and_a_lying_payload_is_refused() {
     assert_eq!(row.token_id, token_id);
 }
 
-/// THE DEAD END (D3): a device held an adopted RIGB whose creator was wiped
-/// and whose ticker was re-created by another device — a different policy,
-/// so a different token. Adopting the live RIGB was refused (the ticker was
-/// taken) with no way out. Forgetting the zero-balance identity frees the
-/// ticker, and the live token adopts.
+/// Adoption is permanent (SA-148): a device holding RIGB never adopts a
+/// different token that another creator named RIGB. The ticker would then
+/// name two assets, and a transfer could credit the wrong one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn forgetting_a_superseded_zero_balance_token_frees_its_ticker() {
-    let (p, superseded) = created_on_a_adopted_on_b("RIGB").await;
+async fn a_ticker_held_by_one_token_never_names_another() {
+    let (p, held) = created_on_a_adopted_on_b("RIGB").await;
     let mut c = TestDevice::create("C", 0x0C);
     c.boot(&p.fleet).await;
     c.fund_admitted(100).await;
     c.enter();
-    let live = economic_fixtures::create_asset(c.router(), "RIGB", 2, 1_000).await;
-    assert_ne!(live, superseded, "another creator is another policy");
+    let other = economic_fixtures::create_asset(c.router(), "RIGB", 2, 1_000).await;
+    assert_ne!(other, held, "another creator is another policy");
 
     p.b.enter();
-    let refused = adopt(p.b.router(), &anchor_text(&live)).await;
-    assert!(
-        !refused.success,
-        "the ticker is taken by the superseded token"
-    );
-
-    let forgotten = forget(p.b.router(), "RIGB").await;
-    assert!(forgotten.success, "forget: {:?}", forgotten.error_message);
-    assert!(token_registry::get_token_by_ticker("RIGB")
-        .expect("read")
-        .is_none());
-
-    let adopted = adopt(p.b.router(), &anchor_text(&live)).await;
-    assert!(
-        adopted.success,
-        "adopt the live RIGB: {:?}",
-        adopted.error_message
-    );
+    let refused = adopt(p.b.router(), &anchor_text(&other)).await;
+    assert!(!refused.success, "the ticker is held by another token");
+    let reason = refused.error_message.expect("a refusal carries its reason");
+    assert!(reason.contains("TICKER_CONFLICT"), "{reason}");
     assert_eq!(
         token_registry::get_token_by_ticker("RIGB")
             .expect("read")
             .expect("row")
             .policy_commit,
-        live
+        held
     );
-}
-
-/// Forgetting removes the NAMING only, and never an asset the device holds:
-/// canonical balances decide. A creator holding its supply cannot forget it;
-/// protocol assets are never forgettable; an unknown name is an error, not a
-/// silent success; and a token can be forgotten by its id.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn forget_refuses_held_protocol_and_unknown_tokens_and_takes_an_id() {
-    let (p, anchor) = created_on_a_adopted_on_b("HELD").await;
-
-    p.a.enter();
-    let held = forget(p.a.router(), "HELD").await;
-    assert!(!held.success, "a held token must not be forgettable");
-    let msg = held.error_message.unwrap_or_default();
-    assert!(
-        msg.contains("100000") && msg.to_lowercase().contains("still holds"),
-        "the refusal names the held base units, got: {msg}"
-    );
-    assert!(token_registry::get_token_by_ticker("HELD")
-        .expect("read")
-        .is_some());
-
-    for builtin in ["ERA", "dBTC"] {
-        let res = forget(p.a.router(), builtin).await;
-        assert!(!res.success, "{builtin} must not be forgettable");
-        assert!(res
-            .error_message
-            .unwrap_or_default()
-            .contains("protocol asset"));
-    }
-
-    let unknown = forget(p.a.router(), "NEVERSEEN").await;
-    assert!(!unknown.success);
-    assert!(unknown
-        .error_message
-        .unwrap_or_default()
-        .contains("no token named"));
-
-    p.b.enter();
-    let by_id = forget(p.b.router(), &derive_token_id(&anchor, "HELD")).await;
-    assert!(by_id.success, "forget by id: {:?}", by_id.error_message);
-    assert!(token_registry::get_token_by_ticker("HELD")
-        .expect("read")
-        .is_none());
 }

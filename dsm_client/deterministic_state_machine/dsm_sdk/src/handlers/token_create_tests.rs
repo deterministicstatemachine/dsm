@@ -375,7 +375,8 @@ async fn token_check_names_each_field_token_create_would_refuse_and_creates_noth
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_created_tokens_amounts_render_at_its_own_decimals() {
-    use crate::handlers::wallet_routes::{token_of_commit, transfer_display_amount};
+    use crate::handlers::wallet_routes::{format_directed_base_units_for_display, token_of_commit};
+    use dsm::types::device_state::BalanceDirection::{Credit, Debit};
     let d = Device::funded(0xC5).await;
     created(&create(&d.router, &request("RIGC", 2, 1_000)).await);
     let rigc = crate::storage::client_db::token_registry::get_token_by_ticker("RIGC")
@@ -385,15 +386,18 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
     let (ticker, decimals) = token_of_commit(&rigc).expect("the token's decimals are known");
     assert_eq!(ticker, "RIGC");
     assert_eq!(
-        transfer_display_amount(25_000, -25_000, decimals),
+        format_directed_base_units_for_display(25_000, Debit, decimals),
         "-250.00"
     );
-    assert_eq!(transfer_display_amount(25_000, 25_000, decimals), "250.00");
+    assert_eq!(
+        format_directed_base_units_for_display(25_000, Credit, decimals),
+        "250.00"
+    );
 
     let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
     let (_, era_decimals) = token_of_commit(&era).expect("ERA's decimals are known");
     assert_eq!(
-        transfer_display_amount(100, -100, era_decimals),
+        format_directed_base_units_for_display(100, Debit, era_decimals),
         "-1.00",
         "ERA renders at its two decimals"
     );

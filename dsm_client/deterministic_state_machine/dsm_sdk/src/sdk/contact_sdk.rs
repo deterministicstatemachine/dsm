@@ -100,13 +100,8 @@ impl ContactManager {
                 ContactError::InvalidContactData(format!("Core add_verified_contact failed: {e}"))
             })?;
 
-        let hash_bytes = crate::util::domain_helpers::device_id_hash_bytes(&device_id);
-        let contact_id = format!(
-            "c_{}",
-            &crate::util::text_id::encode_base32_crockford(&hash_bytes)[..8]
-        );
         let record = crate::storage::client_db::ContactRecord {
-            contact_id,
+            contact_id: contact_id_of(&device_id),
             device_id: device_id.to_vec(),
             alias: alias.to_string(),
             genesis_hash: genesis_hash.to_vec(),
@@ -231,9 +226,31 @@ pub fn contact_add_response(
     }
 }
 
+/// A contact's row id: its whole device id, Base32. A row id cut from the
+/// device id let an identity ground to share the cut take a contact's row
+/// (SA-147).
+fn contact_id_of(device_id: &[u8; 32]) -> String {
+    crate::util::text_id::encode_base32_crockford(device_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SA-147. A contact's row id names its whole device id: two contacts
+    /// share a row id only when they are one device.
+    /// MUTATION CONTROL: cutting the id to a prefix turns this red.
+    #[test]
+    fn a_contacts_row_id_is_its_whole_device_id() {
+        let device_id = [0x3A; 32];
+        let mut other = device_id;
+        other[31] = 0x3B;
+        assert_eq!(
+            crate::util::text_id::decode_base32_crockford(&contact_id_of(&device_id)),
+            Some(device_id.to_vec())
+        );
+        assert_ne!(contact_id_of(&device_id), contact_id_of(&other));
+    }
 
     fn manager_of(device_id: [u8; 32], genesis_hash: [u8; 32]) -> ContactManager {
         ContactManager {
