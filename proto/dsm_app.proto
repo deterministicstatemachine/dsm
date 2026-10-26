@@ -2783,6 +2783,8 @@ message Envelope {
     AuthoredObjectsResponse           authored_objects_response        = 136;
     ContactProfileV1                  contact_profile                  = 137;
     ReceiptEmailResultV1              receipt_email_result             = 138;
+    // Reply to `inbox.moneyWaiting` and `inbox.moneySeen`.
+    MoneyWaitingResponse              money_waiting_response           = 139;
 
 
     // Reply to `token.adoptionQr`.
@@ -3934,6 +3936,23 @@ message TokenMove {
   AmountDirection direction = 6;
 }
 message WalletHistoryResponse { repeated TransactionInfo transactions = 1; }
+
+// The transfers this device received and verified that the user has not
+// opened the b0x inbox on yet, newest first: the count on the app icon and on
+// the b0x button is how many there are (owner, 2026-10-23). Outside the DSM
+// protocol: it decides nothing. `through` is handed back to `inbox.moneySeen`
+// once the user was shown them; with nothing waiting it is how far they have
+// already looked.
+message MoneyWaitingResponse {
+  repeated TransactionInfo received = 1;
+  uint64                   through  = 2;
+}
+
+// inbox.moneySeen: the user was shown every received transfer up to
+// `through`, as `inbox.moneyWaiting` answered it.
+message MoneySeenRequest {
+  uint64 through = 1;
+}
 message ContactsListResponse  { repeated ContactAddResponse contacts = 1; }
 
 // ========================= Geo Emissions (transport only) =========================

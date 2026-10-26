@@ -68,6 +68,7 @@ const READ_ROUTES = new Set([
   'contacts.ownProfile',
   'identity.contact_code',
   'inbox.pull',
+  'inbox.moneyWaiting',
   'storage.status',
   'tokens.getFeeSchedule',
   'token.adoptionQr',

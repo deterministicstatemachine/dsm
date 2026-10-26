@@ -253,6 +253,14 @@ export function initializeEventBridge(): void {
         return;
       }
 
+      // Rust's count of received transfers not yet looked at may have
+      // changed; the page reads it again (inbox.moneyWaiting). No payload.
+      if (topic === 'money.waiting') {
+        bridgeEvents.emit('money.waiting', undefined);
+        emit(topic, bytes);
+        return;
+      }
+
       // Inbox sync result pushed from Rust inbox_poller (Invariant #7 compliant).
       // Payload is StorageSyncResponse protobuf bytes.
       if (topic === 'inbox.updated') {
