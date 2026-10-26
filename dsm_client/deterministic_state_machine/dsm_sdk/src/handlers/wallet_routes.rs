@@ -713,226 +713,13 @@ impl AppRouterImpl {
                     );
                 }
 
-                // Build a lookup map from device_id text to alias for resolving transaction counterparties
-                // Use sync contact lookup from SQLite storage
-                let contacts = match crate::storage::client_db::get_all_contacts() {
-                    Ok(contacts) => contacts,
-                    Err(e) => return err(format!("wallet.history: contacts unreadable: {e}")),
-                };
-                let alias_lookup: std::collections::HashMap<String, String> = contacts
-                    .into_iter()
-                    .map(|c| {
-                        let device_txt =
-                            crate::util::text_id::encode_base32_crockford(&c.device_id);
-                        (device_txt, c.alias)
-                    })
-                    .collect();
-
-                // A stored row is this device's own record: a device id or hash
-                // that does not decode, or a transfer with no token, is a
-                // corrupt row and an error, never an empty field.
-                let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
-                    crate::util::text_id::decode_base32_crockford(text)
-                        .filter(|b| b.len() == 32)
-                        .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+                let alias_lookup = match contact_aliases() {
+                    Ok(aliases) => aliases,
+                    Err(e) => return err(e),
                 };
                 let txs: Result<Vec<generated::TransactionInfo>, String> = sqlite_txs
-                    .into_iter()
-                    .map(|t| {
-                        // A token or SoFi event names every token it moved.
-                        if let Some(event) = event_type(&t.tx_type) {
-                            return event_transaction(&t, event);
-                        }
-                        // PROTO SAFETY:
-                        // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
-                        // Some older records may contain non-UTF8 bytes (or otherwise invalid)
-                        // which will cause strict protobuf decoders (TS) to fail.
-                        // Prefer the stored tx_id, but deterministically fall back to tx_hash
-                        // (canonical base32) if tx_id is not valid UTF-8.
-                        // Deterministic protobuf safety: always use a known-good ASCII identifier.
-                        // `tx_hash` is canonical base32 text in SQLite and is always UTF-8.
-                        // Prefix to avoid ambiguity with other ids and keep stable format.
-                        let safe_id: String = format!("tx_{}", t.tx_hash);
-
-                        // A row that keeps its signed operation shows its amount
-                        // and its token from that operation — the same bytes its
-                        // receipt badge is checked against — and its memo from
-                        // the terms it keeps, once they open the operation. The
-                        // token is named and rendered from the policy the
-                        // operation commits to: the ticker in the terms is the
-                        // sender's word, and two tokens may share one (SoFi
-                        // §47). Only a row with no operation (a faucet claim, a
-                        // Bitcoin event) shows its stored figures, which this
-                        // device wrote.
-                        let (amount, token_id, memo, decimals) = match t
-                            .metadata
-                            .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
-                        {
-                            Some(operation) => {
-                                let op = dsm::types::operations::Operation::from_bytes(operation)
-                                    .map_err(|e| {
-                                    format!(
-                                        "wallet.history: transaction {}'s operation does \
-                                             not decode: {e}",
-                                        t.tx_id
-                                    )
-                                })?;
-                                let kept = t
-                                    .metadata
-                                    .get(crate::storage::client_db::HISTORY_TERMS_KEY)
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "wallet.history: transaction {} keeps no terms for \
-                                             its operation",
-                                            t.tx_id
-                                        )
-                                    })?;
-                                let opened =
-                                    dsm::types::operations::TransferTerms::from_bytes(kept)
-                                        .map_err(|e| {
-                                            format!(
-                                                "wallet.history: transaction {}'s terms do not \
-                                                 decode: {e}",
-                                                t.tx_id
-                                            )
-                                        })?;
-                                let terms = super::recipient_accept::transfer_terms(&op, &opened)
-                                    .map_err(|e| {
-                                    format!("wallet.history: transaction {}: {e}", t.tx_id)
-                                })?;
-                                let (token, decimals) = token_of_commit(&terms.policy_commit)
-                                    .map_err(|e| {
-                                        format!("wallet.history: transaction {}: {e}", t.tx_id)
-                                    })?;
-                                (terms.amount, token, terms.memo, decimals)
-                            }
-                            None => {
-                                let token = t.metadata.get("token_id").ok_or_else(|| {
-                                    format!(
-                                        "wallet.history: transaction {} names no token",
-                                        t.tx_id
-                                    )
-                                })?;
-                                let token = String::from_utf8(token.clone()).map_err(|e| {
-                                    format!(
-                                        "wallet.history: transaction {}'s token is not text: {e}",
-                                        t.tx_id
-                                    )
-                                })?;
-                                // A row with no memo has none; one whose memo is
-                                // not text is corrupt.
-                                let memo = match t.metadata.get("memo") {
-                                    Some(bytes) => {
-                                        String::from_utf8(bytes.clone()).map_err(|e| {
-                                            format!(
-                                            "wallet.history: transaction {}'s memo is not text: \
-                                             {e}",
-                                            t.tx_id
-                                        )
-                                        })?
-                                    }
-                                    None => String::new(),
-                                };
-                                let token = canonicalize_token_id(&token);
-                                let decimals = token_decimals(&token)
-                                    .map_err(|e| format!("wallet.history: {e}"))?;
-                                (t.amount, token, memo, decimals)
-                            }
-                        };
-
-                        // Credited when this device received it, debited when
-                        // it sent it: the magnitude goes on the wire whole,
-                        // whatever its size (SA-144).
-                        let direction = if t.to_device == my_device_id_str {
-                            dsm::types::device_state::BalanceDirection::Credit
-                        } else {
-                            dsm::types::device_state::BalanceDirection::Debit
-                        };
-
-                        // Determine recipient/sender for UI display - resolve aliases
-                        let recipient = if t.tx_type == "faucet" {
-                            "ERA reserve (faucet)".to_string()
-                        } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
-                            "Bitcoin Network".to_string()
-                        } else if t.to_device == my_device_id_str {
-                            // Incoming: show who sent it - try to resolve alias
-                            alias_lookup
-                                .get(&t.from_device)
-                                .cloned()
-                                .unwrap_or_else(|| t.from_device.clone())
-                        } else {
-                            // Outgoing: show who received it - try to resolve alias
-                            alias_lookup
-                                .get(&t.to_device)
-                                .cloned()
-                                .unwrap_or_else(|| t.to_device.clone())
-                        };
-
-                        // The types this device writes. A stored type the wire
-                        // does not name is a row this history cannot report,
-                        // never an unspecified one.
-                        let tx_type_enum = match t.tx_type.as_str() {
-                            "faucet" => generated::TransactionType::TxTypeFaucet,
-                            "bilateral_offline" => {
-                                generated::TransactionType::TxTypeBilateralOffline
-                            }
-                            "online" => generated::TransactionType::TxTypeOnline,
-                            "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
-                            "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
-                            other => {
-                                return Err(format!(
-                                    "wallet.history: transaction {} has type {other:?}, which the \
-                                     wire does not name",
-                                    t.tx_id
-                                ))
-                            }
-                        };
-
-                        Ok(generated::TransactionInfo {
-                            display_amount: format_directed_base_units_for_display(
-                                amount, direction, decimals,
-                            ),
-                            id: safe_id,
-                            // Protocol/UI contract: device ids are binary 32-byte values.
-                            // We store canonical base32 in SQLite for indexing, but must return bytes here.
-                            // A faucet row names no sender device: its source is the
-                            // reserve, and a stored faucet row that names one is corrupt.
-                            from_device_id: if t.tx_type == "faucet" {
-                                if !t.from_device.is_empty() {
-                                    return Err(format!(
-                                        "wallet.history: faucet claim {} names a sender device",
-                                        t.tx_id
-                                    ));
-                                }
-                                Vec::new()
-                            } else {
-                                bytes32("sender device id", &t.from_device)?
-                            },
-                            to_device_id: bytes32("recipient device id", &t.to_device)?,
-                            token_id,
-                            amount,
-                            // tx_hash is stored as canonical base32 text in SQLite.
-                            tx_hash: bytes32("transaction hash", &t.tx_hash)?,
-                            direction: wire_direction(direction) as i32,
-                            tx_type: tx_type_enum as i32,
-                            status: t.status.clone(),
-                            recipient,
-                            stitched_receipt: t.proof_data.clone().unwrap_or_default(),
-                            memo,
-                            // §4.3#3: Derive R_G from the stored receipt's devid_a for
-                            // display-only consistency check. This is historical UI display
-                            // only; protocol acceptance already enforced at ingest time.
-                            receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
-                                receipt_state_holds(
-                                    b,
-                                    t.metadata
-                                        .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
-                                )
-                            }),
-                            // A transfer moves the one token above.
-                            moves: Vec::new(),
-                        })
-                    })
+                    .iter()
+                    .map(|t| history_info(t, &my_device_id_str, &alias_lookup))
                     .collect();
                 let txs = match txs {
                     Ok(txs) => txs,
@@ -1382,6 +1169,214 @@ impl AppRouterImpl {
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
         }
     }
+}
+
+/// This device's contacts' aliases by device id (Base32), for naming a
+/// history row's counterparty.
+pub(crate) fn contact_aliases() -> Result<std::collections::HashMap<String, String>, String> {
+    let contacts = crate::storage::client_db::get_all_contacts()
+        .map_err(|e| format!("wallet.history: contacts unreadable: {e}"))?;
+    Ok(contacts
+        .into_iter()
+        .map(|c| {
+            let device_txt = crate::util::text_id::encode_base32_crockford(&c.device_id);
+            (device_txt, c.alias)
+        })
+        .collect())
+}
+
+/// One stored history row as the history reports it, for this device
+/// (`my_device_id_str`, Base32), its counterparty named from `alias_lookup`.
+pub(crate) fn history_info(
+    t: &crate::storage::client_db::TransactionRecord,
+    my_device_id_str: &str,
+    alias_lookup: &std::collections::HashMap<String, String>,
+) -> Result<generated::TransactionInfo, String> {
+    // A stored row is this device's own record: a device id or hash
+    // that does not decode, or a transfer with no token, is a
+    // corrupt row and an error, never an empty field.
+    let bytes32 = |what: &str, text: &str| -> Result<Vec<u8>, String> {
+        crate::util::text_id::decode_base32_crockford(text)
+            .filter(|b| b.len() == 32)
+            .ok_or_else(|| format!("wallet.history: a stored {what} is not 32 bytes"))
+    };
+    // A token or SoFi event names every token it moved.
+    if let Some(event) = event_type(&t.tx_type) {
+        return event_transaction(t, event);
+    }
+    // PROTO SAFETY:
+    // TransactionInfo.id is a `string` in dsm_app.proto and must be valid UTF-8.
+    // Some older records may contain non-UTF8 bytes (or otherwise invalid)
+    // which will cause strict protobuf decoders (TS) to fail.
+    // Prefer the stored tx_id, but deterministically fall back to tx_hash
+    // (canonical base32) if tx_id is not valid UTF-8.
+    // Deterministic protobuf safety: always use a known-good ASCII identifier.
+    // `tx_hash` is canonical base32 text in SQLite and is always UTF-8.
+    // Prefix to avoid ambiguity with other ids and keep stable format.
+    let safe_id: String = format!("tx_{}", t.tx_hash);
+
+    // A row that keeps its signed operation shows its amount
+    // and its token from that operation — the same bytes its
+    // receipt badge is checked against — and its memo from
+    // the terms it keeps, once they open the operation. The
+    // token is named and rendered from the policy the
+    // operation commits to: the ticker in the terms is the
+    // sender's word, and two tokens may share one (SoFi
+    // §47). Only a row with no operation (a faucet claim, a
+    // Bitcoin event) shows its stored figures, which this
+    // device wrote.
+    let (amount, token_id, memo, decimals) = match t
+        .metadata
+        .get(crate::storage::client_db::HISTORY_OPERATION_KEY)
+    {
+        Some(operation) => {
+            let op = dsm::types::operations::Operation::from_bytes(operation).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s operation does \
+                         not decode: {e}",
+                    t.tx_id
+                )
+            })?;
+            let kept = t
+                .metadata
+                .get(crate::storage::client_db::HISTORY_TERMS_KEY)
+                .ok_or_else(|| {
+                    format!(
+                        "wallet.history: transaction {} keeps no terms for \
+                         its operation",
+                        t.tx_id
+                    )
+                })?;
+            let opened = dsm::types::operations::TransferTerms::from_bytes(kept).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s terms do not \
+                             decode: {e}",
+                    t.tx_id
+                )
+            })?;
+            let terms = super::recipient_accept::transfer_terms(&op, &opened)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            let (token, decimals) = token_of_commit(&terms.policy_commit)
+                .map_err(|e| format!("wallet.history: transaction {}: {e}", t.tx_id))?;
+            (terms.amount, token, terms.memo, decimals)
+        }
+        None => {
+            let token = t
+                .metadata
+                .get("token_id")
+                .ok_or_else(|| format!("wallet.history: transaction {} names no token", t.tx_id))?;
+            let token = String::from_utf8(token.clone()).map_err(|e| {
+                format!(
+                    "wallet.history: transaction {}'s token is not text: {e}",
+                    t.tx_id
+                )
+            })?;
+            // A row with no memo has none; one whose memo is
+            // not text is corrupt.
+            let memo = match t.metadata.get("memo") {
+                Some(bytes) => String::from_utf8(bytes.clone()).map_err(|e| {
+                    format!(
+                        "wallet.history: transaction {}'s memo is not text: \
+                         {e}",
+                        t.tx_id
+                    )
+                })?,
+                None => String::new(),
+            };
+            let token = canonicalize_token_id(&token);
+            let decimals = token_decimals(&token).map_err(|e| format!("wallet.history: {e}"))?;
+            (t.amount, token, memo, decimals)
+        }
+    };
+
+    // Credited when this device received it, debited when
+    // it sent it: the magnitude goes on the wire whole,
+    // whatever its size (SA-144).
+    let direction = if t.to_device == my_device_id_str {
+        dsm::types::device_state::BalanceDirection::Credit
+    } else {
+        dsm::types::device_state::BalanceDirection::Debit
+    };
+
+    // Determine recipient/sender for UI display - resolve aliases
+    let recipient = if t.tx_type == "faucet" {
+        "ERA reserve (faucet)".to_string()
+    } else if t.tx_type == "dbtc_mint" || t.tx_type == "dbtc_burn" {
+        "Bitcoin Network".to_string()
+    } else if t.to_device == my_device_id_str {
+        // Incoming: show who sent it - try to resolve alias
+        alias_lookup
+            .get(&t.from_device)
+            .cloned()
+            .unwrap_or_else(|| t.from_device.clone())
+    } else {
+        // Outgoing: show who received it - try to resolve alias
+        alias_lookup
+            .get(&t.to_device)
+            .cloned()
+            .unwrap_or_else(|| t.to_device.clone())
+    };
+
+    // The types this device writes. A stored type the wire
+    // does not name is a row this history cannot report,
+    // never an unspecified one.
+    let tx_type_enum = match t.tx_type.as_str() {
+        "faucet" => generated::TransactionType::TxTypeFaucet,
+        "bilateral_offline" => generated::TransactionType::TxTypeBilateralOffline,
+        "online" => generated::TransactionType::TxTypeOnline,
+        "dbtc_mint" => generated::TransactionType::TxTypeDbtcMint,
+        "dbtc_burn" => generated::TransactionType::TxTypeDbtcBurn,
+        other => {
+            return Err(format!(
+                "wallet.history: transaction {} has type {other:?}, which the \
+                 wire does not name",
+                t.tx_id
+            ))
+        }
+    };
+
+    Ok(generated::TransactionInfo {
+        display_amount: format_directed_base_units_for_display(amount, direction, decimals),
+        id: safe_id,
+        // Protocol/UI contract: device ids are binary 32-byte values.
+        // We store canonical base32 in SQLite for indexing, but must return bytes here.
+        // A faucet row names no sender device: its source is the
+        // reserve, and a stored faucet row that names one is corrupt.
+        from_device_id: if t.tx_type == "faucet" {
+            if !t.from_device.is_empty() {
+                return Err(format!(
+                    "wallet.history: faucet claim {} names a sender device",
+                    t.tx_id
+                ));
+            }
+            Vec::new()
+        } else {
+            bytes32("sender device id", &t.from_device)?
+        },
+        to_device_id: bytes32("recipient device id", &t.to_device)?,
+        token_id,
+        amount,
+        // tx_hash is stored as canonical base32 text in SQLite.
+        tx_hash: bytes32("transaction hash", &t.tx_hash)?,
+        direction: wire_direction(direction) as i32,
+        tx_type: tx_type_enum as i32,
+        status: t.status.clone(),
+        recipient,
+        stitched_receipt: t.proof_data.clone().unwrap_or_default(),
+        memo,
+        // §4.3#3: Derive R_G from the stored receipt's devid_a for
+        // display-only consistency check. This is historical UI display
+        // only; protocol acceptance already enforced at ingest time.
+        receipt_verified: t.proof_data.as_ref().is_some_and(|b| {
+            receipt_state_holds(
+                b,
+                t.metadata
+                    .get(crate::storage::client_db::HISTORY_OPERATION_KEY),
+            )
+        }),
+        // A transfer moves the one token above.
+        moves: Vec::new(),
+    })
 }
 
 /// Whether a stored receipt's state rules hold against its author's

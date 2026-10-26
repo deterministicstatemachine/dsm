@@ -54,6 +54,8 @@ pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
 #[cfg(test)]
+mod money_waiting_tests;
+#[cfg(test)]
 mod node_e2e_tests;
 #[cfg(test)]
 mod offline_boundary_tests;

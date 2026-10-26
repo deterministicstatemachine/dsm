@@ -39,6 +39,7 @@ mod genesis;
 mod history_repair;
 pub mod lineage_publication;
 mod manifold_seeds;
+pub mod money_received;
 pub mod native_reserve;
 mod nonces;
 mod online_outbox;
@@ -1680,6 +1681,21 @@ fn create_schema(conn: &Connection) -> Result<()> {
 
         CREATE INDEX IF NOT EXISTS idx_transactions_to_device
             ON transactions(to_device);
+
+        -- The received transfers the user has not opened the b0x inbox on
+        -- yet (money_received.rs): one notice per verified received transfer,
+        -- named by its history row, in the order they were written; and how
+        -- far the user has looked. Outside the protocol: it decides nothing.
+        CREATE TABLE IF NOT EXISTS received_notices(
+            notice_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_id      TEXT NOT NULL UNIQUE
+        );
+
+        CREATE TABLE IF NOT EXISTS received_notices_seen(
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            seen_through INTEGER NOT NULL
+        );
+        INSERT OR IGNORE INTO received_notices_seen(id, seen_through) VALUES (1, 0);
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_contacts_device_id
             ON contacts(device_id);

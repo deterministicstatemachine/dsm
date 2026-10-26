@@ -10,7 +10,7 @@ use super::tokens::{upsert_balance_projection_with_conn, BalanceProjectionRecord
 use super::types::TransactionRecord;
 use crate::storage::codecs::{meta_from_blob, meta_to_blob};
 
-fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<usize> {
+pub(super) fn upsert_transaction_row(conn: &Connection, tx: &TransactionRecord) -> Result<usize> {
     let affected = conn.execute(
         "INSERT INTO transactions (
             tx_id, tx_hash, from_device, to_device, amount, tx_type,

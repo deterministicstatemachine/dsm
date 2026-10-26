@@ -415,7 +415,8 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
             | gp::envelope::Payload::AuthoredPublishedResponse(_)
             | gp::envelope::Payload::AuthoredObjectsResponse(_)
             | gp::envelope::Payload::ContactProfile(_)
-            | gp::envelope::Payload::ReceiptEmailResult(_),
+            | gp::envelope::Payload::ReceiptEmailResult(_)
+            | gp::envelope::Payload::MoneyWaitingResponse(_),
         ) => gp::envelope::Payload::Error(gp::Error {
             code: 409,
             message: "Responses should not be sent as requests".to_string(),
