@@ -351,18 +351,34 @@ jobs:
           cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee board.log
           cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board.log
 
+      # Jest tests are evidence for the frontend's own behaviour (owner ruling,
+      # 2026-10-27): the board runs them too, and keeps Jest's own results.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dsm_client/frontend/package-lock.json
+
+      - name: Test (frontend)
+        working-directory: dsm_client/frontend
+        run: |
+          npm ci
+          npm test -- --ci --json --outputFile="$GITHUB_WORKSPACE/jest.json"
+
       # A requirement is Met only on tests that ran and passed on this board:
       # the same gate the PR jobs run statically, given the logs. A test a row
       # names that was not in these logs, crashed, or failed fails the board.
       - name: Conformance evidence, executed
-        run: python3 ci/conformance_evidence.py --board-log board.log
+        run: python3 ci/conformance_evidence.py --board-log board.log --jest-log jest.json
 
       - name: Keep the board log
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: board-log
-          path: board.log
+          path: |
+            board.log
+            jest.json
 
   # --------------------------------------------------------------------------
   # Storage node on Postgres — its only store, the one the fleet deploys.
