@@ -944,6 +944,83 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
     assert_eq!(balance(&p.a, &era()), a_start);
 }
 
+/// SoFi Amendments S22 and S27, MR-SOFI-0396: a wallet locks a stake only
+/// when the setup names, for its side, exactly the session key it derives for
+/// the setup's nonce; only against a counterpart vault that mirrors its own
+/// stake — the same match and the same amount; and it derives no session key
+/// while it is locked. Each refusal moves nothing and keeps no match.
+///
+/// MUTATION CONTROL: dropping the session-key comparison from `create`, or the
+/// commitment or amount check from `mirrors`, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_not_mirror() {
+    let p = Pair::boot(100, 100).await;
+    let teams = teams(&p).await;
+    let nonce = [0x71; 32];
+    let stake = whole_era(25);
+    let b_start = balance(&p.b, &era());
+    let refused = |result: Result<Locked, DsmError>, reason: &str| match result {
+        Err(e) => assert!(
+            e.to_string().contains(reason),
+            "refused for another reason: {e}"
+        ),
+        Ok(locked) => panic!("locked where {reason}: {locked:?}"),
+    };
+
+    // A setup naming A's key on B's side.
+    let key_a = session_key(&p.a, &nonce);
+    let foreign = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &teams.0), (&key_a, &teams.1));
+    refused(
+        lock(&p.b, &p.a, &foreign, MatchSide::B, stake, None).await,
+        "session key for this side is not this wallet's",
+    );
+
+    // A locks in one match; B's lock in another names A's vault.
+    let first = setup(&p, nonce, &teams);
+    let a = lock(&p.a, &p.b, &first, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock");
+    let second = setup(&p, [0x72; 32], &teams);
+    refused(
+        lock(&p.b, &p.a, &second, MatchSide::B, stake, Some(a.vault_id)).await,
+        "bound to another match",
+    );
+    // And B's stake in A's match is another amount than A's.
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &first,
+            MatchSide::B,
+            stake + 1,
+            Some(a.vault_id),
+        )
+        .await,
+        "this stake matches",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_start,
+        "no refused lock moved B's ERA"
+    );
+    assert_eq!(pending_position(&p.b), None);
+
+    // A locked wallet derives no session key.
+    p.b.enter();
+    crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+    match computed_flow::session_public_key(&nonce) {
+        Err(e) => assert!(e.to_string().contains("wallet locked"), "{e}"),
+        Ok(..) => panic!("a locked wallet derived a session key"),
+    }
+    p.b.enter();
+
+    // The mirrored stake locks.
+    lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(a.vault_id))
+        .await
+        .expect("B's mirrored lock");
+}
+
 /// A wallet locks a stake only in a setup whose teams are the creatures as
 /// their issuers last published them, and only fielding creatures it holds:
 /// a modded state, a creature it does not hold, a creature of a token that is
