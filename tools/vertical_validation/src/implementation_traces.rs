@@ -27,7 +27,7 @@ use dsm::emissions::{
     JoinActivationProof, SourceDlvState,
 };
 use dsm::types::contact_types::DsmVerifiedContact;
-use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState, RealizedHead};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
@@ -1190,7 +1190,7 @@ fn trace_bilateral_full_offline_finality(
         };
         let remote = side.remote_device_id;
         let local = side.local_device_id;
-        let mut remote_head = match DeviceState::new(
+        let mut remote_head = match DeviceState::genesis_head(
             TRACE_PAIR1_REMOTE.1,
             remote,
             side.remote_kp.public_key().to_vec(),
@@ -1528,7 +1528,7 @@ fn receiver_acceptance_sig(
 struct TraceSide {
     manager: BilateralTransactionManager,
     tips: std::sync::Arc<TraceTips>,
-    head: DeviceState,
+    head: RealizedHead,
     local_kp: SignatureKeyPair,
     remote_kp: SignatureKeyPair,
     local_device_id: [u8; 32],
@@ -1616,9 +1616,9 @@ async fn trace_prepare(
 fn trace_local_head(
     side: ([u8; 32], [u8; 32]),
     kp: &SignatureKeyPair,
-) -> Result<DeviceState, String> {
+) -> Result<RealizedHead, String> {
     faucet_claim(
-        &DeviceState::new(side.1, side.0, kp.public_key().to_vec()),
+        &DeviceState::genesis_head(side.1, side.0, kp.public_key().to_vec()),
         1,
     )
     .map_err(|e| format!("trace head funding: {e}"))
@@ -1649,7 +1649,7 @@ const TRACE_BILATERAL_AMOUNT: u64 = 1;
 async fn trace_commit_prepared(
     manager: &mut BilateralTransactionManager,
     tips: &TraceTips,
-    local_head: &mut DeviceState,
+    local_head: &mut RealizedHead,
     remote_kp: &SignatureKeyPair,
     remote_device_id: &[u8; 32],
     pre_commitment_hash: &[u8; 32],
@@ -1713,7 +1713,7 @@ async fn trace_commit_prepared(
 
 /// The receiver's credit for a committed step, on its own head.
 fn trace_receive(
-    remote_head: &mut DeviceState,
+    remote_head: &mut RealizedHead,
     local_device_id: &[u8; 32],
     commit: &TraceCommit,
 ) -> Result<(), String> {

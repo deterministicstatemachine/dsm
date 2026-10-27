@@ -4139,14 +4139,18 @@ pub(crate) mod tests {
             precommit_id: vec![0x0E; 32],
             signature,
         };
-        let cases: Vec<(
-            &str,
+        // Each case: its name, the operation and its deltas, the operation
+        // with one carried byte changed and its deltas, and the operation
+        // under a changed signature, which is refused.
+        type Case = (
+            &'static str,
             Operation,
             Vec<BalanceDelta>,
             Operation,
             Vec<BalanceDelta>,
             Operation,
-        )> = vec![
+        );
+        let cases: Vec<Case> = vec![
             (
                 "SofiSetup",
                 Operation::SofiSetup {

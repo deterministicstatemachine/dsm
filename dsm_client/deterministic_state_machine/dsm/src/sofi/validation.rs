@@ -3653,7 +3653,7 @@ mod tests {
                     leaf[0] ^= 0x01;
                     VaultLeafPre::Relationship(VaultRelationshipLeaf {
                         leaf,
-                        ..relationship.clone()
+                        ..*relationship
                     })
                 }
                 VaultLeafPre::Absent => VaultLeafPre::Relationship(VaultRelationshipLeaf {

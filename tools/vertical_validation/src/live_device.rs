@@ -42,7 +42,9 @@ use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
 use dsm::crypto::signatures::SignatureKeyPair;
 use dsm::crypto::sphincs::sphincs_sign;
 use dsm::economic::native_reserve::{era_reserve_id, ERA_FAUCET_PAYOUT};
-use dsm::types::device_state::{AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{
+    AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState, RealizedHead,
+};
 use dsm::types::error::DsmError;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::{
@@ -63,7 +65,7 @@ pub struct LiveDevice {
     /// public key to the device's identity.
     kyber: (Vec<u8>, Vec<u8>),
     kyber_binding_sig: Vec<u8>,
-    pub head: DeviceState,
+    pub head: RealizedHead,
     /// Counterparty -> the relationship tip this device holds.
     shared_tips: BTreeMap<[u8; 32], [u8; 32]>,
     /// Counterparty -> this device's newest EK on the relationship, `(pk, sk)`.
@@ -196,7 +198,7 @@ impl LiveDevice {
             "vv/device/kyber",
         )?;
         let kyber_binding_sig = keypair.sign(&binding_digest(&devid, &genesis, &kyber.0))?;
-        let head = DeviceState::new(genesis, devid, keypair.public_key.clone());
+        let head = DeviceState::genesis_head(genesis, devid, keypair.public_key.clone());
         Ok(Self {
             label: label.to_string(),
             devid,
@@ -528,7 +530,7 @@ fn value_moved(
 /// release at `generation` (never 0, the reserve's genesis) of the network's
 /// reserve. Advanced as the wallet advances it, carrying its own `Prepared`
 /// economic admission; the head returned carries the admission `head` had.
-pub fn faucet_claim(head: &DeviceState, generation: u64) -> Result<DeviceState, DsmError> {
+pub fn faucet_claim(head: &RealizedHead, generation: u64) -> Result<RealizedHead, DsmError> {
     use dsm::economic::admission::{
         dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission,
     };

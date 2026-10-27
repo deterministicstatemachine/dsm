@@ -108,14 +108,12 @@ fn a_device_head_is_installed_only_as_a_head_core_realized() {
     let device_state = core_source("types/device_state.rs");
 
     // The wrapper's field is private: nothing outside Core can make one.
-    let realized = device_state
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Struct(s) if s.ident == "RealizedHead" => Some(s),
-            _ => None,
-        })
-        .expect("RealizedHead is defined in device_state.rs");
+    let Some(realized) = device_state.items.iter().find_map(|item| match item {
+        Item::Struct(s) if s.ident == "RealizedHead" => Some(s),
+        _ => None,
+    }) else {
+        panic!("RealizedHead is defined in device_state.rs");
+    };
     for field in realized.fields.iter() {
         assert!(
             matches!(field.vis, Visibility::Inherited),
@@ -125,10 +123,9 @@ fn a_device_head_is_installed_only_as_a_head_core_realized() {
 
     // Its one wrapping constructor is Core's own.
     let realized_methods = methods(&production_impls(&device_state, "RealizedHead"));
-    let of = realized_methods
-        .iter()
-        .find(|f| f.sig.ident == "of")
-        .expect("RealizedHead::of");
+    let Some(of) = realized_methods.iter().find(|f| f.sig.ident == "of") else {
+        panic!("RealizedHead::of");
+    };
     assert!(
         is_crate_only(&of.vis),
         "RealizedHead::of must stay pub(crate): it wraps any DeviceState"
@@ -181,19 +178,19 @@ fn a_device_head_is_installed_only_as_a_head_core_realized() {
 #[test]
 fn the_state_machine_holds_and_installs_only_a_realized_head() {
     let state_machine = core_source("core/state_machine/mod.rs");
-    let machine = state_machine
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::Struct(s) if s.ident == "StateMachine" => Some(s),
-            _ => None,
-        })
-        .expect("StateMachine is defined");
-    let held = machine
+    let Some(machine) = state_machine.items.iter().find_map(|item| match item {
+        Item::Struct(s) if s.ident == "StateMachine" => Some(s),
+        _ => None,
+    }) else {
+        panic!("StateMachine is defined");
+    };
+    let Some(held) = machine
         .fields
         .iter()
         .find(|f| f.ident.as_ref().is_some_and(|i| i == "device_state"))
-        .expect("StateMachine::device_state");
+    else {
+        panic!("StateMachine::device_state");
+    };
     assert!(
         type_names(&held.ty).contains("RealizedHead"),
         "StateMachine must hold a RealizedHead, not a plain DeviceState: {}",
@@ -201,19 +198,18 @@ fn the_state_machine_holds_and_installs_only_a_realized_head() {
     );
 
     let impls = production_impls(&state_machine, "StateMachine");
-    let set = methods(&impls)
+    let Some(set) = methods(&impls)
         .into_iter()
         .find(|f| f.sig.ident == "set_device_head")
-        .expect("StateMachine::set_device_head");
-    let param = set
-        .sig
-        .inputs
-        .iter()
-        .find_map(|arg| match arg {
-            FnArg::Typed(t) => Some(type_names(&t.ty)),
-            FnArg::Receiver(_) => None,
-        })
-        .expect("set_device_head takes the head");
+    else {
+        panic!("StateMachine::set_device_head");
+    };
+    let Some(param) = set.sig.inputs.iter().find_map(|arg| match arg {
+        FnArg::Typed(t) => Some(type_names(&t.ty)),
+        FnArg::Receiver(_) => None,
+    }) else {
+        panic!("set_device_head takes the head");
+    };
     assert!(
         param.contains("RealizedHead") && !param.contains("DeviceState<"),
         "set_device_head must take a RealizedHead: {param}"
