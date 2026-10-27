@@ -1541,7 +1541,12 @@ mod tests {
             .await
             .expect("a member port");
         let port = listener.local_addr().expect("its address").port();
-        let acceptor = tokio_rustls::TlsAcceptor::from(tls.get_inner());
+        // It answers in HTTP/1.1, so it offers only HTTP/1.1: a client that
+        // negotiated HTTP/2 would read its answer as no answer, and the bytes
+        // it substitutes would never reach the check this test is about.
+        let mut config = (*tls.get_inner()).clone();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
         tokio::spawn(async move {
             let (inbound, ..) = listener.accept().await.expect("the member accepts");
             let mut inbound = acceptor.accept(inbound).await.expect("the TLS handshake");
