@@ -25,6 +25,7 @@ use crate::appliance::{
     Active, Appliance, ApplianceError, BootRecoveryRefusal, CommittedRecord, PreparedRecord,
     Record, RecoverOutcome, Status,
 };
+use crate::enrollment::{ChipBirth, Provisioning};
 use crate::proto::{arr32, pb, ProtoError};
 use crate::root_advance::{OfflineRelease, Transition};
 use crate::tropic::{PartitionSig, Tropic};
@@ -68,8 +69,10 @@ pub enum DurableError {
     Store(StoreError),
     /// The stored record is not an appliance record.
     Record(RecordError),
-    /// The store holds no record: the appliance was never born into it.
-    NeverBorn,
+    /// The store holds no record: the anchor was never provisioned.
+    NotProvisioned,
+    /// The store already holds a record: an anchor is provisioned once.
+    AlreadyProvisioned,
 }
 
 impl From<ApplianceError> for DurableError {
@@ -87,8 +90,7 @@ pub enum DurableBootRefusal {
     Reset(DurableError),
 }
 
-/// The canonical bytes of an active state.
-pub fn encode_active(active: &Active) -> Vec<u8> {
+fn active_pb(active: &Active) -> pb::DurableActive {
     let record = match &active.record {
         Record::Empty => None,
         Record::Prepared(p) => Some(pb::durable_active::Record::Prepared(pb::DurablePrepared {
@@ -111,12 +113,19 @@ pub fn encode_active(active: &Active) -> Vec<u8> {
         anchor_counter: active.anchor_counter,
         record,
     }
-    .encode_to_vec()
+}
+
+/// The canonical bytes of an active state.
+pub fn encode_active(active: &Active) -> Vec<u8> {
+    active_pb(active).encode_to_vec()
 }
 
 /// The active state a record holds. Its status is its record's kind.
 pub fn decode_active(bytes: &[u8]) -> Result<Active, RecordError> {
-    let d = pb::DurableActive::decode(bytes).map_err(RecordError::Undecodable)?;
+    active_from_pb(pb::DurableActive::decode(bytes).map_err(RecordError::Undecodable)?)
+}
+
+fn active_from_pb(d: pb::DurableActive) -> Result<Active, RecordError> {
     let (status, record) = match d.record {
         None => (Status::Ready, Record::Empty),
         Some(pb::durable_active::Record::Prepared(p)) => (
@@ -153,41 +162,108 @@ pub fn decode_active(bytes: &[u8]) -> Result<Active, RecordError> {
     })
 }
 
+fn provisioning_pb(p: &Provisioning) -> pb::Provisioning {
+    pb::Provisioning {
+        device_id: p.device_id.to_vec(),
+        online_id_pk: p.online_id_pk.clone(),
+        policy_hash: p.policy_hash.to_vec(),
+        genesis_root: p.genesis_root.to_vec(),
+    }
+}
+
+/// The canonical bytes of an anchor's durable record: what it was provisioned for, and its
+/// active state.
+pub fn encode_anchor(provisioning: &Provisioning, active: &Active) -> Vec<u8> {
+    pb::DurableAnchor {
+        provisioning: Some(provisioning_pb(provisioning)),
+        active: Some(active_pb(active)),
+    }
+    .encode_to_vec()
+}
+
+/// What an anchor's durable record holds: what it was provisioned for, and its active state.
+pub fn decode_anchor(bytes: &[u8]) -> Result<(Provisioning, Active), RecordError> {
+    let d = pb::DurableAnchor::decode(bytes).map_err(RecordError::Undecodable)?;
+    let p = d.provisioning.ok_or(ProtoError::MissingField)?;
+    let provisioning = Provisioning {
+        device_id: arr32(&p.device_id)?,
+        online_id_pk: p.online_id_pk,
+        policy_hash: arr32(&p.policy_hash)?,
+        genesis_root: arr32(&p.genesis_root)?,
+    };
+    let active = active_from_pb(d.active.ok_or(ProtoError::MissingField)?)?;
+    Ok((provisioning, active))
+}
+
 /// An appliance whose state outlives a power cut: every change to it is written to its store
 /// before the operation that made it returns.
 pub struct DurableAppliance<T: Tropic, P: PartitionSig, S: ActiveStore> {
     app: Appliance<T, P>,
+    provisioning: Provisioning,
     store: S,
     /// The record the store holds, as last written.
     written: Vec<u8>,
 }
 
 impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
-    /// A newly born appliance: its first record is written before it serves anything.
-    pub fn born(app: Appliance<T, P>, mut store: S) -> Result<Self, DurableError> {
-        let written = encode_active(&app.active);
+    /// Provision the anchor for the device `provisioning` names: the birth ceremony over the
+    /// chip's own identity and that device's, and the first record written before the appliance
+    /// serves anything. Refused when the store already holds a record: an anchor is provisioned
+    /// once, and never for a second device.
+    pub fn provision(
+        chip: &ChipBirth,
+        tropic: T,
+        mut store: S,
+        provisioning: Provisioning,
+    ) -> Result<Self, DurableError> {
+        if store.read().map_err(DurableError::Store)?.is_some() {
+            return Err(DurableError::AlreadyProvisioned);
+        }
+        let app = Appliance::new(
+            tropic,
+            chip.enrolled_counter,
+            chip.anchor_id,
+            chip.partition_device_id,
+            chip.birth::<P>(&provisioning),
+        );
+        let written = encode_anchor(&provisioning, &app.active);
         store.write(&written).map_err(DurableError::Store)?;
         Ok(Self {
             app,
+            provisioning,
             store,
             written,
         })
     }
 
-    /// The appliance as its store left it: `app` is the appliance its birth makes, and its
-    /// active state is replaced by the stored record. Nothing is decided here; boot recovery
-    /// ([`Self::recover_at_boot`]) decides whether it serves.
-    pub fn restore(mut app: Appliance<T, P>, mut store: S) -> Result<Self, DurableError> {
+    /// The anchor as its store left it: born again from the chip's identity and the provisioning
+    /// its record holds, with its active state the record's. Nothing is decided here; boot
+    /// recovery ([`Self::recover_at_boot`]) decides whether it serves.
+    pub fn restore(chip: &ChipBirth, tropic: T, mut store: S) -> Result<Self, DurableError> {
         let written = store
             .read()
             .map_err(DurableError::Store)?
-            .ok_or(DurableError::NeverBorn)?;
-        app.active = decode_active(&written).map_err(DurableError::Record)?;
+            .ok_or(DurableError::NotProvisioned)?;
+        let (provisioning, active) = decode_anchor(&written).map_err(DurableError::Record)?;
+        let mut app = Appliance::new(
+            tropic,
+            chip.enrolled_counter,
+            chip.anchor_id,
+            chip.partition_device_id,
+            chip.birth::<P>(&provisioning),
+        );
+        app.active = active;
         Ok(Self {
             app,
+            provisioning,
             store,
             written,
         })
+    }
+
+    /// What the anchor was provisioned for.
+    pub fn provisioning(&self) -> &Provisioning {
+        &self.provisioning
     }
 
     /// The appliance, to read.
@@ -203,7 +279,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// Write the active state if it changed. A write the store does not take undoes the change in
     /// memory: the appliance is again what the store holds.
     fn persist(&mut self) -> Result<(), DurableError> {
-        let record = encode_active(&self.app.active);
+        let record = encode_anchor(&self.provisioning, &self.app.active);
         if record == self.written {
             return Ok(());
         }
@@ -213,7 +289,7 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
                 Ok(())
             }
             Err(e) => {
-                self.app.active = decode_active(&self.written).map_err(DurableError::Record)?;
+                self.app.active = self.written_active()?;
                 Err(DurableError::Store(e))
             }
         }
@@ -222,13 +298,20 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
     /// Undo in memory whatever an operation changed before it failed: the appliance is what the
     /// store holds.
     fn back_to_written(&mut self, e: ApplianceError) -> DurableError {
-        match decode_active(&self.written) {
+        match self.written_active() {
             Ok(active) => {
                 self.app.active = active;
                 DurableError::Appliance(e)
             }
-            Err(record) => DurableError::Record(record),
+            Err(record) => record,
         }
+    }
+
+    /// The active state the store holds.
+    fn written_active(&self) -> Result<Active, DurableError> {
+        decode_anchor(&self.written)
+            .map(|(_, active)| active)
+            .map_err(DurableError::Record)
     }
 
     /// [`Appliance::prepare`], then the prepared record written.

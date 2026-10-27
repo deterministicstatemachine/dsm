@@ -143,3 +143,54 @@ pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Birth {
         chip_pk: inp.chip_pk.to_vec(),
     }
 }
+
+/// What the host supplies when it provisions an anchor for its device: the identity the anchor's
+/// bundle `B` binds. It is supplied once; the anchor keeps it with its durable record.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Provisioning {
+    /// The owner's DSM device id.
+    pub device_id: [u8; 32],
+    /// The owner's online key `pk_on`; `B` binds `H(pk_on)`.
+    pub online_id_pk: Vec<u8>,
+    /// The policy the anchor is enrolled under.
+    pub policy_hash: [u8; 32],
+    /// The genesis that seeds the offline frontier `h_0`.
+    pub genesis_root: [u8; 32],
+}
+
+/// What the chip itself contributes to its birth: its identity, its keys and its entropy. A host
+/// never supplies these.
+#[derive(Clone)]
+pub struct ChipBirth {
+    /// TROPIC01 stable chip identity `stpub` (the pinned anchor id).
+    pub anchor_id: [u8; 32],
+    pub partition_device_id: [u8; 32],
+    /// Resident chip public key `pk_chip` (`σ^chip`).
+    pub chip_pk: Vec<u8>,
+    /// Enrolled TROPIC01 counter value `H₀`.
+    pub enrolled_counter: u32,
+    pub partition_trng: [u8; 32],
+    pub chip_birth_witness: [u8; 32],
+    pub host_nonce: [u8; 32],
+    pub partition_key_seed: [u8; 32],
+}
+
+impl ChipBirth {
+    /// The birth ceremony for the device `provisioning` names.
+    pub fn birth<P: PartitionSig>(&self, provisioning: &Provisioning) -> Birth {
+        birth::<P>(&BirthInputs {
+            partition_trng: &self.partition_trng,
+            chip_birth_witness: &self.chip_birth_witness,
+            host_nonce: &self.host_nonce,
+            device_id: &provisioning.device_id,
+            policy_hash: &provisioning.policy_hash,
+            partition_device_id: &self.partition_device_id,
+            anchor_id: &self.anchor_id,
+            chip_pk: &self.chip_pk,
+            online_id_pk: &provisioning.online_id_pk,
+            partition_key_seed: &self.partition_key_seed,
+            enrolled_counter: self.enrolled_counter,
+            genesis_root: &provisioning.genesis_root,
+        })
+    }
+}

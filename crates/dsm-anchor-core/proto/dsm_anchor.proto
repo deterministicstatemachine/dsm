@@ -147,3 +147,19 @@ message DurableActive {
     DurableCommitted committed     = 4;
   }
 }
+
+// What the host supplies when it provisions an anchor for its device, once: the identity the
+// anchor's bundle B binds. The chip contributes its own identity and entropy.
+message Provisioning {
+  bytes device_id                  = 1;  // 32  the owner's DSM device id
+  bytes online_id_pk               = 2;  //     the owner's online key pk_on (B binds H(pk_on))
+  bytes policy_hash                = 3;  // 32  the policy the anchor is enrolled under
+  bytes genesis_root               = 4;  // 32  the genesis that seeds the offline frontier h_0
+}
+
+// Everything the anchor keeps across a power cut besides its counter: what it was provisioned
+// for, and its active state. One record, replaced whole.
+message DurableAnchor {
+  Provisioning provisioning        = 1;
+  DurableActive active             = 2;
+}

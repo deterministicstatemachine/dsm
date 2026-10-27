@@ -12,10 +12,10 @@ use std::rc::Rc;
 
 use anchor_core::appliance::{Appliance, RecoverOutcome, Status};
 use anchor_core::durable::{
-    decode_active, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
+    decode_anchor, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
     StoreError,
 };
-use anchor_core::enrollment::{anchor_bundle, birth, Birth, BirthInputs};
+use anchor_core::enrollment::{anchor_bundle, ChipBirth, Provisioning};
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
@@ -234,52 +234,68 @@ impl Anchor {
         SigningKey::from_bytes(&derive(&self.seed, "resident key"))
     }
 
-    fn birth(&self) -> Birth {
-        let chip_pk = self.resident().verifying_key().to_bytes().to_vec();
-        birth::<Partition>(&BirthInputs {
-            partition_trng: &derive(&self.seed, "partition trng"),
-            chip_birth_witness: &derive(&self.seed, "chip birth witness"),
-            host_nonce: &derive(&self.seed, "host nonce"),
-            device_id: &derive(&self.seed, "device id"),
-            policy_hash: &derive(&self.seed, "policy"),
-            partition_device_id: &derive(&self.seed, "partition device id"),
-            anchor_id: &derive(&self.seed, "anchor id"),
-            chip_pk: &chip_pk,
-            online_id_pk: &derive(&self.seed, "online key"),
-            partition_key_seed: &derive(&self.seed, "partition key seed"),
+    /// What the chip contributes to its birth: its identity, keys and entropy.
+    fn chip_birth(&self) -> ChipBirth {
+        ChipBirth {
+            anchor_id: derive(&self.seed, "anchor id"),
+            partition_device_id: derive(&self.seed, "partition device id"),
+            chip_pk: self.resident().verifying_key().to_bytes().to_vec(),
             enrolled_counter: H0,
-            genesis_root: &derive(&self.seed, "genesis root"),
-        })
+            partition_trng: derive(&self.seed, "partition trng"),
+            chip_birth_witness: derive(&self.seed, "chip birth witness"),
+            host_nonce: derive(&self.seed, "host nonce"),
+            partition_key_seed: derive(&self.seed, "partition key seed"),
+        }
     }
 
-    /// The appliance its birth makes, before any record is applied.
+    /// The device this anchor is provisioned for.
+    fn owner(&self) -> Provisioning {
+        Provisioning {
+            device_id: derive(&self.seed, "device id"),
+            online_id_pk: derive(&self.seed, "online key").to_vec(),
+            policy_hash: derive(&self.seed, "policy"),
+            genesis_root: derive(&self.seed, "genesis root"),
+        }
+    }
+
+    fn chip(&self) -> Chip {
+        Chip {
+            board: self.board.clone(),
+            counter: self.counter.clone(),
+            resident: self.resident(),
+        }
+    }
+
+    /// The appliance its birth for the owner makes, before any record is applied.
     fn appliance(&self) -> Appliance<Chip, Partition> {
         Appliance::new(
-            Chip {
-                board: self.board.clone(),
-                counter: self.counter.clone(),
-                resident: self.resident(),
-            },
+            self.chip(),
             H0,
             derive(&self.seed, "anchor id"),
             derive(&self.seed, "partition device id"),
-            self.birth(),
+            self.chip_birth().birth::<Partition>(&self.owner()),
         )
     }
 
+    /// Provisioned for its owner.
     fn born(&self) -> Durable {
         ok(
-            DurableAppliance::born(self.appliance(), self.rmemory.clone()),
-            "born",
+            DurableAppliance::provision(
+                &self.chip_birth(),
+                self.chip(),
+                self.rmemory.clone(),
+                self.owner(),
+            ),
+            "provisioned",
         )
     }
 
-    /// Power restored: the appliance rebuilt from its birth, restored from R-memory, and §26 boot
-    /// recovery deciding whether it serves.
+    /// Power restored: the anchor born again from its chip and the provisioning R-memory holds,
+    /// its state the record's, and §26 boot recovery deciding whether it serves.
     fn reboot(&self) -> Result<Durable, DurableBootRefusal> {
         self.board.power_up();
         let mut d = ok(
-            DurableAppliance::restore(self.appliance(), self.rmemory.clone()),
+            DurableAppliance::restore(&self.chip_birth(), self.chip(), self.rmemory.clone()),
             "restored from R-memory",
         );
         d.recover_at_boot()?;
@@ -292,7 +308,7 @@ impl Anchor {
 
     fn stored(&self) -> anchor_core::appliance::Active {
         let record = some(self.rmemory.slot.borrow().clone(), "a record");
-        ok(decode_active(&record), "the record decodes")
+        ok(decode_anchor(&record), "the record decodes").1
     }
 }
 
@@ -599,4 +615,79 @@ fn the_status_discloses_what_the_bundle_recomputes_from() {
         ),
     );
     assert_eq!(recomputed.to_vec(), status.anchor_bundle);
+}
+
+/// An anchor is provisioned once: a second provisioning, for any device, is refused and the
+/// record is unchanged.
+#[test]
+fn an_anchor_is_provisioned_once() {
+    let anchor = Anchor::new(0x1A);
+    let d = anchor.born();
+    let record = some(anchor.rmemory.slot.borrow().clone(), "a record");
+    let bundle = d.appliance().bundle;
+    drop(d);
+    let mut stranger = anchor.owner();
+    stranger.device_id = derive(&[0x1B; 32], "device id");
+    let again = Durable::provision(
+        &anchor.chip_birth(),
+        anchor.chip(),
+        anchor.rmemory.clone(),
+        stranger,
+    )
+    .map(|d| d.appliance().bundle);
+    assert_eq!(again, Err(DurableError::AlreadyProvisioned));
+    assert_eq!(
+        some(anchor.rmemory.slot.borrow().clone(), "a record"),
+        record,
+        "the record is the first provisioning's"
+    );
+    let rebooted = ok(anchor.reboot(), "serves");
+    assert_eq!(
+        rebooted.appliance().bundle,
+        bundle,
+        "and its bundle is the first's"
+    );
+    assert_eq!(rebooted.provisioning(), &anchor.owner());
+}
+
+/// An anchor restored at boot is the one its provisioning made: the same bundle, and the bundle
+/// binds the device, online key and policy it was provisioned for.
+#[test]
+fn a_restored_anchor_is_bound_to_the_device_it_was_provisioned_for() {
+    let anchor = Anchor::new(0x1C);
+    let d = anchor.born();
+    let born = d.appliance().bundle;
+    drop(d);
+    let restored = ok(anchor.reboot(), "serves");
+    let a = restored.appliance();
+    assert_eq!(a.bundle, born);
+    let owner = anchor.owner();
+    assert_eq!(
+        anchor_bundle(
+            &owner.online_id_pk,
+            &a.anchor_id,
+            &a.chip_pk,
+            &a.partition_pk,
+            H0,
+            &owner.device_id,
+            &owner.policy_hash,
+            &a.birth_commitment,
+        ),
+        a.bundle
+    );
+    assert!(
+        matches!(
+            Durable::restore(
+                &anchor.chip_birth(),
+                anchor.chip(),
+                RMemory {
+                    board: anchor.board.clone(),
+                    slot: Rc::new(RefCell::new(None)),
+                }
+            )
+            .map(|d| d.appliance().bundle),
+            Err(DurableError::NotProvisioned)
+        ),
+        "an anchor never provisioned is not restored"
+    );
 }
