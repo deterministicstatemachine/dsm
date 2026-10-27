@@ -275,13 +275,13 @@ async fn carry_exercise(
     // order `F` names them.
     futures::future::try_join_all(cells.into_iter().map(
         |(vault_id, parent_root, attempt, cell)| async move {
-            let write = write_recorded(set, cell.routed(), bytes).await?;
+            let write = write_recorded(set, cell.routed(), &cell.keeps(), bytes).await?;
             Ok::<_, DsmError>(LegWrite {
                 vault_id,
                 parent_root,
                 attempt,
                 key: *cell.routed().key(),
-                reached_leader: write.reached_leader(),
+                leader: write.leader(),
             })
         },
     ))

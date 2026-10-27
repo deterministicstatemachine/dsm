@@ -351,6 +351,18 @@ impl VerdictCell {
             })
         })
     }
+
+    /// The copies of verdicts that prove their authority for this cell: the
+    /// values its reading recognizes ([`verdict_resolution`]), narrower than
+    /// what [`Self::keeps`] keeps. What a writer reads as first at the
+    /// leader, so it records the cell taken only for a value that holds it.
+    pub fn recognizes(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            let refused = std::cell::RefCell::new(Vec::new());
+            let recognize = verdict_at(self, &refused);
+            recognize(bytes).is_some()
+        })
+    }
 }
 
 /// Where a Release stands at its verdict cell (SoFi §19.9, "The facts").

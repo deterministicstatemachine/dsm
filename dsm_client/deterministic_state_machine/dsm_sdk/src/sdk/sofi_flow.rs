@@ -183,8 +183,9 @@ pub struct RelayIntent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Relayed {
-    /// Cells whose write reached their route's leader: the position pair's
-    /// two, and each leg key the exercise was carried to.
+    /// Cells whose write got its link at their route's leader: of the
+    /// position pair's two, and of each leg key the exercise was carried to.
+    /// A cell another value was first at is not counted.
     pub cells_written: u32,
 }
 
@@ -1589,9 +1590,9 @@ enum Walked {
     /// an exercise still in flight holds.
     Live(u64),
     /// A key the walk would have passed was held by an exercise short of
-    /// final: its withheld pair is now registered from the exercise, or the
-    /// exercise of an already decided pair was carried to its keys. The walk
-    /// is run again.
+    /// final: its withheld pair is now registered from the exercise, or was
+    /// found taken by another claim at its leader, or the exercise of an
+    /// already decided pair was carried to its keys. The walk is run again.
     Registered,
     /// The vault moved under the draft: its parent was consumed, or every
     /// nearby key is held by an exercise still in flight. Nothing is
@@ -1711,19 +1712,28 @@ async fn walk_for_attempt(
         if standing == Some(PairStanding::Pending) {
             let relayed =
                 crate::sdk::sofi_relay::relay_exercise(set, vault_id, parent_root, attempt).await?;
-            if !relayed.pair.iter().all(|report| report.reached_leader()) {
-                return Err(storage(
-                    "withheld pair",
-                    format!(
-                        "the leader of the pair the exercise at attempt {attempt} carries did not \
-                         take it"
-                    ),
-                ));
+            match crate::sdk::route_seats::pair_at_leader(&relayed.pair) {
+                crate::sdk::route_seats::AtLeader::Link => log::info!(
+                    "[sofi] registered the withheld pair of the exercise at attempt {attempt} \
+                     from its own signed C_q"
+                ),
+                // Another claim got to the leader of the pair first: the
+                // exercise's fulfillment is lost at its position, and the
+                // walk run again reads it so (SoFi Amendments S14, S20).
+                crate::sdk::route_seats::AtLeader::Taken => log::info!(
+                    "[sofi] the withheld pair of the exercise at attempt {attempt} lost its \
+                     position to another claim"
+                ),
+                crate::sdk::route_seats::AtLeader::Unanswered => {
+                    return Err(storage(
+                        "withheld pair",
+                        format!(
+                            "the leader of the pair the exercise at attempt {attempt} carries \
+                             did not take it"
+                        ),
+                    ))
+                }
             }
-            log::info!(
-                "[sofi] registered the withheld pair of the exercise at attempt {attempt} from \
-                 its own signed C_q"
-            );
             return Ok(Walked::Registered);
         }
         attempt = next_attempt(attempt).map_err(refuse)?;
@@ -2763,12 +2773,12 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
     let relayed = relay_fulfillment(set, &derive::fulfillment_id(&fulfillment.body)).await?;
     let mut cells_written = 0u32;
     for report in &relayed.pair {
-        if report.reached_leader() {
+        if report.leader() == crate::sdk::route_seats::AtLeader::Link {
             cells_written += 1;
         }
     }
     for leg in &relayed.legs {
-        if leg.reached_leader {
+        if leg.leader == crate::sdk::route_seats::AtLeader::Link {
             cells_written += 1;
         }
     }

@@ -62,6 +62,7 @@ use crate::sdk::economic_admission_flow::{
 };
 use crate::sdk::storage_set::canonical_set;
 use crate::sdk::native_reserve::{keep_release_completion, read_successor, walk_reserve, write_release};
+use crate::sdk::route_seats::AtLeader;
 use crate::storage::client_db::native_reserve as reserve_db;
 
 fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
@@ -238,13 +239,23 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         };
 
         let write = write_release(&set, &parent, &envelope).await?;
-        if !write.reached_leader() {
-            return Err(DsmError::storage(
-                "the reserve cell's leader is unreachable — no member stands in; retry with \
-                 the same bytes"
-                    .to_string(),
-                None::<std::io::Error>,
-            ));
+        match write.leader() {
+            AtLeader::Link => {}
+            // Another release is first at the reserve cell's leader: it won
+            // this generation and the head moved. The next attempt walks to
+            // the new head and releases there.
+            AtLeader::Taken => {
+                log::info!("[faucet] another release won generation {generation}");
+                continue;
+            }
+            AtLeader::Unanswered => {
+                return Err(DsmError::storage(
+                    "the reserve cell's leader is unreachable — no member stands in; retry with \
+                     the same bytes"
+                        .to_string(),
+                    None::<std::io::Error>,
+                ))
+            }
         }
         match read_successor(&set, &parent).await? {
             SuccessorRead::Final { release, child } if release.envelope_bytes == envelope => {

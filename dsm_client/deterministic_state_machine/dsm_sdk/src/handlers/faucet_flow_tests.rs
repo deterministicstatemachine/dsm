@@ -206,7 +206,7 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &drain)
         .await
         .expect("the nodes keep whatever they are given");
-    assert!(write.reached_leader());
+    assert_eq!(write.leader(), crate::sdk::route_seats::AtLeader::Link);
 
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
@@ -259,7 +259,7 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &impostor)
         .await
         .expect("the nodes keep whatever they are given");
-    assert!(write.reached_leader());
+    assert_eq!(write.leader(), crate::sdk::route_seats::AtLeader::Link);
 
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
@@ -271,6 +271,153 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
         "the impostor's release holds nothing"
     );
     assert_eq!(recipient_of(&won), d.identity.device_id);
+}
+
+/// A payout release of generation 1 from `r0`, signed by a fresh key for the
+/// device that key derives with `att_a`: one the claim policy allows. The
+/// release and the device it credits.
+fn payout_release(r0: &NativeReserveState, att_a: [u8; 32]) -> (Vec<u8>, [u8; 32]) {
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    let devid = dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a);
+    let release = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: *r0.reserve_id(),
+            parent_root: r0.root(),
+            generation: 1,
+            amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            recipient_genesis: [0x5A; 32],
+            recipient_devid: devid,
+            recipient_economic_position: 1,
+            recipient_operation_digest: [0x5C; 32],
+            storage_set_id: *r0.storage_set_id(),
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+                claimant_att_a: att_a,
+            },
+        },
+        &sk,
+    )
+    .expect("signed");
+    (release, devid)
+}
+
+/// MR-STOR-0134, the faucet's race at a reserve cell. Two claimants release
+/// generation 1 at once, and the winner's release is first at the leader of
+/// the reserve's first successor cell when the loser's reaches the faucet's
+/// writer. The writer records the cell taken, with the winner's leader
+/// record, and puts nothing of the losing release on any member. A claim
+/// then walks to the moved head and takes the generation after.
+/// MUTATION CONTROL: reading another release first at the leader as an open
+/// cell puts the losing release at the leader and carries it along the
+/// route; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_beaten_to_the_reserve_leader_is_recorded_taken() {
+    use crate::sdk::route_seats::AtLeader;
+    use dsm::route_chain::{ChainSlot, RouteEntry};
+    let d = Device::start(0xA9).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let (winner, winner_devid) = payout_release(&r0, [0x5D; 32]);
+    let (loser, _) = payout_release(&r0, [0x5E; 32]);
+
+    let won = crate::sdk::native_reserve::write_release(&set, &r0, &winner)
+        .await
+        .expect("the winner's release is written");
+    let Some(ChainSlot::Link(winner_link)) = won.slots.first().cloned() else {
+        panic!("the winner is first at the leader: {:?}", won.slots);
+    };
+    let lost = crate::sdk::native_reserve::write_release(&set, &r0, &loser)
+        .await
+        .expect("the loser's write is reported");
+    assert_eq!(lost.leader(), AtLeader::Taken);
+    assert_eq!(lost.slots, vec![ChainSlot::Taken(winner_link)]);
+    let cell =
+        SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
+    let held = crate::sdk::storage_node_sdk::SetClient::new(&set)
+        .expect("a client of the set")
+        .held_at(cell.routed().namespace(), cell.routed().key())
+        .await;
+    for (member, values) in held.iter().enumerate() {
+        let values = values.as_ref().expect("every member answers");
+        assert!(
+            values
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .all(|entry| entry.value != loser),
+            "member {member} holds the losing release"
+        );
+    }
+    assert_eq!(recipient_of(&release_at(1).await), winner_devid);
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
+}
+
+/// MR-STOR-0134, the faucet's own race. Another claimant's release lands at
+/// the leader of the reserve's first successor cell between this claim's
+/// walk, which found the cell open, and its write. The claim's write is taken
+/// there. The claim does not stop on it as on a leader that did not answer:
+/// it walks again, carries the other release's chain, which reached only the
+/// leader, to finality, and takes generation 2. Nothing of its own release
+/// for generation 1 is carried past that cell's leader.
+/// MUTATION CONTROL: answering the taken write as an unreachable leader fails
+/// the claim; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_landing_between_the_walk_and_the_write_moves_the_claim_on() {
+    use dsm::route_chain::RouteEntry;
+    let d = Device::start(0xAA).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let cell =
+        SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
+    let route = cell.routed().route();
+    let leader = String::from_utf8(route.leader().to_vec()).expect("member ids are UTF-8");
+    let (rival, rival_devid) = payout_release(&r0, [0x5F; 32]);
+    let entry = dsm::route_chain::leader_copy(cell.routed(), &rival);
+    d.nodes.race_next_put(
+        &leader,
+        crate::test_support::rival::rival_put(
+            &set,
+            &leader,
+            (entry.namespace.clone(), entry.key, entry.encode()),
+        ),
+    );
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert!(
+        !d.nodes.rival_armed(&leader),
+        "the other release landed during the claim"
+    );
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(recipient_of(&release_at(1).await), rival_devid);
+    assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a client of the set");
+    let held = client
+        .held_at(cell.routed().namespace(), cell.routed().key())
+        .await;
+    let past_the_leader = client
+        .members()
+        .iter()
+        .zip(&held)
+        .filter(|(member, _)| member.member_id().as_bytes() != route.leader());
+    for (member, values) in past_the_leader {
+        let values = values.as_ref().expect("every member answers");
+        assert!(
+            values
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .all(|entry| entry.value == rival),
+            "{} holds a generation-1 release other than the one that won",
+            member.member_id()
+        );
+    }
 }
 
 /// The route claims for the device that makes the request, and for no other:

@@ -1137,14 +1137,26 @@ async fn finish_locked(
         &validated.economic_root(),
     )?;
     let write = register_economic_root(set, &cell, &frozen_root).await?;
-    if !write.reached_leader() {
-        return Err(storage_err(
-            "root register",
-            "the root cell's leader did not answer — the admission stays held for resume",
-        ));
+    let at_leader = write.leader();
+    match at_leader {
+        crate::sdk::route_seats::AtLeader::Link => {
+            pending.state = EconomicAdmissionState::Registered;
+            core.update_pending_admission_state(&pending)?;
+        }
+        // Another claim is first at the root cell's leader: the position is
+        // decided for it, and nothing of this claim was put there. Which
+        // claim holds it is Core's reading of the cell, below.
+        crate::sdk::route_seats::AtLeader::Taken => log::warn!(
+            "root register: another claim is first at position {}'s leader",
+            pending.economic_position
+        ),
+        crate::sdk::route_seats::AtLeader::Unanswered => {
+            return Err(storage_err(
+                "root register",
+                "the root cell's leader did not answer — the admission stays held for resume",
+            ))
+        }
     }
-    pending.state = EconomicAdmissionState::Registered;
-    core.update_pending_admission_state(&pending)?;
     // The position is this device's only once its claim is FINAL at the
     // cell. Another claim holding the leader link — this trader's own SoFi
     // `C_q`, for one — takes the position, and this admission never lands.
@@ -1166,9 +1178,16 @@ async fn finish_locked(
             )));
         }
         crate::sdk::economic_registers::RootClaimSettlement::Pending(why) => {
+            let what = match at_leader {
+                crate::sdk::route_seats::AtLeader::Taken => {
+                    "another claim is first at the leader, and the reads do not show it yet"
+                }
+                crate::sdk::route_seats::AtLeader::Link
+                | crate::sdk::route_seats::AtLeader::Unanswered => "the claim is not final yet",
+            };
             return Err(storage_err(
                 "root register",
-                format!("the claim is not final yet ({why}) — the admission stays held for resume"),
+                format!("{what} ({why}) — the admission stays held for resume"),
             ));
         }
     }

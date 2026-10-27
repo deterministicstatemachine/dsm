@@ -33,7 +33,7 @@ use crate::sdk::economic_admission_flow::{
     admitted_self_loop_operation, validated_root_or_activate, BuiltOn,
 };
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
     chain_past_withheld_pairs, context, exercise_draft, head_of, identity, own_setup_ref,
     publication_addr, refuse, relationship_base, require_stored, set_up_with, sign, standing,
@@ -529,12 +529,17 @@ pub async fn adjudicate(
     })?;
     let cell = VerdictCell::new(&verdict_cell, &as_ccb_members(set)?, &set.id())
         .map_err(|e| refuse(format!("verdict cell: {e:?}")))?;
-    let write = write_recorded(set, cell.routed(), &verdict.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "verdict cell",
-            "the cell's leader did not take the verdict; nothing is decided",
-        ));
+    let write = write_recorded(set, cell.routed(), &cell.recognizes(), &verdict.encode()).await?;
+    match write.leader() {
+        // This verdict, or another one first at the cell's leader: the cell
+        // is decided, and what holds it is read back.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "verdict cell",
+                "the cell's leader did not take the verdict; nothing is decided",
+            ))
+        }
     }
     Ok(VerdictView::of(&read_cell(&verifier, &verdict_cell)?))
 }

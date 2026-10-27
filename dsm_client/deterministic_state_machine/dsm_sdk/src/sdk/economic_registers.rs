@@ -113,14 +113,16 @@ pub(crate) async fn next_root_cell(
 
 /// Write this device's frozen root claim at its root cell, along the cell's
 /// route (storage spec §9), continuing an earlier write of the same claim.
-/// Which claim holds the cell is read back ([`root_claim_settlement`]),
-/// never inferred from the write.
+/// At the leader the cell's own rule for what can count there decides
+/// whether another claim is first, and the write is then taken. Which claim
+/// holds the cell is read back ([`root_claim_settlement`]), never inferred
+/// from the write.
 pub async fn register_economic_root(
     set: &StorageSet,
     cell: &RootCell,
     frozen_envelope: &[u8],
 ) -> Result<WriteReport, DsmError> {
-    write_recorded(set, cell.routed(), frozen_envelope).await
+    write_recorded(set, cell.routed(), &cell.keeps(), frozen_envelope).await
 }
 
 /// What the root cell settled for one claim.

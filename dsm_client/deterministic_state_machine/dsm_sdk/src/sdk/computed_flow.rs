@@ -47,7 +47,7 @@ use crate::sdk::economic_admission_flow::{
 };
 use crate::sdk::outcome_programs::{read_setup, DuelProgress, MatchSetup};
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
     identity, publication_addr, refuse, require_stored, sign, standing, storage, vault_at_head,
     PositionOutcome, SIGNATURE_ALG,
@@ -726,14 +726,22 @@ async fn write_start(
     let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b)
         .map_err(|why| refuse(format!("the Start does not assemble: {why:?}")))?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &start.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &start.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Start, or a Withdraw or another Start first at the cell's
+        // leader: the start cell is decided, and the caller reads which.
+        AtLeader::Link | AtLeader::Taken => Ok(()),
+        AtLeader::Unanswered => Err(storage(
             "start cell",
             "the cell's leader did not take the Start; nothing is started",
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Withdraw from the match while no Start holds its start cell: this
@@ -756,12 +764,23 @@ pub async fn withdraw(
     }
     let withdrawal = computed::sign_withdraw(kept.y(), kept.table(), kept.side, &kept.secret()?)?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &withdrawal.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "start cell",
-            "the cell's leader did not take the Withdraw; nothing is withdrawn",
-        ));
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &withdrawal.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Withdraw, or a Start first at the cell's leader: the start
+        // cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "start cell",
+                "the cell's leader did not take the Withdraw; nothing is withdrawn",
+            ))
+        }
     }
     Ok(MatchView::of(&read_cells(&verifier, &kept.terms)?))
 }
@@ -1181,15 +1200,27 @@ pub async fn settle(
         ))
     })?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.match_routed(), &occupant).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "match cell",
-            format!(
-                "the cell's leader did not take the {:?} occupant; nothing is settled",
-                String::from_utf8_lossy(recognized.label())
-            ),
-        ));
+    let programs = crate::sdk::outcome_programs::registry();
+    let write = write_recorded(
+        set,
+        cells.match_routed(),
+        &cells.keeps_match(programs),
+        &occupant,
+    )
+    .await?;
+    match write.leader() {
+        // This occupant, or another one first at the cell's leader: the
+        // match cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "match cell",
+                format!(
+                    "the cell's leader did not take the {:?} occupant; nothing is settled",
+                    String::from_utf8_lossy(recognized.label())
+                ),
+            ))
+        }
     }
     view(core, set, match_cell)
 }
