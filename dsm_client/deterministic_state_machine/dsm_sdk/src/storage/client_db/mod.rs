@@ -41,6 +41,7 @@ mod manifold_seeds;
 pub mod money_received;
 pub mod native_reserve;
 mod nonces;
+pub mod offline_spends;
 mod online_outbox;
 pub mod own_directory_entry;
 mod projection_repair;
@@ -519,7 +520,8 @@ fn get_database_path() -> Result<PathBuf> {
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
 /// the same shape and encoding. `peer_offline_account` is created on open
 /// the same way: a peer's offline account as a boundary the receiver
-/// validated left it (the owner's receive rule, 2026-10-22).
+/// validated left it (the owner's receive rule, 2026-10-22); and
+/// `own_offline_spend`, this device's spends no boundary exposed yet (SA-116).
 ///
 /// v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
 /// whole route — namespace, key, seed and committed set — and the value, and
@@ -932,6 +934,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             account_root        BLOB NOT NULL,      -- 32B
             funding_chain       BLOB NOT NULL,      -- 32B
             PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
+        );
+
+        -- This device's own offline-bearer spends no boundary of its online
+        -- history has exposed yet: the chain each confirm carries from the
+        -- account its receivers recorded (SA-116). Written with the step that
+        -- spent, taken out by the boundary that carries them online.
+        CREATE TABLE IF NOT EXISTS own_offline_spend(
+            bundle              BLOB NOT NULL,      -- 32B
+            anchor_counter      INTEGER NOT NULL,   -- u_i the spend started from
+            hop                 BLOB NOT NULL,      -- OfflineSpendHop
+            PRIMARY KEY(bundle, anchor_counter)
         );
         DROP TABLE IF EXISTS economic_admitted;
 

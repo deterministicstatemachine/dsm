@@ -18,7 +18,7 @@
 use crate::root_advance::{
     anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,
 };
-use crate::tropic::{ChipSig, PartitionSig};
+use crate::tropic::{ChipSig, HostSig};
 use crate::util::ct_eq_32;
 
 /// The DSM-state verifier the receiver supplies. The device SMT is the software authority;
@@ -129,7 +129,7 @@ pub enum AcceptError {
 /// `BranchProof` hop — a hop carries its own `transition_digest`, so no `Δ` is needed. Note
 /// this does NOT recompute `D` from `Δ°`; that Δ°-binding check is done once, on the accepted
 /// release only, in [`accept_offline`].
-fn verify_cert_frontier_and_sigs<C: ChipSig, P: PartitionSig>(
+pub fn verify_cert_frontier_and_sigs<C: ChipSig, P: HostSig>(
     cert: &Certificate,
     pk_chip: &[u8],
     pk_host: &[u8],
@@ -156,7 +156,7 @@ fn verify_cert_frontier_and_sigs<C: ChipSig, P: PartitionSig>(
     if !C::verify(pk_chip, &m, &cert.sigma_chip) {
         return Err(AcceptError::ChipSigInvalid);
     }
-    if !P::part_verify(pk_host, &m, &cert.sigma_host) {
+    if !P::verify(pk_host, &m, &cert.sigma_host) {
         return Err(AcceptError::HostSigInvalid);
     }
     Ok(())
@@ -175,7 +175,7 @@ pub fn accept_offline<D, C, P>(
 where
     D: DsmVerifier,
     C: ChipSig,
-    P: PartitionSig,
+    P: HostSig,
 {
     let t = rel.transition.as_transition();
     let cert = &rel.cert;
@@ -294,6 +294,7 @@ mod tests {
     use super::*;
     use crate::hash::h;
     use crate::root_advance::OwnedTransition;
+    use crate::tropic::PartitionSig;
     use alloc::vec::Vec;
 
     // --- deterministic mock signature schemes (host-only; no chip touched) ---

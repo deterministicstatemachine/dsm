@@ -691,3 +691,24 @@ fn a_restored_anchor_is_bound_to_the_device_it_was_provisioned_for() {
         "an anchor never provisioned is not restored"
     );
 }
+
+/// Over the wire, an appliance that exists is provisioned: OP_PROVISION to it is refused.
+#[test]
+fn a_provisioned_anchor_refuses_to_be_provisioned_again_over_the_wire() {
+    let anchor = Anchor::new(0x1D);
+    let mut a = anchor.appliance();
+    let frame = anchor_core::service::handle(
+        &mut a,
+        &encode_request(&pb::ApplianceRequest {
+            op: pb::Op::Provision as i32,
+            ..Default::default()
+        }),
+    );
+    let answer = ok(decode_response(&frame), "a response");
+    assert_eq!(answer.error, anchor_core::service::err::ALREADY_PROVISIONED);
+    assert_eq!(
+        answer.anchor_bundle,
+        Vec::<u8>::new(),
+        "and discloses nothing"
+    );
+}

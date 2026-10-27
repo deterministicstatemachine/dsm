@@ -10,7 +10,6 @@
 //!
 //! All ambiguous features fail-closed with `DsmError`.
 
-use blake3::Hasher;
 use parking_lot::Mutex;
 use prost::Message;
 use std::collections::HashMap;
@@ -54,11 +53,19 @@ pub struct CoreSDK {
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
     /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
-    /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
-    /// its down-counter + fused-anchor lineage advance. The device's offline account is opened at
-    /// the chip's enrolled origin; each bearer transfer steps the account's software counter and
-    /// frontier in `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
-    anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
+    /// silicon), attached on first use and kept: its down-counter + fused-anchor lineage advance
+    /// across transfers. It is attached only once it is provisioned for this device
+    /// ([`CoreSDK::anchor_for_this_device`]). The device's offline account is opened at the chip's
+    /// enrolled origin; each bearer transfer steps the account's software counter and frontier in
+    /// `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
+    anchor_appliance: Mutex<Option<AttachedAnchor>>,
+}
+
+/// An anchor appliance attached to this device, with the pin it was checked to be provisioned
+/// for this device under.
+struct AttachedAnchor {
+    appliance: Box<dyn crate::anchor::AnchorAppliance + Send>,
+    pin: crate::anchor::AnchorPin,
 }
 
 /// The pending economic admission each device's head carried when THIS PROCESS
@@ -74,14 +81,6 @@ static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /* ------------------------------- Helpers -------------------------------- */
-
-fn blake3_cat(parts: &[&[u8]]) -> [u8; 32] {
-    let mut h = Hasher::new();
-    for p in parts {
-        h.update(p);
-    }
-    *h.finalize().as_bytes()
-}
 
 fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
@@ -1823,7 +1822,7 @@ impl CoreSDK {
             .anchor_appliance
             .lock()
             .as_ref()
-            .map(|appliance| appliance.pin().bundle)?;
+            .map(|attached| attached.pin.bundle)?;
         let sm = self.state_machine.lock();
         sm.device_head()?.offline_allocation(&bundle, asset)
     }
@@ -1961,6 +1960,78 @@ pub struct AnchorStatusSnapshot {
 }
 
 impl CoreSDK {
+    /// The anchor appliance attached to this device: attached through the installed factory on
+    /// first use and kept. An anchor is attached only once it is provisioned for this device: one
+    /// never provisioned is provisioned here, once, with this device's id, online key, the
+    /// offline-bearer policy and its genesis; one provisioned for any other device, key or policy
+    /// is refused. Its pin is kept with it.
+    fn anchor_for_this_device<'a>(
+        &self,
+        slot: &'a mut Option<AttachedAnchor>,
+    ) -> Result<&'a mut AttachedAnchor, DsmError> {
+        if let Some(attached) = slot {
+            return Ok(attached);
+        }
+        let mut appliance = match crate::bridge::anchor_appliance_factory() {
+            Some(factory) => factory()?,
+            None => hardware_appliance_or_fail()?,
+        };
+        let pin = match appliance.provisioned_pin()? {
+            Some(pin) => pin,
+            None => appliance.provision(&self.anchor_provisioning()?)?,
+        };
+        self.require_anchor_for_this_device(&pin)?;
+        Ok(slot.insert(AttachedAnchor { appliance, pin }))
+    }
+
+    /// What this device provisions an anchor with: its device id, its online key, the
+    /// offline-bearer policy and its genesis.
+    fn anchor_provisioning(&self) -> Result<anchor_core::enrollment::Provisioning, DsmError> {
+        let genesis = self
+            .state_machine
+            .lock()
+            .device_head()
+            .ok_or_else(|| {
+                DsmError::state_machine("anchor provisioning: DeviceState not initialized")
+            })?
+            .genesis();
+        Ok(anchor_core::enrollment::Provisioning {
+            device_id: self.device_info.device_id,
+            online_id_pk: self.device_info.public_key.clone(),
+            policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+            genesis_root: genesis,
+        })
+    }
+
+    /// The anchor `pin` describes is provisioned for this device: its bundle `B` recomputes from
+    /// its pin keys, its birth commitment, this device's online key and id and the offline-bearer
+    /// policy. An anchor provisioned for another device is never attached.
+    fn require_anchor_for_this_device(
+        &self,
+        pin: &crate::anchor::AnchorPin,
+    ) -> Result<(), DsmError> {
+        dsm::crypto::anchor_enrollment::require_bundle_of(
+            dsm::crypto::anchor_enrollment::PinKeys {
+                bundle: &pin.bundle,
+                anchor_id: &pin.anchor_id,
+                pk_chip: &pin.pk_chip,
+                partition_pk: &pin.partition_pk,
+                enrolled_counter: pin.enrolled_counter,
+            },
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: &self.device_info.public_key,
+                device_id: &self.device_info.device_id,
+                policy: &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                birth_commitment: &pin.birth_commitment,
+            },
+        )
+        .map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "the anchor is not provisioned for this device: {e}"
+            ))
+        })
+    }
+
     /// The offline account of `bundle` standing exactly where the anchor stands, at `frontier`
     /// and `counter`. The account is the authority and the chip its mirror, so nothing is ever
     /// rewritten to follow the chip: an account not yet open is opened here only at the chip's
@@ -2017,40 +2088,19 @@ impl CoreSDK {
     /// the diagnostics panel can render "no anchor connected" instead of failing.
     #[must_use]
     pub fn anchor_appliance_status(&self) -> AnchorStatusSnapshot {
-        let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            let attached: Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory(),
-                    None => hardware_appliance_or_fail(&seed, dev),
-                };
-            match attached {
-                Ok(a) => *guard = Some(a),
-                Err(e) => {
-                    log::info!("[anchor.status] no anchor appliance attached: {e}");
-                    return AnchorStatusSnapshot {
-                        status: "no anchor appliance connected".into(),
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-
-        let app = match guard.as_mut() {
-            Some(a) => a,
-            None => {
+        let attached = match self.anchor_for_this_device(&mut guard) {
+            Ok(a) => a,
+            Err(e) => {
+                log::info!("[anchor.status] no anchor appliance attached: {e}");
                 return AnchorStatusSnapshot {
-                    status: "no anchor appliance connected".into(),
+                    status: format!("no anchor appliance connected: {e}"),
                     ..Default::default()
-                }
+                };
             }
         };
-
-        let pin = app.pin();
-        match app.status() {
+        let pin = attached.pin.clone();
+        match attached.appliance.status() {
             Ok(s) => AnchorStatusSnapshot {
                 connected: true,
                 anchor_id: pin.anchor_id,
@@ -2100,26 +2150,13 @@ impl CoreSDK {
         use anchor_core::root_advance::{anchor_root_advance, transition_digest};
 
         let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
-            // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
-            // producer. The factory is called once and cached (stateful appliance). Construction only —
-            // the check against the offline account is made PER stage call below, not once at birth.
-            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory()?,
-                    None => hardware_appliance_or_fail(&seed, dev)?,
-                };
-            *guard = Some(a);
-        }
-
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
-        let pin = app.pin();
+        // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory, attached
+        // once and kept (stateful appliance), and only once it is provisioned for this device. The
+        // check against the offline account is made PER stage call below.
+        let attached = self.anchor_for_this_device(&mut guard)?;
+        let pin = attached.pin.clone();
+        let app = &mut attached.appliance;
 
         // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
         // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
@@ -2189,9 +2226,12 @@ impl CoreSDK {
         sender_device_root_after: [u8; 32],
     ) -> Result<OfflineBearerArtifacts, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
 
         app.prepare(
             &staged.transition.as_transition(),
@@ -2211,12 +2251,12 @@ impl CoreSDK {
     /// counter moved before its software side committed.
     pub fn reemit_offline_bearer(&self) -> Result<OfflineBearerArtifacts, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
+        let attached = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not attached")
         })?;
         Ok(OfflineBearerArtifacts {
-            offline_release: app.emit()?,
-            pin: app.pin(),
+            offline_release: attached.appliance.emit()?,
+            pin: attached.pin.clone(),
         })
     }
 
@@ -2226,21 +2266,8 @@ impl CoreSDK {
     pub fn observe_offline_bearer_recovery(
         &self,
     ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
-        let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory()?,
-                    None => hardware_appliance_or_fail(&seed, dev)?,
-                };
-            *guard = Some(a);
-        }
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
-        app.recover()
+        self.anchor_for_this_device(&mut guard)?.appliance.recover()
     }
 
     /// Advance the appliance's frontier to the committed successor, once the step that spends it
@@ -2248,9 +2275,12 @@ impl CoreSDK {
     /// step names.
     pub fn finalize_offline_bearer(&self, appliance_next_root: [u8; 32]) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
         let new_frontier = app.finalize()?;
         if new_frontier != appliance_next_root {
             return Err(DsmError::state_machine(
@@ -2267,8 +2297,8 @@ impl CoreSDK {
     /// it is not `Prepared`.
     pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        if let Some(app) = guard.as_mut() {
-            match app.cancel() {
+        if let Some(attached) = guard.as_mut() {
+            match attached.appliance.cancel() {
                 Ok(()) => log::info!(
                     "[offline-bearer] cancelled an abandoned prepared bearer (appliance → Ready)"
                 ),
@@ -2297,7 +2327,7 @@ impl CoreSDK {
         prepared_owned_by_session: bool,
     ) -> Result<crate::anchor::RecoveryAction, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let Some(app) = guard.as_mut() else {
+        let Some(app) = guard.as_mut().map(|attached| &mut attached.appliance) else {
             // No appliance attached yet -> nothing is prepared -> Ready.
             return Ok(crate::anchor::RecoveryAction::Ready);
         };
@@ -2326,10 +2356,8 @@ pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
 
 /// The sender-side appliance when no hardware factory is installed: none.
 /// Offline-bearer requires the physical anchor device ("offline = chips").
-fn hardware_appliance_or_fail(
-    _seed: &impl Fn(&str) -> [u8; 32],
-    _dev: [u8; 32],
-) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
+{
     Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
 }
 

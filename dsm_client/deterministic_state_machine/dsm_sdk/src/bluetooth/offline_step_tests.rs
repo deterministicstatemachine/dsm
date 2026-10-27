@@ -2187,6 +2187,180 @@ async fn a_released_spend_moves_the_counter_once_and_is_emitted_again_unchanged(
     );
 }
 
+/// Phase 3, crash point 1 inside the anchor's own commit: the committed
+/// candidate is written and the power goes off before the counter moves. The
+/// release does not finish; nothing settles while the appliance is unpowered;
+/// once it boots it has completed the commit from its durable record — the
+/// counter moved once — and settling takes up the release prepared for this
+/// step, never a new one.
+/// MUTATION CONTROL: the appliance not writing the candidate before the counter
+/// moves (anchor-core `commit_no_candidate_record`) leaves nothing to complete.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_power_cut_before_the_counter_moves_is_completed_at_boot_and_released_once() {
+    use crate::test_support::appliance::{Cut, Power};
+    use prost::Message;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let counter_before = appliance.chip_counter();
+    let staged = stage_release(&a, &b, &operation);
+    // Record writes from here: 1 prepared, 2 the committed candidate, 3 the counter moved.
+    appliance.cut(Cut::AfterWrite(2));
+    let router = crate::bridge::app_router().expect("A's router");
+    router
+        .release_offline_bearer(
+            &staged.spend.staged,
+            staged.challenge,
+            staged.root_before,
+            staged.root_after,
+        )
+        .expect_err("the commit cannot finish without power");
+    assert_eq!(appliance.power(), Power::Off);
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before,
+        "the counter has not moved"
+    );
+    settle(&staged).expect_err("nothing settles while the appliance is unpowered");
+
+    appliance.reboot();
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "boot recovery completed the commit: the counter moved once"
+    );
+    let crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Committed(again) =
+        settle(&staged).expect("the completed release is taken up")
+    else {
+        panic!("a completed commit is emitted again, not reset");
+    };
+    let release = anchor_core::proto::pb::OfflineRelease::decode(again.offline_release.as_slice())
+        .expect("a release")
+        .to_release()
+        .expect("a valid release");
+    assert_eq!(release.cert.prev_frontier, before.root);
+    assert_eq!(
+        release.cert.next_frontier, staged.spend.staged.appliance_next_root,
+        "the release is this step's"
+    );
+    assert_eq!(
+        (
+            release.cert.anchor_counter,
+            release.cert.next_anchor_counter
+        ),
+        (before.anchor_counter, before.anchor_counter + 1)
+    );
+    settle(&staged).expect("settling again takes up the same release");
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "and moves the counter no further"
+    );
+    crate::bluetooth::bilateral_ble_handler::advance_committed_frontier(
+        router.as_ref(),
+        staged.spend.staged.appliance_next_root,
+    )
+    .expect("the frontier advances to the step's successor");
+    assert_eq!(
+        chip(&appliance).root,
+        staged.spend.staged.appliance_next_root
+    );
+}
+
+/// Phase 3, crash point 2 inside the anchor's own commit: the counter moved
+/// and the power goes off as the counter-committed record is written. At boot
+/// the appliance marks the commit from its durable candidate without moving the
+/// counter again, and settling takes up this step's release.
+/// MUTATION CONTROL: the appliance's counter phase not refusing a candidate
+/// whose counter moved (anchor-core `commit_counter_unpinned`) is covered in
+/// anchor-core; here boot recovery must not move the counter a second time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_power_cut_after_the_counter_moved_is_completed_at_boot_without_moving_it_again() {
+    use crate::test_support::appliance::{Cut, Power};
+    use prost::Message;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let counter_before = appliance.chip_counter();
+    let staged = stage_release(&a, &b, &operation);
+    appliance.cut(Cut::AtWrite(3));
+    let router = crate::bridge::app_router().expect("A's router");
+    router
+        .release_offline_bearer(
+            &staged.spend.staged,
+            staged.challenge,
+            staged.root_before,
+            staged.root_after,
+        )
+        .expect_err("the counter-committed record did not land");
+    assert_eq!(appliance.power(), Power::Off);
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "the counter moved before the power went"
+    );
+
+    appliance.reboot();
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "boot recovery marks the commit without moving the counter again"
+    );
+    let crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Committed(again) =
+        settle(&staged).expect("the commit is taken up")
+    else {
+        panic!("a committed release is emitted again, not reset");
+    };
+    let release = anchor_core::proto::pb::OfflineRelease::decode(again.offline_release.as_slice())
+        .expect("a release")
+        .to_release()
+        .expect("a valid release");
+    assert_eq!(
+        release.cert.next_frontier,
+        staged.spend.staged.appliance_next_root
+    );
+}
+
+/// Phase 3: a power cut while the anchor holds a prepared release and before
+/// its commit starts. At boot no session can own the prepared record across the
+/// reboot, so the appliance resets it durably; the counter never moved, and the
+/// step settles as nothing released — it goes back to waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_power_cut_while_prepared_is_reset_at_boot_with_nothing_released() {
+    use crate::test_support::appliance::Cut;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let counter_before = appliance.chip_counter();
+    let staged = stage_release(&a, &b, &operation);
+    appliance.cut(Cut::AfterWrite(1));
+    crate::bridge::app_router()
+        .expect("A's router")
+        .release_offline_bearer(
+            &staged.spend.staged,
+            staged.challenge,
+            staged.root_before,
+            staged.root_after,
+        )
+        .expect_err("nothing commits without power");
+    appliance.reboot();
+    assert!(
+        matches!(
+            settle(&staged).expect("settled"),
+            crate::bluetooth::bilateral_ble_handler::ReleaseOnAppliance::Unreleased
+        ),
+        "nothing was released"
+    );
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before,
+        "the counter never moved"
+    );
+    assert_eq!(chip(&appliance), before, "the frontier is where it was");
+}
+
 /// The recovery table: prepared, and the counter unchanged — reset. A release
 /// cut off after its anchor prepared goes back to waiting only once the
 /// appliance reports no transaction with its counter unmoved: the prepared
@@ -2401,7 +2575,6 @@ fn spend_receipt(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded() {
-    use crate::anchor::AnchorAppliance;
     use dsm::bilateral::offline::spend_starts_at_the_record;
 
     let (_pair, a, b, appliance, operation) = bearer_pair().await;
@@ -2422,10 +2595,26 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         .filter(|account| account.economic_position() == position)
         .expect("B recorded the boundary it walked")
     };
+    // B's origin for A's spends: its record, A's anchor as B pins it, and no
+    // spends of A's since the record.
+    let pin = appliance.pin();
+    let origin = |recorded: dsm::economic::peer_lineage::PeerOfflineAccount| {
+        dsm::bilateral::offline::BearerOrigin {
+            recorded,
+            anchor: dsm::types::offline_chain::ChainAnchor {
+                bundle: pin.bundle,
+                anchor_id: pin.anchor_id,
+                pk_chip: pin.pk_chip.clone(),
+                pk_host: pin.partition_pk.clone(),
+            },
+            chain: &[],
+            accepted: None,
+        }
+    };
 
     b.device.enter();
     crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
-    let after_load = recorded(loaded_at);
+    let after_load = origin(recorded(loaded_at));
     let from_load = stage_release(&a, &b, &operation);
     let (load_receipt, load_leaves) = spend_receipt(&a, &b, &operation, &from_load);
     spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_load)
@@ -2457,7 +2646,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
 
     b.device.enter();
     crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at + 1).await;
-    let after_unload = recorded(loaded_at + 1);
+    let after_unload = origin(recorded(loaded_at + 1));
     spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_unload)
         .expect("taken once B recorded the unload");
     spend_starts_at_the_record(&load_receipt, &load_leaves, &genesis, &after_unload)

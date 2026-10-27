@@ -315,7 +315,7 @@ pub struct ConfirmClaims<'a> {
 }
 
 /// What the receiver holds for a step it accepted.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct AcceptedStep<'a> {
     pub commitment_hash: [u8; 32],
     pub operation: &'a Operation,
@@ -331,11 +331,29 @@ pub struct AcceptedStep<'a> {
     /// device derived them from the step's release under the sender's pinned
     /// bundle.
     pub bearer: Option<BearerLeaves>,
-    /// For an offline-bearer step, the sender's offline account under the
-    /// release's bundle as this device last validated it from the sender's
-    /// online history (`economic_lineage::latest_offline_account`); `None`
-    /// when it has validated none.
-    pub bearer_origin: Option<crate::economic::peer_lineage::PeerOfflineAccount>,
+    /// For an offline-bearer step, where this device holds the sender's
+    /// offline account from ([`BearerOrigin`]); `None` when it has validated
+    /// none of it online.
+    pub bearer_origin: Option<&'a BearerOrigin<'a>>,
+}
+
+/// What a receiver holds of a sender's offline account, independently of the
+/// confirm, and what the confirm carries to bring it forward.
+#[derive(Clone, Debug)]
+pub struct BearerOrigin<'a> {
+    /// The sender's offline account under the release's bundle as this device
+    /// last validated it from the sender's online history
+    /// (`economic_lineage::latest_offline_account`).
+    pub recorded: crate::economic::peer_lineage::PeerOfflineAccount,
+    /// The sender's anchor: its bundle and the keys it commits, as this device
+    /// pins it, or admits it from a disclosure whose bundle recomputes.
+    pub anchor: crate::types::offline_chain::ChainAnchor,
+    /// The sender's spends since the recorded account, as the confirm carries
+    /// them (SA-116).
+    pub chain: &'a [crate::types::offline_chain::SpendHop],
+    /// Where this device last accepted a spend from the sender to leave its
+    /// account — the frontier and the counter — if it ever has.
+    pub accepted: Option<([u8; 32], u64)>,
 }
 
 /// A confirm the receiver may commit. Only [`decide_confirm`] makes one,
@@ -346,6 +364,7 @@ pub struct VerifiedConfirm {
     receipt: StitchedReceiptV2,
     successor_tip: [u8; 32],
     bearer: Option<BearerLeaves>,
+    bearer_start: Option<crate::types::offline_chain::AccountPoint>,
 }
 
 impl VerifiedConfirm {
@@ -365,50 +384,97 @@ impl VerifiedConfirm {
     pub fn bearer(&self) -> Option<&BearerLeaves> {
         self.bearer.as_ref()
     }
+
+    /// For an offline-bearer step, the account its spend starts from as this
+    /// device established it: its recorded account carried forward by the
+    /// sender's verified chain of spends, at the counter and frontier the
+    /// release starts from.
+    pub fn bearer_start(&self) -> Option<&crate::types::offline_chain::AccountPoint> {
+        self.bearer_start.as_ref()
+    }
 }
 
 /// The owner's receive rule (2026-10-22): an offline-bearer spend is taken
 /// only from the offline account its receiver validated itself, from the
-/// sender's online history. `recorded` is that account, as the sender's latest
-/// boundary the receiver walked left it, under the spend's anchor bundle. The
-/// receipt's offline-account write names the account the spend started from
-/// (its pre-root, which `verify_receipt_state` folds under the sender's device
-/// root): a spend from another sender's or another bundle's account, or from
-/// any other state of this one, is refused.
+/// sender's online history — carried forward, when the sender has paid offline
+/// since, by the sender's chain of spends (SA-116).
+///
+/// The recorded account must be the sender's, under the spend's bundle, and
+/// the anchor the chain is verified under must be that bundle's. The chain is
+/// verified hop by hop from the recorded account
+/// ([`crate::types::offline_chain::verify_spend_chain`]); the receipt's
+/// offline-account write names the account the spend started from (its
+/// pre-root, which `verify_receipt_state` folds under the sender's device
+/// root), and that must be the account the chain leaves, at the counter and
+/// frontier the release starts from. A spend from another sender's or another
+/// bundle's account, or from any other state of this one, is refused.
+///
+/// Forward only: once this device accepted a spend from the sender, the next
+/// one must pass through the point that spend left the account at — unless
+/// the recorded account is newer, validated online since. A spend that starts
+/// before it, or beside it, is refused.
+///
+/// Answers the account the spend starts from.
 pub fn spend_starts_at_the_record(
     receipt: &StitchedReceiptV2,
     leaves: &BearerLeaves,
     sender_genesis: &[u8; 32],
-    recorded: &crate::economic::peer_lineage::PeerOfflineAccount,
-) -> Result<(), DsmError> {
+    origin: &BearerOrigin<'_>,
+) -> Result<crate::types::offline_chain::AccountPoint, DsmError> {
+    use crate::types::offline_chain::{chain_end, verify_spend_chain, AccountPoint};
+    let recorded = &origin.recorded;
     if recorded.device_id() != &receipt.devid_a
         || recorded.genesis() != sender_genesis
         || recorded.bundle() != &leaves.bundle
+        || origin.anchor.bundle != leaves.bundle
     {
         return Err(DsmError::invalid_operation(
             "offline-bearer spend: the recorded offline account is not the sender's under this \
              spend's anchor bundle",
         ));
     }
+    let payments = verify_spend_chain(recorded.account_root(), &origin.anchor, origin.chain)?;
+    let carried = chain_end(recorded.account_root(), &payments);
     let started_from = receipt
         .step_writes
         .iter()
         .find_map(|write| match &write.leaf {
             ReceiptLeaf::OfflineAccount(witness) => Some(witness.pre_account_root),
-            _ => None,
+            ReceiptLeaf::Relationship => None,
         })
         .ok_or_else(|| {
             DsmError::invalid_operation(
                 "offline-bearer spend: the receipt writes no offline account",
             )
         })?;
-    if &started_from != recorded.account_root() {
+    if started_from != carried {
         return Err(DsmError::invalid_operation(
             "offline-bearer spend: it does not start from the offline account this device \
-             validated online for the sender",
+             validated online for the sender, carried forward by the sender's chain of spends",
         ));
     }
-    Ok(())
+    if let Some((frontier, counter)) = origin.accepted {
+        let recorded_counter = match payments.first() {
+            Some(first) => first.before.counter,
+            None => leaves.counter,
+        };
+        let passes_through = payments
+            .iter()
+            .map(|p| (p.before.counter, p.before.frontier))
+            .chain([(leaves.counter, leaves.frontier)])
+            .any(|point| point == (counter, frontier));
+        if counter >= recorded_counter && !passes_through {
+            return Err(DsmError::invalid_operation(
+                "offline-bearer spend: it does not extend the spend this device last accepted \
+                 from the sender",
+            ));
+        }
+    }
+    Ok(AccountPoint {
+        root: carried,
+        counter: leaves.counter,
+        frontier: leaves.frontier,
+    })
 }
 
 /// The receiver's decision on a confirm for a step it accepted: σ_A under
@@ -465,15 +531,23 @@ pub fn decide_confirm(
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
-    if let Some(leaves) = step.bearer.as_ref() {
-        let recorded = step.bearer_origin.ok_or_else(|| {
-            DsmError::invalid_operation(
-                "offline-bearer confirm: this device has validated none of the sender's offline \
-                 account online, so no offline payment from it is taken",
-            )
-        })?;
-        spend_starts_at_the_record(&receipt, leaves, &sender.genesis, &recorded)?;
-    }
+    let bearer_start = match step.bearer.as_ref() {
+        Some(leaves) => {
+            let origin = step.bearer_origin.ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "offline-bearer confirm: this device has validated none of the sender's \
+                     offline account online, so no offline payment from it is taken",
+                )
+            })?;
+            Some(spend_starts_at_the_record(
+                &receipt,
+                leaves,
+                &sender.genesis,
+                origin,
+            )?)
+        }
+        None => None,
+    };
 
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
         DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
@@ -501,6 +575,7 @@ pub fn decide_confirm(
         receipt,
         successor_tip,
         bearer: step.bearer,
+        bearer_start,
     })
 }
 
@@ -1546,6 +1621,168 @@ mod tests {
         refused(
             decide(commitment_hash, &a_side, step(sender_device_id)),
             "B-side artifacts",
+        );
+    }
+}
+
+/// The receive rule against real spends: a payer's anchor-released spends,
+/// built through its own `advance`, and the receiver's record of the account
+/// the payer's load left.
+#[cfg(test)]
+mod receive_rule_tests {
+    use super::*;
+    use crate::economic::peer_lineage::PeerOfflineAccount;
+    use crate::types::offline_chain::fixture::Payer;
+
+    const RECEIVER: [u8; 32] = [0xB0; 32];
+    const OTHER: [u8; 32] = [0xC0; 32];
+
+    fn refused<T: core::fmt::Debug>(result: Result<T, DsmError>, reason: &str) {
+        let error = result.expect_err(reason);
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+
+    fn record(payer: &Payer) -> PeerOfflineAccount {
+        let account = payer
+            .head
+            .offline_account(&payer.pin.bundle)
+            .expect("the account is open");
+        PeerOfflineAccount::rehydrate_recorded(
+            payer.genesis,
+            payer.head.devid(),
+            1,
+            payer.pin.bundle,
+            account.root(),
+            account.funding_chain().expect("a load funded it"),
+        )
+    }
+
+    fn origin<'a>(
+        recorded: &PeerOfflineAccount,
+        payer: &Payer,
+        chain: &'a [crate::types::offline_chain::SpendHop],
+        accepted: Option<([u8; 32], u64)>,
+    ) -> BearerOrigin<'a> {
+        BearerOrigin {
+            recorded: recorded.clone(),
+            anchor: payer.pin.clone(),
+            chain,
+            accepted,
+        }
+    }
+
+    /// SA-116. A payer that paid someone else offline since its load pays
+    /// this receiver from the account its chain of spends leaves: taken with
+    /// the chain, from the receiver's record of the load; refused without it.
+    /// MUTATION CONTROL: taking the spend's start from the record alone,
+    /// without the chain, turns this red.
+    #[test]
+    fn a_second_offline_spend_is_taken_with_the_chain_from_the_record() {
+        let mut payer = Payer::loaded(0x41, 40);
+        let recorded = record(&payer);
+        let (first, first_receipt, first_leaves) = payer.spend(OTHER, 10);
+        let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
+        let start = spend_starts_at_the_record(
+            &second_receipt,
+            &second_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, &[first.clone()], None),
+        )
+        .expect("the second spend is taken with the chain");
+        assert_eq!((start.counter, start.frontier), (1, second_leaves.frontier));
+        spend_starts_at_the_record(
+            &first_receipt,
+            &first_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, &[], None),
+        )
+        .expect("the first spend starts at the record");
+        refused(
+            spend_starts_at_the_record(
+                &second_receipt,
+                &second_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[], None),
+            ),
+            "carried forward by the sender's chain of spends",
+        );
+    }
+
+    /// A chain that does not reach the release's start, or under another
+    /// anchor, or a record of another sender, is refused.
+    #[test]
+    fn a_spend_whose_chain_does_not_carry_the_record_to_it_is_refused() {
+        let mut payer = Payer::loaded(0x42, 40);
+        let other = Payer::loaded(0x43, 40);
+        let recorded = record(&payer);
+        let (first, _, _) = payer.spend(OTHER, 10);
+        let (second, _, _) = payer.spend(OTHER, 3);
+        let (_, receipt, leaves) = payer.spend(RECEIVER, 5);
+        refused(
+            spend_starts_at_the_record(
+                &receipt,
+                &leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[first.clone()], None),
+            ),
+            "carried forward by the sender's chain of spends",
+        );
+        let both = [first.clone(), second.clone()];
+        let mut foreign = origin(&recorded, &payer, &both, None);
+        foreign.anchor = other.pin.clone();
+        refused(
+            spend_starts_at_the_record(&receipt, &leaves, &payer.genesis, &foreign),
+            "not the sender's under this spend's anchor bundle",
+        );
+        refused(
+            spend_starts_at_the_record(
+                &receipt,
+                &leaves,
+                &payer.genesis,
+                &origin(&record(&other), &payer, &[first, second], None),
+            ),
+            "not the sender's under this spend's anchor bundle",
+        );
+    }
+
+    /// Forward only: once a receiver accepted a spend from a payer, the next
+    /// spend must pass through the point that spend left the account at. A
+    /// spend replayed from before it, or a spend whose chain bypasses it, is
+    /// refused.
+    /// MUTATION CONTROL: dropping the forward-only check takes the replayed
+    /// spend and turns this red.
+    #[test]
+    fn a_spend_before_the_one_last_accepted_is_refused() {
+        let mut payer = Payer::loaded(0x44, 40);
+        let recorded = record(&payer);
+        let (first, first_receipt, first_leaves) = payer.spend(RECEIVER, 10);
+        let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
+        let after_first = Some((first_leaves.next_frontier, first_leaves.counter + 1));
+        spend_starts_at_the_record(
+            &second_receipt,
+            &second_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, &[first.clone()], after_first),
+        )
+        .expect("the next spend passes through the one accepted");
+        let after_second = Some((second_leaves.next_frontier, second_leaves.counter + 1));
+        refused(
+            spend_starts_at_the_record(
+                &first_receipt,
+                &first_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[], after_second),
+            ),
+            "does not extend the spend this device last accepted",
+        );
+        refused(
+            spend_starts_at_the_record(
+                &second_receipt,
+                &second_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[first], Some(([0x5C; 32], 1))),
+            ),
+            "does not extend the spend this device last accepted",
         );
     }
 }

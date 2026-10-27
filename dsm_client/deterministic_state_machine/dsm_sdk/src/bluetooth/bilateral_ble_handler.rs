@@ -180,6 +180,56 @@ pub(crate) struct StagedBearerSpend {
 /// device's anchor under the receiver's challenge `receiver_challenge`, and build its account
 /// spend. The operation's asset is resolved independently from the token `terms` name (§9.5)
 /// and must be the asset the operation signs.
+/// An anchor disclosure's fields, each its exact length: the bundle, the pin
+/// keys `B` commits, the enrolled counter, the policy and the birth commitment.
+pub(crate) struct DisclosedAnchor {
+    pub bundle: [u8; 32],
+    pub anchor_id: [u8; 32],
+    pub enrolled_counter: u64,
+    pub partition_pk: Vec<u8>,
+    pub pk_chip: Vec<u8>,
+    pub policy: [u8; 32],
+    pub birth_commitment: [u8; 32],
+}
+
+impl DisclosedAnchor {
+    pub(crate) fn keys(&self) -> dsm::crypto::anchor_enrollment::PinKeys<'_> {
+        dsm::crypto::anchor_enrollment::PinKeys {
+            bundle: &self.bundle,
+            anchor_id: &self.anchor_id,
+            pk_chip: &self.pk_chip,
+            partition_pk: &self.partition_pk,
+            enrolled_counter: self.enrolled_counter,
+        }
+    }
+}
+
+/// Parse an anchor disclosure, refusing any field of the wrong length: a v2
+/// disclosure carries `pk_chip` (without it `σ^chip` cannot be verified) and
+/// the birth commitment (without it `B` cannot be recomputed).
+pub(crate) fn disclosed_anchor(
+    d: &generated::AnchorDisclosure,
+) -> Result<DisclosedAnchor, DsmError> {
+    let fixed = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
+        <[u8; 32]>::try_from(bytes)
+            .map_err(|e| DsmError::invalid_operation(format!("an anchor disclosure's {what}: {e}")))
+    };
+    if d.pk_chip.len() != 32 {
+        return Err(DsmError::invalid_operation(
+            "an anchor disclosure's pk_chip is not 32 bytes",
+        ));
+    }
+    Ok(DisclosedAnchor {
+        bundle: fixed(&d.bundle, "bundle")?,
+        anchor_id: fixed(&d.anchor_id, "anchor id")?,
+        enrolled_counter: d.enrolled_counter,
+        partition_pk: d.partition_pk.clone(),
+        pk_chip: d.pk_chip.clone(),
+        policy: fixed(&d.policy_hash, "policy")?,
+        birth_commitment: fixed(&d.birth_commitment, "birth commitment")?,
+    })
+}
+
 pub(crate) fn stage_bearer_spend(
     router: &dyn crate::bridge::AppRouter,
     rel_key: [u8; 32],
@@ -2904,6 +2954,7 @@ impl BilateralBleHandler {
                 pre_entropy: pre_entropy.to_vec(),
                 offline_release: Vec::new(),
                 anchor_disclosure: None,
+                offline_spend_chain: None,
             };
             let genesis_hash = self.bilateral_tx_manager.read().await.local_genesis_hash();
             let buffer = confirm_envelope(&self.device_id, &genesis_hash, &confirm_request)?;
@@ -3224,9 +3275,62 @@ impl BilateralBleHandler {
                         &own,
                     )],
                 )?;
+                // The release with the advance's offline-state proofs attached (they sit outside
+                // every signature).
+                let release = crate::sdk::core_sdk::attach_offline_state_proofs(
+                    &artifacts.offline_release,
+                    proofs.parent.clone(),
+                    proofs.child.clone(),
+                )?;
+                // The spends no boundary has exposed yet, before this one: the chain this
+                // confirm carries from the account the receiver recorded (SA-116). This spend
+                // joins them in the same transaction.
+                let chain = crate::storage::client_db::offline_spends::own_offline_spends_in_tx(
+                    tx,
+                    &offline_spend.anchor_bundle_b,
+                )
+                .map_err(|e| storage("this device's unexposed offline spends", e))?
+                .iter()
+                .map(|hop| {
+                    generated::OfflineSpendHop::decode(hop.as_slice()).map_err(|e| {
+                        DsmError::serialization_error(
+                            "OfflineSpendHop",
+                            "protobuf",
+                            Some(e.to_string()),
+                            Some(e),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, DsmError>>()?;
+                let witness = own
+                    .step_writes
+                    .iter()
+                    .find_map(|write| match &write.leaf {
+                        dsm::types::receipt_types::ReceiptLeaf::OfflineAccount(witness) => {
+                            Some((**witness).clone())
+                        }
+                        dsm::types::receipt_types::ReceiptLeaf::Relationship => None,
+                    })
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "sender commit: the step's receipt writes no offline account",
+                        )
+                    })?;
+                let hop = dsm::types::offline_chain::SpendHop::new(
+                    &release,
+                    witness.clone(),
+                    offline_spend.asset,
+                    offline_spend.amount,
+                )?;
+                crate::storage::client_db::offline_spends::record_own_offline_spend_in_tx(
+                    tx,
+                    &offline_spend.anchor_bundle_b,
+                    witness.pre_counter,
+                    &hop.to_proto().encode_to_vec(),
+                )
+                .map_err(|e| storage("this spend, for the chain of the next", e))?;
                 // The confirm, from the advance that commits: its entropy, the successor tip both
-                // parties derive from it, and the release with the advance's offline-state proofs
-                // attached (they sit outside every signature).
+                // parties derive from it, and the release.
                 let confirm_request = generated::BilateralConfirmRequest {
                     commitment_hash: Some(generated::Hash32 {
                         v: commitment_hash.to_vec(),
@@ -3235,12 +3339,9 @@ impl BilateralBleHandler {
                     stitched_receipt: own_receipt.clone(),
                     shared_chain_tip_new: Some(generated::Hash32 { v: child.to_vec() }),
                     pre_entropy: entropy.to_vec(),
-                    offline_release: crate::sdk::core_sdk::attach_offline_state_proofs(
-                        &artifacts.offline_release,
-                        proofs.parent.clone(),
-                        proofs.child.clone(),
-                    )?,
+                    offline_release: release,
                     anchor_disclosure: Some(anchor_disclosure.clone()),
+                    offline_spend_chain: Some(generated::OfflineSpendChain { hops: chain }),
                 };
                 let confirm = confirm_envelope(&local_device_id, &genesis_hash, &confirm_request)?;
                 let mut awaiting = session.clone();
@@ -3472,6 +3573,7 @@ impl BilateralBleHandler {
             partition_pk: pin.partition_pk.clone(),
             policy_hash: policy_hash.to_vec(),
             pk_chip: pin.pk_chip.clone(),
+            birth_commitment: pin.birth_commitment.to_vec(),
         })
     }
 
@@ -3480,20 +3582,25 @@ impl BilateralBleHandler {
     /// matching disclosure is a no-op; a DIFFERING anchor is rejected and the pinned one kept
     /// (silent substitution never succeeds via a transfer). Admission is a memory of what to
     /// verify — it never implies acceptance. Malformed disclosures are ignored fail-closed.
-    /// The anchor bundle `B` this device holds for `sender`: its pinned one,
-    /// or on the first bearer transfer the one this confirm discloses and a
-    /// verified contact's pin would admit. Pure: the pin is written only by
+    /// The anchor this device holds for `sender`: its pinned one, or on the
+    /// first bearer transfer the one this confirm discloses — only for a
+    /// verified contact, and only when the disclosed bundle recomputes from the
+    /// disclosed keys and birth commitment, the sender's pinned online key, its
+    /// device id and the offline-bearer policy (the load in the sender's online
+    /// history names that bundle; the receive rule then requires this device
+    /// recorded it). Pure: the pin is written only by
     /// [`Self::admit_anchor_disclosure`], after the confirm is checked.
-    async fn sender_anchor_bundle(
+    async fn sender_anchor(
         &self,
         sender: [u8; 32],
+        contact: &crate::storage::client_db::types::ContactRecord,
         confirm_request: &generated::BilateralConfirmRequest,
-    ) -> Result<[u8; 32], DsmError> {
+    ) -> Result<dsm::types::offline_chain::ChainAnchor, DsmError> {
         let store = crate::bridge::anchor_enrollment_store().ok_or_else(|| {
             DsmError::state_machine("offline-bearer confirm: no anchor enrollment store installed")
         })?;
         if let Some(existing) = store.get(&sender) {
-            return Ok(existing.pin.bundle);
+            return Ok(dsm::types::offline_chain::ChainAnchor::from(&existing.pin));
         }
         let contact_verified = {
             let mgr = self.bilateral_tx_manager.read().await;
@@ -3509,16 +3616,28 @@ impl BilateralBleHandler {
                 "offline-bearer confirm: an anchor disclosure is admitted only for a verified contact",
             ));
         }
-        <[u8; 32]>::try_from(disclosure.bundle.as_slice()).map_err(|_| {
-            DsmError::invalid_operation(
-                "offline-bearer confirm: the disclosed bundle is not 32 bytes",
-            )
+        let disclosed = disclosed_anchor(disclosure)?;
+        dsm::crypto::anchor_enrollment::require_bundle_of(
+            disclosed.keys(),
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: &contact.public_key,
+                device_id: &sender,
+                policy: &disclosed.policy,
+                birth_commitment: &disclosed.birth_commitment,
+            },
+        )?;
+        Ok(dsm::types::offline_chain::ChainAnchor {
+            bundle: disclosed.bundle,
+            anchor_id: disclosed.anchor_id,
+            pk_chip: disclosed.pk_chip,
+            pk_host: disclosed.partition_pk,
         })
     }
 
     async fn admit_anchor_disclosure(
         &self,
         sender_device_id: [u8; 32],
+        sender_online_key: &[u8],
         commitment_hash: [u8; 32],
         d: &generated::AnchorDisclosure,
     ) {
@@ -3526,36 +3645,42 @@ impl BilateralBleHandler {
             let mgr = self.bilateral_tx_manager.read().await;
             mgr.has_verified_contact(&sender_device_id)
         };
-        let parsed = (|| {
-            let bundle = <[u8; 32]>::try_from(d.bundle.as_slice()).ok()?;
-            let anchor_id = <[u8; 32]>::try_from(d.anchor_id.as_slice()).ok()?;
-            let policy = <[u8; 32]>::try_from(d.policy_hash.as_slice()).ok()?;
-            // pk_chip is REQUIRED in a v2 disclosure — a pin without it cannot verify σ^chip.
-            if d.pk_chip.len() != 32 {
-                return None;
-            }
-            Some((
-                policy,
+        let parsed = disclosed_anchor(d).map(|disclosed| {
+            (
+                disclosed.policy,
+                disclosed.birth_commitment,
                 dsm::crypto::anchor_enrollment::FusedAnchorPin {
-                    bundle,
-                    anchor_id,
-                    enrolled_counter: d.enrolled_counter,
-                    partition_pk: d.partition_pk.clone(),
-                    pk_chip: d.pk_chip.clone(),
+                    bundle: disclosed.bundle,
+                    anchor_id: disclosed.anchor_id,
+                    enrolled_counter: disclosed.enrolled_counter,
+                    partition_pk: disclosed.partition_pk,
+                    pk_chip: disclosed.pk_chip,
                     uncompromised: true,
                 },
-            ))
-        })();
-        match (
-            contact_verified,
-            parsed,
-            crate::bridge::anchor_enrollment_store(),
-        ) {
-            (true, Some((policy, disclosed)), Some(store)) => {
+            )
+        });
+        if !contact_verified {
+            warn!("[BILATERAL] fused anchor disclosure ignored: sender is not a verified contact");
+            return;
+        }
+        let (policy, birth_commitment, disclosed) = match parsed {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                warn!("[BILATERAL] fused anchor disclosure ignored: {e} (fail-closed)");
+                return;
+            }
+        };
+        let Some(store) = crate::bridge::anchor_enrollment_store() else {
+            return;
+        };
+        {
+            {
                 let existing = store.get(&sender_device_id);
                 match crate::bluetooth::anchor_accept::pin_admit_decision(
                     sender_device_id,
+                    sender_online_key,
                     policy,
+                    &birth_commitment,
                     &disclosed,
                     existing.as_ref(),
                 ) {
@@ -3621,13 +3746,6 @@ impl BilateralBleHandler {
                     }
                 }
             }
-            (false, _, _) => warn!(
-                "[BILATERAL] fused anchor disclosure ignored: sender is not a verified contact"
-            ),
-            (_, None, _) => {
-                warn!("[BILATERAL] fused anchor disclosure ignored: malformed fields (fail-closed)")
-            }
-            (_, _, None) => {}
         }
     }
 
@@ -3980,9 +4098,9 @@ impl BilateralBleHandler {
         })?;
         // An offline-bearer step's receipt moves the sender's anchor-state
         // leaf; its values are derived here from the release and this
-        // device's own challenge, under the bundle it pins (or is admitting)
+        // device's own challenge, under the anchor it pins (or is admitting)
         // for the sender — before the receipt is checked, which needs them.
-        let sender_bearer_leaves =
+        let sender_bearer =
             if dsm::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 &session.operation,
             ) {
@@ -3992,35 +4110,65 @@ impl BilateralBleHandler {
                      prepare response that issues it was never recorded",
                 )
                 })?;
-                let bundle = self
-                    .sender_anchor_bundle(session.counterparty_device_id, &confirm_request)
-                    .await?;
-                Some(
-                    crate::bluetooth::anchor_accept::bearer_leaves_of_release(
-                        &confirm_request.offline_release,
-                        &bundle,
-                        &receiver_challenge,
+                let anchor = self
+                    .sender_anchor(
+                        session.counterparty_device_id,
+                        &sender_contact,
+                        &confirm_request,
                     )
-                    .map_err(|r| r.into_dsm_error())?,
+                    .await?;
+                let leaves = crate::bluetooth::anchor_accept::bearer_leaves_of_release(
+                    &confirm_request.offline_release,
+                    &anchor.bundle,
+                    &receiver_challenge,
                 )
+                .map_err(|r| r.into_dsm_error())?;
+                Some((anchor, leaves))
             } else {
                 None
             };
+        let sender_bearer_leaves = sender_bearer.as_ref().map(|(_, leaves)| *leaves);
         // The owner's receive rule (2026-10-22): the sender's offline account
         // under the release's bundle as this device last validated it from the
-        // sender's online history; Core takes the spend only from it.
-        let bearer_origin = match &sender_bearer_leaves {
-            Some(leaves) => crate::storage::client_db::economic_lineage::latest_offline_account(
-                &sender_genesis,
-                &session.counterparty_device_id,
-                &leaves.bundle,
-            )
-            .map_err(|e| {
-                DsmError::storage(
-                    format!("bilateral confirm: the sender's recorded offline account: {e}"),
-                    None::<std::io::Error>,
+        // sender's online history, carried forward by the sender's chain of
+        // spends since (SA-116); Core takes the spend only from there, and
+        // only forward of the last spend this device accepted from the sender.
+        let sender_chain = match confirm_request.offline_spend_chain.clone() {
+            Some(chain) => dsm::types::offline_chain::chain_from_bytes(&chain.encode_to_vec())?,
+            None => Vec::new(),
+        };
+        let bearer_origin = match &sender_bearer {
+            Some((anchor, leaves)) => {
+                let recorded = crate::storage::client_db::economic_lineage::latest_offline_account(
+                    &sender_genesis,
+                    &session.counterparty_device_id,
+                    &leaves.bundle,
                 )
-            })?,
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("bilateral confirm: the sender's recorded offline account: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
+                let accepted =
+                    crate::storage::client_db::anchor_enrollments::load_accepted_anchor_root(
+                        &session.counterparty_device_id,
+                    )
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!(
+                                "bilateral confirm: the sender's last accepted anchor point: {e}"
+                            ),
+                            None::<std::io::Error>,
+                        )
+                    })?;
+                recorded.map(|recorded| dsm::bilateral::offline::BearerOrigin {
+                    recorded,
+                    anchor: anchor.clone(),
+                    chain: &sender_chain,
+                    accepted,
+                })
+            }
             None => None,
         };
         let verified = dsm::bilateral::offline::decide_confirm(
@@ -4041,7 +4189,7 @@ impl BilateralBleHandler {
                 sender_device_tree_root: sender_device_tree,
                 sender_chain_head: sender_chain_head.as_deref(),
                 bearer: sender_bearer_leaves,
-                bearer_origin,
+                bearer_origin: bearer_origin.as_ref(),
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: session.counterparty_device_id,
@@ -4111,8 +4259,13 @@ impl BilateralBleHandler {
             // Admission is a memory of what to verify — acceptance is the predicate below.
             let sender_device_id = session.counterparty_device_id;
             if let Some(d) = confirm_request.anchor_disclosure.as_ref() {
-                self.admit_anchor_disclosure(sender_device_id, commitment_hash, d)
-                    .await;
+                self.admit_anchor_disclosure(
+                    sender_device_id,
+                    &sender_contact.public_key,
+                    commitment_hash,
+                    d,
+                )
+                .await;
             }
             let pin = crate::bridge::anchor_enrollment_store()
                 .and_then(|s| s.get(&sender_device_id))
@@ -4120,29 +4273,21 @@ impl BilateralBleHandler {
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
-            // The frontier adopted from this holder's last ACCEPTED release. Absent row =
-            // relationship genesis — the predicate adopts the release's own `prev_root` TOFU
-            // (authenticated by the anchor-state proofs + the three signatures, the same trust
-            // root as the pin admit).
-            let accepted_root =
-                crate::storage::client_db::anchor_enrollments::load_accepted_anchor_root(
-                    &sender_device_id,
+            // The frontier the release must start from: the one Core established for the
+            // spend — this device's record of the sender's account carried forward by the
+            // sender's verified chain, forward of the last spend it accepted from the sender.
+            let established = verified.bearer_start().ok_or_else(|| {
+                DsmError::invalid_operation(
+                    "offline-bearer confirm: Core established no account the spend starts from",
                 )
-                .map_err(|e| {
-                    DsmError::storage(
-                        format!(
-                            "offline-bearer confirm: the accepted anchor frontier is unreadable: {e}"
-                        ),
-                        None::<std::io::Error>,
-                    )
-                })?;
+            })?;
             // The predicate runs against the confirm Core verified: the release's device roots
             // and anchor leaves must be the ones its receipt proves.
             let adopted = crate::bluetooth::anchor_accept::accept_offline_release(
                 &verified,
                 &confirm_request.offline_release,
                 pinned.as_ref(),
-                accepted_root.as_ref().map(|(r, _)| r),
+                Some(&established.frontier),
                 &self.device_id,
                 &expected_receiver_challenge,
                 &policy_hash,
@@ -6542,13 +6687,26 @@ mod tests {
             }));
         }
 
+        // An anchor born for the sender: its bundle recomputes from the sender's
+        // online key, device id and the disclosed policy, keys and birth.
         let disclosure = |anchor_tag: u8| generated::AnchorDisclosure {
-            bundle: vec![0xB1; 32],
+            bundle: anchor_core::enrollment::anchor_bundle(
+                &[7u8; 32],
+                &[anchor_tag; 32],
+                &[0x0C; 32],
+                &[0x07; 64],
+                1_000,
+                &sender,
+                &[0x9A; 32],
+                &[0xB7; 32],
+            )
+            .to_vec(),
             anchor_id: vec![anchor_tag; 32],
             enrolled_counter: 1_000,
             partition_pk: vec![0x07; 64],
             policy_hash: vec![0x9A; 32],
             pk_chip: vec![0x0C; 32],
+            birth_commitment: vec![0xB7; 32],
         };
         let last_type = |events: &Arc<StdMutex<Vec<generated::BilateralEventNotification>>>| {
             events.lock().expect("evs").last().map(|e| e.event_type)
@@ -6558,7 +6716,7 @@ mod tests {
 
         // 1) First disclosure -> ANCHOR_PINNED + pin stored.
         handler
-            .admit_anchor_disclosure(sender, [0x01; 32], &disclosure(0xA1))
+            .admit_anchor_disclosure(sender, &[7u8; 32], [0x01; 32], &disclosure(0xA1))
             .await;
         assert_eq!(events.lock().expect("evs").len(), 1);
         assert_eq!(last_type(&events), Some(anchor_pinned));
@@ -6569,7 +6727,7 @@ mod tests {
 
         // 2) Identical repeat -> NoChange -> NO new event.
         handler
-            .admit_anchor_disclosure(sender, [0x02; 32], &disclosure(0xA1))
+            .admit_anchor_disclosure(sender, &[7u8; 32], [0x02; 32], &disclosure(0xA1))
             .await;
         assert_eq!(
             events.lock().expect("evs").len(),
@@ -6579,7 +6737,7 @@ mod tests {
 
         // 3) Differing anchor -> ANCHOR_CHANGED + ORIGINAL pin retained (never overwritten).
         handler
-            .admit_anchor_disclosure(sender, [0x03; 32], &disclosure(0xEE))
+            .admit_anchor_disclosure(sender, &[7u8; 32], [0x03; 32], &disclosure(0xEE))
             .await;
         assert_eq!(events.lock().expect("evs").len(), 2);
         assert_eq!(last_type(&events), Some(anchor_changed));

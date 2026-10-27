@@ -85,6 +85,8 @@ enum Op {
   OP_CANCEL      = 7;  // discard a prepared (uncommitted) record
   OP_SPI_PASSTHROUGH = 8; // raw-SPI relay bridge: clock spi_payload to TROPIC01, return the MISO
                           // bytes. NOT an appliance op — the bytes are not interpreted.
+  OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
+                       // answered with the STATUS pin material of the anchor it made
 }
 
 // A request from the (non-secure) host transport into the secure core. The device roots
@@ -97,6 +99,7 @@ message ApplianceRequest {
   bytes sender_device_root_before   = 4;  // OP_PREPARE (32, R_i)
   bytes sender_device_root_after    = 5;  // OP_PREPARE (32, R_{i+1})
   bytes spi_payload                 = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
+  Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
 }
 
 // The secure core's response.
