@@ -1506,21 +1506,23 @@ enum PairPart {
     Withheld,
 }
 
-/// B's pending trade stopped at its install: another value is first at the
-/// leader of one of its pair's cells, so B's writer put nothing of the pair
-/// and wrote no exercise (storage spec §9 route chains, rule 5; SoFi §17.4),
-/// or the pair's leader refused the pair. B then writes, past its own flow,
-/// `part` of its pair and its exercise at every leg's key, built from the
-/// objects its trade published: what a trader that bypasses its own writer
-/// can put, and what every reader must judge.
-async fn write_past_its_own_flow(
-    p: &Pair,
-    set: &crate::sdk::storage_set::StorageSet,
-    pair: &dsm::sofi::registration::PositionCells,
-    part: PairPart,
-) {
-    p.b.enter();
-    let head = p.b.router().core_sdk.device_head().expect("B's head");
+/// `d`'s pending trade as storage holds it: its `F`, its signed `C_q` of its
+/// `P` and `F`, and the exercise built from the objects the trade published.
+struct PendingTrade {
+    fulfillment: dsm::sofi::publication::Signed<TraderFulfillmentBody>,
+    claim: Vec<u8>,
+    exercise: SofiExercise,
+}
+
+/// Read `d`'s pending trade back from storage and build its exercise, as
+/// `d`'s own stage 8 builds it.
+async fn pending_trade(d: &TestDevice, set: &crate::sdk::storage_set::StorageSet) -> PendingTrade {
+    d.enter();
+    let head = d
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("the device's head");
     let fulfillment_id = match head
         .pending_economic_admission()
         .map(|pending| pending.kind)
@@ -1528,7 +1530,7 @@ async fn write_past_its_own_flow(
         Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
             fulfillment_id,
         }) => fulfillment_id,
-        other => panic!("B's pending admission is its fulfillment: {other:?}"),
+        other => panic!("the pending admission is a fulfillment: {other:?}"),
     };
     let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(set, &fulfillment_id)
         .await
@@ -1554,7 +1556,7 @@ async fn write_past_its_own_flow(
     let own_objects =
         crate::sdk::sofi_advance::own_closure_objects(set, &precommit.body, &preimage)
             .await
-            .expect("B's own closure objects");
+            .expect("the trader's own closure objects");
     let request = crate::sdk::sofi_register::InstallRequest {
         precommit: &precommit.body,
         precommit_signature: &precommit.signature,
@@ -1563,7 +1565,7 @@ async fn write_past_its_own_flow(
         fulfillment_signature: &fulfillment.signature,
         own_objects: &own_objects,
     };
-    let (own, parents) = standing_of(&p.b);
+    let (own, parents) = standing_of(d);
     let ctx = VerifierContext::new(set, Some(own), parents.as_ref()).expect("a verifier");
     let evidence = match ctx
         .verifier()
@@ -1575,10 +1577,10 @@ async fn write_past_its_own_flow(
             panic!("the conformance evidence is published, and some of it was not found")
         }
     };
-    p.b.enter();
+    d.enter();
     let claim = {
-        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
-        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("the trader's AK");
+        let att_a = crate::sdk::signing_authority::current_att_a().expect("the trader's AttA");
         dsm::sofi::signature::sign_resolution_claim(
             derive::resolution_claim(&precommit.body, &fulfillment.body),
             fulfillment.body.signature_alg(),
@@ -1586,9 +1588,37 @@ async fn write_past_its_own_flow(
             att_a,
             &sk,
         )
-        .expect("B signs its C_q")
+        .expect("the trader signs its C_q")
         .encode()
     };
+    let exercise =
+        dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
+            .expect("the trader's exercise");
+    PendingTrade {
+        fulfillment,
+        claim,
+        exercise,
+    }
+}
+
+/// B's pending trade stopped at its install: another value is first at the
+/// leader of one of its pair's cells, so B's writer put nothing of the pair
+/// and wrote no exercise (storage spec §9 route chains, rule 5; SoFi §17.4),
+/// or the pair's leader refused the pair. B then writes, past its own flow,
+/// `part` of its pair and its exercise at every leg's key, built from the
+/// objects its trade published: what a trader that bypasses its own writer
+/// can put, and what every reader must judge.
+async fn write_past_its_own_flow(
+    p: &Pair,
+    set: &crate::sdk::storage_set::StorageSet,
+    pair: &dsm::sofi::registration::PositionCells,
+    part: PairPart,
+) {
+    let PendingTrade {
+        fulfillment,
+        claim,
+        exercise,
+    } = pending_trade(&p.b, set).await;
     // The half of the pair B writes, by its cell's own rule.
     match part {
         PairPart::Fulfillment => {
@@ -1629,9 +1659,6 @@ async fn write_past_its_own_flow(
         }
         PairPart::Withheld => {}
     }
-    let exercise =
-        dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
-            .expect("B's exercise");
     let recognized = recognize_exercise(&exercise.encode()).expect("Core recognizes it");
     let legs = write_exercise(set, &exercise, &recognized)
         .await
@@ -3892,6 +3919,104 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
         "a resolve with nothing pending answered {:?}",
         r.data
     );
+}
+
+/// MR-STOR-0134, stage 8's race for a leg key. B's and A's trades are built
+/// on one head, and both are cut short at the vault's first key, its leader
+/// refusing it. Then, as B's own completion writes its exercise there, A's
+/// exercise lands first at that key's leader. B's leg is taken there: B's
+/// completion is written with the leg recorded taken, for the ladder to read,
+/// and not left as a stage the network did not take; and nothing of B's
+/// exercise goes past that key's leader.
+/// MUTATION CONTROL: counting a taken leg as one whose leader did not answer
+/// leaves B's completion not taken; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_leg_key_another_exercise_gets_to_first_is_taken_and_the_stage_completes() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let attempt = attempt_cell(
+        &set,
+        &m.vault_id,
+        &genesis_root_of(&ctx.verifier(), &m.vault_id),
+        0,
+    )
+    .expect("the first attempt key");
+    let attempt_leader = member_name(attempt.routed().route().leader());
+    p.nodes
+        .refuse_cell_writes(&attempt_leader, &[*attempt.routed().key()])
+        .await;
+
+    // B's trade and A's, both on the vault's head, cut short at its first
+    // key: their pairs land, their exercises do not.
+    let q = admitted_position(&p.b) + 1;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    let a_q = admitted_position(&p.a) + 1;
+    let r = invoke(
+        &p.a,
+        "sofi.trade",
+        args(&generated::SofiTradeRequest {
+            vault_id: m.vault_id.to_vec(),
+            token_in_policy_commit: m.era.to_vec(),
+            amount_in_entered: entered(&p.a, &m.era, 7),
+            min_amount_out_entered: entered(&p.a, &m.tkn, 1),
+            token_out_policy_commit: m.tkn.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(position_of(&r, "sofi.trade"), (a_q, exhausted));
+    p.nodes.accept_cell_writes(&attempt_leader).await;
+
+    // A's exercise is armed to land first at the key's leader, just before
+    // the next put there naming that key.
+    let rival = pending_trade(&p.a, &set).await.exercise.encode();
+    let entry = dsm::route_chain::leader_copy(attempt.routed(), &rival);
+    p.nodes.race_next_put(
+        &attempt_leader,
+        crate::test_support::rival::rival_put(
+            &set,
+            &attempt_leader,
+            (entry.namespace.clone(), entry.key, entry.encode()),
+        ),
+    );
+
+    let completed = match complete(&p).await {
+        Completion::Written(completed) => completed,
+        other => panic!("B's completion is written: {other:?}"),
+    };
+    assert!(
+        !p.nodes.rival_armed(&attempt_leader),
+        "A's exercise landed while B's completion wrote"
+    );
+    let leg = completed
+        .exercise
+        .iter()
+        .find(|leg| leg.vault_id == m.vault_id)
+        .expect("the vault's leg");
+    assert_eq!(leg.leader, crate::sdk::route_seats::AtLeader::Taken);
+    let client = SetClient::new(&set).expect("a client of the set");
+    let held = client
+        .held_at(attempt.routed().namespace(), attempt.routed().key())
+        .await;
+    let past_the_leader =
+        client.members().iter().zip(&held).filter(|(member, _)| {
+            member.member_id().as_bytes() != attempt.routed().route().leader()
+        });
+    for (member, values) in past_the_leader {
+        assert_eq!(
+            values.as_ref().expect("every member answers"),
+            &Vec::<Vec<u8>>::new(),
+            "{} holds a copy at the key",
+            member.member_id()
+        );
+    }
 }
 
 /// Two trades built on one head, and the slower loses the key (phones,
