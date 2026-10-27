@@ -2761,6 +2761,49 @@ mod tests {
         (g, [0x52; 32])
     }
 
+    /// MR-DSM-0215: pricing is checked integer arithmetic and the choice a
+    /// function of the candidates and the trader, so two conforming SDKs given
+    /// the same vault states choose byte-identical routes. Each vault alone
+    /// and each pair split are priced from the same reserves, and the route
+    /// chosen is the same whatever order the candidates were enumerated in.
+    ///
+    /// MUTATION CONTROL: breaking ties by candidate position instead of the
+    /// route-lane order turns this red.
+    #[test]
+    fn the_same_vault_states_choose_the_same_route_in_any_enumeration_order() {
+        use dsm::dlv::route_commit::constant_product_output;
+        let reserves: [(u64, u64); 4] = [(100, 1_000), (100, 1_000), (100, 1_000), (90, 900)];
+        let price = |amount: u64, (a, b): (u64, u64)| {
+            constant_product_output(amount, a, b, 30).expect("priced within the reserves")
+        };
+        let mut routes: Vec<(u64, Vec<[u8; 32]>)> = reserves
+            .iter()
+            .zip(0u8..)
+            .map(|(r, i)| (price(10, *r), vec![lane(i)]))
+            .collect();
+        for (i, a) in reserves.iter().enumerate() {
+            for (j, b) in reserves.iter().enumerate().skip(i + 1) {
+                let lanes = vec![lane(i as u8), lane(j as u8)];
+                routes.push((price(5, *a) + price(5, *b), lanes));
+            }
+        }
+        for t in 0..20 {
+            let (g, d) = trader(t);
+            let chosen = |candidates: &[(u64, Vec<[u8; 32]>)]| {
+                candidates[choose_route(candidates, (&g, &d)).expect("a route")].clone()
+            };
+            let reference = chosen(&routes);
+            let mut reversed = routes.clone();
+            reversed.reverse();
+            assert_eq!(chosen(&reversed), reference, "trader {t}, reversed");
+            for k in 1..routes.len() {
+                let mut rotated = routes.clone();
+                rotated.rotate_left(k);
+                assert_eq!(chosen(&rotated), reference, "trader {t}, rotated by {k}");
+            }
+        }
+    }
+
     /// Five equal vaults of a pair, each alone or split in two: a small
     /// trade's split is within the tolerance of a single vault, so each
     /// trader takes one vault alone — the same one every time — and traders

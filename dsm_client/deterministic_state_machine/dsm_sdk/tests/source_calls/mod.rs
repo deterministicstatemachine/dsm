@@ -17,6 +17,8 @@ pub enum Event {
     /// A field read: the binding or field it is read from, when that is a
     /// name (`evidence` in `evidence.setups`), and the field's name.
     Field { base: Option<String>, name: String },
+    /// A struct literal, by its type's path: every segment.
+    Construct(Vec<String>),
 }
 
 /// The source file at `path`, parsed.
@@ -146,7 +148,7 @@ pub fn calls_in_order(block: &Block) -> Vec<String> {
         .filter_map(|event| match event {
             Event::Call(path) => path.last().cloned(),
             Event::Method(name) => Some(format!(".{name}")),
-            Event::Field { .. } => None,
+            Event::Field { .. } | Event::Construct(..) => None,
         })
         .collect()
 }
@@ -264,6 +266,13 @@ fn expr_events(expr: &Expr, out: &mut Vec<Event>) {
             }
         }
         Expr::Struct(e) => {
+            out.push(Event::Construct(
+                e.path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect(),
+            ));
             for field in &e.fields {
                 expr_events(&field.expr, out);
             }

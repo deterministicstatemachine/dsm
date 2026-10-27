@@ -731,6 +731,35 @@ impl NodeSet {
         }
     }
 
+    /// Refuse every immutable object write at each named member: its store
+    /// raises on the insert and the member answers an error — a member whose
+    /// object storage failed. Every read, and every cell write, serves as
+    /// before.
+    pub async fn refuse_object_writes(&self, member_ids: &[String]) {
+        for member_id in member_ids {
+            self.ddl(
+                member_id,
+                "CREATE OR REPLACE FUNCTION refuse_object_write() RETURNS trigger \
+                 LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'the store refused the write'; END $$;
+                 DROP TRIGGER IF EXISTS refuse_object_write ON immutable_objects;
+                 CREATE TRIGGER refuse_object_write BEFORE INSERT ON immutable_objects
+                     FOR EACH ROW EXECUTE FUNCTION refuse_object_write();",
+            )
+            .await;
+        }
+    }
+
+    /// Each named member's object store takes writes again.
+    pub async fn accept_object_writes(&self, member_ids: &[String]) {
+        for member_id in member_ids {
+            self.ddl(
+                member_id,
+                "DROP TRIGGER IF EXISTS refuse_object_write ON immutable_objects",
+            )
+            .await;
+        }
+    }
+
     /// The member's store takes every write again.
     pub async fn accept_cell_writes(&self, member_id: &str) {
         self.ddl(

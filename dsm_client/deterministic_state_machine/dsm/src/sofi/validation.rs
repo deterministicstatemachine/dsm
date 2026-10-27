@@ -3378,6 +3378,22 @@ mod tests {
         ));
     }
 
+    /// SoFi §37, Gate G3, the vault-leaf row: with every pre value of the
+    /// vaults' leaves withheld and everything else in hand, validation waits
+    /// on a vault leaf by name; it is never Invalid for it. (The corrupt half
+    /// of the row is `a_relationship_leaf_of_another_trader_is_invalid` and
+    /// `a_vault_state_that_does_not_derive_its_own_id_is_invalid`.)
+    #[test]
+    fn a_vault_leaf_not_in_hand_waits() {
+        let f = swap_fixture();
+        let mut evidence = f.evidence.clone();
+        evidence.vault_leaves.clear();
+        assert!(matches!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::VaultLeaf { .. }))
+        ));
+    }
+
     /// A two-hop route: the trader spends t0, receives t2, and t1 never
     /// touches its balances — it moves inside the vaults.
     #[test]
@@ -3462,6 +3478,98 @@ mod tests {
             f.preimage.dlv_cores().to_vec(),
         )
         .unwrap()
+    }
+
+    /// SoFi §37, Gate G4, MR-SOFI-0276: changing any byte of any evidence
+    /// item changes `E` or produces a refusal. Across every object, setup and
+    /// token policy the fixture's evidence holds, the first byte, the last,
+    /// and every 61st between are each flipped in turn, and each vault leaf's
+    /// value is moved; validation over the changed evidence never accepts.
+    /// Each sampled byte of `P(E)` flipped fails to decode or recomputes
+    /// another `E`.
+    ///
+    /// MUTATION CONTROL: dropping the re-hash of a token policy against its
+    /// commit (or of an object against its address) turns this red.
+    #[test]
+    fn changing_any_evidence_byte_changes_e_or_is_refused() {
+        let f = swap_fixture();
+        let Ok(()) = validate(&f.precommit, &f.preimage, &f.evidence) else {
+            panic!("the fixture's operation validates");
+        };
+        let flips = |bytes: &[u8]| -> Vec<Vec<u8>> {
+            let mut at: BTreeSet<usize> = (0..bytes.len()).step_by(61).collect();
+            at.extend(bytes.len().checked_sub(1));
+            at.into_iter()
+                .map(|i| {
+                    let mut changed = bytes.to_vec();
+                    changed[i] ^= 0x01;
+                    changed
+                })
+                .collect()
+        };
+        let refused = |evidence: &Evidence, what: &str| {
+            let Err(..) = validate(&f.precommit, &f.preimage, evidence) else {
+                panic!("validation accepted evidence with {what} changed");
+            };
+        };
+        for (addr, bytes) in &f.evidence.objects {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.objects.insert(*addr, changed);
+                refused(&evidence, "an object's byte");
+            }
+        }
+        for (rho, bytes) in &f.evidence.setups {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.setups.insert(*rho, changed);
+                refused(&evidence, "a setup's byte");
+            }
+        }
+        for (commit, bytes) in &f.evidence.token_policies {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.token_policies.insert(*commit, changed);
+                refused(&evidence, "a token policy's byte");
+            }
+        }
+        for (key, leaf) in &f.evidence.vault_leaves {
+            let moved = match leaf {
+                VaultLeafPre::State(state) => VaultLeafPre::State(VaultStateLeaf {
+                    reserve_a: state.reserve_a + 1,
+                    ..state.clone()
+                }),
+                VaultLeafPre::Relationship(relationship) => {
+                    let mut leaf = relationship.leaf;
+                    leaf[0] ^= 0x01;
+                    VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                        leaf,
+                        ..relationship.clone()
+                    })
+                }
+                VaultLeafPre::Absent => VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                    trader_genesis: G,
+                    trader_device_id: [0x22; 32],
+                    leaf: [0x23; 32],
+                }),
+            };
+            let mut evidence = f.evidence.clone();
+            evidence.vault_leaves.insert(*key, moved);
+            refused(&evidence, "a vault leaf's value");
+        }
+
+        let e = derive::recompute_e(&f.preimage).expect("E");
+        let bytes = f.preimage.encode().expect("P(E) encodes");
+        for changed in flips(&bytes) {
+            // A changed P(E) that does not decode is refused; one that does
+            // recomputes another E.
+            let recomputed = SettlementPreimage::decode(&changed)
+                .map_err(|e| e.to_string())
+                .and_then(|other| derive::recompute_e(&other).map_err(|e| e.to_string()));
+            if let Ok(other) = recomputed {
+                assert_ne!(other, e, "a changed byte of P(E) recomputed the same E");
+            }
+        }
     }
 
     #[test]

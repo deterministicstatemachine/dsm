@@ -4015,6 +4015,242 @@ pub(crate) mod tests {
         assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
     }
 
+    /// SoFi §39, MR-SOFI-0284: each SoFi operation is one deterministic
+    /// transition with one derived entropy. A setup, a vault creation and a
+    /// fulfillment, each signed by its own rule: applied twice from one head,
+    /// each gives byte-identical outcomes; with a carried byte changed (and
+    /// signed again) its entropy and tip move; with its signature changed it
+    /// is refused; and its relationship tip and both receipt hashes contain
+    /// its entropy.
+    ///
+    /// MUTATION CONTROL: deriving the entropy without the operation's bytes
+    /// turns the "a carried byte moves it" assertions red.
+    #[test]
+    fn each_sofi_operation_is_one_deterministic_transition_with_one_entropy() {
+        use crate::core::bilateral_transaction_manager::{
+            compute_precommit, compute_smt_key, compute_successor_tip,
+        };
+        use crate::crypto::sphincs::sphincs_sign;
+        use crate::sofi::{derive, wire};
+
+        let keys = test_keypair();
+        let alg = crate::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F;
+        let att_a = [0x5A; 32];
+        let devid = crate::core::identity::genesis_v2::derive_devid(&keys.public_key, &att_a);
+        let genesis = [0x6E; 32];
+        let token = pc(0x42);
+        let era = crate::core::token::token_state_manager::era_policy_commit();
+        let head = DeviceState::new(genesis, devid, keys.public_key.clone())
+            .admitted_faucet_claim(0)
+            .expect("ERA")
+            .created_token(token, 1_000)
+            .expect("a token");
+        let self_loop = compute_smt_key(&devid, &devid);
+        let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
+        let forged = |mut signature: Vec<u8>| {
+            signature[0] ^= 0x01;
+            signature
+        };
+
+        let setup = |position: u64| {
+            let body = wire::SofiSetupBody::new(
+                genesis,
+                devid,
+                position,
+                [0xC1; 32],
+                [0x66; 32],
+                [0x67; 32],
+                alg,
+                &keys.public_key,
+            )
+            .expect("a setup body");
+            let signature = sign(&derive::setup_signing_digest(&body));
+            (body.encode(), signature)
+        };
+        let vault = |amount_b: u64, signed: &dyn Fn(Vec<u8>) -> Vec<u8>| {
+            let creation = wire::VaultCreation {
+                vault_id: [0x51; 32],
+                genesis_root: [0x52; 32],
+                amount_a: 100,
+                amount_b,
+            }
+            .encode();
+            let unsigned = Operation::SofiVaultCreate {
+                genesis_preimage: Vec::new(),
+                creation: creation.clone(),
+                market_policy_preimage: Vec::new(),
+                funding_a_policy_commit: era,
+                funding_b_policy_commit: token,
+                signature: Vec::new(),
+            };
+            let signature = signed(sign(&unsigned.signing_bytes()));
+            let deltas = vec![
+                BalanceDelta {
+                    policy_commit: era,
+                    direction: BalanceDirection::Debit,
+                    amount: 100,
+                },
+                BalanceDelta {
+                    policy_commit: token,
+                    direction: BalanceDirection::Debit,
+                    amount: amount_b,
+                },
+            ];
+            (
+                Operation::SofiVaultCreate {
+                    genesis_preimage: Vec::new(),
+                    creation,
+                    market_policy_preimage: Vec::new(),
+                    funding_a_policy_commit: era,
+                    funding_b_policy_commit: token,
+                    signature,
+                },
+                deltas,
+            )
+        };
+        let fulfillment = |position: u64| {
+            let body = wire::TraderFulfillmentBody::new(
+                [0x0E; 32],
+                vec![[0x21; 32]],
+                vec![wire::AttemptEntry {
+                    vault_id: [0x51; 32],
+                    attempt: 0,
+                }],
+                position,
+                alg,
+                &keys.public_key,
+                att_a,
+            )
+            .expect("a fulfillment body");
+            let signature = sign(&derive::fulfillment_signing_digest(&body));
+            (body.encode(), signature)
+        };
+
+        let unchanged = |signature: Vec<u8>| signature;
+        let (setup_body, setup_signature) = setup(5);
+        let (other_setup_body, other_setup_signature) = setup(6);
+        let (vault_op, vault_deltas) = vault(300, &unchanged);
+        let (other_vault_op, other_vault_deltas) = vault(301, &unchanged);
+        let (forged_vault_op, _) = vault(300, &forged);
+        let (fulfill_body, fulfill_signature) = fulfillment(6);
+        let (other_fulfill_body, other_fulfill_signature) = fulfillment(7);
+        let fulfill = |body: Vec<u8>, signature: Vec<u8>| Operation::SofiFulfill {
+            fulfillment_body: body,
+            precommit_id: vec![0x0E; 32],
+            signature,
+        };
+        let cases: Vec<(
+            &str,
+            Operation,
+            Vec<BalanceDelta>,
+            Operation,
+            Vec<BalanceDelta>,
+            Operation,
+        )> = vec![
+            (
+                "SofiSetup",
+                Operation::SofiSetup {
+                    setup_body: setup_body.clone(),
+                    signature: setup_signature.clone(),
+                },
+                Vec::new(),
+                Operation::SofiSetup {
+                    setup_body: other_setup_body,
+                    signature: other_setup_signature,
+                },
+                Vec::new(),
+                Operation::SofiSetup {
+                    setup_body,
+                    signature: forged(setup_signature),
+                },
+            ),
+            (
+                "SofiVaultCreate",
+                vault_op,
+                vault_deltas.clone(),
+                other_vault_op,
+                other_vault_deltas,
+                forged_vault_op,
+            ),
+            (
+                "SofiFulfill",
+                fulfill(fulfill_body.clone(), fulfill_signature.clone()),
+                Vec::new(),
+                fulfill(other_fulfill_body, other_fulfill_signature),
+                Vec::new(),
+                fulfill(fulfill_body, forged(fulfill_signature)),
+            ),
+        ];
+
+        for (name, op, deltas, changed, changed_deltas, refused) in cases {
+            let refused_deltas = match &refused {
+                Operation::SofiVaultCreate { .. } => vault_deltas.clone(),
+                _ => Vec::new(),
+            };
+            let advanced = |op: Operation, deltas: &[BalanceDelta], what: &str| match head
+                .advance(self_loop, devid, op, deltas, None)
+            {
+                Ok(outcome) => outcome,
+                Err(e) => panic!("{name} {what}: {e}"),
+            };
+            let once = advanced(op.clone(), &deltas, "advances");
+            let twice = advanced(op, &deltas, "advances again");
+            assert_eq!(
+                once.transition_entropy(),
+                twice.transition_entropy(),
+                "{name}"
+            );
+            assert_eq!(
+                once.new_chain_state.compute_chain_tip(),
+                twice.new_chain_state.compute_chain_tip(),
+                "{name}"
+            );
+            assert_eq!(
+                once.new_device_state.root(),
+                twice.new_device_state.root(),
+                "{name}"
+            );
+
+            let other = advanced(
+                changed,
+                &changed_deltas,
+                "with a carried byte changed advances",
+            );
+            assert_ne!(
+                once.transition_entropy(),
+                other.transition_entropy(),
+                "{name}"
+            );
+            assert_ne!(
+                once.new_chain_state.compute_chain_tip(),
+                other.new_chain_state.compute_chain_tip(),
+                "{name}"
+            );
+            let Err(..) = head.advance(self_loop, devid, refused, &refused_deltas, None) else {
+                panic!("{name} under a changed signature is refused");
+            };
+
+            let e = once.transition_entropy();
+            let parent = once.new_chain_state.embedded_parent;
+            let op_bytes = once.new_chain_state.operation.to_bytes();
+            assert_eq!(
+                once.new_chain_state.compute_chain_tip(),
+                relationship_chain_tip_v2(&self_loop, &parent, &devid, &op_bytes, &e, None),
+                "{name}: the tip is the preimage over its entropy"
+            );
+            let mut e_other = e;
+            e_other[0] ^= 0x01;
+            let c_pre = compute_precommit(&parent, &op_bytes, &e);
+            let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+            assert_ne!(c_pre, c_pre_other, "{name}: C_pre contains the entropy");
+            assert_ne!(
+                compute_successor_tip(&parent, &op_bytes, &e, &c_pre),
+                compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other),
+                "{name}: the symmetric tip contains the entropy"
+            );
+        }
+    }
+
     /// A head rebuilt from its persisted tips and other leaves recomputes the
     /// root the live head committed, the tree built once over every leaf, and
     /// is restored. A tip or a leaf left out of the build moves the root, and

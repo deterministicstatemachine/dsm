@@ -1306,6 +1306,58 @@ mod tests {
         assert!(matches!(fresh.slots.first(), Some(ChainSlot::Link(_))));
     }
 
+    /// SoFi §17.4, MR-SOFI-0092: a trader's two position cells, `K_ful(q)`
+    /// and `K_root(q)`, are written together at their leader. They share one
+    /// route, and each seat — the leader first — is asked for both in one
+    /// put, which the node applies all or none.
+    ///
+    /// MUTATION CONTROL: writing the pair as two writes, one per cell, turns
+    /// this red: the leader is asked twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_positions_two_cells_go_to_each_seat_in_one_put() {
+        let (nodes, _config, set, _cell) = pinned(0x92).await;
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let cells = crate::sdk::sofi_register::position_cells(
+            &set,
+            &[0x91; 32],
+            &[0x92; 32],
+            7,
+            &[0x93; 32],
+        )
+        .expect("the pair's cells");
+        assert_eq!(
+            cells.fulfillment().route(),
+            cells.root().routed().route(),
+            "one route serves both cells"
+        );
+        for node in &nodes.nodes {
+            node.forget_requests();
+        }
+        let reports = write_recorded_position(&set, &cells, b"F", b"C_q")
+            .await
+            .expect("the pair is written");
+        assert!(reports.iter().all(WriteReport::reached_leader));
+        let puts = |member: &str| {
+            let Some(node) = nodes.nodes.iter().find(|n| n.member_id == member) else {
+                panic!("no node {member}");
+            };
+            node.requests()
+                .iter()
+                .filter(|request| request.as_str() == "POST /api/v2/cells")
+                .count()
+        };
+        for (position, seat) in cells.fulfillment().route().seats().iter().enumerate() {
+            assert_eq!(
+                puts(&member_id(seat)),
+                1,
+                "the seat at position {position} is asked once, for both cells"
+            );
+        }
+    }
+
     /// The network's pinned nodes on Postgres, the SDK pointed at them, the
     /// set they serve, and a test cell routed over it with key `key`.
     async fn pinned(

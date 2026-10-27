@@ -976,6 +976,87 @@ async fn a_sofi_trade_executes_end_to_end() {
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SoFi §31 stages 4 and 5, MR-SOFI-0261: `P`, its preimage and its closure
+/// are published, and read back Stored, before anything is exercised. With
+/// three of the five members refusing object writes, nothing B publishes can
+/// be Stored — three members returning the exact bytes — so B's trade stops
+/// there: no transition is made, B's head carries no pending position and
+/// its balances have not moved, and no exercise reaches the vault's key. With
+/// the members taking writes again, B's next trade completes the one it
+/// prepared.
+///
+/// MUTATION CONTROL: dropping `require_stored` from `publish_prepared` turns
+/// this red: the trade goes on to its transition over objects no reader can
+/// fetch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_trade_whose_objects_cannot_be_stored_stops_before_its_transition() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (era, tkn) = (balance(&p.b, &m.era), balance(&p.b, &m.tkn));
+    let position = admitted_position(&p.b);
+    let (own, parents) = standing_of(&p.b);
+    let chain = VerifierContext::new(&set, Some(own), parents.as_ref())
+        .expect("a verifier")
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain");
+    let Some((.., head)) = chain.head() else {
+        panic!("the vault has a head");
+    };
+
+    let refusing: Vec<String> = p
+        .nodes
+        .nodes
+        .iter()
+        .take(3)
+        .map(|node| node.member_id.clone())
+        .collect();
+    p.nodes.refuse_object_writes(&refusing).await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert!(!r.success, "the trade is not made");
+    let Some(why) = r.error_message.clone() else {
+        panic!("a refusal says why");
+    };
+    assert!(
+        why.contains("not Stored yet"),
+        "stopped at durability: {why}"
+    );
+    assert_eq!(pending_position(&p.b), None, "no transition was made");
+    assert_eq!(admitted_position(&p.b), position);
+    assert_eq!((balance(&p.b, &m.era), balance(&p.b, &m.tkn)), (era, tkn));
+    p.b.enter();
+    let key = VerifierContext::new(&set, None, None)
+        .expect("a verifier")
+        .verifier()
+        .read_attempt_cell(&m.vault_id, &head, 0)
+        .expect("read");
+    assert!(
+        !matches!(&key, Ok(read) if read.exercise().is_some()),
+        "no exercise reached the vault's key: {key:?}"
+    );
+
+    // With the members taking writes again, B's next trade completes the
+    // fulfillment it prepared and froze (SA-71), and only that one moves.
+    p.nodes.accept_object_writes(&refusing).await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 7))).await;
+    assert!(
+        r.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("prepared fulfillment")),
+        "{:?}",
+        r.error_message
+    );
+    assert_eq!(admitted_position(&p.b), position + 1);
+    assert_eq!(
+        balance(&p.b, &m.era),
+        era - 10,
+        "the prepared trade, once Stored"
+    );
+}
+
 /// SA-71. A trader that signed and published a fulfillment, and stopped
 /// before its transition, completes that fulfillment when it trades again:
 /// it signs no second fulfillment against the same parent. The position
@@ -1378,6 +1459,69 @@ async fn a_trader_who_has_traded_can_pay() {
         a_before + 5,
         "the payee accepted the payment"
     );
+}
+
+/// MR-SOFI-0346 (owner ruling 2026-09-30): resolving another trader's
+/// position reads only the verifier's frontier-to-parent segment of that
+/// trader — within it the position, its predecessor and the accepted claim
+/// at each setup position `P`'s legs name — and never walks back past the
+/// frontier. B sets up with the vault and pays A, so A's frontier for B
+/// stands at that payment; B then trades and pays A again, and A's
+/// acceptance resolves B's SoFi position on the way. A asks no member for any
+/// of B's root cells at or below its frontier but the setup position's.
+///
+/// MUTATION CONTROL: a peer walk that starts from B's genesis rather than A's
+/// frontier turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn resolving_another_traders_position_reads_only_its_segment() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let setup_position = admitted_position(&p.b);
+    let paid = |label: &'static str| {
+        let (a, b) = (&p.a, &p.b);
+        async move {
+            let sent = b.send(a, 5).await;
+            assert!(sent.success, "{label}: {:?}", sent.error_message);
+            let a_sync = a.sync().await;
+            assert!(a_sync.errors.is_empty(), "{label}: {:?}", a_sync.errors);
+            let b_sync = b.sync().await;
+            assert!(b_sync.errors.is_empty(), "{label}: {:?}", b_sync.errors);
+        }
+    };
+    paid("the first payment").await;
+    let frontier = admitted_position(&p.b);
+    let a_before = p.a.era_balance();
+
+    realized_trade(&p, &m, 10).await;
+    let sent = p.b.send(&p.a, 5).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.errors.is_empty(), "{:?}", a_sync.errors);
+    assert_eq!(p.a.era_balance(), a_before + 5, "A accepted B's payment");
+
+    let cell_reads: Vec<String> = p
+        .nodes
+        .nodes
+        .iter()
+        .flat_map(|node| node.requests())
+        .filter(|request| request.starts_with("GET /api/v2/cell/"))
+        .collect();
+    for position in (1..=frontier).filter(|position| *position != setup_position) {
+        let key = dsm::economic::register::economic_root_register_key(
+            &p.b.genesis,
+            &p.b.device_id,
+            position,
+        );
+        let named = crate::util::text_id::encode_base32_crockford(&key);
+        assert!(
+            !cell_reads.iter().any(|request| request.ends_with(&named)),
+            "A read B's root cell at position {position}, at or below its frontier {frontier}"
+        );
+    }
 }
 
 /// B's own exercise re-aimed at the vault's next generation: `P` names the

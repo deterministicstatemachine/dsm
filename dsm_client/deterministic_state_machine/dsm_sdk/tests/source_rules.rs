@@ -238,7 +238,7 @@ fn no_sofi_validity_rule_reads_a_clock_a_height_or_a_duration() {
                         "{}: {name} calls .{method}() — a measure of time",
                         path.display()
                     ),
-                    Event::Field { .. } => {}
+                    Event::Field { .. } | Event::Construct(..) => {}
                 }
             }
         }
@@ -573,4 +573,95 @@ fn core_reads_a_cells_seats_only_where_it_evaluates_route_chains() {
             );
         }
     }
+}
+
+// ── MR-SOFI-0254, 0260, 0261, 0272: the producer stops where Core says ─────
+
+/// Where each of `names` is first called in `calls`, in order; panics naming
+/// the first missing one.
+fn first_calls(calls: &[String], names: &[&str], what: &str) -> Vec<usize> {
+    names
+        .iter()
+        .map(|name| match calls.iter().position(|c| c == name) {
+            Some(at) => at,
+            None => panic!("{what} never calls {name}: {calls:?}"),
+        })
+        .collect()
+}
+
+/// SoFi §31 and rule T5: producers assemble and publish; Core decides. A
+/// precommit is publishable only as a `PrecommitDraft`, whose fields are the
+/// producer's own and which `check_draft` alone makes, only once Core's
+/// `validate` answers Valid — Invalid and Incomplete both stop it. And the
+/// producer acquires the evidence, has Core check the draft, and only then
+/// signs, freezes and publishes; nothing of a draft that is not Valid, or
+/// whose evidence is not in hand, is signed, frozen, published, exercised or
+/// advanced.
+///
+/// MUTATION CONTROL: deleting the `check_draft` call from
+/// `prepare_fulfillment`, moving it after the signature or the freeze, or a
+/// second place that builds a `PrecommitDraft`, turns this red.
+#[test]
+fn a_producer_signs_freezes_and_publishes_only_a_draft_core_found_valid() {
+    let sdk = sdk_source("sdk/sofi_sdk.rs");
+    let draft = struct_named(&sdk, "PrecommitDraft");
+    assert!(
+        draft
+            .fields
+            .iter()
+            .all(|field| !matches!(field.vis, Visibility::Public(_))),
+        "PrecommitDraft has a public field: a draft could be built without Core's check"
+    );
+    for (name, block) in production_fns(&sdk) {
+        let builds = events(&block)
+            .into_iter()
+            .any(|event| matches!(&event, Event::Construct(path) if path.last().is_some_and(|s| s == "PrecommitDraft")));
+        assert!(
+            !builds || name == "check_draft",
+            "sofi_sdk.rs: {name} builds a PrecommitDraft; only check_draft may"
+        );
+    }
+    let check = calls_in_order(&production_fn(&sdk, "check_draft"));
+    first_calls(&check, &["validate"], "check_draft");
+
+    let flow = sdk_source("sdk/sofi_flow.rs");
+    let prepare = calls_in_order(&production_fn(&flow, "prepare_fulfillment"));
+    let at = first_calls(
+        &prepare,
+        &[
+            ".acquire_evidence",
+            "check_draft",
+            "sign",
+            "freeze_prepared",
+            "publish_prepared",
+        ],
+        "prepare_fulfillment",
+    );
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "prepare_fulfillment acquires, checks, signs, freezes and publishes out of order: \
+         {prepare:?}"
+    );
+}
+
+/// SoFi §31 stages 4 to 6, MR-SOFI-0261: `P`, its preimage and its closure
+/// are published with the durability required — each read back Stored —
+/// before the transition that exercises them.
+///
+/// MUTATION CONTROL: dropping `require_stored` from `publish_prepared`, or
+/// fulfilling before publishing in `finish_prepared`, turns this red.
+#[test]
+fn a_producer_exercises_only_what_it_has_read_back_stored() {
+    let flow = sdk_source("sdk/sofi_flow.rs");
+    first_calls(
+        &calls_in_order(&production_fn(&flow, "publish_prepared")),
+        &["publish_all", "require_stored"],
+        "publish_prepared",
+    );
+    let finish = calls_in_order(&production_fn(&flow, "finish_prepared"));
+    let at = first_calls(&finish, &["publish_prepared", "fulfill"], "finish_prepared");
+    assert!(
+        at[0] < at[1],
+        "finish_prepared fulfills before it publishes: {finish:?}"
+    );
 }
