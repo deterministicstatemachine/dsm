@@ -19,9 +19,9 @@ use dsm::economic::classifier::{classify, EconomicEffect};
 use dsm::economic::credit::{CreditSource, CreditSourceNativeReserveRelease};
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::native_reserve::{
-    era_reserve_id, release_constructible, release_evidence_addr, release_source_id, sign_release,
-    reserve_genesis_supply, NativeReserveReleaseBody, NativeReserveState, ReleaseSource,
-    ERA_FAUCET_PAYOUT,
+    era_reserve_id, release_constructible, release_evidence_addr, release_source_id,
+    reserve_genesis_supply, reserve_lineage_genesis, sign_release, NativeReserveReleaseBody,
+    NativeReserveState, ReleaseRefusal, ReserveHeadError, ReleaseSource, ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::provenance::{
     verify_credit_source, PeerLineageFailure, ProvenanceContext, ProvenanceError,
@@ -30,6 +30,7 @@ use dsm::economic::provenance::{
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
+use dsm::shared_lineage::{EstablishedSharedHead, GenerationChain};
 use dsm::types::operations::Operation;
 
 const G: [u8; 32] = [0x11; 32];
@@ -71,17 +72,43 @@ fn genesis() -> NativeReserveState {
     NativeReserveState::genesis(NETWORK, SET_ID).expect("R_0")
 }
 
-/// A signed release succeeding `parent`, plus the witness of the transition
-/// it funds, built the way an honest claimant builds them.
+/// A signed release succeeding the state at the end of `history`, plus the
+/// witness of the transition it funds, built the way an honest claimant
+/// builds them, with the reader's established heads before and after it.
 struct Fixture {
     envelope: Vec<u8>,
-    parent: NativeReserveState,
+    parent_head: EstablishedSharedHead,
+    child_head: EstablishedSharedHead,
     witness: EconomicTransitionWitness,
     descriptor: CreditSourceNativeReserveRelease,
     pk: Vec<u8>,
 }
 
-fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture {
+/// The established chain of the reserve whose genesis is `genesis`, through
+/// the releases `history` names, one a generation: what a reader's walk of
+/// those releases established.
+fn chain_through(genesis: &NativeReserveState, history: &[Vec<u8>]) -> GenerationChain {
+    let mut chain = GenerationChain::from_genesis(&reserve_lineage_genesis(genesis).expect("R_0"));
+    for (i, envelope) in history.iter().enumerate() {
+        let state = genesis
+            .at_generation(i as u64 + 1)
+            .expect("a generation of the lineage");
+        chain
+            .push(state.root(), release_evidence_addr(envelope))
+            .expect("the next generation");
+    }
+    chain
+}
+
+fn fixture_at(
+    genesis: &NativeReserveState,
+    history: &[Vec<u8>],
+    position: u64,
+    amount: u64,
+) -> Fixture {
+    let parent = genesis
+        .at_generation(history.len() as u64)
+        .expect("the state the history ends at");
     let (pk, sk) = trader().clone();
     let reserve_id = *parent.reserve_id();
     let generation = parent.generation() + 1;
@@ -133,9 +160,21 @@ fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture
     )
     .expect("valid witness");
 
+    // The heads a reader holds once its walk passed this release: the chain
+    // through the history, and that chain with this release as the next
+    // generation's step on the lineage's next state.
+    let mut chain = chain_through(genesis, history);
+    let parent_head = chain.head();
+    let child_state = genesis
+        .at_generation(parent.generation() + 1)
+        .expect("the lineage's next state");
+    chain
+        .push(child_state.root(), release_evidence_addr(&envelope))
+        .expect("the next generation");
     Fixture {
         envelope,
-        parent,
+        parent_head,
+        child_head: chain.head(),
         witness,
         descriptor,
         pk,
@@ -143,16 +182,17 @@ fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture
 }
 
 fn fixture(position: u64) -> Fixture {
-    fixture_at(genesis(), position, ERA_FAUCET_PAYOUT)
+    fixture_at(&genesis(), &[], position, ERA_FAUCET_PAYOUT)
 }
 
 /// A resolver whose walk of the reserve established exactly one final
-/// release, at `generation` of the state `parent`.
+/// release, at `generation`, between the heads `parent` and `child`.
 struct OneRelease {
     reserve_id: [u8; 32],
     generation: u64,
     envelope: Vec<u8>,
-    parent: NativeReserveState,
+    parent: EstablishedSharedHead,
+    child: EstablishedSharedHead,
 }
 
 impl OneRelease {
@@ -161,7 +201,8 @@ impl OneRelease {
             reserve_id: fx.descriptor.reserve_id,
             generation: fx.descriptor.generation,
             envelope: fx.envelope.clone(),
-            parent: fx.parent,
+            parent: fx.parent_head,
+            child: fx.child_head,
         }
     }
 }
@@ -204,6 +245,7 @@ impl ProvenanceResolver for OneRelease {
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
             parent: self.parent,
+            child: self.child,
         })
     }
 
@@ -347,10 +389,12 @@ fn a_final_release_funds_exactly_what_it_released() {
 /// what the walk computed — `S_genesis = remaining + Σ credited`.
 #[test]
 fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
-    let mut parent = genesis();
+    let r0 = genesis();
+    let mut parent = r0;
+    let mut history = Vec::new();
     let mut credited = 0u64;
     for position in 1u64..=3 {
-        let fx = fixture_at(parent, position, ERA_FAUCET_PAYOUT);
+        let fx = fixture_at(&r0, &history, position, ERA_FAUCET_PAYOUT);
         let funded = verify_credit_source(
             &fx.witness.credit_sources[0],
             &fx.witness,
@@ -362,6 +406,7 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
         let release = dsm::economic::native_reserve::decode_and_verify_release(&fx.envelope)
             .expect("verifies");
         parent = release_constructible(&parent, &release).expect("the walk's next state");
+        history.push(fx.envelope.clone());
         assert_eq!(
             parent.remaining_supply() + credited,
             reserve_genesis_supply().expect("ERA's genesis supply")
@@ -371,7 +416,7 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
 
     // A release of any other amount funds nothing: it is not a release the
     // claim policy allows, so it never became the reserve's successor.
-    let off_rule = fixture_at(parent, 4, 7);
+    let off_rule = fixture_at(&r0, &history, 4, 7);
     assert!(verify_credit_source(
         &off_rule.witness.credit_sources[0],
         &off_rule.witness,
@@ -382,20 +427,22 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
 }
 
 /// `no valid reserve transition can mint ERA`, at the verifier: a release
-/// that is not the successor of the state the walk validated funds nothing —
-/// here one that releases more than the reserve holds. Remove the successor
-/// check from the arm (or the overdraft refusal from the construction
-/// predicate) and this goes red.
+/// that is not the successor of the state at the reader's established head
+/// before it funds nothing. Here one that releases twice what the release
+/// rule allows, and then an honest release presented against a head five
+/// generations on, whose state it does not succeed. Remove the successor
+/// check from the arm and this goes red.
+///
+/// A release of more than the reserve holds is possible only at its last
+/// generation, which no reader's head reaches in a test (a chain of about
+/// 8 × 10^8 releases). That refusal is the construction predicate's,
+/// which `EstablishedReserve::succeeded_by` runs for every release the
+/// verifier accepts; it is tested in Core
+/// (`a_claim_at_exhaustion_is_refused_before_a_release_is_signed`).
 #[test]
 fn a_release_that_is_not_its_parents_successor_funds_nothing() {
-    // The last generation: one payout left, and a release of two.
-    let last = genesis()
-        .at_generation(
-            reserve_genesis_supply().expect("ERA's genesis supply") / ERA_FAUCET_PAYOUT - 1,
-        )
-        .expect("the last generation");
-    assert_eq!(last.remaining_supply(), ERA_FAUCET_PAYOUT);
-    let fx = fixture_at(last, 1, 2 * ERA_FAUCET_PAYOUT);
+    let r0 = genesis();
+    let fx = fixture_at(&r0, &[], 1, 2 * ERA_FAUCET_PAYOUT);
     assert!(matches!(
         verify_credit_source(
             &fx.witness.credit_sources[0],
@@ -403,15 +450,20 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
             &OneRelease::of(&fx),
             &ctx(1, &fx.pk),
         ),
-        Err(ProvenanceError::ReleaseInvalid(
-            "is not the successor of its parent"
+        Err(ProvenanceError::ReleaseNotTheSuccessor(
+            ReserveHeadError::NotASuccessor(ReleaseRefusal::NotTheReleaseRulesAmount { .. })
         ))
     ));
-    // The same bytes presented against a parent whose root they do not
-    // commit — another state of the lineage — fund nothing either.
+    // The same honest bytes presented against a head whose state they do not
+    // succeed: another state of the lineage, five real releases on.
+    let mut history = Vec::new();
+    for position in 1..=5 {
+        history.push(fixture_at(&r0, &history, position, ERA_FAUCET_PAYOUT).envelope);
+    }
+    let later = chain_through(&r0, &history).head();
     let fx = fixture(1);
     let resolver = OneRelease {
-        parent: genesis().at_generation(5).expect("generation 5"),
+        parent: later,
         ..OneRelease::of(&fx)
     };
     assert!(matches!(
@@ -421,9 +473,62 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
             &resolver,
             &ctx(1, &fx.pk),
         ),
-        Err(ProvenanceError::ReleaseInvalid(
-            "is not the successor of its parent"
+        Err(ProvenanceError::ReleaseNotTheSuccessor(
+            ReserveHeadError::NotASuccessor(ReleaseRefusal::ParentRootMismatch)
         ))
+    ));
+}
+
+/// DSM Amendment A15, MR-DSM-0315: the verifier takes the reserve's state
+/// only from the reader's established heads. A parent head that is not a
+/// state of this reserve funds nothing, and neither does a release that is
+/// not the step between the heads: here the reader's chain holds another
+/// release at that generation, its own next state's root the same.
+///
+/// MUTATION CONTROL: dropping the child-head comparison in the arm turns the
+/// step assertion red.
+#[test]
+fn a_reserve_credit_is_checked_against_the_readers_established_heads() {
+    let r0 = genesis();
+    let fx = fixture(1);
+    let mut forged = GenerationChain::from_genesis(&reserve_lineage_genesis(&r0).expect("R_0"));
+    forged
+        .push(
+            r0.at_generation(2).expect("generation 2").root(),
+            release_evidence_addr(&fx.envelope),
+        )
+        .expect("a generation");
+    let resolver = OneRelease {
+        parent: forged.head(),
+        ..OneRelease::of(&fx)
+    };
+    assert!(matches!(
+        verify_credit_source(
+            &fx.witness.credit_sources[0],
+            &fx.witness,
+            &resolver,
+            &ctx(1, &fx.pk),
+        ),
+        Err(ProvenanceError::ReleaseParentNotOnTheReserve(
+            ReserveHeadError::RootIsNotTheState { generation: 1 }
+        ))
+    ));
+
+    // Another honest release at generation 1, for position 2: the reader's
+    // chain holds it, not this credit's release.
+    let other = fixture_at(&r0, &[], 2, ERA_FAUCET_PAYOUT);
+    let resolver = OneRelease {
+        child: other.child_head,
+        ..OneRelease::of(&fx)
+    };
+    assert!(matches!(
+        verify_credit_source(
+            &fx.witness.credit_sources[0],
+            &fx.witness,
+            &resolver,
+            &ctx(1, &fx.pk),
+        ),
+        Err(ProvenanceError::ReleaseIsNotTheEstablishedStep { generation: 1 })
     ));
 }
 
@@ -435,7 +540,7 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
 fn wrong_reserve_id_cannot_create_a_second_genesis_supply() {
     let other = NativeReserveState::genesis(b"another-network", SET_ID).expect("R_0");
     assert_ne!(other.reserve_id(), genesis().reserve_id());
-    let fx = fixture_at(other, 1, ERA_FAUCET_PAYOUT);
+    let fx = fixture_at(&other, &[], 1, ERA_FAUCET_PAYOUT);
     assert!(matches!(
         verify_credit_source(
             &fx.witness.credit_sources[0],
@@ -490,8 +595,17 @@ fn faucet_claim_names_its_claimant_as_recipient() {
         &sk,
     )
     .expect("signable");
+    // The reader's chain holds that release at generation 1.
+    let mut chain = chain_through(&genesis(), &[]);
+    chain
+        .push(
+            parent.at_generation(1).expect("generation 1").root(),
+            release_evidence_addr(&paid_to_someone_else),
+        )
+        .expect("generation 1");
     let resolver = OneRelease {
         envelope: paid_to_someone_else.clone(),
+        child: chain.head(),
         ..OneRelease::of(&fx)
     };
     let mut descriptor = fx.descriptor.clone();
@@ -521,6 +635,10 @@ fn one_release_funds_at_most_one_position() {
     ));
 }
 
+/// A release won in a register other than the network's canonical one funds
+/// nothing. The verifier's genesis commits the canonical set, so a head the
+/// reader holds under another set is not a state of the reserve; and on a
+/// canonical head, a release naming another set is no successor.
 #[test]
 fn a_foreign_register_set_is_refused() {
     let fx = fixture(1);
@@ -533,7 +651,50 @@ fn a_foreign_register_set_is_refused() {
             &OneRelease::of(&fx),
             &c
         ),
-        Err(ProvenanceError::ReleaseForeignSet)
+        Err(ProvenanceError::ReleaseParentNotOnTheReserve(
+            ReserveHeadError::RootIsNotTheState { generation: 0 }
+        ))
+    ));
+
+    // On the canonical head, a release that names another set.
+    let r0 = genesis();
+    let (pk, sk) = trader().clone();
+    let op = claim_op(*r0.reserve_id(), 1);
+    let foreign = sign_release(
+        &NativeReserveReleaseBody {
+            reserve_id: *r0.reserve_id(),
+            parent_root: r0.root(),
+            generation: 1,
+            amount: ERA_FAUCET_PAYOUT,
+            recipient_genesis: G,
+            recipient_devid: *dev(),
+            recipient_economic_position: 1,
+            recipient_operation_digest: dsm_operation_digest(&op.to_bytes()),
+            storage_set_id: [0x77; 32],
+            source: ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+                claimant_att_a: ATTA,
+            },
+        },
+        &sk,
+    )
+    .expect("signable");
+    let resolver = OneRelease {
+        envelope: foreign.clone(),
+        ..OneRelease::of(&fx)
+    };
+    let mut descriptor = fx.descriptor.clone();
+    descriptor.release_evidence_addr = release_evidence_addr(&foreign);
+    assert!(matches!(
+        verify_credit_source(
+            &CreditSource::NativeReserveRelease(descriptor),
+            &fx.witness,
+            &resolver,
+            &ctx(1, &fx.pk)
+        ),
+        Err(ProvenanceError::ReleaseNotTheSuccessor(
+            ReserveHeadError::NotASuccessor(ReleaseRefusal::ForeignSet)
+        ))
     ));
 }
 
@@ -609,7 +770,7 @@ fn a_descriptor_refused_in_hand_reads_nothing_of_the_reserve() {
     };
 
     let other = NativeReserveState::genesis(b"another-network", SET_ID).expect("R_0");
-    let fx = fixture_at(other, 1, ERA_FAUCET_PAYOUT);
+    let fx = fixture_at(&other, &[], 1, ERA_FAUCET_PAYOUT);
     let resolver = counting(&fx);
     assert!(matches!(
         verify_credit_source(

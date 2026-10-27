@@ -4172,16 +4172,50 @@ The release is also on the nodes although only the sender reads it, from an addr
 - *A start with no identifier.* The node has no listing route, and a ByteCommit carries only a root, a byte count and a parent digest, so finding an identity needs a starting identifier. The faucet reserve is the exception. Every release pays the same amount, so the reserve's state at any generation, and that state's cell key, follow from the network's public constants (`native_reserve::genesis_state`, `NativeReserveState::at_generation`). Each release there names its recipient's genesis and device id, so every faucet-funded identity could be listed with no starting point. `ReleaseSource` names the mainnet emission lottery as another source on the same reserve.
 - *The discovery crawl.* What an observer reaches from nothing, from a payer alone and from a recipient alone has not been run. The probe source is kept outside the repository in the session group's notes folder.
 
+### 6.99 The native reserve is read through its established head (MR-DSM-0315) (`fix/reserve-release-established-head`, 2026-10-27)
+
+**Part 1: MR-DSM-0315, the reserve's established head.**
+
+- *The requirement.* DSM Amendment A15, "One boundary for every backend": a reader's result is an established head `(kind, lineage_id, generation, generation_digest, state_root)`. Owner ruling 3 of 2026-10-27 scoped it to the lineage with no owner, the native reserve, which every consumer reads through that head (MR-DSM-0315).
+- *What it was.*
+  - The faucet claim built its release on `WalkStop::Head(NativeReserveState)`: the walk's state, from a walk that started at the memo's highest row.
+  - The verifier's reserve credit took `ReserveReleaseWin.parent`, a bare `NativeReserveState`.
+  - Neither read a generation digest. Where the memo skipped a generation, the walk started past the gap while the generation chain stopped at it.
+- *Core.*
+  - `native_reserve::EstablishedReserve` is a head with the state Core derives at it, and the one form in which a consumer takes a reserve state. `EstablishedReserve::of(genesis, head)` refuses a head of another lineage or kind, a root that is not the state at its generation, a generation past exhaustion, and at generation 0 a digest that is not the genesis's.
+  - `succeeded_by(release)` extends a head by a release that succeeds its state, the release's evidence address as the step. The extension is `EstablishedSharedHead::extended`, crate-private, the one computation `GenerationChain::push` also uses.
+  - `walk_lineage` starts from an `EstablishedReserve` and every stop names one. `WalkStop::Refused` is the stop where a final release does not extend the head.
+  - The reserve arm of `provenance::verify_credit_source`:
+    - takes the parent state from the reader's parent head (`ReleaseParentNotOnTheReserve`);
+    - requires the release to succeed it (`ReleaseNotTheSuccessor`, which carries the construction predicate's refusal);
+    - requires the head the release establishes there to be the reader's child head (`ReleaseIsNotTheEstablishedStep`).
+
+    `ReserveReleaseWin` now carries both heads.
+  - The former check 7 (`ReleaseForeignSet`) could no longer fire: the parent state comes from the genesis that commits the canonical set, and the construction predicate refuses a release naming another set. It is deleted.
+- *SDK.*
+  - `walk_reserve` starts from the head of the established chain; `memo::latest_state` is deleted.
+  - `release_at` answers from `established_release_at`: the chain's heads around the release, and the release at that generation, never a memo row past a gap. `memo::release_at` is deleted.
+  - The faucet builds its release on the state of `WalkStop::Head`'s established head, and a resumed claim takes its parent from the established head.
+  - The memo fold also checks each row's parent supply, so the column that `memo::release_at` used to check is still read.
+- *Tests.* Each passed in its own targeted `--release` run, node-backed suites one at a time (2026-10-27):
+  - Core: `economic::` 93/0, `shared_lineage` 10/0, `native_reserve_wire` 13/0, `economic_admission_lifecycle` 21/0.
+  - SDK: `storage::client_db::native_reserve` 1/0, `sdk::native_reserve` 2/0, `handlers::faucet_flow_tests` 20/0, `handlers::counterfeit_acceptance_tests` 7/0, `handlers::token_create_tests` 10/0, `handlers::frontier_verification_tests` 13/0. In the module run, two frontier tests failed while another session's node tests held the shared Postgres: the server refused connections ("admits 1 more connections"), and a claim read not final. Each passed alone straight after.
+  - New: `dsm::economic::native_reserve::tests::a_reserve_state_is_taken_only_from_a_head_of_this_reserve`, `dsm::economic::native_reserve::tests::a_head_extends_only_by_a_release_that_succeeds_it`, `dsm::native_reserve_wire::a_reserve_credit_is_checked_against_the_readers_established_heads`, `dsm_sdk::sdk::native_reserve::tests::a_memoised_release_past_a_gap_is_not_an_established_release`.
+  - Rewritten to the heads: both walk tests, `a_release_that_is_not_its_parents_successor_funds_nothing`, `a_foreign_register_set_is_refused`, `faucet_claim_names_its_claimant_as_recipient` and `a_corrupt_memo_row_is_an_error_not_a_release`.
+- *A case the verifier test no longer presents.* `a_release_that_is_not_its_parents_successor_funds_nothing` used to present a release of more than the reserve holds, at the reserve's last generation, with that generation's state given as the parent. A parent is now a head, and a head at the last generation needs an established chain of about 8 × 10^8 releases (ERA's 8 × 10^12 base units at 10,000 a release), which no test builds. The test now presents a release of twice the rule's amount, and an honest release against a head five real releases on. The overdraft refusal is the construction predicate's: `EstablishedReserve::succeeded_by` runs it for every release the verifier accepts, and `a_claim_at_exhaustion_is_refused_before_a_release_is_signed` tests it in Core.
+- *Mutation controls.* One `DSM_MUTANT` build in a detached scratch worktree with its own target directory, with each test's unmutated control green before and after. Each mutant turned its named test red: the head's root check, the genesis-digest check and the lineage check in `EstablishedReserve::of`; the child-head check in the reserve arm; the head's root check again, against the verifier test; and in the SDK, the memo fold's parent-supply check, against `a_corrupt_memo_row_is_an_error_not_a_release`.
+- *Row.* MR-DSM-0315 is Met.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 331 | 195 | 63 | 20 | 0 | 35 | 18 |
+| DSM high-level (MR-DSM) | 331 | 196 | 62 | 20 | 0 | 35 | 18 |
 | SoFi (MR-SOFI) | 423 | 373 | 19 | 13 | 1 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 74 | 16 | 49 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 9 | 1 | 1 | 0 | 0 | 0 |
-| **All** | **1058** | **651** | **99** | **83** | **1** | **70** | **154** |
+| **All** | **1058** | **652** | **98** | **83** | **1** | **70** | **154** |
 
 ## 8 Per-requirement results
 
@@ -4503,7 +4537,7 @@ The release is also on the nodes although only the sender reads it, from an addr
 | MR-DSM-0312 | Met | `dsm_sdk::sdk::vault_history::walk`; `dsm_sdk::sdk::native_reserve::walk_reserve` | `dsm_sdk::handlers::node_e2e_tests::a_vault_history_read_ahead_establishes_exactly_what_the_walk_does`; `dsm_sdk::handlers::faucet_flow_tests::lying_reserve_hints_change_nothing_a_walk_establishes` | DSM Amendment A15 (§6.78). |
 | MR-DSM-0313 | Met | `dsm_sdk::sdk::lineage_discovery::discover` | `dsm_sdk::handlers::faucet_flow_tests::a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else` | DSM Amendment A15 (§6.78). Mutation red (matrix). |
 | MR-DSM-0314 | Met | `dsm::shared_lineage::GenerationChain`; `dsm_sdk::sdk::lineage_discovery::discover` | `dsm::shared_lineage::tests::discovery_code_names_no_constructor_of_established_state`; `dsm_sdk::sdk::lineage_discovery::tests::discovery_code_names_no_constructor_of_established_state` | DSM Amendment A15 (§6.78). Also CI `sofi_validated_root_constructors.sh` [6]. |
-| MR-DSM-0315 | Partial | `dsm::shared_lineage::GenerationChain::head`; `dsm::shared_lineage::EstablishedSharedHead`; `dsm_sdk::sdk::vault_history` | `dsm::shared_lineage::tests::a_checkpoint_end_matches_only_the_head_the_walk_reached`; `dsm::shared_lineage::tests::discovery_code_names_no_constructor_of_established_state`; `dsm::shared_lineage::tests::a_generation_digest_binds_its_history_lineage_and_kind` | Rechecked 2026-10-27 (owner ruling 3, §6.96): scoped by A15's refinement to lineages with no owner, the native reserve; owned vault lineages read S24's composed state (MR-DSM-0331). The head is built only from generations Core established, and it gates checkpoint admission in the reserve walk. Remaining: the faucet claim builds on the walk's stop (`WalkStop::Head`), the same Core walk's state, not on `EstablishedSharedHead`, so the head is not yet the type every reserve consumer reads. Needs code; no test can tell the two apart in an honest run, so the check owed is structural. |
+| MR-DSM-0315 | Met | `dsm::economic::native_reserve::EstablishedReserve`; `dsm::economic::native_reserve::walk_lineage`; `dsm::economic::provenance::verify_credit_source`; `dsm::shared_lineage::EstablishedSharedHead`; `dsm::shared_lineage::GenerationChain::head`; `dsm_sdk::sdk::native_reserve::walk_reserve`; `dsm_sdk::sdk::native_reserve::established_release_at`; `dsm_sdk::sdk::faucet_claim_flow::claim_era_faucet` | `dsm::economic::native_reserve::tests::a_reserve_state_is_taken_only_from_a_head_of_this_reserve`; `dsm::economic::native_reserve::tests::a_head_extends_only_by_a_release_that_succeeds_it`; `dsm::economic::native_reserve::tests::the_walk_advances_through_final_releases_and_stops_at_the_head`; `dsm::native_reserve_wire::a_reserve_credit_is_checked_against_the_readers_established_heads`; `dsm_sdk::sdk::native_reserve::tests::a_memoised_release_past_a_gap_is_not_an_established_release`; `dsm::shared_lineage::tests::a_checkpoint_end_matches_only_the_head_the_walk_reached`; `dsm::shared_lineage::tests::discovery_code_names_no_constructor_of_established_state` | Met 2026-10-27 (§6.99): every consumer of the native reserve reads it through an established head. The faucet builds its release on the head the walk established, the walk starts from the established chain's head, and the verifier takes the parent state from the reader's head before the release and requires the release to establish the reader's head at its generation. Scoped by A15's refinement to the lineage with no owner (owner ruling 3, §6.96); owned vault lineages read S24's composed state (MR-DSM-0331). Mutation controls in the verification matrix. |
 | MR-DSM-0316 | Missing | `dsm::shared_lineage` | — | Rechecked 2026-10-26 on main ad831f53 (was Missing). No recursive validity proof and no verifier for one. The native reserve stays at phase A (Core replays every generation). The trait states the boundary, and its doc says no backend exists. Scoped to unowned lineages by the A15 refinement. Out of beta if the G3 ruling (2026-09-23: beta runs on the existing specialized mechanisms) covers this general construct; owner to confirm. |
 | MR-DSM-0317 | Missing | — | — | Rechecked 2026-10-26 on main ad831f53 (was Missing). [OPEN-ITEM] Storage §24 item 15 leaves the ByteCommit ancestry accumulator undecided, including how it behaves against a member that shows different histories to different readers. No accumulator code in the node, Core or SDK. Blocked: the storage spec leaves this Open. |
 | MR-DSM-0318 | Met | `dsm::sofi::frontier`; `dsm::sofi::resolution::VaultChain::from_baseline` | `dsm_sdk::handlers::node_e2e_tests::a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades`; `dsm_sdk::handlers::node_e2e_tests::a_fresh_reader_reads_the_same_at_any_vault_age` | DSM Amendment A15 refinement (§6.79). |

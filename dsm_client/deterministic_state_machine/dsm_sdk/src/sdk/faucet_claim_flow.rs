@@ -6,7 +6,7 @@
 //! ```text
 //! target position = admitted + 1        (position 0 = activate(), empty root)
 //! loop attempts:
-//!     head     = walk the reserve lineage (memoised)
+//!     head     = walk the reserve lineage to its established head (memoised)
 //!     op       = FaucetClaim { era_reserve_id(network), head.generation + 1 }
 //!     release  = frozen-or-sign-once(NativeReserveRelease naming THIS device,
 //!                target position, op digest, x = ERA_FAUCET_PAYOUT)
@@ -47,8 +47,8 @@
 use dsm::economic::admission::{dsm_operation_digest, PendingAdmissionKind, PendingEconomicAdmission};
 use dsm::economic::native_reserve::{
     decode_and_verify_release, era_reserve_id, release_evidence_addr, sign_release,
-    NativeReserveReleaseBody, NativeReserveState, ReleaseSource, SuccessorRead, WalkStop,
-    ERA_FAUCET_PAYOUT,
+    EstablishedReserve, NativeReserveReleaseBody, NativeReserveState, ReleaseSource, SuccessorRead,
+    WalkStop, ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
@@ -127,15 +127,20 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 .map_err(|e| storage_err("reserve memo", e))?
         {
             let reserve_genesis = crate::sdk::native_reserve::genesis_state(network_id)?;
-            let win = reserve_db::release_at(&reserve_genesis, generation)
-                .map_err(|e| storage_err("reserve memo", e))?
-                .ok_or_else(|| {
+            let win =
+                crate::sdk::native_reserve::established_release_at(&reserve_genesis, generation)?
+                    .ok_or_else(|| {
                     storage_err(
                         "reserve memo",
-                        format!("the release at generation {generation} has no memoised parent"),
+                        format!(
+                            "the release at generation {generation} is not on the head this \
+                                 device's walks established"
+                        ),
                     )
                 })?;
-            if !keep_release_completion(&set, &win.parent, &envelope).await? {
+            let parent = EstablishedReserve::of(&reserve_genesis, &win.parent)
+                .map_err(|e| storage_err("reserve head", e))?;
+            if !keep_release_completion(&set, parent.state(), &envelope).await? {
                 return Err(storage_err(
                     "reserve completion",
                     "the resumed release's completion proof could not be rebuilt from the \
@@ -149,8 +154,10 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             won = Some((generation, envelope, dsm_operation_digest(&op.to_bytes())));
             break;
         }
+        // The release is built on the head the walk established (DSM
+        // Amendment A15), and on nothing else.
         let parent: NativeReserveState = match stop {
-            WalkStop::Head(state) => state,
+            WalkStop::Head(head) => *head.state(),
             WalkStop::LeaderHeld {
                 settled, release, ..
             } => {
@@ -158,7 +165,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 // three links. Any party MAY continue a chain along the
                 // remaining route (storage spec §9 rule 8), whoever's release
                 // it is; the next attempt walks past it once it is final.
-                write_release(&set, &settled, &release.envelope_bytes).await?;
+                write_release(&set, settled.state(), &release.envelope_bytes).await?;
                 // The members take a moment to carry the chain on: walk again after one.
                 tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
                 continue;
@@ -168,6 +175,13 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                     "the reserve head could not be read — retry later".to_string(),
                     None::<std::io::Error>,
                 ))
+            }
+            WalkStop::Refused { last, refusal } => {
+                return Err(DsmError::invalid_operation(format!(
+                    "faucet: the release final after reserve generation {} does not extend \
+                     the established head: {refusal}",
+                    last.head().generation()
+                )))
             }
         };
         // At exhaustion the claim is refused here, before anything is signed,

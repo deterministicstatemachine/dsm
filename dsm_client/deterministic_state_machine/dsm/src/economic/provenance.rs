@@ -332,14 +332,18 @@ pub struct ProvenanceContext<'a> {
 
 /// The release that installed one generation of the native reserve: the
 /// exact envelope bytes a walk of the reserve lineage established as FINAL at
-/// that generation's cell (Part II §13), with the reserve state it succeeded.
-/// The verifier re-runs the construction predicate over both; nothing here is
-/// believed because a member returned it.
+/// that generation's cell (Part II §13), with the reader's established heads
+/// before and after it (DSM Amendment A15). The verifier takes the parent
+/// state from the parent head, re-runs the construction predicate, and
+/// requires the head the release establishes there to be the child head;
+/// nothing here is believed because a member returned it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReserveReleaseWin {
     pub envelope_bytes: Vec<u8>,
-    /// `R_{generation − 1}`, validated by the walk from `R_0`.
-    pub parent: crate::economic::native_reserve::NativeReserveState,
+    /// The reader's established head at `generation − 1`.
+    pub parent: crate::shared_lineage::EstablishedSharedHead,
+    /// The reader's established head at `generation`.
+    pub child: crate::shared_lineage::EstablishedSharedHead,
 }
 
 /// Why a peer's lineage could not be resolved to a validated transition.
@@ -569,10 +573,18 @@ pub enum ProvenanceError {
         generation: u64,
         failure: PeerLineageFailure,
     },
-    /// The established envelope is not a valid release, is not the successor
-    /// of the state the walk validated, or names different coordinates than
-    /// the descriptor.
+    /// The established envelope is not a valid release, or names different
+    /// coordinates than the descriptor.
     ReleaseInvalid(&'static str),
+    /// The parent head the reader holds is not a state of this network's
+    /// reserve.
+    ReleaseParentNotOnTheReserve(crate::economic::native_reserve::ReserveHeadError),
+    /// The release is not the successor of the state at the reader's
+    /// established head before it.
+    ReleaseNotTheSuccessor(crate::economic::native_reserve::ReserveHeadError),
+    /// The release is not the step between the reader's established heads:
+    /// the head it establishes on the parent is not the child head.
+    ReleaseIsNotTheEstablishedStep { generation: u64 },
     /// The release's recipient is not the identity under validation, or the
     /// claimant key is not the P0–P6-proven AK.
     ReleaseRecipientMismatch,
@@ -580,9 +592,6 @@ pub enum ProvenanceError {
     /// than the transition under validation. Position + digest binding IS the
     /// non-reuse mechanism.
     ReleaseBindingMismatch,
-    /// The release names a storage set other than the canonical one for the
-    /// claimant's network — a release from a foreign register masquerading.
-    ReleaseForeignSet,
     /// The release's bytes do not hash to the descriptor's evidence address.
     ReleaseEvidenceAddrMismatch,
     /// The claimant's network has no resolvable pinned register, decided
@@ -766,6 +775,20 @@ impl core::fmt::Display for ProvenanceError {
             Self::ReleaseInvalid(why) => {
                 write!(f, "credit provenance: reserve release invalid: {why}")
             }
+            Self::ReleaseNotTheSuccessor(e) => write!(
+                f,
+                "credit provenance: the release is not the successor of its parent: {e}"
+            ),
+            Self::ReleaseParentNotOnTheReserve(e) => write!(
+                f,
+                "credit provenance: the established head before the release is not a state \
+                 of this network's reserve: {e}"
+            ),
+            Self::ReleaseIsNotTheEstablishedStep { generation } => write!(
+                f,
+                "credit provenance: the release is not the step that established reserve \
+                 generation {generation}"
+            ),
             Self::ReleaseRecipientMismatch => write!(
                 f,
                 "credit provenance: the release's recipient is not the identity under \
@@ -777,11 +800,6 @@ impl core::fmt::Display for ProvenanceError {
                 "credit provenance: the release binds a different economic position or \
                  operation digest than this transition — position + digest binding is the \
                  non-reuse mechanism, so a mismatch is a reuse attempt or a stale release"
-            ),
-            Self::ReleaseForeignSet => write!(
-                f,
-                "credit provenance: the release names a storage set other than the canonical \
-                 one for the claimant's network"
             ),
             Self::OwnerLineage(e) => {
                 write!(f, "credit provenance: owner lineage: {e}")
@@ -1247,14 +1265,31 @@ pub fn verify_credit_source(
                     generation: d.generation,
                     failure,
                 })?;
-            // 4. The release verifies and IS the successor of the state the
-            //    walk validated: `remaining' = remaining − amount`, so the
-            //    amount below cannot exceed what the reserve held.
+            // 4. The release verifies and IS the successor of the state at
+            //    the reader's established head before it (DSM Amendment A15):
+            //    `remaining' = remaining − amount`, so the amount below cannot
+            //    exceed what the reserve held. The head it establishes there
+            //    must be the reader's head at its generation.
+            let genesis = native_reserve::NativeReserveState::genesis(
+                ctx.network_id,
+                ctx.canonical_storage_set_id,
+            )
+            .map_err(|e| ProvenanceError::ReleaseNotEstablished {
+                generation: d.generation,
+                failure: PeerLineageFailure::Incomplete(format!("the reserve's genesis: {e}")),
+            })?;
+            let parent = native_reserve::EstablishedReserve::of(&genesis, &win.parent)
+                .map_err(ProvenanceError::ReleaseParentNotOnTheReserve)?;
             let release = native_reserve::decode_and_verify_release(&win.envelope_bytes)
                 .map_err(|_| ProvenanceError::ReleaseInvalid("does not verify"))?;
-            native_reserve::release_constructible(&win.parent, &release).map_err(|_| {
-                ProvenanceError::ReleaseInvalid("is not the successor of its parent")
-            })?;
+            let child = parent
+                .succeeded_by(&release)
+                .map_err(ProvenanceError::ReleaseNotTheSuccessor)?;
+            if child.head() != &win.child {
+                return Err(ProvenanceError::ReleaseIsNotTheEstablishedStep {
+                    generation: d.generation,
+                });
+            }
             if release.body.reserve_id != d.reserve_id || release.body.generation != d.generation {
                 return Err(ProvenanceError::ReleaseInvalid(
                     "release names different coordinates than the descriptor",
@@ -1284,13 +1319,11 @@ pub fn verify_credit_source(
             {
                 return Err(ProvenanceError::ReleaseBindingMismatch);
             }
-            // 7. The release was won in the CANONICAL set for this network —
-            //    accepting whatever set it names would let a foreign register
-            //    masquerade.
-            if release.body.storage_set_id != ctx.canonical_storage_set_id {
-                return Err(ProvenanceError::ReleaseForeignSet);
-            }
-            // 8. The bytes the members hold are the bytes the DAG addresses.
+            // 7. The bytes the members hold are the bytes the DAG addresses.
+            //    (The release was won in the CANONICAL set for this network:
+            //    the parent state comes from the genesis that commits that set,
+            //    and the construction predicate refuses a release naming any
+            //    other, at step 4.)
             if native_reserve::release_evidence_addr(&win.envelope_bytes) != d.release_evidence_addr
             {
                 return Err(ProvenanceError::ReleaseEvidenceAddrMismatch);
@@ -1300,7 +1333,7 @@ pub fn verify_credit_source(
             // then forces the credit mutation to be exactly that.
             FundedCredit {
                 source_id: native_reserve::release_source_id(&d.reserve_id, d.generation),
-                policy_commit: *win.parent.policy_commit(),
+                policy_commit: *parent.state().policy_commit(),
                 amount: release.body.amount,
             }
         }

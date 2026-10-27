@@ -21,14 +21,13 @@
 use std::collections::{BTreeMap, HashMap};
 
 use dsm::economic::native_reserve::{
-    release_evidence_addr, reserve_cell_key, reserve_cell_namespace, reserve_seed,
-    resolve_successor, successor_completion, walk_lineage, NativeReserveState, SuccessorCell,
-    SuccessorRead, WalkStop,
+    release_evidence_addr, reserve_cell_key, reserve_cell_namespace, reserve_lineage_genesis,
+    reserve_seed, resolve_successor, successor_completion, walk_lineage, EstablishedReserve,
+    NativeReserveState, SuccessorCell, SuccessorRead, WalkStop,
 };
 use dsm::route_chain::{CellEvidence, RoutedCell};
 use dsm::shared_lineage::{
-    BundleStep, GenerationChain, LineageKind, SharedGenesisV1, TransitionBundleV1,
-    EPOCH_GENERATIONS,
+    BundleStep, GenerationChain, LineageKind, TransitionBundleV1, EPOCH_GENERATIONS,
 };
 use dsm::economic::provenance::ReserveReleaseWin;
 use dsm::types::error::DsmError;
@@ -239,17 +238,6 @@ pub(crate) async fn read_ahead(
     Ok(())
 }
 
-/// The reserve as a shared lineage of kind 2 (SoFi Amendment S23): its
-/// `R_0`, and the policy commit its genesis supply is fixed in.
-fn shared_genesis(genesis: &NativeReserveState) -> SharedGenesisV1 {
-    SharedGenesisV1::new(
-        LineageKind::Reserve,
-        *genesis.reserve_id(),
-        genesis.root(),
-        *genesis.policy_commit(),
-    )
-}
-
 /// The successor cell of a root the epoch index names: where a release of
 /// that state would be decided. Where to look, never what the state is.
 fn cell_of_named_root(
@@ -333,8 +321,9 @@ async fn read_named(
     Ok(ahead)
 }
 
-/// Walk the reserve lineage from the latest memoised state (or `R_0`) to
-/// wherever it stops, memoising every final release on the way.
+/// Walk the reserve lineage from the head this device's walks established
+/// (or `R_0`) to wherever it stops, memoising every final release on the
+/// way. The walk starts from that head and stops at one (DSM Amendment A15).
 ///
 /// Before the walk, the epoch index is read for the hints and checkpoints
 /// others published (SoFi Amendment S23), and the cells of the roots they
@@ -355,21 +344,23 @@ pub fn walk_reserve(
     runtime: &tokio::runtime::Handle,
 ) -> Result<WalkStop, DsmError> {
     let genesis = genesis_state(network_id)?;
-    let start = memo::latest_state(&genesis).map_err(|e| storage_err("reserve memo", e))?;
-    let (established, _) = established_chain(&genesis)?;
+    let (established, _, _) = established_chain(&genesis, None)?;
+    let start = EstablishedReserve::of(&genesis, &established.head())
+        .map_err(|e| storage_err("reserve head", e))?;
+    let from = *start.state();
     let (mut ahead, mut candidates) = tokio::task::block_in_place(|| {
         runtime.block_on(async {
             let mut candidates = lineage_discovery::discover(
                 set,
                 LineageKind::Reserve,
-                start.reserve_id(),
-                start.generation(),
+                from.reserve_id(),
+                from.generation(),
             )
             .await;
             // A checkpoint names cells to read only for the segment that
             // starts where this device's own walks stand (SA-69).
-            candidates.admit_checkpoints(&established.head());
-            let ahead = read_named(set, &start, &candidates).await?;
+            candidates.admit_checkpoints(start.head());
+            let ahead = read_named(set, &from, &candidates).await?;
             Ok::<_, DsmError>((ahead, candidates))
         })
     })?;
@@ -402,32 +393,40 @@ pub fn walk_reserve(
             })
         },
         |parent, release, child| {
-            memo::record_final_release(parent, release, child)
+            memo::record_final_release(parent.state(), release, child.state())
                 .map_err(|e| storage_err("reserve memo write", e))
         },
     )?;
     // A checkpoint whose end the walk did not reproduce is discarded before
     // anything is owed (SoFi Amendment S23, step 4).
-    let (walked, _) = established_chain(&genesis)?;
+    let (walked, _, _) = established_chain(&genesis, None)?;
     let settled = candidates.settle_checkpoints(&walked);
     log::info!(
         "[reserve] checkpoints after the walk: {} borne out, {} discarded",
         settled.borne_out,
         settled.discarded
     );
-    owe_after_walk(set, &genesis, start.generation(), &candidates)?;
+    owe_after_walk(set, &genesis, from.generation(), &candidates)?;
     Ok(stop)
 }
 
-/// The generation chain of what this device's walks established, and each
-/// generation's step digest (its release's evidence address).
+/// The generation chain of what this device's walks established, each
+/// generation's step digest (its release's evidence address), and the
+/// envelope of the release at generation `keep`, when the chain reaches it.
+/// A memoised release past the first generation the memo skips is not one
+/// this device's walks established, and is not in the chain.
 fn established_chain(
     genesis: &NativeReserveState,
-) -> Result<(GenerationChain, BTreeMap<u64, [u8; 32]>), DsmError> {
-    let mut chain = GenerationChain::from_genesis(&shared_genesis(genesis));
+    keep: Option<u64>,
+) -> Result<(GenerationChain, BTreeMap<u64, [u8; 32]>, Option<Vec<u8>>), DsmError> {
+    let lineage =
+        reserve_lineage_genesis(genesis).map_err(|e| storage_err("reserve genesis", e))?;
+    let mut chain = GenerationChain::from_genesis(&lineage);
     let mut steps = BTreeMap::new();
+    let mut kept = None;
     // One memoised release at a time: its step digest is taken and the
-    // release let go before the next is read (SA-75).
+    // release let go before the next is read (SA-75), except the one asked
+    // to be kept.
     memo::fold_memoised_lineage(genesis, |state, envelope| {
         if state.generation() != chain.head().generation() + 1 {
             return Ok(std::ops::ControlFlow::Break(()));
@@ -437,10 +436,38 @@ fn established_chain(
             .push(state.root(), step)
             .map_err(|e| anyhow::anyhow!("reserve generation chain: {e}"))?;
         steps.insert(state.generation(), step);
+        if keep == Some(state.generation()) {
+            kept = Some(envelope.to_vec());
+        }
         Ok(std::ops::ControlFlow::Continue(()))
     })
     .map_err(|e| storage_err("reserve memo", e))?;
-    Ok((chain, steps))
+    Ok((chain, steps, kept))
+}
+
+/// The release this device's walks established at `generation`, with the
+/// established heads before and after it; `None` while the chain does not
+/// reach it. Reads only what was memoised: nothing is walked here.
+pub(crate) fn established_release_at(
+    genesis: &NativeReserveState,
+    generation: u64,
+) -> Result<Option<ReserveReleaseWin>, DsmError> {
+    let Some(before) = generation.checked_sub(1) else {
+        return Err(DsmError::invalid_operation(
+            "generation 0 is the reserve's genesis state, never a release",
+        ));
+    };
+    let (chain, _, kept) = established_chain(genesis, Some(generation))?;
+    let (Some(parent), Some(child), Some(envelope_bytes)) =
+        (chain.head_at(before), chain.head_at(generation), kept)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ReserveReleaseWin {
+        envelope_bytes,
+        parent,
+        child,
+    }))
 }
 
 /// Owe the epoch index a hint for every generation the walk established
@@ -454,7 +481,7 @@ fn owe_after_walk(
     from: u64,
     candidates: &Candidates,
 ) -> Result<usize, DsmError> {
-    let (chain, steps) = established_chain(genesis)?;
+    let (chain, steps, _) = established_chain(genesis, None)?;
     let set_id = set.id();
     let mut owed = lineage_discovery::owe_missing_hints(&set_id, &chain, &steps, candidates, from)?;
     let head = chain.head().generation();
@@ -498,9 +525,9 @@ fn segment_bundle(
 }
 
 /// The final release at `generation` of the reserve `reserve_id`, for a
-/// verifier: from the memo when a walk already passed it, else by walking.
-/// `None` while the lineage has not reached that generation with a final
-/// release.
+/// verifier, with the established heads around it: from what this device's
+/// walks established when they already passed it, else by walking. `None`
+/// while the lineage has not reached that generation with a final release.
 pub fn release_at(
     set: &StorageSet,
     network_id: &[u8],
@@ -514,18 +541,11 @@ pub fn release_at(
             "the named reserve is not this network's native reserve",
         ));
     }
-    if generation == 0 {
-        return Err(DsmError::invalid_operation(
-            "generation 0 is the reserve's genesis state, never a release",
-        ));
-    }
-    if let Some(win) =
-        memo::release_at(&genesis, generation).map_err(|e| storage_err("reserve memo", e))?
-    {
+    if let Some(win) = established_release_at(&genesis, generation)? {
         return Ok(Some(win));
     }
     walk_reserve(set, network_id, runtime)?;
-    memo::release_at(&genesis, generation).map_err(|e| storage_err("reserve memo", e))
+    established_release_at(&genesis, generation)
 }
 
 /// Write the exact release bytes at `parent`'s successor cell along its
@@ -607,7 +627,8 @@ mod tests {
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
-        let mut expected = GenerationChain::from_genesis(&shared_genesis(&genesis));
+        let mut expected =
+            GenerationChain::from_genesis(&reserve_lineage_genesis(&genesis).expect("R_0"));
         for g in [1u64, 2, 3, 5] {
             let state = genesis
                 .at_generation(g)
@@ -620,8 +641,46 @@ mod tests {
                     .expect("the next generation");
             }
         }
-        let (chain, steps) = established_chain(&genesis).expect("the chain");
+        let (chain, steps, _) = established_chain(&genesis, None).expect("the chain");
         assert_eq!(chain.head(), expected.head());
         assert_eq!(steps.len(), 3, "generation 5 follows a gap");
+    }
+
+    /// DSM Amendment A15, MR-DSM-0315: a verifier is answered from the head
+    /// this device's walks established. A memoised release on that chain
+    /// comes with the chain's heads before and after it; a memoised release
+    /// past a gap is not established, and is not answered as a release, so
+    /// the verifier walks for it instead.
+    #[test]
+    #[serial_test::serial]
+    fn a_memoised_release_past_a_gap_is_not_an_established_release() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
+        let mut expected =
+            GenerationChain::from_genesis(&reserve_lineage_genesis(&genesis).expect("R_0"));
+        for g in [1u64, 2, 3, 5] {
+            let state = genesis.at_generation(g).expect("a generation");
+            let envelope = [0xC0 | g as u8; 40];
+            memo_row(&genesis, &state, &envelope);
+            if g <= 3 {
+                expected
+                    .push(state.root(), release_evidence_addr(&envelope))
+                    .expect("the next generation");
+            }
+        }
+        let win = established_release_at(&genesis, 3)
+            .expect("read")
+            .expect("generation 3 is on the chain");
+        assert_eq!(win.envelope_bytes, vec![0xC3; 40]);
+        assert_eq!(Some(win.parent), expected.head_at(2));
+        assert_eq!(Some(win.child), expected.head_at(3));
+        assert_eq!(
+            established_release_at(&genesis, 5).expect("read"),
+            None,
+            "a release memoised past a gap is not established"
+        );
+        assert_eq!(established_release_at(&genesis, 4).expect("read"), None);
     }
 }

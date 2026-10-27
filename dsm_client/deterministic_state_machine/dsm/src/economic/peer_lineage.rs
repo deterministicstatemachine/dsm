@@ -733,9 +733,11 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
             | P::NotTheCanonicalReserve { .. }
             | P::GenerationIsGenesis
             | P::ReleaseInvalid(..)
+            | P::ReleaseParentNotOnTheReserve(..)
+            | P::ReleaseNotTheSuccessor(..)
+            | P::ReleaseIsNotTheEstablishedStep { .. }
             | P::ReleaseRecipientMismatch
             | P::ReleaseBindingMismatch
-            | P::ReleaseForeignSet
             | P::ReleaseEvidenceAddrMismatch
             | P::RegisterNotResolvable(..) => invalid_at(&p),
         },
