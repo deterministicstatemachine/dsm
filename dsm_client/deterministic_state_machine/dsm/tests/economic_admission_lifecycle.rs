@@ -1156,23 +1156,19 @@ fn held_first_claim(
 }
 
 /// The trader's head as it reloads: `balances`, `allocations`, and the
-/// admission in flight.
+/// admission in flight. `restore` takes the root the device persisted with the
+/// fields; it is computed here, independently, over the leaves those fields
+/// hold: the device's own relationship at `h_0` and, with allocations, the
+/// one offline account a load leaves.
 fn head_of(
     genesis: [u8; 32],
     fx: &FaucetFixture,
     balances: &[([u8; 32], u64)],
     allocations: &[([u8; 32], u64)],
     pending: Option<PendingEconomicAdmission>,
-) -> dsm::types::device_state::DeviceState {
-    dsm::types::device_state::DeviceState::restore(
-        genesis,
-        *dev(),
-        fx.pk.clone(),
-        None,
-        balances.iter().copied().collect(),
-        Vec::new(),
-        std::collections::BTreeMap::new(),
-        // Any allocation is held in one offline account, as a load leaves it.
+) -> dsm::types::device_state::RealizedHead {
+    use dsm::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
+    let accounts: std::collections::BTreeMap<[u8; 32], dsm::types::offline_account::OfflineAccount> =
         Some(allocations)
             .filter(|held| !held.is_empty())
             .map(|held| {
@@ -1187,8 +1183,31 @@ fn head_of(
                 )
             })
             .into_iter()
-            .collect(),
+            .collect();
+    let stored_root = *dsm::merkle::sparse_merkle_tree::SparseMerkleTree::from_leaves(
+        std::iter::once((
+            compute_smt_key(dev(), dev()),
+            initial_chain_tip_from_device_ids(dev(), dev()),
+        ))
+        .chain(accounts.iter().map(|(bundle, account)| {
+            (
+                dsm::types::offline_account::offline_account_leaf_key(bundle),
+                account.root(),
+            )
+        })),
+    )
+    .root();
+    dsm::types::device_state::DeviceState::restore(
+        genesis,
+        *dev(),
+        fx.pk.clone(),
+        None,
+        balances.iter().copied().collect(),
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+        accounts,
         pending,
+        stored_root,
     )
     .expect("the head reloads")
 }
@@ -1357,7 +1376,7 @@ struct AdmittedBoundary {
 const BUNDLE: [u8; 32] = [0xB0; 32];
 
 fn boundary(
-    head: &dsm::types::device_state::DeviceState,
+    head: &dsm::types::device_state::RealizedHead,
     kind: dsm::types::device_state::OfflineBoundaryKind,
     amount: u64,
     pre_root: [u8; 32],

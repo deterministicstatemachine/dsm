@@ -2511,7 +2511,7 @@ impl AppRouter for AppRouterImpl {
         }
     }
 
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+    fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
         self.core_sdk.device_head()
     }
 

@@ -20,7 +20,9 @@ use dsm::core::identity::genesis_v3::{derive_genesis_v3_self_attested, GenesisV3
 use dsm::core::token::token_state_manager::era_policy_commit;
 use dsm::crypto::ephemeral_key;
 use dsm::economic::register::BETA_NETWORK_ID;
-use dsm::types::device_state::{AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState};
+use dsm::types::device_state::{
+    AdvanceOutcome, BalanceDelta, BalanceDirection, DeviceState, RealizedHead,
+};
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::receipt_types::{DeviceTreeAcceptanceCommitment, StitchedReceiptV2};
 use dsm::types::token_types::Balance;
@@ -92,8 +94,8 @@ impl Party {
     }
 
     /// The device head at genesis.
-    pub fn head(&self) -> DeviceState {
-        DeviceState::new(
+    pub fn head(&self) -> RealizedHead {
+        DeviceState::genesis_head(
             self.genesis(),
             self.device_id(),
             self.signing_public_key().to_vec(),
@@ -205,7 +207,7 @@ pub struct Step {
 fn step(
     author: &Party,
     toward: &Party,
-    head: DeviceState,
+    head: RealizedHead,
     operation: Operation,
     direction: BalanceDirection,
     amount: u64,

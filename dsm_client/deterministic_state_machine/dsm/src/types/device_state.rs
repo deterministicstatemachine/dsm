@@ -129,6 +129,111 @@ fn hex_short(b: &[u8; 32]) -> String {
     s
 }
 
+/// A device head Core produced: the genesis head, a head restored from this
+/// device's own persisted encoding, or a head one of Core's transitions made
+/// from a realized head. The realization predicate is the only way a state
+/// comes into existence (DSM §78, MR-DSM-0243/0244): this is the only kind
+/// [`StateMachine::set_device_head`](crate::core::state_machine::StateMachine::set_device_head)
+/// installs, its field is private, and nothing outside Core builds one, so a
+/// head assembled any other way does not compile into an install. Reading goes
+/// through `Deref`; every transition is a method here, taking a realized head
+/// and returning one.
+#[derive(Clone)]
+pub struct RealizedHead(DeviceState);
+
+impl RealizedHead {
+    /// A head one of Core's own transitions produced.
+    pub(crate) fn of(state: DeviceState) -> Self {
+        Self(state)
+    }
+
+    /// The head as a plain value, for a caller that only reads, persists or
+    /// simulates from it. It is never installed again without passing back
+    /// through Core.
+    pub fn into_head(self) -> DeviceState {
+        self.0
+    }
+
+    /// One transition on `rel_key`: see [`DeviceState::advance`].
+    pub fn advance(
+        &self,
+        rel_key: [u8; 32],
+        counterparty_devid: [u8; 32],
+        operation: Operation,
+        deltas: &[BalanceDelta],
+        offline_spend: Option<OfflineSpend>,
+    ) -> Result<AdvanceOutcome, DsmError> {
+        self.0
+            .advance(rel_key, counterparty_devid, operation, deltas, offline_spend)
+    }
+
+    /// The relationship with `counterparty_devid` established at its `h_0`:
+    /// see [`DeviceState::establish_relationship`].
+    pub fn establish_relationship(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.establish_relationship(counterparty_devid).map(Self)
+    }
+
+    /// This head with `pending` as its admission in flight: see
+    /// [`DeviceState::with_pending_economic_admission`].
+    pub fn with_pending_economic_admission(
+        &self,
+        pending: Option<crate::economic::admission::PendingEconomicAdmission>,
+    ) -> RealizedHead {
+        Self(self.0.with_pending_economic_admission(pending))
+    }
+
+    /// This head after a resolved SoFi position: see
+    /// [`DeviceState::with_resolved_position`].
+    pub fn with_resolved_position(
+        &self,
+        balances: &crate::sofi::lineage::ResolvedBalances,
+    ) -> Result<RealizedHead, DsmError> {
+        self.0.with_resolved_position(balances).map(Self)
+    }
+
+    /// This head with the offline account of `bundle` opened: see
+    /// [`DeviceState::open_offline_account`].
+    pub fn open_offline_account(
+        &self,
+        bundle: &[u8; 32],
+        frontier: [u8; 32],
+        counter: u64,
+    ) -> Result<RealizedHead, DsmError> {
+        self.0
+            .open_offline_account(bundle, frontier, counter)
+            .map(Self)
+    }
+
+    /// One offline boundary from this head: see
+    /// [`DeviceState::cross_offline_boundary`].
+    pub fn cross_offline_boundary(
+        &self,
+        bundle: &[u8; 32],
+        kind: OfflineBoundaryKind,
+        asset: &[u8; 32],
+        amount: u64,
+    ) -> Result<OfflineBoundaryOutcome, DsmError> {
+        self.0.cross_offline_boundary(bundle, kind, asset, amount)
+    }
+}
+
+impl core::ops::Deref for RealizedHead {
+    type Target = DeviceState;
+
+    fn deref(&self) -> &DeviceState {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RealizedHead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Canonical value-capability of a relationship, for recovery gate-set construction
 /// (spec §0.5 gap 13, R4 anti-shrink). This is the ONLY representation — there is no
 /// legacy bool, no default-false, no `missing == No`.
@@ -652,8 +757,8 @@ pub struct OfflineStateProofs {
 
 #[derive(Clone, Debug)]
 pub struct AdvanceOutcome {
-    /// The new [`DeviceState`] to install on CAS success.
-    pub new_device_state: DeviceState,
+    /// The new head to install on CAS success.
+    pub new_device_state: RealizedHead,
 
     /// The new chain state for the advanced relationship. Signatures are
     /// `None` in this outcome — the caller attaches them via the stitched
@@ -742,6 +847,16 @@ impl DeviceState {
         state
     }
 
+    /// The genesis head of a device: its own relationship at `h_0` and
+    /// nothing else, with the genesis digest `G` as its compat anchor. The base
+    /// case of the realization predicate: every other head is reached from one
+    /// of these through Core's transitions.
+    pub fn genesis_head(genesis: [u8; 32], devid: [u8; 32], public_key: Vec<u8>) -> RealizedHead {
+        let mut state = Self::new(genesis, devid, public_key);
+        state.legacy_anchor = Some(genesis);
+        RealizedHead::of(state)
+    }
+
     /// Write the relationship with `counterparty_devid` into this device's
     /// tree at its `h_0` (§26: the leaf holds the chain's current head, from
     /// the first). `h_0` is derived here, never supplied.
@@ -771,7 +886,7 @@ impl DeviceState {
     /// value. Every step on the relationship then replaces a leaf the device
     /// committed, so the step's parent root is one the device held. Refused
     /// when the relationship is already established.
-    pub fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<Self, DsmError> {
+    pub(crate) fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<Self, DsmError> {
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
             &self.devid,
             &counterparty_devid,
@@ -798,7 +913,7 @@ impl DeviceState {
     /// The persistence layer calls this inside the same transaction that
     /// writes the pending row, so the head and the fence state can never
     /// disagree about whether an admission is in flight.
-    pub fn with_pending_economic_admission(
+    pub(crate) fn with_pending_economic_admission(
         &self,
         pending: Option<crate::economic::admission::PendingEconomicAdmission>,
     ) -> Self {
@@ -819,9 +934,9 @@ impl DeviceState {
     ///    tree over them once. The tree is a pure function of its leaves, so
     ///    the root is determined.
     /// 3. Installs `balances`, `tips`, and `legacy_anchor` directly.
-    ///
-    /// The caller is responsible for verifying that the resulting `root()`
-    /// matches the stored sanity-check digest.
+    /// 4. Refuses unless the rebuilt root is `stored_root`, the root this
+    ///    device persisted with the fields: a head is restored as it was
+    ///    realized, or not at all.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
         genesis: [u8; 32],
@@ -837,7 +952,8 @@ impl DeviceState {
         // defaulted `None` here would be a silent fence-open on any path that
         // forgot — a gate precondition with no mandatory producer.
         pending_economic_admission: Option<crate::economic::admission::PendingEconomicAdmission>,
-    ) -> Result<Self, DsmError> {
+        stored_root: [u8; 32],
+    ) -> Result<RealizedHead, DsmError> {
         let mut state = Self::new(genesis, devid, public_key);
         state.legacy_anchor = legacy_anchor;
         state.balances = balances;
@@ -857,19 +973,53 @@ impl DeviceState {
 
         // One build over every leaf, each node hashed once: the device's own relationship `new`
         // wrote, each tip, then each other leaf.
-        state.smt =
-            SparseMerkleTree::from_leaves(
-                state
-                    .tips
-                    .iter()
-                    .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
-                    .chain(state.extra_leaves.iter().map(|(key, value)| (*key, *value)))
-                    .chain(state.offline_accounts.iter().map(|(bundle, account)| {
-                        (offline_account_leaf_key(bundle), account.root())
-                    })),
-            );
+        state.smt = Self::device_tree(&state.tips, &state.extra_leaves, &state.offline_accounts);
 
-        Ok(state)
+        if state.root() != stored_root {
+            return Err(DsmError::invalid_operation(format!(
+                "restore: the rebuilt device root {} is not the stored root {}",
+                crate::utils::text_id::encode_base32_crockford(&state.root()),
+                crate::utils::text_id::encode_base32_crockford(&stored_root)
+            )));
+        }
+        Ok(RealizedHead::of(state))
+    }
+
+    /// The device tree over a head's leaves: each relationship tip, then every
+    /// other leaf, then each offline account's root. A pure function of its
+    /// leaves, so the root is determined; [`Self::restore`] builds a head over
+    /// exactly this tree.
+    fn device_tree(
+        tips: &BTreeMap<[u8; 32], RelChainTip>,
+        extra_leaves: &BTreeMap<[u8; 32], [u8; 32]>,
+        offline_accounts: &BTreeMap<[u8; 32], OfflineAccount>,
+    ) -> SparseMerkleTree {
+        SparseMerkleTree::from_leaves(
+            tips.iter()
+                .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
+                .chain(extra_leaves.iter().map(|(key, value)| (*key, *value)))
+                .chain(offline_accounts.iter().map(|(bundle, account)| {
+                    (offline_account_leaf_key(bundle), account.root())
+                })),
+        )
+    }
+
+    /// The root [`Self::restore`] rebuilds for these fields: the device's own
+    /// relationship at `h_0`, the tips (a later one at a key replaces an earlier
+    /// one), every other leaf and each offline account. Only a root: nothing
+    /// built from it is a head.
+    pub fn root_over(
+        devid: [u8; 32],
+        tips_in_order: &[([u8; 32], RelChainTip)],
+        extra_leaves: &BTreeMap<[u8; 32], [u8; 32]>,
+        offline_accounts: &BTreeMap<[u8; 32], OfflineAccount>,
+    ) -> [u8; 32] {
+        let own = Self::new(devid, devid, Vec::new());
+        let mut tips = own.tips;
+        for (rel_key, tip) in tips_in_order {
+            tips.insert(*rel_key, tip.clone());
+        }
+        *Self::device_tree(&tips, extra_leaves, offline_accounts).root()
     }
 
     /// Current device head `r_A` — the Per-Device SMT root (§2.2).
@@ -890,14 +1040,6 @@ impl DeviceState {
             .map_err(|e| DsmError::invalid_operation(format!("rel_inclusion_proof: {e}")))
     }
 
-    /// Stash a legacy `State.hash` as a verification anchor. Callers that
-    /// hold a legacy State and want `legacy_anchor()` to return its hash
-    /// (for hash-adjacency verification) use this. Strictly compat path —
-    /// not part of the §2.2 SMT.
-    pub fn bootstrap_legacy_root(&mut self, legacy_root: [u8; 32]) {
-        self.legacy_anchor = Some(legacy_root);
-    }
-
     /// Returns the legacy anchor if set (compat path).
     pub fn legacy_anchor(&self) -> Option<[u8; 32]> {
         self.legacy_anchor
@@ -906,27 +1048,6 @@ impl DeviceState {
     /// Device genesis digest.
     pub fn genesis_digest(&self) -> [u8; 32] {
         self.genesis
-    }
-
-    /// Install the canonical genesis authority root `G` on an ALREADY
-    /// CONSTRUCTED head.
-    ///
-    /// Only the constructor used to write `genesis`, which made
-    /// `CoreSDK::write_genesis_device_head` silently unable to honour its own
-    /// contract: it takes the existing head when one is present, so on that
-    /// branch `genesis` kept whatever the head was built with. Genesis install
-    /// always hits that branch — `StateMachine::set_state` materialises a head
-    /// first — so every freshly created wallet ended up with a head whose
-    /// `genesis` was the `[0u8; 32]` that `set_state` invented. Every consumer
-    /// reading `genesis_digest()` as the authority root then compared against
-    /// zeros: the ERA faucet's authority evidence re-derived the real seed-rooted
-    /// `v3.g` and fail-closed on every device, correctly.
-    ///
-    /// This is the narrow repair for that: a head that HAS the canonical root
-    /// can be told it. It does not make the root optional and does not add a
-    /// second notion of `G` — there is one, the seed-derived `v3.g`.
-    pub fn set_genesis_digest(&mut self, genesis: [u8; 32]) {
-        self.genesis = genesis;
     }
 
     /// Device identifier.
@@ -1075,7 +1196,7 @@ impl DeviceState {
     /// position.
     ///
     /// [`advance_resolved`]: crate::sofi::lineage::advance_resolved
-    pub fn with_resolved_position(
+    pub(crate) fn with_resolved_position(
         &self,
         balances: &crate::sofi::lineage::ResolvedBalances,
     ) -> Result<Self, DsmError> {
@@ -1129,7 +1250,7 @@ impl DeviceState {
     /// snapshots and build valid candidates; the caller's CAS layer
     /// enforces first-commit-wins.
     #[allow(clippy::too_many_arguments)]
-    pub fn advance(
+    pub(crate) fn advance(
         &self,
         rel_key: [u8; 32],
         counterparty_devid: [u8; 32],
@@ -1472,7 +1593,7 @@ impl DeviceState {
         };
 
         Ok(AdvanceOutcome {
-            new_device_state,
+            new_device_state: RealizedHead::of(new_device_state),
             new_chain_state,
             transition,
             parent_r_a,
@@ -1486,7 +1607,7 @@ impl DeviceState {
     /// anchor's frontier and counter: the account's root becomes the device-SMT
     /// leaf at `offline_account_leaf_key(B)`. Once per bundle; an account that
     /// is open is never opened again, so its counter is never reset.
-    pub fn open_offline_account(
+    pub(crate) fn open_offline_account(
         &self,
         bundle: &[u8; 32],
         frontier: [u8; 32],
@@ -1550,7 +1671,7 @@ impl DeviceState {
     /// The boundary's operation id is derived here, from the roots it starts
     /// from ([`OfflineBoundaryId::operation_id`]), and becomes the account's
     /// funding chain: the funding origin is never the caller's to name.
-    pub fn cross_offline_boundary(
+    pub(crate) fn cross_offline_boundary(
         &self,
         bundle: &[u8; 32],
         kind: OfflineBoundaryKind,
@@ -1615,12 +1736,12 @@ impl DeviceState {
         offline_accounts.insert(*bundle, account_move.account.clone());
         let post_device_root = *smt.root();
         Ok(OfflineBoundaryOutcome {
-            new_device_state: Self {
+            new_device_state: RealizedHead::of(Self {
                 smt,
                 balances,
                 offline_accounts,
                 ..self.clone()
-            },
+            }),
             operation_id: boundary_id,
             pre_device_root,
             post_device_root,
@@ -1692,7 +1813,7 @@ impl OfflineBoundaryId {
 /// the boundary is admitted.
 #[derive(Debug, Clone)]
 pub struct OfflineBoundaryOutcome {
-    pub new_device_state: DeviceState,
+    pub new_device_state: RealizedHead,
     pub operation_id: [u8; 32],
     pub pre_device_root: [u8; 32],
     pub post_device_root: [u8; 32],
@@ -1742,6 +1863,7 @@ impl DeviceState {
             .map(|o| {
                 o.new_device_state
                     .with_pending_economic_admission(self.pending_economic_admission.clone())
+                    .into_head()
             })
     }
 
@@ -1788,7 +1910,7 @@ impl DeviceState {
                 ],
                 None,
             )
-            .map(|o| o.new_device_state)
+            .map(|o| o.new_device_state.into_head())
     }
 
     /// TEST-ONLY. Adopt `policy_commit` on this device: the authenticated
@@ -1806,7 +1928,7 @@ impl DeviceState {
                 &[],
                 None,
             )
-            .map(|o| o.new_device_state)
+            .map(|o| o.new_device_state.into_head())
     }
 
     /// The device's self-loop relationship key — where every self-authored
@@ -2914,8 +3036,9 @@ pub(crate) mod tests {
         let mut loaded = with_offline_account(0xD7, token, bundle)
             .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
             .expect("load 40")
-            .new_device_state;
-        loaded.set_genesis_digest(genesis);
+            .new_device_state
+            .into_head();
+        loaded.genesis = genesis;
         let cp = devid(0xC7);
         let rk = compute_smt_key(&loaded.devid, &cp);
         let loaded = loaded.establish_relationship(cp).expect("establish");
@@ -3451,7 +3574,10 @@ pub(crate) mod tests {
                     None,
                 )
                 .expect("advance");
-            dev = out.new_device_state.with_pending_economic_admission(None);
+            dev = out
+                .new_device_state
+                .with_pending_economic_admission(None)
+                .into_head();
         }
 
         let expected = (1000_i64 + net_delta) as u64;
@@ -3563,7 +3689,8 @@ pub(crate) mod tests {
             head = head
                 .advance(rk, cp, op(), &[], None)
                 .expect("a step on the relationship")
-                .new_device_state;
+                .new_device_state
+                .into_head();
             let proof = holds_only_its_current_head(&head, &rk, &proofs);
             proofs.push(proof);
         }
@@ -3829,9 +3956,9 @@ pub(crate) mod tests {
     }
 
     /// A head rebuilt from its persisted tips and other leaves recomputes the
-    /// root the live head committed, the tree built once over every leaf. A
-    /// tip or a leaf left out of the build moves the root, so the loader's
-    /// root check refuses the head.
+    /// root the live head committed, the tree built once over every leaf, and
+    /// is restored. A tip or a leaf left out of the build moves the root, and
+    /// restore refuses the head against the stored root.
     #[test]
     fn a_restored_head_recomputes_the_live_root() {
         let mut live = DeviceState::new(devid(0xC1), devid(0xC2), vec![0x01; 32]);
@@ -3863,13 +3990,19 @@ pub(crate) mod tests {
                 extra,
                 accounts,
                 None,
+                live.root(),
             )
-            .expect("restore")
+        };
+        let refused = |restored: Result<RealizedHead, DsmError>, why: &str| match restored {
+            Err(e) => assert!(e.to_string().contains("is not the stored root"), "{why}: {e}"),
+            Ok(head) => panic!("{why}: restored at root {:?}", head.root()),
         };
         let extra = live.extra_leaves_snapshot().clone();
         let accounts = live.offline_accounts().clone();
         assert_eq!(
-            restore(tips.clone(), extra.clone(), accounts.clone()).root(),
+            restore(tips.clone(), extra.clone(), accounts.clone())
+                .expect("the full set of leaves restores")
+                .root(),
             live.root()
         );
         let dropped =
@@ -3880,20 +4013,17 @@ pub(crate) mod tests {
             .cloned()
             .collect();
         assert_eq!(fewer.len() + 1, tips.len());
-        assert_ne!(
-            restore(fewer, extra.clone(), accounts.clone()).root(),
-            live.root(),
-            "a tip left out of the build moves the root"
+        refused(
+            restore(fewer, extra.clone(), accounts.clone()),
+            "a tip left out of the build moves the root",
         );
-        assert_ne!(
-            restore(tips.clone(), BTreeMap::new(), accounts).root(),
-            live.root(),
-            "an extra leaf left out of the build moves the root"
+        refused(
+            restore(tips.clone(), BTreeMap::new(), accounts),
+            "an extra leaf left out of the build moves the root",
         );
-        assert_ne!(
-            restore(tips, extra, BTreeMap::new()).root(),
-            live.root(),
-            "an offline account left out of the build moves the root"
+        refused(
+            restore(tips, extra, BTreeMap::new()),
+            "an offline account left out of the build moves the root",
         );
     }
 }

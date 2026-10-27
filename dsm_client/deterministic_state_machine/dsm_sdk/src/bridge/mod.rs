@@ -92,7 +92,7 @@ pub trait AppRouter: Send + Sync {
     /// from the device head's authoritative balance scalar — never to mutate
     /// it. `None` when the router does not yet hold an identity (the
     /// pre-genesis bootstrap router).
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState>;
+    fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead>;
 
     /// §9.5: resolve a token's canonical `policy_commit` from the local
     /// source-of-truth installed policy (builtins -> canonical constants;

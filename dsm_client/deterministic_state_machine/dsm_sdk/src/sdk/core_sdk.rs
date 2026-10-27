@@ -847,17 +847,23 @@ impl CoreSDK {
     /// downstream is taught to tolerate a zero root.
     fn write_genesis_device_head(&self, genesis_hash: [u8; 32]) -> Result<(), DsmError> {
         use crate::storage::client_db::update_bcr_device_head;
-        let mut head = self.device_head().unwrap_or_else(|| {
-            dsm::types::device_state::DeviceState::new(
-                genesis_hash,
-                self.device_info.device_id,
-                self.device_info.public_key.clone(),
-            )
-        });
-        head.set_genesis_digest(genesis_hash);
-        if head.legacy_anchor().is_none() {
-            head.bootstrap_legacy_root(genesis_hash);
+        // A head already installed is this device's lineage: genesis under the
+        // same `G` has nothing to write, and under another `G` it would rewrite
+        // the device's identity, which no transition does (MR-DSM-0243).
+        if let Some(existing) = self.device_head() {
+            if existing.genesis_digest() == genesis_hash {
+                return Ok(());
+            }
+            return Err(DsmError::invalid_operation(format!(
+                "genesis install: this device already holds a head under genesis {}",
+                crate::util::text_id::encode_base32_crockford(&existing.genesis_digest())
+            )));
         }
+        let head = dsm::types::device_state::DeviceState::genesis_head(
+            genesis_hash,
+            self.device_info.device_id,
+            self.device_info.public_key.clone(),
+        );
         update_bcr_device_head(&head).map_err(|e| {
             DsmError::storage(
                 format!("genesis head-cache write failed: {e}"),
@@ -1823,7 +1829,7 @@ impl CoreSDK {
     }
 
     /// Get the canonical DeviceState head (§2.2 SMT root).
-    pub fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+    pub fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
         self.state_machine.lock().device_head().cloned()
     }
 
@@ -1884,15 +1890,7 @@ impl CoreSDK {
         &self,
         genesis_state: &dsm::core::identity::genesis::GenesisState,
     ) -> Result<[u8; 32], DsmError> {
-        let genesis_state_hash = {
-            let mut sm = self.state_machine.lock();
-            let mut s = State::new_genesis(genesis_state.genesis_nonce, self.device_info.clone());
-            s.hash = genesis_state.hash;
-            let snapshot = s.clone();
-            sm.set_state(s);
-            snapshot.hash
-        };
-        self.write_genesis_device_head(genesis_state_hash)?;
+        self.write_genesis_device_head(genesis_state.hash)?;
         Ok(genesis_state.hash)
     }
 }

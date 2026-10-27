@@ -574,7 +574,7 @@ fn the_bytes_the_members_hold_must_be_the_bytes_the_dag_addresses() {
 fn conservation_refuses_anything_but_the_derived_payout() {
     use dsm::types::device_state::{BalanceDelta, BalanceDirection, DeviceState};
     let devid = [0x33u8; 32];
-    let head = DeviceState::new([0x44u8; 32], devid, vec![0xAA; 32]);
+    let head = DeviceState::genesis_head([0x44u8; 32], devid, vec![0xAA; 32]);
     let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid, &devid);
     let op = claim_op(era_reserve_id(NETWORK), 42);
 

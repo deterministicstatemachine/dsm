@@ -163,7 +163,7 @@ fn sender_step_receipt(ak_pk: &[u8], op: &Operation, amount: u64) -> StitchedRec
         dsm::economic::tree::empty_economic_root(),
         dsm_operation_digest(&claim.to_bytes()),
     );
-    let funded = DeviceState::new(G_SENDER, DEV_SENDER, ak_pk.to_vec())
+    let funded = DeviceState::genesis_head(G_SENDER, DEV_SENDER, ak_pk.to_vec())
         .with_pending_economic_admission(Some(prepared))
         .advance(
             compute_smt_key(&DEV_SENDER, &DEV_SENDER),

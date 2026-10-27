@@ -413,7 +413,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             // offline bearer could run over.
             fn sync_balance_cache(&self) {}
 
-            fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+            fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
                 None
             }
 
