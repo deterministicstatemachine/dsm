@@ -4363,6 +4363,156 @@ The release is also on the nodes although only the sender reads it, from an addr
 
 **Rows.** MR-DSM-0191: Met, evidence moved to the write set. MR-SOFI-0311: Partial (offline-bearer transfers). MR-DSM-0004: code reference moved. MR-DSM-0272: Met. MR-DSM-0332: added, Partial. §5A "Encrypted spool payloads (G16)": ticked.
 
+### 6.101 Storage decisions for the owner: eight rows blocked by Open items, the register incarnation, and two storage rulings (`docs/storage-open-decisions`, 2026-10-27)
+
+**Why.** The owner's words, 2026-10-27: for each, "present the exact existing requirement, observed implementation, conflict, and your proposed ruling", and "Do not ask for blanket approval without explaining the consequences." For the rows blocked by Open items: "preserve their unresolved status and present the precise missing specification decisions."
+
+**Method.** Read from the spec corpus and the code at `856b7336`. Nothing was run. No row status changes: the spec decides none of these.
+
+#### A. The eight rows blocked by Open storage-spec items
+
+**A1. The registry: MR-STOR-0087, MR-STOR-0088 (Missing).**
+- *Requirement.* MR-STOR-0087: "The active registry is the sorted list of operator ids, stored as an immutable object, advancing by a pure function of the prior registry and hash-referenced capacity, performance and applicant evidence." MR-STOR-0088: "Each registry successor is a keyed cell on the network's pinned set keyed by the prior registry's address; anyone may write a candidate, non-recomputing objects are not candidates, and the first candidate at the leader wins under the ordinary finality rule." Both come from storage spec §13 rules 1–3.
+- *What leaves it Open.* Storage §24 item 6: "Wire formats and domain tags for retirement, loss, handover, and registry-successor objects (§12, §13), and for payment receipts (§16)." The successor function's inputs are Open too. The performance evidence is A2 below, and the signals and the applicant ranking are A3.
+- *Decisions the requirement needs.*
+  1. The registry object's encoding and domain tag. An operator id is not a member id: a member id names a seat (§11), and the registry lists operators.
+  2. The successor object: the prior registry's address, hash references to its inputs, and the registry that results.
+  3. The successor cell: its namespace, the key derived from the prior registry's address, and its recognizer, which recomputes a candidate.
+  4. The genesis registry, and where the network pins it.
+  5. The pure function itself, which waits on A2 and A3.
+- *Options.*
+  - (a) Specify the registry now with no inputs, so the function admits and cuts nothing until A2 and A3 exist. The successor cell, its recognizer and the recompute can be built and tested on the route chains that exist, and the registry stays its genesis value in beta.
+  - (b) Specify the whole pipeline together: registry, signals, ranking and performance criterion. This waits on every A2 and A3 decision.
+  - (c) Keep the registry outside beta and the fleet pinned in code and configuration, as today. Then no party set can be assigned from a registry (C2), and no seat can be rebound (§12.4).
+- *Code today.* There is no registry object, no successor function and no successor cell. `RegistryV3`, `RegistryUpdateV3` and `ApplicantV3` exist in `proto/dsm_app.proto` and in the generated TypeScript only; no Rust, Kotlin or application code uses them. The fleet is the five members pinned in Core (`dsm::economic::register`, `BETA_ROOT_REGISTER_MEMBERS`) and in the environment configs. Endpoints come from configuration, which §24 item 2 leaves Open.
+- *Proposed.* (a). The registry's mechanics then exist, and nothing claims growth or pruning before A2 and A3 are decided. The rows stay Missing.
+
+**A2. The performance criterion: MR-STOR-0089, MR-STOR-0091, MR-STOR-0092 (Missing).**
+- *Requirement.*
+  - MR-STOR-0089: "Pruning is computed from committed evidence only; locally measured latency or uptime never enters it."
+  - MR-STOR-0091: "A new operator's grace period from pruning is counted in ByteCommit cycles, never in time."
+  - MR-STOR-0092: "An operator below the performance bar is never admitted and is cut when it falls below it; cadence regularity is part of the score."
+- *What leaves it Open.* Storage §13: "**Open — the performance criterion.** The October 2025 spec prunes by lowest utilisation. The owner's intent is to prune under-performers. Which performance measures are expressible over committed evidence is not decided here." §24 item 4: "The performance criterion for pruning, expressible over committed evidence (§13). Cadence regularity (§9.1, §13.7) is one criterion; the rest are undecided." The grace period's unit is decided (§13 rule 6) but not its length, which §13 takes from the October 2025 spec, outside this corpus.
+- *A conflict inside the decided part.* §14's closing rule 4: "A cycle closes when any party asks and at least one cell entry has arrived since the last close. A quiet node emits nothing." The size and spacing of an operator's cycles therefore follow its readers' demand as much as the operator. So cadence regularity, the one decided criterion, measures demand unless cycles close on a cadence of their own. Whether they must is, in §14's words, "part of the open performance criterion (§24 item 4)".
+- *Decisions the requirement needs.*
+  1. The measures. Each must be a pure function of committed evidence: mirrored ByteCommit chains, and signals that reference them.
+  2. Whether cycles close on a cadence of their own, and what drives it without a clock.
+  3. The score, the bar and the cut rule.
+  4. The grace length in cycles.
+  5. That all of this runs inside the registry successor function (A1).
+- *Options.*
+  - (a) Score only what committed evidence proves outright. A mirror holding two ByteCommits for one member and cycle proves equivocation (§14 mirror sync keeps every distinct one), and that is a cut. Cadence is compared with the operator's own history and with its set-mates over the same registry window, so shared demand cancels.
+  - (b) The October 2025 rule, pruning the least utilised. This contradicts the owner's stated intent to prune under-performers.
+  - (c) No pruning in beta: the registry never cuts. The rows stay Missing, and no cell is affected, since no registry event changes a route (obligation 22.6).
+- *Code today.* There is no score, cut, bar or grace period. `GRACE_CYCLES` was deleted with `api/registry` (#976). The node reads a clock only for transport liveness.
+- *Proposed.* (c) for beta, with option (a)'s measures specified when the registry grows past its genesis. The rows stay Missing.
+
+**A3. Growth ranking and capacity signals: MR-STOR-0090, MR-STOR-0095 (Missing).**
+- *Requirement.*
+  - MR-STOR-0090: "Growth selects new operators by a salted applicant ranking anchored in a genesis commit-reveal, so no party can bias selection; the ranking and commit-reveal themselves are open (storage spec §24 item 14)."
+  - MR-STOR-0095: "Up and Down capacity signals reference windows of accepted ByteCommits and are checked against them; how they are computed is open (storage spec §24 item 14)."
+- *What leaves it Open.*
+  - §13 rule 5: "**Open:** the ranking and the commit-reveal are defined only in the October 2025 spec (§9 and §5 there), which is outside this corpus; they are to be specified here (§24 item 14)."
+  - §14: "**Open:** how the signals are computed is defined only in the October 2025 spec (§8 there), outside this corpus (§24 item 14)."
+  - §24 item 14.
+- *Decisions the requirement needs.*
+  1. Import or redefine the ranking, and its salt: who commits in the genesis commit-reveal, when the reveal counts without a clock (in cycles), and what a withheld reveal does.
+  2. The applicant pack. The October 2025 `ApplicantV3` carries `hw_bind` and `env_fp`, a hardware binding.
+  3. The Up and Down thresholds, the window `w` in cycles, and the declared capacity. Also whether a ByteCommit's committed `bytes_used` (§14) is the utilisation they measure.
+  4. How a signal's anchors, the digests of `w` consecutive ByteCommits, are checked against the mirrors.
+- *Options.*
+  - (a) Import the October 2025 §5, §8 and §9 definitions into the storage spec, adapted to `ByteCommitV4`. The applicant pack's hardware binding then ties growth to the enrolled-appliance work, which the owner placed last.
+  - (b) No growth in beta: the registry stays its genesis, and signals are unused. The rows stay Missing, and no cell is affected.
+- *Code today.* `UpSignalV3`, `DownSignalV3` and `ApplicantV3` exist only in the proto and the generated TypeScript.
+- *Proposed.* (b). Growth's applicant binding depends on the hardware work. The rows stay Missing.
+
+**A4. The ByteCommit ancestry accumulator: MR-DSM-0317 (Missing).**
+- *Requirement.* "Phase C relies on an ancestry accumulator over each storage member's ByteCommits (Storage §24 item 15), undecided."
+- *What leaves it Open.*
+  - Storage §24 item 15: "An ancestry accumulator over each member's ByteCommits, so a reader holding a member's current ByteCommit can check an earlier one with a proof whose size does not grow with the cycles between them. DSM Amendment A15's phase C (a validity proof of a shared lineage's history) needs it to rely on historical finality facts. Whether it holds against a member showing different histories to different readers is undecided (§14)."
+  - DSM Amendment A15: "Phase C needs an ancestry accumulator over each member's ByteCommits (Storage §24 item 15) and is not yet built; nothing may claim phase A meets it."
+  - A15's refinement of 2026-10-27 scopes phase C to lineages with no owner. In practice that means the native reserve, which "stays at phase A".
+- *Decisions the requirement needs.*
+  1. The size bound. "Does not grow with the cycles between them" read strictly means constant size. The usual constant-size accumulators (RSA or class groups) are not post-quantum. Hash-based constructions (a Merkle mountain range root carried in each ByteCommit) give proofs that grow with the logarithm of the distance. DSM's signatures are post-quantum (SPHINCS+), so the strict reading conflicts with the corpus's post-quantum stance unless the accumulator sits inside the phase-C validity proof itself.
+  2. The equivocation rule: what a reader requires of the mirrors before relying on an accumulator root, since a member could keep two histories. §14 keeps every distinct ByteCommit a mirror fetched for a member and cycle, and "a ByteCommit is not accepted by counting how many mirrors hold it".
+  3. The ByteCommit format change. A field added to `ByteCommitV4` changes its digest, closing and mirroring.
+- *Options.*
+  - (a) A Merkle mountain range root in each ByteCommit, with logarithmic proofs, and §24 item 15's bound amended to logarithmic. This is post-quantum and needs a ByteCommit format change.
+  - (b) Constant-size proofs, carried only inside the phase-C validity proof, with the hash chain as the base. This waits on phase C's own construction.
+  - (c) No accumulator. The native reserve stays at phase A, which is today, and A15 says phase A does not meet phase C.
+- *Code today.* `ByteCommitV4 { member_id, cycle_index, smt_root, bytes_used, parent_digest }` forms a hash chain. `ByteCommit::follows` checks one parent link, and `CommittedAt` carries a ByteCommit with its parent. There is no accumulator in the node, Core or the SDK.
+- *Proposed.* (c) for beta, recorded as the native reserve's known gap, with (a) the candidate when phase C is scheduled. The row stays Missing.
+
+#### B. The register incarnation (MR-STOR-0066, Missing; out of beta with Part III)
+
+- *Requirement.* MR-STOR-0066: "Replacing the operator in a seat leaves the seat and every cell it led unchanged." (storage §11.1 rule 2)
+- *Text one.* Storage §10 rule 1: "A storage set is five members committed in state. Each member is committed as its member id paired with the register incarnation it serves, and `storage_set_id` covers those pairs, never endpoints (Owner decision, 2026-09-23; SoFi Amendment S6)." And its *Why*: "A member that loses its register and is rebuilt under the same member id gets a new incarnation. Committing the pair makes the rebuilt member a different member of the set, so it cannot answer for cells its lost register held, for example by reporting a cell empty. Once members run enrolled appliances whose hardware identity carries this continuity, the incarnation may be revisited; until then it stays in the set identity."
+- *Text two.* Storage §11 rule 3: "Once `S` is committed, it never changes. The leader of every cell is a seat, so it is fixed forever (§9), whichever machine later occupies that seat." §12.6, on loss: "The role's new operator serves the leader position for `K` from here."
+- *Observed.*
+  - A node mints its incarnation as 32 random bytes the first time its database starts, and keeps it there (`dsm_storage_node::db::register_incarnation`).
+  - A node refuses to start when its configuration lists another incarnation for it (`NodeStorageSet::new`).
+  - `storage_set_id` is computed over the `(member id, incarnation)` pairs (`dsm::ccb::storage_set_id`).
+  - The beta set is pinned as those pairs, compiled into Core (`BETA_ROOT_REGISTER_MEMBERS`) and listed in every environment config: the app's, Android's instrumented config, and the node's `production.toml`.
+  - `RoutedCell::new` refuses members that do not re-derive the committed id.
+  - The 2026-09-27 reprovision gave every member a new incarnation, and claims made under the old id stopped validating.
+- *Conflict.* With the incarnation in the set id, §11–§12's seat model cannot operate on loss. A lost seat rebound to a new operator (§12.4, §12.6) has a fresh register, hence a new incarnation, hence it is not a member of `S`. A live handover (§12.5) is not in conflict: the incarnation names a register history, and a handover carries that history.
+- *Reading A: the incarnation stays in the set id (§10 governs).*
+  - *Vault states.* Every vault's genesis commits the pinned `storage_set_id` (§10 rule 2). After a register loss, `RoutedCell::new` refuses the new members, and every vault's cells are unroutable.
+  - *Pinned set in app and node configs.* The pins compiled into Core and the environment configs change on every loss, which means an app release.
+  - *Native reserve.* `NativeReserveState` commits `storage_set_id`, and its successor cells route over it. The reserve stops at a loss, and the faucet with it.
+  - *SoFi routing.* Position cells, attempt cells, verdict, match and start cells all route over the set id, and stop the same way. Economic claims name the set in their signed body, and claims under the old id stop validating, as on 2026-09-27.
+  - *Replacing a lost operator.* It means a new set, and in beta a reprovision. It is safe: a rebuilt register can never answer for a cell its lost register held.
+- *Reading B: `S` names seats only, and the incarnation leaves the set id (§11.3 governs).*
+  - *Vaults, the reserve, SoFi routing and claims* keep working across a replacement, and configurations change endpoints only.
+  - *What protects safety.* The safety §10 protects is then carried by §12.6 alone: loss records with markers at every survivor, pre-loss material, the verifier rules of §12.3, and the rule that a new operator's log is never the leader's order for a cell with a pre-loss chain. Part III is out of beta (owner, 2026-09-23) and not built. Without it, a rebuilt leader with an empty register gives Core no recognized value at the leader (`leader_link` finds none), and Core reads the cell Open. A second value can then become final where one already was: a second release of one reserve generation, or a second claim at a root cell.
+  - *What §3 says.* That is the case storage §3 rules out: "The loss of every copy of a role's memory is handled by §12.6, never by treating a new machine's empty memory as the role's history." Reading B is unsafe until §12.6 is built.
+- *Proposed ruling.* §10 governs in beta, read with §11.3 so that `S` commits each seat together with the register history it serves.
+  1. The incarnation names a register history, not a machine. A live handover (§12.5) carries the history and its incarnation, and `S` is unchanged.
+  2. A loss (§12.6) ends `S`. Until §12.6 is built, or until enrolled appliances carry the continuity, as §10 itself foresees, a lost register means a new set. In beta that is a reprovision, with no compatibility, as on 2026-09-27.
+  3. MR-STOR-0066 holds for handover only until then, and stays Missing with Part III.
+  4. §11.3 and §12.6 gain a sentence saying so, worded by the owner.
+- *Consequences of the proposal.* Beta survives no register loss without a reprovision. A register restored from a snapshot keeps its incarnation, so the incarnation does not catch a stale restore. Storage §3 rule 3 already makes such a restore a safety violation, so it stays an operator obligation and is not a detected event. Nothing changes in code.
+
+#### C. Two storage rulings among the owner's 14 (§6.95)
+
+**C1. MR-STOR-0005: the node holds a TLS server key (Partial).**
+- *Requirement.* "A node must hold no key and must sign nothing." This is storage §1 rule 1, imported from DSM §11: "A storage node holds no key and signs nothing, ever."
+- *Observed.* The node requires `tls.cert_path`, `tls.key_path` and `tls.ca_path` (`dsm_storage_node` `main.rs`) and serves TLS with that key. Set-mates are reached by a client pinned to the storage set's CA (`set_client::pinned_set_client`), and devices pin the fleet through `custom_ca_certs` in their environment config. A TLS handshake signs with the server key. No protocol object is signed: ByteCommits are unsigned, and the node has no protocol signing path. Of anything to do with signing, `ci/storage_is_dumb.sh` bans only `verify_signed_object` (its other banned tokens are SoFi names), so nothing fails if a protocol signing path is added.
+- *Conflict.* Read literally, the node holds a key and signs, in every handshake. DSM §11 itself describes the shipping node as "speaking protobuf over TLS".
+- *What the TLS key carries today.*
+  - *Mirror provenance.* A node keeps a fetched ByteCommit only if the answering node's echoed member id matches (§14 mirror sync). That echo is only as good as the endpoint's authentication, and the pinned TLS is what keeps a network attacker's bytes out of a mirror (obligation 22.8).
+  - *Device reads.* ByteCommits are unsigned, so a device's confidence that a log or proof came from the member rests on transport authentication together with §3's fault model.
+  - *The spool* is sealed end to end (DSM Amendment A7), and needs no TLS for confidentiality.
+- *Options.*
+  - (a) Scope rule 1 to protocol keys: "A node MUST hold no protocol key and MUST sign no protocol object. A transport key that authenticates its endpoint certifies nothing a verifier relies on as a protocol fact." This matches the code. MR-STOR-0005 becomes Met once a gate refuses any protocol signing path in the node (a test obligation).
+  - (b) Terminate TLS outside the node process, in a proxy that holds the key. This satisfies the letter for the process, but the trust moves to the proxy, which belongs to the same operator. There is no security gain, and deployment is more complex.
+  - (c) No TLS. Mirror provenance (22.8) fails against any network attacker, and so does the device's assurance that it is reading the member.
+- *Proposed ruling.* (a). The storage set's CA is a trust root outside committed state, and naming who runs it belongs with endpoint resolution (§24 item 2). A rebound seat's new operator needs a certificate for the seat's member id from that CA.
+
+**C2. MR-STOR-0057: per-party storage sets, against one fixed fleet (Partial).**
+- *Requirement.* "Every party has its own storage set for its own objects and cells: traders' to the trader's set, an owner's to the owner's set."
+- *Spec.*
+  - Storage §10, "Rule — party sets (Owner decision)": "1. Every party has its own storage set for its own objects and cells. Traders' objects and cells go to the trader's set; an owner's objects and cells go to the owner's set. 2. A party's set is assigned from the active registry by Fisher–Yates. The party never chooses a member. 3. A party MAY opt out of a member. The replacement is drawn by Fisher–Yates (§12.4). The party may draw another poor performer; that is accepted. 4. A party pays for storage with credits (§17)."
+  - "**Open — device register set.** DSM §9 and §80.12 require the economic-root register's set to be 'owner-committed'. Where that set is committed in device state is not specified." These are §24 items 1, 5 and 12.
+  - DSM Amendment A5 makes a vault's set the network's pinned set.
+- *Observed.* One pinned five-member set serves every party. `canonical_set(NETWORK)` is called from 42 production sites in 21 SDK files: identity publication, the spool, the recovery store, Connect, SoFi, escrow, tokens, admission and the faucet. No party's state commits a set of its own, and the device's register set is the network's pinned register (`resolve_root_register_profile`).
+- *Conflict.* The rule assigns each party's set from the active registry, which does not exist (A1). Where the set is committed in device state is Open (§24 item 1), and so are endpoint resolution (§24 item 2), payment per set (§17, outside beta) and the minimum network size (§24 item 12). With five operators, a Fisher–Yates draw of five distinct operators from a registry of five returns those five. Every party's set is then the pinned set, so in beta the rule and the code give the same members. What differs is that no party commits its set and none can opt out: an opt-out has no replacement to draw.
+- *Options.*
+  - (a) Party sets begin when the registry holds more than five operators. The spec states that while it holds five, every party set is the pinned set. Nothing changes in code, and no opt-out is possible in beta.
+  - (b) Commit each party's set id in its own state now, equal to the pinned id in beta. This decides §24 item 1. Every reader derives a party's cells from that party's committed set. It is a state-format change, and all 42 sites must read the party's set rather than the network's. Growth would later need no wire change, but in beta the commitment is always the pinned id, so nothing observable changes.
+  - (c) Full per-party assignment now. This needs the registry (A1, blocked), endpoint resolution and the payment split (§24 item 9), and cannot be built in beta.
+- *Proposed ruling.* (a) for beta, with the equivalence written into §10. MR-STOR-0057 stays Partial until the registry grows. Separately, decide §24 item 1, where a party's set is committed, now, so that (b)'s format change is known before growth needs it, without building it.
+
+#### Decisions for the owner, in one list
+
+1. A1, the registry: (a), a registry with no inputs, specified and built; (b), the whole pipeline; or (c), outside beta.
+2. A2, the performance criterion: (c), no pruning in beta, with (a)'s evidence-only measures specified later; and whether ByteCommit cycles must close on a cadence of their own.
+3. A3, growth and signals: (b), no growth in beta; or (a), import the October 2025 definitions with their hardware binding.
+4. A4, the accumulator: (c), the native reserve stays at phase A in beta; and whether §24 item 15's bound is constant or logarithmic.
+5. B, the incarnation: the proposed reading, under which a handover keeps `S` and a loss ends it until §12.6 exists; or reading B, with §12.6 built first.
+6. C1, the TLS key: (a), rule 1 scoped to protocol keys, with a gate against protocol signing paths in the node.
+7. C2, party sets: (a), equal to the pinned set while the registry holds five operators; and where a party's set is committed in device state (§24 item 1).
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
