@@ -1152,6 +1152,8 @@ name = "dsm-anchor-core"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "dsm-sphincs",
+ "ed25519-dalek",
  "prost 0.14.4",
  "prost-build 0.14.4",
  "protoc-bin-vendored",

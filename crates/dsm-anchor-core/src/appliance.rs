@@ -124,6 +124,9 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     pub partition_pk: Vec<u8>,
     /// PUBLIC resident chip (`σ^chip`) verification key `pk_chip` — receiver pin material.
     pub chip_pk: Vec<u8>,
+    /// PUBLIC birth commitment `S_birth` that `B` commits — receiver pin material: with the other
+    /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
+    pub birth_commitment: [u8; 32],
     pub active: Active,
     /// Set when recovery sees a firmware-boundary / R-memory-map event (downgrades to online).
     pub firmware_boundary_invalid: bool,
@@ -150,6 +153,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             partition_device_id,
             partition_pk: birth.partition_pk,
             chip_pk: birth.chip_pk,
+            birth_commitment: birth.birth_commitment,
             active: Active {
                 root: birth.genesis_frontier,
                 anchor_counter: 0,
@@ -271,7 +275,17 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// before the counter moves, so an interrupted commit is completable by [`recover`].
     /// Nothing is exported before phase 2. The DSM SMT inclusion proofs are attached by the
     /// SDK (which owns the tree) after emit — the appliance carries them as empty here.
+    ///
+    /// The phases are [`Self::commit_candidate`] and [`Self::commit_counter`]; an appliance
+    /// whose state outlives a power cut writes its record between them.
     pub fn commit(&mut self) -> Result<(), ApplianceError> {
+        self.commit_candidate()?;
+        self.commit_counter()
+    }
+
+    /// §12.3 commit, phase 1: the committed candidate, its counter not yet moved, in place of the
+    /// prepared record. The counter has not moved and nothing is exported.
+    pub fn commit_candidate(&mut self) -> Result<(), ApplianceError> {
         let p = match &self.active.record {
             Record::Prepared(p) => p,
             _ => return Err(ApplianceError::WrongState),
@@ -315,6 +329,20 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             release,
             committed: false,
         }));
+        Ok(())
+    }
+
+    /// §12.3 commit, phases 2 and 3: move the counter for the committed candidate, then mark it
+    /// committed. Refused unless the record is a candidate whose counter has not moved, so the
+    /// counter moves once per release.
+    pub fn commit_counter(&mut self) -> Result<(), ApplianceError> {
+        let (anchor_counter, next_anchor_counter) = match &self.active.record {
+            Record::Committed(c) if !c.committed => (c.anchor_counter, c.next_anchor_counter),
+            _ => return Err(ApplianceError::WrongState),
+        };
+        if self.live_index()? != anchor_counter {
+            return Err(ApplianceError::CounterMismatch);
+        }
 
         // Phase 2: move the counter (the non-rewind floor). On failure nothing is exported;
         // recovery completes the durable candidate.

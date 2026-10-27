@@ -77,6 +77,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         pin_enrolled_counter: 0,
         pin_partition_pk: Vec::new(),
         pin_chip_pk: Vec::new(),
+        pin_birth_commitment: Vec::new(),
     }
 }
 
@@ -160,6 +161,7 @@ pub fn dispatch<T: Tropic, P: PartitionSig>(
             pin_enrolled_counter: u64::from(app.h0),
             pin_partition_pk: app.partition_pk.clone(),
             pin_chip_pk: app.chip_pk.clone(),
+            pin_birth_commitment: app.birth_commitment.to_vec(),
             ..base(op)
         },
         Ok(pb::Op::Cancel) => match app.cancel() {

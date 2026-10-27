@@ -117,4 +117,33 @@ message ApplianceResponse {
   uint64 pin_enrolled_counter  = 11; // OP_STATUS: H0 (the live provisioned enrollment counter)
   bytes  pin_partition_pk      = 12; // OP_STATUS: partition public key pk_host
   bytes  pin_chip_pk           = 13; // OP_STATUS: resident chip public key pk_chip
+  // OP_STATUS: the public birth commitment S_birth B commits. With fields 6 and 10–13 and the
+  // owner's online key and device id, B recomputes from what the chip discloses.
+  bytes  pin_birth_commitment  = 14;
+}
+
+// The appliance's durable record (§26): everything it holds across a power cut except the
+// chip's own monotonic counter. Written whole at each durable point of the flow; a store holds
+// the last record written in full. The status is the record's kind: none is Ready.
+message DurablePrepared {
+  TransitionPackage transition     = 1;
+  RootAdvanceCertificate cert      = 2;
+}
+
+message DurableCommitted {
+  bytes prev_frontier              = 1;  // 32  h_i
+  bytes next_frontier              = 2;  // 32  h_{i+1}
+  uint64 anchor_counter            = 3;  //     u_i
+  uint64 next_anchor_counter       = 4;  //     u_i+1
+  OfflineRelease release           = 5;
+  bool counter_committed           = 6;  // the counter has moved for this release
+}
+
+message DurableActive {
+  bytes root                       = 1;  // 32  h_i, the active frontier
+  uint64 anchor_counter            = 2;  //     u_i
+  oneof record {
+    DurablePrepared prepared       = 3;
+    DurableCommitted committed     = 4;
+  }
 }
