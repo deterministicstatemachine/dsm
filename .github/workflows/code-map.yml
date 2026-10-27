@@ -110,7 +110,7 @@ jobs:
       # sets a cfg is refused from it, so it is kept with them.
       - name: The indexes and fixture run of a commit with the same key
         id: kept
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           key: ${{ steps.key.outputs.key }}
           path: |
