@@ -503,6 +503,68 @@ mod tests {
         }
     }
 
+    /// MR-SOFI-0007, MR-SOFI-0110, MR-SOFI-0134: an object's identity is
+    /// computed over its canonical body, never its envelope. Each recognizer
+    /// names a setup, a precommit and a fulfillment by the identity its body
+    /// derives; an envelope over the same body whose signature differs is
+    /// not recognized at all, so no envelope can name another object.
+    /// MUTATION CONTROL: deriving a recognized identity over the envelope
+    /// bytes turns this red.
+    #[test]
+    fn an_objects_identity_is_its_body_whatever_envelope_carries_it() {
+        let f = swap_fixture_n(2);
+        let s = setup();
+        let p = f.precommit.clone();
+        let fb = fulfillment(&p);
+        let setup_sig = signed(derive::setup_signing_digest(&s));
+        let p_sig = signed(derive::precommit_signing_digest(&p));
+        let f_sig = signed(derive::fulfillment_signing_digest(&fb));
+        let bytes = |publication: Publication<'_>| publication.object_bytes().unwrap();
+        let flipped = |signature: &[u8]| {
+            let mut other = signature.to_vec();
+            other[0] ^= 0x01;
+            other
+        };
+
+        let Some((setup_id, _)) = recognize_setup(&bytes(Publication::Setup {
+            body: &s,
+            signature: &setup_sig,
+        })) else {
+            panic!("the setup is recognized");
+        };
+        assert_eq!(setup_id, derive::setup_ref(&s));
+        let Some((precommit_id, _)) = recognize_precommit(&bytes(Publication::Precommit {
+            body: &p,
+            signature: &p_sig,
+        })) else {
+            panic!("the precommit is recognized");
+        };
+        assert_eq!(precommit_id, derive::precommit_id(&p));
+        let Some((fulfillment_id, _)) = recognize_fulfillment(&bytes(Publication::Fulfillment {
+            body: &fb,
+            signature: &f_sig,
+        })) else {
+            panic!("the fulfillment is recognized");
+        };
+        assert_eq!(fulfillment_id, derive::fulfillment_id(&fb));
+
+        assert!(recognize_setup(&bytes(Publication::Setup {
+            body: &s,
+            signature: &flipped(&setup_sig),
+        }))
+        .is_none());
+        assert!(recognize_precommit(&bytes(Publication::Precommit {
+            body: &p,
+            signature: &flipped(&p_sig),
+        }))
+        .is_none());
+        assert!(recognize_fulfillment(&bytes(Publication::Fulfillment {
+            body: &fb,
+            signature: &flipped(&f_sig),
+        }))
+        .is_none());
+    }
+
     /// Every kind round-trips through its own recognizer with the identity
     /// the reader recomputes from the bytes equal to the locator it is
     /// indexed under.
