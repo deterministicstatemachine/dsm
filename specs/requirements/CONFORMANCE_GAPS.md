@@ -220,7 +220,7 @@ The skeleton (step 6 of the working flow) removes what the specifications forbid
 | [x] | SDK test harness | The fake storage node (`test_support/fake_node.rs`) and the in-process fakes built into the I/O layer: in every test build, each storage call in `storage_io` (cells, objects, indexes, reads and writes) answered from `fake_registers` / `fake_fleet` and never reached a node (owner, 2026-09-23: no fakes) | Real nodes in process (`test_support/nodes.rs` (`NodeSet`): the node's own code on Postgres, one database per node, its own register incarnation, its pinned set, and exactly the binary's app via `dsm_storage_node::build_app`); the harnesses on them (`two_device.rs` `Pair`, `one_device.rs` `Device` and `Fleet`); every test that used the fakes or their fault injection rewritten on real nodes | `dsm_sdk::test_support::two_device::tests::two_device_slots_keep_durable_state_isolated`; `dsm_sdk::test_support::two_device::tests::a_peer_holds_the_keys_the_device_uses`; `dsm_sdk::sdk::b0x_sdk::tests::delivery_below_the_quorum_is_refused_however_many_members_are_marked_failed`; `dsm_sdk::handlers::faucet_flow_tests::a_claim_cut_short_resumes_on_its_own_release_byte_identically` |
 | [ ] | Encrypted spool payloads (G16) | Nothing was encrypted | Per-step message key from each step's Kyber shared secret under its own domain tag; transfer bodies, replies, evidence halves, checkpoints and `message.send` text sealed with XChaCha20-Poly1305; exercised end to end with a node holding only ciphertext | Open. Every payload is sealed (MR-STOR-0146 Met), but with a fresh encapsulation to the recipient's directory key, not the step's own Kyber exchange (Amendment A7): MR-DSM-0272 is Partial (§6.39). The end-to-end check finds the memo in the sender's history before searching every node for it: `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives`. |
 | [ ] | Tip-mirror leaves (G16) | Checked: not encrypted | Confirm per-relationship leaves are stored encrypted, as storage §8 requires; seal them if not | Open. Checked: the only per-relationship leaves posted anywhere, recovery's PDSMT leaf sets, are plaintext. |
-| [ ] | What a transfer publishes (G16) | Audited 2026-10-27 (§6.96) | Audit every object an ordinary bilateral transfer writes to shared storage against "only the parties to a relationship hold its bytes" | Audited by running one online A→B transfer on the node harness and listing what each node newly held (2026-10-27). Besides the sealed spool: the sender's root claim (register cell), manifest, transition witness, successor evidence and ek-cert step; the receiver's root claim, manifest, witness, successor evidence, authority evidence, peer transfer acceptance, recipient economic release and ek-cert step. Each has a reader in verification: a later receiver's frontier-relative walk (DSM Amendment A19) reads the claims, manifests, witnesses, successor and authority evidence; credit provenance reads the acceptance and the ek-cert steps; the sender's finalization reads the recipient release. The memo, nonce and ticker are in none (`dsm_sdk::handlers::node_e2e_tests::no_node_holds_a_transfers_memo_ticker_or_nonce`). What they reveal to anyone who walks an identity's lineage: balances, counterparties, amounts, tokens and relationship tips. That meets A7, which scopes the property to the spool, and not the explainer's general sentence; owner question 7 (§6.96). |
+| [ ] | What a transfer publishes (G16) | Accounted field by field 2026-10-27 (§6.98) | Audit every object an ordinary bilateral transfer writes to shared storage against "only the parties to a relationship hold its bytes" | Accounted field by field in §6.98: one online A→B transfer on the node harness, every row each node newly held decoded with the crates' own decoders (run 2026-10-27). It added 12 objects, 2 register cells (5 entries each), 1 index entry and 4 sealed spool envelopes. No node read takes a credential, and every item but the recipient release can be found from one identity's (G, DevID) (run). The memo, nonce, ticker and salt are in none (`dsm_sdk::handlers::node_e2e_tests::no_node_holds_a_transfers_memo_ticker_or_nonce`). The economic evidence (claims, manifests, witnesses, authority evidence) is what A19's walk reads, and it reveals balances, amounts, assets, recipients and payers to anyone who walks. The relationship's tips, receipt, countersignature and EK chain are also published, with no requirement found that authorizes them; from them anyone computes the relationship's spool keys and three of a transfer's four message ids (run). Some published fields are read by nothing. Open on owner questions 1–3 of §6.98. |
 | [x] | Device directory | The node's first-write-wins device table, its routes, and the SDK's quorum lookup and token registration | Self-signed entries in a keyed cell (`dsm::core::identity::directory`, `sdk::device_directory`): each device publishes its own AK-signed entry; senders keep the entry whose AK hashes to the device id and whose signature verifies, highest counter first; every caller of the old lookup moved to `read_entry` / `publish_entry` | `dsm::core::identity::directory::tests::the_devices_own_entry_is_chosen_and_a_squatters_is_ignored`; `dsm::core::identity::directory::tests::a_higher_counter_replaces_a_lower_one`; `dsm_sdk::test_support::two_device::tests::a_peer_holds_the_keys_the_device_uses`; `dsm_sdk::handlers::storage_routes::tests::the_sender_ak_is_the_one_the_contact_book_holds` |
 | [x] | Sealing's key and store | — | `b0x_sdk::seal_for` seals once with the recipient's Kyber key from its verified directory entry and keeps the bytes (`client_db::b0x_sealed`); `open_sealed` decapsulates with this device's Kyber secret | `dsm_sdk::storage::client_db::b0x_sealed::tests::the_first_seal_of_a_message_stands`; `dsm_sdk::handlers::bilateral_finality_tests::r7_a_frozen_checkpoint_is_replayed_byte_identically_after_the_fleet_returns`; `dsm_sdk::handlers::node_e2e_tests::a_transfer_reaches_the_nodes_only_sealed_and_arrives`. The key is not the per-step key of Amendment A7 (see Encrypted spool payloads). |
 | [x] | Vault genesis acceptance | Never built before #976: SoFi §28 step 5 names `genesis_accepted` | `sofi::lineage::genesis_accepted`, called from `fetch_vault_genesis`: the signed creation bound to the owner transition, the committed market policy re-derived, the pair ordered, both token policies permitting a market leg; `Resolved::Unavailable` there becomes a network failure, not "no genesis" | `dsm::sofi::lineage::genesis_acceptance::the_genesis_the_owners_creation_carried_is_accepted`; `dsm::sofi::lineage::genesis_acceptance::a_genesis_the_owner_did_not_create_is_refused`; `dsm::sofi::lineage::genesis_acceptance::a_carried_market_that_is_not_the_committed_one_is_refused`; `dsm::sofi::lineage::genesis_acceptance::a_vault_over_a_token_that_forbids_transfer_is_refused`; `dsm_sdk::handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end` |
@@ -3919,6 +3919,254 @@ Not mutation-tested, as no single gate decides them: the relationship-order prop
 **Applied: MR-DSM-0315.** DSM Amendment A15 gains the refinement's scope in the owner's words: owned lineages (SoFi market, escrow and computed escrow vaults) read SoFi Amendment S24's composed state, from the latest authenticated owner baseline, and a reader holding a valid baseline holds and fetches no generation below it; the established head stays the boundary for the lineage with no owner, the native reserve; induction above the baseline, discovery without authority, the walk from the genesis without a baseline, and quarantine on differing frontiers are kept. MR-DSM-0315 is restated for lineages with no owner and MR-DSM-0331 added (Met, on the S24 and S26 end-to-end tests). MR-DSM-0315 stays Partial: the faucet builds on the walk's stop, not on `EstablishedSharedHead`.
 
 **Applied: MR-SOFI-0273, MR-SOFI-0268.** Gate G1 is rebuilt on compiler-resolved identity: `ci/sofi_reachability.py` indexes the workspace with the pinned toolchain's rust-analyzer (SCIP, read by a small hand-written protobuf reader) and counts a caller only where name resolution and type inference resolve a reference to the function, so `x.method()` is told apart from every other method of that name. The set is every public SoFi function, inherent method, struct, enum, const, static, type alias and trait; an item's references inside its own definition and its own impl blocks do not count. On the tree it found 41 public methods and functions with no production caller, none of which the text matcher had checked. 21 were referenced nowhere and are deleted. 8 were accessors or helpers only tests read: the tests now read the fields (`EstablishedFacts`, `VaultWitness`, `VerifiedFrontier`, `ProvenRoot`, `AttemptWalk`), `PreEClosureIndex::with` is `cfg(test)`, and `EscrowKind::encode` and `Validation::all` and `and` are deleted with their test. 11 were standalone decoders of objects production parses only inside a parent (cores, entries, settlement bodies, owner authority, closure index, validation refs, the trader relationship leaf), or never parses (the route-digest preimage, the route leg set, the unsigned resolution claim): they are deleted, their round trips moved from the integration tests onto the production parsers (`sofi::wire::objects::parse_tests`), and the integration tests keep their independent-encoder checks. `VaultChain::roots` is deleted; the twenty SDK tests that read it use the accepted genesis root and the chain's head. After: 812 of 812 reachable, baseline empty. The negative control plants a public SoFi method with no caller beside an SDK method of the same name that production calls, and an unused public type; the gate names both and passes once they are used. It runs as a cargo test, and three gate mutants turn it red. rust-analyzer and rust-src join the toolchain file and the CI jobs that run the gate or the test. The intent pins of MR-SOFI-0029 name the deleted test; pins are refreshed from CI's code map at the end, as planned.
+
+### 6.98 What one online transfer publishes, field by field (G16, owner ruling 7 of 2026-10-27; `docs/transfer-publication-field-audit`, 2026-10-27)
+
+**Why.** Owner ruling 7 of 2026-10-27 (§6.96) asks for a field-by-field accounting of every object and cell entry an ordinary transfer publishes. For each item: what it holds, who can read it, the production reader that needs it, and the requirement that authorizes the disclosure. The accounting is to be reconciled with A7, A19, the ruling of 2026-09-29, SoFi §36–37 and G16 "without silently relaxing confidentiality requirements". Nothing in the protocol, the specifications or the code changes here. Where the requirements conflict, the decision is put to the owner at the end.
+
+**Method.**
+- *Run.* A throwaway probe on the node harness: its own Postgres database, `--release`, one thread.
+  - After `Pair::boot(100, 0)` it read every node's `cells`, `index_entries`, `inbox_spool` and `immutable_objects`. It then ran `send(10)`, B's sync and A's sync, and read the tables again.
+  - It decoded every new row with the crates' own decoders: `decode_registered_economic_claim`, `RouteEntry::decode`, `decode_admission_manifest`, `decode_transition_witness`, `decode_authority_evidence`, `LineageObject::recognize`, and the prost messages for the rest.
+  - It recomputed each register key and each spool key from public inputs, and matched each spool message id against published values.
+  - It fetched every new object, cell and spool key from a node over HTTPS, holding no key and sending no credential.
+  - Four runs gave the same shapes and sizes. The probe is deleted.
+- *Readers.* Two read-only research agents mapped every production producer and reader of these objects. The tree was clean before and after (`git status --porcelain`, `git diff`), and every claim used below was checked against the source.
+- *What is verified.* "Verified" marks what the probe showed; everything else is read from source. A third party's walk (C, paid by B) was not run: no third device was booted.
+
+**What the transfer added (verified).** The boot had already published A's faucet admission (its manifest, witness, successor and authority evidence) and the reserve release. Those are not counted.
+
+| Where | Item | Count and size | Held by | Written by, when |
+|---|---|---|---|---|
+| cells | root claim, `DSM/trader-economic-root-register-key/v1` | 2 keys, A's at position 2 and B's at position 1; 5 entries each, 50,229–50,743 B around a 50,137 B claim | all 5 members, one entry a seat | A at send; B at its admission |
+| object | `DSM/economic-admission-manifest/v1` | 2: 138 B (A), 170 B (B) | all 5 | A at send; B at its admission |
+| object | `DSM/economic-transition-witness/v1` | 2: 8,426 B (A), 16,764 B (B) | all 5 | the same |
+| object | `DSM/economic-dsm-successor-evidence/v1` | 2: 100,023 B each | all 5 | the same |
+| object | `DSM/economic-authority-evidence/v1` | 1: 100,294 B, B's. A's manifest names the copy held since the boot | all 5 | B at its admission |
+| object | `DSM/ek-cert-step/v1` | 2: 49,960 B each, A's and B's | all 5 | B at its admission; A keeps local rows only |
+| object | `DSM/peer-transfer-acceptance/v1` | 1: 252,259 B | all 5 | B at its admission |
+| object | `DSM/recipient-economic-release/v1` | 1: 50,069 B | all 5 | B, in its admit transaction |
+| object | `DSM/shared-lineage/object/v1` | 1: 141 B, the reserve's `GenerationHintV1` at generation 1 | all 5 | the reserve walk during the syncs. Read from source: B's walk of A's faucet credit owes it |
+| index | the reserve's epoch locator, naming the hint | 1 | all 5 | the same |
+| spool | sealed envelopes | 4 under 3 keys: the transfer (51,407 B) and A's receipt evidence (102,582 B) to B; B's reply (102,388 B) to A; the relationship-finalized certificate (51,443 B) to B | 3 of 5 | A at send and at its finalization; B at its reply |
+
+**Who can read (verified).**
+- *Operators.* Every operator of a member that holds an item: five members for objects, cells and the index, three for the spool.
+- *Anyone.* No read takes a credential (`dsm_storage_node/src/api`):
+  - `GET /api/v2/immutable/{addr}`;
+  - `GET /api/v2/cell/{key}` with `x-namespace`;
+  - `GET /api/v2/index/{locator}`;
+  - `GET /api/v2/b0x/retrieve/{seq}` with `x-dsm-b0x-address`.
+
+  A client holding no key was served every new object, both cells and every spool entry. The index read was not run.
+- *What a reader needs to find each item.*
+  - *Register cell.* `K_root = H(DSM/trader-economic-root-register-key/v1; G ‖ DevID ‖ u64be(position))` (`economic::register::economic_root_register_key`).
+    - An identity's genesis and device id are enough. Positions run from 1 without gaps, so they can be enumerated.
+    - Both keys were recomputed from the three fields of the claim each holds.
+    - G and DevID are a device's directory coordinates (Amendment A18). Every claim names its own, and B's witness names A's.
+  - *The evidence behind a claim.*
+    - The claim's `admission_manifest_addr` gives the manifest, which gives the witness, authority evidence and successor evidence.
+    - B's witness credit source, and B's manifest index, give the acceptance bundle. The bundle gives the previous EK steps of A↔B.
+    - This transfer's two EK steps are named by the next A↔B bundle; their bytes follow from this one (read from source).
+  - *Release.* No published object names it. The bundle's `recipient_economic_release_addr` is empty, and the address travels only in B's sealed reply. The parties and the members' operators can find it.
+  - *Hint.* `epoch_locator(Reserve, reserve id, epoch)`, from the network's reserve id.
+  - *Spool keys and message ids.*
+    - A↔B's routing tip starts at `initial_relationship_chain_tip(G_A, DevID_A, G_B, DevID_B)`: the four public ids alone.
+    - It moves to `compute_successor_tip(h, op, e, compute_precommit(h, op, e))`, over the canonical operation bytes and the transition entropy. Both are in the published acceptance bundle.
+    - The probe derived all three keys this way: the transfer and A's evidence at `b0x(G_B, DevID_B, h0)`, B's reply at `b0x(G_A, DevID_A, h0)`, the finalized certificate at `b0x(G_B, DevID_B, h1)`. Each contact's tip after the transfer was the derived `h1`.
+    - Three of the four message ids follow from published values:
+      - the transfer's is `derive_submission_id` of the receipt commitment;
+      - the evidence's is `derive_artifact_submission_id` of `receipt_evidence_digest_a`;
+      - the reply's is `reply_message_id(commitment, h0)`.
+
+      The commitment and the digest are in the bundle's countersignature. The certificate's id comes from its sealed content.
+
+So everything except the release and the spool's plaintext can be found from one identity's (G, DevID).
+
+**The readers named below.**
+- **W**, the frontier-relative walk (Amendment A19): `dsm::economic::peer_lineage`.
+  - Entry points: `validate_peer_lineage`, `validate_peer_prefix`, `peer_root_at`, `peer_claim_at`. Each runs `Verifier::authenticate` and `full_step`, then `lineage::advance_validated`.
+  - Reached from recipient prevalidation (`economic_admission_flow::prevalidate_incoming_transfer_admission`), the device's own admission (`finish_locked`), the sender's finalization (`verify_release_against_register`), a contact add (`economic_registers::prevalidate_contact`), the holdings check (`connect::holdings::verify`) and SoFi (`sofi_reads::peer_walk`, `trader_root_at`, `accepted_claim_at`).
+- **P**, credit provenance: `provenance::verify_credit_source`, then `peer_acceptance::verify_peer_transfer_acceptance`, with the EK chain through `resolve_expected_prev_pk`.
+  - A third party reaches A's step this way: C, paid by B, walks B. B's credit's source is A's debit, so `SourceAncestry::validated_peer_transition` and `source_step` walk A's segment from C's frontier for A, and check the A→B bundle.
+- **F**, the sender's finalization: `storage_routes::finalize_from_countersign_delta`, then `release::verify_recipient_economic_release` and `verify_release_against_register`.
+- **D**, discovery: `lineage_discovery::read_epoch`, from `native_reserve::walk_reserve`.
+
+**Root claim, one entry a seat (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| The entry: `namespace`, `key`, `seat_member_id`, `position`, and a `chain` of arrival records (member id, namespace, key, index, running hash) | Which seats hold the claim, in route order, and each seat's arrival index | W: finality from the route chain (`register::read_root_cell`) | Storage §9 (MR-STOR-0046, MR-STOR-0129, MR-STOR-0131) |
+| `trader_genesis`, `trader_devid` | The identity | W: `K_root` re-derived; the claim names this trader | MR-DSM-0273, MR-DSM-0277 |
+| `economic_position` | How many economic steps the identity has taken (A 2, B 1) | W: the position follows the last validated one | MR-DSM-0273 |
+| `post_economic_root` | The identity's economic root after the step | W: equals the witness's post-root | MR-DSM-0273, MR-DSM-0328 |
+| `admission_manifest_addr` | The way into the evidence | W: fetched; equals the manifest's address | MR-DSM-0273 |
+| `root_register_storage_set_id` | The network's register set | W: equals the peer network's canonical set | MR-DSM-0273 |
+| `signature_alg` | The algorithm | Checked to be known and to fit the key; it selects nothing | MR-DSM-0277 |
+| `claimant_public_key`, `claimant_att_a` | The device's AK and AttA, as its directory entry also shows | W: they derive `trader_devid`, and the key is the P0–P6-proven AK | MR-DSM-0277, MR-DSM-0326 |
+| `claimant_signature` | SPHINCS+ over the body | W: verifies | MR-DSM-0277 |
+
+**Admission manifest (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `authority_position` | The device-tree transition the authority is proved at | W: the position P0–P6 resolves at | MR-DSM-0273 |
+| `transition_witness_addr`, `authority_evidence_addr`, `substrate` (`DsmSuccessor` and its evidence address) | Where the step's evidence is | W: fetch keys; each must equal what the walk established (`lineage::advance_validated`) | MR-DSM-0273 |
+| `provenance_evidence_addrs` | A's names nothing; B's names the acceptance bundle that funds its credit | W: equals the index derived from the witness (`claim::verify_manifest_provenance_index`) | MR-DSM-0273 |
+
+**Transition witness (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `pre_economic_root`, `post_economic_root` | The economic roots around the step | W: the pre-root equals the validated parent, the post-root the claim's | MR-DSM-0273, MR-DSM-0328 |
+| `economic_operation_id` | `H(G ‖ DevID ‖ C_dsm+)` | W: recomputed from the successor's tip. P: the consumed-source leaf's consumer | MR-DSM-0273 |
+| `operation_digest` | The operation's digest | W: equals the verified operation's | MR-DSM-0273 |
+| `mutations`: each a leaf's pre-state, post-state and 256 siblings | Every leaf the step writes, in the clear. A's ERA balance went from 10,000 to 9,990 base units, which gives the amount. B's shows its new balance of 10 and its consumed-source leaf (source id, consumer). The siblings are hashes of the rest of the tree: A's tree held one leaf, and B's path has one non-default sibling, its other new leaf. Each leaf's value appears in the witness that writes it, so a walker holds the identity's whole economic state at every position it walks | W: `verify_mutation_sequence` recomputes the post-root; `verify_operation_write_set` matches the operation. P: the debit and credit amounts | MR-DSM-0273 ("verifies the transition producing that root against its authenticated parent") |
+| `credit_sources` | B's names A: `peer_genesis`, `peer_devid`, A's position 2, the debit's mutation index, and the acceptance bundle's address. That is the payment edge A→B, readable by anyone who reads B | P: `verify_transition_provenance` | MR-DSM-0273 (a credit's source is held to account) |
+
+**Successor evidence, A's and B's (verified).** Both carry A's signed transfer.
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `operation_bytes` (49,989 B) | `Transfer{to_device_id: B's DevID, amount: 10, policy_commit: ERA's, terms_commitment, signature (49,856 B), authority_policy: none}`. No memo, nonce, ticker or salt | W: the write set; the online-transfer check; the recipient, asset, amount and transfer policy (`provenance::prevalidate_sender_debit`, `lineage::advance_validated`) | The owner's ruling of 2026-10-02 (§6.71) for the recipient, amount, policy commit and authority policy, which no amendment records (MR-SOFI-0283); MR-DSM-0273 for reading them |
+| `rel_key` | `compute_smt_key(DevID_A, DevID_B)`, naming the relationship | W: only inside the `C_dsm+` recomputation | None found |
+| `counterparty_devid` | The other party: B in A's, A in B's | W: only hashed; never compared with `to_device_id` | None found |
+| `embedded_parent` | The relationship's tip before the step | W: hashed. On the receiving step, P also checks it as B's pair; on the paying step nothing else reads it | None found |
+| `entropy`, `encapsulated_entropy` | The step's transition entropy `e_{n+1}`; no encapsulation | W: hashed | None found |
+| `c_dsm_plus` | The relationship's tip after the step. This is the relationship leaf's value in the device's tree (the receipt's step write) | W: equals the recomputation, and is the input of `economic_operation_id`. P: equals the receipt's `child_tip` | None found. Storage §8.1 keeps per-relationship leaves encrypted (MR-DSM-0069, MR-STOR-0033) |
+| `sigma_dsm` | The AK's signature over `(G, DevID, C_dsm+, operation_digest)` | W: verifies under the proven AK | MR-DSM-0273 |
+
+The corpus does not ask a foreign verifier to recompute the relationship tip from its preimage. That is why the preimage fields have no authorizing requirement, although W reads them.
+
+**Authority evidence, B's (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `genesis_params_ccb` (125 B), `delegations` (the GRK's, 182 B and a signature), `transitions` (one device-tree transition, 140 B and a signature), `inclusion_proof` (9 B), `ak_public_key`, `atta` | The account's genesis parameters, its device-tree history up to the named transition, and the device's AK and AttA | W: P0–P6 (`resolve_owner_authority_at_position`), giving the proven AK and the network id | MR-DSM-0273 (the payer's authenticated key). The same evidence is in the device's public directory entry (MR-DSM-0326, MR-DSM-0327) |
+
+**EK cert steps, A's and B's (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `ek_pk` (64 B), `ek_cert` (49,856 B), `h_n`, `prior_step_addr` (absent: the relationship's first step) | Each party's per-step key, certified over the relationship's tip before the step. The chain links the relationship's steps back to its first | P: only once a later A↔B bundle names the step. The parties hold their own rows and never fetch | None found: the corpus has no per-step key certificate |
+
+**Peer transfer acceptance (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `transfer_request_bytes` (49,996 B): `signature`, `canonical_operation_bytes` (133 B) | A's signature and the unsigned transfer. `transfer_terms` is empty and the locators are 0 | P: equals the validated debit's operation; the signature verifies under A's proven AK | MR-DSM-0273 (the source step is an online transfer's debit); §6.71 |
+| `receipt_evidence_a_bytes` (101,238 B), A's receipt: `genesis`, `devid_a`, `devid_b`, `parent_tip`, `child_tip`, `parent_root`, `child_root`, `dev_proof`, `transition_entropy`, `step_writes` (the relationship leaf's path, one sibling), `sig_a`, `ek_cert_a`, `ek_pk_a`, `kyber_ct_a` (1,088 B) | The A↔B receipt: both parties; the relationship's tips; A's device-tree roots around the step and the relationship leaf's path in that tree; the entropy; A's per-step key and signature; the step's Kyber ciphertext to B | P checks: the parties; `child_tip` equals A's `C_dsm+`; A's EK certificate over `parent_tip`; `sig_a` over the receipt commitment, which hashes the roots, path, proof and entropy. Nothing reads `kyber_ct_a` | None found. MR-DSM-0050 lets a receipt be shown to a third party as evidence |
+| `receipt_countersign_b_bytes` (101,013 B): `commitment`, `receipt_evidence_digest_a`, `sig_b`, `ek_cert_b`, `ek_pk_b`, `kyber_ct_b` (1,088 B), `b_parent_tip`, `b_child_tip`, `recipient_economic_release_addr` (empty) | B's countersignature and B's side of the relationship's tips | P checks: `commitment` equals the receipt's; B's pair equals B's successor; B's EK certificate; `sig_b`. Nothing reads `receipt_evidence_digest_a` or `kyber_ct_b` | None found |
+| `a_prior_step_addr`, `b_prior_step_addr` (absent) | The previous EK steps | P: the EK chain | None found |
+
+**Recipient economic release (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `body`: `receipt_commitment`, `acceptance_evidence_addr`, `recipient_genesis`, `recipient_devid`, `recipient_economic_position` (1), `post_economic_root`, `admission_manifest_addr`; and `recipient_signature` | B's admitted coordinates, which B's claim also shows | F only, the sender, checks: the signature under B's stored AK; the commitment; B's ids; the walked position, root and manifest. Nothing reads `acceptance_evidence_addr` | None found. Only the parties and the members' operators can find it |
+
+**Shared-lineage hint and its index entry (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| `kind` (Reserve), `lineage_id` (the reserve's id), `generation` (1), `state_root`, `generation_digest`, `step_digest` (the reserve release's address) | That the native reserve released generation 1, the boot's faucet claim. Reserve state, not the transfer's | D: the kind, lineage, generation and state root, to order reads. Nothing reads the two digests | MR-DSM-0312, MR-DSM-0313 (Amendment A15: discovery only) |
+
+**Spool envelopes (verified).**
+
+| Field | Holds; reveals | Read by: check | Authorized by |
+|---|---|---|---|
+| The outer envelope: `version` (3), `headers` (absent), `message_id` (16 B), `SealedEnvelopeV1{kem_ciphertext (1,088 B), ciphertext}`; and the key it is filed under | The payload is sealed. In the clear: the key, the id, the size, the order and the members holding it. The keys and three of the ids derive from public values (above), so anyone can tell which of a relationship's messages each entry is, and its size | The recipient's device | A7, MR-DSM-0070, MR-DSM-0272, MR-STOR-0034, MR-STOR-0145, MR-STOR-0146 for the content; MR-STOR-0037 for the key. Nothing found requires keys or ids to be unlinkable |
+
+**Reconciliation.**
+
+*The texts.*
+1. **Explainer §78**, the comparison with zero-knowledge proofs: "only the parties to a relationship hold its bytes". This is comparison text; MASTER derives no row from it.
+2. **Amendment A7** seals the spool: "This is what makes 'only the parties to a relationship hold its bytes' true of the spool". SoFi's objects and cells "are public verification material by design" (MR-DSM-0272).
+3. **Explainer §10**: "This is scoping, not secrecy. Charlie can be shown the A ↔ B receipt as evidence of something" (MR-DSM-0050).
+4. **Explainer §9**: "Alice's balance is not stored inside either relationship chain. It is a leaf in Alice's device SMT".
+5. **Explainer §11 and storage §8.1**: the tip mirror, "a public head and encrypted per-relationship leaves", where a counterparty's copy of a receipt lives (MR-DSM-0069, MR-STOR-0033). Both rows are Missing: no tip mirror is built, and it belongs to recovery, which is out of scope.
+6. **Storage §5**: immutable objects carry no confidentiality property. Their payloads are opaque to the node, not secret from a reader (§6.90).
+7. **Amendment A8 as A19 restores it**:
+   - each segment step's transition is verified "against its authenticated parent, using only that transition's directly required evidence and the provenance of its credits";
+   - a credit's source is verified through its own segment;
+   - the owner, 2026-10-20: "Supposed to be checked against the storage nodes".
+
+   Rows MR-DSM-0273–0275, MR-DSM-0328–0330, MR-SOFI-0347.
+8. **SoFi Amendment S12 (2026-09-29)**: "SoFi's objects are public by design; the trader's other balances and history are not in the exercise".
+   - Its record (§6.40) gives the reason the walk of the trader's history was dropped: "it reads the plaintext transition witnesses G16 records as a violation of 'only the parties to a relationship hold its bytes'".
+   - G16's own text (2026-09-23) names only the spool as the violation, and leaves what a transfer publishes beyond it to be checked. The 2026-09-29 record is the first to call the witnesses a violation.
+9. **SoFi §36–37**: every unlock-preimage item is content-addressed or published evidence (Rule T2). §36's parent claim is the trader's ordinary root claim at `K_root(p)`, and Gate G3 makes each item load bearing. Nothing there is confidential.
+10. **The owner's ruling of 2026-10-02 (§6.71)**: the signed transfer keeps the recipient, amount, policy commit and authority policy, and commits to the rest under a salt.
+
+§6.96 question 7 read A7 as scoping the sentence to the spool. A7 says the seal makes the sentence true of the spool; it does not say the sentence holds nowhere else. So A7 settles neither reading below.
+
+*What holds together.*
+- The spool meets A7 for content: all four envelopes are sealed and carry no headers (verified).
+- §6.71 holds: there is no memo, nonce, ticker or salt anywhere, and the published request's terms are empty (verified).
+- SoFi's publication is authorized outright (texts 2, 8 and 9).
+- The claim, the manifest, the authority evidence and the witness's economic content are what A19's predicate reads. Storage §5 gives immutable objects no confidentiality, and §9 places the balance in the device's own tree, outside every relationship chain.
+
+*C1. A19's walk and the §78 sentence.*
+- *What the walk reads.* A19 has a receiver validate, from the nodes:
+  - every economic transition in a payer's segment, the payer's payments to others included;
+  - every transition in each credit source's segment, transitively.
+
+  Validating recomputes each post-root from the pre-root and the leaf values (MR-DSM-0273; `verify_mutation_sequence`). So the walker holds, in the clear, the identity's balances at each position, every debit with its amount, asset and recipient, and every credit with its payer.
+- *Who walks.* The walker is not a party to the relationships it walks: C, paid by B, walks A's debit to B. Nothing limits who walks, because the nodes serve anyone (verified).
+- *Proofs are not built.* A8 and A19 name succinct validity proofs as the later replacement for the walk.
+
+Whether this contradicts §78 depends on what "a relationship's bytes" covers:
+- *If it includes a step's economic effect* (the 2026-09-29 record's reading, text 8), the contradiction is exact. MR-DSM-0273 asks for "every economic transition in it verified" by a receiver who is no party to those transitions; §78 says "only the parties to a relationship hold its bytes". Sealing the evidence to its readers does not resolve it, because a credit's later verifiers are not known when the evidence is published.
+- *If it means the relationship's chain* (its tips, receipts, messages and terms), as texts 3 and 4 support, A19 and §78 agree on the economic content. C2 remains.
+
+Since 2026-10-20 a SoFi trader's root and SetupValid are also read through this walk (MR-SOFI-0347; `sofi_reads::peer_walk`, `trader_root_at`). That is the path S12 dropped on 2026-09-29.
+
+*C2. Relationship-chain bytes in published objects.*
+- *The fields.* On either reading, these published fields belong to the relationship's chain:
+  - the successor evidence's `rel_key`, `counterparty_devid`, `embedded_parent`, `entropy` and `c_dsm_plus`;
+  - each EK step's `h_n` and keys;
+  - the bundle's A-side receipt: the tips, A's device-tree roots and the relationship leaf's path, the entropy, `sig_a`, the EK material and the Kyber ciphertext;
+  - B's countersignature: the tips, `sig_b`, the EK material and the Kyber ciphertext.
+- *What they expose.*
+  - The tip they carry is the relationship leaf of the device's tree: the value storage §8.1 keeps encrypted in the tip mirror (text 5).
+  - With them and the four public ids, anyone computes the relationship's spool key at each step and three of its four message ids (verified).
+- *Authorization.* None found.
+  - MR-DSM-0273 asks that a credit's source step be an online transfer's debit. It does not ask for the recipient's countersignature, a per-step key chain, or a proof of the tip's preimage.
+  - MR-DSM-0050 lets a receipt be shown to a third party. Publishing it to every reader of storage is more than that.
+- *Readers.* W's tip recomputation and P's acceptance check.
+
+*C3. Published, and read by nothing (read from source).* No requirement can authorize a field that no reader needs:
+- the bundle's `kyber_ct_a`, `kyber_ct_b` and `receipt_evidence_digest_a`, and the request's locators, which are 0. The digest is never compared with the receipt bytes, yet it is the input of the evidence message's spool id;
+- the release's `acceptance_evidence_addr`;
+- the successor evidence's `counterparty_devid` (never compared with `to_device_id`) and, on a paying step, `embedded_parent`. Both are only hashed;
+- the hint's `generation_digest` and `step_digest`;
+- the claim's `signature_alg`, which selects nothing.
+
+The release is also on the nodes although only the sender reads it, from an address only the parties know. The members' operators hold it.
+
+**Questions for the owner.** Each is one decision. Nothing is built until it is answered, and §5A's row stays unticked until then.
+
+1. **What does "only the parties to a relationship hold its bytes" cover?**
+   - (a) **The relationship's chain:** its tips, receipts, messages and terms.
+     - An identity's economic transitions are then verification material for A19's walkers: its balance of each token at each position, each debit's amount, asset and recipient device, each credit's payer, and its number of steps.
+     - To record: an amendment to A7 or A19 saying so, with S12's sentence on "history" and the 2026-09-29 record read accordingly. Nothing in the economic evidence changes.
+     - Cost: anyone who knows an identity's (G, DevID), or meets it in a credit's provenance, reads its balances and its payment graph from the nodes.
+   - (b) **The step's economic effect as well.**
+     - A non-party cannot then meet A19 without validity proofs, which are not built.
+     - Beta would need the proof system first, or A19 narrowed to walkers who are parties. Narrowing reopens SA-02 for credit sources (§6.90).
+     - Cost: the largest. Beta's acceptance path changes.
+2. **If 1(a): may the published evidence carry the relationship's chain (C2)?**
+   - (a) **Yes.**
+     - Amend storage §8.1 and explainer §11 to say the tip mirror's leaf encryption is not a confidentiality property, since the same tips are in the published evidence.
+     - Record that a relationship's spool keys and message ids can be computed from public objects.
+     - No code change.
+   - (b) **No.** The published evidence stops carrying them. That needs:
+     - a foreign-checkable operation identity that is not the relationship tip. Today `economic_operation_id = H(G ‖ DevID ‖ C_dsm+)`, and `sigma_dsm` signs `C_dsm+`;
+     - credit provenance that does not publish the receipt, the countersignature and the EK chain;
+     - spool keys and message ids that public values do not give.
+
+     Cost: a wire and key-schedule change to the successor evidence, the witness, the acceptance bundle and the EK steps. The replacement needs the owner's design.
+3. **The fields nothing reads (C3):** remove each from its published object (a wire change to each), or keep them?
 
 ## 7 Totals
 
