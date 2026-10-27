@@ -279,6 +279,15 @@ pub(crate) fn walk(
         crate::util::text_id::encode_base32_crockford(&history.vault_id[..5])
     );
     let chain = verifier.chain(&history.vault_id).map_err(verifier_error)?;
+    // A checkpoint whose end the walk did not reproduce is discarded (SoFi
+    // Amendment S23, step 4).
+    let (walked, _) = recorded_chain(verifier, &history.vault_id, &genesis)?;
+    let settled = history.candidates.settle_checkpoints(&walked);
+    log::info!(
+        "[vault history] checkpoints after the walk: {} borne out, {} discarded",
+        settled.borne_out,
+        settled.discarded
+    );
     owe_hints(set, verifier, history, &genesis)?;
     Ok(chain)
 }

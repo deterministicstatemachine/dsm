@@ -55,6 +55,11 @@ pub(crate) struct Candidates {
     /// eligible at a head this device established (SoFi Amendment S23,
     /// "a fresh reader", step 2; SA-69).
     checkpoints: Vec<CheckpointV1>,
+    /// The checkpoints admitted at an established head, whose roots are named
+    /// until the walk shows their end is not the one it computed.
+    admitted: Vec<CheckpointV1>,
+    /// The roots the hints name, by generation.
+    hint_roots: BTreeMap<u64, BTreeSet<D32>>,
     /// The generations some hint was found for.
     hinted: BTreeSet<u64>,
     /// The epochs whose index could not be read in full.
@@ -98,29 +103,76 @@ impl Candidates {
                 log::debug!("[lineage discovery] a checkpoint not taken: {why:?}");
                 continue;
             }
-            for (offset, root) in checkpoint.claimed_roots().iter().enumerate() {
-                self.roots
-                    .entry(checkpoint.start_generation() + offset as u64)
-                    .or_default()
-                    .insert(*root);
-            }
+            name_roots(&mut self.roots, checkpoint);
+            self.admitted.push(checkpoint.clone());
             admitted += 1;
         }
         admitted
+    }
+
+    /// Step 4 of a fresh reader (SoFi Amendment S23): once the walk has
+    /// established a segment, compare each checkpoint taken for it with the
+    /// digest and root the walk computed at its end. One whose end the walk
+    /// does not reproduce is discarded — dropped, its roots naming nothing
+    /// more — and nothing else is; one whose segment the walk has not
+    /// established yet is neither borne out nor discarded.
+    pub(crate) fn settle_checkpoints(&mut self, chain: &GenerationChain) -> Settled {
+        let mut settled = Settled::default();
+        let mut standing = Vec::with_capacity(self.admitted.len());
+        for checkpoint in std::mem::take(&mut self.admitted) {
+            match chain.head_at(checkpoint.end_generation()) {
+                Some(end) if checkpoint.end_matches(&end) => {
+                    settled.borne_out += 1;
+                    standing.push(checkpoint);
+                }
+                Some(..) => {
+                    settled.discarded += 1;
+                    self.checkpoints.retain(|found| *found != checkpoint);
+                }
+                None => standing.push(checkpoint),
+            }
+        }
+        self.admitted = standing;
+        self.roots = self.hint_roots.clone();
+        for checkpoint in &self.admitted {
+            name_roots(&mut self.roots, checkpoint);
+        }
+        settled
     }
 
     fn add(&mut self, object: LineageObject) {
         match object {
             LineageObject::Hint(hint) => {
                 self.hinted.insert(hint.generation());
-                self.roots
-                    .entry(hint.generation())
-                    .or_default()
-                    .insert(*hint.claimed_root());
+                for named in [&mut self.roots, &mut self.hint_roots] {
+                    named
+                        .entry(hint.generation())
+                        .or_default()
+                        .insert(*hint.claimed_root());
+                }
             }
             LineageObject::Checkpoint(checkpoint) => self.checkpoints.push(checkpoint),
         }
     }
+}
+
+/// Name each root a checkpoint claims, at its generation.
+fn name_roots(roots: &mut BTreeMap<u64, BTreeSet<D32>>, checkpoint: &CheckpointV1) {
+    for (offset, root) in checkpoint.claimed_roots().iter().enumerate() {
+        roots
+            .entry(checkpoint.start_generation() + offset as u64)
+            .or_default()
+            .insert(*root);
+    }
+}
+
+/// What comparing the admitted checkpoints with the walk came to.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Settled {
+    /// Checkpoints whose end the walk reproduced.
+    pub(crate) borne_out: usize,
+    /// Checkpoints whose end it did not: discarded.
+    pub(crate) discarded: usize,
 }
 
 /// Whether an epoch's index was read in full.
@@ -479,6 +531,94 @@ mod tests {
             expected,
             "only the checkpoint eligible at the head names roots"
         );
+    }
+
+    /// SoFi Amendment S23, a fresh reader, step 4 (MR-SOFI-0401): once the
+    /// walk has established a segment, a checkpoint taken for it whose end
+    /// the walk does not reproduce is discarded — dropped, its roots naming
+    /// nothing more — and nothing else is: the checkpoint the walk bears out
+    /// keeps naming its roots, a hint keeps naming its root, and a checkpoint
+    /// whose segment the walk has not established yet is neither.
+    /// MUTATION CONTROL: settling without `end_matches`, keeping every
+    /// admitted checkpoint, turns this red.
+    #[test]
+    fn a_checkpoint_whose_end_the_walk_does_not_reproduce_is_discarded() {
+        let walked = chain_of(EPOCH_GENERATIONS);
+        let (r_0, d_0) = walked.at(0).expect("the genesis");
+        let (_, d_end) = walked.at(EPOCH_GENERATIONS).expect("the segment's end");
+        let honest = CheckpointV1::new(
+            LineageKind::Reserve,
+            LINEAGE,
+            0,
+            d_0,
+            d_end,
+            (0..=EPOCH_GENERATIONS)
+                .map(|g| walked.at(g).expect("an established generation").0)
+                .collect(),
+            [0x7B; 32],
+        )
+        .expect("the segment's checkpoint");
+        let lying = checkpoint(LineageKind::Reserve, LINEAGE, 0, d_0, r_0, 0xE7);
+        let hinted_root = [0x5C; 32];
+        let hint = GenerationHintV1::new(
+            LineageKind::Reserve,
+            LINEAGE,
+            7,
+            hinted_root,
+            [0x5D; 32],
+            [0x5E; 32],
+        )
+        .expect("a hint");
+        let mut found = Candidates::default();
+        found.add(LineageObject::Checkpoint(honest.clone()));
+        found.add(LineageObject::Checkpoint(lying.clone()));
+        found.add(LineageObject::Hint(hint));
+        let Some(genesis) = walked.head_at(0) else {
+            panic!("the genesis is established");
+        };
+        assert_eq!(
+            found.admit_checkpoints(&genesis),
+            2,
+            "both start at the genesis"
+        );
+
+        let mut early = Candidates::default();
+        early.add(LineageObject::Checkpoint(lying.clone()));
+        early.admit_checkpoints(&genesis);
+        assert_eq!(
+            early.settle_checkpoints(&chain_of(5)),
+            Settled::default(),
+            "a segment not established yet settles nothing"
+        );
+
+        assert_eq!(
+            found.settle_checkpoints(&walked),
+            Settled {
+                borne_out: 1,
+                discarded: 1
+            }
+        );
+        assert!(found.checkpoints().contains(&honest));
+        assert!(
+            !found.checkpoints().contains(&lying),
+            "the lying checkpoint is dropped"
+        );
+        let named: BTreeSet<D32> = found
+            .named_from(0)
+            .into_iter()
+            .map(|(_, root)| root)
+            .collect();
+        assert!(
+            lying.claimed_roots()[1..]
+                .iter()
+                .all(|root| !named.contains(root)),
+            "the discarded checkpoint names nothing more"
+        );
+        assert!(honest
+            .claimed_roots()
+            .iter()
+            .all(|root| named.contains(root)));
+        assert!(named.contains(&hinted_root), "a hint keeps naming its root");
     }
 
     /// SA-69. Hints are anyone's too, up to `CANDIDATES_PER_EPOCH` an epoch:

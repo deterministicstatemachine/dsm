@@ -141,7 +141,11 @@ fn an_online_transfer_request_is_the_same_bytes_from_an_independent_encoder() {
     bytes_field(5, &request.signature, &mut independent);
     bytes_field(11, &request.canonical_operation_bytes, &mut independent);
     uint_field(13, request.sender_economic_position, &mut independent);
-    uint_field(14, u64::from(request.sender_debit_mutation_index), &mut independent);
+    uint_field(
+        14,
+        u64::from(request.sender_debit_mutation_index),
+        &mut independent,
+    );
     bytes_field(15, &request.transfer_terms, &mut independent);
     assert_eq!(request.encode_to_vec(), independent);
 }

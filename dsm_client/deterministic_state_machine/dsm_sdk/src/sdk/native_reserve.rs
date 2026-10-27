@@ -357,7 +357,7 @@ pub fn walk_reserve(
     let genesis = genesis_state(network_id)?;
     let start = memo::latest_state(&genesis).map_err(|e| storage_err("reserve memo", e))?;
     let (established, _) = established_chain(&genesis)?;
-    let (mut ahead, candidates) = tokio::task::block_in_place(|| {
+    let (mut ahead, mut candidates) = tokio::task::block_in_place(|| {
         runtime.block_on(async {
             let mut candidates = lineage_discovery::discover(
                 set,
@@ -406,6 +406,15 @@ pub fn walk_reserve(
                 .map_err(|e| storage_err("reserve memo write", e))
         },
     )?;
+    // A checkpoint whose end the walk did not reproduce is discarded before
+    // anything is owed (SoFi Amendment S23, step 4).
+    let (walked, _) = established_chain(&genesis)?;
+    let settled = candidates.settle_checkpoints(&walked);
+    log::info!(
+        "[reserve] checkpoints after the walk: {} borne out, {} discarded",
+        settled.borne_out,
+        settled.discarded
+    );
     owe_after_walk(set, &genesis, start.generation(), &candidates)?;
     Ok(stop)
 }

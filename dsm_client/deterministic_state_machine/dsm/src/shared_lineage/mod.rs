@@ -376,6 +376,19 @@ impl GenerationChain {
         }
     }
 
+    /// The head as it stood at generation `g`, when `g` has been pushed:
+    /// what a checkpoint whose segment ends at `g` is compared with.
+    pub fn head_at(&self, generation: u64) -> Option<EstablishedSharedHead> {
+        let (state_root, generation_digest) = self.at(generation)?;
+        Some(EstablishedSharedHead {
+            kind: self.kind,
+            lineage_id: self.lineage_id,
+            generation,
+            generation_digest,
+            state_root,
+        })
+    }
+
     /// The digest and root of generation `g`, when it has been pushed.
     pub fn at(&self, generation: u64) -> Option<(D32, D32)> {
         if generation >= self.generations.len() as u64 {
