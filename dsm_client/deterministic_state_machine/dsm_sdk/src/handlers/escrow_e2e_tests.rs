@@ -607,6 +607,80 @@ async fn a_joint_cancel_and_a_referee_result_cannot_both_settle() {
     assert_eq!(balance(&p.b, &m.era), whole_era(100));
 }
 
+/// DSM §60, MR-DSM-0185: three parties, two chains, one commitment. Alice
+/// (A) and Bob (B) each fund a vault for Carol (R) bound to the same
+/// delivery `Y`, each released to Carol by its own funder's acknowledgement
+/// and refunded by its funder alone. Bob refuses to acknowledge. Alice's
+/// vault still releases to Carol: the two vaults name one `Y` and share no
+/// parent, so they bind two verdict cells, and Bob's refusal is a liveness
+/// failure on his chain only. Bob's vault holds no verdict and releases
+/// nothing, until Bob's own branch refunds it.
+///
+/// MUTATION CONTROL: deriving the verdict cell from `Y` alone, so the two
+/// vaults share one, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_refusal_on_one_chain_cannot_touch_another_bound_to_the_same_commitment() {
+    let p = Pair::boot(100, 100).await;
+    // Carol is a wallet of her own: a release is an operation on her own
+    // lineage, so she has one.
+    let carol = referee(&p).await;
+    carol.fund_admitted(100).await;
+    let (pa, pb, pc) = (party(&p.a).await, party(&p.b).await, party(&carol).await);
+    let stake = whole_era(10);
+    let delivery = b"delivery 9: Carol delivers to Alice and Bob";
+    let funded = |funder: &generated::EscrowPartyResponse| {
+        vec![
+            branch(b"delivered", vec![signer_of(funder)], &pc),
+            branch(b"refund", vec![signer_of(funder)], funder),
+        ]
+    };
+    let alice = created(&lock(&p.a, delivery, stake, funded(&pa), None).await);
+    let bob = created(&lock(&p.b, delivery, stake, funded(&pb), None).await);
+    assert_eq!(
+        alice.external_commitment, bob.external_commitment,
+        "both vaults name the one delivery"
+    );
+    assert_ne!(
+        alice.verdict_cell, bob.verdict_cell,
+        "two chains, two verdict cells: no shared parent"
+    );
+    let (alice_vault, bob_vault) = (d32(&alice.vault_id), d32(&bob.vault_id));
+
+    // Alice acknowledges the delivery; Bob refuses and signs nothing.
+    let acknowledged = verdict_of(
+        &adjudicate(&p.a, &alice_vault, b"delivered").await,
+        "escrow.adjudicate",
+    );
+    assert_eq!(
+        (acknowledged.state, acknowledged.outcome.as_slice()),
+        (
+            generated::EscrowVerdictState::Final as i32,
+            b"delivered".as_slice()
+        )
+    );
+    assert_eq!(
+        verdict(&carol, &bob_vault).await.state,
+        generated::EscrowVerdictState::None as i32,
+        "Bob's refusal leaves his cell empty"
+    );
+
+    // Carol is paid from Alice's vault; Bob's releases nothing.
+    realized_through(&carol, "escrow.release", release_request(&alice_vault)).await;
+    assert_eq!(balance(&carol, &era()), whole_era(100) + stake);
+    refused_release(&carol, &bob_vault, "no verdict holds the cell yet").await;
+    assert_eq!(balance(&p.b, &era()), whole_era(100) - stake);
+
+    // Bob's own branch still settles his vault.
+    verdict_of(
+        &adjudicate(&p.b, &bob_vault, b"refund").await,
+        "escrow.adjudicate",
+    );
+    realized_through(&p.b, "escrow.release", release_request(&bob_vault)).await;
+    assert_eq!(balance(&p.b, &era()), whole_era(100));
+    assert_eq!(balance(&p.a, &era()), whole_era(100) - stake);
+}
+
 /// An escrow vault is not a market: it is not traded through, its owner
 /// cannot close it, and it is not among the owner's market vaults. A stake
 /// locked against a vault bound to another verdict cell is not locked.
