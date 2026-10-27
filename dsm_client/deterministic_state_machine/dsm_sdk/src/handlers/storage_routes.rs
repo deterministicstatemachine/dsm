@@ -1409,24 +1409,25 @@ impl AppRouterImpl {
                 // the signed child is a pair this device applied: the apply
                 // reports it as a duplicate. The apply pins the parent again,
                 // under the state-machine lock.
-                let pinned_head =
-                    match crate::storage::client_db::pinned_counterparty_a_head(&rel_key) {
-                        Ok(Some(pinned)) => pinned,
-                        // No row is a fresh relationship: its one tip both sides
-                        // derive is the genesis seed.
-                        Ok(None) => {
-                            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
-                                &self_device,
-                                &sender_device,
-                            )
-                        }
-                        Err(e) => {
-                            failures.push(format!(
-                                "split transfer {name}: the sender's pinned head is unreadable: {e}"
-                            ));
-                            continue;
-                        }
-                    };
+                let pinned_head = match crate::storage::client_db::pinned_counterparty_a_head(
+                    &rel_key,
+                ) {
+                    Ok(Some(pinned)) => pinned,
+                    // No row is a fresh relationship: its one tip both sides
+                    // derive is the genesis seed.
+                    Ok(None) => {
+                        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                            &self_device,
+                            &sender_device,
+                        )
+                    }
+                    Err(e) => {
+                        failures.push(format!(
+                            "split transfer {name}: the sender's pinned head is unreadable: {e}"
+                        ));
+                        continue;
+                    }
+                };
                 if v.receipt.parent_tip != pinned_head && v.receipt.child_tip != pinned_head {
                     failures.push(format!(
                         "split transfer {name}: the signed parent is not the sender's head this \
@@ -2948,8 +2949,7 @@ mod tests {
     use crate::sdk::b0x_sdk::CountersignDelta;
     use crate::storage::client_db;
     use crate::storage::client_db::sender_proposal::{
-        get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
-        PROPOSAL_SUBMITTED,
+        get_sender_proposal_by_commitment, PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED,
     };
     use crate::test_support::two_device::Pair;
     use prost::Message;

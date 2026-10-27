@@ -262,7 +262,7 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         super::super::reset_database_for_tests();
         super::super::init_database().expect("init");
-        let genesis = NativeReserveState::genesis(b"memo-test", [0x5E; 32]);
+        let genesis = NativeReserveState::genesis(b"memo-test", [0x5E; 32]).expect("R_0");
 
         memo_row(&genesis, 3, 900);
         let win = release_at(&genesis, 3).expect("read").expect("recorded");

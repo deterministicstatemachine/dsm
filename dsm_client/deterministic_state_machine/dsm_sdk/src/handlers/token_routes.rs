@@ -1223,6 +1223,16 @@ impl AppRouterImpl {
                     transferable: req.transferable,
                     allowlist_device_ids,
                 };
+                // The whole supply is issued to this device at creation, and
+                // Core releases it only to a recipient the allowlist admits:
+                // a policy that leaves the creator out could never be issued.
+                if !parsed.admits_issuance_to(&creator_device_id) {
+                    return err(
+                        "token.create: the recipient allowlist must name this device, which \
+                         receives the whole supply at creation"
+                            .into(),
+                    );
+                }
 
                 // Pack the canonical policy HERE. The blob is protocol: it is
                 // hashed into the CPTA anchor and fixes the token's supply and

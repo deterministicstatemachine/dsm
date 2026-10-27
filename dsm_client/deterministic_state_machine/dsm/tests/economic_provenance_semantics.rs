@@ -259,7 +259,29 @@ impl ProvenanceResolver for Anchors {
 /// SoFi §47 packs it: a device-created policy names `creator` and a signer
 /// set (Amendment S8); a network-anchored one names neither (S11).
 fn native_policy(creator: ([u8; 32], [u8; 32]), release_rule: u8, supply: u128) -> Vec<u8> {
-    let mut blob = vec![3, 0, 0, 0x02, release_rule];
+    policy_with_recipients(creator, release_rule, supply, &[])
+}
+
+/// A transferable creator-released policy of 1,000 units whose recipient
+/// allowlist names exactly `recipients`.
+fn native_policy_allowing(creator: ([u8; 32], [u8; 32]), recipients: &[[u8; 32]]) -> Vec<u8> {
+    policy_with_recipients(creator, RELEASE_AT_CREATION, 1_000, recipients)
+}
+
+fn policy_with_recipients(
+    creator: ([u8; 32], [u8; 32]),
+    release_rule: u8,
+    supply: u128,
+    recipients: &[[u8; 32]],
+) -> Vec<u8> {
+    let flags = match recipients {
+        [] => dsm::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        _ => {
+            dsm::economic::token_policy::POLICY_FLAG_TRANSFERABLE
+                | dsm::economic::token_policy::POLICY_FLAG_ALLOWLIST
+        }
+    };
+    let mut blob = vec![3, 0, 0, flags, release_rule];
     if release_rule == RELEASE_AT_CREATION {
         blob.extend_from_slice(&creator.0);
         blob.extend_from_slice(&creator.1);
@@ -275,8 +297,14 @@ fn native_policy(creator: ([u8; 32], [u8; 32]), release_rule: u8, supply: u128) 
     blob.extend_from_slice(&supply.to_be_bytes());
     blob.extend_from_slice(&0u16.to_be_bytes());
     blob.extend_from_slice(&0u16.to_be_bytes());
-    blob.push(0);
-    blob.extend_from_slice(&0u16.to_be_bytes());
+    match recipients {
+        [] => blob.push(dsm::economic::token_policy::ALLOWLIST_KIND_NONE),
+        _ => blob.push(dsm::economic::token_policy::ALLOWLIST_KIND_INLINE),
+    }
+    blob.extend_from_slice(&(recipients.len() as u16).to_be_bytes());
+    for recipient in recipients {
+        blob.extend_from_slice(recipient);
+    }
     prost::Message::encode_to_vec(&dsm::types::proto::TokenPolicyV3 { policy_bytes: blob })
 }
 
@@ -354,6 +382,50 @@ fn a_genesis_release_of_another_creators_policy_is_refused() {
             other => panic!("expected the creator refusal, got {other:?}"),
         }
     }
+}
+
+/// SoFi §49, MR-SOFI-0312: the recipient allowlist governs who may receive
+/// issuance. A creator-released policy whose allowlist leaves its creator out
+/// releases nothing to it; one that names the creator among others releases
+/// the whole supply to it.
+///
+/// MUTATION CONTROL: dropping the `admits_issuance_to` check from
+/// `verify_genesis_release` turns the refusal red.
+#[test]
+fn a_genesis_release_to_a_creator_its_allowlist_leaves_out_is_refused() {
+    let excluded = native_policy_allowing((G, DEV), &[[0x77; 32]]);
+    let pc = policy_commit_of(&excluded);
+    let op = create_token(pc, 1_000);
+    match verify_release(&Anchors(excluded), &release_witness(pc, 1_000), Some(&op)) {
+        Err(ProvenanceError::GenesisReleaseInvalid(m)) => {
+            assert!(m.contains("allowlist"), "refused for another reason: {m}")
+        }
+        other => panic!("a creator its allowlist leaves out received issuance: {other:?}"),
+    }
+
+    let included = native_policy_allowing((G, DEV), &[[0x77; 32], DEV]);
+    let pc = policy_commit_of(&included);
+    let op = create_token(pc, 1_000);
+    let funded = verify_release(&Anchors(included), &release_witness(pc, 1_000), Some(&op))
+        .expect("a creator the allowlist names receives its supply");
+    assert_eq!((funded.policy_commit, funded.amount), (pc, 1_000));
+}
+
+/// SoFi §49: the allowlist has no market meaning, and a token trades freely
+/// once issued. A transferable token whose allowlist names only its creator
+/// transfers, and its market legs are permitted: neither rule reads the
+/// allowlist, so no holder outside it is refused.
+#[test]
+fn an_allowlisted_token_trades_freely_once_issued() {
+    let policy = native_policy_allowing((G, DEV), &[DEV]);
+    let pc = policy_commit_of(&policy);
+    dsm::economic::provenance::check_transfer_policy(&pc, &Anchors(policy.clone()))
+        .expect("an allowlisted transferable token transfers");
+    let parsed =
+        dsm::economic::token_policy::parse_token_policy(&policy).expect("the policy parses");
+    assert_eq!(parsed.allowlist_device_ids, vec![DEV]);
+    dsm::economic::issuance::check_market_leg_permitted(&parsed)
+        .expect("an allowlisted transferable token's market leg is permitted");
 }
 
 #[test]

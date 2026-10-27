@@ -173,8 +173,9 @@ pub mod class {
     pub const SOFI_REF_SETUP: u16 = 0x0040;
     /// `𝒞_E^pre` — the canonical pre-E validation closure index (lives in `B°`).
     pub const SOFI_PRE_E_CLOSURE_INDEX: u16 = 0x0041;
-    /// `PolicyFulfillmentAuxRef` — a content-addressed auxiliary evidence
-    /// candidate. Never an identity field, never a singleton slot.
+    /// A content-addressed auxiliary evidence candidate's reference. No
+    /// candidate is built in beta (owner ruling 2026-09-23); the class stays
+    /// one no pre-E closure may name, since auxiliary evidence depends on E.
     pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
     /// `Γ` — the canonical route-leg set folded into a route E.
     pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;

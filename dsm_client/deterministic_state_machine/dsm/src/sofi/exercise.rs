@@ -54,9 +54,16 @@ pub struct RecognizedExercise {
     witnesses: Vec<DlvPolicyFulfillmentBody>,
     closure: Vec<Vec<u8>>,
     external_commitment: D32,
+    bytes: Vec<u8>,
 }
 
 impl RecognizedExercise {
+    /// The exact bytes recognized: what a writer carries to every leg key its
+    /// `F` names.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     /// `F`, signed.
     pub fn fulfillment(&self) -> &Signed<TraderFulfillmentBody> {
         &self.fulfillment
@@ -289,6 +296,7 @@ pub fn recognize_exercise(bytes: &[u8]) -> Option<RecognizedExercise> {
         witnesses,
         closure: exercise.closure().to_vec(),
         external_commitment: e,
+        bytes: bytes.to_vec(),
     })
 }
 

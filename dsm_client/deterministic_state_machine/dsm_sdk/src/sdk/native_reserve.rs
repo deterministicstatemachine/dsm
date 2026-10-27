@@ -66,10 +66,7 @@ fn storage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
 pub fn genesis_state(network_id: &[u8]) -> Result<NativeReserveState, DsmError> {
     let profile = dsm::economic::register::resolve_root_register_profile(network_id)
         .map_err(|e| storage_err("root register profile", e))?;
-    Ok(NativeReserveState::genesis(
-        network_id,
-        profile.storage_set_id,
-    ))
+    NativeReserveState::genesis(network_id, profile.storage_set_id)
 }
 
 /// `parent`'s successor cell over the members of `set`, which must be the
@@ -596,7 +593,7 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
-        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]);
+        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
         let mut expected = GenerationChain::from_genesis(&shared_genesis(&genesis));
         let mut state = genesis;
         for g in [1u64, 2, 3, 5] {

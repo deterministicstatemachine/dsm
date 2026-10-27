@@ -200,18 +200,15 @@ mod state_machine_tests {
         // canonical head rather than an override — but how the head came to hold
         // a balance is not incidental: a restored, invented balance would make
         // this test pass against a head no device could ever have.
-        let head = crate::types::device_state::DeviceState::genesis_head(
-            devid,
-            devid,
-            vec![0xAAu8; 32],
-        )
-        .into_head()
-        .admitted_faucet_claim(0)
-            .expect("faucet claim")
-            .admitted_faucet_claim(1)
-            .expect("faucet claim")
-            .admitted_faucet_claim(2)
-            .expect("faucet claim");
+        let head =
+            crate::types::device_state::DeviceState::genesis_head(devid, devid, vec![0xAAu8; 32])
+                .into_head()
+                .admitted_faucet_claim(0)
+                .expect("faucet claim")
+                .admitted_faucet_claim(1)
+                .expect("faucet claim")
+                .admitted_faucet_claim(2)
+                .expect("faucet claim");
 
         let mut sm = StateMachine::new();
         sm.set_device_head(crate::types::device_state::RealizedHead::of(head.clone()));

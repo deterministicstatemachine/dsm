@@ -170,6 +170,11 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 ))
             }
         };
+        // At exhaustion the claim is refused here, before anything is signed,
+        // frozen or written (SoFi Amendment S11): no release the claim policy
+        // allows succeeds a reserve that holds less than one payout.
+        dsm::economic::native_reserve::faucet_claim_admissible(&parent)
+            .map_err(|refusal| DsmError::invalid_operation(format!("faucet: {refusal}")))?;
         let generation = parent.generation + 1;
         let op = Operation::FaucetClaim {
             reserve_id,

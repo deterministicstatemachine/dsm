@@ -253,6 +253,7 @@ struct FaucetFixture {
 /// The reserve state the fixture's release succeeds: `R_0`.
 fn reserve_genesis() -> dsm::economic::native_reserve::NativeReserveState {
     dsm::economic::native_reserve::NativeReserveState::genesis(b"dsm-testnet", canonical_set_id())
+        .expect("R_0")
 }
 
 fn faucet_fixture(position: u64) -> FaucetFixture {
@@ -1168,22 +1169,24 @@ fn head_of(
     pending: Option<PendingEconomicAdmission>,
 ) -> dsm::types::device_state::RealizedHead {
     use dsm::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
-    let accounts: std::collections::BTreeMap<[u8; 32], dsm::types::offline_account::OfflineAccount> =
-        Some(allocations)
-            .filter(|held| !held.is_empty())
-            .map(|held| {
-                (
-                    [0xB0; 32],
-                    dsm::types::offline_account::OfflineAccount::restore(
-                        held.iter().copied().collect(),
-                        0,
-                        [0x01; 32],
-                        Some([0x0F; 32]),
-                    ),
-                )
-            })
-            .into_iter()
-            .collect();
+    let accounts: std::collections::BTreeMap<
+        [u8; 32],
+        dsm::types::offline_account::OfflineAccount,
+    > = Some(allocations)
+        .filter(|held| !held.is_empty())
+        .map(|held| {
+            (
+                [0xB0; 32],
+                dsm::types::offline_account::OfflineAccount::restore(
+                    held.iter().copied().collect(),
+                    0,
+                    [0x01; 32],
+                    Some([0x0F; 32]),
+                ),
+            )
+        })
+        .into_iter()
+        .collect();
     let stored_root = *dsm::merkle::sparse_merkle_tree::SparseMerkleTree::from_leaves(
         std::iter::once((
             compute_smt_key(dev(), dev()),

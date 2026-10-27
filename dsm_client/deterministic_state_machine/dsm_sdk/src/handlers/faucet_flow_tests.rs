@@ -14,7 +14,7 @@
 use serial_test::serial;
 
 use dsm::economic::native_reserve::{
-    NativeReserveState, SuccessorCell, WalkStop, ERA_RESERVE_GENESIS_SUPPLY,
+    reserve_genesis_supply, NativeReserveState, SuccessorCell, WalkStop,
 };
 
 use crate::bridge::{AppInvoke, AppQuery, AppRouter};
@@ -221,7 +221,7 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     assert_eq!(head.generation, 1);
     assert_eq!(
         head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(100)
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(100)
     );
 }
 
@@ -697,7 +697,7 @@ async fn another_claimants_release_moves_the_head_and_the_next_claim_takes_the_g
     assert_eq!(head.generation, 2);
     assert_eq!(
         head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(200)
     );
 }
 
@@ -756,7 +756,7 @@ async fn a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_an
     assert_eq!(head.generation, 2, "A released once, B once");
     assert_eq!(
         head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(200)
     );
 }
 

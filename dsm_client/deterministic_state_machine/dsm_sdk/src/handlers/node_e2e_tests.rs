@@ -2212,6 +2212,105 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SoFi Amendment S25, MR-SOFI-0266: a relay completes a registered
+/// fulfillment whose hops are not final from nothing the trader carries. B
+/// trades with the leader of the vault's first key refusing writes there, so
+/// B's pair registers and its exercise lands nowhere. A relays B's position:
+/// no leg key holds an exercise of B's fulfillment, so A rebuilds it from the
+/// position's public objects and carries it to the key, which then holds B's
+/// exercise final before B does anything more. B's position realizes on what
+/// A wrote.
+///
+/// MUTATION CONTROL: carrying only an exercise a leg key already holds, as
+/// the relay did, turns this red: A writes the pair alone and the key stays
+/// open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_relay_rebuilds_an_exercise_no_key_holds_from_public_objects() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let realized = generated::SofiPositionState::Realized as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = ctx
+        .verifier()
+        .chain(&m.vault_id)
+        .expect("the vault's chain")
+        .roots()[0];
+    let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the vault's first key");
+    let key_leader = member_name(key.routed().route().leader());
+
+    // B trades; the key's leader refuses its exercise, so B's pair is written
+    // and its exercise is not.
+    p.nodes
+        .refuse_cell_writes(&key_leader, &[*key.routed().key()])
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    let (traded, state) = position_of(&r, "sofi.trade");
+    assert_eq!(traded, q);
+    assert_ne!(state, realized, "B's exercise did not reach the key");
+    p.nodes.accept_cell_writes(&key_leader).await;
+
+    // A relays B's position with nothing from B.
+    let relayed = match payload(
+        &invoke(
+            &p.a,
+            "sofi.relay",
+            args(&generated::SofiRelayRequest {
+                trader_genesis: p.b.genesis.to_vec(),
+                trader_device_id: p.b.device_id.to_vec(),
+                position: q,
+            }),
+        )
+        .await,
+    ) {
+        Payload::SofiRelayResponse(r) => r.cells_written,
+        other => panic!("sofi.relay answered {other:?}"),
+    };
+    assert_eq!(
+        relayed, 3,
+        "the position pair's two cells and the key, carrying the exercise A rebuilt"
+    );
+    p.a.enter();
+    let read = VerifierContext::new(&set, None, None)
+        .expect("a verifier")
+        .verifier()
+        .read_attempt_cell(&m.vault_id, &r0, 0)
+        .expect("read")
+        .expect("the key is decided");
+    assert!(
+        matches!(
+            read.fact(),
+            CellFact::Held {
+                state: ChainState::Final,
+                ..
+            }
+        ),
+        "the key is final on what A carried"
+    );
+    let Some(held) = read.into_exercise() else {
+        panic!("an exercise holds the key");
+    };
+    assert_eq!(
+        (
+            held.precommit().body.device_id(),
+            held.fulfillment().body.position()
+        ),
+        (&p.b.device_id, q),
+        "B's exercise at B's position, rebuilt by A"
+    );
+
+    // B's position realizes on what A wrote.
+    assert_eq!(resolve(&p).await, (q, realized));
+    let out = dsm::dlv::route_commit::constant_product_output(10, 100, 1_000, 30)
+        .expect("the vault prices the trade");
+    assert_eq!(balance(&p.b, &m.tkn), out);
+    head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
+}
+
 /// SA-86. A trader that signs a fulfillment whose attempts name a vault its
 /// `P` has no leg for, and leaves that exercise only at the leader of a
 /// vault's key, holds the key: Core refutes the exercise in hand

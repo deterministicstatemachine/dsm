@@ -97,6 +97,33 @@ fn chain_state(
     }
 }
 
+/// `own`'s step on its own self-loop relationship over `operation`: the
+/// relationship a burn or a token creation advances.
+fn self_loop_state(own: &TestDevice, operation: &Operation, entropy: u8) -> RelationshipChainState {
+    own.enter();
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&own.device_id, &own.device_id);
+    let Some(embedded_parent) = own
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("the head")
+        .chain_tip(&rel_key)
+    else {
+        panic!("the self-loop has a tip: the device has advanced it");
+    };
+    RelationshipChainState {
+        rel_key,
+        embedded_parent,
+        counterparty_devid: own.device_id,
+        operation: operation.clone(),
+        entropy: vec![entropy; 32],
+        encapsulated_entropy: None,
+        entity_sig: None,
+        counterparty_sig: None,
+    }
+}
+
 /// Put every artifact of `parts` on the network's set, and register, under
 /// `device`'s own key, the claim naming them at `position` along the cell
 /// routed from `parent_root`. Asserts the claim is final there: the nodes
@@ -251,15 +278,15 @@ async fn three_parties() -> (Pair, TestDevice) {
     (p, c)
 }
 
-/// `payer`'s next step at its real admitted root: `operation`, with the write
-/// set `write_set_operation` produces. An honest producer builds the write
-/// set from the operation it signs; software that does not can build it from
-/// another. Published and registered along the cell routed from that root.
-/// Returns the position it was registered at.
+/// `payer`'s next step at its real admitted root: the relationship step
+/// `state` over its operation, with the write set `write_set_operation`
+/// produces. An honest producer builds the write set from the operation it
+/// signs; software that does not can build it from another. Published and
+/// registered along the cell routed from that root. Returns the position it
+/// was registered at.
 async fn next_step(
     payer: &TestDevice,
-    payee: &TestDevice,
-    operation: &Operation,
+    state: RelationshipChainState,
     write_set_operation: &Operation,
 ) -> u64 {
     use dsm::economic::admission::{
@@ -268,7 +295,7 @@ async fn next_step(
     };
     use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
     use dsm::storage_object::immutable_inner;
-    let state = chain_state(payer, payee, operation, 0x33);
+    let operation = &state.operation;
     payer.enter();
     let core = payer.router().core_sdk.clone();
     let validated = validated_root_or_activate(&core).expect("the payer's admitted root");
@@ -664,7 +691,7 @@ async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted(
         .expect("BOUND is registered")
         .policy_commit;
     let transfer = signed_token_transfer(payer, &c, bound, "BOUND", 5);
-    let position = next_step(payer, &c, &transfer, &transfer).await;
+    let position = next_step(payer, chain_state(payer, &c, &transfer, 0x33), &transfer).await;
 
     c.enter();
     match verify(payer, position).await {
@@ -673,6 +700,63 @@ async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted(
             "refused by the token's committed policy: {why}"
         ),
         other => panic!("a transfer the token's policy forbids is never accepted: {other:?}"),
+    }
+}
+
+/// A burn of a token whose committed policy does not let it be burned is
+/// never accepted (DSM §61, MR-DSM-0191: no operation bypasses the asset's
+/// committed policy). The payer created the token itself, honestly, with
+/// burns turned off, and then burns some of it; its own wallet would refuse
+/// the burn, so it builds the step itself, with the write set its builders
+/// produce for that burn. A receiver new to the payer walks its history.
+///
+/// MUTATION CONTROL: skipping `check_burn_policy` in `advance_validated`
+/// turns this red: the receiver accepts the burn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_burn_of_a_token_whose_policy_forbids_burns_is_never_accepted() {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use prost::Message;
+    let (p, c) = three_parties().await;
+    let payer = &p.a;
+    payer.enter();
+    let created = payer
+        .router()
+        .invoke(AppInvoke {
+            method: "token.create".into(),
+            args: dsm::types::proto::ArgPack {
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: super::sender_admission_tests::non_burnable_request("KEPT").encode_to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(
+        created.success,
+        "the token is created: {:?}",
+        created.error_message
+    );
+    payer.enter();
+    let kept = client_db::token_registry::get_token_by_ticker("KEPT")
+        .expect("registry read")
+        .expect("KEPT is registered")
+        .policy_commit;
+    let burn = Operation::Burn {
+        amount: dsm::types::token_types::Balance::amount(5),
+        token_id: b"KEPT".to_vec(),
+        policy_commit: kept,
+        message: "burn 5 KEPT".to_string(),
+    };
+    let position = next_step(payer, self_loop_state(payer, &burn, 0x34), &burn).await;
+
+    c.enter();
+    match verify(payer, position).await {
+        Err(PeerLineageFailure::Invalid(why)) => assert!(
+            why.contains("does not let it be burned"),
+            "refused by the token's committed policy: {why}"
+        ),
+        other => panic!("a burn the token's policy forbids is never accepted: {other:?}"),
     }
 }
 
@@ -691,7 +775,7 @@ async fn a_debit_that_takes_less_than_it_sends_is_never_accepted() {
     let payer = &p.a;
     let whole = signed_transfer(payer, &c, payout());
     let one = signed_transfer(payer, &c, 1);
-    let position = next_step(payer, &c, &whole, &one).await;
+    let position = next_step(payer, chain_state(payer, &c, &whole, 0x33), &one).await;
 
     c.enter();
     match verify(payer, position).await {

@@ -431,15 +431,6 @@ fn every_union_variant_round_trips() {
         PreEClosureIndex::decode(&idx.encode()).expect("decode"),
         idx
     );
-    let aux = PolicyFulfillmentAuxRef {
-        policy_fulfillment_id: [14; 32],
-        evidence_class: 0x0042,
-        addr: [15; 32],
-    };
-    assert_eq!(
-        PolicyFulfillmentAuxRef::decode(&aux.encode()).expect("decode"),
-        aux
-    );
 }
 
 #[test]
@@ -1081,10 +1072,7 @@ fn bounds_are_the_ruled_values() {
     assert_eq!(MAX_VALIDATION_FETCH_BYTES, 4 * 1024 * 1024);
     assert_eq!(MAX_PROVENANCE_FANOUT, 16);
     assert_eq!(MAX_SETTLEMENT_PREIMAGE_BYTES, 256 * 1024);
-    assert_eq!(
-        (STORAGE_MEMBER_COUNT, STORAGE_FINALITY_COUNT, ROUTE_MAX_LEGS),
-        (5, 3, 2)
-    );
+    assert_eq!((STORAGE_FINALITY_COUNT, ROUTE_MAX_LEGS), (3, 2));
 }
 
 /// The signed transport envelope, byte for byte, from the field table.

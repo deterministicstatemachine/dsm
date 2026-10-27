@@ -157,6 +157,16 @@ pub struct TokenPolicy {
     pub allowlist_device_ids: Vec<[u8; 32]>,
 }
 
+impl TokenPolicy {
+    /// Whether `device_id` may receive issuance under this policy (SoFi §49,
+    /// MR-SOFI-0312): anyone when the policy names no recipients, otherwise
+    /// only a device it names. Issuance is the only thing the allowlist
+    /// governs; no transfer, vault or market leg reads it.
+    pub fn admits_issuance_to(&self, device_id: &[u8; 32]) -> bool {
+        self.allowlist_device_ids.is_empty() || self.allowlist_device_ids.contains(device_id)
+    }
+}
+
 /// Bounds-checked cursor; the blob must be consumed exactly.
 struct Reader<'a> {
     b: &'a [u8],

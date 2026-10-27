@@ -782,9 +782,9 @@ const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 ///
 /// **`body_class` is not a dispatch hint.** It is checked against the class
 /// the inner canonical bytes actually carry, and the signing preimage is
-/// rederived from the DECODED object — see `signature::verify_signed_object`,
-/// which is where the class-specific rules live. The envelope is generic; the
-/// verification deliberately is not.
+/// rederived from the DECODED object — see `publication::recognize_precommit`
+/// and its siblings, which is where the class-specific rules live. The
+/// envelope is generic; the verification deliberately is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedSofiObject {
     body_class: u16,
@@ -795,10 +795,10 @@ pub struct SignedSofiObject {
 
 impl SignedSofiObject {
     /// The only constructor. It refuses a body class this envelope does not
-    /// carry, so no producer in this codebase can emit one — the matching
-    /// refusal on the consumer side is in `verify_signed_object`, and both
-    /// exist because a producer check and a verifier check answer different
-    /// questions.
+    /// carry, so no producer in this codebase can emit one — on the consumer
+    /// side no recognizer takes an envelope of such a class as an object, and
+    /// both exist because a producer check and a verifier check answer
+    /// different questions.
     pub fn new(
         body_class: u16,
         body_ccb: &[u8],
@@ -1266,40 +1266,6 @@ impl PreEClosureIndex {
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
         let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
-}
-
-// ── 0x0042 PolicyFulfillmentAuxRef ─────────────────────────────────────────
-
-/// One content-addressed auxiliary evidence candidate for a policy-fulfillment
-/// witness. Many may exist per `(policy_fulfillment_id, evidence_class)`; there
-/// is no singleton slot, and a candidate can only ever establish validity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyFulfillmentAuxRef {
-    pub policy_fulfillment_id: D32,
-    pub evidence_class: u16,
-    pub addr: D32,
-}
-
-impl PolicyFulfillmentAuxRef {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        push_env(&mut out, class::SOFI_POLICY_FULFILLMENT_AUX_REF);
-        push_digest32(&mut out, &self.policy_fulfillment_id);
-        push_u16(&mut out, self.evidence_class);
-        push_digest32(&mut out, &self.addr);
-        out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_POLICY_FULFILLMENT_AUX_REF, SCHEMA_V1)?;
-        let v = Self {
-            policy_fulfillment_id: c.digest32()?,
-            evidence_class: c.u16()?,
-            addr: c.digest32()?,
-        };
         finish(&c, v)
     }
 }

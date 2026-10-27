@@ -163,8 +163,13 @@ impl RealizedHead {
         deltas: &[BalanceDelta],
         offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
-        self.0
-            .advance(rel_key, counterparty_devid, operation, deltas, offline_spend)
+        self.0.advance(
+            rel_key,
+            counterparty_devid,
+            operation,
+            deltas,
+            offline_spend,
+        )
     }
 
     /// The relationship with `counterparty_devid` established at its `h_0`:
@@ -886,7 +891,10 @@ impl DeviceState {
     /// value. Every step on the relationship then replaces a leaf the device
     /// committed, so the step's parent root is one the device held. Refused
     /// when the relationship is already established.
-    pub(crate) fn establish_relationship(&self, counterparty_devid: [u8; 32]) -> Result<Self, DsmError> {
+    pub(crate) fn establish_relationship(
+        &self,
+        counterparty_devid: [u8; 32],
+    ) -> Result<Self, DsmError> {
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(
             &self.devid,
             &counterparty_devid,
@@ -998,9 +1006,11 @@ impl DeviceState {
             tips.iter()
                 .map(|(rel_key, tip)| (*rel_key, tip.chain_tip))
                 .chain(extra_leaves.iter().map(|(key, value)| (*key, *value)))
-                .chain(offline_accounts.iter().map(|(bundle, account)| {
-                    (offline_account_leaf_key(bundle), account.root())
-                })),
+                .chain(
+                    offline_accounts.iter().map(|(bundle, account)| {
+                        (offline_account_leaf_key(bundle), account.root())
+                    }),
+                ),
         )
     }
 
@@ -3994,7 +4004,10 @@ pub(crate) mod tests {
             )
         };
         let refused = |restored: Result<RealizedHead, DsmError>, why: &str| match restored {
-            Err(e) => assert!(e.to_string().contains("is not the stored root"), "{why}: {e}"),
+            Err(e) => assert!(
+                e.to_string().contains("is not the stored root"),
+                "{why}: {e}"
+            ),
             Ok(head) => panic!("{why}: restored at root {:?}", head.root()),
         };
         let extra = live.extra_leaves_snapshot().clone();

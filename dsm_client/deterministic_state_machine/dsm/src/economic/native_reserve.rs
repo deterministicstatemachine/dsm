@@ -74,9 +74,17 @@ use crate::types::proto as generated;
 type D32 = [u8; 32];
 
 /// The whole distributable ERA supply of one network at genesis, in base
-/// units: 80,000,000,000.00 ERA at ERA's two decimals (SoFi Amendment S18).
-/// Nothing is minted after it; every unit in circulation was released from it.
-pub const ERA_RESERVE_GENESIS_SUPPLY: u64 = 8_000_000_000_000;
+/// units: ERA's committed genesis supply, read from ERA's policy (SoFi
+/// Amendment S11), never a figure of the reserve's own. Nothing is minted
+/// after it; every unit in circulation was released from it.
+pub fn reserve_genesis_supply() -> Result<u64, crate::types::error::DsmError> {
+    let supply = crate::core::token::era_policy::era_policy()?.genesis_supply;
+    u64::try_from(supply).map_err(|e| {
+        crate::types::error::DsmError::invalid_operation(format!(
+            "ERA's committed genesis supply {supply} does not fit a reserve state: {e}"
+        ))
+    })
+}
 
 /// What one beta faucet claim releases, in base units: 100.00 ERA (SoFi
 /// Amendment S18). The claim names no amount: the beta claim policy fixes it,
@@ -153,15 +161,19 @@ pub struct NativeReserveState {
 }
 
 impl NativeReserveState {
-    /// `R_0` for one network: the whole genesis supply, generation 0.
-    pub fn genesis(network_id: &[u8], storage_set_id: D32) -> Self {
-        Self {
+    /// `R_0` for one network: ERA's whole committed genesis supply,
+    /// generation 0.
+    pub fn genesis(
+        network_id: &[u8],
+        storage_set_id: D32,
+    ) -> Result<Self, crate::types::error::DsmError> {
+        Ok(Self {
             reserve_id: era_reserve_id(network_id),
             policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
-            remaining_supply: ERA_RESERVE_GENESIS_SUPPLY,
+            remaining_supply: reserve_genesis_supply()?,
             generation: 0,
             storage_set_id,
-        }
+        })
     }
 
     /// `R_n`.
@@ -428,6 +440,8 @@ pub enum ReleaseRefusal {
     ForeignSet,
     /// Releases nothing.
     ZeroRelease,
+    /// Nothing remains: all of the genesis supply has been released.
+    Exhausted,
     /// Releases more than remains: the one arm that would mint.
     ExceedsReserve { remaining: u64, amount: u64 },
     /// Signed by a key that is not the recipient device's: `derive_devid(key,
@@ -452,6 +466,10 @@ impl core::fmt::Display for ReleaseRefusal {
             }
             Self::ForeignSet => write!(f, "release names a foreign storage set"),
             Self::ZeroRelease => write!(f, "release of zero"),
+            Self::Exhausted => write!(
+                f,
+                "the reserve is exhausted: all of its genesis supply has been released"
+            ),
             Self::ExceedsReserve { remaining, amount } => write!(
                 f,
                 "release of {amount} exceeds the {remaining} remaining — no valid reserve \
@@ -470,6 +488,22 @@ impl core::fmt::Display for ReleaseRefusal {
 }
 
 impl std::error::Error for ReleaseRefusal {}
+
+/// Whether a faucet claim may be made at the reserve state `parent`: the
+/// question a claimant answers before it signs or writes anything (SoFi
+/// Amendment S11, MR-SOFI-0337). At exhaustion the claim is refused; where
+/// less than one payout remains, no release the claim policy allows is the
+/// successor of `parent`.
+pub fn faucet_claim_admissible(parent: &NativeReserveState) -> Result<(), ReleaseRefusal> {
+    match parent.remaining_supply {
+        0 => Err(ReleaseRefusal::Exhausted),
+        remaining if remaining < ERA_FAUCET_PAYOUT => Err(ReleaseRefusal::ExceedsReserve {
+            remaining,
+            amount: ERA_FAUCET_PAYOUT,
+        }),
+        _ => Ok(()),
+    }
+}
 
 /// The ONE transition of the reserve. Given the validated parent state and a
 /// verified release, the successor state — or why the release is not one.
@@ -790,7 +824,12 @@ mod tests {
     }
 
     fn genesis() -> NativeReserveState {
-        NativeReserveState::genesis(NETWORK, committed_set_id())
+        NativeReserveState::genesis(NETWORK, committed_set_id()).expect("R_0")
+    }
+
+    /// ERA's committed genesis supply, as the reserve reads it.
+    fn supply() -> u64 {
+        reserve_genesis_supply().expect("ERA's genesis supply")
     }
 
     fn body(parent: &NativeReserveState, amount: u64, pk: &[u8]) -> NativeReserveReleaseBody {
@@ -842,7 +881,7 @@ mod tests {
             seats.route,
             crate::route_chain::Route::of(&r0.successor_seed(), &committed_set()).unwrap()
         );
-        let other = NativeReserveState::genesis(NETWORK, [0x77; 32]);
+        let other = NativeReserveState::genesis(NETWORK, [0x77; 32]).expect("R_0");
         assert!(matches!(
             SuccessorCell::of(&other, &committed_set()),
             Err(CellError::NotTheCommittedSet { .. })
@@ -862,10 +901,64 @@ mod tests {
         );
     }
 
+    /// SoFi Amendment S11, MR-SOFI-0337: the reserve is exhausted exactly when
+    /// all of it has been released, and at exhaustion a claim is refused
+    /// before anything is signed. From a state two payouts from the end, two
+    /// claims are admissible and their releases construct; the reserve is
+    /// then exhausted, the next claim is refused, and no release succeeds the
+    /// exhausted state. A state holding less than one payout refuses too.
+    ///
+    /// MUTATION CONTROL: dropping the `0` arm of `faucet_claim_admissible`
+    /// turns the exhaustion assertion red.
+    #[test]
+    fn a_claim_at_exhaustion_is_refused_before_a_release_is_signed() {
+        let mut state = NativeReserveState {
+            remaining_supply: 2 * ERA_FAUCET_PAYOUT,
+            ..genesis()
+        };
+        for _ in 0..2 {
+            faucet_claim_admissible(&state).expect("a payout remains");
+            state = release_constructible(&state, &signed(&state, ERA_FAUCET_PAYOUT))
+                .expect("the release succeeds its parent");
+        }
+        assert_eq!(state.remaining_supply, 0, "all of it has been released");
+        assert_eq!(
+            faucet_claim_admissible(&state),
+            Err(ReleaseRefusal::Exhausted)
+        );
+        assert_eq!(
+            release_constructible(&state, &signed(&state, ERA_FAUCET_PAYOUT)),
+            Err(ReleaseRefusal::ExceedsReserve {
+                remaining: 0,
+                amount: ERA_FAUCET_PAYOUT,
+            }),
+            "no release succeeds an exhausted reserve"
+        );
+        let short = NativeReserveState {
+            remaining_supply: ERA_FAUCET_PAYOUT - 1,
+            ..genesis()
+        };
+        assert_eq!(
+            faucet_claim_admissible(&short),
+            Err(ReleaseRefusal::ExceedsReserve {
+                remaining: ERA_FAUCET_PAYOUT - 1,
+                amount: ERA_FAUCET_PAYOUT,
+            })
+        );
+    }
+
     #[test]
     fn the_genesis_state_holds_the_whole_supply_at_generation_zero() {
         let r0 = genesis();
-        assert_eq!(r0.remaining_supply, ERA_RESERVE_GENESIS_SUPPLY);
+        // ERA's committed genesis supply, 80,000,000,000.00 ERA in base units
+        // (SoFi Amendments S11 and S18): the reserve starts from the policy.
+        assert_eq!(
+            u128::from(r0.remaining_supply),
+            crate::core::token::era_policy::era_policy()
+                .expect("ERA's policy")
+                .genesis_supply
+        );
+        assert_eq!(r0.remaining_supply, 8_000_000_000_000);
         assert_eq!(r0.generation, 0);
         assert_eq!(
             r0.policy_commit,
@@ -1050,10 +1143,7 @@ mod tests {
             let release = signed(&state, amount);
             state = release_constructible(&state, &release).expect("constructible");
             released += amount;
-            assert_eq!(
-                state.remaining_supply + released,
-                ERA_RESERVE_GENESIS_SUPPLY
-            );
+            assert_eq!(state.remaining_supply + released, supply());
         }
         assert_eq!(state.generation, 4);
     }
@@ -1161,7 +1251,7 @@ mod tests {
         let r0 = genesis();
         let release = signed(&r0, ERA_FAUCET_PAYOUT);
         // Signed, canonical, succeeding R_0 — and releasing more than exists.
-        let too_much = signed(&r0, ERA_RESERVE_GENESIS_SUPPLY + 1);
+        let too_much = signed(&r0, supply() + 1);
         let (at, mut cell) = successor_cell(&r0);
         cell.write(b"not a release", 0, &[]);
         cell.write(&too_much.envelope_bytes, 0, &[]);
@@ -1265,10 +1355,7 @@ mod tests {
         );
         assert_eq!(stop, Ok(WalkStop::Head(r2)));
         assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
-        assert_eq!(
-            r2.remaining_supply,
-            ERA_RESERVE_GENESIS_SUPPLY - 2 * ERA_FAUCET_PAYOUT
-        );
+        assert_eq!(r2.remaining_supply, supply() - 2 * ERA_FAUCET_PAYOUT);
     }
 
     #[test]

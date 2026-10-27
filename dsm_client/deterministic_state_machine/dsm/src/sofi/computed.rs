@@ -317,11 +317,6 @@ impl VerifiedTranscript {
         self.heads.get(index as usize)
     }
 
-    /// The head after the last entry.
-    pub fn last_head(&self) -> &D32 {
-        &self.heads[self.heads.len() - 1]
-    }
-
     /// The opened entries, in order: what the program sees.
     pub fn opened(&self) -> &[Opened] {
         &self.opened

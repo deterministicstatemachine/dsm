@@ -875,6 +875,13 @@ fn verify_genesis_release(
             "the token's policy names another creator".into(),
         ));
     }
+    // The recipient allowlist governs who may receive issuance (SoFi §49): a
+    // policy that names recipients releases its supply only to one of them.
+    if !policy.admits_issuance_to(ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's recipient allowlist does not name its creator".into(),
+        ));
+    }
     let amount = u64::try_from(policy.genesis_supply).map_err(|_| {
         ProvenanceError::GenesisReleaseInvalid(
             "the genesis supply exceeds what one balance can hold".into(),

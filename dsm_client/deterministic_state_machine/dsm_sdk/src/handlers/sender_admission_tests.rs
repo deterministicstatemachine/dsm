@@ -79,6 +79,13 @@ pub(super) fn non_transferable_request(ticker: &str) -> crate::generated::TokenC
     request
 }
 
+/// A token whose policy refuses every burn.
+pub(super) fn non_burnable_request(ticker: &str) -> crate::generated::TokenCreateRequest {
+    let mut request = create_request(ticker, 2, 1_000);
+    request.burn_enabled = false;
+    request
+}
+
 fn payload(result: &AppResult) -> crate::generated::envelope::Payload {
     assert!(result.success, "{:?}", result.error_message);
     crate::generated::Envelope::decode(&result.data[1..])
@@ -395,9 +402,7 @@ async fn a_burn_is_entered_in_token_units_and_debits_its_base_units() {
 #[serial]
 async fn a_burn_disabled_token_refuses_its_burn() {
     let d = Device::funded(0xC6).await;
-    let mut request = create_request("NOBN", 2, 1_000);
-    request.burn_enabled = false;
-    let created = invoke(&d.router, "token.create", &request).await;
+    let created = invoke(&d.router, "token.create", &non_burnable_request("NOBN")).await;
     match payload(&created) {
         crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
         other => panic!("expected TokenCreateResponse, got {other:?}"),
@@ -432,6 +437,66 @@ async fn a_burn_disabled_token_refuses_its_burn() {
     assert!(
         head.pending_economic_admission().is_none(),
         "nothing left pending"
+    );
+}
+
+/// SoFi §49, MR-SOFI-0312: a creation issues the whole supply to its creator,
+/// and Core releases issuance only to a recipient the allowlist admits. A
+/// creation whose allowlist leaves the creating device out is refused before
+/// anything is signed or written; the same creation naming the device among
+/// its recipients is created.
+///
+/// MUTATION CONTROL: dropping the `admits_issuance_to` refusal from
+/// `token.create` turns this red: the advance commits and its admission is
+/// refused by Core after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_creation_whose_allowlist_leaves_its_creator_out_is_refused_before_it_is_written() {
+    let d = Device::funded(0xC7).await;
+    let position = admitted_position();
+    let mut request = create_request("LEFT", 2, 1_000);
+    request.allowlist_device_ids = vec![vec![0x77; 32]];
+    let refused = invoke(&d.router, "token.create", &request).await;
+    assert!(
+        !refused.success,
+        "a creation its allowlist leaves out must be refused"
+    );
+    let Some(why) = refused.error_message.clone() else {
+        panic!("a refusal says why");
+    };
+    assert!(
+        why.contains("allowlist must name this device"),
+        "refused by the allowlist, not for another reason: {why}"
+    );
+    assert!(
+        client_db::token_registry::get_token_by_ticker("LEFT")
+            .expect("registry read")
+            .is_none(),
+        "no registry row"
+    );
+    assert_eq!(admitted_position(), position, "no position was admitted");
+    let head = d.core().device_head().expect("head");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "nothing left pending"
+    );
+
+    request.allowlist_device_ids = vec![vec![0x77; 32], head.devid().to_vec()];
+    let created = invoke(&d.router, "token.create", &request).await;
+    match payload(&created) {
+        crate::generated::envelope::Payload::TokenCreateResponse(_) => {}
+        other => panic!("expected TokenCreateResponse, got {other:?}"),
+    }
+    let row = client_db::token_registry::get_token_by_ticker("LEFT")
+        .expect("registry read")
+        .expect("registry row committed with the advance");
+    assert_eq!(
+        d.core()
+            .device_head()
+            .expect("head")
+            .balance(&row.policy_commit),
+        1_000 * 100,
+        "the creator the allowlist names receives the whole supply"
     );
 }
 
@@ -902,6 +967,205 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     p.b.enter();
     let b_head = p.b.router().core_sdk.device_head().expect("B's head");
     assert_eq!(b_head.balance(&row.policy_commit), 0, "nothing reached B");
+}
+
+/// G13, MR-DSM-0029: the receiver holds the payer's signed parent to the
+/// payer's head it pinned before it reads anything of the payer's register.
+/// A pays B honestly and B applies it, pinning A's head after that step. A
+/// then forks its own chain: it signs a second transfer to B on the head it
+/// held before the honest one, advances that stale copy over it, and signs
+/// the step's receipt with its per-step EK. Both halves reach B's boundary
+/// and bind. B's sync refuses the pair because its signed parent is not the
+/// head B pinned, and no member is asked for a cell while it does.
+///
+/// MUTATION CONTROL: dropping the pinned-head check in `complete_staged_pairs`
+/// turns this red: B reads A's register before it refuses the fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before_the_senders_register_is_read(
+) {
+    use crate::handlers::recipient_dispatch::{ingest_evidence_half, ingest_transfer_half};
+    use crate::storage::client_db::recipient_staging::{self, PairState};
+    use crate::test_support::receipts::Party;
+    use dsm::types::device_state::{BalanceDelta, BalanceDirection};
+    use dsm::types::receipt_types::{compute_receipt_challenge_response_target, StitchedReceiptV2};
+
+    let p = Pair::boot(100, 0).await;
+    let era = era();
+
+    // What A holds before its honest payment: the head and its tip with B.
+    p.a.enter();
+    let stale_head = p.a.router().core_sdk.device_head().expect("A's head");
+    let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+        .expect("A's contacts")
+        .expect("A holds B as a contact");
+    let stale_tip = crate::handlers::app_router_impl::contact_relationship_tip(&b_contact)
+        .expect("A's relationship tip with B");
+    let stale_position = admitted_position() + 1;
+
+    // The honest payment, applied by B.
+    let sent = p.a.send_token(&p.b, "ERA", 10).await;
+    assert!(sent.success, "A pays B: {:?}", sent.error_message);
+    let synced = p.b.sync().await;
+    assert!(
+        synced.errors.is_empty(),
+        "B applies it: {:?}",
+        synced.errors
+    );
+    p.b.enter();
+    assert_eq!(
+        p.b.router()
+            .core_sdk
+            .device_head()
+            .expect("B's head")
+            .balance(&era),
+        10,
+        "B holds the honest payment"
+    );
+
+    // A's fork: a transfer signed on the stale tip, as its send would sign it.
+    p.a.enter();
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"ERA".to_vec(),
+        crate::handlers::app_router_impl::transfer_nonce(&stale_tip, 7, "ERA", &p.b.device_id),
+        dsm::types::operations::TransactionMode::Unilateral,
+        String::new(),
+    );
+    let unsigned = dsm::types::operations::Operation::Transfer {
+        to_device_id: p.b.device_id.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(7),
+        policy_commit: era,
+        terms_commitment: terms.commitment(),
+        signature: Vec::new(),
+        authority_policy: None,
+    };
+    let canonical = unsigned.to_bytes();
+    let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
+        &canonical,
+    )
+    .expect("A signs");
+    let signed =
+        dsm::types::operations::Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+
+    // The stale head's step over it, and the step's receipt, signed by A's
+    // per-step EK as its wallet signs a send's receipt.
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&p.a.device_id, &p.b.device_id);
+    let outcome = stale_head
+        .advance(
+            rel_key,
+            p.b.device_id,
+            signed,
+            &[BalanceDelta {
+                policy_commit: era,
+                direction: BalanceDirection::Debit,
+                amount: 7,
+            }],
+            None,
+        )
+        .expect("the stale head advances over the fork");
+    let mut receipt = StitchedReceiptV2::of_step(
+        p.a.genesis,
+        p.a.device_id,
+        p.b.device_id,
+        &outcome,
+        None,
+        &crate::sdk::app_state::AppState::get_device_tree_commitment()
+            .expect("A's Device Tree commitment"),
+    )
+    .expect("the step's receipt");
+    assert_ne!(
+        Some(receipt.parent_tip),
+        p.a.router()
+            .core_sdk
+            .device_head()
+            .expect("A's head")
+            .chain_tip(&rel_key),
+        "the fork's parent is not A's head with B: A moved past it"
+    );
+    let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
+    assert_eq!(a.device_id(), p.a.device_id, "the harness's A is seed 0x0A");
+    let commitment = receipt.compute_commitment().expect("the commitment");
+    let target = compute_receipt_challenge_response_target(&commitment, &commitment);
+    let c_pre = dsm::core::bilateral_transaction_manager::compute_precommit(
+        &stale_tip,
+        &canonical,
+        &outcome.transition_entropy(),
+    );
+    let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
+    receipt.set_ek_pk_a(answer.ek_pk);
+    receipt.set_ek_cert_a(answer.ek_cert);
+    receipt.set_kyber_ct_a(answer.kyber_ct);
+    receipt.add_sig_a(answer.sig);
+    let receipt_bytes = receipt.to_full_protobuf().expect("the signed receipt");
+    let transfer_bytes = dsm::types::proto::OnlineTransferRequest {
+        signature,
+        canonical_operation_bytes: canonical,
+        sender_economic_position: stale_position,
+        sender_debit_mutation_index: 0,
+        transfer_terms: terms.to_bytes(),
+    }
+    .encode_to_vec();
+
+    // Both halves reach B's boundary on B's route for A, and bind.
+    p.b.enter();
+    let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
+        .expect("B's contacts")
+        .expect("B holds A as a contact");
+    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+        &p.b.genesis,
+        &p.b.device_id,
+        &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
+            .expect("B's relationship tip with A"),
+    )
+    .expect("B's route for A");
+    ingest_transfer_half(
+        &transfer_bytes,
+        &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
+        &route,
+        &client_db::derive_submission_id(&commitment),
+    )
+    .expect("the transfer half is ingested");
+    ingest_evidence_half(
+        &receipt_bytes,
+        &route,
+        &crate::util::text_id::encode_base32_crockford(&commitment[..16]),
+    )
+    .expect("the evidence half is ingested");
+    let pairs = recipient_staging::pairs_in_flight().expect("pairs");
+    assert!(
+        matches!(pairs.as_slice(), [pair] if pair.state == PairState::Bound),
+        "the pair binds"
+    );
+
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let synced = p.b.sync().await;
+    for node in &p.nodes.nodes {
+        for request in node.requests() {
+            assert!(
+                !request.starts_with("GET /api/v2/cell/"),
+                "{} was asked for a cell while B refused a fork of the head it pinned: \
+                 {request}",
+                node.member_id
+            );
+        }
+    }
+    assert!(
+        synced
+            .errors
+            .iter()
+            .any(|e| e.contains("the signed parent is not the sender's head this device pinned")),
+        "B refuses by the head it pinned: {:?}",
+        synced.errors
+    );
+    p.b.enter();
+    let b_head = p.b.router().core_sdk.device_head().expect("B's head");
+    assert_eq!(b_head.balance(&era), 10, "nothing of the fork reached B");
 }
 
 /// Token creation through its route, end to end: the fee debit and the

@@ -20,8 +20,8 @@ use dsm::economic::credit::{CreditSource, CreditSourceNativeReserveRelease};
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::native_reserve::{
     era_reserve_id, release_constructible, release_evidence_addr, release_source_id, sign_release,
-    NativeReserveReleaseBody, NativeReserveState, ReleaseSource, ERA_FAUCET_PAYOUT,
-    ERA_RESERVE_GENESIS_SUPPLY,
+    reserve_genesis_supply, NativeReserveReleaseBody, NativeReserveState, ReleaseSource,
+    ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::provenance::{
     verify_credit_source, PeerLineageFailure, ProvenanceContext, ProvenanceError,
@@ -68,7 +68,7 @@ fn claim_op(reserve_id: [u8; 32], generation: u64) -> Operation {
 }
 
 fn genesis() -> NativeReserveState {
-    NativeReserveState::genesis(NETWORK, SET_ID)
+    NativeReserveState::genesis(NETWORK, SET_ID).expect("R_0")
 }
 
 /// A signed release succeeding `parent`, plus the witness of the transition
@@ -364,7 +364,7 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
         parent = release_constructible(&parent, &release).expect("the walk's next state");
         assert_eq!(
             parent.remaining_supply + credited,
-            ERA_RESERVE_GENESIS_SUPPLY
+            reserve_genesis_supply().expect("ERA's genesis supply")
         );
     }
     assert_eq!(parent.generation, 3);
