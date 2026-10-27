@@ -83,6 +83,32 @@ pub(super) fn era() -> [u8; 32] {
 }
 
 /// Create a token on `d` and return its policy commit.
+/// `vault_id`'s accepted genesis root, as `verifier` accepts it: the first
+/// root of every chain walked from the vault's genesis.
+fn genesis_root_of<R: dsm::sofi::resolve::SofiReads + ?Sized>(
+    verifier: &dsm::sofi::resolve::Verifier<'_, R>,
+    vault_id: &[u8; 32],
+) -> [u8; 32] {
+    match verifier
+        .vault_genesis(vault_id)
+        .expect("the vault's genesis reads")
+    {
+        dsm::sofi::resolve::VaultGenesis::Accepted(accepted) => *accepted.genesis_root(),
+        other => panic!("the vault's genesis is accepted: {other:?}"),
+    }
+}
+
+/// The generation of `chain`'s head: how many generations past its first it
+/// established.
+fn head_generation(chain: &dsm::sofi::resolution::VaultChain) -> u64 {
+    chain.head().expect("an established chain has a head").0
+}
+
+/// The root at `chain`'s head.
+fn head_root(chain: &dsm::sofi::resolution::VaultChain) -> [u8; 32] {
+    chain.head().expect("an established chain has a head").1
+}
+
 pub(super) async fn create_token(d: &TestDevice, ticker: &str, supply: u128) -> [u8; 32] {
     let r = invoke(
         d,
@@ -1170,7 +1196,7 @@ async fn a_key_whose_fulfillment_can_never_register_is_skipped_without_its_evide
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    let r0 = chain.roots()[0];
+    let r0 = genesis_root_of(&verifier, &m.vault_id);
     let held = verifier
         .read_attempt_cell(&m.vault_id, &r0, 0)
         .expect("read")
@@ -1276,8 +1302,8 @@ async fn a_skipped_key_is_judged_once_by_the_process() {
         let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
         let verifier = ctx.verifier();
         let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-        let r0 = chain.roots()[0];
-        let roots = chain.roots().to_vec();
+        let r0 = genesis_root_of(&verifier, &m.vault_id);
+        let roots = (r0, chain.head());
         let chains = BTreeMap::from([(m.vault_id, chain)]);
         let walked = verifier
             .walk_parent(&chains, &m.vault_id, &r0, 0, WALK_BUDGET)
@@ -1327,7 +1353,7 @@ async fn a_skipped_key_is_judged_once_by_the_process() {
         "the kept judgement walks as the fresh one did"
     );
     assert!(
-        kept.contains(&open_key(&judged.0[0])),
+        kept.contains(&open_key(&judged.0 .0)),
         "the open key is read again"
     );
     assert!(
@@ -1364,7 +1390,7 @@ async fn a_consumed_key_is_judged_again_by_every_walk() {
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    let r0 = chain.roots()[0];
+    let r0 = genesis_root_of(&verifier, &m.vault_id);
     let chains = BTreeMap::from([(m.vault_id, chain)]);
     crate::sdk::sofi_reads::forget_judgements();
     let walked = verifier
@@ -1681,8 +1707,8 @@ async fn a_key_held_by_an_exercise_its_own_bytes_refute_is_skipped_on_those_byte
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
-    let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
+    assert_eq!(head_generation(&chain), 1, "genesis and one consumption");
+    let (r0, r1) = (genesis_root_of(&verifier, &m.vault_id), head_root(&chain));
 
     // B's exercise, read back from the key it consumed, and re-aimed.
     let honest = verifier
@@ -1856,8 +1882,8 @@ async fn an_unsigned_exercise_at_a_successor_key_takes_nothing() {
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
-    let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
+    assert_eq!(head_generation(&chain), 1, "genesis and one consumption");
+    let (r0, r1) = (genesis_root_of(&verifier, &m.vault_id), head_root(&chain));
     let honest = verifier
         .read_attempt_cell(&m.vault_id, &r0, 0)
         .expect("read")
@@ -1919,8 +1945,8 @@ async fn junk_at_more_attempt_keys_than_one_walk_examines_is_walked_past() {
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    assert_eq!(chain.roots().len(), 2, "genesis and one consumption");
-    let (r0, r1) = (chain.roots()[0], chain.roots()[1]);
+    assert_eq!(head_generation(&chain), 1, "genesis and one consumption");
+    let (r0, r1) = (genesis_root_of(&verifier, &m.vault_id), head_root(&chain));
     let honest = verifier
         .read_attempt_cell(&m.vault_id, &r0, 0)
         .expect("read")
@@ -1984,8 +2010,8 @@ async fn junk_at_more_attempt_keys_than_one_walk_examines_is_walked_past() {
         .chain(&m.vault_id)
         .expect("the owner's chain");
     assert_eq!(
-        walked.roots().len(),
-        3,
+        head_generation(&walked),
+        2,
         "genesis, B's first trade, and B's trade past the junk"
     );
 }
@@ -2020,8 +2046,8 @@ async fn an_exercise_carrying_other_bytes_than_its_closure_holds_no_key() {
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    assert_eq!(chain.roots().len(), 1, "the vault is at its genesis");
-    let r0 = chain.roots()[0];
+    assert_eq!(head_generation(&chain), 0, "the vault is at its genesis");
+    let r0 = genesis_root_of(&verifier, &m.vault_id);
     let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
     let attempt_leader = member_name(attempt.routed().route().leader());
 
@@ -2178,11 +2204,7 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     let pair_leader = member_name(pair.fulfillment().route().leader());
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
 
     // B trades; its pair's leader refuses the pair, so the trade stops
     // before anything is written at the pair or the vault.
@@ -2386,11 +2408,7 @@ async fn a_relay_rebuilds_an_exercise_no_key_holds_from_public_objects() {
     let q = admitted_position(&p.b) + 1;
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
     let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the vault's first key");
     let key_leader = member_name(key.routed().route().leader());
 
@@ -2492,11 +2510,7 @@ async fn an_exercise_naming_a_vault_its_precommit_has_no_leg_for_does_not_freeze
     let pair_leader = member_name(pair.fulfillment().route().leader());
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
 
     // B trades with its pair refused, so nothing of it is written; B's P,
     // P(E) and F are published.
@@ -2668,11 +2682,7 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
         .expect("B's next position pair");
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
     let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
     // Every seat after the leader refuses B's exercise.
     for seat in &attempt.routed().route().seats()[1..] {
@@ -2753,11 +2763,7 @@ async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk
     let q = admitted_position(&p.b) + 1;
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
     let attempt = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the first attempt key");
     let seats: Vec<String> = attempt.routed().route().seats()[1..]
         .iter()
@@ -2956,7 +2962,7 @@ async fn a_root_cell_naming_the_fulfillment_with_another_body_is_invalid_for_the
     let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    let r0 = chain.roots()[0];
+    let r0 = genesis_root_of(&verifier, &m.vault_id);
     assert!(
         verifier
             .read_attempt_cell(&m.vault_id, &r0, 0)
@@ -3165,7 +3171,7 @@ async fn nothing_but_the_leaders_first_fulfillment_decides_k_ful() {
         .verifier()
         .chain(&m.vault_id)
         .expect("the owner's chain");
-    assert_eq!(walked.roots().len(), 2, "genesis and B's trade");
+    assert_eq!(head_generation(&walked), 1, "genesis and B's trade");
 
     // And q + 1 is the open position it is: nothing at its leader.
     let (own, parents) = standing_of(&p.b);
@@ -3261,10 +3267,7 @@ async fn a_position_reads_the_same_before_and_after_a_precommit_is_published() {
     let r0 = {
         let (own, parents) = standing_of(&p.b);
         let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-        ctx.verifier()
-            .chain(&m.vault_id)
-            .expect("the vault's chain")
-            .roots()[0]
+        genesis_root_of(&ctx.verifier(), &m.vault_id)
     };
 
     // B's own P_a at p, not published, and B's own F_a naming it at q.
@@ -3440,9 +3443,14 @@ async fn a_trade_cut_short_by_a_refused_write_is_the_network_status_until_it_lan
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let verifier = ctx.verifier();
     let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
-    assert_eq!(chain.roots().len(), 1, "the vault is at its genesis");
-    let attempt =
-        attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");
+    assert_eq!(head_generation(&chain), 0, "the vault is at its genesis");
+    let attempt = attempt_cell(
+        &set,
+        &m.vault_id,
+        &genesis_root_of(&verifier, &m.vault_id),
+        0,
+    )
+    .expect("the first attempt key");
     let attempt_leader = member_name(attempt.routed().route().leader());
 
     // 1. The pair's leader refuses the pair: the trade is the network status
@@ -3545,12 +3553,13 @@ async fn a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realiz
     // The vault's first key at its genesis root, refused at its leader.
     let (own, parents) = standing_of(&p.b);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let chain = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain");
-    let attempt =
-        attempt_cell(&set, &m.vault_id, &chain.roots()[0], 0).expect("the first attempt key");
+    let attempt = attempt_cell(
+        &set,
+        &m.vault_id,
+        &genesis_root_of(&ctx.verifier(), &m.vault_id),
+        0,
+    )
+    .expect("the first attempt key");
     let attempt_leader = member_name(attempt.routed().route().leader());
     p.nodes
         .refuse_cell_writes(&attempt_leader, &[*attempt.routed().key()])
@@ -5145,11 +5154,7 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
     let set = canonical_set(NETWORK).expect("the pinned set");
     let (own, parents) = standing_of(&p.a);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-    let r0 = ctx
-        .verifier()
-        .chain(&m.vault_id)
-        .expect("the vault's chain")
-        .roots()[0];
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
     let head = format!(
         "GET /api/v2/cell/{}",
         crate::util::text_id::encode_base32_crockford(
@@ -5911,7 +5916,7 @@ async fn one_resolution_asks_each_node_for_a_final_cell_or_an_object_once() {
     let mut open = Vec::new();
     for vault_id in [one, two] {
         let chain = verifier.chain(&vault_id).expect("the vault's chain");
-        let head = *chain.roots().last().expect("the vault's head");
+        let head = head_root(&chain);
         assert_eq!(
             verifier
                 .read_attempt_cell(&vault_id, &head, 0)
@@ -6107,11 +6112,7 @@ async fn a_final_vault_key_is_relied_on_only_through_a_proof_fresh_reads_hold() 
     let root = {
         let (own, parents) = standing_in(&p.b);
         let reading = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
-        let chain = reading
-            .verifier()
-            .chain(&m.vault_id)
-            .expect("the vault's chain");
-        *chain.roots().first().expect("the vault's first root")
+        genesis_root_of(&reading.verifier(), &m.vault_id)
     };
     let cell = attempt_cell(&set, &m.vault_id, &root, 0).expect("the consumed key");
     let relied = consumed_key_reading(&p, &set, &m.vault_id, &root);

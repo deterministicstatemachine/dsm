@@ -82,11 +82,6 @@ impl VerifiedFrontier {
     pub fn commitment(&self) -> &D32 {
         &self.commitment
     }
-
-    /// The owner authority the baseline's signer was proven to hold.
-    pub fn owner(&self) -> &OwnerAuthorityAtPosition {
-        &self.owner
-    }
 }
 
 fn invalid(msg: impl Into<String>) -> ResolveFailure {
@@ -485,9 +480,6 @@ impl VaultWitness {
     /// The trader whose relationship this witness proves.
     pub fn trader(&self) -> (&D32, &D32) {
         (&self.trader_genesis, &self.trader_device_id)
-    }
-    pub fn relationship(&self) -> Option<&VaultRelationshipLeaf> {
-        self.relationship.as_ref()
     }
     pub fn relationship_path(&self) -> &Path {
         &self.relationship_path

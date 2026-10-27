@@ -331,10 +331,6 @@ impl VerdictCell {
         })
     }
 
-    pub fn key(&self) -> &D32 {
-        &self.key
-    }
-
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
     }
@@ -394,11 +390,6 @@ impl VerdictCellRead {
     /// The verdict holding the cell, if any.
     pub fn verdict(&self) -> Option<&EscrowVerdict> {
         self.held.as_ref().map(|(verdict, _)| verdict)
-    }
-
-    /// The exact bytes of the verdict holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     /// Why each value the leader holds ahead of the one deciding the cell

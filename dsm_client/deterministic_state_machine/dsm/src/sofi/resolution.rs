@@ -376,12 +376,6 @@ impl VaultChain {
         Ok(chain)
     }
 
-    /// `R*_g` for every generation established, in generation order, from
-    /// [`Self::base`].
-    pub fn roots(&self) -> &[[u8; 32]] {
-        &self.roots
-    }
-
     /// The generation the chain starts at.
     pub fn base(&self) -> u64 {
         self.base
@@ -1170,18 +1164,8 @@ impl AttemptWalk {
         &self.parent_root
     }
 
-    /// The attempt the walk started at.
-    pub fn base(&self) -> u64 {
-        self.base
-    }
-
     pub fn outcome(&self) -> WalkOutcome {
         self.outcome
-    }
-
-    /// `E` of the exercise that consumed the parent, when the walk found one.
-    pub fn consumed_by(&self) -> Option<&[u8; 32]> {
-        self.consumed_by.as_ref()
     }
 
     /// `AttemptLive(K^(attempt))` — every key before `attempt` skipped — and
@@ -1408,13 +1392,13 @@ mod tests {
         let (r1, r2) = ([0xA1; 32], [0xA2; 32]);
 
         assert_eq!(
-            VaultChain::from_recorded(&genesis, &[]).unwrap().roots(),
+            VaultChain::from_recorded(&genesis, &[]).unwrap().roots,
             &[g][..],
             "no rows: the chain is the genesis alone"
         );
         let rows = recorded(&g, &[r1, r2]);
         assert_eq!(
-            VaultChain::from_recorded(&genesis, &rows).unwrap().roots(),
+            VaultChain::from_recorded(&genesis, &rows).unwrap().roots,
             &[g, r1, r2][..]
         );
 
@@ -2439,7 +2423,7 @@ mod tests {
         let consumed = walk(&V, &PRE, 0, 16, facts_for);
         assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 3 });
         assert_eq!(
-            consumed.consumed_by(),
+            consumed.consumed_by.as_ref(),
             Some(&E),
             "the walk names who consumed"
         );

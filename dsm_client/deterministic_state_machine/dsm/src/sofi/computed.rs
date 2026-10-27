@@ -814,11 +814,6 @@ impl ComputedCells {
         &self.start_key
     }
 
-    /// `P`, the program the terms pin.
-    pub fn program(&self) -> &D32 {
-        &self.program
-    }
-
     pub fn match_routed(&self) -> &RoutedCell {
         &self.match_cell
     }
@@ -920,11 +915,6 @@ impl MatchCellRead {
     /// The occupant holding the cell, if any.
     pub fn occupant(&self) -> Option<&MatchOccupant> {
         self.held.as_ref().map(|(occupant, _)| occupant)
-    }
-
-    /// The exact bytes holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     /// Why each value ahead of the one holding the cell counts as nothing.

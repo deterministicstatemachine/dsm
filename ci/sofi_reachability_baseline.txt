@@ -1,6 +1,7 @@
 # Gate G1 baseline (ci/sofi_reachability.py): pub fns under CORE/sofi that the
-# rebuild has not wired into production yet. One line per function, with the
-# rebuild step expected to wire it. A step that wires one DELETES its line;
+# rebuild has not wired into production yet. One line per function, as
+# `path name` (a method as `path Type::name`), with the rebuild step expected
+# to wire it. A step that wires one DELETES its line;
 # R14 deletes the file and G1 passes with no exceptions.
 #
 # TWO ENTRIES, BOTH THE SAME HOLE (2026-09-24), WIRED AND DELETED (2026-10-24).

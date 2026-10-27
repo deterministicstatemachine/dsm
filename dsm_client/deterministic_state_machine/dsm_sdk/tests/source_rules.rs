@@ -665,3 +665,36 @@ fn a_producer_exercises_only_what_it_has_read_back_stored() {
         "finish_prepared fulfills before it publishes: {finish:?}"
     );
 }
+
+// ── MR-SOFI-0273, MR-SOFI-0268: Gate G1 and rule T1 ────────────────────────
+
+/// Gate G1 (SoFi §37) and rule T1 (§35): every public SoFi function, method
+/// and item has a production caller or user, as the compiler front end
+/// resolves it (`ci/sofi_reachability.py`, rust-analyzer's index of the
+/// workspace; production safety checks run it on the whole tree). This runs
+/// its negative control: on a workspace whose public SoFi method has no
+/// caller and whose public SoFi type nothing uses, beside a called method of
+/// the same name on another type, the gate fails naming both; once
+/// production code calls the method and uses the type, it passes.
+///
+/// MUTATION CONTROL: the gate counting a reference by name instead of by its
+/// resolved symbol, or skipping methods or items, turns this red.
+#[test]
+fn the_reachability_gate_names_an_uncalled_public_sofi_method_and_an_unused_type() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let control = match std::process::Command::new("bash")
+        .arg("ci/sofi_reachability_negative_control.sh")
+        .current_dir(&root)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => panic!("the negative control did not run: {e}"),
+    };
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(control.status.success(), "{said}");
+    assert!(said.contains("G1 negative control:"), "{said}");
+}

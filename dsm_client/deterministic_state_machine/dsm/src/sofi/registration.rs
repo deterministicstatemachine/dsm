@@ -129,11 +129,6 @@ impl PositionCells {
     pub fn root(&self) -> &RootCell {
         &self.root
     }
-
-    /// `R_p`, the root the pair is routed by.
-    pub fn parent_root(&self) -> &D32 {
-        &self.parent_root
-    }
 }
 
 /// `FulfillmentRegistered` at one position as the reads established it,
@@ -161,33 +156,12 @@ pub struct RegistrationRead {
 }
 
 impl RegistrationRead {
-    pub fn genesis(&self) -> &D32 {
-        &self.genesis
-    }
-
-    pub fn device_id(&self) -> &D32 {
-        &self.device_id
-    }
-
-    pub fn position(&self) -> u64 {
-        self.position
-    }
-
-    pub fn parent_root(&self) -> &D32 {
-        &self.parent_root
-    }
-
     pub fn registration(&self) -> &Registration {
         &self.registration
     }
 
     pub fn into_registration(self) -> Registration {
         self.registration
-    }
-
-    /// The id of the claim holding `K_root(q)`'s leader link, if any.
-    pub fn root_claim(&self) -> Option<&D32> {
-        self.root_claim.as_ref()
     }
 
     /// The exact bytes final at `K_root(q)`, if a claim is final there.

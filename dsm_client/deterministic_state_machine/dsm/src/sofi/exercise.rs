@@ -86,11 +86,6 @@ impl RecognizedExercise {
         &self.preimage
     }
 
-    /// The policy-fulfillment witnesses `F` commits.
-    pub fn witnesses(&self) -> &[DlvPolicyFulfillmentBody] {
-        &self.witnesses
-    }
-
     /// The closure objects as carried, in reference order.
     pub fn closure(&self) -> &[Vec<u8>] {
         &self.closure
@@ -360,18 +355,6 @@ impl AttemptCell {
             attempt,
             cell,
         })
-    }
-
-    pub fn vault_id(&self) -> &D32 {
-        &self.vault_id
-    }
-
-    pub fn parent_root(&self) -> &D32 {
-        &self.parent_root
-    }
-
-    pub fn attempt(&self) -> u64 {
-        self.attempt
     }
 
     pub fn routed(&self) -> &RoutedCell {

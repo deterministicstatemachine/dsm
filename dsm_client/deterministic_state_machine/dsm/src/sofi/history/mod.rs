@@ -170,9 +170,6 @@ pub struct ProvenRoot {
 }
 
 impl ProvenRoot {
-    pub fn vault_id(&self) -> &D32 {
-        &self.vault_id
-    }
     pub fn generation(&self) -> u64 {
         self.generation
     }

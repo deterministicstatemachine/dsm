@@ -36,5 +36,7 @@
 # file so every consumer moves together.
 [toolchain]
 channel = "1.98.0"
-components = ["rustfmt", "clippy", "llvm-tools-preview"]
+# rust-analyzer and rust-src: Gate G1 (ci/sofi_reachability.py) resolves
+# callers with rust-analyzer's index, which needs the standard library source.
+components = ["rustfmt", "clippy", "llvm-tools-preview", "rust-analyzer", "rust-src"]
 profile = "minimal"

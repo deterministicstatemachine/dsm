@@ -6532,7 +6532,10 @@ mod tests {
     /// The same operation against an escrow vault of either kind.
     fn escrow_fixture_of(owner_device: D32, terms: EscrowKind, op: EscrowOp) -> Fixture {
         let held = *terms.token();
-        let terms_bytes = terms.encode();
+        let terms_bytes = match &terms {
+            EscrowKind::Signed(terms) => terms.encode(),
+            EscrowKind::Computed(terms) => terms.encode(),
+        };
         let terms_addr = escrow::terms_address_of(&terms_bytes);
         let vault_id = derive::vault_id(&G, &owner_device, P_CREATE);
         let rel_key = derive::relationship_key(&G, &dev(), &vault_id);

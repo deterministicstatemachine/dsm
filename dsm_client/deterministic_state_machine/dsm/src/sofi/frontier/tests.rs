@@ -325,7 +325,10 @@ impl Vault {
             *witness.state_path(),
             self.tree.siblings(&derive::vault_state_key(&self.id))
         );
-        assert_eq!(witness.relationship(), self.relationships.get(&rel_key));
+        assert_eq!(
+            witness.relationship.as_ref(),
+            self.relationships.get(&rel_key)
+        );
         assert_eq!(*witness.relationship_path(), self.tree.siblings(&rel_key));
     }
 }
@@ -349,7 +352,7 @@ fn an_owner_baseline_authenticates_its_frontier() {
         .expect("the owner's baseline");
     assert_eq!(*verified.frontier(), frontier);
     assert_eq!(*verified.commitment(), frontier_commitment(&frontier));
-    assert_eq!(verified.owner().device_id, owner().devid);
+    assert_eq!(verified.owner.device_id, owner().devid);
 }
 
 /// Every binding is load-bearing: each mutation below breaks one, and each

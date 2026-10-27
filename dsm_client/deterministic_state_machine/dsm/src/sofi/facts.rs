@@ -62,10 +62,6 @@ impl InHandRefutation {
         &self.external_commitment
     }
 
-    pub fn fulfillment_id(&self) -> &D32 {
-        &self.fulfillment_id
-    }
-
     pub fn refuted(&self) -> RefutedInHand {
         self.refuted
     }
@@ -336,10 +332,6 @@ pub struct EstablishedFacts {
 }
 
 impl EstablishedFacts {
-    pub fn fulfillment_id(&self) -> &D32 {
-        &self.fulfillment_id
-    }
-
     pub fn external_commitment(&self) -> &D32 {
         &self.external_commitment
     }
@@ -1037,7 +1029,7 @@ mod tests {
         let facts = r.establish(&r.legs()).expect("every read decides");
         let p = &r.exercise.precommit().body;
         let f = &r.exercise.fulfillment().body;
-        assert_eq!(facts.fulfillment_id(), &derive::fulfillment_id(f));
+        assert_eq!(facts.fulfillment_id, derive::fulfillment_id(f));
         assert_eq!(facts.external_commitment(), p.external_commitment());
         assert_eq!(facts.pair, PairStanding::Registered);
         assert_eq!(

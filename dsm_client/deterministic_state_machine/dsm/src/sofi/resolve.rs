@@ -518,10 +518,6 @@ impl LocalLeaves {
         })
     }
 
-    pub fn root(&self) -> D32 {
-        self.root
-    }
-
     /// The `TraderPreBalance` of every balance `core` states as present
     /// before the operation (SoFi Amendment S12): the values the exercise
     /// carries, so that a verifier that is not this device can judge it. A
@@ -765,11 +761,6 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
     pub fn with_programs(mut self, programs: ProgramRegistry) -> Self {
         self.programs = programs;
         self
-    }
-
-    /// The outcome programs this verifier runs.
-    pub fn programs(&self) -> &ProgramRegistry {
-        &self.programs
     }
 }
 

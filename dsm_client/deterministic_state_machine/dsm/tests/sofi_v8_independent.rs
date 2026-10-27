@@ -373,7 +373,6 @@ fn every_object_matches_the_independent_encoder_and_round_trips() {
         c.encode(),
         indep::resolution_claim(&G, &DEV, 42, &fid, &[0xC1; 32], &[0xC2; 32])
     );
-    assert_eq!(SofiResolutionClaim::decode(&c.encode()).expect("decode"), c);
 
     let gamma = RouteLegSet::new(vec![
         RouteLegEntry {
@@ -394,7 +393,6 @@ fn every_object_matches_the_independent_encoder_and_round_trips() {
         gamma.encode(),
         indep::route_leg_set(&[(V1, R1, rho, SHADOWS[0]), (V2, R2, [0xBB; 32], SHADOWS[1])])
     );
-    assert_eq!(RouteLegSet::decode(&gamma.encode()).expect("decode"), gamma);
 }
 
 #[test]
@@ -407,30 +405,6 @@ fn every_union_variant_round_trips() {
     ] {
         assert_eq!(ParentClaimRef::decode(&r.encode()).expect("decode"), r);
     }
-    let refs = [
-        ValidationRef::ContentAddr {
-            object_class: 0x001C,
-            addr: [3; 32],
-        },
-        ValidationRef::SingleRootClaim { claim_ref: [4; 32] },
-        ValidationRef::ConditionalClaim {
-            genesis: G,
-            device_id: DEV,
-            position: 9,
-            fulfillment_id: [5; 32],
-        },
-        ValidationRef::Setup { setup_ref: [6; 32] },
-    ];
-    for r in refs {
-        assert_eq!(ValidationRef::decode(&r.encode()).expect("decode"), r);
-    }
-    let mut sorted = refs.to_vec();
-    sorted.sort_by_key(|r| r.encode());
-    let idx = PreEClosureIndex::new(sorted).expect("closure");
-    assert_eq!(
-        PreEClosureIndex::decode(&idx.encode()).expect("decode"),
-        idx
-    );
 }
 
 #[test]

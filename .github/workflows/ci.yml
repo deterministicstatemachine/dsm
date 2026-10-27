@@ -157,7 +157,9 @@ jobs:
       # Bump this pin deliberately and reformat in the same PR.
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
-          components: rustfmt, clippy
+          # rust-analyzer and rust-src: Gate G1 resolves SoFi callers with
+          # rust-analyzer's index of the workspace (ci/sofi_reachability.py).
+          components: rustfmt, clippy, rust-analyzer, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
@@ -254,6 +256,10 @@ jobs:
           df -h /
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          # The G1 negative control (dsm_sdk source_rules) indexes a scratch
+          # workspace with rust-analyzer, which needs the standard library source.
+          components: rust-analyzer, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -325,6 +331,10 @@ jobs:
           df -h /
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          # The G1 negative control (dsm_sdk source_rules) indexes a scratch
+          # workspace with rust-analyzer, which needs the standard library source.
+          components: rust-analyzer, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
