@@ -276,30 +276,7 @@ async fn offer_one(
     {
         return Ok(None);
     }
-    if sofi_vault_head::owner_baseline(vault_id, head.generation)
-        .map_err(|e| failure("baseline", e))?
-        .is_none()
-    {
-        // The history first: a baseline commits it, and a reader proves a
-        // root below the baseline from it (SoFi Amendment S26).
-        let history_root = publish_history(set, vault_id, head.generation).await?;
-        let frontier = VaultFrontierV1 {
-            vault_id: *vault_id,
-            generation: head.generation,
-            root: head.root,
-            history_root,
-        };
-        let network = crate::sdk::economic_admission_flow::committed_network_id()?;
-        let bundle = sign(&network, own_g, &frontier)?;
-        publish(set, &frontier, &bundle).await?;
-        sofi_vault_head::put_owner_baseline(vault_id, head.generation, &bundle)
-            .map_err(|e| failure("baseline", e))?;
-        log::info!(
-            "[vault baseline] {}: published the baseline at generation {}",
-            crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
-            head.generation
-        );
-    }
+    ensure_baseline(set, own_g, vault_id, head.generation, &head.root).await?;
     let rel_key = derive::relationship_key(&trader.0, &trader.1, vault_id);
     let witness = witness_from_tree(
         &tree,
@@ -314,6 +291,118 @@ async fn offer_one(
         generation: head.generation,
         witness_ccb: witness.encode().map_err(|e| failure("witness", e))?,
     }))
+}
+
+/// Whether [`ensure_baseline`] published a baseline, or found one published.
+pub(crate) enum BaselineAt {
+    Published,
+    AlreadyPublished,
+}
+
+/// Sign and publish the owner's baseline of `vault_id` at `generation`, whose
+/// root this device recorded as `root`, unless one is published at that
+/// generation already: its history first, which the baseline commits and a
+/// reader proves a root below it from (SoFi Amendment S26), then the frontier
+/// and the baseline.
+async fn ensure_baseline(
+    set: &StorageSet,
+    own_g: &D32,
+    vault_id: &D32,
+    generation: u64,
+    root: &D32,
+) -> Result<BaselineAt, DsmError> {
+    if sofi_vault_head::owner_baseline(vault_id, generation)
+        .map_err(|e| failure("baseline", e))?
+        .is_some()
+    {
+        return Ok(BaselineAt::AlreadyPublished);
+    }
+    let history_root = publish_history(set, vault_id, generation).await?;
+    let frontier = VaultFrontierV1 {
+        vault_id: *vault_id,
+        generation,
+        root: *root,
+        history_root,
+    };
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    let bundle = sign(&network, own_g, &frontier)?;
+    publish(set, &frontier, &bundle).await?;
+    sofi_vault_head::put_owner_baseline(vault_id, generation, &bundle)
+        .map_err(|e| failure("baseline", e))?;
+    log::info!(
+        "[vault baseline] {}: published the baseline at generation {generation}",
+        crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
+    );
+    Ok(BaselineAt::Published)
+}
+
+/// The owner's duty (SoFi Amendment S24): a continuously online owner
+/// publishes a baseline after each realized generation. Each vault this
+/// device created is walked on from what it recorded, and a baseline is
+/// published at the head the walk established when none is published at that
+/// generation yet. Never on an admission's path: a baseline not published
+/// costs a fresh reader speed and nothing else. Returns how many baselines
+/// were published, and why each vault that has none at its head was left.
+pub(crate) async fn publish_owned_baselines(
+    core: &crate::sdk::core_sdk::CoreSDK,
+    set: &StorageSet,
+) -> (u32, Vec<String>) {
+    let mut left = Vec::new();
+    // A device mid-admission publishes after it; one with no admitted
+    // position has created no vault.
+    let Some(head) = core
+        .device_head()
+        .filter(|head| head.pending_economic_admission().is_none())
+    else {
+        return (0, left);
+    };
+    let (genesis, device_id) = (head.genesis_digest(), head.devid());
+    match crate::storage::client_db::economic_lineage::get_admitted() {
+        Ok(Some(..)) => {}
+        Ok(None) => return (0, left),
+        Err(e) => return (0, vec![format!("every vault: the admitted position: {e}")]),
+    }
+    let creations = match crate::sdk::economic_admission_flow::validated_root_or_activate(core)
+        .and_then(|validated| {
+            crate::sdk::sofi_reads::local_leaves_of_validated(&genesis, &device_id, &validated)
+        }) {
+        Ok(local) => local.vault_creations(),
+        Err(why) => return (0, vec![format!("every vault: this device's leaves: {why}")]),
+    };
+    if creations.is_empty() {
+        return (0, left);
+    }
+    let ctx =
+        match crate::sdk::sofi_reads::VerifierContext::new(set, Some((genesis, device_id)), None) {
+            Ok(ctx) => ctx,
+            Err(why) => return (0, vec![format!("every vault: no verifier: {why}")]),
+        };
+    let verifier = ctx.verifier();
+    let mut published = 0u32;
+    for creation in creations {
+        let vault = crate::util::text_id::encode_base32_crockford(&creation.vault_id[..5]);
+        let chain = match verifier.chain(&creation.vault_id) {
+            Ok(chain) => chain,
+            Err(why) => {
+                left.push(format!("{vault}: its chain: {why}"));
+                continue;
+            }
+        };
+        let Some((generation, root)) = chain.head() else {
+            left.push(format!("{vault}: no head established"));
+            continue;
+        };
+        // At the genesis a reader needs no baseline: the genesis is one read.
+        if generation == 0 {
+            continue;
+        }
+        match ensure_baseline(set, &genesis, &creation.vault_id, generation, &root).await {
+            Ok(BaselineAt::Published) => published += 1,
+            Ok(BaselineAt::AlreadyPublished) => {}
+            Err(why) => left.push(format!("{vault}: generation {generation}: {why}")),
+        }
+    }
+    (published, left)
 }
 
 /// How many objects of a history are put at once.

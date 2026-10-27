@@ -2701,6 +2701,24 @@ impl AppRouterImpl {
         if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
             report.errors.push(e);
         }
+        // The owner's duty (SoFi Amendment S24): a baseline at the head of
+        // every vault this device created. One not published is reported and
+        // the sync goes on: it costs a fresh reader speed, never an admission.
+        match crate::sdk::economic_admission_flow::committed_network_id()
+            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+        {
+            Ok(set) => {
+                let (published, left) =
+                    crate::sdk::vault_baseline::publish_owned_baselines(&self.core_sdk, &set).await;
+                report.pushed += published;
+                report
+                    .errors
+                    .extend(left.into_iter().map(|why| format!("owner baseline: {why}")));
+            }
+            Err(e) => report
+                .errors
+                .push(format!("owner baselines: no committed set: {e}")),
+        }
         // An admission the head already carried when this process restored
         // it; one created after startup belongs to the handler that created it.
         let stranded = self

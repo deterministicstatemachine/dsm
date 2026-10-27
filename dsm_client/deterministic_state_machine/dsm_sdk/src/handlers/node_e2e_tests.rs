@@ -1510,16 +1510,23 @@ async fn resolving_another_traders_position_reads_only_its_segment() {
         .flat_map(|node| node.requests())
         .filter(|request| request.starts_with("GET /api/v2/cell/"))
         .collect();
-    for position in (1..=frontier).filter(|position| *position != setup_position) {
-        let key = dsm::economic::register::economic_root_register_key(
-            &p.b.genesis,
-            &p.b.device_id,
-            position,
-        );
-        let named = crate::util::text_id::encode_base32_crockford(&key);
+    let latest = admitted_position(&p.b);
+    let read_positions: Vec<u64> = (1..=latest)
+        .filter(|position| {
+            let key = dsm::economic::register::economic_root_register_key(
+                &p.b.genesis,
+                &p.b.device_id,
+                *position,
+            );
+            let named = crate::util::text_id::encode_base32_crockford(&key);
+            cell_reads.iter().any(|request| request.ends_with(&named))
+        })
+        .collect();
+    for position in &read_positions {
         assert!(
-            !cell_reads.iter().any(|request| request.ends_with(&named)),
-            "A read B's root cell at position {position}, at or below its frontier {frontier}"
+            *position > frontier || *position == setup_position,
+            "A read B's root cell at position {position}, at or below its frontier {frontier} \
+             (setup at {setup_position}); B's root cells A read: {read_positions:?}"
         );
     }
 }
@@ -3987,6 +3994,72 @@ fn chain_at_b(p: &Pair, m: &Market) -> dsm::sofi::resolution::VaultChain {
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let chain = ctx.verifier().chain(&m.vault_id).expect("the chain");
     chain
+}
+
+/// SoFi Amendment S24, the owner's duty, MR-SOFI-0410: a continuously online
+/// owner publishes a baseline after each realized generation, without being
+/// asked. B trades on A's vault; A's sync publishes the baseline at the
+/// generation the trade realized; B trades again and A's next sync publishes
+/// the next. B, reading the network, finds each at its locator and
+/// authenticates it as the vault owner's.
+///
+/// MUTATION CONTROL: dropping `publish_owned_baselines` from the sync turns
+/// this red: no baseline is published until a trader asks over Connect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_online_owner_publishes_a_baseline_after_each_realized_generation() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    for generation in 1..=2u64 {
+        realized_trade(&p, &m, 5).await;
+        let synced = p.a.sync().await;
+        assert!(synced.errors.is_empty(), "{:?}", synced.errors);
+        p.a.enter();
+        assert!(
+            crate::storage::client_db::sofi_vault_head::owner_baseline(&m.vault_id, generation)
+                .expect("A's record")
+                .is_some(),
+            "A published its baseline at generation {generation}"
+        );
+
+        let (own, parents) = standing_of(&p.b);
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let dsm::sofi::resolve::VaultGenesis::Accepted(genesis) = ctx
+            .verifier()
+            .vault_genesis(&m.vault_id)
+            .expect("the genesis read")
+        else {
+            panic!("B accepts the vault's genesis");
+        };
+        let found = crate::sdk::storage_io::resolve_locator_all(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes(),
+            &derive::vault_baseline_locator(&m.vault_id, generation),
+            8,
+            |bytes| match crate::sdk::vault_baseline::authenticate(bytes, &genesis) {
+                Ok(verified) => Some((
+                    dsm::sofi::frontier::frontier_commitment(verified.frontier()),
+                    verified.frontier().generation,
+                )),
+                Err(why) => {
+                    log::info!("a baseline candidate does not authenticate: {why}");
+                    None
+                }
+            },
+        )
+        .await
+        .expect("the locator read");
+        let generations = match found {
+            dsm::sofi::storage::Discovered::Complete(found)
+            | dsm::sofi::storage::Discovered::Partial(found) => found,
+        };
+        assert_eq!(
+            generations,
+            vec![generation],
+            "the baseline at generation {generation} is published and is the owner's"
+        );
+    }
 }
 
 /// SoFi Amendment S24, end to end. After three trades, B forgets the vault
