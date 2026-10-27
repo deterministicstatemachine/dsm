@@ -2385,6 +2385,126 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// SoFi §37, Gate G3, the `P(E)` row's removal half. Owner ruling 6
+/// (2026-10-27): withholding `P(E)` is the removal test of every item it
+/// embeds, `B°`, `T°` and each vault core. B trades with the leader of the
+/// vault's first key refusing writes there, so B's pair registers and its
+/// exercise lands nowhere; a verifier can only rebuild it from public
+/// objects (SoFi Amendment S25). With `P(E)` withheld from the verifier's
+/// reads, the rebuild answers that `P(E)` is missing, and nothing is built
+/// or decided. With `P(E)` in hand, the same rebuild recognizes B's
+/// exercise.
+///
+/// MUTATION CONTROL: the rebuild naming another object as missing for an
+/// absent `P(E)` turns this red. No mutant can let the rebuild go on without
+/// `P(E)`: the exercise is built from its value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_withheld_preimage_leaves_an_exercise_unbuilt_and_nothing_decided() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+
+    let q = admitted_position(&p.b) + 1;
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
+    let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the vault's first key");
+    let key_leader = member_name(key.routed().route().leader());
+    p.nodes
+        .refuse_cell_writes(&key_leader, &[*key.routed().key()])
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    let (traded, _) = position_of(&r, "sofi.trade");
+    assert_eq!(traded, q);
+    p.nodes.accept_cell_writes(&key_leader).await;
+
+    p.b.enter();
+    let head = p.b.router().core_sdk.device_head().expect("B's head");
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
+        other => panic!("B's pending admission is its fulfillment: {other:?}"),
+    };
+    let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(&set, fulfillment.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+
+    let live = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("live reads");
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
+    let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
+    let reads_withholding = |withheld: Option<[u8; 32]>| CountingReads {
+        live: &live,
+        owner_walks: std::sync::atomic::AtomicUsize::new(0),
+        genesis_scans: std::sync::atomic::AtomicUsize::new(0),
+        withheld_preimage: withheld,
+    };
+    let withheld = reads_withholding(Some(*precommit.body.external_commitment()));
+    let in_hand = reads_withholding(None);
+    let withholding_verifier = dsm::sofi::resolve::Verifier::new(
+        &withheld,
+        &members,
+        set.id(),
+        &network,
+        None,
+        dsm::sofi::resolve::AcceptedGeneses::default(),
+    );
+    let verifier = dsm::sofi::resolve::Verifier::new(
+        &in_hand,
+        &members,
+        set.id(),
+        &network,
+        None,
+        dsm::sofi::resolve::AcceptedGeneses::default(),
+    );
+    let registration = match verifier
+        .read_registration(
+            precommit.body.genesis(),
+            precommit.body.device_id(),
+            fulfillment.body.position(),
+            precommit.body.void_root(),
+        )
+        .expect("read")
+    {
+        Ok(registration) => registration,
+        Err(missing) => panic!("B's pair is decided: {missing:?}"),
+    };
+
+    match withholding_verifier
+        .rebuild_exercise(&precommit, &fulfillment, &registration)
+        .expect("read")
+    {
+        Err(dsm::sofi::resolve::RebuildMissing::Preimage) => {}
+        other => panic!("with P(E) withheld, the rebuild waits on P(E): {other:?}"),
+    }
+    match verifier
+        .rebuild_exercise(&precommit, &fulfillment, &registration)
+        .expect("read")
+    {
+        Ok(exercise) => assert_eq!(
+            exercise.fulfillment().body,
+            fulfillment.body,
+            "with P(E) in hand, B's exercise is rebuilt"
+        ),
+        Err(missing) => panic!("with P(E) in hand the rebuild completes: {missing:?}"),
+    }
+}
+
 /// SoFi Amendment S25, MR-SOFI-0266: a relay completes a registered
 /// fulfillment whose hops are not final from nothing the trader carries. B
 /// trades with the leader of the vault's first key refusing writes there, so
@@ -5452,11 +5572,13 @@ async fn every_sofi_route_reaches_its_producer() {
 }
 
 /// The reads of a live verifier, counting the owner lineages it walks and
-/// the genesis locators it scans. Every read is the live one.
+/// the genesis locators it scans. Every read is the live one, except the
+/// preimage of `withheld_preimage`'s `E`, which this verifier cannot get.
 struct CountingReads<'a> {
     live: &'a crate::sdk::sofi_reads::LiveSofiReads<'a>,
     owner_walks: std::sync::atomic::AtomicUsize,
     genesis_scans: std::sync::atomic::AtomicUsize,
+    withheld_preimage: Option<[u8; 32]>,
 }
 
 impl CountingReads<'_> {
@@ -5495,6 +5617,9 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         dsm::sofi::storage::Resolved<dsm::sofi::wire::SettlementPreimage>,
         dsm::sofi::resolve::ReadFailure,
     > {
+        if self.withheld_preimage == Some(*external_commitment) {
+            return Ok(dsm::sofi::storage::Resolved::Unavailable);
+        }
         self.live.preimage(external_commitment)
     }
     fn fulfillment(
@@ -5690,6 +5815,7 @@ async fn a_request_reads_each_vaults_genesis_once() {
         live: &live,
         owner_walks: std::sync::atomic::AtomicUsize::new(0),
         genesis_scans: std::sync::atomic::AtomicUsize::new(0),
+        withheld_preimage: None,
     };
     let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
     let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
@@ -5741,6 +5867,7 @@ async fn an_operations_verifiers_share_the_geneses_it_accepted() {
         live: &live,
         owner_walks: std::sync::atomic::AtomicUsize::new(0),
         genesis_scans: std::sync::atomic::AtomicUsize::new(0),
+        withheld_preimage: None,
     };
     let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
     let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
