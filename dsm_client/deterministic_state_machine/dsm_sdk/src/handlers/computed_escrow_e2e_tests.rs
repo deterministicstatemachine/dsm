@@ -948,7 +948,9 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
 /// when the setup names, for its side, exactly the session key it derives for
 /// the setup's nonce; only against a counterpart vault that mirrors its own
 /// stake — the same match and the same amount; and it derives no session key
-/// while it is locked. Each refusal moves nothing and keeps no match.
+/// while it is locked. Each refusal moves nothing and keeps no match. A
+/// counterpart's terms are its own: one that keeps this match's table and
+/// branches and names another `Y` binds another match cell, and is refused.
 ///
 /// MUTATION CONTROL: dropping the session-key comparison from `create`, or the
 /// commitment or amount check from `mirrors`, turns this red.
@@ -984,6 +986,33 @@ async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_
     let second = setup(&p, [0x72; 32], &teams);
     refused(
         lock(&p.b, &p.a, &second, MatchSide::B, stake, Some(a.vault_id)).await,
+        "bound to another match",
+    );
+    // A vault of A's whose terms are this match's, table and branches, under
+    // another `Y`: another match cell, however much else it mirrors.
+    let first_read = crate::sdk::outcome_programs::read_setup(&first).expect("the setup");
+    let honest = computed_flow::terms_of(&first, &first_read, era(), (p.a.genesis, p.a.device_id))
+        .expect("A's terms");
+    let other_y = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        [0x5A; 32],
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms under another Y");
+    p.a.enter();
+    let (elsewhere, _) = computed_flow::create_vault(
+        &p.a.router().core_sdk,
+        &set(),
+        (p.a.genesis, p.a.device_id),
+        &other_y,
+        era(),
+        stake,
+    )
+    .await
+    .expect("A's vault under another Y");
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(elsewhere)).await,
         "bound to another match",
     );
     // And B's stake in A's match is another amount than A's.

@@ -346,73 +346,8 @@ pub async fn create(
         .await?;
     }
 
-    let validated = validated_root_or_activate(core)?;
-    let create_position = next_position(validated.economic_position()).map_err(refuse)?;
-    let terms_object = Publication::ComputedEscrowTerms(&terms);
-    let addr = publication_addr(&terms_object)?;
-    let preimage = VaultGenesisPreimage {
-        owner_genesis: me.0,
-        owner_device_id: me.1,
-        create_position,
-        state: VaultStateLeaf {
-            owner_genesis: me.0,
-            owner_device_id: me.1,
-            create_position,
-            market_policy: addr,
-            fee_policy: addr,
-            release_policy: addr,
-            storage_set_id: set.id(),
-            generation: 0,
-            reserve_a: intent.amount,
-            reserve_b: 0,
-            status: VAULT_STATUS_ACTIVE,
-        },
-    };
-    let produced = build_computed_vault_create(&preimage, &terms).map_err(refuse)?;
-    let genesis_object = Publication::ComputedEscrowVaultGenesis {
-        preimage: &preimage,
-        terms: &terms,
-    };
-    let (terms_published, genesis_published) =
-        futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
-            .await?;
-    require_stored("computed escrow terms", &terms_published)?;
-    if terms_published.addr != addr {
-        return Err(refuse("the computed terms were stored at another address"));
-    }
-    require_stored("computed escrow vault genesis", &genesis_published)?;
-    let operation = produced
-        .operation
-        .clone()
-        .with_signature(sign(produced.signs.bytes())?);
-    let deltas = [BalanceDelta {
-        policy_commit: intent.token,
-        direction: BalanceDirection::Debit,
-        amount: intent.amount,
-    }];
-    let (outcome, admitted) = admitted_self_loop_operation(
-        core,
-        operation,
-        &deltas,
-        CreditSourceFacts::None,
-        Vec::new(),
-        None,
-        Some(BuiltOn::of(&validated)),
-    )
-    .await?;
-    let vault_id = preimage.vault_id();
-    record_realized(
-        &outcome.new_device_state,
-        Realized::EscrowLock,
-        &vault_id,
-        admitted.economic_position,
-        &[vault_id],
-        &[Moved {
-            policy_commit: intent.token,
-            direction: BalanceDirection::Debit,
-            amount: intent.amount,
-        }],
-    );
+    let (vault_id, position) =
+        create_vault(core, set, me, &terms, intent.token, intent.amount).await?;
     let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.reason))?;
     store::insert_match(&DuelMatchRow {
         match_cell,
@@ -436,8 +371,90 @@ pub async fn create(
         external_commitment: *terms.external_commitment(),
         program: read.program,
         session_public_key: session.public_key().to_vec(),
-        position: admitted.economic_position,
+        position,
     })
+}
+
+/// Create `owner`'s computed escrow vault under `terms`, holding `amount` of
+/// `token`: the terms and the vault's genesis stored first, then the creation
+/// admitted as one self-loop operation, and the lock recorded for the wallet
+/// to show. The vault id and the admitted position.
+pub(crate) async fn create_vault(
+    core: &CoreSDK,
+    set: &StorageSet,
+    owner: (D32, D32),
+    terms: &ComputedEscrowTerms,
+    token: D32,
+    amount: u64,
+) -> Result<(D32, u64), DsmError> {
+    let validated = validated_root_or_activate(core)?;
+    let create_position = next_position(validated.economic_position()).map_err(refuse)?;
+    let terms_object = Publication::ComputedEscrowTerms(terms);
+    let addr = publication_addr(&terms_object)?;
+    let preimage = VaultGenesisPreimage {
+        owner_genesis: owner.0,
+        owner_device_id: owner.1,
+        create_position,
+        state: VaultStateLeaf {
+            owner_genesis: owner.0,
+            owner_device_id: owner.1,
+            create_position,
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            storage_set_id: set.id(),
+            generation: 0,
+            reserve_a: amount,
+            reserve_b: 0,
+            status: VAULT_STATUS_ACTIVE,
+        },
+    };
+    let produced = build_computed_vault_create(&preimage, terms).map_err(refuse)?;
+    let genesis_object = Publication::ComputedEscrowVaultGenesis {
+        preimage: &preimage,
+        terms,
+    };
+    let (terms_published, genesis_published) =
+        futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
+            .await?;
+    require_stored("computed escrow terms", &terms_published)?;
+    if terms_published.addr != addr {
+        return Err(refuse("the computed terms were stored at another address"));
+    }
+    require_stored("computed escrow vault genesis", &genesis_published)?;
+    let operation = produced
+        .operation
+        .clone()
+        .with_signature(sign(produced.signs.bytes())?);
+    let deltas = [BalanceDelta {
+        policy_commit: token,
+        direction: BalanceDirection::Debit,
+        amount,
+    }];
+    let (outcome, admitted) = admitted_self_loop_operation(
+        core,
+        operation,
+        &deltas,
+        CreditSourceFacts::None,
+        Vec::new(),
+        None,
+        Some(BuiltOn::of(&validated)),
+    )
+    .await?;
+    let vault_id = preimage.vault_id();
+    record_realized(
+        &outcome.new_device_state,
+        Realized::EscrowLock,
+        &vault_id,
+        admitted.economic_position,
+        &[vault_id],
+        &[Moved {
+            policy_commit: token,
+            direction: BalanceDirection::Debit,
+            amount,
+        }],
+    );
+    Ok((vault_id, admitted.economic_position))
 }
 
 // ── the kept match ──────────────────────────────────────────────────────────
