@@ -713,7 +713,7 @@ fn semantic_write_set(
 /// commit before anything is read out of them, so the check is a function of
 /// the operation alone: the producer and every verifier read the same bytes,
 /// and bytes that are not the token's make the operation itself invalid.
-fn moved_token_policy(
+pub(crate) fn moved_token_policy(
     policy_commit: &[u8; 32],
     carried: &[u8],
 ) -> Result<crate::economic::token_policy::TokenPolicy, WriteSetError> {

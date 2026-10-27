@@ -6197,8 +6197,8 @@ mod tests {
         }
 
         let stale_op = Operation::Transfer {
-            policy_commit: [0u8; 32],
-            token_policy: Vec::new(),
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![1],
@@ -6213,8 +6213,8 @@ mod tests {
             authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
         };
         let next_op = Operation::Transfer {
-            policy_commit: [0u8; 32],
-            token_policy: Vec::new(),
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![2],
@@ -6312,8 +6312,8 @@ mod tests {
             counterparty_device_id: counterparty,
             counterparty_genesis_hash: Some([0x54u8; 32]),
             operation: Operation::Transfer {
-                policy_commit: [0x0Fu8; 32],
-                token_policy: Vec::new(),
+                policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+                token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
                 terms_commitment: dsm::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![1; 32],

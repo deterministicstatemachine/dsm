@@ -409,8 +409,14 @@ pub(crate) mod fixture {
         blake3::derive_key(&format!("DSM Core offline chain test {input}"), &[seed; 32])
     }
 
-    /// A payer's offline-bearer transfer of `amount` of `token` to `to`.
-    pub(crate) fn bearer_op(to: [u8; 32], token: [u8; 32], amount: u64) -> Operation {
+    /// A payer's offline-bearer transfer of `amount` of `token`, whose
+    /// committed policy is `policy`, to `to`.
+    pub(crate) fn bearer_op(
+        to: [u8; 32],
+        token: [u8; 32],
+        policy: &[u8],
+        amount: u64,
+    ) -> Operation {
         use crate::types::operations::{
             canonical_offline_bearer_policy, TransactionMode, TransferTerms,
         };
@@ -426,6 +432,7 @@ pub(crate) mod fixture {
                 salt: vec![0x5A; 32],
             }
             .commitment(),
+            token_policy: policy.to_vec(),
             signature: Vec::new(),
             authority_policy: Some(canonical_offline_bearer_policy()),
         }
@@ -440,6 +447,8 @@ pub(crate) mod fixture {
         /// The birth commitment `S_birth` `B` commits.
         pub(crate) birth_commitment: [u8; 32],
         pub(crate) token: [u8; 32],
+        /// The token's committed `TokenPolicyV3` bytes.
+        pub(crate) token_policy: Vec<u8>,
         pub(crate) genesis: [u8; 32],
         related: Vec<[u8; 32]>,
     }
@@ -448,9 +457,20 @@ pub(crate) mod fixture {
         /// A device `seed` whose anchor is born for it and whose offline
         /// account, opened at the anchor's origin, a load of `loaded` funded.
         pub(crate) fn loaded(seed: u8, loaded: u64) -> Self {
+            Self::loaded_with(
+                seed,
+                loaded,
+                crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+            )
+        }
+
+        /// [`Self::loaded`], the token's committed policy carrying `flags`.
+        pub(crate) fn loaded_with(seed: u8, loaded: u64, flags: u8) -> Self {
             let resident = SigningKey::from_bytes(&derive(seed, "resident key"));
             let chip_pk = resident.verifying_key().to_bytes().to_vec();
-            let token = derive(seed, "token");
+            let (token, token_policy) = crate::sofi::validation::fixtures::committed(
+                crate::sofi::validation::fixtures::token_policy_bytes_with(seed, flags),
+            );
             let genesis = derive(seed, "genesis");
             let mut head = crate::types::device_state::tests::fresh_device(seed)
                 .created_token(token, 100)
@@ -501,9 +521,40 @@ pub(crate) mod fixture {
                 enrolled_counter: H0,
                 birth_commitment,
                 token,
+                token_policy,
                 genesis,
                 related: Vec::new(),
             }
+        }
+
+        /// The device's advance for a spend of `amount` to `to` from where its
+        /// anchor stands, without its anchor: what Core decides of the step.
+        pub(crate) fn advance_spend(
+            &mut self,
+            to: [u8; 32],
+            amount: u64,
+        ) -> Result<crate::types::device_state::AdvanceOutcome, crate::types::error::DsmError>
+        {
+            let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+                &self.head.devid(),
+                &to,
+            );
+            if !self.related.contains(&to) {
+                self.head = self.head.establish_relationship(to).expect("establish");
+                self.related.push(to);
+            }
+            self.head.advance(
+                rk,
+                to,
+                bearer_op(to, self.token, &self.token_policy, amount),
+                &[],
+                Some(OfflineSpend {
+                    anchor_bundle_b: self.pin.bundle,
+                    asset: self.token,
+                    amount,
+                    next_frontier: derive(0x77, "a successor frontier"),
+                }),
+            )
         }
 
         /// The root of the account the device holds now.
@@ -531,7 +582,7 @@ pub(crate) mod fixture {
                 self.head = self.head.establish_relationship(to).expect("establish");
                 self.related.push(to);
             }
-            let operation = bearer_op(to, self.token, amount);
+            let operation = bearer_op(to, self.token, &self.token_policy, amount);
             let frontier = self.app.active.root;
             let counter = self.app.active.anchor_counter;
             let challenge = derive(counter as u8, "challenge");
@@ -682,6 +733,52 @@ mod tests {
                 .expect("decoded")
                 .len(),
             1
+        );
+    }
+
+    /// Owner question 9, offline: the sender's Core refuses its own bearer
+    /// spend of a token whose committed policy does not let it move, or whose
+    /// carried policy bytes are not the token's, before anything is written.
+    /// The receiver's Core refuses such a transfer in its own advance.
+    /// MUTATION CONTROL: dropping `bearer_token_moves` from
+    /// `validate_conservation` lets the spend and the receipt through and
+    /// turns this red.
+    #[test]
+    fn a_bearer_transfer_of_a_token_that_may_not_move_is_refused_by_both_sides_advance() {
+        use crate::types::device_state::{BalanceDelta, BalanceDirection};
+        let mut locked = Payer::loaded_with(0x51, 40, 0);
+        refused(locked.advance_spend(B, 10), "non-transferable");
+        let mut misnamed = Payer::loaded(0x52, 40);
+        misnamed.token_policy = crate::sofi::validation::fixtures::token_policy_bytes_with(
+            0x53,
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        );
+        refused(
+            misnamed.advance_spend(B, 10),
+            "are not the committed policy",
+        );
+
+        let payer = Payer::loaded_with(0x54, 40, 0);
+        let receiver = crate::types::device_state::tests::fresh_device(0xB0)
+            .establish_relationship(payer.head.devid())
+            .expect("related");
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(
+            &receiver.devid(),
+            &payer.head.devid(),
+        );
+        refused(
+            receiver.advance(
+                rk,
+                payer.head.devid(),
+                super::fixture::bearer_op(receiver.devid(), payer.token, &payer.token_policy, 10),
+                &[BalanceDelta {
+                    policy_commit: payer.token,
+                    direction: BalanceDirection::Credit,
+                    amount: 10,
+                }],
+                None,
+            ),
+            "non-transferable",
         );
     }
 

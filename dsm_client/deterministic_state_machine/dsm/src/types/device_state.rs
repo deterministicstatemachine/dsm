@@ -548,6 +548,14 @@ fn validate_conservation(
             policy_commit,
             ..
         } => {
+            // An offline-bearer transfer, on either side, moves only a token its committed policy
+            // lets move: no economic write set checks it offline.
+            if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
+                operation,
+            ) {
+                crate::bilateral::offline::bearer_token_moves(operation)
+                    .map_err(|e| DsmError::invalid_operation(format!("conservation: {e}")))?;
+            }
             // Offline-bearer transfer: allocation-backed, no online balance movement.
             if let Some(allocation_amount) = offline_spend {
                 if !deltas.is_empty() {
@@ -2620,15 +2628,14 @@ pub(crate) mod tests {
                 Operation::Transfer {
                     to_device_id,
                     amount,
-                    policy_commit,
                     terms_commitment,
                     signature,
                     ..
                 } => Operation::Transfer {
                     to_device_id,
                     amount,
-                    policy_commit,
-                    token_policy: Vec::new(),
+                    policy_commit: moving_token().0,
+                    token_policy: moving_token().1,
                     terms_commitment,
                     signature,
                     authority_policy: Some(AuthorityPolicy {
@@ -2946,13 +2953,26 @@ pub(crate) mod tests {
         assert!(reopened.to_string().contains("already open"), "{reopened}");
     }
 
+    /// A token whose committed policy lets it move between holders, and that
+    /// policy's bytes.
+    fn moving_token() -> ([u8; 32], Vec<u8>) {
+        crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(
+                0xA1,
+                crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+            ),
+        )
+    }
+
+    /// A bearer transfer of `amt` of [`moving_token`] to `cp`, or of another
+    /// `token` carrying the moving token's policy bytes, which are not its own.
     fn bearer_op(cp: [u8; 32], token: [u8; 32], amt: u64) -> Operation {
         use crate::types::operations::{AuthorityMode, AuthorityPolicy, TransactionMode};
         Operation::Transfer {
             to_device_id: cp.to_vec(),
             amount: bal(amt),
             policy_commit: token,
-            token_policy: Vec::new(),
+            token_policy: moving_token().1,
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![],
@@ -2974,7 +2994,7 @@ pub(crate) mod tests {
     fn a_bearer_spend_draws_from_the_account_and_moves_its_counter_and_frontier() {
         use crate::core::bilateral_transaction_manager::compute_smt_key;
         use crate::types::offline_account::verify_offline_state;
-        let (token, bundle) = (pc(0xA1), [0xB2; 32]);
+        let (token, bundle) = (moving_token().0, [0xB2; 32]);
         let loaded = with_offline_account(0xD5, token, bundle)
             .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
             .expect("load 40")
@@ -3100,7 +3120,7 @@ pub(crate) mod tests {
         use crate::verification::receipt_verification::{
             verify_receipt_state, BearerLeaves, ReceiptStateContext,
         };
-        let (token, bundle, genesis) = (pc(0xA1), [0xB5; 32], [0x6E; 32]);
+        let (token, bundle, genesis) = (moving_token().0, [0xB5; 32], [0x6E; 32]);
         let mut loaded = with_offline_account(0xD7, token, bundle)
             .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, 40)
             .expect("load 40")

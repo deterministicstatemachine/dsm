@@ -53,6 +53,36 @@ pub fn offline_operation(operation_bytes: &[u8]) -> Result<Operation, DsmError> 
     Ok(operation)
 }
 
+/// An offline-bearer transfer moves only a token its committed policy lets
+/// move between holders (owner question 9, 2026-10-27: "Core must be the
+/// authoritative enforcement boundary ... Any policy supplied to Core must be
+/// authenticated against the committed token policy"). The transfer carries
+/// the token's committed `TokenPolicyV3` bytes; they must re-hash to its
+/// `policy_commit` (`economic::write_set::moved_token_policy`, the one check
+/// the write set runs online), and the policy must be `transferable`. An
+/// offline step has no economic write set, so its sender's and its receiver's
+/// Core hold it to this here, before anything is written.
+pub fn bearer_token_moves(operation: &Operation) -> Result<(), DsmError> {
+    let Operation::Transfer {
+        policy_commit,
+        token_policy,
+        ..
+    } = operation
+    else {
+        return Err(DsmError::invalid_operation(
+            "an offline-bearer token policy is the policy of a transfer",
+        ));
+    };
+    let policy = crate::economic::write_set::moved_token_policy(policy_commit, token_policy)
+        .map_err(|e| DsmError::invalid_operation(format!("offline-bearer transfer: {e}")))?;
+    if !policy.transferable {
+        return Err(DsmError::invalid_operation(
+            "offline-bearer transfer: the token's committed policy makes it non-transferable",
+        ));
+    }
+    Ok(())
+}
+
 /// The keys a message carries for its sender: its AK, its Kyber key and the
 /// binding of the one to the other.
 #[derive(Clone, Copy, Debug)]
@@ -213,6 +243,7 @@ pub fn decide_prepare(
     // before anything is verified or written; the confirm path behind it stays
     // for the complete proof, unreached.
     if operation_requires_offline_bearer(operation) {
+        bearer_token_moves(operation)?;
         return Err(DsmError::invalid_operation(
             "offline-bearer receipt is disabled until the allocation a bearer transfer spends \
              is proven to be its sender's (SA-61): this device takes no offline-bearer transfer",
@@ -798,10 +829,28 @@ mod tests {
         );
     }
 
+    /// A bearer transfer to `to` of a token whose committed policy lets it
+    /// move.
     fn bearer_transfer(to: [u8; 32]) -> Operation {
+        bearer_transfer_of(
+            to,
+            crate::sofi::validation::fixtures::committed(
+                crate::sofi::validation::fixtures::token_policy_bytes_with(
+                    0x0F,
+                    crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+                ),
+            ),
+        )
+    }
+
+    /// A bearer transfer to `to` of the token `(policy_commit, token_policy)`.
+    fn bearer_transfer_of(
+        to: [u8; 32],
+        (policy_commit, token_policy): ([u8; 32], Vec<u8>),
+    ) -> Operation {
         Operation::Transfer {
-            policy_commit: [0x0F; 32],
-            token_policy: Vec::new(),
+            policy_commit,
+            token_policy,
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"TOK".to_vec(),
                 nonce: vec![1; 8],
@@ -1052,6 +1101,53 @@ mod tests {
             decide(&[], Some([0x7Cu8; 32])),
             "offline-bearer receipt is disabled",
         );
+    }
+
+    /// Owner question 9, offline: the receiver's Core refuses, at the
+    /// prepare and before anything is verified or written, a bearer transfer
+    /// of a token whose committed policy does not let it move, or whose
+    /// carried policy bytes are not the token's.
+    /// MUTATION CONTROL: dropping `bearer_token_moves` from `decide_prepare`
+    /// lets both proposals on to the next refusal and turns this red.
+    #[test]
+    fn a_bearer_transfer_of_a_token_that_may_not_move_is_refused_at_its_receivers_prepare() {
+        use crate::sofi::validation::fixtures::{committed, token_policy_bytes_with};
+        let sender = Peer::new(0x4F);
+        let receiver = [0x50u8; 32];
+        let held = [0x7Bu8; 32];
+        let locked = committed(token_policy_bytes_with(0x10, 0));
+        let (moving, _) = committed(token_policy_bytes_with(
+            0x11,
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        ));
+        let not_its_own = (moving, locked.1.clone());
+        for (operation, reason) in [
+            (bearer_transfer_of(receiver, locked), "non-transferable"),
+            (
+                bearer_transfer_of(receiver, not_its_own),
+                "are not the committed policy",
+            ),
+        ] {
+            let commitment =
+                BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+            refused(
+                decide_prepare(
+                    commitment,
+                    &operation,
+                    PrepareClaims {
+                        addressed_to: &receiver,
+                        expected_tip: Some(held),
+                        credentials: credentials(&sender),
+                        signature: &sender.sign_step(&commitment),
+                    },
+                    &sender.pinned(),
+                    &receiver,
+                    held,
+                    None,
+                ),
+                reason,
+            );
+        }
     }
 
     /// A stale proposal's claimed tip is evidence of the sender's tip only
