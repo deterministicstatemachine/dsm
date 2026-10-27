@@ -31,11 +31,16 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \*   Supply = remaining + SUM balances                    at every state
 \*   FaucetClaim(A, x)  =>  balance[A] += x
 \*
-\* TWO PROPERTIES, KEPT APART (owner ruling). Finality is leader first:
+\* TWO PROPERTIES, KEPT APART (owner ruling). Finality is the route chain's
+\* (DSM_RouteChain; storage spec §9; DSM Amendment A6):
 \*   LeaderHeld(x) == x is the first recognized object at the leader
-\*   Final(x)      == LeaderHeld(x) /\ two OTHER members hold x
-\* and nothing more — a release final on three members is exposed to its
-\* recipient at once (Advance). Replication is all-member: anyone may carry
+\*   Final(x)      == LeaderHeld(x) /\ two further links
+\* where a further link is a copy at another member that carries x's leader
+\* record: written once x held the leader. A copy written before that carries
+\* no leader record and counts for nothing, however many members hold one, so
+\* visibility to the set grants no priority (the copy rule, "two other members
+\* hold x", is the CopyRule FAULT). A release final on its chain is exposed to
+\* its recipient at once (Advance). Replication is all-member: anyone may carry
 \* the final release to every remaining member, in the background, and an
 \* unavailable non-leader member never blocks finality (AllMemberFinality is
 \* a FAULT). Five copies would not make the decision more authoritative: the
@@ -63,6 +68,7 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 CONSTANTS
     MaxStep,                 \* depth budget (the runner reads it; this model is finite)
     CountWithoutLeader,      \* [FALSE] finality counted over any three holders
+    CopyRule,                \* [FALSE] finality counted over copies however they were written
     AvailabilityLeader,      \* [FALSE] the leader is whoever is reachable
     AllMemberFinality,       \* [FALSE] finality waits for every member
     OverdraftRecognized,     \* [FALSE] recognition accepts a release of more than remains
@@ -91,13 +97,16 @@ VARIABLES
     leaderSeq,   \* what the leader holds at the cell, in arrival order
     altSeq,      \* what member A holds, in arrival order
     counts,      \* value -> how many of the three other members hold it (0..3)
+    altLinked,   \* values whose copy at A carries their leader record
+    linkCounts,  \* value -> how many of the three others hold a copy carrying it (0..3)
     upL, upA,    \* availability of the leader and of member A
     remaining,   \* units the reserve still holds
     released,    \* whether the reserve advanced past R_0
     balance,     \* account -> units credited
     wonBy        \* the claimant whose release advanced the reserve, or NONE
 
-vars == <<leaderSeq, altSeq, counts, upL, upA, remaining, released, balance, wonBy>>
+vars == <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, upA, remaining, released,
+          balance, wonBy>>
 
 \* ---------------------------------------------------------------------------
 \* Recognition and the leader-first facts
@@ -128,10 +137,18 @@ Copies(v) ==
 
 Holders(v) == Copies(v) + (IF InSeq(v, LeadSeq) THEN 1 ELSE 0)
 
+\* Further links: copies at the committed leader's other members that carry
+\* v's leader record. (Under the AvailabilityLeader FAULT, A leads and only
+\* the three others can link.)
+Links(v) ==
+    (IF Lead = L /\ v \in altLinked THEN 1 ELSE 0)
+    + (IF v \in Countable THEN linkCounts[v] ELSE 0)
+
 Final(v) ==
     IF CountWithoutLeader THEN Recognized(v) /\ Holders(v) >= 3
-    ELSE IF AllMemberFinality THEN LeaderHeld(v) /\ Copies(v) >= 4
-    ELSE LeaderHeld(v) /\ Copies(v) >= 2
+    ELSE IF CopyRule THEN LeaderHeld(v) /\ Copies(v) >= 2
+    ELSE IF AllMemberFinality THEN LeaderHeld(v) /\ Links(v) >= 4
+    ELSE LeaderHeld(v) /\ Links(v) >= 2
 
 \* ---------------------------------------------------------------------------
 \* Actions
@@ -143,24 +160,45 @@ Final(v) ==
 WriteLeader(v) ==
     /\ upL /\ ~InSeq(v, leaderSeq)
     /\ leaderSeq' = Append(leaderSeq, v)
-    /\ UNCHANGED <<altSeq, counts, upL, upA, remaining, released, balance, wonBy>>
+    /\ UNCHANGED <<altSeq, counts, altLinked, linkCounts, upL, upA, remaining, released, balance,
+                   wonBy>>
 
 WriteAlt(v) ==
     /\ upA /\ ~InSeq(v, altSeq)
     /\ altSeq' = Append(altSeq, v)
-    /\ UNCHANGED <<leaderSeq, counts, upL, upA, remaining, released, balance, wonBy>>
+    /\ UNCHANGED <<leaderSeq, counts, altLinked, linkCounts, upL, upA, remaining, released,
+                   balance, wonBy>>
 
-\* One of the three copy members takes v (a write, or the background carry —
-\* the member cannot tell, and neither can this model).
+\* A writer carries v's chain to A: once v holds the leader, the copy carries
+\* its leader record. A keeps it beside anything it already held.
+LinkAlt(v) ==
+    /\ upA /\ LeaderHeld(v) /\ v \notin altLinked
+    /\ altLinked' = altLinked \cup {v}
+    /\ altSeq' = IF InSeq(v, altSeq) THEN altSeq ELSE Append(altSeq, v)
+    /\ UNCHANGED <<leaderSeq, counts, linkCounts, upL, upA, remaining, released, balance, wonBy>>
+
+\* One of the three copy members takes a copy of v that carries no leader
+\* record (a write before v held the leader, or junk on v's behalf — the
+\* member cannot tell, and neither can this model).
 WriteOther(v) ==
     /\ v \in Countable /\ counts[v] < 3
     /\ counts' = [counts EXCEPT ![v] = @ + 1]
-    /\ UNCHANGED <<leaderSeq, altSeq, upL, upA, remaining, released, balance, wonBy>>
+    /\ UNCHANGED <<leaderSeq, altSeq, altLinked, linkCounts, upL, upA, remaining, released,
+                   balance, wonBy>>
 
-CrashL == upL /\ upL' = FALSE /\ UNCHANGED <<leaderSeq, altSeq, counts, upA, remaining, released, balance, wonBy>>
-RecoverL == ~upL /\ upL' = TRUE /\ UNCHANGED <<leaderSeq, altSeq, counts, upA, remaining, released, balance, wonBy>>
-CrashA == upA /\ upA' = FALSE /\ UNCHANGED <<leaderSeq, altSeq, counts, upL, remaining, released, balance, wonBy>>
-RecoverA == ~upA /\ upA' = TRUE /\ UNCHANGED <<leaderSeq, altSeq, counts, upL, remaining, released, balance, wonBy>>
+\* A writer, or anyone carrying the chain on (§9 route chains, rule 8), puts a
+\* copy of v carrying its leader record at one of the three others: one that
+\* held nothing of v, or one that held only copies without the record.
+LinkOther(v) ==
+    /\ v \in Countable /\ LeaderHeld(v) /\ linkCounts[v] < 3
+    /\ linkCounts' = [linkCounts EXCEPT ![v] = @ + 1]
+    /\ counts' = [counts EXCEPT ![v] = IF @ <= linkCounts[v] THEN @ + 1 ELSE @]
+    /\ UNCHANGED <<leaderSeq, altSeq, altLinked, upL, upA, remaining, released, balance, wonBy>>
+
+CrashL == upL /\ upL' = FALSE /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upA, remaining, released, balance, wonBy>>
+RecoverL == ~upL /\ upL' = TRUE /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upA, remaining, released, balance, wonBy>>
+CrashA == upA /\ upA' = FALSE /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, remaining, released, balance, wonBy>>
+RecoverA == ~upA /\ upA' = TRUE /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, remaining, released, balance, wonBy>>
 
 \* Core advances the reserve by the final release: remaining' = remaining -
 \* amount, the recipient (the claimant) credited exactly amount. The
@@ -175,13 +213,14 @@ Advance(v) ==
     /\ remaining' = IF Amount(v) <= remaining THEN remaining - Amount(v) ELSE 0
     /\ balance' = [balance EXCEPT ![Recipient(v)] = @ + Amount(v)]
     /\ wonBy' = Claimant(v)
-    /\ UNCHANGED <<leaderSeq, altSeq, counts, upL, upA>>
+    /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, upA>>
 
 \* FAULT: an arm that raises the reserve.
 Mint ==
     /\ MintArm
     /\ remaining' = remaining + 1
-    /\ UNCHANGED <<leaderSeq, altSeq, counts, upL, upA, released, balance, wonBy>>
+    /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, upA, released, balance,
+                   wonBy>>
 
 \* FAULT: an arm that moves units to the creator without a release.
 Withdraw ==
@@ -189,10 +228,11 @@ Withdraw ==
     /\ remaining >= 1
     /\ remaining' = remaining - 1
     /\ balance' = [balance EXCEPT !["Creator"] = @ + 1]
-    /\ UNCHANGED <<leaderSeq, altSeq, counts, upL, upA, released, wonBy>>
+    /\ UNCHANGED <<leaderSeq, altSeq, counts, altLinked, linkCounts, upL, upA, released, wonBy>>
 
 Next ==
-    \/ \E v \in Values : WriteLeader(v) \/ WriteAlt(v) \/ WriteOther(v) \/ Advance(v)
+    \/ \E v \in Values : WriteLeader(v) \/ WriteAlt(v) \/ LinkAlt(v) \/ WriteOther(v)
+                        \/ LinkOther(v) \/ Advance(v)
     \/ CrashL \/ RecoverL \/ CrashA \/ RecoverA
     \/ Mint \/ Withdraw
 
@@ -200,6 +240,8 @@ Init ==
     /\ leaderSeq = << >>
     /\ altSeq = << >>
     /\ counts = [v \in Countable |-> 0]
+    /\ altLinked = {}
+    /\ linkCounts = [v \in Countable |-> 0]
     /\ upL = TRUE /\ upA = TRUE
     /\ remaining = Supply
     /\ released = FALSE
@@ -218,6 +260,8 @@ TypeOK ==
     /\ leaderSeq \in Seq(Values) /\ Len(leaderSeq) <= 4
     /\ altSeq \in Seq(Values) /\ Len(altSeq) <= 4
     /\ counts \in [Countable -> 0..3]
+    /\ altLinked \subseteq Values
+    /\ linkCounts \in [Countable -> 0..3]
     /\ upL \in BOOLEAN /\ upA \in BOOLEAN
     /\ remaining \in Nat
     /\ released \in BOOLEAN
@@ -252,11 +296,16 @@ LeaderFromCommittedSet == Lead = L
 \* occupy the cell and never finalize.
 UnrecognizedBytesNeverOccupy == \A v \in Values : ~Recognized(v) => ~LeaderHeld(v) /\ ~Final(v)
 
-\* Three holders — the leader and two others — is finality; an unavailable
+\* The leader's link and two further links are finality; an unavailable
 \* non-leader member never blocks it.
-ThreeHoldersIsFinal == \A v \in Values : LeaderHeld(v) /\ Copies(v) >= 2 => Final(v)
+LeaderAndTwoLinksIsFinal == \A v \in Values : LeaderHeld(v) /\ Links(v) >= 2 => Final(v)
 UnavailableNonLeaderNeverBlocks ==
-    \A v \in Values : ~upA /\ LeaderHeld(v) /\ counts[v] >= 2 => Final(v)
+    \A v \in Values : ~upA /\ LeaderHeld(v) /\ linkCounts[v] >= 2 => Final(v)
+
+\* Finality is the chain's: a final release has two further links carrying
+\* its leader record. Copies written before it held the leader never make it
+\* final, however many members hold them (visibility grants no priority).
+FinalRequiresChainLinks == \A v \in Values : Final(v) => LeaderHeld(v) /\ Links(v) >= 2
 
 \* Additional replicas never alter the winner: the winner is a function of
 \* the leader's read alone.

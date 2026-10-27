@@ -35,8 +35,10 @@ use crate::tla_trace_replay::{
 /// 94 since the offline step's bearer order (owner ruling 2026-10-22: the
 /// sender commits when its anchor commits): `OfflineFinality/commit-on-ack`,
 /// `OfflineFinality/commit-without-owed-confirm` and
-/// `OfflineFinality/sender-ahead-reachable`.
-pub const EXPECTED_STANDARD_SPECS: usize = 94;
+/// `OfflineFinality/sender-ahead-reachable`. 95 since the reserve takes its
+/// finality from the route chain (G15): `NativeReserveRelease/copy-rule`;
+/// 96 with the successor cells' `SofiSuccessorCells/copy-rule`.
+pub const EXPECTED_STANDARD_SPECS: usize = 96;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -597,7 +599,8 @@ impl TlaRunner {
             // reserve's successor cell at the members while claimants, garbage,
             // outages and the background carry interleave; Core recognizes,
             // resolves leader first, and advances the reserve by exactly the
-            // amount the final release names. Finality (leader + two copies) and
+            // amount the final release names. Finality (the route chain's: the
+            // leader's link and two further links carrying it) and
             // all-member replication are two properties, kept apart. The Rust
             // twins are dsm/src/economic/native_reserve.rs and
             // dsm_sdk/src/sdk/native_reserve.rs; the algebra is
@@ -617,7 +620,8 @@ impl TlaRunner {
                     "AtMostOneFinal".into(),
                     "LeaderFromCommittedSet".into(),
                     "UnrecognizedBytesNeverOccupy".into(),
-                    "ThreeHoldersIsFinal".into(),
+                    "LeaderAndTwoLinksIsFinal".into(),
+                    "FinalRequiresChainLinks".into(),
                     "UnavailableNonLeaderNeverBlocks".into(),
                     "ReplicasDoNotAlterTheWinner".into(),
                 ],
@@ -643,7 +647,16 @@ impl TlaRunner {
                 "NativeReserveRelease/all-member-finality",
                 "DSM_NativeReserveRelease.tla",
                 "DSM_NativeReserveRelease_AllMemberFinality.cfg",
-                "ThreeHoldersIsFinal",
+                "LeaderAndTwoLinksIsFinal",
+            ),
+            // G15: the copy rule ("two other members hold x") counted copies
+            // written before the release held the leader; the route chain
+            // counts only copies carrying its leader record.
+            expect_violation(
+                "NativeReserveRelease/copy-rule",
+                "DSM_NativeReserveRelease.tla",
+                "DSM_NativeReserveRelease_CopyRule.cfg",
+                "FinalRequiresChainLinks",
             ),
             expect_violation(
                 "NativeReserveRelease/unavailable-non-leader-blocks",
@@ -762,6 +775,7 @@ impl TlaRunner {
                     "FinalImpliesRecognized".into(),
                     "RecognizedImpliesConstructible".into(),
                     "FinalRequiresLeader".into(),
+                    "FinalRequiresChainLinks".into(),
                     "AtMostOneFinalPerCoordinate".into(),
                     "LeaderFromCommittedSet".into(),
                     "FinalityIsPermanent".into(),
@@ -853,6 +867,15 @@ impl TlaRunner {
                 "DSM_SofiSuccessorCells.tla",
                 "DSM_SofiSuccessorCells_CountWithoutLeader.cfg",
                 "FinalRequiresLeader",
+            ),
+            // G15: the copy rule counted copies of an exercise written before
+            // it held the leader; the route chain counts only copies carrying
+            // its leader record.
+            expect_violation(
+                "SofiSuccessorCells/copy-rule",
+                "DSM_SofiSuccessorCells.tla",
+                "DSM_SofiSuccessorCells_CopyRule.cfg",
+                "FinalRequiresChainLinks",
             ),
             expect_violation(
                 "SofiSuccessorCells/count-without-leader-two-finals",
