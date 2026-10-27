@@ -68,6 +68,9 @@ use crate::route_chain::{
     check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
     ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
 };
+use crate::shared_lineage::{
+    EstablishedSharedHead, GenerationChain, LineageKind, LineageObjectError, SharedGenesisV1,
+};
 use crate::storage_object::immutable_addr;
 use crate::types::proto as generated;
 
@@ -251,6 +254,143 @@ impl NativeReserveState {
     /// The seed of that cell's leader.
     pub fn successor_seed(&self) -> D32 {
         reserve_seed(&self.reserve_id, &self.root())
+    }
+}
+
+/// Why an established head is not a state of this reserve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveHeadError {
+    /// The state given as the genesis is at a later generation.
+    NotTheGenesis { generation: u64 },
+    /// The head is of another lineage, or of a lineage of another kind.
+    NotThisReserve,
+    /// The lineage has no generation `generation`: it is exhausted before it.
+    NoSuchGeneration { generation: u64, why: String },
+    /// The head's root is not the reserve's state at its generation.
+    RootIsNotTheState { generation: u64 },
+    /// A head at generation 0 whose digest is not this reserve's genesis.
+    NotTheGenesisDigest,
+    /// The release does not succeed the head's state.
+    NotASuccessor(ReleaseRefusal),
+    /// The head cannot be extended by another generation.
+    Lineage(LineageObjectError),
+}
+
+impl core::fmt::Display for ReserveHeadError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotTheGenesis { generation } => write!(
+                f,
+                "the reserve state given as the genesis is at generation {generation}"
+            ),
+            Self::NotThisReserve => write!(f, "the head is not of this reserve's lineage"),
+            Self::NoSuchGeneration { generation, why } => {
+                write!(f, "the reserve has no generation {generation}: {why}")
+            }
+            Self::RootIsNotTheState { generation } => write!(
+                f,
+                "the head's root is not the reserve's state at generation {generation}"
+            ),
+            Self::NotTheGenesisDigest => {
+                write!(f, "the head at generation 0 is not this reserve's genesis")
+            }
+            Self::NotASuccessor(refusal) => {
+                write!(f, "the release does not succeed the head: {refusal}")
+            }
+            Self::Lineage(e) => write!(f, "the head cannot be extended: {e:?}"),
+        }
+    }
+}
+
+impl std::error::Error for ReserveHeadError {}
+
+/// The reserve as a shared lineage of kind 2 (SoFi Amendment S23): `R_0`'s
+/// root, and the policy commit its genesis supply is fixed in. Refused for a
+/// state after the genesis.
+pub fn reserve_lineage_genesis(
+    genesis: &NativeReserveState,
+) -> Result<SharedGenesisV1, ReserveHeadError> {
+    if genesis.generation != 0 {
+        return Err(ReserveHeadError::NotTheGenesis {
+            generation: genesis.generation,
+        });
+    }
+    Ok(SharedGenesisV1::new(
+        LineageKind::Reserve,
+        genesis.reserve_id,
+        genesis.root(),
+        genesis.policy_commit,
+    ))
+}
+
+/// A head of the reserve a reader established (DSM Amendment A15), with the
+/// reserve state Core derives at it. The one form in which a consumer of the
+/// reserve takes a state to build on: a claim builds its release on one, and
+/// a verifier checks a release against the heads around it.
+///
+/// It is made only from an [`EstablishedSharedHead`] whose root Core checks
+/// against the state at its generation, or by Core extending one by a
+/// release that succeeds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EstablishedReserve {
+    head: EstablishedSharedHead,
+    state: NativeReserveState,
+}
+
+impl EstablishedReserve {
+    /// The reserve's state at `head`, when `head` is of the reserve whose
+    /// genesis is `genesis` and its root is the state at its generation. At
+    /// generation 0 its digest must also be the genesis's.
+    pub fn of(
+        genesis: &NativeReserveState,
+        head: &EstablishedSharedHead,
+    ) -> Result<Self, ReserveHeadError> {
+        let lineage = reserve_lineage_genesis(genesis)?;
+        if head.kind() != LineageKind::Reserve || head.lineage_id() != &genesis.reserve_id {
+            return Err(ReserveHeadError::NotThisReserve);
+        }
+        let generation = head.generation();
+        let state =
+            genesis
+                .at_generation(generation)
+                .map_err(|e| ReserveHeadError::NoSuchGeneration {
+                    generation,
+                    why: e.to_string(),
+                })?;
+        if &state.root() != head.state_root() {
+            return Err(ReserveHeadError::RootIsNotTheState { generation });
+        }
+        if generation == 0 && head.generation_digest() != &lineage.digest() {
+            return Err(ReserveHeadError::NotTheGenesisDigest);
+        }
+        Ok(Self { head: *head, state })
+    }
+
+    /// The reserve's genesis as an established head.
+    pub fn genesis(genesis: &NativeReserveState) -> Result<Self, ReserveHeadError> {
+        let lineage = reserve_lineage_genesis(genesis)?;
+        Self::of(genesis, &GenerationChain::from_genesis(&lineage).head())
+    }
+
+    pub fn head(&self) -> &EstablishedSharedHead {
+        &self.head
+    }
+
+    pub fn state(&self) -> &NativeReserveState {
+        &self.state
+    }
+
+    /// The head `release` establishes on this one: the state it builds by
+    /// the construction predicate, with the release's evidence address as
+    /// the generation's step.
+    pub fn succeeded_by(&self, release: &VerifiedRelease) -> Result<Self, ReserveHeadError> {
+        let state =
+            release_constructible(&self.state, release).map_err(ReserveHeadError::NotASuccessor)?;
+        let head = self
+            .head
+            .extended(state.root(), release_evidence_addr(&release.envelope_bytes))
+            .map_err(ReserveHeadError::Lineage)?;
+        Ok(Self { head, state })
     }
 }
 
@@ -796,73 +936,80 @@ pub fn check_successor_completion(
     check_completion_proof(&cell.cell, evidence, proof, release_of(&cell.parent))
 }
 
-/// Where a walk of the lineage stopped.
+/// Where a walk of the lineage stopped. Every stop names the head the walk
+/// established last (DSM Amendment A15).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WalkStop {
     /// `head`'s successor cell is open: `head` is the current state.
-    Head(NativeReserveState),
+    Head(EstablishedReserve),
     /// The successor of `settled` is leader-held but not final: the next
     /// state is decided (`child`) but a release at it cannot yet be final.
     LeaderHeld {
-        settled: NativeReserveState,
+        settled: EstablishedReserve,
         release: Box<VerifiedRelease>,
         child: NativeReserveState,
     },
     /// The evidence for the successor cell of `last` does not decide it yet.
     Unavailable {
-        last: NativeReserveState,
+        last: EstablishedReserve,
         missing: Missing,
     },
     /// The budget ran out at `last`. Never a verdict about the lineage.
-    BudgetExhausted(NativeReserveState),
+    BudgetExhausted(EstablishedReserve),
+    /// The release final at `last`'s successor cell does not extend `last`.
+    Refused {
+        last: EstablishedReserve,
+        refusal: ReserveHeadError,
+    },
 }
 
-/// Walk the lineage from a validated `start` — `R_0`, or a state an earlier
-/// walk established as final — reading one successor cell per step through
-/// `read`, which takes the parent and returns what its cell established.
-/// Every final release advances the state; `visit` sees each one, in order,
-/// with the parent it succeeded, so a caller can memoise validated states.
-/// An error from either stops the walk and is returned as it is: a reader
-/// that could not read reports that, never a reading.
+/// Walk the lineage from an established `start` — the genesis, or the head an
+/// earlier walk established — reading one successor cell per step through
+/// `read`, which takes the parent state and returns what its cell
+/// established. Every final release extends the head; `visit` sees each one,
+/// in order, with the head it succeeded and the head it established, so a
+/// caller can memoise them. An error from either stops the walk and is
+/// returned as it is: a reader that could not read reports that, never a
+/// reading.
 ///
-/// Finality is permanent (Part II §8), so a state reached through final
+/// Finality is permanent (Part II §8), so a head reached through final
 /// releases is a sound start for any later walk.
 pub fn walk_lineage<R, V, E>(
-    start: NativeReserveState,
+    start: EstablishedReserve,
     budget: usize,
     mut read: R,
     mut visit: V,
 ) -> Result<WalkStop, E>
 where
     R: FnMut(&NativeReserveState) -> Result<SuccessorRead, E>,
-    V: FnMut(&NativeReserveState, &VerifiedRelease, &NativeReserveState) -> Result<(), E>,
+    V: FnMut(&EstablishedReserve, &VerifiedRelease, &EstablishedReserve) -> Result<(), E>,
 {
-    let mut state = start;
+    let mut at = start;
     let mut remaining = budget;
     while remaining > 0 {
         remaining -= 1;
-        match read(&state)? {
-            SuccessorRead::Final { release, child } => {
-                visit(&state, &release, &child)?;
-                state = child;
-            }
+        match read(&at.state)? {
+            SuccessorRead::Final { release, .. } => match at.succeeded_by(&release) {
+                Ok(next) => {
+                    visit(&at, &release, &next)?;
+                    at = next;
+                }
+                Err(refusal) => return Ok(WalkStop::Refused { last: at, refusal }),
+            },
             SuccessorRead::LeaderHeld { release, child } => {
                 return Ok(WalkStop::LeaderHeld {
-                    settled: state,
+                    settled: at,
                     release,
                     child,
                 })
             }
-            SuccessorRead::Open => return Ok(WalkStop::Head(state)),
+            SuccessorRead::Open => return Ok(WalkStop::Head(at)),
             SuccessorRead::Unavailable(missing) => {
-                return Ok(WalkStop::Unavailable {
-                    last: state,
-                    missing,
-                })
+                return Ok(WalkStop::Unavailable { last: at, missing })
             }
         }
     }
-    Ok(WalkStop::BudgetExhausted(state))
+    Ok(WalkStop::BudgetExhausted(at))
 }
 
 #[cfg(test)]
@@ -1378,6 +1525,23 @@ mod tests {
 
     // ── The walk ─────────────────────────────────────────────────────────
 
+    /// The reserve's established head after `releases`, as the generation
+    /// chain builds it from the releases' evidence addresses.
+    fn chain_head(
+        r0: &NativeReserveState,
+        releases: &[(&VerifiedRelease, &NativeReserveState)],
+    ) -> EstablishedSharedHead {
+        let mut chain = GenerationChain::from_genesis(
+            &reserve_lineage_genesis(r0).expect("R_0 is the genesis"),
+        );
+        for (release, state) in releases {
+            chain
+                .push(state.root(), release_evidence_addr(&release.envelope_bytes))
+                .expect("the next generation");
+        }
+        chain.head()
+    }
+
     #[test]
     fn the_walk_advances_through_final_releases_and_stops_at_the_head() {
         let r0 = genesis();
@@ -1387,7 +1551,7 @@ mod tests {
         let r2 = release_constructible(&r1, &rel2).unwrap();
         let mut visited = Vec::new();
         let stop = walk_lineage(
-            r0,
+            EstablishedReserve::genesis(&r0).expect("R_0's head"),
             16,
             |parent| -> Result<SuccessorRead, core::convert::Infallible> {
                 Ok(if parent.root() == r0.root() {
@@ -1405,11 +1569,20 @@ mod tests {
                 })
             },
             |parent, release, child| {
-                visited.push((parent.generation, release.body.generation, child.generation));
+                visited.push((
+                    parent.state.generation,
+                    release.body.generation,
+                    child.state.generation,
+                ));
                 Ok(())
             },
         );
-        assert_eq!(stop, Ok(WalkStop::Head(r2)));
+        // The head the walk stops at is the generation chain's over the same
+        // releases: one digest of the history, whoever builds it.
+        let head = EstablishedReserve::of(&r0, &chain_head(&r0, &[(&rel1, &r1), (&rel2, &r2)]))
+            .expect("the chain's head is a head of the reserve");
+        assert_eq!(stop, Ok(WalkStop::Head(head)));
+        assert_eq!(*head.state(), r2);
         assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
         assert_eq!(r2.remaining_supply, supply() - 2 * ERA_FAUCET_PAYOUT);
     }
@@ -1417,10 +1590,11 @@ mod tests {
     #[test]
     fn the_walk_never_turns_unavailable_or_budget_into_a_head() {
         let r0 = genesis();
+        let h0 = EstablishedReserve::genesis(&r0).expect("R_0's head");
         let mut visited = 0;
         assert_eq!(
             walk_lineage(
-                r0,
+                h0,
                 16,
                 |parent| -> Result<SuccessorRead, core::convert::Infallible> {
                     assert_eq!(parent.generation, 0, "the walk reads R_0's cell first");
@@ -1428,13 +1602,13 @@ mod tests {
                 },
                 |parent, release, child| {
                     visited += 1;
-                    assert_eq!(parent.generation + 1, release.body.generation);
-                    assert_eq!(release.body.generation, child.generation);
+                    assert_eq!(parent.state.generation + 1, release.body.generation);
+                    assert_eq!(release.body.generation, child.state.generation);
                     Ok(())
                 },
             ),
             Ok(WalkStop::Unavailable {
-                last: r0,
+                last: h0,
                 missing: Missing::LeaderUnread
             })
         );
@@ -1442,7 +1616,7 @@ mod tests {
         let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &rel1).unwrap();
         let stop = walk_lineage(
-            r0,
+            h0,
             1,
             |parent| -> Result<SuccessorRead, core::convert::Infallible> {
                 Ok(if parent.root() == r0.root() {
@@ -1455,26 +1629,117 @@ mod tests {
                 })
             },
             |parent, release, child| {
-                assert_eq!(parent.generation + 1, release.body.generation);
-                assert_eq!(release.body.generation, child.generation);
+                assert_eq!(parent.state.generation + 1, release.body.generation);
+                assert_eq!(release.body.generation, child.state.generation);
                 Ok(())
             },
         );
-        assert_eq!(stop, Ok(WalkStop::BudgetExhausted(r1)));
+        let h1 = EstablishedReserve::of(&r0, &chain_head(&r0, &[(&rel1, &r1)])).expect("a head");
+        assert_eq!(stop, Ok(WalkStop::BudgetExhausted(h1)));
 
         // A reader that could not read stops the walk with its error.
         assert_eq!(
             walk_lineage(
-                r0,
+                h0,
                 16,
                 |parent| Err(parent.generation),
                 |parent, release, child| {
-                    assert_eq!(parent.generation + 1, release.body.generation);
-                    assert_eq!(release.body.generation, child.generation);
+                    assert_eq!(parent.state.generation + 1, release.body.generation);
+                    assert_eq!(release.body.generation, child.state.generation);
                     Ok(())
                 },
             ),
             Err(0)
+        );
+    }
+
+    /// DSM Amendment A15, MR-DSM-0315: a reserve state is taken from an
+    /// established head only when the head is of this reserve and its root is
+    /// the state at its generation. A head of another lineage, a root the
+    /// reserve does not hold at that generation, a generation past
+    /// exhaustion, a genesis head with another digest, and a genesis that is
+    /// not generation 0 are each refused.
+    ///
+    /// MUTATION CONTROL: dropping the root comparison in
+    /// `EstablishedReserve::of` turns the root assertion red.
+    #[test]
+    fn a_reserve_state_is_taken_only_from_a_head_of_this_reserve() {
+        let r0 = genesis();
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
+        let r1 = release_constructible(&r0, &rel1).unwrap();
+        let honest = chain_head(&r0, &[(&rel1, &r1)]);
+        assert_eq!(
+            *EstablishedReserve::of(&r0, &honest)
+                .expect("an honest head")
+                .state(),
+            r1
+        );
+
+        // The same history with generation 1 claiming the root of generation 2.
+        let r2 = r0.at_generation(2).expect("generation 2");
+        let mut chain = GenerationChain::from_genesis(&reserve_lineage_genesis(&r0).unwrap());
+        chain
+            .push(r2.root(), release_evidence_addr(&rel1.envelope_bytes))
+            .unwrap();
+        assert_eq!(
+            EstablishedReserve::of(&r0, &chain.head()),
+            Err(ReserveHeadError::RootIsNotTheState { generation: 1 })
+        );
+
+        // A vault's lineage with this reserve's id, and another reserve's.
+        let vault = GenerationChain::from_genesis(&SharedGenesisV1::new(
+            LineageKind::Vault,
+            r0.reserve_id,
+            r0.root(),
+            r0.policy_commit,
+        ));
+        assert_eq!(
+            EstablishedReserve::of(&r0, &vault.head()),
+            Err(ReserveHeadError::NotThisReserve)
+        );
+        let other = NativeReserveState::genesis(b"othernet", committed_set_id()).expect("R_0");
+        assert_eq!(
+            EstablishedReserve::of(&other, &honest),
+            Err(ReserveHeadError::NotThisReserve)
+        );
+
+        // A genesis head whose digest commits another genesis preimage.
+        let forged = GenerationChain::from_genesis(&SharedGenesisV1::new(
+            LineageKind::Reserve,
+            r0.reserve_id,
+            r0.root(),
+            [0x5A; 32],
+        ));
+        assert_eq!(
+            EstablishedReserve::of(&r0, &forged.head()),
+            Err(ReserveHeadError::NotTheGenesisDigest)
+        );
+
+        // A state after the genesis is never taken as the genesis.
+        assert_eq!(
+            EstablishedReserve::of(&r1, &honest),
+            Err(ReserveHeadError::NotTheGenesis { generation: 1 })
+        );
+    }
+
+    /// A head extends only by a release that succeeds its state, and the head
+    /// it establishes is the generation chain's: the release's evidence
+    /// address is the generation's step. A release of another parent extends
+    /// nothing.
+    #[test]
+    fn a_head_extends_only_by_a_release_that_succeeds_it() {
+        let r0 = genesis();
+        let h0 = EstablishedReserve::genesis(&r0).expect("R_0's head");
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
+        let r1 = release_constructible(&r0, &rel1).unwrap();
+        let h1 = h0.succeeded_by(&rel1).expect("the release succeeds R_0");
+        assert_eq!(h1.head(), &chain_head(&r0, &[(&rel1, &r1)]));
+        assert_eq!(*h1.state(), r1);
+        assert_eq!(
+            h1.succeeded_by(&rel1),
+            Err(ReserveHeadError::NotASuccessor(
+                ReleaseRefusal::ParentRootMismatch
+            ))
         );
     }
 }

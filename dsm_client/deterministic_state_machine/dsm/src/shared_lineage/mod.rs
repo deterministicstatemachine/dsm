@@ -319,6 +319,35 @@ impl EstablishedSharedHead {
     pub fn state_root(&self) -> &D32 {
         &self.state_root
     }
+
+    /// The head one established generation later: `state_root` installed by
+    /// the step whose digest is `step_digest`. Core's own walks extend a head
+    /// this way and nothing else does, so no layer outside Core builds a
+    /// head except through [`GenerationChain`].
+    pub(crate) fn extended(
+        &self,
+        state_root: D32,
+        step_digest: D32,
+    ) -> Result<Self, LineageObjectError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(LineageObjectError::GenerationOverflow)?;
+        let next = SharedGenerationV1::new(
+            self.kind,
+            self.lineage_id,
+            generation,
+            self.generation_digest,
+            state_root,
+            step_digest,
+        )?;
+        Ok(Self {
+            generation,
+            generation_digest: next.digest(),
+            state_root,
+            ..*self
+        })
+    }
 }
 
 /// The digests `d_0 … d_n` of the generations a reader established, in
@@ -346,20 +375,8 @@ impl GenerationChain {
 
     /// Append the next established generation, its root and step digest.
     pub fn push(&mut self, state_root: D32, step_digest: D32) -> Result<(), LineageObjectError> {
-        let parent = self.head();
-        let generation = parent
-            .generation
-            .checked_add(1)
-            .ok_or(LineageObjectError::GenerationOverflow)?;
-        let next = SharedGenerationV1::new(
-            self.kind,
-            self.lineage_id,
-            generation,
-            parent.generation_digest,
-            state_root,
-            step_digest,
-        )?;
-        self.generations.push((state_root, next.digest()));
+        let next = self.head().extended(state_root, step_digest)?;
+        self.generations.push((state_root, next.generation_digest));
         Ok(())
     }
 

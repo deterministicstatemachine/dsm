@@ -58,7 +58,7 @@ async fn reserve_head() -> NativeReserveState {
     .expect("join")
     .expect("walk");
     match stop {
-        WalkStop::Head(state) => state,
+        WalkStop::Head(head) => *head.state(),
         other => panic!("the reserve walk stopped short of its head: {other:?}"),
     }
 }

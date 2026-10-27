@@ -20,7 +20,6 @@ use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension};
 
 use dsm::economic::native_reserve::{NativeReserveState, VerifiedRelease};
-use dsm::economic::provenance::ReserveReleaseWin;
 
 use super::get_connection;
 
@@ -105,29 +104,6 @@ pub fn record_final_release(
     Ok(())
 }
 
-/// The latest memoised state of the reserve whose genesis is `genesis`, or
-/// `genesis` itself when nothing is memoised.
-pub fn latest_state(genesis: &NativeReserveState) -> Result<NativeReserveState> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let row: Option<(i64, i64)> = conn
-        .query_row(
-            "SELECT generation, remaining FROM native_reserve_lineage_memo
-              WHERE reserve_id = ?1 ORDER BY generation DESC LIMIT 1",
-            params![genesis.reserve_id().as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    Ok(match row {
-        Some((generation, remaining)) => memoised(
-            genesis,
-            u64_of(generation, "generation")?,
-            u64_of(remaining, "remaining")?,
-        )?,
-        None => *genesis,
-    })
-}
-
 /// The state at `generation` of the lineage `genesis` starts, as Core derives
 /// it, when the memo's `remaining` for that generation agrees. A row that
 /// disagrees is corrupt storage, never a state: the memo names generations,
@@ -154,7 +130,9 @@ fn memoised(
 /// in generation order, into `step`: the state each final release installed,
 /// and the release's envelope. What this device's own walks established.
 /// One row is read at a time, so a walk holds one release, never the memo
-/// (SA-75). `step` answers whether to read on.
+/// (SA-75). `step` answers whether to read on. A row whose supplies are not
+/// the ones the lineage holds at its generation and the one before is
+/// corrupt storage, and an error.
 pub fn fold_memoised_lineage(
     genesis: &NativeReserveState,
     mut step: impl FnMut(NativeReserveState, &[u8]) -> Result<std::ops::ControlFlow<()>>,
@@ -164,59 +142,34 @@ pub fn fold_memoised_lineage(
         .lock()
         .map_err(|e| anyhow!("native reserve memo: the store is poisoned: {e}"))?;
     let mut stmt = conn.prepare(
-        "SELECT generation, remaining, envelope FROM native_reserve_lineage_memo
+        "SELECT generation, remaining, parent_remaining, envelope
+           FROM native_reserve_lineage_memo
           WHERE reserve_id = ?1 ORDER BY generation ASC",
     )?;
     let mut rows = stmt.query(params![genesis.reserve_id().as_slice()])?;
     while let Some(row) = rows.next()? {
+        let generation = u64_of(row.get::<_, i64>(0)?, "generation")?;
         let state = memoised(
             genesis,
-            u64_of(row.get::<_, i64>(0)?, "generation")?,
+            generation,
             u64_of(row.get::<_, i64>(1)?, "remaining")?,
         )?;
-        let envelope = row.get_ref(2)?.as_blob()?;
+        // The row's parent supply is the lineage's one generation before;
+        // generation 0 has no row, so a row has a parent.
+        let parent_generation = generation
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("native_reserve_lineage_memo: generation 0 has no parent"))?;
+        memoised(
+            genesis,
+            parent_generation,
+            u64_of(row.get::<_, i64>(2)?, "parent remaining")?,
+        )?;
+        let envelope = row.get_ref(3)?.as_blob()?;
         if step(state, envelope)?.is_break() {
             break;
         }
     }
     Ok(())
-}
-
-/// The memoised final release at `generation`, with the state it succeeded.
-pub fn release_at(
-    genesis: &NativeReserveState,
-    generation: u64,
-) -> Result<Option<ReserveReleaseWin>> {
-    let binding = get_connection()?;
-    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-    let row: Option<(i64, Vec<u8>)> = conn
-        .query_row(
-            "SELECT parent_remaining, envelope FROM native_reserve_lineage_memo
-              WHERE reserve_id = ?1 AND generation = ?2",
-            params![
-                genesis.reserve_id().as_slice(),
-                i64_of(generation, "generation")?
-            ],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    let Some((parent_remaining, envelope)) = row else {
-        return Ok(None);
-    };
-    // A memo row that does not decode is corrupt storage, never a release: a
-    // parent supply read as zero, or a parent generation below the genesis,
-    // would be evidence this device invented.
-    let parent_generation = generation
-        .checked_sub(1)
-        .ok_or_else(|| anyhow!("native_reserve_lineage_memo: generation 0 has no parent"))?;
-    Ok(Some(ReserveReleaseWin {
-        envelope_bytes: envelope,
-        parent: memoised(
-            genesis,
-            parent_generation,
-            u64_of(parent_remaining, "parent remaining")?,
-        )?,
-    }))
 }
 
 /// The memoised final release naming `(genesis, devid, position)` as its
@@ -255,18 +208,24 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    fn memo_row(genesis: &NativeReserveState, generation: i64, parent_remaining: i64) {
+    fn memo_row(
+        genesis: &NativeReserveState,
+        generation: i64,
+        parent_remaining: i64,
+        remaining: i64,
+    ) {
         let binding = get_connection().expect("connection");
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
         conn.execute(
             "INSERT INTO native_reserve_lineage_memo
                (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
                 recipient_devid, recipient_position, envelope)
-             VALUES (?1, ?2, ?3, 0, ?4, ?5, 0, ?6)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
             params![
                 genesis.reserve_id().as_slice(),
                 generation,
                 parent_remaining,
+                remaining,
                 [0x61u8; 32].as_slice(),
                 [0x62u8; 32].as_slice(),
                 [0x63u8; 8].as_slice(),
@@ -275,10 +234,10 @@ mod tests {
         .expect("memo row");
     }
 
-    /// A memoised release reads back as the release it recorded, its parent
-    /// the state Core derives at that generation; a row whose parent supply is
-    /// negative, or is not the one the lineage holds there, is corrupt storage
-    /// and an error — never a release with an invented parent supply.
+    /// The fold reads each memoised release with the state it installed; a
+    /// row whose parent supply is negative, or is not the one the lineage
+    /// holds there, is corrupt storage and an error — never a release with an
+    /// invented parent supply.
     #[test]
     #[serial]
     fn a_corrupt_memo_row_is_an_error_not_a_release() {
@@ -286,31 +245,53 @@ mod tests {
         super::super::reset_database_for_tests();
         super::super::init_database().expect("init");
         let genesis = NativeReserveState::genesis(b"memo-test", [0x5E; 32]).expect("R_0");
+        let folded = |genesis: &NativeReserveState| -> Result<Vec<u64>> {
+            let mut seen = Vec::new();
+            fold_memoised_lineage(genesis, |state, _| {
+                seen.push(state.generation());
+                Ok(std::ops::ControlFlow::Continue(()))
+            })?;
+            Ok(seen)
+        };
 
         let parent = genesis.at_generation(2).expect("generation 2");
+        let state = genesis.at_generation(3).expect("generation 3");
         memo_row(
             &genesis,
             3,
             i64::try_from(parent.remaining_supply()).expect("fits"),
+            i64::try_from(state.remaining_supply()).expect("fits"),
         );
-        let win = release_at(&genesis, 3).expect("read").expect("recorded");
-        assert_eq!(win.parent, parent);
+        assert_eq!(folded(&genesis).expect("read"), vec![3]);
 
-        memo_row(&genesis, 4, -1);
-        assert!(
-            release_at(&genesis, 4).is_err(),
-            "a negative parent supply is corrupt"
+        memo_row(
+            &genesis,
+            4,
+            -1,
+            i64::try_from(genesis.at_generation(4).expect("4").remaining_supply()).expect("fits"),
         );
+        match folded(&genesis) {
+            Err(e) => assert!(
+                e.to_string().contains("parent remaining is negative"),
+                "refused as a negative parent supply: {e}"
+            ),
+            Ok(seen) => panic!("a negative parent supply is corrupt, yet the fold read {seen:?}"),
+        }
 
-        memo_row(&genesis, 5, 900);
-        match release_at(&genesis, 5) {
+        super::super::reset_database_for_tests();
+        super::super::init_database().expect("init");
+        memo_row(
+            &genesis,
+            5,
+            900,
+            i64::try_from(genesis.at_generation(5).expect("5").remaining_supply()).expect("fits"),
+        );
+        match folded(&genesis) {
             Err(e) => assert!(
                 e.to_string().contains("where the lineage holds"),
                 "refused as a supply the lineage does not hold there: {e}"
             ),
             Ok(..) => panic!("a parent supply the lineage does not hold there is corrupt"),
         }
-
-        assert!(release_at(&genesis, 9).expect("read").is_none());
     }
 }

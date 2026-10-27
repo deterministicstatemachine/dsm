@@ -1112,4 +1112,269 @@ mod tests {
         assert!((0u8..32).any(|b| leader([0xA1; 32], [b; 32]) != base));
         assert!((0u8..32).any(|b| leader([b; 32], [0xB2; 32]) != base));
     }
+
+    // ── G3: each recognition condition, corrupted alone ──────────────────
+
+    /// The exercise of `p` (signed `p_signature`) and `fb`, with `F` and
+    /// its `C_q` signed by the trader, and the rest as given.
+    fn assembled(
+        p: &TraderPrecommitBody,
+        p_signature: &[u8],
+        fb: &TraderFulfillmentBody,
+        preimage: Vec<u8>,
+        witnesses: Vec<Vec<u8>>,
+        closure: Vec<Vec<u8>>,
+    ) -> Vec<u8> {
+        SofiExercise::new(
+            Publication::Fulfillment {
+                body: fb,
+                signature: &signed(derive::fulfillment_signing_digest(fb)),
+            }
+            .object_bytes()
+            .unwrap(),
+            signed_c_q(derive::resolution_claim(p, fb)),
+            Publication::Precommit {
+                body: p,
+                signature: p_signature,
+            }
+            .object_bytes()
+            .unwrap(),
+            preimage,
+            witnesses,
+            closure,
+        )
+        .unwrap()
+        .encode()
+    }
+
+    /// `like` with another precommit id and witness set, under the trader's
+    /// key and `AttA`.
+    fn fulfillment_of(
+        precommit_id: D32,
+        set: Vec<D32>,
+        like: &TraderFulfillmentBody,
+    ) -> TraderFulfillmentBody {
+        TraderFulfillmentBody::new(
+            precommit_id,
+            set,
+            like.attempts().to_vec(),
+            like.position(),
+            ALG,
+            key(),
+            TRADER_ATT_A,
+        )
+        .unwrap()
+    }
+
+    /// The sorted ids of `witnesses`: the set an `F` over them commits.
+    fn set_of(witnesses: &[DlvPolicyFulfillmentBody]) -> Vec<D32> {
+        let mut set: Vec<D32> = witnesses
+            .iter()
+            .map(derive::policy_fulfillment_id)
+            .collect();
+        set.sort();
+        set
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: `F` names `PrecommitId(P)`.
+    /// An `F` naming another precommit, signed by the trader with its own
+    /// signed `C_q`, over P's own witnesses and their set, satisfies every
+    /// other condition and is not an exercise.
+    ///
+    /// MUTATION CONTROL: dropping the precommit-id comparison
+    /// (`g3_precommit_id`) turns this red.
+    #[test]
+    fn an_exercise_whose_fulfillment_names_another_precommit_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let p_sig = signed(derive::precommit_signing_digest(p));
+        let parts = |fb: &TraderFulfillmentBody| {
+            assembled(
+                p,
+                &p_sig,
+                fb,
+                x.preimage().to_vec(),
+                x.witnesses().to_vec(),
+                x.closure().to_vec(),
+            )
+        };
+        assert!(
+            recognize_exercise(&parts(fb)).is_some(),
+            "the honest parts are an exercise"
+        );
+        let elsewhere = derive::precommit_id(&swap_fixture_n(1).precommit);
+        assert_ne!(elsewhere, *fb.precommit_id());
+        let stray = fulfillment_of(elsewhere, fb.policy_fulfillment_set().to_vec(), fb);
+        assert!(recognize_exercise(&parts(&stray)).is_none());
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: `F`'s key is the key `P`
+    /// commits. A `P` naming the trader's device but signed under another
+    /// key, with the trader's `F`, witnesses and `C_q` built on it, satisfies
+    /// every other condition (`F` still proves the device) and is not an
+    /// exercise.
+    ///
+    /// MUTATION CONTROL: dropping the key comparison (`g3_same_key`) turns
+    /// this red.
+    #[test]
+    fn an_exercise_whose_precommit_is_signed_under_another_key_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let (other_pk, other_sk) = generate_sphincs_keypair().unwrap();
+        let foreign = TraderPrecommitBody::new(
+            *p.genesis(),
+            *p.device_id(),
+            p.position(),
+            *p.parent_claim_ref(),
+            *p.external_commitment(),
+            p.legs().to_vec(),
+            *p.realize_root(),
+            *p.void_root(),
+            *p.storage_set_id(),
+            ALG,
+            &other_pk,
+        )
+        .unwrap();
+        let foreign_sig =
+            sphincs_sign(&other_sk, &derive::precommit_signing_digest(&foreign)).unwrap();
+        let pid = derive::precommit_id(&foreign);
+        let witnesses: Vec<DlvPolicyFulfillmentBody> = x
+            .witnesses()
+            .iter()
+            .map(|w| DlvPolicyFulfillmentBody {
+                precommit_id: pid,
+                ..DlvPolicyFulfillmentBody::decode(w).unwrap()
+            })
+            .collect();
+        let fb_on = fulfillment_of(pid, set_of(&witnesses), fb);
+        assert!(fulfillment_proves_the_device(&fb_on, foreign.device_id()));
+        let bytes = assembled(
+            &foreign,
+            &foreign_sig,
+            &fb_on,
+            x.preimage().to_vec(),
+            witnesses
+                .iter()
+                .map(DlvPolicyFulfillmentBody::encode)
+                .collect(),
+            x.closure().to_vec(),
+        );
+        assert!(recognize_exercise(&bytes).is_none());
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: the carried `P(E)`
+    /// recomputes the `E` that `P` commits. Another operation's `P(E)` and
+    /// closure, with P's witnesses bound to the `E` that preimage recomputes
+    /// and the trader's `F` over them, satisfies every other condition and is
+    /// not an exercise.
+    ///
+    /// MUTATION CONTROL: dropping the `E` comparison (`g3_e`) turns this red.
+    #[test]
+    fn an_exercise_whose_preimage_is_not_its_precommits_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let other = swap_fixture_n(1);
+        let e = derive::recompute_e(&other.preimage).unwrap();
+        assert_ne!(e, *p.external_commitment());
+        let witnesses: Vec<DlvPolicyFulfillmentBody> = x
+            .witnesses()
+            .iter()
+            .map(|w| DlvPolicyFulfillmentBody {
+                external_commitment: e,
+                ..DlvPolicyFulfillmentBody::decode(w).unwrap()
+            })
+            .collect();
+        let fb_on = fulfillment_of(*fb.precommit_id(), set_of(&witnesses), fb);
+        let bytes = assembled(
+            p,
+            &signed(derive::precommit_signing_digest(p)),
+            &fb_on,
+            other.preimage.encode().unwrap(),
+            witnesses
+                .iter()
+                .map(DlvPolicyFulfillmentBody::encode)
+                .collect(),
+            other.closure_in_order(),
+        );
+        assert!(recognize_exercise(&bytes).is_none());
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: one witness per leg. The
+    /// honest exercise carrying one witness more, every leg's witness and
+    /// everything else as carried, is not an exercise.
+    ///
+    /// MUTATION CONTROL: dropping the witness count (`g3_witness_count`)
+    /// turns this red.
+    #[test]
+    fn an_exercise_carrying_a_witness_beyond_its_legs_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let mut witnesses = x.witnesses().to_vec();
+        witnesses.push(witnesses[0].clone());
+        let bytes = assembled(
+            p,
+            &signed(derive::precommit_signing_digest(p)),
+            fb,
+            x.preimage().to_vec(),
+            witnesses,
+            x.closure().to_vec(),
+        );
+        assert!(recognize_exercise(&bytes).is_none());
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: one closure object per
+    /// `𝒞_E^pre` reference. The honest exercise carrying one closure object
+    /// more, every referenced object and everything else as carried, is not
+    /// an exercise.
+    ///
+    /// MUTATION CONTROL: dropping the closure count (`g3_closure_count`)
+    /// turns this red.
+    #[test]
+    fn an_exercise_carrying_an_object_beyond_its_references_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let mut closure = x.closure().to_vec();
+        assert_ne!(closure.len(), 0, "the fixture's closure names objects");
+        closure.push(closure[0].clone());
+        let bytes = assembled(
+            p,
+            &signed(derive::precommit_signing_digest(p)),
+            fb,
+            x.preimage().to_vec(),
+            x.witnesses().to_vec(),
+            closure,
+        );
+        assert!(recognize_exercise(&bytes).is_none());
+    }
+
+    /// MR-SOFI-0275 (G3), recognition condition: each closure object is the
+    /// one its reference names. The honest closure with one object's bytes
+    /// changed, the count and everything else as carried, is not an
+    /// exercise.
+    ///
+    /// MUTATION CONTROL: dropping the per-object check (`g3_closure_object`)
+    /// turns this red.
+    #[test]
+    fn an_exercise_whose_closure_object_is_not_its_references_is_nothing() {
+        let f = swap_fixture_n(2);
+        let honest = exercise(&f, &[0, 1]);
+        let (p, fb, x) = (&honest.precommit, &honest.fulfillment, &honest.exercise);
+        let mut closure = x.closure().to_vec();
+        let last = closure[0].len() - 1;
+        closure[0][last] ^= 0x01;
+        let bytes = assembled(
+            p,
+            &signed(derive::precommit_signing_digest(p)),
+            fb,
+            x.preimage().to_vec(),
+            x.witnesses().to_vec(),
+            closure,
+        );
+        assert!(recognize_exercise(&bytes).is_none());
+    }
 }
