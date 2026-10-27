@@ -48,6 +48,9 @@ bash ci/sofi_validated_root_constructors.sh
 # The baseline lists what the rebuild (R1..R14) has not wired yet and only
 # ever shrinks; R14 deletes it.
 python3 ci/sofi_reachability.py
+# Its negative control (MR-SOFI-0273): the same gate fails, naming it, on a
+# tree whose public SoFi function has no production caller.
+bash ci/sofi_reachability_negative_control.sh
 echo ""
 
 # A vault genesis must not be consumable from a PRESENTED creation operation.
