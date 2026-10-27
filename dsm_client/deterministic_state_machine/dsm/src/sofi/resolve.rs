@@ -883,6 +883,9 @@ struct LegsRead {
     registration: RegistrationRead,
     cells: Vec<AttemptCellRead>,
     walks: Vec<Option<AttemptWalk>>,
+    /// Per leg, the state leaf its core states at a parent root the chain
+    /// does not name ([`Verifier::parent_state`]).
+    parent_states: Vec<Option<VaultStateLeaf>>,
     /// For a Release, the cell its vault's kind binds it to: the verdict
     /// cell (SoFi Amendment S21) or the start and match cells (Amendment
     /// S22).
@@ -899,11 +902,17 @@ impl LegsRead {
         precommit
             .legs()
             .iter()
-            .zip(self.cells.iter().zip(self.walks.iter()))
-            .map(|(leg, (cell, walk))| LegReads {
+            .zip(
+                self.cells
+                    .iter()
+                    .zip(self.walks.iter())
+                    .zip(self.parent_states.iter()),
+            )
+            .map(|(leg, ((cell, walk), parent_state))| LegReads {
                 cell,
                 chain: chains.get(&leg.vault_id),
                 walk: walk.as_ref(),
+                parent_state: parent_state.as_ref(),
             })
             .collect()
     }
@@ -2628,6 +2637,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             },
             SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
         };
+        let key_state = self.parent_state(
+            exercise.preimage(),
+            key.read.vault_id(),
+            key.read.parent_root(),
+            chains.get(key.read.vault_id()),
+        )?;
         let key_ground = match establish_key_ground(&KeyGroundReads {
             exercise,
             registration: &registration,
@@ -2636,6 +2651,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 cell: key.read,
                 chain: chains.get(key.read.vault_id()),
                 walk: Some(key.reached),
+                parent_state: key_state.as_ref(),
             },
             verdict: verdict.as_ref(),
         }) {
@@ -2804,6 +2820,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
+        let mut parent_states = Vec::with_capacity(precommit.legs().len());
+        for leg in precommit.legs() {
+            parent_states.push(self.parent_state(
+                exercise.preimage(),
+                &leg.vault_id,
+                &leg.parent_root,
+                chains.get(&leg.vault_id),
+            )?);
+        }
         // A Release stands on the cell its vault's kind binds it to (SoFi
         // Amendments S21, S22): the verdict cell, or the start and match
         // cells. Nothing is read for any other operation.
@@ -2822,8 +2847,36 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             registration,
             cells,
             walks,
+            parent_states,
             verdict,
         }))
+    }
+
+    /// The state leaf `preimage`'s core for `vault_id` states at
+    /// `parent_root`, read by its value (SoFi Amendment S26), when the vault's
+    /// chain does not name that root: what places a parent the chain does not
+    /// hold at its generation, so the chain can refute it with no validation
+    /// evidence (§23.5 arm (ii), MR-SOFI-0241). `None` when the chain names
+    /// the root, when there is no chain, or when the leaf is not in hand.
+    fn parent_state(
+        &self,
+        preimage: &SettlementPreimage,
+        vault_id: &D32,
+        parent_root: &D32,
+        chain: Option<&VaultChain>,
+    ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        match chain {
+            Some(chain) if !chain.names(parent_root) => {}
+            Some(..) | None => return Ok(None),
+        }
+        let Some(core) = preimage
+            .dlv_cores()
+            .iter()
+            .find(|core| core.vault_id() == vault_id && core.pre_root() == parent_root)
+        else {
+            return Ok(None);
+        };
+        self.published_state(core)
     }
 
     /// The complete facts of the exercise over `read`: its validation

@@ -1741,6 +1741,55 @@ fn entry_path(
     })
 }
 
+/// Why [`generation_at`] could not place a root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotPlaced {
+    /// The core's state entry path is not one sibling per level.
+    Path(Refusal),
+    /// The state leaf has no canonical value.
+    Leaf(super::wire::SofiWireError),
+}
+
+/// The generation `state` places vault `vault_id`'s root `root` at, when
+/// `preimage` carries that vault's core at `root` and the core's own path
+/// proves `state` is the vault's state leaf under it: the state entry states
+/// `state`'s value, and that value with the entry's path re-derives `root`.
+/// `Ok(None)` when the preimage carries no such core or the core proves
+/// another leaf; `Err` when the core's path is not one sibling per level, or
+/// `state` has no value. The one fact refuting a named parent needs (SoFi
+/// §23.5 arm (ii), MR-SOFI-0241), established from the exercise and one
+/// object, with none of the route's validation evidence.
+pub(crate) fn generation_at(
+    preimage: &SettlementPreimage,
+    vault_id: &D32,
+    root: &D32,
+    state: &VaultStateLeaf,
+) -> Result<Option<u64>, NotPlaced> {
+    let Some(core) = preimage
+        .dlv_cores()
+        .iter()
+        .find(|core| core.vault_id() == vault_id && core.pre_root() == root)
+    else {
+        return Ok(None);
+    };
+    let key = derive::vault_state_key(vault_id);
+    let Some(entry) = core.entries().iter().find(|entry| entry.key() == key) else {
+        return Ok(None);
+    };
+    let Some(value) = stated(entry).0 else {
+        return Ok(None);
+    };
+    let computed = derive::vault_state_leaf_value(state).map_err(NotPlaced::Leaf)?;
+    let path = entry_path(entry).map_err(NotPlaced::Path)?;
+    Ok((computed == value
+        && crate::economic::tree::root_from_path(
+            &key,
+            &crate::economic::tree::leaf_node(&key, Some(&value)),
+            path,
+        ) == *root)
+        .then_some(state.generation))
+}
+
 /// The pre values a vault core's leaves held, read from the core's own paths
 /// against its pre-root (SoFi Amendment S24, the authenticated-root mode).
 ///

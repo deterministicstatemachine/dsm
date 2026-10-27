@@ -2229,6 +2229,56 @@ pub(crate) mod tests {
             .expect("bob's own leaf");
     }
 
+    /// MR-DSM-0020, MR-DSM-0102, MR-DSM-0245, MR-DSM-0095: no global order
+    /// enters a device's state. The order relationships are established in is
+    /// not state: either order gives one root. And once a relationship has a
+    /// chain, its next step is a function of that chain alone: Bob's step
+    /// lands after any number of Carol's exactly as it would have at once, so
+    /// no step waits on a deadline or a count kept across relationships. (A
+    /// relationship's first step is seeded from the device root it is taken
+    /// from, which is that step's parent state.)
+    ///
+    /// MUTATION CONTROL: folding a device-wide step count (any sequence kept
+    /// across relationships) into a step's entropy or tip turns this red.
+    #[test]
+    fn a_relationships_steps_depend_on_its_own_chain_and_have_no_deadline() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        let (bob, carol) = (devid(0xB1), devid(0xC1));
+        let base = fresh_device(0xA9);
+        let (bob_key, carol_key) = (
+            compute_smt_key(&base.devid, &bob),
+            compute_smt_key(&base.devid, &carol),
+        );
+        let establish = |first: [u8; 32], second: [u8; 32]| {
+            base.establish_relationship(first)
+                .and_then(|d| d.establish_relationship(second))
+                .expect("both relationships")
+        };
+        let step = |dev: &DeviceState, key: [u8; 32], counterparty: [u8; 32]| {
+            dev.advance(key, counterparty, op(), &[], None)
+                .expect("a step on the relationship")
+                .new_device_state
+                .into_head()
+        };
+        let bob_first = establish(bob, carol);
+        assert_eq!(
+            bob_first.root(),
+            establish(carol, bob).root(),
+            "the order relationships were established in is not state"
+        );
+
+        let stepped = step(&step(&bob_first, bob_key, bob), carol_key, carol);
+        let mut late = stepped.clone();
+        for _ in 0..5 {
+            late = step(&late, carol_key, carol);
+        }
+        assert_eq!(
+            step(&late, bob_key, bob).chain_tip(&bob_key),
+            step(&stepped, bob_key, bob).chain_tip(&bob_key),
+            "Bob's step lands after Carol's five exactly as it would have at once"
+        );
+    }
+
     #[test]
     fn creating_a_token_with_zero_supply_is_refused() {
         const PC: [u8; 32] = [0x7D; 32];

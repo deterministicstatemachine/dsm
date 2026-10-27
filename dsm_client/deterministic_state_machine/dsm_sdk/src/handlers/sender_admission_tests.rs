@@ -971,24 +971,26 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
 
 /// G13, MR-DSM-0029: the receiver holds the payer's signed parent to the
 /// payer's head it pinned before it reads anything of the payer's register.
-/// A pays B honestly and B applies it, pinning A's head after that step. A
-/// then forks its own chain: it signs a second transfer to B on the head it
-/// held before the honest one, advances that stale copy over it, and signs
-/// the step's receipt with its per-step EK. Both halves reach B's boundary
-/// and bind. B's sync refuses the pair because its signed parent is not the
-/// head B pinned, and no member is asked for a cell while it does.
+/// A pays B honestly and B applies it, pinning A's head after that step and
+/// the per-step key A signed it with. A then forks its own chain from the
+/// head it held before that payment: it advances that copy over a transfer it
+/// never sends, and over a second it does send, whose receipt A's wallet signs
+/// as it signs any send — its per-step key certified by the key B holds for
+/// A. The second step's parent is a head B never applied. Both halves reach
+/// B's boundary and bind. B's sync refuses the pair because its signed parent
+/// is not the head B pinned, and no member is asked for a cell while it does.
 ///
 /// MUTATION CONTROL: dropping the pinned-head check in `complete_staged_pairs`
 /// turns this red: B reads A's register before it refuses the fork.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before_the_senders_register_is_read(
-) {
-    use crate::handlers::recipient_dispatch::{ingest_evidence_half, ingest_transfer_half};
+async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders_register_is_read()
+{
+    use crate::handlers::recipient_dispatch::{ingest_evidence_half, ingest_transfer_half, Ingested};
     use crate::storage::client_db::recipient_staging::{self, PairState};
-    use crate::test_support::receipts::Party;
     use dsm::types::device_state::{BalanceDelta, BalanceDirection};
-    use dsm::types::receipt_types::{compute_receipt_challenge_response_target, StitchedReceiptV2};
+    use dsm::types::operations::{Operation, TransactionMode, TransferTerms};
+    use dsm::types::receipt_types::StitchedReceiptV2;
 
     let p = Pair::boot(100, 0).await;
     let era = era();
@@ -1003,7 +1005,9 @@ async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before
         .expect("A's relationship tip with B");
     let stale_position = admitted_position() + 1;
 
-    // The honest payment, applied by B.
+    // The honest payment, applied by B and finalized by A: B pins A's head
+    // and the per-step key A signed it with, and A holds that key's secret as
+    // its own chain head.
     let sent = p.a.send_token(&p.b, "ERA", 10).await;
     assert!(sent.success, "A pays B: {:?}", sent.error_message);
     let synced = p.b.sync().await;
@@ -1011,6 +1015,12 @@ async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before
         synced.errors.is_empty(),
         "B applies it: {:?}",
         synced.errors
+    );
+    let finalized = p.a.sync().await;
+    assert!(
+        finalized.errors.is_empty(),
+        "A finalizes it: {:?}",
+        finalized.errors
     );
     p.b.enter();
     assert_eq!(
@@ -1023,50 +1033,57 @@ async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before
         "B holds the honest payment"
     );
 
-    // A's fork: a transfer signed on the stale tip, as its send would sign it.
+    // A's transfers to B, signed as its send signs one.
     p.a.enter();
-    let terms = dsm::types::operations::TransferTerms::new(
-        b"ERA".to_vec(),
-        crate::handlers::app_router_impl::transfer_nonce(&stale_tip, 7, "ERA", &p.b.device_id),
-        dsm::types::operations::TransactionMode::Unilateral,
-        String::new(),
-    );
-    let unsigned = dsm::types::operations::Operation::Transfer {
-        to_device_id: p.b.device_id.to_vec(),
-        amount: dsm::types::token_types::Balance::amount(7),
-        policy_commit: era,
-        terms_commitment: terms.commitment(),
-        signature: Vec::new(),
-        authority_policy: None,
-    };
-    let canonical = unsigned.to_bytes();
     let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
-    let signature = dsm::crypto::sphincs::sphincs_sign(
-        &crate::sdk::signing_authority::current_secret_key().expect("A's signing key"),
-        &canonical,
-    )
-    .expect("A signs");
-    let signed =
-        dsm::types::operations::Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+    let a_secret = crate::sdk::signing_authority::current_secret_key().expect("A's signing key");
+    let transfer = |amount: u64| {
+        let terms = TransferTerms::new(
+            b"ERA".to_vec(),
+            crate::handlers::app_router_impl::transfer_nonce(
+                &stale_tip,
+                amount,
+                "ERA",
+                &p.b.device_id,
+            ),
+            TransactionMode::Unilateral,
+            String::new(),
+        );
+        let canonical = Operation::Transfer {
+            to_device_id: p.b.device_id.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(amount),
+            policy_commit: era,
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+        .to_bytes();
+        let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
+        let signed = Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
             .expect("A's signature binds");
+        (terms, canonical, signature, signed)
+    };
+    let debit = |amount: u64| {
+        [BalanceDelta {
+            policy_commit: era,
+            direction: BalanceDirection::Debit,
+            amount,
+        }]
+    };
 
-    // The stale head's step over it, and the step's receipt, signed by A's
-    // per-step EK as its wallet signs a send's receipt.
+    // The fork: the stale head over a transfer A never sends, then over the
+    // one it does.
     let rel_key =
         dsm::core::bilateral_transaction_manager::compute_smt_key(&p.a.device_id, &p.b.device_id);
-    let outcome = stale_head
-        .advance(
-            rel_key,
-            p.b.device_id,
-            signed,
-            &[BalanceDelta {
-                policy_commit: era,
-                direction: BalanceDirection::Debit,
-                amount: 7,
-            }],
-            None,
-        )
-        .expect("the stale head advances over the fork");
+    let (.., unsent) = transfer(5);
+    let forked = stale_head
+        .advance(rel_key, p.b.device_id, unsent, &debit(5), None)
+        .expect("the stale head advances over the unsent transfer")
+        .new_device_state;
+    let (terms, canonical, signature, signed) = transfer(7);
+    let outcome = forked
+        .advance(rel_key, p.b.device_id, signed, &debit(7), None)
+        .expect("the fork advances over the sent transfer");
     let mut receipt = StitchedReceiptV2::of_step(
         p.a.genesis,
         p.a.device_id,
@@ -1077,25 +1094,46 @@ async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before
             .expect("A's Device Tree commitment"),
     )
     .expect("the step's receipt");
-    assert_ne!(
-        Some(receipt.parent_tip),
+    for head in [
+        stale_head.chain_tip(&rel_key),
         p.a.router()
             .core_sdk
             .device_head()
             .expect("A's head")
             .chain_tip(&rel_key),
-        "the fork's parent is not A's head with B: A moved past it"
-    );
-    let (a, b) = (Party::from_seed(0x0A), Party::from_seed(0x0B));
-    assert_eq!(a.device_id(), p.a.device_id, "the harness's A is seed 0x0A");
+    ] {
+        assert_ne!(
+            Some(receipt.parent_tip),
+            head,
+            "the sent step's parent is a head B never applied"
+        );
+    }
+
+    // A's wallet signs the receipt as it signs a send's: its per-step key
+    // certified by the key of the step B applied.
     let commitment = receipt.compute_commitment().expect("the commitment");
-    let target = compute_receipt_challenge_response_target(&commitment, &commitment);
     let c_pre = dsm::core::bilateral_transaction_manager::compute_precommit(
-        &stale_tip,
+        &receipt.parent_tip,
         &canonical,
         &outcome.transition_entropy(),
     );
-    let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
+    let answer = crate::sdk::receipts::sign_receipt_with_per_step_ek(
+        &crate::sdk::receipts::PerStepSigningInputs {
+            commitment: &commitment,
+            h_n: receipt.parent_tip,
+            c_pre,
+            devid_sender: p.a.device_id,
+            relationship_key: rel_key,
+            root_ak_keypair: None,
+            recipient_kyber_pk: &p.b.kyber_pk,
+            session_binding: &commitment,
+        },
+    )
+    .expect("A's wallet signs the fork's receipt");
+    assert!(
+        !answer.used_root_ak,
+        "the key is certified by the step B applied, not the AK"
+    );
     receipt.set_ek_pk_a(answer.ek_pk);
     receipt.set_ek_cert_a(answer.ek_cert);
     receipt.set_kyber_ct_a(answer.kyber_ct);
@@ -1122,23 +1160,25 @@ async fn a_transfer_forked_from_a_head_the_receiver_moved_past_is_refused_before
             .expect("B's relationship tip with A"),
     )
     .expect("B's route for A");
-    ingest_transfer_half(
+    let half = ingest_transfer_half(
         &transfer_bytes,
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
         &route,
         &client_db::derive_submission_id(&commitment),
     )
     .expect("the transfer half is ingested");
-    ingest_evidence_half(
+    assert_eq!(half.ingested, Ingested::Staged, "the transfer half");
+    let half = ingest_evidence_half(
         &receipt_bytes,
         &route,
         &crate::util::text_id::encode_base32_crockford(&commitment[..16]),
     )
     .expect("the evidence half is ingested");
+    assert_eq!(half.ingested, Ingested::Staged, "the evidence half");
     let pairs = recipient_staging::pairs_in_flight().expect("pairs");
     assert!(
         matches!(pairs.as_slice(), [pair] if pair.state == PairState::Bound),
-        "the pair binds"
+        "the pair binds: {pairs:?}"
     );
 
     for node in &p.nodes.nodes {

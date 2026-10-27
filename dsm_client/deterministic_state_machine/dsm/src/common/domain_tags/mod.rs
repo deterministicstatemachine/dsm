@@ -323,6 +323,56 @@ mod tests {
         );
     }
 
+    /// SoFi §14.1, MR-SOFI-0105: a retired domain is never reused. No
+    /// registered tag names one, and no `tagged_domain!` anywhere in Core's
+    /// sources declares one, registered or not.
+    #[test]
+    fn no_tag_reuses_a_retired_domain() {
+        const RETIRED: &[&str] = &["DSM/sofi/route-outcome/v2"];
+        for tag in all_tags() {
+            assert!(
+                !RETIRED
+                    .iter()
+                    .any(|retired| retired.as_bytes() == tag.source_bytes()),
+                "the registered tag {:?} reuses a retired domain",
+                String::from_utf8_lossy(tag.source_bytes())
+            );
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut pending = vec![src];
+        while let Some(dir) = pending.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) => panic!("read {}: {e}", dir.display()),
+            };
+            for entry in entries {
+                let path = match entry {
+                    Ok(entry) => entry.path(),
+                    Err(e) => panic!("an entry of {}: {e}", dir.display()),
+                };
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => panic!("read {}: {e}", path.display()),
+                };
+                for retired in RETIRED {
+                    let declared = format!("tagged_domain!(b\"{retired}\")");
+                    assert!(
+                        !text.contains(&declared),
+                        "{} declares the retired domain {retired}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
     /// Change-control tripwire. NOT a completeness guard — see the module note.
     #[test]
     fn the_declared_domain_tag_count_is_the_expected_one() {
