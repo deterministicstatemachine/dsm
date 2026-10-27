@@ -5363,6 +5363,7 @@ mod tests {
     fn online_tier_transfer(counterparty: [u8; 32]) -> Operation {
         Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![9],
@@ -6052,6 +6053,7 @@ mod tests {
 
         let stale_op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![1],
@@ -6067,6 +6069,7 @@ mod tests {
         };
         let next_op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![2],
@@ -6165,6 +6168,7 @@ mod tests {
             counterparty_genesis_hash: Some([0x54u8; 32]),
             operation: Operation::Transfer {
                 policy_commit: [0x0Fu8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: dsm::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![1; 32],

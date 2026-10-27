@@ -760,6 +760,7 @@ async fn bearer_pair() -> (
             "ERA",
             "",
             &dsm::core::token::token_state_manager::era_policy_commit(),
+            Vec::new(),
         );
     let operation = Proposal {
         operation: Operation::from_bytes(&bytes).expect("the bearer transfer"),

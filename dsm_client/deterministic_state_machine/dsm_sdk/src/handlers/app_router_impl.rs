@@ -828,11 +828,17 @@ impl AppRouterImpl {
         // Sign the canonical Operation bytes (signature field cleared) so the
         // state machine and inbox verifier use the same preimage.
         // =====================================================================
+        let token_policy =
+            match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                Ok(bytes) => bytes,
+                Err(e) => return OnlineSent::NotDebited(err(format!("wallet.send: {e}"))),
+            };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(intent.amount),
             policy_commit,
             terms_commitment: transfer_terms.commitment(),
+            token_policy,
             signature: Vec::new(),
             authority_policy: None,
         };

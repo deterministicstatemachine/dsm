@@ -577,6 +577,7 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
+    token_policy: Vec<u8>,
 ) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
     // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
     // the canonical offline-bearer authority policy rides on the transfer so
@@ -598,6 +599,7 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit: *policy_commit,
         terms_commitment: terms.commitment(),
+        token_policy,
         signature: Vec::new(),
         authority_policy: Some(policy),
     };
@@ -899,12 +901,18 @@ impl AppRouterImpl {
                         ))
                     }
                 };
+                let token_policy =
+                    match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                        Ok(bytes) => bytes,
+                        Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                    };
                 let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
                     transfer_amount,
                     &token_id,
                     req.memo.trim(),
                     &policy_commit,
+                    token_policy,
                 );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
@@ -1744,6 +1752,7 @@ mod tests {
             "DBTC",
             "memo",
             &[0u8; 32],
+            vec![0x0A; 40],
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
@@ -2107,6 +2116,7 @@ mod history_tests {
             to_device_id: device.router.device_id_bytes.to_vec(),
             amount: dsm::types::token_types::Balance::amount(100),
             policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,

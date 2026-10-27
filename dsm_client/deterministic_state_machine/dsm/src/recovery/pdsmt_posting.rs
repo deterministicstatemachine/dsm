@@ -808,6 +808,7 @@ mod tests {
                     amount: Balance::amount(10),
                     token_id: b"ERA".to_vec(),
                     policy_commit: [0xF1; 32],
+                    token_policy: Vec::new(),
                     message: String::new(),
                 },
                 &[BalanceDelta {

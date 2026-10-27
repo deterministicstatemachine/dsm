@@ -295,6 +295,7 @@ impl LiveDevice {
             to_device_id: to.devid.to_vec(),
             amount: Balance::amount(amount),
             policy_commit: era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: nonce.to_vec(),

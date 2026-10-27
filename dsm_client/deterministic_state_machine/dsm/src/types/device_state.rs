@@ -2349,6 +2349,7 @@ pub(crate) mod tests {
             amount: bal(amount),
             token_id: b"ERA".to_vec(),
             policy_commit,
+            token_policy: Vec::new(),
             message: String::new(),
         }
     }
@@ -2370,6 +2371,7 @@ pub(crate) mod tests {
             to_device_id: devid(0xAA).to_vec(),
             amount: bal(amount),
             policy_commit,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![0x11; 32],
@@ -2520,6 +2522,7 @@ pub(crate) mod tests {
             to_device_id: to.to_vec(),
             amount: bal(amt),
             policy_commit: pcv,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![],
@@ -2625,6 +2628,7 @@ pub(crate) mod tests {
                     to_device_id,
                     amount,
                     policy_commit,
+                    token_policy: Vec::new(),
                     terms_commitment,
                     signature,
                     authority_policy: Some(AuthorityPolicy {
@@ -2661,6 +2665,7 @@ pub(crate) mod tests {
             to_device_id: to.devid.to_vec(),
             amount: bal(amount),
             policy_commit,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"CUSTOM".to_vec(),
                 nonce: vec![0x5C; 32],
@@ -2947,6 +2952,7 @@ pub(crate) mod tests {
             to_device_id: cp.to_vec(),
             amount: bal(amt),
             policy_commit: token,
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![],

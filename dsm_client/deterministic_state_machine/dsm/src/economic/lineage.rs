@@ -1108,26 +1108,11 @@ pub fn advance_validated(
     let funded = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
-    // THE TRANSFER CONJUNCT: a Transfer moves a token only when its committed
-    // policy transfers (SoFi §49, "on every transfer, online and offline").
-    // Checked here, on the verified operation, so every verifier of the
-    // step — not only the two endpoints — refuses a non-transferable token
-    // moved by a sender that skips its own check (SA-136).
-    if let Some(crate::types::operations::Operation::Transfer { policy_commit, .. }) =
-        accepted.dsm_verified_operation()
-    {
-        crate::economic::provenance::check_transfer_policy(policy_commit, resolver)
-            .map_err(EconomicValidationError::Provenance)?;
-    }
-    // THE BURN CONJUNCT (DSM §61, MR-DSM-0191): no operation bypasses the
-    // asset's committed policy. The sender's route reads `burn_enabled` too;
-    // this is the check every verifier of the step runs.
-    if let Some(crate::types::operations::Operation::Burn { policy_commit, .. }) =
-        accepted.dsm_verified_operation()
-    {
-        crate::economic::provenance::check_burn_policy(policy_commit, resolver)
-            .map_err(EconomicValidationError::Provenance)?;
-    }
+    // The transfer and burn conjuncts (SoFi §49, DSM §61) are the write
+    // set's: `verify_operation_write_set` above refuses a Transfer or Burn
+    // its token's committed policy forbids, from the policy bytes the signed
+    // operation carries, for every verifier of the step and for the
+    // producer before its head commits (owner question 9, 2026-10-27).
 
     // A SoFi operation cannot reach here — `verify_operation_write_set`
     // refuses it by name above — and if it ever did, "no DLV transition"

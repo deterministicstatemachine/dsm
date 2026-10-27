@@ -1639,10 +1639,13 @@ impl AppRouterImpl {
         if amount == 0 {
             return Err("amount must be > 0".into());
         }
+        let token_policy = crate::sdk::economic_registers::carried_token_policy(&policy_commit)
+            .map_err(|e| format!("token.burn: {e}"))?;
         let op = dsm::types::operations::Operation::Burn {
             amount: dsm::types::token_types::Balance::amount(amount),
             token_id: req.token_id.as_bytes().to_vec(),
             policy_commit,
+            token_policy,
             message: req.message.clone(),
         };
         let deltas = [dsm::types::device_state::BalanceDelta {

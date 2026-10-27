@@ -257,6 +257,7 @@ mod pending_list_tests {
             to_device_id: peer.to_vec(),
             amount: dsm::types::token_types::Balance::amount(3),
             policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,

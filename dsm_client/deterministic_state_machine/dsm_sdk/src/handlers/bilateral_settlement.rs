@@ -313,6 +313,7 @@ mod tests {
         };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
             amount: Balance::amount(5),
@@ -339,6 +340,7 @@ mod tests {
         };
         let op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: terms.commitment(),
             to_device_id: vec![0x11; 32],
             amount: Balance::amount(7),

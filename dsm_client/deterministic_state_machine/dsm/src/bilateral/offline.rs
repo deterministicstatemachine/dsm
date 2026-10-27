@@ -726,6 +726,7 @@ mod tests {
     fn bearer_transfer(to: [u8; 32]) -> Operation {
         Operation::Transfer {
             policy_commit: [0x0F; 32],
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"TOK".to_vec(),
                 nonce: vec![1; 8],

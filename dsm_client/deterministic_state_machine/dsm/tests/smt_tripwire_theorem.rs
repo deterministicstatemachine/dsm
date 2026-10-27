@@ -99,6 +99,7 @@ fn compute_initial_chain_tip(
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        token_policy: Vec::new(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![0u8; 16],

@@ -155,8 +155,8 @@ fn an_online_transfer_request_is_the_same_bytes_from_an_independent_encoder() {
 /// `Operation::Transfer`'s canonical bytes: tag 37, then each field as a
 /// little-endian u32 length and its bytes — the recipient, the balance's 16
 /// canonical bytes (value then locked, little-endian u64s), the policy
-/// commitment, the terms commitment, the signature — and no authority-policy
-/// tail when there is none.
+/// commitment, the terms commitment, the token's committed policy bytes, the
+/// signature — and no authority-policy tail when there is none.
 #[test]
 fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
     let put = |bytes: &[u8], out: &mut Vec<u8>| {
@@ -167,6 +167,7 @@ fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
         to_device_id: vec![0x61; 32],
         amount: dsm::types::token_types::Balance::amount(1_234),
         policy_commit: [0x62; 32],
+        token_policy: vec![0x65; 7],
         terms_commitment: [0x63; 32],
         signature: vec![0x64; 9],
         authority_policy: None,
@@ -178,6 +179,7 @@ fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
     put(&balance, &mut independent);
     put(&[0x62; 32], &mut independent);
     put(&[0x63; 32], &mut independent);
+    put(&[0x65; 7], &mut independent);
     put(&[0x64; 9], &mut independent);
     assert_eq!(operation.to_bytes(), independent);
 }

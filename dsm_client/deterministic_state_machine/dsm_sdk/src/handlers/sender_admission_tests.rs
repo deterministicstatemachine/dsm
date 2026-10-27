@@ -710,6 +710,8 @@ async fn a_non_transferable_token_refuses_its_transfer() {
         to_device_id: p.b.device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(25),
         policy_commit: row.policy_commit,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&row.policy_commit)
+            .expect("A holds NOTX's committed policy"),
         terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
@@ -841,6 +843,8 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         to_device_id: p.b.device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(25),
         policy_commit: row.policy_commit,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&row.policy_commit)
+            .expect("A holds NOTX's committed policy"),
         terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
@@ -1053,6 +1057,7 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
             to_device_id: p.b.device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
             policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,

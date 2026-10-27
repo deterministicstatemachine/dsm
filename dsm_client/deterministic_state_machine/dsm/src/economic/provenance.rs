@@ -489,22 +489,6 @@ pub enum ProvenanceError {
     /// genesis release: not fetched, or the bytes did not re-hash to the
     /// commit. The taxonomy survives, so an outage is retried.
     GenesisReleasePolicy(PeerLineageFailure),
-    /// A Transfer moves a token whose committed policy does not let it
-    /// transfer: SoFi §49 checks `transferable` "on every transfer, online
-    /// and offline", so a foreign verifier refuses it as the endpoints do.
-    AssetNotTransferable,
-    /// The committed policy of a transferred token could not be established:
-    /// not fetched, or the bytes did not re-hash to the commit. The taxonomy
-    /// survives, so an outage is retried.
-    TransferPolicy(PeerLineageFailure),
-    /// A Burn destroys a token whose committed policy does not let it be
-    /// burned: no operation bypasses the asset's committed policy (DSM §61,
-    /// MR-DSM-0191), so every verifier refuses it, not only the sender's route.
-    AssetNotBurnable,
-    /// The committed policy of a burned token could not be established: not
-    /// fetched, or the bytes did not re-hash to the commit. The taxonomy
-    /// survives, so an outage is retried.
-    BurnPolicy(PeerLineageFailure),
     /// A `0x0075` credit on an admission whose substrate is not an offline
     /// unload: there is no offline debit to fund it.
     NotAnOfflineUnload,
@@ -604,64 +588,6 @@ pub enum ProvenanceError {
     RegisterNotEstablished(PeerLineageFailure),
 }
 
-/// The committed policy of `policy_commit`, read as every conjunct reads one:
-/// ERA's from Core's own bytes (Amendment S11), any other from the bytes the
-/// resolver anchors, which must re-hash to the commit. `failure` names the
-/// conjunct asking, so an outage keeps its class under that conjunct.
-fn committed_policy(
-    policy_commit: &[u8; 32],
-    resolver: &dyn ProvenanceResolver,
-    failure: fn(PeerLineageFailure) -> ProvenanceError,
-) -> Result<crate::economic::token_policy::TokenPolicy, ProvenanceError> {
-    let bytes = if *policy_commit == crate::core::token::era_policy::era_policy_commit() {
-        crate::core::token::era_policy::era_policy_bytes().to_vec()
-    } else {
-        resolver
-            .anchored_policy_bytes(policy_commit)
-            .map_err(failure)?
-    };
-    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
-        != *policy_commit
-    {
-        return Err(failure(PeerLineageFailure::Incomplete(
-            "policy bytes do not re-hash to the token's policy commit".into(),
-        )));
-    }
-    crate::economic::token_policy::parse_token_policy(&bytes).map_err(|e| {
-        failure(PeerLineageFailure::Invalid(format!(
-            "the token's committed policy does not parse: {e}"
-        )))
-    })
-}
-
-/// The transfer conjunct of SoFi §49: a Transfer moves the token
-/// `policy_commit` names only when that token's committed policy transfers.
-pub fn check_transfer_policy(
-    policy_commit: &[u8; 32],
-    resolver: &dyn ProvenanceResolver,
-) -> Result<(), ProvenanceError> {
-    if committed_policy(policy_commit, resolver, ProvenanceError::TransferPolicy)?.transferable {
-        Ok(())
-    } else {
-        Err(ProvenanceError::AssetNotTransferable)
-    }
-}
-
-/// The burn conjunct (DSM §61, MR-DSM-0191): a Burn destroys the token
-/// `policy_commit` names only when that token's committed policy lets it be
-/// burned. The sender's route checks it too; this is the check every verifier
-/// of the step runs, so a sender that skips its own still cannot burn.
-pub fn check_burn_policy(
-    policy_commit: &[u8; 32],
-    resolver: &dyn ProvenanceResolver,
-) -> Result<(), ProvenanceError> {
-    if committed_policy(policy_commit, resolver, ProvenanceError::BurnPolicy)?.burn_enabled {
-        Ok(())
-    } else {
-        Err(ProvenanceError::AssetNotBurnable)
-    }
-}
-
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -671,16 +597,6 @@ impl core::fmt::Display for ProvenanceError {
             Self::GenesisReleasePolicy(e) => {
                 write!(f, "genesis-release token policy: {e}")
             }
-            Self::AssetNotTransferable => write!(
-                f,
-                "the transferred token's committed policy does not let it transfer"
-            ),
-            Self::TransferPolicy(e) => write!(f, "transferred token policy: {e}"),
-            Self::AssetNotBurnable => write!(
-                f,
-                "the burned token's committed policy does not let it be burned"
-            ),
-            Self::BurnPolicy(e) => write!(f, "burned token policy: {e}"),
             Self::NotAnOfflineUnload => write!(
                 f,
                 "an offline-boundary debit funds a credit only on an offline unload's admission"

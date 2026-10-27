@@ -1743,6 +1743,7 @@ fn build_signed_bilateral_transfer(
 ) -> Operation {
     let op = Operation::Transfer {
         policy_commit: era_policy_commit(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![nonce; 8],

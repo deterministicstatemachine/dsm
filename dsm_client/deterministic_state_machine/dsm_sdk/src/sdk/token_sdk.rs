@@ -571,6 +571,9 @@ impl TokenSDK {
                     amount: Balance::amount(*amount),
                     policy_commit,
                     terms_commitment: terms.commitment(),
+                    token_policy: crate::sdk::economic_registers::carried_token_policy(
+                        &policy_commit,
+                    )?,
                     signature: Vec::new(),
                     authority_policy: None,
                 };
@@ -643,6 +646,9 @@ impl TokenSDK {
                     amount: Balance::amount(*amount),
                     token_id: token_id.as_bytes().to_vec(),
                     policy_commit,
+                    token_policy: crate::sdk::economic_registers::carried_token_policy(
+                        &policy_commit,
+                    )?,
                     message: "Burn operation via TokenSDK".to_string(),
                 };
 
@@ -1060,6 +1066,7 @@ impl TokenSDK {
             amount: Balance::amount(fee),
             policy_commit: fee_policy_commit,
             terms_commitment: fee_terms.commitment(),
+            token_policy: crate::sdk::economic_registers::carried_token_policy(&fee_policy_commit)?,
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -1272,6 +1279,7 @@ mod tests {
             to_device_id: recipient.to_vec(),
             amount: Balance::amount(1),
             policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,

@@ -998,6 +998,7 @@ mod tests {
     fn signed_transfer_op(kp: &SignatureKeyPair, message: &str, nonce: u8) -> Operation {
         let mut op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![nonce; 8],

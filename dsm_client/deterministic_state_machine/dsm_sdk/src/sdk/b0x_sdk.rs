@@ -3639,6 +3639,7 @@ mod tests {
                 to_device_id: vec![0x44; 32],
                 amount: dsm::types::token_types::Balance::amount(100),
                 policy_commit: [0x0F; 32],
+                token_policy: Vec::new(),
                 terms_commitment: terms.commitment(),
                 signature: vec![0xA5; sphincs_sig_len()],
                 authority_policy: None,

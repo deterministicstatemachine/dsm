@@ -42,6 +42,7 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
         to_device_id: to.to_vec(),
         amount: Balance::amount(amount),
         policy_commit,
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"T".to_vec(),
             nonce: vec![7; 32],
@@ -55,11 +56,47 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
     }
 }
 
+/// A Transfer of `token`, carrying `carried` as its token's policy.
+fn transfer_carrying(to: [u8; 32], amount: u64, token: [u8; 32], carried: &[u8]) -> Operation {
+    match transfer(to, amount, token) {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            terms_commitment,
+            signature,
+            authority_policy,
+            ..
+        } => Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            terms_commitment,
+            token_policy: carried.to_vec(),
+            signature,
+            authority_policy,
+        },
+        other => other,
+    }
+}
+
+/// A Burn of `token`, carrying `carried` as its token's policy.
+fn burn_carrying(amount: u64, token: [u8; 32], carried: &[u8]) -> Operation {
+    Operation::Burn {
+        amount: Balance::amount(amount),
+        token_id: b"T".to_vec(),
+        policy_commit: token,
+        token_policy: carried.to_vec(),
+        message: String::new(),
+    }
+}
+
 fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
     Operation::Burn {
         amount: Balance::amount(amount),
         token_id: b"T".to_vec(),
         policy_commit,
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         message: String::new(),
     }
 }
@@ -131,6 +168,124 @@ fn round_trip(
     verify_operation_write_set(operation, &G, &DEV, &witness, P_CREATE)
         .expect("exact effect verifies");
     witness
+}
+
+// ── A token's committed policy, read in the write set (owner question 9) ──
+
+/// `build_write_set` for `operation` over a tree funded with `amount` of `token`.
+fn build_over(
+    operation: &Operation,
+    token: [u8; 32],
+    amount: u64,
+) -> Result<dsm::economic::write_set::BuiltWriteSet, WriteSetError> {
+    let (mut tree, balances) = funded_tree(token, amount);
+    build_write_set(
+        operation,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE),
+        &mut tree,
+        &CreditSourceFacts::None,
+    )
+}
+
+/// Owner question 9 (2026-10-27): Core is the enforcement boundary for a
+/// Transfer or Burn its token's committed policy forbids. The write set
+/// refuses it, from the policy bytes the signed operation carries, before
+/// anything moves: the producer's device cannot build it, and a verifier
+/// handed the debit refuses the operation that names it. A token whose policy
+/// permits the move passes both.
+///
+/// MUTATION CONTROL: removing the `transferable` refusal from the write set's
+/// Transfer arm turns this red, and so does removing the `burn_enabled`
+/// refusal from its Burn arm.
+#[test]
+fn a_transfer_or_burn_its_tokens_policy_forbids_has_no_write_set() {
+    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    let (burns_only, burns_only_policy) = policy_token(70, POLICY_FLAG_BURN);
+    let (moves_only, moves_only_policy) = policy_token(71, POLICY_FLAG_TRANSFERABLE);
+
+    let forbidden_transfer = transfer_carrying(PEER_DEV, 40, burns_only, &burns_only_policy);
+    match build_over(&forbidden_transfer, burns_only, 100) {
+        Err(refused) => assert_eq!(
+            refused,
+            WriteSetError::TokenNotTransferable { token: burns_only }
+        ),
+        Ok(_) => panic!("a transfer of a token that does not transfer has a write set"),
+    }
+    let forbidden_burn = burn_carrying(40, moves_only, &moves_only_policy);
+    match build_over(&forbidden_burn, moves_only, 100) {
+        Err(refused) => assert_eq!(
+            refused,
+            WriteSetError::TokenNotBurnable { token: moves_only }
+        ),
+        Ok(_) => panic!("a burn of a token that does not burn has a write set"),
+    }
+
+    // The permitted twins build, and their witnesses verify.
+    let (tree, balances) = funded_tree(moves_only, 100);
+    round_trip(
+        &transfer_carrying(PEER_DEV, 40, moves_only, &moves_only_policy),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+    let (tree, balances) = funded_tree(burns_only, 100);
+    let pre_root = tree.root();
+    let burned = round_trip(
+        &burn_carrying(40, burns_only, &burns_only_policy),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+
+    // A verifier handed that exact debit under a Transfer of the same token
+    // refuses the Transfer: the debit is a burn's shape, the token does not
+    // transfer.
+    let as_transfer = EconomicTransitionWitness::new(
+        pre_root,
+        burned.post_economic_root,
+        econ_op_id(),
+        dsm::economic::admission::dsm_operation_digest(&forbidden_transfer.to_bytes()),
+        burned.mutations.clone(),
+        burned.credit_sources.clone(),
+    )
+    .expect("a well-formed witness");
+    assert_eq!(
+        verify_operation_write_set(&forbidden_transfer, &G, &DEV, &as_transfer, P_CREATE),
+        Err(WriteSetError::TokenNotTransferable { token: burns_only })
+    );
+}
+
+/// The policy bytes a Transfer or Burn carries are its token's committed
+/// policy, ERA's included, re-hashed to its commit before anything is read
+/// out of them: another token's bytes, or none, are refused.
+///
+/// MUTATION CONTROL: skipping the re-hash turns this red.
+#[test]
+fn a_transfer_or_burn_carries_exactly_its_tokens_committed_policy() {
+    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    let (token, _) = policy_token(72, POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
+    let (_, other_policy) = policy_token(73, POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
+    for moved in [token, era()] {
+        for carried in [other_policy.clone(), Vec::new()] {
+            for operation in [
+                transfer_carrying(PEER_DEV, 40, moved, &carried),
+                burn_carrying(40, moved, &carried),
+            ] {
+                match build_over(&operation, moved, 100) {
+                    Err(refused) => {
+                        assert_eq!(
+                            refused,
+                            WriteSetError::TokenPolicyNotTheToken { token: moved }
+                        )
+                    }
+                    Ok(_) => panic!("an operation carrying bytes that are not its token's built"),
+                }
+            }
+        }
+    }
 }
 
 // ── Round trips: the producer output IS the verifier's expectation ─────────
@@ -770,12 +925,17 @@ fn sofi_genesis_state(market: ([u8; 32], [u8; 32])) -> dsm::sofi::wire::VaultSta
 /// Fixture token `i`: a native token whose committed policy transfers. Its
 /// commit, and the `TokenPolicyV3` bytes that commit names.
 fn sofi_token(i: u8) -> ([u8; 32], Vec<u8>) {
+    policy_token(i, dsm::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+}
+
+/// Fixture token `i` whose committed policy has the movement flags `flags`.
+fn policy_token(i: u8, flags: u8) -> ([u8; 32], Vec<u8>) {
     use dsm::economic::token_policy as tp;
     let mut blob = vec![
         tp::TOKEN_POLICY_VERSION,
         tp::TOKEN_KIND_FUNGIBLE,
         tp::SUPPLY_CLASS_NATIVE,
-        tp::POLICY_FLAG_TRANSFERABLE,
+        flags,
         tp::ReleaseRule::AllAtCreation.code(),
     ];
     blob.extend_from_slice(&G);

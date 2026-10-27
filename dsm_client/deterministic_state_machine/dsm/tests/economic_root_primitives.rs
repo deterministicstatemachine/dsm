@@ -350,6 +350,7 @@ fn the_offline_bearer_tier_is_classified_by_authority_policy_not_by_variant() {
         to_device_id: vec![1; 32],
         amount: Balance::amount(5),
         policy_commit: ERA,
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![0; 8],

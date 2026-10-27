@@ -38,6 +38,7 @@ fn transfer_to(recipient: [u8; 32], amount: u64) -> Operation {
         to_device_id: recipient.to_vec(),
         amount: Balance::amount(amount),
         policy_commit: era(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![9; 32],

@@ -278,17 +278,23 @@ async fn three_parties() -> (Pair, TestDevice) {
     (p, c)
 }
 
+/// Where [`next_step`] registered the payer's step, and the index in its
+/// witness of the mutation whose balance fell: what a payee's locator names.
+struct Registered {
+    position: u64,
+    debit_mutation_index: u32,
+}
+
 /// `payer`'s next step at its real admitted root: the relationship step
 /// `state` over its operation, with the write set `write_set_operation`
 /// produces. An honest producer builds the write set from the operation it
 /// signs; software that does not can build it from another. Published and
-/// registered along the cell routed from that root. Returns the position it
-/// was registered at.
+/// registered along the cell routed from that root.
 async fn next_step(
     payer: &TestDevice,
     state: RelationshipChainState,
     write_set_operation: &Operation,
-) -> u64 {
+) -> Registered {
     use dsm::economic::admission::{
         dsm_economic_operation_id, dsm_operation_digest, AcceptedAdmissionCoords,
         AcceptedSubstrateCoords,
@@ -315,6 +321,16 @@ async fn next_step(
         &CreditSourceFacts::None,
     )
     .expect("the write set of the other operation");
+    let debit_mutation_index = built
+        .mutations
+        .iter()
+        .position(|m| {
+            m.post_state.as_ref().and_then(|s| s.credit_amount())
+                < m.pre_state.as_ref().and_then(|s| s.credit_amount())
+        })
+        .map(u32::try_from)
+        .expect("the write set debits the payer")
+        .expect("the index fits");
     let witness = dsm::economic::witness::EconomicTransitionWitness::new(
         pre_root,
         built.post_root,
@@ -380,7 +396,10 @@ async fn next_step(
     };
     let position = pre_state.economic_position;
     publish_and_register(payer, position, &validated.economic_root(), &parts).await;
-    position
+    Registered {
+        position,
+        debit_mutation_index,
+    }
 }
 
 /// `from`'s online transfer of `amount` of the token `policy_commit` to `to`,
@@ -408,6 +427,8 @@ fn signed_token_transfer(
         to_device_id: to.device_id.to_vec(),
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&policy_commit)
+            .expect("the payer holds its token's committed policy"),
         terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
@@ -652,13 +673,20 @@ async fn a_credit_whose_source_is_an_activation_root_is_never_accepted() {
 }
 
 /// A transfer of a token whose committed policy does not let it transfer is
-/// never accepted, however valid the payer's history and the step's write
-/// set. The payer created the token itself, honestly, with transfers turned
-/// off, and then debits some of it to a receiver new to it; its own wallet
-/// would refuse the send, so it builds the step itself.
+/// never accepted, however valid the payer's history and the step's debit.
+/// The payer created the token itself, honestly, with transfers turned off,
+/// and then debits some of it to a receiver new to it. Its own wallet and
+/// Core's builder refuse the send, so it builds the step itself: the signed
+/// transfer carries the token's own committed policy, and the debit is the one a burn
+/// of the same amount writes. The receiver's provenance walk refuses the step,
+/// and so does its whole acceptance (`prevalidate_incoming_transfer_admission`,
+/// which every payment its sync picks up goes through before anything is
+/// written), from the signed transfer, the locator of the registered debit
+/// and a receipt naming the step: nothing durable is left (owner question 9:
+/// the enforcement is Core's, past the payer's SDK).
 ///
-/// MUTATION CONTROL: skipping `check_transfer_policy` in `advance_validated`
-/// turns this red: the receiver accepts the transfer.
+/// MUTATION CONTROL: removing the `transferable` refusal from the write set's
+/// Transfer arm turns this red: the receiver accepts the transfer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted() {
@@ -691,27 +719,96 @@ async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted(
         .expect("BOUND is registered")
         .policy_commit;
     let transfer = signed_token_transfer(payer, &c, bound, "BOUND", 5);
-    let position = next_step(payer, chain_state(payer, &c, &transfer, 0x33), &transfer).await;
+    let same_debit = Operation::Burn {
+        amount: dsm::types::token_types::Balance::amount(5),
+        token_id: b"BOUND".to_vec(),
+        policy_commit: bound,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&bound)
+            .expect("the payer holds BOUND's committed policy"),
+        message: String::new(),
+    };
+    let state = chain_state(payer, &c, &transfer, 0x33);
+    let step = next_step(payer, state.clone(), &same_debit).await;
 
     c.enter();
-    match verify(payer, position).await {
+    match verify(payer, step.position).await {
         Err(PeerLineageFailure::Invalid(why)) => assert!(
-            why.contains("does not let it transfer"),
+            why.contains("does not let it move between holders"),
             "refused by the token's committed policy: {why}"
         ),
         other => panic!("a transfer the token's policy forbids is never accepted: {other:?}"),
     }
+
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        payer.genesis,
+        payer.device_id,
+        c.device_id,
+        state.embedded_parent,
+        state.compute_chain_tip(),
+        [0x51; 32],
+        [0x52; 32],
+        [0x33; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &transfer else {
+        panic!("the step is a transfer")
+    };
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &payer.genesis,
+        &payer.device_id,
+        &payer.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &transfer.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: step.position,
+                debit_mutation_index: step.debit_mutation_index,
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(payer),
+    )
+    .await
+    .map(drop)
+    .expect_err("a transfer the token's policy forbids is never prepared for admission");
+    assert!(
+        format!("{refusal}").contains("does not let it move between holders"),
+        "the acceptance is refused by the token's committed policy: {refusal}"
+    );
+    c.enter();
+    let head = c.router().core_sdk.device_head().expect("a head");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "no pending admission"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .is_none(),
+        "no admitted credit"
+    );
+    assert_eq!(head.balance(&bound), 0, "no BOUND");
 }
 
 /// A burn of a token whose committed policy does not let it be burned is
 /// never accepted (DSM §61, MR-DSM-0191: no operation bypasses the asset's
 /// committed policy). The payer created the token itself, honestly, with
-/// burns turned off, and then burns some of it; its own wallet would refuse
-/// the burn, so it builds the step itself, with the write set its builders
-/// produce for that burn. A receiver new to the payer walks its history.
+/// burns turned off, and then burns some of it. Its own wallet and Core's
+/// builder refuse the burn, so it builds the step itself: the signed burn
+/// carries the token's own committed policy, and the debit is the one a transfer of
+/// the same amount writes. A receiver new to the payer walks its history.
 ///
-/// MUTATION CONTROL: skipping `check_burn_policy` in `advance_validated`
-/// turns this red: the receiver accepts the burn.
+/// MUTATION CONTROL: removing the `burn_enabled` refusal from the write set's
+/// Burn arm turns this red: the receiver accepts the burn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_burn_of_a_token_whose_policy_forbids_burns_is_never_accepted() {
@@ -746,12 +843,15 @@ async fn a_burn_of_a_token_whose_policy_forbids_burns_is_never_accepted() {
         amount: dsm::types::token_types::Balance::amount(5),
         token_id: b"KEPT".to_vec(),
         policy_commit: kept,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&kept)
+            .expect("the payer holds KEPT's committed policy"),
         message: "burn 5 KEPT".to_string(),
     };
-    let position = next_step(payer, self_loop_state(payer, &burn, 0x34), &burn).await;
+    let same_debit = signed_token_transfer(payer, &c, kept, "KEPT", 5);
+    let step = next_step(payer, self_loop_state(payer, &burn, 0x34), &same_debit).await;
 
     c.enter();
-    match verify(payer, position).await {
+    match verify(payer, step.position).await {
         Err(PeerLineageFailure::Invalid(why)) => assert!(
             why.contains("does not let it be burned"),
             "refused by the token's committed policy: {why}"
@@ -775,10 +875,10 @@ async fn a_debit_that_takes_less_than_it_sends_is_never_accepted() {
     let payer = &p.a;
     let whole = signed_transfer(payer, &c, payout());
     let one = signed_transfer(payer, &c, 1);
-    let position = next_step(payer, chain_state(payer, &c, &whole, 0x33), &one).await;
+    let step = next_step(payer, chain_state(payer, &c, &whole, 0x33), &one).await;
 
     c.enter();
-    match verify(payer, position).await {
+    match verify(payer, step.position).await {
         Err(PeerLineageFailure::Invalid(why)) => assert!(
             why.contains("debit delta is not exactly the operation amount"),
             "refused: the debit is not the amount sent: {why}"

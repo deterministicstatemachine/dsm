@@ -418,11 +418,12 @@ fn a_genesis_release_to_a_creator_its_allowlist_leaves_out_is_refused() {
 #[test]
 fn an_allowlisted_token_trades_freely_once_issued() {
     let policy = native_policy_allowing((G, DEV), &[DEV]);
-    let pc = policy_commit_of(&policy);
-    dsm::economic::provenance::check_transfer_policy(&pc, &Anchors(policy.clone()))
-        .expect("an allowlisted transferable token transfers");
     let parsed =
         dsm::economic::token_policy::parse_token_policy(&policy).expect("the policy parses");
+    assert!(
+        parsed.transferable,
+        "an allowlisted transferable token transfers: the write set reads only `transferable`"
+    );
     assert_eq!(parsed.allowlist_device_ids, vec![DEV]);
     dsm::economic::issuance::check_market_leg_permitted(&parsed)
         .expect("an allowlisted transferable token's market leg is permitted");
@@ -436,6 +437,7 @@ fn a_genesis_release_rides_only_its_creating_operation() {
         amount: dsm::types::token_types::Balance::amount(1),
         token_id: b"TKN".to_vec(),
         policy_commit: pc,
+        token_policy: policy.clone(),
         message: String::new(),
     };
     for operation in [None, Some(&burn)] {

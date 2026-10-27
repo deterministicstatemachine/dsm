@@ -776,6 +776,7 @@ mod tests {
     fn sample_operation(tag: &[u8], amount: u64) -> Operation {
         Operation::Transfer {
             policy_commit: [0xD4; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![0xCC; 8],

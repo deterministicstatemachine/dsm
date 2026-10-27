@@ -777,6 +777,24 @@ pub(crate) async fn anchored_policy_bytes_async(
     }
 }
 
+/// The policy bytes a Transfer or Burn of `policy_commit` carries (owner
+/// question 9, 2026-10-27): the token's committed policy as this device holds
+/// it, ERA's being Core's own bytes. A device moves only a token it holds,
+/// and it adopted that token's policy to hold it. Core re-hashes the bytes to
+/// the commit in the write set; this is only where they come from.
+pub(crate) fn carried_token_policy(policy_commit: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+    match held_policy_bytes(policy_commit) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(DsmError::invalid_operation(
+            "this device holds no committed policy for the token: it moves only tokens whose \
+             policy it adopted",
+        )),
+        Err(failure) => Err(DsmError::invalid_operation(format!(
+            "the token's committed policy: {failure}"
+        ))),
+    }
+}
+
 /// The policy this device already holds for `policy_commit`, or none.
 fn held_policy_bytes(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
     // ERA's policy is Core's own (SoFi Amendment S11): answered from its

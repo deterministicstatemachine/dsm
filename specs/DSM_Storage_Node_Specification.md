@@ -144,7 +144,7 @@ Anyone MAY append the content address of an object the member already holds unde
 **Rule (Imported: DSM §11)**
 
 1. **Tip mirror.** A public head and encrypted per-relationship leaves, keyed by device and relationship.
-2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, and never opened by the node. The spool is append-only and read from a position: nothing is marked, hidden, expired or removed after a write, and which messages a device has consumed is the device's own state. Every payload is ciphertext, sealed end to end under a per-step key derived from the relationship's Kyber exchange (Owner decision, 2026-09-23; DSM Amendment A7).
+2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, and never opened by the node. The spool is append-only and read from a position: nothing is marked, hidden, expired or removed after a write, and which messages a device has consumed is the device's own state. Every payload is ciphertext, sealed end to end under a key from that payload's own Kyber encapsulation to the recipient device (Owner decision, 2026-09-23; DSM Amendment A7, refined by the owner's ruling of 2026-10-27). The seal authenticates no sender: the recipient takes a payload's content only on the signature that content carries.
 3. **Identity and recovery.** Genesis anchoring, device-tree indexing, and recovery capsules, stored as bytes under derived keys. Recovery is out of scope for this round; this document imports it as substrate only.
 
 **Rule — routing exists only through a pre-established contact (Owner decision; Imported: DSM §9, §13)**

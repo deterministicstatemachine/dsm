@@ -330,6 +330,11 @@ pub enum Operation {
         /// [`TransferTerms::commitment`] of the terms that travel beside this
         /// operation and nowhere public.
         terms_commitment: [u8; 32],
+        /// The token's committed `TokenPolicyV3` bytes, ERA's included, which
+        /// re-hash to `policy_commit`. Core reads `transferable` from them in
+        /// the write set, before anything moves, for the producer and every
+        /// verifier alike (owner question 9, 2026-10-27).
+        token_policy: Vec<u8>,
         /// Sender's SPHINCS+ signature authorizing this transfer.
         signature: Vec<u8>,
         /// Authority-proof requirement for this transfer. `Some` opts into the offline-bearer
@@ -381,6 +386,11 @@ pub enum Operation {
         /// CPTA commit of the asset being burned. Binds the applied debit to
         /// the asset the signed operation names.
         policy_commit: [u8; 32],
+        /// The token's committed `TokenPolicyV3` bytes, ERA's included, which
+        /// re-hash to `policy_commit`. Core reads `burn_enabled` from them in
+        /// the write set, before anything moves (owner question 9,
+        /// 2026-10-27).
+        token_policy: Vec<u8>,
         /// Human-readable description of the burn event.
         message: String,
     },
@@ -1152,6 +1162,7 @@ impl Operation {
                 amount,
                 policy_commit,
                 terms_commitment,
+                token_policy,
                 signature,
                 authority_policy,
             } => {
@@ -1166,6 +1177,8 @@ impl Operation {
                 put_bytes(&mut out, policy_commit);
                 // The terms, by their salted commitment only.
                 put_bytes(&mut out, terms_commitment);
+                // The token's committed policy, under the signature.
+                put_bytes(&mut out, token_policy);
                 // Sender signature (online) or empty for bilateral (signatures in receipt)
                 put_bytes(&mut out, signature);
                 // Append-only authority-policy tail: None emits NOTHING (byte-identical to every
@@ -1180,6 +1193,7 @@ impl Operation {
                 amount,
                 token_id,
                 policy_commit,
+                token_policy,
                 message,
             } => {
                 put_u8(&mut out, 5);
@@ -1187,6 +1201,7 @@ impl Operation {
                 put_bytes(&mut out, &bal);
                 put_bytes(&mut out, token_id);
                 put_bytes(&mut out, policy_commit);
+                put_bytes(&mut out, token_policy);
                 put_str(&mut out, message);
             }
             LockToken {
@@ -1680,6 +1695,7 @@ impl Operation {
                         DsmError::invalid_operation("transfer policy_commit must be 32 bytes")
                     })?;
                 let terms_commitment = get_arr32(&mut input)?;
+                let token_policy = get_bytes(&mut input)?;
                 // The signature field is always encoded (empty when the
                 // signatures ride in the receipt): one transfer, one encoding.
                 let signature = get_bytes(&mut input)?;
@@ -1722,6 +1738,7 @@ impl Operation {
                     amount,
                     policy_commit,
                     terms_commitment,
+                    token_policy,
                     signature,
                     authority_policy,
                 }
@@ -1733,11 +1750,13 @@ impl Operation {
                     get_bytes(&mut input)?.as_slice().try_into().map_err(|_| {
                         DsmError::invalid_operation("burn policy_commit must be 32 bytes")
                     })?;
+                let token_policy = get_bytes(&mut input)?;
                 let message = get_str(&mut input)?;
                 Burn {
                     amount,
                     token_id,
                     policy_commit,
+                    token_policy,
                     message,
                 }
             }
@@ -2464,6 +2483,7 @@ mod tests {
             to_device_id: b"rcpt".to_vec(),
             amount: test_balance(100),
             policy_commit: [7u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![1, 2, 3],
@@ -2541,6 +2561,7 @@ mod tests {
                 to_device_id: vec![0x11; 32],
                 amount: test_balance(42),
                 policy_commit: [0x0F; 32],
+                token_policy: Vec::new(),
                 terms_commitment: terms.commitment(),
                 signature: Vec::new(),
                 authority_policy: None,
@@ -2711,6 +2732,7 @@ mod tests {
         fn transfer_no_precommit_op() -> Operation {
             Operation::Transfer {
                 policy_commit: [0u8; 32],
+                token_policy: vec![0x0A; 40],
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![0xFF; 16],
@@ -2736,6 +2758,7 @@ mod tests {
                 amount: test_balance(200),
                 token_id: b"TKN".to_vec(),
                 policy_commit: [0u8; 32],
+                token_policy: vec![0x0A; 40],
                 message: "burn tokens".into(),
             }
         }
@@ -3287,6 +3310,7 @@ mod tests {
 
             let transfer = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: vec![],
                     nonce: vec![],
@@ -3306,6 +3330,7 @@ mod tests {
                 amount: test_balance(1),
                 token_id: vec![],
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 message: String::new(),
             };
             assert_eq!(burn.get_operation_type(), "burn");
@@ -3382,6 +3407,7 @@ mod tests {
         fn clears_transfer_signature() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![0xFF; 16],
@@ -3509,6 +3535,7 @@ mod tests {
                 to_device_id: vec![0x01; 32],
                 amount: test_balance(100),
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![0xFF; 16],
@@ -3573,6 +3600,7 @@ mod tests {
                 to_device_id: vec![0x11; 32],
                 amount: test_balance(42),
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: unit_terms().commitment(),
                 signature: Vec::new(),
                 authority_policy: None,
@@ -3651,6 +3679,7 @@ mod tests {
                 amount,
                 token_id: b"T".to_vec(),
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 message: String::new(),
             }
         }
@@ -3702,6 +3731,7 @@ mod tests {
                 amount: bal,
                 token_id: b"X".to_vec(),
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 message: String::new(),
             };
             roundtrip(&op);
@@ -3738,6 +3768,7 @@ mod tests {
         fn encoding_is_deterministic() {
             let op = Operation::Transfer {
                 policy_commit: [0u8; 32],
+                token_policy: Vec::new(),
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
                     nonce: vec![0xAA; 16],

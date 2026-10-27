@@ -5764,15 +5764,12 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
     let (own, parents) = standing_of(&p.a);
     let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
     let r0 = genesis_root_of(&ctx.verifier(), &m.vault_id);
+    let key = attempt_cell(&set, &m.vault_id, &r0, 0).expect("the head's first key");
     let head = format!(
         "GET /api/v2/cell/{}",
-        crate::util::text_id::encode_base32_crockford(
-            attempt_cell(&set, &m.vault_id, &r0, 0)
-                .expect("the head's first key")
-                .routed()
-                .key()
-        )
+        crate::util::text_id::encode_base32_crockford(key.routed().key())
     );
+    let leader = member_name(key.routed().route().leader());
 
     for node in &p.nodes.nodes {
         node.forget_requests();
@@ -5800,18 +5797,36 @@ async fn a_trade_reads_its_vaults_open_head_once_per_walk() {
     // every seat eleven times, the leader twelve. Once B's exercise holds the
     // key final, the resolution relying on it reads it once more, afresh, for
     // the check of its completion proof (SoFi Amendment S10; owner ruling
-    // 2026-10-24): eight.
-    let per_seat = p
+    // 2026-10-24): eight. The leader is asked once more, for B's exercise:
+    // the writer reads the leader's log again after its put, and decides from
+    // that log whether its own value is first there or the write was taken
+    // (MR-STOR-0134, owner ruling 4 of 2026-10-27): nine.
+    let reads =
+        |n: &crate::test_support::nodes::Node| n.requests().iter().filter(|r| **r == head).count();
+    let all = asked.iter().filter(|r| **r == head).count();
+    let at_leader = p
         .nodes
         .nodes
         .iter()
-        .map(|n| n.requests().iter().filter(|r| **r == head).count())
+        .filter(|n| n.member_id == leader)
+        .map(reads)
         .max()
-        .expect("a set has members");
+        .expect("the leader is a member");
+    let elsewhere = p
+        .nodes
+        .nodes
+        .iter()
+        .filter(|n| n.member_id != leader)
+        .map(reads)
+        .max()
+        .expect("the route has later seats");
     assert!(
-        per_seat <= 8,
-        "a seat was asked for the head {per_seat} times ({} requests in all)",
-        asked.iter().filter(|r| **r == head).count()
+        at_leader <= 9,
+        "the leader was asked for the head {at_leader} times ({all} requests in all)"
+    );
+    assert!(
+        elsewhere <= 8,
+        "a later seat was asked for the head {elsewhere} times ({all} requests in all)"
     );
 
     // A second trade through the same vault stands on the setup the first

@@ -129,6 +129,18 @@ pub enum WriteSetError {
         token: [u8; 32],
         refusal: crate::economic::issuance::MarketLegRefusal,
     },
+    /// A Transfer or Burn carries policy bytes that are not its token's
+    /// committed policy: they do not re-hash to `policy_commit` (owner
+    /// question 9).
+    TokenPolicyNotTheToken { token: [u8; 32] },
+    /// A moved token's committed policy does not parse, and why.
+    TokenPolicyDoesNotParse { token: [u8; 32], reason: String },
+    /// A Transfer of a token whose committed policy does not let it move
+    /// between holders (SoFi §49; MR-SOFI-0311, owner question 9).
+    TokenNotTransferable { token: [u8; 32] },
+    /// A Burn of a token whose committed policy does not let it be burned
+    /// (DSM §61; MR-DSM-0191, owner question 9).
+    TokenNotBurnable { token: [u8; 32] },
     /// A mutation or state constructor refused (zero-amount leaf, sibling
     /// arity, ...) — carried through from the CCB layer.
     Ccb(String),
@@ -202,6 +214,26 @@ impl core::fmt::Display for WriteSetError {
             Self::FundedTokenNotPermitted { token, refusal } => write!(
                 f,
                 "funded token {} cannot be locked in a vault: {refusal}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenPolicyNotTheToken { token } => write!(
+                f,
+                "the policy bytes carried are not the committed policy of token {}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenPolicyDoesNotParse { token, reason } => write!(
+                f,
+                "the committed policy of token {} does not parse: {reason}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenNotTransferable { token } => write!(
+                f,
+                "token {}'s committed policy does not let it move between holders",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::TokenNotBurnable { token } => write!(
+                f,
+                "token {}'s committed policy does not let it be burned",
                 crate::utils::text_id::encode_base32_crockford(token)
             ),
             Self::Ccb(e) => write!(f, "write set: {e}"),
@@ -387,8 +419,17 @@ fn semantic_write_set(
             to_device_id,
             amount,
             policy_commit,
+            token_policy,
             ..
         } => {
+            // Before anything moves (SoFi §49): the producer's device refuses
+            // here, before its head commits, and every verifier refuses the
+            // same bytes.
+            if !moved_token_policy(policy_commit, token_policy)?.transferable {
+                return Err(WriteSetError::TokenNotTransferable {
+                    token: *policy_commit,
+                });
+            }
             if crate::core::bilateral_transaction_manager::operation_requires_offline_bearer(
                 operation,
             ) {
@@ -415,11 +456,19 @@ fn semantic_write_set(
         Operation::Burn {
             amount,
             policy_commit,
+            token_policy,
             ..
-        } => Ok(SemanticWriteSet::DebitOnly {
-            policy_commit: *policy_commit,
-            amount: amount.value(),
-        }),
+        } => {
+            if !moved_token_policy(policy_commit, token_policy)?.burn_enabled {
+                return Err(WriteSetError::TokenNotBurnable {
+                    token: *policy_commit,
+                });
+            }
+            Ok(SemanticWriteSet::DebitOnly {
+                policy_commit: *policy_commit,
+                amount: amount.value(),
+            })
+        }
         // Creation releases the token's whole genesis supply to its creator
         // (`ReleaseRule::AllAtCreation`, SoFi §51) in the same write set as
         // the ERA fee. A token with no supply is not a token (§50), and the
@@ -656,6 +705,33 @@ fn semantic_write_set(
             _ => Err(WriteSetError::NoEconomicWriteSet),
         },
     }
+}
+
+/// The committed policy a Transfer or Burn moves its token under (owner
+/// question 9, 2026-10-27). Every token's committed `TokenPolicyV3` bytes,
+/// ERA's included, ride in the signed operation and are re-hashed to its
+/// commit before anything is read out of them, so the check is a function of
+/// the operation alone: the producer and every verifier read the same bytes,
+/// and bytes that are not the token's make the operation itself invalid.
+fn moved_token_policy(
+    policy_commit: &[u8; 32],
+    carried: &[u8],
+) -> Result<crate::economic::token_policy::TokenPolicy, WriteSetError> {
+    let derived = crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_POLICY,
+        carried,
+    );
+    if derived != *policy_commit {
+        return Err(WriteSetError::TokenPolicyNotTheToken {
+            token: *policy_commit,
+        });
+    }
+    crate::economic::token_policy::parse_token_policy(carried).map_err(|reason| {
+        WriteSetError::TokenPolicyDoesNotParse {
+            token: *policy_commit,
+            reason,
+        }
+    })
 }
 
 /// The funded tokens whose committed policies a vault creation carries, in
@@ -2752,7 +2828,8 @@ mod creation_fee_and_bearer_tests {
         Operation::Transfer {
             to_device_id: vec![0x33; 32],
             amount: crate::types::token_types::Balance::amount(5),
-            policy_commit: [0x44; 32],
+            policy_commit: crate::core::token::era_policy::era_policy_commit(),
+            token_policy: crate::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: TransferTerms {
                 token_id: b"TOK".to_vec(),
                 nonce: vec![1, 2, 3],

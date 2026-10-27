@@ -1510,6 +1510,7 @@ mod tests {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
             policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
