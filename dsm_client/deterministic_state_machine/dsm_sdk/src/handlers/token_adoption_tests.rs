@@ -401,6 +401,71 @@ async fn a_scanned_payload_adopts_and_a_lying_payload_is_refused() {
     assert_eq!(row.token_id, token_id);
 }
 
+/// SoFi Amendment S28 (MR-SOFI-0305): nothing reserves a ticker across the
+/// network, and a device holds one token per ticker. A and B each create a
+/// token named TWIN, independently: both creations stand, as two tokens,
+/// two policy commits, each held by its own creator. On each device the
+/// ticker still names one token: B, holding its own TWIN, refuses A's, and A
+/// cannot create a second TWIN.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_devices_each_create_a_token_under_one_ticker_and_each_holds_its_own() {
+    let p = Pair::boot(100, 100).await;
+    p.a.enter();
+    let a_twin = economic_fixtures::create_asset(p.a.router(), "TWIN", 2, 1_000).await;
+    p.b.enter();
+    let b_twin = economic_fixtures::create_asset(p.b.router(), "TWIN", 2, 1_000).await;
+    assert_ne!(a_twin, b_twin, "two creations are two tokens");
+    for (d, held) in [(&p.a, a_twin), (&p.b, b_twin)] {
+        d.enter();
+        assert_eq!(
+            token_registry::get_token_by_ticker("TWIN")
+                .expect("read")
+                .expect("row")
+                .policy_commit,
+            held,
+            "{} holds its own TWIN",
+            d.slot
+        );
+    }
+
+    // What a refusal before anything is written leaves as it was: the
+    // device's ERA and its admitted position.
+    let standing = |d: &TestDevice| {
+        (
+            super::node_e2e_tests::balance(d, &super::node_e2e_tests::era()),
+            super::node_e2e_tests::admitted_position(d),
+        )
+    };
+    let b_before = standing(&p.b);
+    p.b.enter();
+    let refused = adopt(p.b.router(), &anchor_text(&a_twin)).await;
+    assert!(!refused.success, "B already holds a TWIN");
+    let reason = refused.error_message.expect("a refusal carries its reason");
+    assert!(reason.contains("TICKER_CONFLICT"), "{reason}");
+    assert_eq!(standing(&p.b), b_before, "B's refusal wrote nothing");
+
+    let a_before = standing(&p.a);
+    // Another policy under the same ticker: only the alias differs.
+    let mut another = super::sender_admission_tests::create_request("TWIN", 2, 1_000);
+    another.alias = "Another twin".into();
+    let second =
+        super::node_e2e_tests::invoke(&p.a, "token.create", super::node_e2e_tests::args(&another))
+            .await;
+    assert!(!second.success, "A already holds a TWIN");
+    let why = second.error_message.expect("a refusal carries its reason");
+    assert!(why.contains("already held by a different token"), "{why}");
+    assert_eq!(standing(&p.a), a_before, "A's refusal spent nothing");
+    assert_eq!(
+        token_registry::get_token_by_ticker("TWIN")
+            .expect("read")
+            .expect("row")
+            .policy_commit,
+        a_twin,
+        "A's TWIN is still the one it created"
+    );
+}
+
 /// Adoption is permanent (SA-148): a device holding RIGB never adopts a
 /// different token that another creator named RIGB. The ticker would then
 /// name two assets, and a transfer could credit the wrong one.

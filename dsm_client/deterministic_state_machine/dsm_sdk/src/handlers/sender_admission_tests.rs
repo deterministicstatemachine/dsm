@@ -53,7 +53,7 @@ fn burn_request(token_id: &str, amount: u64) -> dsm::types::proto::TokenBurnRequ
     }
 }
 
-fn create_request(
+pub(super) fn create_request(
     ticker: &str,
     decimals: u32,
     genesis_supply: u128,
