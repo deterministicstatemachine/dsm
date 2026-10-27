@@ -1005,7 +1005,7 @@ fn closure_index_enforces_bounds_order_and_current_e_exclusion() {
         class::SOFI_DLV_POLICY_FULFILLMENT_BODY,
         class::SOFI_TRADER_FULFILLMENT_BODY,
         class::SOFI_RESOLUTION_CLAIM,
-        class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+        dsm::ccb::declared_unencoded::SOFI_POLICY_FULFILLMENT_AUX_REF,
         class::SOFI_PRE_E_CLOSURE_INDEX,
         class::SOFI_SIGNED_OBJECT,
         class::SOFI_SETUP_BODY,
@@ -1161,12 +1161,15 @@ fn class_discriminants_do_not_collide() {
             "{name} is declared under burned_class but is not in burned_class::ALL"
         );
     }
-    // The SoFi v8 range is fully accounted for: every number is a live class
-    // or a burned one, and the demolition's seven are burned.
+    // The SoFi v8 range is fully accounted for: every number is a live class,
+    // a burned one, or one the registry defines with no encoder in beta, and
+    // the demolition's seven are burned.
     for v in 0x0036u16..=0x004A {
         assert!(
-            live.contains_key(&v) || burned.contains_key(&v),
-            "{v:#06x} is neither a live SoFi v8 class nor a burned one"
+            live.contains_key(&v)
+                || burned.contains_key(&v)
+                || dsm::ccb::declared_unencoded::is_declared_unencoded(v),
+            "{v:#06x} is neither a live SoFi v8 class, a burned one nor a declared one"
         );
     }
     for v in 0x0043u16..=0x0049 {

@@ -2643,19 +2643,26 @@ mod tests {
     mod roundtrip {
         use super::*;
 
+        fn genesis_op() -> Operation {
+            Operation::Genesis
+        }
+
         #[test]
         fn genesis() {
-            roundtrip(&Operation::Genesis);
+            roundtrip(&genesis_op());
+        }
+
+        fn noop_op() -> Operation {
+            Operation::Noop
         }
 
         #[test]
         fn noop() {
-            roundtrip(&Operation::Noop);
+            roundtrip(&noop_op());
         }
 
-        #[test]
-        fn create() {
-            roundtrip(&Operation::Create {
+        fn create_op() -> Operation {
+            Operation::Create {
                 message: "create identity".into(),
                 identity_data: vec![1, 2, 3],
                 public_key: vec![4, 5, 6],
@@ -2663,34 +2670,46 @@ mod tests {
                 commitment: vec![9],
                 proof: vec![10, 11],
                 mode: TransactionMode::Bilateral,
-            });
+            }
         }
 
         #[test]
-        fn update_with_forward_link() {
-            roundtrip(&Operation::Update {
+        fn create() {
+            roundtrip(&create_op());
+        }
+
+        fn update_with_forward_link_op() -> Operation {
+            Operation::Update {
                 message: "update id".into(),
                 identity_id: vec![0xAA; 16],
                 updated_data: vec![0xBB; 8],
                 proof: vec![0xCC; 4],
                 forward_link: Some(vec![0xDD; 32]),
-            });
+            }
         }
 
         #[test]
-        fn update_without_forward_link() {
-            roundtrip(&Operation::Update {
+        fn update_with_forward_link() {
+            roundtrip(&update_with_forward_link_op());
+        }
+
+        fn update_without_forward_link_op() -> Operation {
+            Operation::Update {
                 message: "no fwd".into(),
                 identity_id: vec![1],
                 updated_data: vec![2],
                 proof: vec![3],
                 forward_link: None,
-            });
+            }
         }
 
         #[test]
-        fn transfer_no_precommit() {
-            roundtrip(&Operation::Transfer {
+        fn update_without_forward_link() {
+            roundtrip(&update_without_forward_link_op());
+        }
+
+        fn transfer_no_precommit_op() -> Operation {
+            Operation::Transfer {
                 policy_commit: [0u8; 32],
                 terms_commitment: crate::types::operations::TransferTerms {
                     token_id: b"ERA".to_vec(),
@@ -2704,68 +2723,92 @@ mod tests {
                 amount: test_balance(500),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
-            });
+            }
         }
 
         #[test]
-        fn burn() {
-            roundtrip(&Operation::Burn {
+        fn transfer_no_precommit() {
+            roundtrip(&transfer_no_precommit_op());
+        }
+
+        fn burn_op() -> Operation {
+            Operation::Burn {
                 amount: test_balance(200),
                 token_id: b"TKN".to_vec(),
                 policy_commit: [0u8; 32],
                 message: "burn tokens".into(),
-            });
+            }
         }
 
         #[test]
-        fn lock_token() {
-            roundtrip(&Operation::LockToken {
+        fn burn() {
+            roundtrip(&burn_op());
+        }
+
+        fn lock_token_op() -> Operation {
+            Operation::LockToken {
                 token_id: b"ERA".to_vec(),
                 amount: 500,
                 purpose: b"escrow".to_vec(),
                 mode: TransactionMode::Unilateral,
                 signature: vec![0xDD; 32],
-            });
+            }
         }
 
         #[test]
-        fn unlock_token() {
-            roundtrip(&Operation::UnlockToken {
+        fn lock_token() {
+            roundtrip(&lock_token_op());
+        }
+
+        fn unlock_token_op() -> Operation {
+            Operation::UnlockToken {
                 token_id: b"ERA".to_vec(),
                 amount: 250,
                 purpose: b"escrow".to_vec(),
                 mode: TransactionMode::Bilateral,
                 signature: vec![0xEE; 32],
-            });
+            }
         }
 
         #[test]
-        fn lock() {
-            roundtrip(&Operation::Lock {
+        fn unlock_token() {
+            roundtrip(&unlock_token_op());
+        }
+
+        fn lock_op() -> Operation {
+            Operation::Lock {
                 token_id: b"TKN".to_vec(),
                 amount: test_balance(100),
                 purpose: b"collateral".to_vec(),
                 owner: vec![0x11; 32],
                 message: "lock for collateral".into(),
                 signature: vec![0x22; 48],
-            });
+            }
         }
 
         #[test]
-        fn unlock() {
-            roundtrip(&Operation::Unlock {
+        fn lock() {
+            roundtrip(&lock_op());
+        }
+
+        fn unlock_op() -> Operation {
+            Operation::Unlock {
                 token_id: b"TKN".to_vec(),
                 amount: test_balance(50),
                 purpose: b"collateral".to_vec(),
                 owner: vec![0x33; 32],
                 message: "release collateral".into(),
                 signature: vec![0x44; 48],
-            });
+            }
         }
 
         #[test]
-        fn add_relationship() {
-            roundtrip(&Operation::AddRelationship {
+        fn unlock() {
+            roundtrip(&unlock_op());
+        }
+
+        fn add_relationship_op() -> Operation {
+            Operation::AddRelationship {
                 from_id: [0x01; 32],
                 to_id: [0x02; 32],
                 relationship_type: b"bilateral_transfer".to_vec(),
@@ -2773,35 +2816,47 @@ mod tests {
                 proof: vec![0xBB; 64],
                 mode: TransactionMode::Bilateral,
                 message: "add rel".into(),
-            });
+            }
         }
 
         #[test]
-        fn create_relationship() {
-            roundtrip(&Operation::CreateRelationship {
+        fn add_relationship() {
+            roundtrip(&add_relationship_op());
+        }
+
+        fn create_relationship_op() -> Operation {
+            Operation::CreateRelationship {
                 message: "create rel".into(),
                 counterparty_id: vec![0x01; 32],
                 commitment: vec![0x02; 16],
                 proof: vec![0x03; 64],
                 mode: TransactionMode::Unilateral,
-            });
+            }
         }
 
         #[test]
-        fn remove_relationship() {
-            roundtrip(&Operation::RemoveRelationship {
+        fn create_relationship() {
+            roundtrip(&create_relationship_op());
+        }
+
+        fn remove_relationship_op() -> Operation {
+            Operation::RemoveRelationship {
                 from_id: [0xAA; 32],
                 to_id: [0xBB; 32],
                 relationship_type: b"expired".to_vec(),
                 proof: vec![0xCC; 64],
                 mode: TransactionMode::Bilateral,
                 message: "remove rel".into(),
-            });
+            }
         }
 
         #[test]
-        fn recovery() {
-            roundtrip(&Operation::Recovery {
+        fn remove_relationship() {
+            roundtrip(&remove_relationship_op());
+        }
+
+        fn recovery_op() -> Operation {
+            Operation::Recovery {
                 message: "recover chain".into(),
                 state_number: 42,
                 state_hash: vec![0x11; 32],
@@ -2813,60 +2868,84 @@ mod tests {
                 new_state_entropy: vec![0x66; 32],
                 compromise_proof: vec![0x77; 128],
                 authority_sigs: vec![vec![0x88; 64], vec![0x99; 64]],
-            });
+            }
         }
 
         #[test]
-        fn delete() {
-            roundtrip(&Operation::Delete {
+        fn recovery() {
+            roundtrip(&recovery_op());
+        }
+
+        fn delete_op() -> Operation {
+            Operation::Delete {
                 reason: "resource expired".into(),
                 proof: vec![0xAA; 64],
                 mode: TransactionMode::Unilateral,
                 id: vec![0xBB; 16],
-            });
+            }
         }
 
         #[test]
-        fn link() {
-            roundtrip(&Operation::Link {
+        fn delete() {
+            roundtrip(&delete_op());
+        }
+
+        fn link_op() -> Operation {
+            Operation::Link {
                 target_id: vec![0x01; 32],
                 link_type: b"forward".to_vec(),
                 proof: vec![0x02; 64],
                 mode: TransactionMode::Bilateral,
-            });
+            }
+        }
+
+        #[test]
+        fn link() {
+            roundtrip(&link_op());
+        }
+
+        fn unlink_op() -> Operation {
+            Operation::Unlink {
+                target_id: vec![0x01; 32],
+                proof: vec![0x02; 64],
+                mode: TransactionMode::Unilateral,
+            }
         }
 
         #[test]
         fn unlink() {
-            roundtrip(&Operation::Unlink {
-                target_id: vec![0x01; 32],
-                proof: vec![0x02; 64],
-                mode: TransactionMode::Unilateral,
-            });
+            roundtrip(&unlink_op());
+        }
+
+        fn invalidate_op() -> Operation {
+            Operation::Invalidate {
+                reason: "clone detected".into(),
+                proof: vec![0xDE; 64],
+                mode: TransactionMode::Bilateral,
+            }
         }
 
         #[test]
         fn invalidate() {
-            roundtrip(&Operation::Invalidate {
-                reason: "clone detected".into(),
-                proof: vec![0xDE; 64],
-                mode: TransactionMode::Bilateral,
-            });
+            roundtrip(&invalidate_op());
         }
 
-        #[test]
-        fn generic() {
-            roundtrip(&Operation::Generic {
+        fn generic_op() -> Operation {
+            Operation::Generic {
                 operation_type: b"custom_op".to_vec(),
                 data: vec![1, 2, 3, 4, 5],
                 message: "generic op".into(),
                 signature: vec![0xFF; 32],
-            });
+            }
         }
 
         #[test]
-        fn receive_with_sender_state_hash() {
-            roundtrip(&Operation::Receive {
+        fn generic() {
+            roundtrip(&generic_op());
+        }
+
+        fn receive_with_sender_state_hash_op() -> Operation {
+            Operation::Receive {
                 token_id: b"ERA".to_vec(),
                 from_device_id: vec![0x01; 32],
                 amount: test_balance(777),
@@ -2875,12 +2954,16 @@ mod tests {
                 mode: TransactionMode::Bilateral,
                 nonce: vec![0x03; 16],
                 sender_state_hash: Some(vec![0x04; 32]),
-            });
+            }
         }
 
         #[test]
-        fn receive_without_sender_state_hash() {
-            roundtrip(&Operation::Receive {
+        fn receive_with_sender_state_hash() {
+            roundtrip(&receive_with_sender_state_hash_op());
+        }
+
+        fn receive_without_sender_state_hash_op() -> Operation {
+            Operation::Receive {
                 token_id: b"TKN".to_vec(),
                 from_device_id: vec![0xAA; 32],
                 amount: test_balance(1),
@@ -2889,24 +2972,36 @@ mod tests {
                 mode: TransactionMode::Unilateral,
                 nonce: vec![],
                 sender_state_hash: None,
-            });
+            }
+        }
+
+        #[test]
+        fn receive_without_sender_state_hash() {
+            roundtrip(&receive_without_sender_state_hash_op());
+        }
+
+        fn adopt_token_op() -> Operation {
+            Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![0xCD; 64],
+            }
+        }
+
+        fn adopt_token_unsigned_op() -> Operation {
+            Operation::AdoptToken {
+                policy_commit: [0x5A; 32],
+                signature: vec![],
+            }
         }
 
         #[test]
         fn adopt_token_roundtrip() {
-            roundtrip(&Operation::AdoptToken {
-                policy_commit: [0x5A; 32],
-                signature: vec![0xCD; 64],
-            });
-            roundtrip(&Operation::AdoptToken {
-                policy_commit: [0x5A; 32],
-                signature: vec![],
-            });
+            roundtrip(&adopt_token_op());
+            roundtrip(&adopt_token_unsigned_op());
         }
 
-        #[test]
-        fn create_token_full() {
-            roundtrip(&Operation::CreateToken {
+        fn create_token_full_op() -> Operation {
+            Operation::CreateToken {
                 token_id: b"dBTC".to_vec(),
                 initial_supply: test_balance(21_000_000),
                 name: "Deterministic Bitcoin".into(),
@@ -2916,12 +3011,16 @@ mod tests {
                 policy_commit: [0xAB; 32],
                 fee_amount: 10,
                 signature: vec![0xCD; 64],
-            });
+            }
         }
 
         #[test]
-        fn create_token_minimal() {
-            roundtrip(&Operation::CreateToken {
+        fn create_token_full() {
+            roundtrip(&create_token_full_op());
+        }
+
+        fn create_token_minimal_op() -> Operation {
+            Operation::CreateToken {
                 token_id: b"T".to_vec(),
                 initial_supply: test_balance(0),
                 name: "Test".into(),
@@ -2931,12 +3030,16 @@ mod tests {
                 policy_commit: [0u8; 32],
                 fee_amount: 0,
                 signature: vec![],
-            });
+            }
         }
 
         #[test]
-        fn dlv_create() {
-            roundtrip(&Operation::DlvCreate {
+        fn create_token_minimal() {
+            roundtrip(&create_token_minimal_op());
+        }
+
+        fn dlv_create_op() -> Operation {
+            Operation::DlvCreate {
                 vault_id: vec![0x01; 32],
                 creator_public_key: vec![0x02; 64],
                 parameters_hash: vec![0x03; 32],
@@ -2944,12 +3047,16 @@ mod tests {
                 intended_recipient: Some(vec![0x05; 64]),
                 signature: vec![0x06; 48],
                 mode: TransactionMode::Unilateral,
-            });
+            }
         }
 
         #[test]
-        fn dlv_create_no_optionals() {
-            roundtrip(&Operation::DlvCreate {
+        fn dlv_create() {
+            roundtrip(&dlv_create_op());
+        }
+
+        fn dlv_create_no_optionals_op() -> Operation {
+            Operation::DlvCreate {
                 vault_id: vec![0x01; 32],
                 creator_public_key: vec![0x02; 64],
                 parameters_hash: vec![0x03; 32],
@@ -2957,7 +3064,12 @@ mod tests {
                 intended_recipient: None,
                 signature: vec![0x06; 48],
                 mode: TransactionMode::Bilateral,
-            });
+            }
+        }
+
+        #[test]
+        fn dlv_create_no_optionals() {
+            roundtrip(&dlv_create_no_optionals_op());
         }
 
         /// Tag 27 (legacy DlvOwnerApply, owner directive 2026-08-28) and tags
@@ -2979,37 +3091,186 @@ mod tests {
             }
         }
 
-        #[test]
-        fn dlv_unlock() {
-            roundtrip(&Operation::DlvUnlock {
+        fn dlv_unlock_op() -> Operation {
+            Operation::DlvUnlock {
                 vault_id: vec![0x01; 32],
                 fulfillment_proof: vec![0x02; 128],
                 requester_public_key: vec![0x03; 64],
                 signature: vec![0x04; 48],
                 mode: TransactionMode::Unilateral,
-            });
+            }
         }
 
         #[test]
-        fn dlv_claim() {
-            roundtrip(&Operation::DlvClaim {
+        fn dlv_unlock() {
+            roundtrip(&dlv_unlock_op());
+        }
+
+        fn dlv_claim_op() -> Operation {
+            Operation::DlvClaim {
                 vault_id: vec![0x01; 32],
                 claim_proof: vec![0x02; 64],
                 claimant_public_key: vec![0x03; 64],
                 signature: vec![0x04; 48],
                 mode: TransactionMode::Bilateral,
-            });
+            }
         }
 
         #[test]
-        fn dlv_invalidate() {
-            roundtrip(&Operation::DlvInvalidate {
+        fn dlv_claim() {
+            roundtrip(&dlv_claim_op());
+        }
+
+        fn dlv_invalidate_op() -> Operation {
+            Operation::DlvInvalidate {
                 vault_id: vec![0x01; 32],
                 reason: "timeout expired".into(),
                 creator_public_key: vec![0x02; 64],
                 signature: vec![0x03; 48],
                 mode: TransactionMode::Unilateral,
-            });
+            }
+        }
+
+        #[test]
+        fn dlv_invalidate() {
+            roundtrip(&dlv_invalidate_op());
+        }
+        fn faucet_claim_op() -> Operation {
+            Operation::FaucetClaim {
+                reserve_id: [0x52; 32],
+                generation: 7,
+            }
+        }
+
+        fn sofi_setup_op() -> Operation {
+            Operation::SofiSetup {
+                setup_body: vec![0x36, 0x00],
+                signature: vec![0xA1; 64],
+            }
+        }
+
+        fn sofi_vault_create_op() -> Operation {
+            Operation::SofiVaultCreate {
+                genesis_preimage: vec![0x5A, 0x00],
+                creation: vec![0x5B, 0x00],
+                market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
+                funding_a_policy_commit: [0x5C; 32],
+                funding_b_policy_commit: [0x5D; 32],
+                funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
+                signature: vec![0xA2; 64],
+            }
+        }
+
+        fn sofi_fulfill_op() -> Operation {
+            Operation::SofiFulfill {
+                fulfillment_body: vec![0x39, 0x00],
+                precommit_id: vec![0x11; 32],
+                signature: vec![0xA3; 64],
+            }
+        }
+
+        fn escrow_vault_create_op() -> Operation {
+            Operation::EscrowVaultCreate {
+                genesis_preimage: vec![0x5A, 0x00],
+                creation: vec![0x5B, 0x00],
+                terms: vec![0x00, 0x63, 0x00, 0x01],
+                funding_policies: vec![vec![0x40, 0x01]],
+                signature: vec![0xA4; 64],
+            }
+        }
+
+        /// The variant an operation is. The match has no wildcard, so a
+        /// variant added to `Operation` does not compile until it has an
+        /// index here, and then fails `every_variant_has_one_encoding` until
+        /// it has an object.
+        fn variant(op: &Operation) -> usize {
+            match op {
+                Operation::Genesis => 0,
+                Operation::Create { .. } => 1,
+                Operation::Update { .. } => 2,
+                Operation::Transfer { .. } => 3,
+                Operation::FaucetClaim { .. } => 4,
+                Operation::AdoptToken { .. } => 5,
+                Operation::Burn { .. } => 6,
+                Operation::LockToken { .. } => 7,
+                Operation::UnlockToken { .. } => 8,
+                Operation::Lock { .. } => 9,
+                Operation::Unlock { .. } => 10,
+                Operation::AddRelationship { .. } => 11,
+                Operation::CreateRelationship { .. } => 12,
+                Operation::RemoveRelationship { .. } => 13,
+                Operation::Recovery { .. } => 14,
+                Operation::Delete { .. } => 15,
+                Operation::Link { .. } => 16,
+                Operation::Unlink { .. } => 17,
+                Operation::Invalidate { .. } => 18,
+                Operation::Generic { .. } => 19,
+                Operation::Receive { .. } => 20,
+                Operation::CreateToken { .. } => 21,
+                Operation::Noop => 22,
+                Operation::DlvCreate { .. } => 23,
+                Operation::DlvUnlock { .. } => 24,
+                Operation::DlvClaim { .. } => 25,
+                Operation::SofiSetup { .. } => 26,
+                Operation::SofiVaultCreate { .. } => 27,
+                Operation::SofiFulfill { .. } => 28,
+                Operation::EscrowVaultCreate { .. } => 29,
+                Operation::DlvInvalidate { .. } => 30,
+            }
+        }
+
+        /// Every operation variant has an object here, and each object's
+        /// canonical bytes decode back to it and re-encode to the same bytes
+        /// (MR-DSM-0100).
+        #[test]
+        fn every_variant_has_one_encoding() {
+            const VARIANTS: usize = 31;
+            let objects = [
+                genesis_op(),
+                create_op(),
+                update_with_forward_link_op(),
+                update_without_forward_link_op(),
+                transfer_no_precommit_op(),
+                faucet_claim_op(),
+                adopt_token_op(),
+                adopt_token_unsigned_op(),
+                burn_op(),
+                lock_token_op(),
+                unlock_token_op(),
+                lock_op(),
+                unlock_op(),
+                add_relationship_op(),
+                create_relationship_op(),
+                remove_relationship_op(),
+                recovery_op(),
+                delete_op(),
+                link_op(),
+                unlink_op(),
+                invalidate_op(),
+                generic_op(),
+                receive_with_sender_state_hash_op(),
+                receive_without_sender_state_hash_op(),
+                create_token_full_op(),
+                create_token_minimal_op(),
+                noop_op(),
+                dlv_create_op(),
+                dlv_create_no_optionals_op(),
+                dlv_unlock_op(),
+                dlv_claim_op(),
+                sofi_setup_op(),
+                sofi_vault_create_op(),
+                sofi_fulfill_op(),
+                escrow_vault_create_op(),
+                dlv_invalidate_op(),
+            ];
+            let mut held = [0usize; VARIANTS];
+            for op in &objects {
+                held[variant(op)] += 1;
+                roundtrip(op);
+            }
+            for (index, count) in held.iter().enumerate() {
+                assert_ne!(*count, 0, "operation variant {index} has no object here");
+            }
         }
     }
 

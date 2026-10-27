@@ -1165,7 +1165,7 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     class::SOFI_TRADER_FULFILLMENT_BODY,
     class::SOFI_RESOLUTION_CLAIM,
     class::SOFI_PRE_E_CLOSURE_INDEX,
-    class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+    crate::ccb::declared_unencoded::SOFI_POLICY_FULFILLMENT_AUX_REF,
     // The signed envelope wraps P and F, both of which commit E. Without this
     // entry the wrapper would be a back door into `𝒞_E^pre` for the two
     // objects the acyclicity argument most depends on keeping out — the list
