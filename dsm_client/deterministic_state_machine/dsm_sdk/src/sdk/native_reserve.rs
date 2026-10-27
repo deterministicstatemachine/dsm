@@ -530,7 +530,8 @@ pub fn release_at(
 
 /// Write the exact release bytes at `parent`'s successor cell along its
 /// route (storage spec §9), continuing an earlier write of the same bytes.
-/// Nothing here decides which release holds the cell — Core reads that back
+/// Another release first at the cell's leader takes the write there. Nothing
+/// here decides which release holds the cell — Core reads that back
 /// ([`read_successor`]).
 pub async fn write_release(
     set: &StorageSet,
@@ -538,7 +539,8 @@ pub async fn write_release(
     envelope: &[u8],
 ) -> Result<WriteReport, DsmError> {
     let cell = successor_cell(set, parent)?;
-    write_recorded(set, cell.routed(), envelope).await
+    let report = write_recorded(set, cell.routed(), &cell.keeps(), envelope).await?;
+    Ok(report)
 }
 
 /// Keep the completion proof of this device's release at `parent`'s

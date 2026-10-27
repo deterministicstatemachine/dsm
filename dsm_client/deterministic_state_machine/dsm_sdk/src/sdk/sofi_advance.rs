@@ -52,7 +52,7 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
-use crate::sdk::route_seats::{read_cell_kept, root_claim_final, NodeSeats};
+use crate::sdk::route_seats::{read_cell_kept, root_claim_final, AtLeader, NodeSeats};
 use crate::sdk::sofi_exercise::{write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_reads::{verifier_error, VerifierContext};
@@ -302,11 +302,16 @@ impl OwnStanding {
 
 /// What an install that wrote nothing means: the network's status when the
 /// leader did not answer or the evidence is not in hand, an error otherwise
-/// — a non-conforming `F`, an object without canonical bytes, a member or
-/// this device's own store that could not be read or written.
+/// — a position another claim took, a non-conforming `F`, an object without
+/// canonical bytes, a member or this device's own store that could not be
+/// read or written.
 fn install_failure(e: InstallError) -> Result<NotTaken, DsmError> {
     match e {
         InstallError::LeaderUnreached => Ok(NotTaken::PairLeaderUnreached),
+        InstallError::PositionTaken => Err(refuse(
+            "install: another value is first at the leader of the position's pair: the \
+             position went to it, and this fulfillment can never register there",
+        )),
         InstallError::Unavailable(missing) => Ok(NotTaken::Evidence(missing)),
         InstallError::NotConforming(why) => Err(refuse(format!("install: {why:?}"))),
         InstallError::Wire(e) => Err(refuse(format!("install: {e:?}"))),
@@ -352,9 +357,12 @@ async fn exercise_legs(
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
         .ok_or_else(|| refuse("the exercise built here does not recognize"))?;
     let writes = write_exercise(set, &exercise, &recognized).await?;
+    // A key another exercise is first at is decided for it: what that means
+    // for this position is the ladder's, from the cells (stage 10). Only a
+    // leader that did not answer leaves the stage to run again.
     let unreached: Vec<D32> = writes
         .iter()
-        .filter(|write| !write.reached_leader)
+        .filter(|write| write.leader == AtLeader::Unanswered)
         .map(|write| write.vault_id)
         .collect();
     if !unreached.is_empty() {
@@ -994,13 +1002,18 @@ mod tests {
 
     /// An install the network did not take — the leader of `s(q)` silent,
     /// the evidence not in hand after the rounds — is the network's status.
-    /// An install refused, or one whose read or write failed, is an error:
-    /// never the status, never `RetriesExhausted`.
+    /// An install refused, a position another claim took, or an install
+    /// whose read or write failed, is an error: never the status, never
+    /// `RetriesExhausted`.
     #[test]
     fn only_an_install_the_network_did_not_take_is_the_network_status() {
         assert!(matches!(
             install_failure(InstallError::LeaderUnreached),
             Ok(NotTaken::PairLeaderUnreached)
+        ));
+        assert!(matches!(
+            install_failure(InstallError::PositionTaken),
+            Err(DsmError::InvalidOperation(..))
         ));
         assert!(matches!(
             install_failure(InstallError::Unavailable(vec![ConformanceMissing::Preimage])),

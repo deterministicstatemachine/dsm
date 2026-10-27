@@ -908,7 +908,12 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
     let written = crate::sdk::sofi_exercise::write_exercise(&set, &exercise, &recognized)
         .await
         .expect("any party may write an exercise");
-    assert!(written.iter().all(|leg| leg.reached_leader), "{written:?}");
+    assert!(
+        written
+            .iter()
+            .all(|leg| leg.leader == crate::sdk::route_seats::AtLeader::Link),
+        "{written:?}"
+    );
     let held = verifier
         .read_attempt_cell(&a.vault_id, &vault.root, 0)
         .expect("read")

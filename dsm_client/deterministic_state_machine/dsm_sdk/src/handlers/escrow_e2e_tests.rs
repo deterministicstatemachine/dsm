@@ -325,10 +325,14 @@ async fn write_to_cell(d: &TestDevice, m: &Match, value: &EscrowVerdict) {
         &set.id(),
     )
     .expect("the verdict cell");
-    let wrote = write_recorded(&set, cell.routed(), &value.encode())
+    let wrote = write_recorded(&set, cell.routed(), &cell.recognizes(), &value.encode())
         .await
         .expect("the write");
-    assert!(wrote.reached_leader(), "the cell's leader took the value");
+    assert_eq!(
+        wrote.leader(),
+        crate::sdk::route_seats::AtLeader::Link,
+        "the cell's leader took the value"
+    );
 }
 
 /// The match settles A's way: A takes both stakes, once, and B takes nothing.

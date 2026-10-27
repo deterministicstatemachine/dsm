@@ -851,6 +851,40 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
+/// The first of `cell`'s position-0 copies in the leader's log that `pick`
+/// makes something of, with where it arrived and what `pick` made of it. The
+/// one rule for which value is first at the leader (§9 route chains, rule
+/// 3): Core's evaluation reads it ([`leader_link`]) and so does the writer
+/// ([`first_recognized_at_leader`]).
+fn first_at_leader<R>(
+    cell: &RoutedCell,
+    log: &SeatLog<'_>,
+    pick: impl Fn(&RouteEntry) -> Option<R>,
+) -> Option<(RouteEntry, (u64, [u8; 32]), R)> {
+    log.copies(cell, 0)
+        .find_map(|(entry, at)| pick(&entry).map(|made| (entry, at, made)))
+}
+
+/// The first recognized value at `cell`'s leader, read from the leader's
+/// arrival log, with the record the leader returned for its copy: the first
+/// position-0 copy that `recognized` keeps, the cell's rule for what can
+/// count there ([`recognized_copies`]). Once a ByteCommit of the leader's
+/// commits that record it is the cell's leader link (§9 route chains, rule
+/// 3), whichever value it carries. `None` while the log holds no such copy.
+///
+/// A writer reads this before it puts a value at the leader and again after:
+/// another value first there means the cell is decided for that value, and
+/// the writer records a taken empty carrying this record (§9 rule 5).
+pub fn first_recognized_at_leader(
+    cell: &RoutedCell,
+    leader_log: &HeldLog,
+    recognized: &dyn Fn(&RouteEntry) -> bool,
+) -> Option<(Vec<u8>, ArrivalRecord)> {
+    let log = SeatLog::of(cell.route.leader(), leader_log);
+    first_at_leader(cell, &log, |entry| recognized(entry).then_some(()))
+        .map(|(entry, at, ())| (entry.value, log.record(at)))
+}
+
 /// The leader link of a cell: the first recognized value in the leader's
 /// arrival log, stored there as the cell's position-0 copy, with the record
 /// the leader returned for it (§9 route chains, rule 3), and the leader's
@@ -879,9 +913,9 @@ where
         cell.route.leader(),
         leader.values.as_ref().ok_or(Missing::LeaderUnread)?,
     );
-    let Some((entry, at, id, object)) = log.copies(cell, 0).find_map(|(entry, at)| {
-        recognize(&entry.value).map(|(id, object)| (entry, at, id, object))
-    }) else {
+    let Some((entry, at, (id, object))) =
+        first_at_leader(cell, &log, |entry| recognize(&entry.value))
+    else {
         return Ok(None);
     };
     let record = log.record(at);
@@ -2049,6 +2083,40 @@ mod tests {
         );
         assert_eq!(
             leader_copy_record(&routed, b"ok-x", &held(b"ok-x", &[])),
+            None
+        );
+    }
+
+    /// MR-STOR-0134: the writer decides which value is first at the leader by
+    /// the rule Core's evaluation reads. Past junk, a copy of a value nothing
+    /// recognizes, and a copy for another position, the first recognized
+    /// position-0 copy is `ok-a`'s, with the record the leader gave it; a
+    /// later recognized value is not first. Evaluated over the same log, Core
+    /// holds the cell for that value at that record.
+    #[test]
+    fn the_writer_and_core_name_one_first_value_at_the_leader() {
+        let mut c = cell();
+        c.put(0, b"not a route entry".to_vec());
+        c.write(b"junk", 0, &[]);
+        let routed = c.routed();
+        let later = RouteEntry::at_leader(NS.to_vec(), c.key, b"ok-b".to_vec(), &c.route)
+            .next(ChainSlot::NoResponse, &c.route)
+            .expect("position 1");
+        c.put(0, later.encode());
+        c.write(b"ok-a", 0, &[]);
+        c.write(b"ok-b", 0, &[]);
+        let recognized = recognized_copies(&routed, |value: &[u8]| recognize_ok(value).is_some());
+        let log = HeldLog::of(&routed, &c.logs[0], &recognized);
+        let first = first_recognized_at_leader(&routed, &log, &recognized);
+        assert_eq!(first, Some((b"ok-a".to_vec(), c.record_at(0, 4))));
+        let Ok(CellReading::Held { value, .. }) = evaluate(&routed, &c.evidence(), recognize_ok)
+        else {
+            panic!("the cell is held");
+        };
+        assert_eq!(Some(value), first.map(|(value, _)| value));
+        let none = HeldLog::of(&routed, &c.logs[0][..3], &recognized);
+        assert_eq!(
+            first_recognized_at_leader(&routed, &none, &recognized),
             None
         );
     }

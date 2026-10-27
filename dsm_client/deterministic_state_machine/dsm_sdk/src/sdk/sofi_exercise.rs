@@ -17,7 +17,7 @@ use dsm::sofi::exercise::{AttemptCell, RecognizedExercise};
 use dsm::sofi::wire::SofiExercise;
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -33,8 +33,9 @@ pub struct LegWrite {
     pub parent_root: D32,
     pub attempt: u64,
     pub key: D32,
-    /// The leader returned its record: the write got past position 0.
-    pub reached_leader: bool,
+    /// What the write got at the key's leader: its link, the key taken by
+    /// another exercise first there, or no answer.
+    pub leader: AtLeader,
 }
 
 /// `K^(attempt)` of `vault_id` at `parent_root`, routed over `set`: the
@@ -73,13 +74,13 @@ pub async fn write_exercise(
                 .find(|l| l.vault_id == attempt.vault_id)
                 .ok_or_else(|| err("exercise", "an attempt names a vault P has no leg for"))?;
             let cell = attempt_cell(set, &leg.vault_id, &leg.parent_root, attempt.attempt)?;
-            let write = write_recorded(set, cell.routed(), bytes).await?;
+            let write = write_recorded(set, cell.routed(), &cell.keeps(), bytes).await?;
             Ok::<_, DsmError>(LegWrite {
                 vault_id: leg.vault_id,
                 parent_root: leg.parent_root,
                 attempt: attempt.attempt,
                 key: *cell.routed().key(),
-                reached_leader: write.reached_leader(),
+                leader: write.leader(),
             })
         },
     ))
