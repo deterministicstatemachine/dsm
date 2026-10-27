@@ -2344,7 +2344,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         };
         // The evidence this verifier holds may not let it recompute the
         // consumption. The chain then stops; nothing is refuted.
-        match vault_post_states(precommit, exercise.preimage(), &evidence) {
+        match vault_post_states(
+            precommit,
+            &exercise.fulfillment().body,
+            exercise.preimage(),
+            &evidence,
+        ) {
             Ok(posts) => Ok(posts
                 .into_iter()
                 .find(|p| p.vault_id() == vault_id && p.pre_root() == current)),

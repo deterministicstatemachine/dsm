@@ -924,8 +924,13 @@ pub async fn resolve_pending_position(
             // against that vault has evidence to stand on (§44.4). Recomputed
             // from the same evidence the verdict used, and bound to what each
             // `V°` states — never read back from anything the producer said.
-            vault_heads = vault_post_states(&precommit, facts.preimage(), facts.evidence())
-                .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
+            vault_heads = vault_post_states(
+                &precommit,
+                &fulfillment.body,
+                facts.preimage(),
+                facts.evidence(),
+            )
+            .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
             post_leaf_cache(current, &post)?
         }
         (Resolution::Void, _) => current,
@@ -954,6 +959,15 @@ pub async fn resolve_pending_position(
         &set.id(),
         &vault_heads,
     )?;
+    // The position is committed; what it owes each vault's epoch index comes
+    // after, never on its path (SoFi Amendment S23, "who writes"). What is
+    // not owed here, a later walk owes.
+    if let Err(e) = crate::sdk::vault_history::owe_realized(set, &verifier, &vault_heads) {
+        log::error!(
+            "[sofi advance] the position stands; its vault generations are not owed to the \
+             epoch index yet: {e}"
+        );
+    }
     // A realized route is the event the wallet shows: its history row, and
     // the projection of every token it moved rebuilt from the installed
     // head. A void route moved nothing and has none.

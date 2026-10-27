@@ -510,7 +510,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     // gave it: `Canonical` where its chain names the parent, else
     // `Unavailable`, and never `Orphaned`.
     let generations: BTreeMap<D32, u64> =
-        match vault_post_states(precommit, exercise.preimage(), reads.evidence) {
+        match vault_post_states(precommit, fulfillment, exercise.preimage(), reads.evidence) {
             Ok(posts) => posts
                 .iter()
                 .map(|post| (*post.vault_id(), post.pre_generation()))

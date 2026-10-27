@@ -194,13 +194,14 @@ pub fn frontier_below(
             r.get::<_, i64>(0)?,
             r.get::<_, Vec<u8>>(1)?,
             r.get::<_, Vec<u8>>(2)?,
+            super::column_32(r, 3)?,
         ))
     };
     // A position past what a row can hold is above every recorded one.
     let row = match i64::try_from(position) {
         Ok(below) => conn
             .query_row(
-                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
+                "SELECT economic_position, economic_root, accepted_claim, claim_ref FROM peer_frontier
                  WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
                  ORDER BY economic_position DESC LIMIT 1",
                 params![peer_genesis.as_slice(), peer_devid.as_slice(), below],
@@ -209,7 +210,7 @@ pub fn frontier_below(
             .optional()?,
         Err(..) => conn
             .query_row(
-                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
+                "SELECT economic_position, economic_root, accepted_claim, claim_ref FROM peer_frontier
                  WHERE peer_genesis = ?1 AND peer_devid = ?2
                  ORDER BY economic_position DESC LIMIT 1",
                 params![peer_genesis.as_slice(), peer_devid.as_slice()],
@@ -217,7 +218,7 @@ pub fn frontier_below(
             )
             .optional()?,
     };
-    row.map(|(recorded, root, accepted)| {
+    row.map(|(recorded, root, accepted, claim_ref)| {
         Ok(
             dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
                 *peer_genesis,
@@ -227,6 +228,7 @@ pub fn frontier_below(
                 digest32(root, "frontier root")?,
                 dsm::sofi::wire::ParentClaimRef::decode(&accepted)
                     .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
+                claim_ref,
             ),
         )
     })
@@ -240,19 +242,21 @@ fn record_frontier_in_tx(
     tx: &Transaction<'_>,
     frontier: &dsm::economic::peer_lineage::PeerFrontier,
 ) -> Result<()> {
-    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
+    let (position, root, accepted, claim_ref) = frontier.recorded().ok_or_else(|| {
         anyhow!("the activation root is every receiver's frontier and is never recorded")
     })?;
     tx.execute(
         "INSERT OR IGNORE INTO peer_frontier(
-             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
+             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim,
+             claim_ref)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             frontier.genesis().as_slice(),
             frontier.device_id().as_slice(),
             i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
             root.as_slice(),
-            accepted.encode()
+            accepted.encode(),
+            claim_ref.as_slice()
         ],
     )?;
     Ok(())

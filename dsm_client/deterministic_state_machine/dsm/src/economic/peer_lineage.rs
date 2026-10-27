@@ -149,8 +149,18 @@ enum FrontierAt {
     Recorded {
         economic_position: u64,
         economic_root: [u8; 32],
-        accepted: ParentClaimRef,
+        accepted: Accepted,
     },
+}
+
+/// The claim a verifier accepted at a coordinate: the reference a later `P`
+/// names it by as a parent, and `ClaimRef_p`, the digest of the claim Core
+/// accepted there (SoFi §16), which a setup at that position is checked
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Accepted {
+    parent: ParentClaimRef,
+    claim_ref: [u8; 32],
 }
 
 impl PeerFrontier {
@@ -176,7 +186,10 @@ impl PeerFrontier {
                 at: FrontierAt::Recorded {
                     economic_position: transition.validated_root().economic_position(),
                     economic_root: transition.validated_root().economic_root(),
-                    accepted: ParentClaimRef::SingleRoot {
+                    accepted: Accepted {
+                        parent: ParentClaimRef::SingleRoot {
+                            claim_ref: transition.accepted_claim().claim_ref(),
+                        },
                         claim_ref: transition.accepted_claim().claim_ref(),
                     },
                 },
@@ -211,7 +224,8 @@ impl PeerFrontier {
         device_id: [u8; 32],
         economic_position: u64,
         economic_root: [u8; 32],
-        accepted: ParentClaimRef,
+        parent: ParentClaimRef,
+        claim_ref: [u8; 32],
     ) -> Self {
         Self {
             genesis,
@@ -219,7 +233,7 @@ impl PeerFrontier {
             at: FrontierAt::Recorded {
                 economic_position,
                 economic_root,
-                accepted,
+                accepted: Accepted { parent, claim_ref },
             },
         }
     }
@@ -241,16 +255,42 @@ impl PeerFrontier {
         }
     }
 
-    /// The recorded coordinate: position, root and accepted claim. `None` at
-    /// the activation root, which is never recorded.
-    pub fn recorded(&self) -> Option<(u64, [u8; 32], &ParentClaimRef)> {
+    /// The recorded coordinate: position, root, the reference a later `P`
+    /// names its claim by, and that claim's digest. `None` at the activation
+    /// root, which is never recorded.
+    pub fn recorded(&self) -> Option<(u64, [u8; 32], &ParentClaimRef, [u8; 32])> {
         match &self.at {
             FrontierAt::Activation => None,
             FrontierAt::Recorded {
                 economic_position,
                 economic_root,
                 accepted,
-            } => Some((*economic_position, *economic_root, accepted)),
+            } => Some((
+                *economic_position,
+                *economic_root,
+                &accepted.parent,
+                accepted.claim_ref,
+            )),
+        }
+    }
+
+    /// The claim this receiver accepted at `position`, when this coordinate
+    /// is the one it validated there: answered from what it recorded, so
+    /// nothing behind its frontier is read again (DSM Amendments A8, A19;
+    /// SoFi Amendment S15).
+    fn claim_accepted_at(&self, position: u64) -> Option<AcceptedClaim> {
+        match &self.at {
+            FrontierAt::Recorded {
+                economic_position,
+                accepted,
+                ..
+            } if *economic_position == position => Some(AcceptedClaim::from_validated_coordinate(
+                self.genesis,
+                self.device_id,
+                position,
+                accepted.claim_ref,
+            )),
+            FrontierAt::Activation | FrontierAt::Recorded { .. } => None,
         }
     }
 }
@@ -551,7 +591,7 @@ pub fn peer_root_at(
     })?;
     let frontier = verifier.frontier_below(peer_genesis, peer_devid, below)?;
     let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position)?;
-    let accepted = point.accepted.ok_or_else(|| {
+    let accepted = point.accepted.map(|a| a.parent).ok_or_else(|| {
         invalid(format!(
             "position {position} is the activation root: no claim was accepted there for a P \
              to name as its parent"
@@ -562,12 +602,14 @@ pub fn peer_root_at(
 }
 
 /// The claim a peer's lineage accepted AT `position` (SoFi Amendment S15,
-/// MR-SOFI-0347): what a setup naming that position is checked against. The
-/// segment from this receiver's frontier is validated in full as a payer's
-/// is, and `position` itself as its last step, or, when its claim is
-/// conditional, resolved through `conditional` exactly as an interior
-/// position is. The coordinate at `position` is a frontier like any other the
-/// walk reached.
+/// MR-SOFI-0347): what a setup naming that position is checked against.
+/// When this receiver validated `position` itself, the claim it recorded
+/// there answers, and nothing behind its frontier is read again (DSM
+/// Amendments A8, A19; MR-SOFI-0346). Otherwise the segment from its
+/// frontier below `position` is validated in full as a payer's is, and
+/// `position` itself as its last step, or, when its claim is conditional,
+/// resolved through `conditional` exactly as an interior position is. The
+/// coordinate at `position` is a frontier like any other the walk reached.
 pub fn peer_claim_at(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
@@ -583,7 +625,15 @@ pub fn peer_claim_at(
         ));
     }
     let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
-    let frontier = verifier.frontier_below(peer_genesis, peer_devid, position)?;
+    let below = position.checked_add(1).ok_or_else(|| {
+        invalid(format!(
+            "position {position} has no successor to stand below"
+        ))
+    })?;
+    let frontier = verifier.frontier_below(peer_genesis, peer_devid, below)?;
+    if let Some(accepted) = frontier.claim_accepted_at(position) {
+        return Ok(verifier.checked(accepted, None));
+    }
     let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position - 1)?;
     verifier.spend_step()?;
     let (accepted, own) =
@@ -609,8 +659,11 @@ pub fn peer_claim_at(
                 )?;
                 let at = ChainPoint {
                     root,
-                    accepted: Some(ParentClaimRef::Conditional {
-                        fulfillment_id: held.fulfillment_id,
+                    accepted: Some(Accepted {
+                        parent: ParentClaimRef::Conditional {
+                            fulfillment_id: held.fulfillment_id,
+                        },
+                        claim_ref: accepted.claim_ref(),
                     }),
                 };
                 (
@@ -743,7 +796,7 @@ impl Register {
 /// the claim it accepted there (`None` only at the activation root).
 struct ChainPoint {
     root: ValidatedEconomicRoot,
-    accepted: Option<ParentClaimRef>,
+    accepted: Option<Accepted>,
 }
 
 /// A single-root claim authenticated at its position.
@@ -787,8 +840,9 @@ struct Verifier<'a> {
     /// What this verification has cost so far, counted as it reads.
     cost: std::cell::Cell<StepCost>,
     /// Every frontier this walk established besides the walked identity's own
-    /// last coordinate: the position before a target, and each credit source's
-    /// segment end, each standing at a step whose whole segment passed.
+    /// last coordinate: each position a segment passed through, and each
+    /// credit source's segment end, each standing at a step whose whole
+    /// segment passed.
     established: std::cell::RefCell<Vec<PeerFrontier>>,
     /// Every offline account a step this walk validated left: each boundary
     /// in a step that passed.
@@ -955,7 +1009,7 @@ impl Verifier<'_> {
         point: &ChainPoint,
         held: &SofiResolutionClaim,
     ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure> {
-        let parent = point.accepted.as_ref().ok_or_else(|| {
+        let parent = point.accepted.as_ref().map(|a| &a.parent).ok_or_else(|| {
             invalid(format!(
                 "position {position}: a conditional position cannot follow the activation root, \
                  where no claim was accepted for it to name as its parent"
@@ -1200,9 +1254,12 @@ impl Verifier<'_> {
                     .map_err(|e| invalid(format!("activation shape: {e}")))?,
                 accepted: None,
             }),
-            Some((position, root, accepted)) => Ok(ChainPoint {
+            Some((position, root, parent, claim_ref)) => Ok(ChainPoint {
                 root: authenticated_root(position, root),
-                accepted: Some(*accepted),
+                accepted: Some(Accepted {
+                    parent: *parent,
+                    claim_ref,
+                }),
             }),
         }
     }
@@ -1256,18 +1313,24 @@ impl Verifier<'_> {
                 )?;
                 Ok(ChainPoint {
                     root: *step.validated_root(),
-                    accepted: Some(ParentClaimRef::SingleRoot {
+                    accepted: Some(Accepted {
+                        parent: ParentClaimRef::SingleRoot {
+                            claim_ref: step.accepted_claim().claim_ref(),
+                        },
                         claim_ref: step.accepted_claim().claim_ref(),
                     }),
                 })
             }
             RegisteredEconomicClaim::ConditionalSofi(held) => {
-                let (root, _) =
+                let (root, accepted) =
                     self.resolve_conditional(genesis, device_id, position, point, &held)?;
                 Ok(ChainPoint {
                     root,
-                    accepted: Some(ParentClaimRef::Conditional {
-                        fulfillment_id: held.fulfillment_id,
+                    accepted: Some(Accepted {
+                        parent: ParentClaimRef::Conditional {
+                            fulfillment_id: held.fulfillment_id,
+                        },
+                        claim_ref: accepted.claim_ref(),
                     }),
                 })
             }
@@ -1288,6 +1351,10 @@ impl Verifier<'_> {
             self.spend_step()?;
             let claim = self.final_claim(genesis, device_id, position, &point.root)?;
             point = self.next_point(genesis, device_id, position, &point, claim)?;
+            // The segment to `position` has passed whole: its coordinate is a
+            // frontier, so a later read at or below it reads nothing behind it
+            // (DSM Amendment A19: every validated frontier is recorded).
+            self.keep_frontier(genesis, device_id, &point);
         }
         Ok(point)
     }
@@ -1302,12 +1369,6 @@ impl Verifier<'_> {
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
         let frontier = self.frontier_below(genesis, device_id, target)?;
         let point = self.chain_through(genesis, device_id, &frontier, target - 1)?;
-        // The position before the target stands at the end of a segment that
-        // passed whole: it is a frontier whether or not the target passes, and
-        // the receiver's later walk to the target starts from it.
-        if let Some(before) = PeerFrontier::at_point(*genesis, *device_id, &point) {
-            self.established.borrow_mut().push(before);
-        }
         self.spend_step()?;
         let claim = self.final_claim(genesis, device_id, target, &point.root)?;
         // The target is the step being presented, and a conditional position
@@ -1375,7 +1436,16 @@ impl Verifier<'_> {
                     return Ok((reached, PrefixStop::Short(why)))
                 }
             };
+            self.keep_frontier(genesis, device_id, &point);
             reached = PeerFrontier::at_point(*genesis, *device_id, &point);
+        }
+    }
+
+    /// Keep the coordinate `point` stands at as a frontier this walk
+    /// established.
+    fn keep_frontier(&self, genesis: &[u8; 32], device_id: &[u8; 32], point: &ChainPoint) {
+        if let Some(reached) = PeerFrontier::at_point(*genesis, *device_id, point) {
+            self.established.borrow_mut().push(reached);
         }
     }
 
@@ -1673,6 +1743,7 @@ mod tests {
                 ParentClaimRef::SingleRoot {
                     claim_ref: [0x78; 32],
                 },
+                [0x78; 32],
             ))
         }
     }
@@ -1838,6 +1909,7 @@ mod tests {
             position,
             [0x66; 32],
             accepted,
+            [0xF6; 32],
         ));
         let fetcher = CountingCells {
             inner: ConditionalCellFetcher {
@@ -1861,6 +1933,58 @@ mod tests {
         assert_eq!(
             (root.economic_position(), root.economic_root(), named),
             (position, [0x66; 32], accepted)
+        );
+        assert_eq!(fetcher.reads.get(), 0, "nothing of the peer was read");
+    }
+
+    /// MR-SOFI-0346, MR-SOFI-0347 (DSM Amendment A19): `peer_claim_at` at a
+    /// position this receiver validated and recorded answers with the claim
+    /// it accepted there, and nothing of the peer is read: a setup's claim
+    /// behind the receiver's frontier is never read again. The answer is the
+    /// accepted claim's own digest, which for a conditional position is
+    /// `C_q`'s and not the fulfillment that names it as a parent.
+    /// MUTATION CONTROL: walking from the frontier below the position instead
+    /// reads the peer's root cells and turns this red.
+    #[test]
+    fn a_claim_recorded_at_the_position_answers_and_nothing_is_read() {
+        let position = 6;
+        let recorded = Recorded(PeerFrontier::rehydrate_recorded(
+            PEER_G,
+            peer_d(),
+            position,
+            [0x66; 32],
+            ParentClaimRef::Conditional {
+                fulfillment_id: [0xF5; 32],
+            },
+            [0xF6; 32],
+        ));
+        let fetcher = CountingCells {
+            inner: ConditionalCellFetcher {
+                position,
+                writes: vec![peer_c_q(conditional_claim(position))],
+                last: crate::route_chain::ROUTE_LEN - 1,
+            },
+            reads: std::cell::Cell::new(0),
+        };
+        let claim = peer_claim_at(
+            &fetcher,
+            NETWORK,
+            &PEER_G,
+            &peer_d(),
+            position,
+            &recorded,
+            &NoResolution,
+        )
+        .expect("the recorded claim")
+        .into_answer();
+        assert_eq!(
+            (
+                claim.genesis(),
+                claim.device_id(),
+                claim.economic_position(),
+                claim.claim_ref()
+            ),
+            (PEER_G, peer_d(), position, [0xF6; 32])
         );
         assert_eq!(fetcher.reads.get(), 0, "nothing of the peer was read");
     }
@@ -2324,6 +2448,7 @@ mod tests {
             ParentClaimRef::SingleRoot {
                 claim_ref: [0x78; 32],
             },
+            [0x78; 32],
         ));
         let outcome = validate_peer_lineage(
             &fetcher,

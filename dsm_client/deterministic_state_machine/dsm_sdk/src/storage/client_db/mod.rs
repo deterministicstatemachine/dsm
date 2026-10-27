@@ -529,7 +529,16 @@ fn get_database_path() -> Result<PathBuf> {
 /// own id (SA-141) or an own directory entry without an authority position
 /// (SA-143): beta keeps no legacy, so such a database is refused at open and
 /// the wallet is reprovisioned, never read with those rows in place.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
+///
+/// v34: a receiver records a frontier at every position a passing walk
+/// validates, each with the digest of the claim it accepted there
+/// (`peer_frontier.claim_ref`), so a setup's claim behind the frontier is
+/// answered from the receiver's own record and never read again (DSM
+/// Amendment A19, MR-SOFI-0346); and `sofi_vault_step`, each recorded vault
+/// generation's bundle step (SoFi Amendment S23). A database made at 33
+/// holds frontiers without the digest and generations without their steps,
+/// and is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 34;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -702,6 +711,23 @@ fn create_schema(conn: &Connection) -> Result<()> {
             -- stands on this device's memo (`VaultChain::from_recorded`).
             pre_root    BLOB CHECK (pre_root IS NULL OR length(pre_root) = 32),
             consumed_by BLOB CHECK (consumed_by IS NULL OR length(consumed_by) = 32),
+            PRIMARY KEY (vault_id, generation)
+        ) WITHOUT ROWID;
+        -- v34 (SoFi Amendment S23): each recorded generation's
+        -- bundle step — the attempt that consumed its parent, E, the
+        -- trader's (G, DevID, q) and the route's other legs as 64-byte
+        -- (vault, parent root) pairs — written in the transaction that
+        -- records the generation. Discovery only: what a checkpoint's bundle
+        -- carries.
+        CREATE TABLE IF NOT EXISTS sofi_vault_step(
+            vault_id            BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation          INTEGER NOT NULL CHECK (generation > 0),
+            attempt             INTEGER NOT NULL CHECK (attempt >= 0),
+            external_commitment BLOB NOT NULL CHECK (length(external_commitment) = 32),
+            trader_genesis      BLOB NOT NULL CHECK (length(trader_genesis) = 32),
+            trader_device_id    BLOB NOT NULL CHECK (length(trader_device_id) = 32),
+            trader_position     INTEGER NOT NULL CHECK (trader_position >= 0),
+            siblings            BLOB NOT NULL CHECK (length(siblings) % 64 = 0),
             PRIMARY KEY (vault_id, generation)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS sofi_vault_leaf(
@@ -880,13 +906,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         -- DSM Amendment A19: this receiver's frontier for a peer, a
-        -- coordinate it validated itself, with the claim it accepted there.
+        -- coordinate it validated itself, with the claim it accepted there:
+        -- one row for every position a passing walk validated. v34: the
+        -- accepted claim's own digest beside the reference a later P names it
+        -- by, so a setup's claim behind the frontier is answered from here.
         CREATE TABLE IF NOT EXISTS peer_frontier(
             peer_genesis        BLOB NOT NULL,      -- 32B
             peer_devid          BLOB NOT NULL,      -- 32B
             economic_position   INTEGER NOT NULL,
             economic_root       BLOB NOT NULL,      -- 32B
             accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
+            claim_ref           BLOB NOT NULL CHECK (length(claim_ref) = 32),
             PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
 

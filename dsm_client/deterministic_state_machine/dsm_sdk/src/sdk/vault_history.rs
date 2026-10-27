@@ -12,15 +12,22 @@
 //! from the vault's accepted genesis, one consumption at a time. A named root
 //! decides only what is read early; the walk decides what the state is.
 //! Afterwards, the hints nobody published for what the walk established are
-//! owed, and the storage sweep publishes them.
+//! owed, with the checkpoint and bundle of each complete segment nobody
+//! published one for, and the storage sweep publishes them. The trader whose
+//! position resolves Realized owes its own generation's the same way, once
+//! the position is committed ([`owe_realized`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use dsm::route_chain::{CellFact, ChainState};
-use dsm::shared_lineage::{vault_step_digest, GenerationChain, LineageKind, SharedGenesisV1};
+use dsm::shared_lineage::{
+    vault_step_digest, BundleStep, GenerationChain, LineageKind, SharedGenesisV1,
+    TransitionBundleV1, EPOCH_GENERATIONS,
+};
 use dsm::sofi::resolution::VaultChain;
 use dsm::sofi::resolve::{SofiReads, VaultGenesis, Verifier};
 use dsm::sofi::storage::Resolved;
+use dsm::sofi::validation::VaultPostState;
 use dsm::types::error::DsmError;
 
 use crate::sdk::lineage_discovery::{self, Candidates};
@@ -288,31 +295,161 @@ pub(crate) fn walk(
         settled.borne_out,
         settled.discarded
     );
-    owe_hints(set, verifier, history, &genesis)?;
+    owe_lineage(set, verifier, history, &genesis)?;
     Ok(chain)
 }
 
 /// Owe the epoch index a hint for every generation this device established
-/// that the index named no hint for, and start the sweep that publishes
-/// them.
-fn owe_hints(
+/// that the index named no hint for, and the checkpoint and bundle of every
+/// complete segment it named no checkpoint for; then start the sweep that
+/// publishes them.
+fn owe_lineage(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     history: &VaultHistory,
     genesis: &dsm::sofi::lineage::AcceptedVaultGenesis,
 ) -> Result<usize, DsmError> {
     let (chain, steps) = recorded_chain(verifier, &history.vault_id, genesis)?;
-    let owed = lineage_discovery::owe_missing_hints(
-        &set.id(),
+    let set_id = set.id();
+    let mut owed = lineage_discovery::owe_missing_hints(
+        &set_id,
         &chain,
         &steps,
         &history.candidates,
         history.from,
     )?;
+    let head = chain.head().generation();
+    let mut start = history.from - history.from % EPOCH_GENERATIONS;
+    while start + EPOCH_GENERATIONS <= head {
+        if let Some(bundle) = segment_bundle(&history.vault_id, &chain, &steps, start)? {
+            owed += lineage_discovery::owe_checkpoint(
+                &set_id,
+                &chain,
+                &bundle,
+                start,
+                &history.candidates,
+            )?;
+        }
+        start += EPOCH_GENERATIONS;
+    }
     if owed > 0 {
         crate::handlers::artifact_republish::spawn_frozen_artifact_republish("vault history");
     }
     Ok(owed)
+}
+
+/// What the trader whose position resolved Realized owes for each vault
+/// generation `g` it made (SoFi Amendment S23, "who writes"): the hint for
+/// `g` and, when `g` is a positive multiple of 32, the checkpoint and bundle
+/// of the segment that ends at `g`. Called once the position is committed,
+/// never on its path; anything it does not owe, a later walk owes. A vault
+/// whose recorded chain does not reach `g` from its genesis — one this
+/// device started at an owner baseline — has no digest at `g` here, and
+/// nothing is owed for it.
+pub(crate) fn owe_realized(
+    set: &StorageSet,
+    verifier: &Verifier<'_, LiveSofiReads<'_>>,
+    heads: &[VaultPostState],
+) -> Result<usize, DsmError> {
+    let set_id = set.id();
+    let mut owed = 0usize;
+    for post in heads {
+        let vault_id = post.vault_id();
+        let generation = post.generation();
+        let VaultGenesis::Accepted(genesis) =
+            verifier.vault_genesis(vault_id).map_err(verifier_error)?
+        else {
+            return Err(DsmError::storage(
+                "a vault this position realized through has no accepted genesis",
+                None::<std::io::Error>,
+            ));
+        };
+        let (chain, steps) = recorded_chain(verifier, vault_id, &genesis)?;
+        if chain.head().generation() < generation {
+            log::info!(
+                "[vault history] {}: the recorded chain stands at {}, below {generation}; \
+                 nothing owed for it",
+                crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
+                chain.head().generation()
+            );
+            continue;
+        }
+        let none_found = Candidates::default();
+        let own: BTreeMap<u64, D32> = steps
+            .get(&generation)
+            .map(|step| (generation, *step))
+            .into_iter()
+            .collect();
+        owed +=
+            lineage_discovery::owe_missing_hints(&set_id, &chain, &own, &none_found, generation)?;
+        if generation % EPOCH_GENERATIONS == 0 {
+            let start = generation - EPOCH_GENERATIONS;
+            if let Some(bundle) = segment_bundle(vault_id, &chain, &steps, start)? {
+                owed += lineage_discovery::owe_checkpoint(
+                    &set_id,
+                    &chain,
+                    &bundle,
+                    start,
+                    &none_found,
+                )?;
+            }
+        }
+    }
+    if owed > 0 {
+        crate::handlers::artifact_republish::spawn_frozen_artifact_republish("realized vaults");
+    }
+    Ok(owed)
+}
+
+/// The bundle of the segment of `vault_id`'s recorded chain starting at
+/// `start`: each generation's recorded step, which must name the very
+/// consumption the chain recorded there. `None` when a generation of the
+/// segment was recorded without its step (by a build that kept none): this
+/// device cannot build that segment's bundle, and another reader may.
+fn segment_bundle(
+    vault_id: &D32,
+    chain: &GenerationChain,
+    step_digests: &BTreeMap<u64, D32>,
+    start: u64,
+) -> Result<Option<TransitionBundleV1>, DsmError> {
+    let store = |what: &str, e: &dyn core::fmt::Display| {
+        DsmError::storage(
+            format!("vault segment: {what}: {e}"),
+            None::<std::io::Error>,
+        )
+    };
+    let recorded = sofi_vault_head::recorded_steps(vault_id).map_err(|e| store("steps", &e))?;
+    let mut steps = Vec::with_capacity(EPOCH_GENERATIONS as usize);
+    for g in start + 1..=start + EPOCH_GENERATIONS {
+        let Some(step) = recorded.get(&g) else {
+            log::info!(
+                "[vault history] {}: generation {g} has no recorded step; the segment from \
+                 {start} is not owed by this device",
+                crate::util::text_id::encode_base32_crockford(&vault_id[..5])
+            );
+            return Ok(None);
+        };
+        let BundleStep::Vault {
+            external_commitment,
+            ..
+        } = step
+        else {
+            return Err(store(
+                "steps",
+                &format!("generation {g} records a reserve step"),
+            ));
+        };
+        if step_digests.get(&g) != Some(&vault_step_digest(external_commitment)) {
+            return Err(store(
+                "steps",
+                &format!("the step at generation {g} names another consumption than the chain"),
+            ));
+        }
+        steps.push(step.clone());
+    }
+    TransitionBundleV1::new(LineageKind::Vault, *chain.head().lineage_id(), start, steps)
+        .map(Some)
+        .map_err(|e| store("bundle", &e))
 }
 
 /// The generation chain of what this device's walks recorded for

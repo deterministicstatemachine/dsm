@@ -34,6 +34,7 @@ use crate::dlv::route_commit::constant_product_output_classified;
 use crate::economic::keys::balance_key;
 use crate::economic::lineage::AcceptedClaim;
 use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
+use crate::shared_lineage::BundleStep;
 
 use super::admission::{preimage_admissible, NotAdmissible};
 use super::conformance::Validation;
@@ -42,9 +43,10 @@ use super::escrow;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
     next_position, ComputedEscrowTerms, CoreEntry, DlvCore, EscrowKind, EscrowTerms,
-    SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderPreBalance, TraderPrecommitBody,
-    TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf, VaultStateLeaf,
-    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderFulfillmentBody,
+    TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef,
+    VaultRelationshipLeaf, VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE,
+    VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -176,6 +178,12 @@ pub enum Invalid {
     /// A Release's amount is not the vault's whole held amount, or the vault
     /// holds a second reserve.
     ReleaseIsNotTheWholeAmount,
+    /// `F.precommit_id` does not name this `P`, so `F` is not this
+    /// operation's exercise.
+    FulfillmentNamesAnotherPrecommit,
+    /// `F` fixes no attempt for a vault `P` names (conformance item 4), so
+    /// no attempt consumed that vault's parent.
+    NoAttemptForLeg,
 }
 
 /// The conjunction, as an accumulator: any Invalid dominates, and only in its
@@ -870,6 +878,11 @@ pub struct VaultPostState {
     /// `pre_root`: what a held witness advances through (SoFi Amendment
     /// S24).
     entries: Vec<FoldEntry>,
+    /// What a reader needs to read this generation (SoFi Amendment S23):
+    /// the attempt that consumed `pre_root`, `E`, the trader's `(G, DevID,
+    /// q)` and the route's other legs. Discovery only: the step a
+    /// checkpoint's bundle carries for this generation.
+    step: BundleStep,
 }
 
 impl VaultPostState {
@@ -915,6 +928,11 @@ impl VaultPostState {
     pub fn entries(&self) -> &[FoldEntry] {
         &self.entries
     }
+
+    /// This generation's bundle step.
+    pub fn step(&self) -> &BundleStep {
+        &self.step
+    }
 }
 
 #[cfg(test)]
@@ -938,8 +956,51 @@ impl VaultPostState {
             relationship,
             consumed_by: [0xE5; 32],
             entries,
+            step: BundleStep::Vault {
+                attempt: 0,
+                external_commitment: [0xE5; 32],
+                trader_genesis: [0x61; 32],
+                trader_device_id: [0x62; 32],
+                trader_position: 1,
+                siblings: Vec::new(),
+            },
         }
     }
+}
+
+/// The bundle step of the generation an exercise of `(P, F)` makes in
+/// `vault_id` (SoFi Amendment S23), from the pair alone: the attempt `F`
+/// fixed for that vault, `P`'s `E` and trader, `q = F.position`, and `P`'s
+/// other legs as `(vault, parent root)`. Every reader of the pair derives
+/// the same step.
+fn vault_bundle_step(
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    vault_id: &D32,
+) -> Result<BundleStep, Refusal> {
+    require(
+        *fulfillment.precommit_id() == derive::precommit_id(precommit),
+        Invalid::FulfillmentNamesAnotherPrecommit,
+    )?;
+    let attempt = fulfillment
+        .attempts()
+        .iter()
+        .find(|entry| entry.vault_id == *vault_id)
+        .ok_or(Refusal::Invalid(Invalid::NoAttemptForLeg))?
+        .attempt;
+    Ok(BundleStep::Vault {
+        attempt,
+        external_commitment: *precommit.external_commitment(),
+        trader_genesis: *precommit.genesis(),
+        trader_device_id: *precommit.device_id(),
+        trader_position: fulfillment.position(),
+        siblings: precommit
+            .legs()
+            .iter()
+            .filter(|leg| leg.vault_id != *vault_id)
+            .map(|leg| (leg.vault_id, leg.parent_root))
+            .collect(),
+    })
 }
 
 /// Every vault's state after the operation, recomputed from the pre states the
@@ -957,6 +1018,7 @@ impl VaultPostState {
 /// caller that stored a root from anywhere else would be storing an opinion.
 pub fn vault_post_states(
     precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
     preimage: &SettlementPreimage,
     evidence: &Evidence,
 ) -> Result<Vec<VaultPostState>, Refusal> {
@@ -1010,6 +1072,7 @@ pub fn vault_post_states(
 
         let entries = dlv_fold_entries(core, &e, evidence)?;
         let root = fold_core(&entries, core.pre_root())?;
+        let step = vault_bundle_step(precommit, fulfillment, &vault_id)?;
         out.push(VaultPostState {
             vault_id,
             pre_root: *core.pre_root(),
@@ -1019,6 +1082,7 @@ pub fn vault_post_states(
             relationship,
             consumed_by: e,
             entries,
+            step,
         });
     }
     Ok(out)
@@ -2994,6 +3058,51 @@ pub(crate) mod fixtures {
                 .map(|reference| objects[reference].clone())
                 .collect()
         }
+
+        /// The canonical `F` of the fixture's `P`, fixing attempt `3 + i`
+        /// for its `i`-th leg.
+        pub(crate) fn fulfillment(&self) -> TraderFulfillmentBody {
+            let canonical = derive::canonical_legs(&self.preimage).unwrap();
+            let shadows: Vec<D32> = self
+                .precommit
+                .legs()
+                .iter()
+                .map(|leg| {
+                    canonical
+                        .iter()
+                        .find(|l| l.vault_id == leg.vault_id)
+                        .unwrap()
+                        .shadow_core
+                })
+                .collect();
+            let mut set: Vec<D32> =
+                crate::sofi::conformance::derive_policy_fulfillments(&self.precommit, &shadows)
+                    .unwrap()
+                    .iter()
+                    .map(derive::policy_fulfillment_id)
+                    .collect();
+            set.sort();
+            let attempts = self
+                .precommit
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(i, leg)| crate::sofi::wire::AttemptEntry {
+                    vault_id: leg.vault_id,
+                    attempt: 3 + i as u64,
+                })
+                .collect();
+            TraderFulfillmentBody::new(
+                derive::precommit_id(&self.precommit),
+                set,
+                attempts,
+                self.precommit.position() + 1,
+                self.precommit.signature_alg(),
+                self.precommit.claimant_public_key(),
+                TRADER_ATT_A,
+            )
+            .unwrap()
+        }
     }
 
     /// The trader's registered claim at [`P_POS`] over `root`, signed under
@@ -4790,7 +4899,8 @@ mod tests {
     #[test]
     fn vault_post_states_are_recomputed_and_bound_to_the_stated_values() {
         let f = fixtures::swap_fixture_n(2);
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts.len(), f.preimage.dlv_cores().len());
         for post in &posts {
             let core = f
@@ -4850,6 +4960,80 @@ mod tests {
         assert_ne!(posts[0].root, posts[1].root, "two vaults, two roots");
     }
 
+    /// SoFi Amendment S23 (MR-SOFI-0399): each vault generation carries the
+    /// bundle step its exercise derives — the attempt `F` fixed for that
+    /// vault, `E`, the trader's `(G, DevID, q)` and the route's other legs —
+    /// from `(P, F)` alone; an `F` of another `P`, or one that fixes no
+    /// attempt for a leg, is not this operation's exercise.
+    /// MUTATION CONTROL: taking another leg's attempt, or dropping the
+    /// precommit check, turns this red.
+    #[test]
+    fn each_vault_generation_carries_the_bundle_step_its_exercise_derives() {
+        let f = fixtures::swap_fixture_n(2);
+        let fulfillment = f.fulfillment();
+        let posts =
+            vault_post_states(&f.precommit, &fulfillment, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(posts.len(), 2);
+        for post in &posts {
+            let (i, _) = f
+                .precommit
+                .legs()
+                .iter()
+                .enumerate()
+                .find(|(_, leg)| leg.vault_id == post.vault_id)
+                .unwrap();
+            let other = f
+                .precommit
+                .legs()
+                .iter()
+                .find(|leg| leg.vault_id != post.vault_id)
+                .unwrap();
+            assert_eq!(
+                post.step(),
+                &BundleStep::Vault {
+                    attempt: 3 + i as u64,
+                    external_commitment: *f.precommit.external_commitment(),
+                    trader_genesis: *f.precommit.genesis(),
+                    trader_device_id: *f.precommit.device_id(),
+                    trader_position: f.precommit.position() + 1,
+                    siblings: vec![(other.vault_id, other.parent_root)],
+                }
+            );
+        }
+
+        let with = |precommit_id: D32, attempts: &[crate::sofi::wire::AttemptEntry]| {
+            TraderFulfillmentBody::new(
+                precommit_id,
+                fulfillment.policy_fulfillment_set().to_vec(),
+                attempts.to_vec(),
+                fulfillment.position(),
+                fulfillment.signature_alg(),
+                fulfillment.claimant_public_key(),
+                fixtures::TRADER_ATT_A,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            vault_post_states(
+                &f.precommit,
+                &with([0x0A; 32], fulfillment.attempts()),
+                &f.preimage,
+                &f.evidence
+            ),
+            Err(Refusal::Invalid(Invalid::FulfillmentNamesAnotherPrecommit))
+        );
+        let last = fulfillment.attempts().len() - 1;
+        assert_eq!(
+            vault_post_states(
+                &f.precommit,
+                &with(*fulfillment.precommit_id(), &fulfillment.attempts()[..last]),
+                &f.preimage,
+                &f.evidence
+            ),
+            Err(Refusal::Invalid(Invalid::NoAttemptForLeg))
+        );
+    }
+
     /// A `V°` that states a post state the arithmetic does not reach is
     /// refused, so nothing unverified can be stored as a vault head.
     #[test]
@@ -4881,7 +5065,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vault_post_states(&f.precommit, &preimage, &f.evidence),
+            vault_post_states(&f.precommit, &f.fulfillment(), &preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
         );
     }
@@ -6522,7 +6706,8 @@ mod tests {
             trader_credits(&f.preimage, &f.evidence),
             Ok(vec![tokens()[0].0])
         );
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
         assert_eq!(
@@ -6685,7 +6870,8 @@ mod tests {
             trader_credits(&f.preimage, &f.evidence),
             Ok(vec![tokens()[0].0])
         );
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
 
         // The verdict cell the same Y would have under signed terms is not

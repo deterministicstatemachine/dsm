@@ -191,8 +191,10 @@ impl ValidatedEconomicRoot {
 ///
 /// Verifier-derived, like [`ValidatedEconomicRoot`]: [`advance_validated`]
 /// produces one for an ordinary position, `sofi::lineage::advance_resolved`
-/// for a SoFi position, and [`Self::rehydrate_from_admitted_store`] for this
-/// device's own admitted position. There is no other constructor.
+/// for a SoFi position, [`Self::rehydrate_from_admitted_store`] for this
+/// device's own admitted position, and [`Self::from_validated_coordinate`]
+/// for a peer's coordinate this receiver validated. There is no other
+/// constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedClaim {
     genesis: [u8; 32],
@@ -237,6 +239,27 @@ impl AcceptedClaim {
                 economic_position,
                 fulfillment_id,
             }),
+        }
+    }
+
+    /// A peer's claim at a coordinate this receiver validated itself and
+    /// recorded (DSM Amendment A19): the claim one of the constructors above
+    /// produced when the walk reached that coordinate, read back so that
+    /// nothing behind the receiver's frontier is read again. **Only
+    /// `peer_lineage` may call this**, from a frontier coordinate: one Core
+    /// built from a walk that passed, or the receiver rehydrated from its own
+    /// frontier store.
+    pub(crate) fn from_validated_coordinate(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        claim_ref: [u8; 32],
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            claim_ref,
         }
     }
 

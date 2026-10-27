@@ -11,6 +11,7 @@
 //! |---|---|---|
 //! | `sofi_vault_root` | `(vault, generation) -> root` | the chain this verifier established, one row per generation, kept forever because a parent's status is asked about a GENERATION |
 //! | `sofi_vault_leaf` | `(vault, generation, leaf_key) -> value + preimage` | every generation's state leaf, which the verifier reads as the state at a root it established (every other leaf an operation reads is proven by its core's path, SoFi Amendment S24), and the leaves this device saw, which rebuild the whole tree where it saw them all: an owner's record, from which it hands traders their witnesses |
+//! | `sofi_vault_step` | `(vault, generation) -> bundle step` | what a checkpoint's bundle carries for each generation (SoFi Amendment S23): the attempt, `E`, the trader's `(G, DevID, q)` and the route's other legs, written with the generation's row; discovery only |
 //! | `sofi_vault_witness` | `vault -> generation, root, witness` | this device's own witness at the generation it established last: the state leaf and its relationship leaf with their paths, advanced as each generation is recorded |
 //! | `sofi_vault_baseline` | `vault -> generation, baseline` | the owner baseline a chain starts at, when it does not start at the genesis |
 //!
@@ -23,10 +24,13 @@
 //! This replaces the persistent node store R14 deleted. A node store returned
 //! leaf VALUES; evidence needs the preimages, so the values alone could never
 //! have served the next trade.
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
 use dsm::economic::tree::EconomicSmt;
+use dsm::shared_lineage::BundleStep;
 use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::resolve::RecordedGenerationRow;
@@ -106,7 +110,138 @@ pub fn record_resolved_with_conn(tx: &Transaction<'_>, post: &VaultPostState) ->
         post.root(),
         Some((post.pre_root(), post.consumed_by())),
         &leaves,
-    )
+    )?;
+    write_step(tx, vault_id, post.generation(), post.step())
+}
+
+/// The step columns of a vault generation: attempt, `E`, `G`, `DevID`, `q`
+/// and the sibling pairs, concatenated.
+type StepColumns = (i64, D32, D32, D32, i64, Vec<u8>);
+
+fn step_columns(step: &BundleStep) -> Result<StepColumns> {
+    let BundleStep::Vault {
+        attempt,
+        external_commitment,
+        trader_genesis,
+        trader_device_id,
+        trader_position,
+        siblings,
+    } = step
+    else {
+        return Err(anyhow!("a vault generation's step is a reserve step"));
+    };
+    let mut pairs = Vec::with_capacity(siblings.len() * 64);
+    for (vault, parent_root) in siblings {
+        pairs.extend_from_slice(vault);
+        pairs.extend_from_slice(parent_root);
+    }
+    Ok((
+        i64::try_from(*attempt).map_err(|e| anyhow!("attempt overflow: {e}"))?,
+        *external_commitment,
+        *trader_genesis,
+        *trader_device_id,
+        i64::try_from(*trader_position).map_err(|e| anyhow!("position overflow: {e}"))?,
+        pairs,
+    ))
+}
+
+fn step_of(columns: StepColumns) -> Result<BundleStep> {
+    let (attempt, external_commitment, trader_genesis, trader_device_id, position, pairs) = columns;
+    let mut siblings = Vec::with_capacity(pairs.len() / 64);
+    for pair in pairs.chunks(64) {
+        let (vault, parent_root) = pair.split_at(32);
+        siblings.push((
+            digest32(vault.to_vec(), "sibling vault")?,
+            digest32(parent_root.to_vec(), "sibling parent root")?,
+        ));
+    }
+    Ok(BundleStep::Vault {
+        attempt: u64::try_from(attempt).map_err(|e| anyhow!("attempt negative: {e}"))?,
+        external_commitment,
+        trader_genesis,
+        trader_device_id,
+        trader_position: u64::try_from(position).map_err(|e| anyhow!("position negative: {e}"))?,
+        siblings,
+    })
+}
+
+/// Write generation `generation`'s bundle step. A step already recorded
+/// there must be the same one: one consumption per generation, so another
+/// step is a contradiction, never an update.
+fn write_step(
+    tx: &Transaction<'_>,
+    vault_id: &D32,
+    generation: u64,
+    step: &BundleStep,
+) -> Result<()> {
+    let generation_i64 =
+        i64::try_from(generation).map_err(|e| anyhow!("generation overflow: {e}"))?;
+    let (attempt, e, genesis, device_id, position, siblings) = step_columns(step)?;
+    let inserted = tx.execute(
+        "INSERT OR IGNORE INTO sofi_vault_step (vault_id, generation, attempt,
+             external_commitment, trader_genesis, trader_device_id, trader_position, siblings)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            vault_id.as_slice(),
+            generation_i64,
+            attempt,
+            e.as_slice(),
+            genesis.as_slice(),
+            device_id.as_slice(),
+            position,
+            siblings,
+        ],
+    )?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    match steps_with_conn(tx, vault_id)?.get(&generation) {
+        Some(recorded) if recorded == step => Ok(()),
+        _ => Err(anyhow!(
+            "generation {generation} of this vault already records another step"
+        )),
+    }
+}
+
+/// The bundle step of every generation of `vault_id` this device recorded
+/// one for, by generation.
+pub fn recorded_steps(vault_id: &D32) -> Result<BTreeMap<u64, BundleStep>> {
+    let binding = get_connection()?;
+    let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    steps_with_conn(&conn, vault_id)
+}
+
+fn steps_with_conn(
+    conn: &rusqlite::Connection,
+    vault_id: &D32,
+) -> Result<BTreeMap<u64, BundleStep>> {
+    let mut stmt = conn.prepare(
+        "SELECT generation, attempt, external_commitment, trader_genesis, trader_device_id,
+                trader_position, siblings
+           FROM sofi_vault_step WHERE vault_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![vault_id.as_slice()], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            (
+                r.get::<_, i64>(1)?,
+                super::column_32(r, 2)?,
+                super::column_32(r, 3)?,
+                super::column_32(r, 4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, Vec<u8>>(6)?,
+            ),
+        ))
+    })?;
+    let mut steps = BTreeMap::new();
+    for row in rows {
+        let (generation, columns) = row?;
+        steps.insert(
+            u64::try_from(generation).map_err(|e| anyhow!("generation negative: {e}"))?,
+            step_of(columns)?,
+        );
+    }
+    Ok(steps)
 }
 
 /// One generation's row, as recorded.
@@ -944,5 +1079,48 @@ mod tests {
         assert!(recorded_generations_with_conn(&conn, &OTHER)
             .unwrap()
             .is_empty());
+    }
+
+    /// SoFi Amendment S23 (MR-SOFI-0399): a generation's bundle step is
+    /// recorded once and read back exactly — attempt, `E`, trader, position
+    /// and every sibling pair in order; the same step again is idempotent,
+    /// and another step at a recorded generation is refused, never an
+    /// update.
+    /// MUTATION CONTROL: a writer that ignores a conflicting step turns this
+    /// red.
+    #[test]
+    fn a_generations_bundle_step_is_recorded_once_and_read_back_exactly() {
+        let step = |attempt: u64, e: D32| BundleStep::Vault {
+            attempt,
+            external_commitment: e,
+            trader_genesis: [0x61; 32],
+            trader_device_id: [0x62; 32],
+            trader_position: 9,
+            siblings: vec![([0x53; 32], [0x54; 32]), ([0x55; 32], [0x56; 32])],
+        };
+        let mut conn = db();
+        let tx = conn.transaction().unwrap();
+        write_step(&tx, &V, 1, &step(4, E1)).unwrap();
+        write_step(&tx, &V, 2, &step(0, E2)).unwrap();
+        write_step(&tx, &V, 1, &step(4, E1)).unwrap();
+        let Err(conflict) = write_step(&tx, &V, 1, &step(5, E1)) else {
+            panic!("another attempt at a recorded generation was taken");
+        };
+        assert!(conflict.to_string().contains("another step"), "{conflict}");
+        let Err(reserve) = write_step(
+            &tx,
+            &V,
+            3,
+            &BundleStep::Reserve {
+                release_evidence_addr: E2,
+            },
+        ) else {
+            panic!("a reserve step was recorded for a vault");
+        };
+        assert!(reserve.to_string().contains("reserve step"), "{reserve}");
+        tx.commit().unwrap();
+        let steps = steps_with_conn(&conn, &V).unwrap();
+        assert_eq!(steps, BTreeMap::from([(1, step(4, E1)), (2, step(0, E2))]));
+        assert_eq!(steps_with_conn(&conn, &OTHER).unwrap(), BTreeMap::new());
     }
 }

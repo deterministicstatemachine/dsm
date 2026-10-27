@@ -3940,6 +3940,7 @@ fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
         )
         .expect("forget the vault's generations");
         for table in [
+            "sofi_vault_step",
             "sofi_vault_witness",
             "sofi_vault_baseline",
             "sofi_vault_quarantine",
@@ -3948,7 +3949,7 @@ fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
                 &format!("DELETE FROM {table} WHERE vault_id = ?1"),
                 [vault_id.as_slice()],
             )
-            .expect("forget the vault's witness, baseline and quarantine");
+            .expect("forget the vault's steps, witness, baseline and quarantine");
         }
     }
     crate::sdk::final_reads::forget_everything();
@@ -4037,11 +4038,16 @@ async fn an_online_owner_publishes_a_baseline_after_each_realized_generation() {
             dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes(),
             &derive::vault_baseline_locator(&m.vault_id, generation),
             8,
+            // Kept only as the owner's authenticated frontier, under the
+            // locator that frontier names, as the wallet's own reader keeps it.
             |bytes| match crate::sdk::vault_baseline::authenticate(bytes, &genesis) {
-                Ok(verified) => Some((
-                    dsm::sofi::frontier::frontier_commitment(verified.frontier()),
-                    verified.frontier().generation,
-                )),
+                Ok(verified) => {
+                    let frontier = verified.frontier();
+                    Some((
+                        derive::vault_baseline_locator(&frontier.vault_id, frontier.generation),
+                        frontier.generation,
+                    ))
+                }
                 Err(why) => {
                     log::info!("a baseline candidate does not authenticate: {why}");
                     None
@@ -4537,6 +4543,93 @@ async fn a_vault_history_read_ahead_establishes_exactly_what_the_walk_does() {
         walk_with_history(&p.a, &m.vault_id).await,
         plain,
         "lying hints change nothing the walk establishes"
+    );
+}
+
+/// SoFi Amendment S23, "who writes" (MR-SOFI-0399): the trader whose
+/// position resolves Realized at generation 32 of a vault owes, once the
+/// position is committed, the bundle and checkpoint of the segment that ends
+/// there, and a hint for every generation it made; the sweep publishes them.
+/// The checkpoint names the roots the trader recorded, and its bundle names
+/// for each generation the consumption recorded there, the attempt that
+/// took the parent, the trader and its position.
+/// MUTATION CONTROL: dropping the checkpoint from `owe_realized` turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_trader_that_realizes_generation_32_publishes_its_segments_checkpoint() {
+    use dsm::shared_lineage::{BundleStep, LineageKind, TransitionBundleV1, EPOCH_GENERATIONS};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let mut positions = Vec::new();
+    for _ in 0..EPOCH_GENERATIONS {
+        positions.push(realized_trade(&p, &m, 2).await);
+    }
+    p.b.enter();
+    let rows = crate::storage::client_db::sofi_vault_head::recorded_generations(&m.vault_id)
+        .expect("B's record");
+    assert_eq!(
+        rows.len() as u64,
+        EPOCH_GENERATIONS + 1,
+        "the genesis and B's 32 trades"
+    );
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let found =
+        crate::sdk::lineage_discovery::discover(&set, LineageKind::Vault, &m.vault_id, 0).await;
+    for row in rows.iter().skip(1) {
+        assert_eq!(
+            found.roots_at(row.generation).collect::<Vec<_>>(),
+            vec![&row.root],
+            "a hint names the root B recorded at {}",
+            row.generation
+        );
+    }
+    let segment: Vec<_> = found
+        .checkpoints()
+        .iter()
+        .filter(|c| c.start_generation() == 0)
+        .collect();
+    assert_eq!(segment.len(), 1, "one checkpoint of the first segment");
+    let checkpoint = segment[0];
+    assert_eq!(checkpoint.end_generation(), EPOCH_GENERATIONS);
+    let roots: Vec<[u8; 32]> = rows.iter().map(|row| row.root).collect();
+    assert_eq!(checkpoint.claimed_roots(), roots.as_slice());
+
+    let bytes =
+        crate::sdk::storage_io::read_stored_bytes(&set, checkpoint.transition_bundle_digest())
+            .await
+            .expect("the bundle is read")
+            .expect("the bundle is stored");
+    let bundle = TransitionBundleV1::decode(&bytes).expect("a bundle");
+    assert_eq!(bundle.address(), *checkpoint.transition_bundle_digest());
+    assert_eq!(bundle.steps().len() as u64, EPOCH_GENERATIONS);
+    let ((genesis, device_id), _) = standing_of(&p.b);
+    let mut stepped = Vec::new();
+    for (step, row) in bundle.steps().iter().zip(rows.iter().skip(1)) {
+        let BundleStep::Vault {
+            attempt,
+            external_commitment,
+            trader_genesis,
+            trader_device_id,
+            trader_position,
+            siblings,
+        } = step
+        else {
+            panic!("generation {} has a reserve step", row.generation);
+        };
+        assert_eq!(Some(*external_commitment), row.consumed_by);
+        assert_eq!((*trader_genesis, *trader_device_id), (genesis, device_id));
+        assert_eq!(*attempt, 0, "each trade took its parent's first key");
+        assert!(siblings.is_empty(), "one hop, no other leg");
+        stepped.push(*trader_position);
+    }
+    assert_eq!(
+        stepped, positions,
+        "each step names the position it realized"
     );
 }
 
