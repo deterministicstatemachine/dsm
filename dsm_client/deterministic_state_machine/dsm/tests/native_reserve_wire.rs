@@ -537,6 +537,126 @@ fn a_foreign_register_set_is_refused() {
     ));
 }
 
+/// A resolver that counts every read of the reserve's lineage.
+struct Counting {
+    inner: OneRelease,
+    reads: std::cell::Cell<usize>,
+}
+
+impl ProvenanceResolver for Counting {
+    fn root_register_candidate_set(
+        &self,
+        network_id: &[u8],
+    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
+        self.inner.root_register_candidate_set(network_id)
+    }
+
+    fn validated_peer_transition(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
+        self.inner
+            .validated_peer_transition(genesis, device_id, position)
+    }
+
+    fn native_reserve_release(
+        &self,
+        reserve_id: &[u8; 32],
+        generation: u64,
+    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+        self.reads.set(self.reads.get() + 1);
+        self.inner.native_reserve_release(reserve_id, generation)
+    }
+
+    fn immutable_evidence(
+        &self,
+        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
+        addr: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.inner.immutable_evidence(namespace, addr)
+    }
+
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        self.inner.held_ek_step(signer, addr)
+    }
+
+    fn anchored_policy_bytes(
+        &self,
+        policy_commit: &[u8; 32],
+    ) -> Result<Vec<u8>, PeerLineageFailure> {
+        self.inner.anchored_policy_bytes(policy_commit)
+    }
+}
+
+/// MR-STOR-0045: what a reserve-funded credit decides from its descriptor
+/// alone — that it names the network's canonical reserve, at a generation
+/// past the genesis — is decided before the reserve's lineage is read, so a
+/// descriptor refused in hand causes no read. The canonical descriptor is
+/// read, once, and funds.
+/// MUTATION CONTROL: reading the release before the canonical-id check
+/// turns this red.
+#[test]
+fn a_descriptor_refused_in_hand_reads_nothing_of_the_reserve() {
+    let counting = |fx: &Fixture| Counting {
+        inner: OneRelease::of(fx),
+        reads: std::cell::Cell::new(0),
+    };
+
+    let other = NativeReserveState::genesis(b"another-network", SET_ID).expect("R_0");
+    let fx = fixture_at(other, 1, ERA_FAUCET_PAYOUT);
+    let resolver = counting(&fx);
+    assert!(matches!(
+        verify_credit_source(
+            &fx.witness.credit_sources[0],
+            &fx.witness,
+            &resolver,
+            &ctx(1, &fx.pk)
+        ),
+        Err(ProvenanceError::NotTheCanonicalReserve { .. })
+    ));
+    assert_eq!(resolver.reads.get(), 0, "another reserve is not read");
+
+    let fx = fixture(1);
+    let mut d = fx.descriptor.clone();
+    d.generation = 0;
+    let resolver = counting(&fx);
+    assert!(matches!(
+        verify_credit_source(
+            &CreditSource::NativeReserveRelease(d),
+            &fx.witness,
+            &resolver,
+            &ctx(1, &fx.pk)
+        ),
+        Err(ProvenanceError::GenerationIsGenesis)
+    ));
+    assert_eq!(
+        resolver.reads.get(),
+        0,
+        "the genesis is not read as a release"
+    );
+
+    let resolver = counting(&fx);
+    let funded = verify_credit_source(
+        &fx.witness.credit_sources[0],
+        &fx.witness,
+        &resolver,
+        &ctx(1, &fx.pk),
+    )
+    .expect("the canonical release funds the credit");
+    assert_eq!(funded.amount(), ERA_FAUCET_PAYOUT);
+    assert_eq!(
+        resolver.reads.get(),
+        1,
+        "the canonical release is read once"
+    );
+}
+
 #[test]
 fn no_final_release_fails_closed_and_generation_zero_is_refused() {
     let fx = fixture(1);
