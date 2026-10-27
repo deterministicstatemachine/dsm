@@ -4557,6 +4557,448 @@ The release is also on the nodes although only the sender reads it, from an addr
 
 **Environment.** Jest ran with the main checkout's `node_modules`, linked into this worktree; nothing was downloaded. The two lockfiles differ only in build-tool security pins (handlebars, fast-uri, js-yaml, webpack-dev-server), not in anything the tests or the components load.
 
+### 6.105 Owner decisions outside storage: twelve rulings, what the G3 ruling covers in ten rows, and the offline SoFi door (`docs/owner-decision-briefs`, 2026-10-27)
+
+**Why.** The owner's words, 2026-10-27: for each, "present the exact existing requirement, observed implementation, conflict, and your proposed ruling", and "Do not ask for blanket approval without explaining the consequences." On G3: apply the 2026-09-23 ruling "only where it genuinely covers those mechanisms"; no blanket exclusion "until Claude shows precisely what each one covers". And: "Bring back the exact register-incarnation and offline SoFi-door questions with their architectural consequences."
+
+**Method.** Read from the spec corpus and the code at `7cf6483e`. Read-only research agents gathered the facts; `git status --porcelain` was empty before and after each, and every claim below was rechecked against source. Each absence claim was checked with `git grep` both at the branch tip and at `origin/main` (`ad831f53`). Nothing was run, so every statement about runtime behaviour is read from source and is marked unverified where it matters. No row status changes. Spec line numbers are those of the current files; several rows' source cells cite older lines.
+
+#### A. Twelve rulings
+
+**A1. Which "index" a transition binds to: MR-DSM-0199 (Partial).**
+- *Requirement.* "A transition binds to the receiver's committed context (expected parent, index and policy anchors), so arbitrary bytes cannot form a valid candidate."
+- *Spec.* Explainer §62, in the aside on spam resistance that opens "The DJTE paper also answers…" (L3042–3044): "A transition must bind to a receiver's committed context (the expected parent, index, and policy anchors), so random bytes cannot be represented as a valid candidate at all and fail the cheapest check first." The position the sentence can lean on is defined at L230–232: "Position u. In online mode, u is a committed integer position that increments on every value-moving advance. More generally, u is the mode's monotonic progression object."
+- *Observed.*
+  - *Parent.* A relationship step's parent is the chain tip (`dsm::types::device_state::DeviceState::advance`). `dsm::bilateral::offline::decide_prepare` answers `StaleTip` unless the proposal's expected tip is the tip it holds.
+  - *Index.* Online, the claim body commits `economic_position` (`dsm::economic::claim::EconomicRootClaimBody`; MR-DSM-0009 is Met). The receiver validates the sender's lineage at that position from its own frontier (`validated_peer_lineage`). A relationship chain carries no counter: its position is hash adjacency to the tip.
+  - *Policy anchors.* An advance refuses credit of a token the device has not adopted (`DeviceState::advance`).
+  - *Order.* Bytes that do not decode fail first, in `offline_operation`. `decide_prepare` then checks the address, applies the SA-61 refusal and checks the pinned keys before any signature work, and compares the tip after the SPHINCS+ check.
+- *Conflict.* The spec does not say which index. The §8 note ("There is no committed index") reads it as a counter in the relationship tip. Read as u, the index is committed and checked online. The sentence sits in a DJTE aside, and emissions are out of scope this round.
+- *Options.*
+  - (a) The index is the mode's progression object: u online, hash adjacency on a relationship chain. *Makes true:* the three bindings hold as built. *Requires:* no code. The §8 note is rewritten at the next pass to cite `dsm_sdk::handlers::recipient_dispatch::tests::a_wrong_locator_hint_is_not_a_verdict` and `economic_admission_lifecycle::a_registration_at_the_wrong_position_is_refused`.
+  - (b) The index is a counter committed in every relationship tip. *Requires:* a new field in the relationship chain state and the step hash, a wire change, new vectors, and reversing the counterless chain the code is built on.
+  - (c) The aside is DJTE rationale, not a requirement, and the row is withdrawn. *Requires:* the owner's agreement only.
+- *Proposed.* (a). The corpus already defines u as the committed progression object, and the code binds and checks it.
+
+**A2. Perpetuals, funding and liquidation: MR-DSM-0217 (Missing).**
+- *Requirement.* "Perpetual funding is denominated in trade activity, liquidation is a branch precommitted at open, and reference prices are co-signed windows over verified trade digests, never an oracle feed as authority."
+- *Spec.*
+  - Explainer §63, "What this gives you" (L3167–3169): "Perpetuals and liquidation. Funding is denominated in trade activity rather than elapsed time, and liquidation is a precommitted branch the position holder committed at open. No clock, no oracle feed as authority; reference prices are co-signed windows over verified trade digests."
+  - The comparison table: L2695, "Perpetuals, liquidation | precommitted liquidation branch, activity-based funding", and L2693, "Oracle | external commitment, co-signed reference window | Section 60". §60 describes no reference window.
+  - The SoFi spec only reserves `TAG_DSM_SOFI_TRADE_DIGEST` and `TAG_DSM_SOFI_REF_WINDOW` (L777–778). "Perpetual", "liquidation" and "reference price" appear in no other specification.
+- *Observed.* Nothing exists at the tip or on main: a `git grep` for perpetual, liquidat, funding_rate, reference_price, ref_window and trade_digest over Core, the SDK, the node, proto and the frontend returns nothing. Two things are reserved and nothing more: the two domain tags, and the CCB codes `TRADE_DIGEST` (0x0012) and `REFERENCE_WINDOW` (0x0013) in `dsm::ccb::declared_unencoded`.
+- *Conflict.* The row comes from a capability bullet and a comparison table. No specification defines any of the following:
+  - a position object;
+  - the funding formula;
+  - the liquidation branch;
+  - a trade-digest object;
+  - who co-signs a window. Storage nodes sign nothing.
+
+  The row cannot be built as written without specification the owner has not written.
+- *Options.*
+  - (a) Out of beta, recorded: SoFi reserves the tags and specifies nothing else. The row stays Missing, with that reason. *Requires:* no code.
+  - (b) A SoFi amendment that specifies all of it:
+    - the position;
+    - activity-denominated funding;
+    - the liquidation branch precommitted at open;
+    - the 0x0012 and 0x0013 encodings;
+    - the co-signer set and its threshold.
+
+    The build then covers Core types and predicates, the CCB encoders, SDK producers, proto, negative tests, and the TLA and Lean models.
+  - (c) Leave the row Missing with no ruling. It stays red with no path to close it.
+- *Proposed.* (a), with (b)'s five decisions recorded as what the mechanism needs before any work starts.
+
+**A3. When a Connect grant ends: MR-DSM-0292 (Partial).**
+- *Requirement.* "The highest sequence number the wallet has carried out under a grant is its replay guard: a request at or below it is never carried out again. A grant has no expiry by time; it ends when the player disconnects the application or its total is spent."
+- *Spec.*
+  - DSM Amendment A11 (L3457): "At pairing the player approves a list of request kinds, each bound to the assets or the pair it may touch, with a cap per request and a cap in total. … There is no expiry by time; a grant ends when the player disconnects the application or its total is spent."
+  - Amendment A12 (L3463, L3466): an escrow scope has "a cap per request and a cap in total, counted against the grant as a payment is"; "A collect pays nothing but this wallet, so it is inside the grant whenever an escrow scope stands."
+  - Amendment A16 (L3474): a contacts scope "caps nothing".
+- *Observed.*
+  - *Replay.* `connect_routes` treats `seq <= session.last_seq` as already seen, and `dsm_sdk::storage::client_db::connect::record_processed` refuses any `seq` but `last + 1`.
+  - *Ending.* A session ends only through `connect::disconnect`, which only the disconnect route calls.
+  - *Caps.* `dsm_sdk::sdk::connect::grant::within` makes a request that would pass a cap's `total` `Decision::Outside` ("… more would pass the grant's total of …"), so it waits for the player and the session stays. Caps are per scope and token. There is no grant-level total.
+  - *Tests.* Two tests assert that a spent grant keeps running: `a_collect_is_in_scope_whenever_an_escrow_scope_stands` ("… even from a spent grant") and `every_move_of_a_match_runs_without_the_player_under_a_duel_scope` ("a move spends nothing, even from a spent grant").
+- *Conflict.* "Its total" is singular, but A11 gives each request kind its own cap in total. The scopes with no cap (holdings, quote, contacts, collect, duel moves) have nothing to spend. If a spent total ended the grant, a stake equal to its cap would end the session before the match's moves, settlement or collect could run, and A12 and S22 rely on those.
+- *Options.*
+  - (a) "Its total" is each kind's cap in total. Once that cap is spent, that kind's spending requests wait for the player, and the grant stands until a disconnect. *Requires:* A11's sentence reworded by the owner, no code, and a test that a spent total sends the next spending request to the player.
+  - (b) The grant ends once every spending scope's total is spent. *Requires:*
+    - detecting that state at `record_processed` and ending the session;
+    - sending the signed disconnect notice, and handling it in the application;
+    - deciding what happens to a match that is already staked;
+    - end-to-end and mutation tests.
+  - (c) The grant ends when any one total is spent. *Requires:* amending A12 and S22, because a stake equal to its cap would end the grant mid-match.
+- *Proposed.* (a). It is the per-kind cap A11 itself describes, and A12 and A16 already work that way.
+
+**A4. Pair restrictions on a token: MR-DSM-0194 (Partial).**
+- *Requirement.* "A token policy states what makes a transfer of that token valid and does not by default enumerate trading pairs; pair restrictions are an optional capability."
+- *Spec.*
+  - Explainer L2904: "A token's policy says what makes a transfer of that token valid. It does not enumerate trading pairs."
+  - L2912–2916: "A more restrictive token can certainly say "only against approved assets," "only through approved vault policies," or "only with counterparties who hold this credential." That is an optional capability, and it is how soulbound and compliance-scoped assets are built. It is not the default…"
+  - The normative grammar, SoFi §47 (L2882–2896), has no pair, vault-policy or credential field. §49 (L2976–2977) says the recipient allowlist "has no market meaning, and a token trades freely".
+- *Observed.*
+  - `dsm::economic::token_policy::TokenPolicy` has no pair field.
+  - `dsm::economic::issuance::check_market_leg_permitted` consults only `transferable`. Its doc calls that "a ruling, not an omission (owner, 2026-08-30 — the CoinGecko model)".
+  - `dsm::types::policy_types::PolicyCondition` has OperationRestriction, BitcoinTapConstraint and SupplyCap only.
+  - No credential object exists, at the tip or on main.
+  - No test asserts the default.
+- *Conflict.* The Explainer allows a capability that the normative grammar gives no encoding, and §49 says a token trades freely. Building it needs a field layout, a policy version, and a credential mechanism that no specification defines.
+- *Options.*
+  - (a) The default only, for beta. It holds by structure. *Requires:* a test in which a vault pairs two custom transferable tokens and the leg check reads only `transferable`. The capability is recorded as unbuilt and outside this round. *Consequence:* no compliance-scoped tokens in beta. The only restriction is `transferable = false`.
+  - (b) Build all three restrictions. *Requires:*
+    - a SoFi amendment for the blob fields and their flags;
+    - the parser;
+    - a market-leg check that takes the counter-token, the vault policy and the trader's credential;
+    - a credential specification;
+    - proto, the creation wizard, and negative and mutation tests.
+  - (c) Build approved assets and approved vault policies only, since both can be checked from committed bytes, and defer credentials.
+- *Proposed.* (a).
+
+**A5. Checks outside the constructor: MR-SOFI-0021 (Partial).**
+- *Requirement.* "Nothing downstream (SDK, storage, app) checks what construction guarantees; a validity check outside the constructor is forbidden and means the constructor has a hole to close in Core."
+- *Spec.*
+  - SoFi preamble rule 5 (L204): "Nothing downstream checks what construction guarantees. Not the SDK, not storage, not the app."
+  - Its "Do not" (L206–209): "Adding a validity check anywhere outside the constructor. … A check downstream hides the hole; it does not close it."
+  - Against it, §47 (L2878): "Rust packs one canonical blob, the only packer for the format (build_policy_v3_bytes, SDK/handlers/token_routes.rs)."
+  - Amendment S28 (L2903–2907) keeps an SDK refusal on purpose. It is "a display and anti-spoofing rule of the holder's own wallet", and "no verifier consults it".
+- *A ruling already in force.* §6.100, owner question 9, 2026-10-27: "Core must be the authoritative enforcement boundary, with SDK preflight retained for early rejection."
+- *Observed.*
+  - `dsm_sdk::handlers::token_routes::build_policy_v3_bytes` checks the signer count, threshold, supply above zero and the length caps, then runs Core's parser over its own output.
+  - `token_fields` and `ticker_refusal` check ticker length and built-in tickers, the alias, and decimals up to 18.
+  - `token.create` refuses when the parsed policy does not admit issuance to the creator (`admits_issuance_to`, at the tip and not on main).
+  - Core enforces each of these itself: in `dsm::economic::token_policy`'s parser, and at the genesis release in `dsm::economic::provenance`, which also checks the allowlist.
+  - Storage refuses only malformed requests (`dsm_storage_node` `cells_keep_everything::only_malformed_requests_are_refused`).
+- *Conflict.* Read literally, rule 5 forbids the SDK's copies. Question 9's ruling keeps "SDK preflight … for early rejection" with Core as the authority, and §47 places the packer in the SDK.
+- *Options.*
+  - (a) The SDK's input checks are preflight for early rejection, and Core is the authority, as in question 9's ruling. Rule 5 is amended to say so. *Requires:*
+    - for each SDK bound, a test that Core refuses the same input when it arrives without the SDK. Signer count, threshold, supply, ticker, decimals and the issuance allowlist are each refused by Core alone.
+    - a mutation control on each Core bound.
+
+    *Consequence:* every bound exists twice. A preflight looser than Core does no harm. One that is stricter refuses tokens Core would accept, so the tests must also cover the boundary values.
+  - (b) Delete the SDK copies. Keep S28's ticker rule and the wire-shape conversion. Core's parser returns typed per-field errors that the wizard maps to its field refusals. *Requires:* the parser change and the same tests as (a).
+  - (c) Move the packer into Core with typed field errors, and have the SDK call it. *Requires:* amending §47's code pointer and the tests of (a).
+- *Proposed.* (a). The owner has already ruled the same question for transfers and burns, and (b) and (c) would contradict that ruling here.
+
+**A6. What the SDK adapter may compute: MR-SOFI-0037 (Partial).**
+- *Requirement.* "The SDK adapter only packages a result Core accepted: it never validates a second time, computes a second root, or supplies its own entropy."
+- *Spec.*
+  - SoFi §2.1 (L368): "Packages a result Core already accepted into Core's generic transition input. Never validates a second time, never computes a second root, never supplies its own entropy."
+  - The same specification gives the SDK producer validation and setup construction:
+    - L1738: "A producer MUST obtain Valid before it publishes F."
+    - §31 stage 3 (L2147): "Any other result stops the producer."
+    - R6 (L2797): "SDK/sdk/sofi_sdk.rs:376 validates with real evidence".
+    - L990: "Builder: build_setup, SDK/sdk/sofi_sdk.rs:210."
+    - L2058: "build_setup builds the signed setup body".
+- *Observed.*
+  - *Setup root.* `dsm_sdk::sdk::sofi_sdk::build_setup` checks that the pre-tree root is the predecessor and refuses an existing leaf. It then inserts the leaf into a clone of the tree and puts that clone's root into `SofiSetupBody.setup_root`. Core re-derives the root and refuses a mismatch (`dsm::economic::lineage`, `SetupRootIsNotTheDerivedRoot`).
+  - *Validation.* `check_draft` runs Core's validation before anything is published.
+  - *Leaf cache.* `dsm_sdk::sdk::sofi_advance::resolve_pending_position` rebuilds an `EconomicSmt` from Core's leaves and refuses if its root is not Core's.
+  - *Entropy.* There is no entropy source in `sofi_sdk`, `sofi_flow` or `sofi_advance`.
+  - *Missing test.* The test the §8 note records, `a_producer_refuses_a_route_that_does_not_chain`, exists neither at the tip nor on main.
+- *Conflict.* §2.1 contradicts the same specification's producer rules, which have the SDK obtain Valid and name `build_setup` as SDK code. Apart from that, the SDK computes two roots: the setup root, which Core re-derives, and the leaf-cache recompute, which no rule asks for.
+- *Options.*
+  - (a) Read §2.1 as "never substitutes its own verdict or root". An SDK call to a Core function whose result Core re-derives counts as packaging. Amend §2.1 and keep the code.
+  - (b) Move setup-body construction into Core: a Core producer derives the setup root, and the SDK signs and packages it. `advance_resolved` returns the leaves bound to its root, so the SDK writes its cache without recomputing. The pre-publication validation stays, because the specification requires it. *Requires:*
+    - amending the pointers at L990, L2058 and R8;
+    - a Core producer test;
+    - a mutation of the setup-root check.
+
+    No wire change.
+  - (c) Strict: also remove the SDK's pre-publication validation. That contradicts L1738 and §31, and a producer would publish objects Core refuses.
+- *Proposed.* (b). It takes the SDK out of root computation, keeps the validation the specification requires, and changes no wire.
+
+**A7. When a producer may publish F: MR-SOFI-0217 (Partial).**
+- *Requirement.* "A producer must obtain Valid conformance before it publishes F."
+- *Spec.* L1737–1738: "Registration supplies no truth value for this predicate. A registered F injected by an arbitrary caller may be Invalid. A producer MUST obtain Valid before it publishes F." "Publishes F" has two readings in the same specification:
+  - R8 (L2800) lists "publication of P, G, F and the setup body".
+  - The stage table does not: stage 4 (L2148) puts P, P(E) and the closure; stage 6 (L2150) builds F under the structural check; stage 7 (L2151) "writes F at Kful(q)".
+  - The definitions (L405–408) make P "Noneconomic: publishing or storing it is never exercise", and FulfillmentRegistered(F) "The one irreversible exercise boundary".
+- *Observed.*
+  - `dsm_sdk::sdk::sofi_sdk::build_fulfillment` runs only the structural subset (`check_fulfillment_against_precommit`) and pushes `ToPublish::Fulfillment` onto the publish list.
+  - `dsm_sdk::sdk::sofi_flow::prepare_fulfillment` runs evidence, `check_draft`, `build_fulfillment` and `freeze_prepared`, then "// Stages 4 and 5." `publish_prepared`, which puts F's signed envelope along with the rest.
+  - `finish_prepared` publishes again, runs stage 6 (`fulfill`, the trader's `SofiFulfill` head advance), then `complete_and_settle`.
+  - The full `dsm::sofi::conformance::fulfillment_conformance` runs only in `dsm_sdk::sdk::sofi_register::install_fulfillment`, after `acquire_conformance_evidence` and before `write_recorded_position`, the Kful/Kroot write.
+  - The order is the same on main.
+- *Conflict.* F's content object is Stored before Valid. That breaks L1738 if "publishes" means the content put, and meets it if it means the install at Kful(q).
+  - The trader's stage 6 head advance also comes before full conformance, so an Invalid result is found only at install, after the advance. What the position does then was not traced.
+  - The §8 note records that no test fails if the install gate is removed.
+- *Options.*
+  - (a) Reorder:
+    - publish P, P(E), each Gj, the pre-balances and the closure;
+    - acquire the conformance evidence and run `fulfillment_conformance`;
+    - only on Valid, put F and run stage 6;
+    - apply the same gate in `finish_prepared`.
+
+    *Makes true:* L1738 under both readings, and an Invalid exercise stops before the head advance. *Requires:*
+    - code in `sofi_sdk` and `sofi_flow`, with the publish list in two phases;
+    - no wire change;
+    - a test for each withheld or corrupted evidence item, asserting that no F object is Stored and no head advance happens;
+    - a mutation of each gate, before the put and at install.
+  - (b) "Publishes F" means the install at Kful(q). F's content object is noneconomic, as P's is, and R8 is reconciled with stage 4. *Requires:* spec text only, plus the missing test for the install gate.
+  - (c) Stop storing F as a content object. *Requires:* rewriting every reader that fetches F by FulfillmentId (`sofi_relay`, `sofi_reads`, `sofi_advance`) and amending R8.
+- *Proposed.* (a).
+
+**A8. The staged tree store §34 still names: MR-SOFI-0267 (Partial).**
+- *Requirement.* "Validate staged post-tree frontiers before installation and retain only nodes reachable from validated roots." (derived; found by one of the two extractions)
+- *Spec.*
+  - §34 (L2222–2223): "validate_staged_frontier, reachable | the trader's tree store: staged post trees are validated before stage 7, and nodes not reachable from a validated root are dropped after stage 10".
+  - Stale in the same way: §31 stage 3 (L2147) names `verify` (`CORE/sofi/smt/tree.rs:402`), and §41.1 (L2662–2663) lists `smt/store.rs validate_staged_frontier` and `smt/tree.rs verify, reachable`.
+  - No "§44.4" exists in the specification.
+- *Observed.*
+  - `validate_staged_frontier`, any `reachable` and any staged-frontier type are absent from Core, the SDK, the node and the formal models, at the tip and on main. `dsm/src/sofi/smt/` holds `fold.rs` and `mod.rs`.
+  - The store was deleted in `73f02048` (#956, 2026-09-21). Its message records the only trace of the ruling: "Owner ruling §44.4: replace the responsibility, not the dead implementation." It also gives the reason: "the vault head past its genesis needs the leaf PREIMAGES a later acquisition consumes — a VaultStateLeaf, a relationship leaf — and a node store returns leaf VALUES."
+  - That commit touched no specification. The corpus arrived afterwards (`ce08151b`, 2026-09-22) and still names the deleted functions.
+  - *What replaces it, trader side.* Stage 10 in `sofi_advance::resolve_pending_position` recomputes the post leaves from verified evidence (`dsm::sofi::validation::trader_post_states`). It refuses with "the post leaves do not recompute the installed root — nothing written", and writes the whole post tree (`economic_lineage::record_admitted_with_conn`). Nothing is staged before stage 7.
+  - *Vault side.* `sofi_vault_head::record_resolved_with_conn` keeps each selected generation's leaves. `tree_at_head` returns nothing unless the rebuilt root matches.
+- *Conflict.* §34 places two functions and a store that exist nowhere. The replacement keeps no unvalidated post tree and writes only leaves that recompute a validated root. That meets the purpose of the text but not its words. The ruling the deletion cites exists only in a commit message.
+- *Options.*
+  - (a) Amend §34, §31 stage 3 and §41.1 to describe the current mechanism. Write the deletion ruling into the specification in the owner's words, then re-extract the row. *Requires:* no code, plus named mutation tests that go red when either root check is removed.
+  - (b) Rebuild the staged node store. *Requires:* a Core SMT store, SDK tables, and wiring at stages 7 and 10. The deletion's reason still applies: such a store returns leaf values, not the preimages later trades need.
+  - (c) Retire the row as code placement rather than a protocol rule. §34 still needs the edit.
+- *Proposed.* (a).
+
+**A9. Where the transfer nonce lives: MR-SOFI-0283 (Partial).**
+- *Requirement.* "A transfer nonce, where an operation has one, stays in the operation bytes."
+- *Spec.*
+  - §39 item 4 (L2411): "A transfer nonce, where an operation has one, stays in the operation bytes, where it is already hashed."
+  - §43.1 (L2763–2764): "The seam change removes the entropy parameter, puts the one derived value into the relationship tip and both receipt hashes, keeps the transfer nonce in the operation bytes, and meets Section 39."
+- *The ruling in force.* §6.71, owner, 2026-10-02: "the signed transfer keeps only what admission needs (recipient, amount, policy commit, authority policy) and a salted commitment to the rest". §6.71 adds: "The specification's wording predates the ruling." No specification records it.
+- *Observed.*
+  - `dsm::types::operations::TransferTerms` holds `token_id`, `nonce`, `mode`, `memo` and `salt`. Its commitment is a hash under `DSM/transfer-terms/v1`, and `open` accepts only terms that match it.
+  - `Operation::Transfer` carries `terms_commitment` and no nonce.
+  - The recipient spends the opened nonce (`recipient_dispatch`, `relationship_nonce_hash`).
+  - Tests: `terms_that_differ_in_anything_do_not_open_the_transfer` and `a_transfer_operation_carries_no_term_in_the_clear`.
+- *Conflict.* Read literally, L2411 is broken: the nonce is bound into the operation bytes by the salted commitment, but it is not in them. Read for §43.1's purpose, it holds: the nonce is hashed with the operation and is not used as transition entropy.
+- *Options.*
+  - (a) Amend §39 item 4 and §43.1 to record the ruling. For example: "a transfer nonce is bound into the operation bytes by the salted terms commitment, and is never carried in the clear". *Requires:* specification text only.
+  - (b) Put the nonce back in the clear. *Requires:* reversing §6.71 and a new canonical tag. It would also expose again a nonce that §6.67 shows is predictable from public identifiers.
+  - (c) Mark the row Met under the current wording. That is a derived document reinterpreting the specification, against the authority order.
+- *Proposed.* (a).
+
+**A10. Raising supply with a successor token: MR-SOFI-0323, MR-SOFI-0324, MR-SOFI-0325 (Missing), one decision.**
+- *Requirements.*
+  - MR-SOFI-0323: "The new token's policy commits a conversion rule releasing it one for one for the old token, and the old units taken in are locked for good."
+  - MR-SOFI-0324: "The conversion rule is part of the new token's anchored, locked policy and is not a DLV."
+  - MR-SOFI-0325: "The new token's policy names the old token's policy_commit, and that is the only link between them."
+- *Spec.*
+  - §53 (L3055–3063): "A native token's genesis supply never changes, so a token that needs more supply is a new token."
+  - "The new token's policy commits a conversion rule: it releases the new token for the old one, one for one, and the old units it takes in are locked for good."
+  - The rule is "anchored and locked like the rest of the policy. It is not a DLV: a DLV's owner could close it and take the old units back."
+  - "The new token's policy names the old token's policy_commit; that is the only link between them."
+  - §47's field table (L2882–2896) has no conversion or predecessor field, and no specification gives an encoding.
+  - Amendment S11 (L2917): "join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and … a different ERA identity."
+- *The ruling in force.* G7 (§5, owner, 2026-09-23): "no minting after genesis; `token.mint` removed, supply fixed at creation, ERA released from the reserve by the faucet with the release rule replaceable by emissions later …". It does not mention §53. §6.95 lists the open question "whether raising supply by a conversion rule is in beta".
+- *Observed.*
+  - `dsm::economic::token_policy::ReleaseRule` has `AllAtCreation` (0) and `Faucet` (1). The parser refuses any other code ("policy blob release rule {rule} is unknown").
+  - No field names another token's policy_commit.
+  - `LockToken` and `UnlockToken` are reversible.
+  - No conversion rule, conversion transition or predecessor link exists at the tip or on main.
+- *Conflict.* None with G7: §53 creates a new token with its own fixed supply and mints nothing. What is open is the scope, plus design the specification has not written:
+  - the blob encoding of the rule and of the old policy_commit;
+  - where the new token's unreleased supply sits, since all-at-creation leaves nothing to convert;
+  - where the old units are locked for good. A burn is not available where the old policy forbids burns, because "The mint and burn flag governs burns only" (§54, L3080);
+  - the single transition that locks the old units and releases the new ones.
+- *Options.*
+  - (a) Out of beta, recorded in §5, with the specification unchanged. The parser already refuses any unknown release rule.
+  - (b) In beta. The specification comes first: the §47 encoding, where the new supply sits, the permanent-lock sink, and the transition. Then:
+    - the parser and the Core verifier;
+    - provenance and peer-lineage support for credits sourced from a conversion;
+    - an `Operation` tag, proto and an SDK route;
+    - negative tests: release without a lock, a lock without a release, a ratio other than one, the wrong old commit, double use;
+    - the supply identity in the formal models.
+  - (c) Add only the policy field now. That commits a rule nothing executes, which is a stand-in, so this option is not available.
+- *Proposed.* (a). One consequence to note: by S11, ERA's move to DJTE after beta makes a new ERA identity. That is the first case §53 would serve, so §53's design falls due when DJTE is scheduled.
+
+#### B. What the G3 ruling covers, row by row
+
+**The ruling's record.** No verbatim owner text from 2026-09-23 survives. The only record is the §5 bullet written in #976 (`9f6205fc`, 2026-09-23); searches of the session transcripts found nothing older. Its words:
+
+> "**Out of beta, declared:** G3 (the candidate and guard state model). Owner direction, 2026-09-23: every kind of state rests on required base terms — a resource, a guard, a consumption key derived from parent and resource, and the consumed set — and specialized kinds (money, SoFi, offline, and later ones such as game state) are built on those base terms and added by software update; beta runs on the existing specialized mechanisms, and nothing added for beta may conflict with the base terms; …"
+
+Each item below turns on one of four clauses:
+- (i) what is out: "G3 (the candidate and guard state model)";
+- (ii) "required base terms — a resource, a guard, a consumption key derived from parent and resource, and the consumed set";
+- (iii) "beta runs on the existing specialized mechanisms";
+- (iv) "nothing added for beta may conflict with the base terms".
+
+**Facts common to the ten rows.**
+- *§59 defines the general construct as G3's own parts.* Explainer L2656–2658: "It is not code that runs. It is a guard family (Section 38) attached to a precommitted candidate space (Section 34) over linear resources (Section 41). The reader has already seen the whole mechanism; this section only names it."
+- *Not in G3's lists.* None of the ten rows is in G3's row lists (§4, G3).
+- *Beta's instances came after the ruling.* They are escrow vaults (SoFi S21, 2026-10-04 and 05) and computed escrow (DSM A13 and SoFi S22, 2026-10-06). A13 places its program under §59 by name (L2814): "A computed outcome is therefore one more guard over committed inputs (§59): its predicate is "`P` maps this transcript to this branch", and its static budget is the one the transcript bound gives it." And at L2818: "This amends §59".
+- *No general construct exists.* A `git grep` at the tip and on main finds none of `SmartCommitment`, `GuardFamily`, `CandidateSpace`, `evaluation_budget`, `static_budget`, `PredicateFamily`, `kappa_res`, `consume_resource` or `ResourceDescriptor`.
+- *What each row's §8 note says today.* Each ends: "Out of beta if the G3 ruling (2026-09-23: beta runs on the existing specialized mechanisms) covers this general construct; owner to confirm."
+
+**B1. MR-DSM-0177 (Partial). Covered: yes.**
+- *Requirement.* "A smart commitment is a bounded deterministic predicate over committed inputs: a guard family attached to a precommitted candidate space over linear resources. There is no contract virtual machine."
+- *Spec.* L2651, L2656–2658.
+- *Mechanism.* The general smart-commitment construct.
+- *Why covered.* §59 says the construct is clause (i)'s model, and that the section "only names it".
+- *Code today.* Escrow only: `dsm::sofi::escrow::verdict_occupying`, and `dsm::sofi::computed::{OutcomeProgram, ProgramRegistry, verify_transcript}`.
+- *Remains for beta.* Nothing. The escrow instances answer to clause (iv).
+
+**B2. MR-DSM-0178 (Partial). Covered: yes.**
+- *Requirement.* "A smart commitment binds input and output deltas, invariants, external commitments, encumbrances, intent bounds and evaluation budget."
+- *Spec.* L2654: "C = {∆in, ∆out, invariants, external commitments, encumbrances, intent bounds, budget}."
+- *Mechanism.* The content of the general commitment object.
+- *Why covered.* The tuple is the content of clause (i)'s candidate. Clause (iv) protects the base terms, not this tuple.
+- *Code today.* `dsm::sofi::wire::objects::{EscrowTerms, ComputedEscrowTerms}` bind Y, each branch's output, P and the session keys. They do not bind input deltas, invariants, intent bounds or a declared budget.
+- *Remains for beta.* Nothing, because beta escrow terms answer to S21 and A13. If the owner wants the full tuple on beta escrow, that needs a canonical object binding all seven parts and a verifier check.
+
+**B3. MR-DSM-0179 (Partial). Covered: partly.**
+- *Requirement.* "A smart commitment may use only checked integer arithmetic and comparison, Boolean composition, hashing and signature verification, SMT inclusion and non-inclusion, membership in committed bounded sets, and iteration with a cardinality fixed at commit time."
+- *Spec.* L2659–2671.
+- *Mechanism.* The guard language: what a guard predicate may compute.
+- *Why only partly.*
+  - The general language is a property of Γ, so clause (i) covers it.
+  - The ruling's words do not reach a guard the specification added after it and placed under §59 by name: A13's computed `P`. A13 says `P` "keeps no state between evaluations, calls nothing, reads no clock and fetches nothing". It never restates §59's operation list.
+- *Code today.*
+  - The signed-escrow guard uses hashing, signatures and membership in the committed signer set.
+  - `OutcomeProgram` is a Rust trait, registered as `Arc<dyn OutcomeProgram>` in `ProgramRegistry`. Its limits are its documentation.
+- *Remains for beta.* A decision on the computed `P`, one of:
+  - (a) a bounded representation for `P`: an intermediate form and an interpreter over §59's operations, with iteration fixed at commit;
+  - (b) an amendment saying a program registered in the verifier meets §59 on A13's terms. Those terms are that the registry is closed by the build, each program is pinned by hash at lock, and the transcript bound is its budget. *Consequence of (b):* determinism and termination become a review obligation on each registered program, not a property that holds by construction.
+- *Proposed.* (b), in the owner's wording. (a) is a language and an interpreter, and no beta flow needs one.
+
+**B4. MR-DSM-0180 (Partial). Covered: partly.**
+- *Requirement.* "A smart commitment cannot use recursion, dynamic dispatch, or unbounded loops, and every predicate family declares a static evaluation budget."
+- *Spec.* L2673–2674.
+- *Mechanism.* The guard language's termination bound and its static budget.
+- *Why only partly.* For the same reason as B3. A13 supplies the computed instance's budget, the transcript bound. It does not exclude recursion or loops inside `P`.
+- *Code today.* `TRANSCRIPT_MAX_ENTRIES` is enforced by `verify_transcript`. Nothing stops a registered program from recursing or looping, and no family declares a budget as data.
+- *Remains for beta.* B3's decision. Under B3 (a), it also needs a budget field per family, checked by Core.
+
+**B5. MR-DSM-0181 (Partial). Covered: partly.**
+- *Requirement.* "Where a contract would use time, a smart commitment uses an iteration budget that decrements only on accepted local steps; there are no clocks."
+- *Spec.* L2704–2706.
+- *Mechanism.* Two parts: the time-lock guard (the iteration budget β), and the rule that there are no clocks.
+- *Why only partly.* The β time-lock is a branch of a guard family, so clause (i) covers it. "There are no clocks" is a DSM-wide rule the ruling does not touch. It holds: A13 says "No clock. A match that is not finished waits."
+- *Code today.* `dsm::ccb::state::VaultStateV2::iteration_budget` is encoded and decoded. Only the decoder and tests build it, and nothing reads or decrements it. No time-lock branch exists.
+- *Remains for beta.* The no-clock half, which holds.
+- *Consequences of the covered half.*
+  - There is no time-lock in beta. SoFi L1526: "A refund after a deadline needs an iteration budget (Explainer §59) and is not part of this amendment." A beta escrow whose verdict never comes holds its stakes until the verdict does come.
+  - The `iteration_budget` slot carries a mechanism nothing builds. Whether it stays in the vault-state encoding is the owner's call, and removing it is a wire change.
+
+**B6. MR-DSM-0182 (Partial). Covered: yes.**
+- *Requirement.* "A commitment can reference only what was committed when it was created (candidate space, guards, external commitments by hash); there is no open-ended composition."
+- *Spec.* L2709–2711.
+- *Mechanism.* The closure of a commitment's references.
+- *Why covered.* The three things it names are clause (i)'s model.
+- *Code today.* The escrow instance already meets it: its terms are content-addressed (`terms_address_of`), Y is referenced by hash, its cells are derived (`verdict_cell_of`, `match_cell_of`), and P is referenced by hash.
+- *Remains for beta.* Nothing.
+
+**B7. MR-DSM-0183 (Partial). Covered: yes.**
+- *Requirement.* "Every outcome of a commitment is bounded by its committed candidate space and static budget, so it can be enumerated before acceptance."
+- *Spec.* L2713–2716.
+- *Mechanism.* Being able to enumerate a commitment's outcomes, which follows from its candidate space and budget.
+- *Why covered.* It follows from clause (i)'s candidate space. In the computed instance, `P`'s answer "counts only when it names a branch the terms precommitted" (L2813).
+- *Code today.* `dsm::sofi::computed`, `dsm::sofi::escrow::verdict_occupying` and `dsm::sofi::resolution::effect_of`.
+- *Remains for beta.* Nothing beyond B3. Whether `P` terminates rests on that decision.
+
+**B8. MR-DSM-0265 (Partial). Covered: partly.**
+- *Requirement.* "Resource-key derivation and descriptor injectivity, not covered by the models, are discharged by the derived-keys-only rule and the implementation enforcement skeleton."
+- *Spec.* §81 (L4222–4225): "It does not exercise resource-key derivation or descriptor injectivity; those are discharged by the derived-keys-only rule and the implementation enforcement skeleton of the formal paper, not by the model checker."
+- *Mechanism.* Two parts: the enforcement skeleton, and the derived-keys-only rule.
+- *Why only partly.*
+  - The skeleton, `tools/dsm_guarded_reference::{verify_candidate, apply_candidate}`, works over candidates, Γ and Σ, and G3's own headline lists "no κres derivation". So the skeleton is covered.
+  - The derived-keys-only rule is clause (ii)'s "a consumption key derived from parent and resource", which the ruling calls required and clause (iv) protects. The ruling binds that rule; it does not remove it. A15 says the same for lineages (L2152): "The consumption key stays derived from the parent."
+- *Code today.*
+  - SoFi's registration keys are derived (`dsm::sofi::registration`).
+  - The skeleton is a separate workspace that is "deliberately NOT wired into the production state machine and NOT a member of the root DSM workspace" (its `Cargo.toml`). It is not on the board.
+  - `canonical_encode_injective` in Lean covers the model's encoding only.
+- *Remains for beta.*
+  - An inventory of every consumption key on beta paths: SoFi's Kful and Kroot, the successor cells, the economic register, the native reserve's generations, and relationships.
+  - For each key, a negative test that a key not derived from its parent and resource names nothing.
+  - An injectivity argument for that key's input encoding.
+
+  Whether this already holds outside SoFi was not checked.
+
+**B9. MR-DSM-0267 (Partial). Covered: partly.**
+- *Requirement.* "A production implementation must faithfully refine the abstract model; conformance testing and the enforcement skeleton tie the code to it."
+- *Spec.* §81 (L4234–4236).
+- *Mechanism.* Refinement from model to code, for each of §81's artifacts.
+- *Why only partly.* Only the guarded model (`DSMGuardedTripwire.lean`, `DSM_Guarded*.tla`) is clause (i)'s model. The ruling's words do not reach the relationship-scoped, storage-cell, SoFi and recognition models. Beta runs on what those models describe (clause (iii)).
+- *Code today.*
+  - `tools/vertical_validation` replays TLC Tripwire traces into `decide_prepare` and `decide_confirm`, and DSM.tla traces into the implementation.
+  - Its runner registers `supports_trace_replay: false` for OfflineAnchorSingleAppliance, ReceiptWriteSet, NativeReserveRelease, RouteChain, SofiSuccessorCells (three configurations), SofiFulfillment (two) and DSM_bilateral_liveness.
+  - Outside its own sources, nothing runs `DSM_Guarded*`.
+- *Remains for beta.* Code-level refinement checks for the route-chain and storage-cell, SoFi and recognition models: either trace replay into the implementation, or a Rust-to-model correspondence with mutation controls.
+
+**B10. MR-DSM-0316 (Missing). Covered: no.**
+- *Requirement.* "Phase C for a shared lineage with no owner (the native reserve): a fresh reader establishes its head from a recursive validity proof of its history that commits to the external finality facts it relied on, plus the live ByteCommit facts it needs, fetching no historical transition, with work independent of the lineage's age."
+- *Spec.* DSM Amendment A15 (L2155), and its refinement (L2159): "the phase-C end state above applies only there".
+- *Mechanism.* A proof backend for reading a shared lineage. It is not a state component.
+- *Why not covered.*
+  - A recursive validity proof is not one of clause (ii)'s base terms, nor a part of clause (i)'s model, and G3 does not list the row.
+  - The ruling predates A15 (2026-10-07). Clause (iii) says what beta runs on. It does not rule out an end state that A15 later set for one of those mechanisms, the native reserve.
+- *Code today.* `dsm::shared_lineage::SharedLineageValidity`'s doc: "No backend exists yet; nothing implements this until a proof does." Nothing implements it, at the tip or on main. The reserve runs phase A (`dsm::economic::native_reserve::EstablishedReserve`).
+- *Remains for beta.* Whether phase C is in beta is the decision §6.101 A4 already briefs (`docs/storage-open-decisions`, `98c169cb`), not repeated here. That brief covers the ByteCommit ancestry accumulator (MR-DSM-0317; Storage §24 item 15, which is Open), and proposes "(c) for beta, recorded as the native reserve's known gap".
+- *Proposed.* The G3 reason leaves this row's §8 note at the next pass, and the row's beta status follows §6.101 A4.
+
+**What this asks of the owner on G3.** The ten rows split four ways:
+- **Confirm out of beta, with nothing left:** B1, B2, B6, B7.
+- **Confirm the covered half and decide the remainder:**
+  - B3 and B4: the computed `P`.
+  - B5: the `iteration_budget` slot. The no-clock half stays and holds.
+  - B8: the inventory of consumption keys.
+  - B9: refinement checks for the models that are not guard models.
+- **Not covered:** B10, which follows §6.101 A4.
+
+#### C. The offline SoFi door, and the register incarnation
+
+**C1. The offline SoFi door: MR-DSM-0219 (Partial).**
+- *Requirement.* "A market trade is online: it needs the vault's storage set reachable, and SoFi does not inherit the offline-bearer path."
+- *Spec.*
+  - Explainer §63 (L3189–3192): "Two costs are explicit in the specification. First, a market trade is online: it needs the vault's storage set reachable, so SoFi does not inherit DSM's offline-bearer path. … Both are liveness properties. Neither lets reserves move without a completed bilateral exchange."
+  - SoFi §4 (L436): "SoFi settles five operations, all online."
+  - SoFi principle 10 (L96–97): "Online and offline behave the same. The guarantees come from the bytes, not from the path the bytes travel". This is read as a statement about where guarantees come from, not as permission for SoFi to run offline. The owner should confirm that reading.
+- *Observed.*
+  - *The door.* `dsm::bilateral::offline::offline_operation` refuses two things: bytes that do not decode, and an `Operation::Transfer` that is not offline-bearer. (`operation_requires_offline_bearer` holds only for a Transfer whose authority policy is `OfflineBearerRequired`.) Every other variant passes, including SofiSetup, SofiVaultCreate, SofiFulfill, EscrowVaultCreate and the Dlv* variants. Its one test, `an_online_tier_transfer_is_not_an_offline_operation`, has no SoFi case.
+  - *SA-61.* `decide_prepare` then refuses the bearer Transfer itself (owner, 2026-10-18: "Disable the vulnerable acceptance path until the complete proof is implemented."). After that, the receiver's prepare admits exactly the variants that are not Transfers, SoFi included.
+  - *Receiver.* `dsm_sdk::bluetooth::bilateral_ble_handler::handle_prepare_request` calls the door, then `decide_prepare` (keys, signature, tip), and persists the proposal as a `PendingUserAction` session. The accept path does not check the operation kind.
+  - *Sender.* `prepare_bilateral_step` repeats the door's one check inline instead of calling Core.
+  - *Producers.* No SoFi or escrow route reaches BLE: `sofi_routes`, `sofi_flow` and `escrow_routes` hold no BLE reference, at the tip or on main.
+  - *Downstream.* Read from source, not run:
+    - SofiVaultCreate and EscrowVaultCreate would fail conservation in `DeviceState::advance`, because the receiver's deltas are empty.
+    - SofiSetup and SofiFulfill would fail `dsm::sofi::signature::verify_operation`, which checks against the receiver's own key.
+    - No refusal was found for the Dlv* variants.
+- *Conflict.* The specification says SoFi does not inherit the offline-bearer path, and the door does not apply that rule. An honest app never proposes a SoFi step over BLE. A hostile pinned contact can still:
+  - have one held as `PendingUserAction`;
+  - if the user accepts, have the receiver sign σ_B over its commitment.
+
+  The step then fails to commit, for the incidental reasons above (unverified). For Dlv*, no reason was found.
+- *Options and their architectural consequences.*
+  - (a) An exhaustive allowlist in Core. `offline_operation` becomes a `match` with no wildcard arm: it admits what the offline protocol carries and refuses the rest by name, the SoFi and Dlv* variants citing SoFi §4 and Explainer §63. The sender's inline copy is replaced by a call to it.
+    - *Makes true:* the offline half of MR-DSM-0219 holds at the door, before any session row or σ_B exists. Core alone classifies what BLE carries, and a new `Operation` variant does not compile until someone classifies it.
+    - *The owner fixes the membership.* The candidates:
+      - the bearer Transfer, which SA-61 refuses anyway until the proof exists;
+      - `CreateRelationship`, for recovery re-establishment, which has no production caller (recovery is out of scope);
+      - `Noop`, which `tests/ble_smoke.rs` and the BLE bridge's test module send. Leaving it out means those tests carry another operation. Leaving it in admits an operation that only tests send.
+    - *Requires:* a Core test refusing each SoFi and Dlv* variant at the door; an SDK test that a SoFi prepare through `handle_prepare_request` is refused with no session row written; and a mutation of the refusing arm. No specification text, no wire change.
+    - *Scope.* It touches the door, not the SA-61 bearer proof.
+  - (b) Add the SoFi variants, and the Dlv* ones, to the refused set. *Requires:* the same tests as (a). It closes SoFi, but a new variant still passes by default.
+  - (c) Defer it to the offline round. The §8 note files this row under offline hardware, done last (owner, 2026-10-26). *Requires:* no code. The receiver keeps holding SoFi proposals from pinned contacts, and keeps signing over them, while the refusal stays incidental.
+- *Proposed.* (a), with the owner fixing the membership. The specification already decides the behaviour, since SoFi is online, so this refusal is the specified behaviour and not a stand-in for unbuilt work. Whether it belongs to the offline round the owner placed last is the owner's call.
+
+**C2. The register incarnation.** §6.101 part B on `docs/storage-open-decisions` (`98c169cb`) briefs it, and that branch is not yet in this one; the brief is not repeated here. The question as it stands there (its decision 5): "B, the incarnation: the proposed reading, under which a handover keeps `S` and a loss ends it until §12.6 exists; or reading B, with §12.6 built first." Its consequences, in brief:
+- *The proposed reading.* Beta survives no register loss without a reprovision. At a loss, every vault's cells, the native reserve and SoFi routing stop, and the pinned set changes with an app release.
+- *Reading B.* Everything keeps routing across a replacement. But until §12.6 is built, a rebuilt leader's empty register reads a cell Open, so a second value can become final where one already was.
+
+#### Decisions for the owner, in one list
+
+1. A1, the index: (a), u online and hash adjacency on a relationship chain.
+2. A2, perpetuals: (a), out of beta, with the five design decisions recorded.
+3. A3, the grant's total: (a), each kind's cap; A11's sentence reworded by the owner.
+4. A4, pair restrictions: (a), the default only in beta.
+5. A5, checks outside the constructor: (a), SDK preflight for early rejection with Core as the authority, as in question 9's ruling; rule 5 amended to match.
+6. A6, the SDK adapter: (b), setup-body construction and the leaf cache's root move into Core.
+7. A7, publishing F: (a), F's content object put only after Valid, before stage 6.
+8. A8, the staged tree store: (a), §34, §31 and §41.1 amended to the current mechanism, and the deletion ruling written down.
+9. A9, the transfer nonce: (a), §39 and §43.1 amended to record the 2026-10-02 ruling.
+10. A10, raising supply: (a), out of beta, due when DJTE is scheduled.
+11. B, G3: confirm B1, B2, B6 and B7 out; for B3 and B4, (b), the registered-program amendment; B5's `iteration_budget` slot, keep or remove; B8's key inventory and B9's refinement checks, in beta or not; B10, not G3, and it follows §6.101 A4.
+12. C1, the offline SoFi door: (a), an exhaustive Core allowlist; its membership; and whether it waits for the offline round.
+13. C2, the register incarnation: §6.101 decision 5.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
