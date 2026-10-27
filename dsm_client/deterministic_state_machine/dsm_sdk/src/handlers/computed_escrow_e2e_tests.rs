@@ -949,8 +949,10 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
 /// the setup's nonce; only against a counterpart vault that mirrors its own
 /// stake — the same match and the same amount; and it derives no session key
 /// while it is locked. Each refusal moves nothing and keeps no match. A
-/// counterpart's terms are its own: one that keeps this match's table and
-/// branches and names another `Y` binds another match cell, and is refused.
+/// counterpart's terms are its own, so each mirror check refuses on its own:
+/// a vault that is not the opponent's, one under another `Y` that keeps this
+/// match's table and branches, one in another token, one whose branches do
+/// not mirror, one no longer Active and one holding another amount.
 ///
 /// MUTATION CONTROL: dropping the session-key comparison from `create`, or the
 /// commitment or amount check from `mirrors`, turns this red.
@@ -1043,6 +1045,102 @@ async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_
         Ok(..) => panic!("a locked wallet derived a session key"),
     }
     p.b.enter();
+
+    // Each mirror check refuses on its own. A vault of B's own under A's
+    // terms is not the opponent's.
+    let small = whole_era(1);
+    let (bs_own, _) = computed_flow::create_vault(
+        &p.b.router().core_sdk,
+        &set(),
+        (p.b.genesis, p.b.device_id),
+        &honest,
+        era(),
+        small,
+    )
+    .await
+    .expect("B's vault under A's terms");
+    let b_mid = balance(&p.b, &era());
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(bs_own)).await,
+        "not the expected player's",
+    );
+    // A vault of A's whose a-wins branch pays B does not mirror the match.
+    let crossed = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest
+            .branches()
+            .iter()
+            .map(|branch| match branch.label() {
+                label if label == dsm::sofi::wire::COMPUTED_LABEL_A_WINS => {
+                    dsm::sofi::wire::ComputedBranch::new(label, p.b.genesis, p.b.device_id)
+                }
+                _ => branch.clone(),
+            })
+            .collect(),
+    )
+    .expect("terms whose a-wins pays B");
+    // A vault of A's under this match's terms in another token A holds.
+    let tkn = super::node_e2e_tests::create_token(&p.a, "TKN", 10_000).await;
+    let other_token = dsm::sofi::wire::ComputedEscrowTerms::new(
+        tkn,
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms in another token");
+    p.a.enter();
+    let mut hostile = Vec::new();
+    for (terms, token, amount) in [(&crossed, era(), small), (&other_token, tkn, 1)] {
+        let (vault, _) = computed_flow::create_vault(
+            &p.a.router().core_sdk,
+            &set(),
+            (p.a.genesis, p.a.device_id),
+            terms,
+            token,
+            amount,
+        )
+        .await
+        .expect("A's hostile vault");
+        hostile.push(vault);
+    }
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[0])).await,
+        "branches are not this match's mirrored",
+    );
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[1])).await,
+        "bound to another match",
+    );
+    // A stake A withdrew and took back is no longer Active.
+    let third = setup(&p, [0x73; 32], &teams);
+    let withdrawn = lock(&p.a, &p.b, &third, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock in a third match");
+    p.a.enter();
+    let voided = computed_flow::withdraw(&p.a.router().core_sdk, &set(), &withdrawn.match_cell)
+        .await
+        .expect("A withdraws");
+    assert_eq!(voided.final_outcome(), Some(b"void".to_vec()));
+    collect(&p.a, &withdrawn.vault_id).await;
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &third,
+            MatchSide::B,
+            stake,
+            Some(withdrawn.vault_id),
+        )
+        .await,
+        "no longer Active",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_mid,
+        "no refused lock moved B's ERA"
+    );
 
     // The mirrored stake locks.
     lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(a.vault_id))
