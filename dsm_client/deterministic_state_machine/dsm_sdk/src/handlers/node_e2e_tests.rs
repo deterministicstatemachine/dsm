@@ -1428,27 +1428,7 @@ async fn trade_whose_position_is_taken(
     };
     let pair = position_cells(set, &p.b.genesis, &p.b.device_id, q, &root)
         .expect("B's next position pair");
-    let rival = {
-        p.b.enter();
-        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
-        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
-        dsm::sofi::signature::sign_resolution_claim(
-            dsm::sofi::wire::SofiResolutionClaim {
-                genesis: p.b.genesis,
-                device_id: p.b.device_id,
-                position: q,
-                fulfillment_id: [0x77; 32],
-                realize_root: [0x78; 32],
-                void_root: root,
-            },
-            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
-            att_a,
-            &sk,
-        )
-        .expect("B signs its own claim")
-        .encode()
-    };
+    let rival = claim_of_another_fulfillment(p, q, &root);
     let taken = crate::sdk::route_seats::write_recorded(
         set,
         pair.root().routed(),
@@ -1486,30 +1466,58 @@ async fn trade_whose_position_is_taken(
     );
 
     // Past its own flow, B writes F and its exercise itself.
-    write_past_the_taken_install(p, set, &pair, OwnHalf::Fulfillment).await;
+    write_past_its_own_flow(p, set, &pair, PairPart::Fulfillment).await;
     (q, root, pair)
 }
 
-/// The half of B's position pair B writes itself.
-enum OwnHalf {
+/// B's own signed claim at position `q` of a fulfillment other than any it
+/// trades with, over the root `root` it admitted below `q`: only B can sign
+/// a claim that occupies its `K_root(q)` (DSM Amendment A10, SoFi Amendment
+/// S20).
+fn claim_of_another_fulfillment(p: &Pair, q: u64, root: &[u8; 32]) -> Vec<u8> {
+    p.b.enter();
+    let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    dsm::sofi::signature::sign_resolution_claim(
+        dsm::sofi::wire::SofiResolutionClaim {
+            genesis: p.b.genesis,
+            device_id: p.b.device_id,
+            position: q,
+            fulfillment_id: [0x77; 32],
+            realize_root: [0x78; 32],
+            void_root: *root,
+        },
+        dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+        &pk,
+        att_a,
+        &sk,
+    )
+    .expect("B signs its own claim")
+    .encode()
+}
+
+/// What of B's position pair B writes itself.
+enum PairPart {
     /// `F` at `K_ful(q)`.
     Fulfillment,
     /// B's signed `C_q` at `K_root(q)`.
     Claim,
+    /// Nothing: B withholds its pair.
+    Withheld,
 }
 
 /// B's pending trade stopped at its install: another value is first at the
 /// leader of one of its pair's cells, so B's writer put nothing of the pair
-/// and wrote no exercise (storage spec §9 route chains, rule 5; SoFi §17.4).
-/// B then writes, past its own flow, the `half` of the pair still open and
-/// its exercise at every leg's key, built from the objects its trade
-/// published: what a trader that bypasses its own writer can put, and what
-/// every reader must judge.
-async fn write_past_the_taken_install(
+/// and wrote no exercise (storage spec §9 route chains, rule 5; SoFi §17.4),
+/// or the pair's leader refused the pair. B then writes, past its own flow,
+/// `part` of its pair and its exercise at every leg's key, built from the
+/// objects its trade published: what a trader that bypasses its own writer
+/// can put, and what every reader must judge.
+async fn write_past_its_own_flow(
     p: &Pair,
     set: &crate::sdk::storage_set::StorageSet,
     pair: &dsm::sofi::registration::PositionCells,
-    half: OwnHalf,
+    part: PairPart,
 ) {
     p.b.enter();
     let head = p.b.router().core_sdk.device_head().expect("B's head");
@@ -1581,38 +1589,46 @@ async fn write_past_the_taken_install(
         .expect("B signs its C_q")
         .encode()
     };
-    let written = match half {
-        OwnHalf::Fulfillment => {
+    // The half of the pair B writes, by its cell's own rule.
+    match part {
+        PairPart::Fulfillment => {
             let f_bytes = Publication::Fulfillment {
                 body: &fulfillment.body,
                 signature: &fulfillment.signature,
             }
             .object_bytes()
             .expect("F's envelope");
-            crate::sdk::route_seats::write_recorded(
+            let written = crate::sdk::route_seats::write_recorded(
                 set,
                 pair.fulfillment(),
                 &pair.keeps_fulfillment(),
                 &f_bytes,
             )
             .await
+            .expect("the nodes keep whatever they are given");
+            assert_eq!(
+                written.leader(),
+                crate::sdk::route_seats::AtLeader::Link,
+                "K_ful(q) takes B's F"
+            );
         }
-        OwnHalf::Claim => {
-            crate::sdk::route_seats::write_recorded(
+        PairPart::Claim => {
+            let written = crate::sdk::route_seats::write_recorded(
                 set,
                 pair.root().routed(),
                 &pair.root().keeps(),
                 &claim,
             )
             .await
+            .expect("the nodes keep whatever they are given");
+            assert_eq!(
+                written.leader(),
+                crate::sdk::route_seats::AtLeader::Link,
+                "K_root(q) takes B's C_q"
+            );
         }
+        PairPart::Withheld => {}
     }
-    .expect("the nodes keep whatever they are given");
-    assert_eq!(
-        written.leader(),
-        crate::sdk::route_seats::AtLeader::Link,
-        "the open half of the pair takes B's value"
-    );
     let exercise =
         dsm::sofi::exercise::exercise_from_objects(&request.objects(), &claim, &evidence)
             .expect("B's exercise");
@@ -1649,27 +1665,7 @@ async fn a_payment_at_a_position_another_claim_holds_is_lost_and_puts_nothing() 
     };
     let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
         .expect("B's next position pair");
-    let rival = {
-        p.b.enter();
-        let (pk, sk) = crate::sdk::signing_authority::current_keypair().expect("B's AK");
-        let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
-        dsm::sofi::signature::sign_resolution_claim(
-            dsm::sofi::wire::SofiResolutionClaim {
-                genesis: p.b.genesis,
-                device_id: p.b.device_id,
-                position: q,
-                fulfillment_id: [0x77; 32],
-                realize_root: [0x78; 32],
-                void_root: root,
-            },
-            dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
-            &pk,
-            att_a,
-            &sk,
-        )
-        .expect("B signs its own claim")
-        .encode()
-    };
+    let rival = claim_of_another_fulfillment(&p, q, &root);
     let rival_write = crate::sdk::route_seats::write_recorded(
         &set,
         pair.root().routed(),
@@ -2649,6 +2645,96 @@ async fn an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_
     head_agrees_with_admitted_root(&p.b, &[m.era, m.tkn]);
 }
 
+/// MR-STOR-0134, the walk's relay racing for a withheld pair. B trades with
+/// its pair's leader refusing the pair, then writes its exercise at the
+/// vault's key itself and withholds the pair. When A closes the vault, its
+/// walk relays B's pair from the `C_q` the exercise carries; between the
+/// relay's read of `K_root(q)`, which found it open, and its put, B's own
+/// claim of another fulfillment lands first at that cell's leader. The
+/// relay's write is taken there. The walk does not stop on it as on a leader
+/// that did not answer: it reads the pair again, finds B's `F` lost at `q`,
+/// passes over the key, and A closes the vault with its own reserve, B's
+/// trade having moved nothing.
+/// MUTATION CONTROL: answering the taken pair as a leader that did not take
+/// it fails A's close; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_claim_landing_first_while_the_walk_relays_a_withheld_pair_loses_the_position() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+    write_past_its_own_flow(&p, &set, &pair, PairPart::Withheld).await;
+
+    // B's claim of another fulfillment is armed to land first at K_root(q)'s
+    // leader, just before the next put there naming that cell.
+    let rival = claim_of_another_fulfillment(&p, q, &root);
+    let entry = dsm::route_chain::leader_copy(pair.root().routed(), &rival);
+    p.nodes.race_next_put(
+        &pair_leader,
+        crate::test_support::rival::rival_put(
+            &set,
+            &pair_leader,
+            (entry.namespace.clone(), entry.key, entry.encode()),
+        ),
+    );
+
+    p.a.enter();
+    let era_before = balance(&p.a, &m.era);
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert!(
+        !p.nodes.rival_armed(&pair_leader),
+        "B's claim landed while A's walk relayed the pair"
+    );
+    assert_eq!(
+        balance(&p.a, &m.era),
+        era_before + 100,
+        "A closed with its own reserve: B's trade moved nothing"
+    );
+    let (own_a, parents_a) = standing_of(&p.a);
+    let ctx = VerifierContext::new(&set, Some(own_a), parents_a.as_ref()).expect("a verifier");
+    let registration = ctx
+        .verifier()
+        .read_registration(&p.b.genesis, &p.b.device_id, q, &root)
+        .expect("read")
+        .expect("decided");
+    assert!(
+        matches!(
+            registration.registration(),
+            Registration::NeverRegistered { .. }
+        ),
+        "B's F is lost at q to its own other claim: {:?}",
+        registration.registration()
+    );
+}
+
 /// SoFi Amendment S25, MR-SOFI-0266: a relay completes a registered
 /// fulfillment whose hops are not final from nothing the trader carries. B
 /// trades with the leader of the vault's first key refusing writes there, so
@@ -3621,7 +3707,7 @@ async fn a_position_reads_the_same_before_and_after_a_precommit_is_published() {
     // exercise itself, behind F_a.
     let stopped = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 10))).await;
     assert!(!stopped.success, "the trade stops at its taken position");
-    write_past_the_taken_install(&p, &set, &pair, OwnHalf::Claim).await;
+    write_past_its_own_flow(&p, &set, &pair, PairPart::Claim).await;
     let held = {
         let (own, parents) = standing_of(&p.b);
         let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");

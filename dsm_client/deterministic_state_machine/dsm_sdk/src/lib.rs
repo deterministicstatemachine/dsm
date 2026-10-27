@@ -130,6 +130,7 @@ pub(crate) mod test_support {
     mod nodes_tests;
     pub mod one_device;
     pub mod receipts;
+    pub mod rival;
     pub mod two_device;
 }
 #[cfg(test)]

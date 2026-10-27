@@ -357,6 +357,69 @@ async fn a_release_beaten_to_the_reserve_leader_is_recorded_taken() {
     assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
 }
 
+/// MR-STOR-0134, the faucet's own race. Another claimant's release lands at
+/// the leader of the reserve's first successor cell between this claim's
+/// walk, which found the cell open, and its write. The claim's write is taken
+/// there. The claim does not stop on it as on a leader that did not answer:
+/// it walks again, carries the other release's chain, which reached only the
+/// leader, to finality, and takes generation 2. Nothing of its own release
+/// for generation 1 is carried past that cell's leader.
+/// MUTATION CONTROL: answering the taken write as an unreachable leader fails
+/// the claim; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_landing_between_the_walk_and_the_write_moves_the_claim_on() {
+    use dsm::route_chain::RouteEntry;
+    let d = Device::start(0xAA).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let cell =
+        SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
+    let route = cell.routed().route();
+    let leader = String::from_utf8(route.leader().to_vec()).expect("member ids are UTF-8");
+    let (rival, rival_devid) = payout_release(&r0, [0x5F; 32]);
+    let entry = dsm::route_chain::leader_copy(cell.routed(), &rival);
+    d.nodes.race_next_put(
+        &leader,
+        crate::test_support::rival::rival_put(
+            &set,
+            &leader,
+            (entry.namespace.clone(), entry.key, entry.encode()),
+        ),
+    );
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert!(
+        !d.nodes.rival_armed(&leader),
+        "the other release landed during the claim"
+    );
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(recipient_of(&release_at(1).await), rival_devid);
+    assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a client of the set");
+    let held = client
+        .held_at(cell.routed().namespace(), cell.routed().key())
+        .await;
+    let past_the_leader = client
+        .members()
+        .iter()
+        .zip(&held)
+        .filter(|(member, _)| member.member_id().as_bytes() != route.leader());
+    for (member, values) in past_the_leader {
+        let values = values.as_ref().expect("every member answers");
+        assert!(
+            values
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .all(|entry| entry.value == rival),
+            "{} holds a generation-1 release other than the one that won",
+            member.member_id()
+        );
+    }
+}
+
 /// The route claims for the device that makes the request, and for no other:
 /// a request naming another device is refused before anything is claimed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
