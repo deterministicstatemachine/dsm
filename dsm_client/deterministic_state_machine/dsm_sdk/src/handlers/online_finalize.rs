@@ -445,9 +445,9 @@ mod tests {
     /// `receipts::tests::stripping_kyber_ct_b_leaves_sig_b_valid_and_wire_decodable`,
     /// which shows sig_b still verifies after the same deletion.
     ///
-    /// The gate itself is CORRECT and stays. What changed is the consequence:
-    /// this rejection is now recorded as `awaiting_valid_reply` rather than
-    /// leaving the step pinned at `submitted` with no reachable exit.
+    /// The gate itself is CORRECT and stays. Its refusal records nothing
+    /// (MR-DSM-0018): the step stays `submitted`, and a valid artifact for the
+    /// same commitment finalizes it.
     #[test]
     fn a_stripped_kyber_ct_b_is_rejected_by_the_live_gate() {
         let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);

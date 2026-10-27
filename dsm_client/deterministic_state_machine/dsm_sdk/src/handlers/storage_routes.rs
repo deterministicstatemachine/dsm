@@ -293,7 +293,7 @@ async fn finalize_from_countersign_delta(
     let bound = match bind_countersign_delta(&retained, &wire) {
         Ok(DeltaBinding::Bound(b)) => *b,
         Ok(DeltaBinding::Rejected { reason }) => {
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::DigestMismatch(reason);
         }
         Err(e) => {
@@ -361,7 +361,7 @@ async fn finalize_from_countersign_delta(
             // credited the transfer, so nothing is un-spent or reverted; the step
             // is simply marked as awaiting a VALID replacement artifact for the
             // same commitment, which can still finalize it.
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
         Err(e) => {
@@ -385,13 +385,13 @@ async fn finalize_from_countersign_delta(
         let reason = "countersign delta carries no recipient economic release — bare sig_b \
                       cannot finalize the sender"
             .to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     }
     let Ok(release_addr) = <[u8; 32]>::try_from(wire.recipient_economic_release_addr.as_slice())
     else {
         let reason = "recipient economic release addr is not 32 bytes".to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     };
     // Fetch the exact release bytes by content address (re-hash verified by
@@ -433,7 +433,7 @@ async fn finalize_from_countersign_delta(
         Ok(f) => f,
         Err(e) => {
             let reason = format!("recipient economic release refused: {e}");
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
     };
@@ -442,7 +442,7 @@ async fn finalize_from_countersign_delta(
     {
         let reason = "recipient economic release is bound to a different transition or recipient"
             .to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     }
     // The release's genesis must be the PINNED contact identity — otherwise a
@@ -454,7 +454,7 @@ async fn finalize_from_countersign_delta(
             let reason =
                 "recipient economic release names a genesis that is not the pinned contact's"
                     .to_string();
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
         Err(e) => {
@@ -473,7 +473,7 @@ async fn finalize_from_countersign_delta(
         }
         Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Mismatch(m)) => {
             let reason = format!("release does not match the registered economic root: {m}");
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
     }
@@ -528,7 +528,7 @@ async fn finalize_from_countersign_delta(
                     crate::util::text_id::encode_base32_crockford(&bound.b_parent_tip[..4]),
                     crate::util::text_id::encode_base32_crockford(&pinned[..4]),
                 );
-                park_awaiting_valid_reply(&proposal, &short, &reason);
+                log_refused_artifact(&short, &reason);
                 return CountersignOutcome::Rejected(reason);
             }
         }
@@ -675,30 +675,14 @@ async fn finalize_from_countersign_delta(
     }
 }
 
-/// Park a step whose delta proved nothing: awaiting a VALID replacement
-/// artifact for the same commitment. Not a rollback — see the caller.
-fn park_awaiting_valid_reply(
-    proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
-    short: &str,
-    reason: &str,
-) {
-    match crate::storage::client_db::mark_sender_proposal_awaiting_valid_reply(
-        &proposal.relationship_key,
-        &proposal.canonical_parent,
-    ) {
-        Ok(true) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained, step now awaiting a valid replacement artifact"
-        ),
-        Ok(false) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained; proposal status unchanged (already finalized, or never submitted)"
-        ),
-        Err(e) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained, but recording the awaiting-valid-reply state FAILED: {e}"
-        ),
-    }
+/// A delta that proved nothing records nothing (MR-DSM-0018): the step stays
+/// `submitted`, so a valid artifact for the same commitment still finalizes it,
+/// and the refused bytes are raw material, never a verdict on the transfer.
+fn log_refused_artifact(short: &str, reason: &str) {
+    log::error!(
+        "[storage.sync] ADR 0003 countersign delta {short}.. REFUSED: {reason} — nothing \
+         recorded; the step stays submitted for a valid artifact"
+    );
 }
 
 /// Build and sign the `RelationshipFinalizedV1` for a verified acceptance,
@@ -1416,6 +1400,38 @@ impl AppRouterImpl {
                 // again, under the state-machine lock.
                 if let Err(e) = self.core_sdk.enforce_policy_for_operation(&v.signed_op) {
                     failures.push(format!("split transfer {name}: {e}"));
+                    continue;
+                }
+                // The sender's A-side head this device pinned is state it holds,
+                // so a signed parent that is not that head (the genesis seed
+                // before any step) is refused here too, before prevalidation
+                // reads the sender's register. A pinned head that is already
+                // the signed child is a pair this device applied: the apply
+                // reports it as a duplicate. The apply pins the parent again,
+                // under the state-machine lock.
+                let pinned_head =
+                    match crate::storage::client_db::pinned_counterparty_a_head(&rel_key) {
+                        Ok(Some(pinned)) => pinned,
+                        // No row is a fresh relationship: its one tip both sides
+                        // derive is the genesis seed.
+                        Ok(None) => {
+                            dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                                &self_device,
+                                &sender_device,
+                            )
+                        }
+                        Err(e) => {
+                            failures.push(format!(
+                                "split transfer {name}: the sender's pinned head is unreadable: {e}"
+                            ));
+                            continue;
+                        }
+                    };
+                if v.receipt.parent_tip != pinned_head && v.receipt.child_tip != pinned_head {
+                    failures.push(format!(
+                        "split transfer {name}: the signed parent is not the sender's head this \
+                         device pinned"
+                    ));
                     continue;
                 }
 
@@ -2932,7 +2948,7 @@ mod tests {
     use crate::sdk::b0x_sdk::CountersignDelta;
     use crate::storage::client_db;
     use crate::storage::client_db::sender_proposal::{
-        get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
+        get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
         PROPOSAL_SUBMITTED,
     };
     use crate::test_support::two_device::Pair;
@@ -3026,7 +3042,7 @@ mod tests {
     /// redelivered honest delta is an idempotent no-op.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn a_poisoned_delta_parks_the_step_and_the_honest_delta_still_finalizes() {
+    async fn a_poisoned_delta_records_nothing_and_the_honest_delta_still_finalizes() {
         let p = Pair::boot(100, 0).await;
         let (honest, commitment) = step_with_reply(&p, 10).await;
         p.a.enter();
@@ -3046,8 +3062,8 @@ mod tests {
         }
         assert_eq!(
             status(&commitment),
-            PROPOSAL_AWAITING_VALID_REPLY,
-            "a rejected artifact parks the step; it is not a rollback"
+            PROPOSAL_SUBMITTED,
+            "a refused artifact records nothing: the step stays submitted"
         );
 
         // A-bytes this sender never retained: refused before any signature
@@ -3063,7 +3079,7 @@ mod tests {
             finalize_from_countersign_delta(&foreign_digest).await,
             CountersignOutcome::DigestMismatch(..)
         ));
-        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
 
         // sig_b is acceptance provenance only: a delta with no recipient
         // economic release cannot finalize the sender.
@@ -3074,7 +3090,7 @@ mod tests {
             }
             other => panic!("a delta without a release must be Rejected, got {other:?}"),
         }
-        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
 
         // The honest delta for the SAME step finalizes it.
         assert_eq!(
@@ -3127,7 +3143,7 @@ mod tests {
             ),
             other => panic!("a replayed release must be Rejected, got {other:?}"),
         }
-        assert_eq!(status(&second_commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&second_commitment), PROPOSAL_SUBMITTED);
         assert_eq!(
             finalize_from_countersign_delta(&second).await,
             CountersignOutcome::Finalized

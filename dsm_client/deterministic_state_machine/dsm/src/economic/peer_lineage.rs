@@ -654,6 +654,7 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
         EconomicValidationError::Provenance(p) => match p {
             P::GenesisReleasePolicy(failure)
             | P::TransferPolicy(failure)
+            | P::BurnPolicy(failure)
             | P::PeerTransitionNotValidated { failure, .. }
             | P::AcceptanceEvidence(failure)
             | P::OwnerLineage(failure)
@@ -661,6 +662,7 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
             | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
             P::GenesisReleaseInvalid(..)
             | P::AssetNotTransferable
+            | P::AssetNotBurnable
             | P::PeerDebitIsNotAnOnlineTransfer
             | P::NotAnOfflineUnload
             | P::PeerDebitNotAddressedToConsumer

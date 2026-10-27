@@ -1096,6 +1096,15 @@ pub fn advance_validated(
         crate::economic::provenance::check_transfer_policy(policy_commit, resolver)
             .map_err(EconomicValidationError::Provenance)?;
     }
+    // THE BURN CONJUNCT (DSM §61, MR-DSM-0191): no operation bypasses the
+    // asset's committed policy. The sender's route reads `burn_enabled` too;
+    // this is the check every verifier of the step runs.
+    if let Some(crate::types::operations::Operation::Burn { policy_commit, .. }) =
+        accepted.dsm_verified_operation()
+    {
+        crate::economic::provenance::check_burn_policy(policy_commit, resolver)
+            .map_err(EconomicValidationError::Provenance)?;
+    }
 
     // A SoFi operation cannot reach here — `verify_operation_write_set`
     // refuses it by name above — and if it ever did, "no DLV transition"
