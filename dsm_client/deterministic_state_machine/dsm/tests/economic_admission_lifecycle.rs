@@ -265,7 +265,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     };
     let (pk, sk) = trader().clone();
     let parent = reserve_genesis();
-    let reserve_id = parent.reserve_id;
+    let reserve_id = *parent.reserve_id();
     let generation = 1u64;
     let op = Operation::FaucetClaim {
         reserve_id,
@@ -362,7 +362,7 @@ impl ProvenanceResolver for OneTicket {
         generation: u64,
     ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
         let parent = reserve_genesis();
-        if *reserve_id != parent.reserve_id || generation != 1 {
+        if reserve_id != parent.reserve_id() || generation != 1 {
             return Err(PeerLineageFailure::Incomplete(format!(
                 "this fixture's walk reached generation 1 only, not {generation} of {reserve_id:?}"
             )));
@@ -1333,7 +1333,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
 
     // The witness of another operation than the one pending.
     let other = Operation::FaucetClaim {
-        reserve_id: reserve_genesis().reserve_id,
+        reserve_id: *reserve_genesis().reserve_id(),
         generation: 2,
     };
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &other);
@@ -1529,7 +1529,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let at_three =
         validate_boundary(&fx, &at_two, 3, &unload, &unload.witness).expect("the unload validates");
     assert_eq!(at_three.funded.len(), 1, "the unload's credit is funded");
-    assert_eq!(at_three.funded[0].amount, 100);
+    assert_eq!(at_three.funded[0].amount(), 100);
 
     // The same unload cannot fund a second credit: its source is consumed.
     let again = dsm::economic::write_set::build_boundary_write_set(

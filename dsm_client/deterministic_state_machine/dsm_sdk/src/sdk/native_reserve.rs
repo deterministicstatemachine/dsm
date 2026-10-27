@@ -197,7 +197,7 @@ fn next_state(
                 Err(refusal) => {
                     log::info!(
                         "[reserve] a release at generation {} does not succeed it: {refusal:?}",
-                        state.generation + 1
+                        state.generation() + 1
                     );
                     None
                 }
@@ -206,7 +206,7 @@ fn next_state(
         Err(refusal) => {
             log::info!(
                 "[reserve] bytes at generation {} are no release: {refusal:?}",
-                state.generation + 1
+                state.generation() + 1
             );
             None
         }
@@ -234,7 +234,7 @@ pub(crate) async fn read_ahead(
     log::info!(
         "[reserve] read {} successor cells ahead of generation {}",
         cells.len(),
-        from.generation
+        from.generation()
     );
     Ok(())
 }
@@ -244,9 +244,9 @@ pub(crate) async fn read_ahead(
 fn shared_genesis(genesis: &NativeReserveState) -> SharedGenesisV1 {
     SharedGenesisV1::new(
         LineageKind::Reserve,
-        genesis.reserve_id,
+        *genesis.reserve_id(),
         genesis.root(),
-        genesis.policy_commit,
+        *genesis.policy_commit(),
     )
 }
 
@@ -291,8 +291,8 @@ async fn read_named(
     candidates: &Candidates,
 ) -> Result<ReadAhead, DsmError> {
     let mut cells = Vec::new();
-    for (generation, root) in candidates.named_from(start.generation) {
-        let cell = cell_of_named_root(set, &start.reserve_id, &root, &start.storage_set_id)?;
+    for (generation, root) in candidates.named_from(start.generation()) {
+        let cell = cell_of_named_root(set, start.reserve_id(), &root, start.storage_set_id())?;
         // A cell this process already read final is read from what it
         // kept, and is not asked for again.
         if crate::sdk::final_reads::final_cell(&cell).is_none() {
@@ -303,7 +303,7 @@ async fn read_named(
     let window = &ReadWindow::new(READ_AHEAD_BYTES);
     let mut ahead = ReadAhead {
         cells: HashMap::new(),
-        through: start.generation,
+        through: start.generation(),
     };
     for chunk in cells.chunks(CELLS_AT_ONCE) {
         // Once a seat went unread for want of the window, a further read
@@ -312,8 +312,11 @@ async fn read_named(
             break;
         }
         let reads = futures::future::join_all(chunk.iter().map(|(cell, root, _)| async move {
-            let keep =
-                dsm::economic::native_reserve::named_successor_keeps(cell, &start.reserve_id, root);
+            let keep = dsm::economic::native_reserve::named_successor_keeps(
+                cell,
+                start.reserve_id(),
+                root,
+            );
             read_cell_within(seats, cell, &keep, window).await
         }))
         .await;
@@ -325,7 +328,7 @@ async fn read_named(
     log::info!(
         "[reserve] read {} named successor cells from generation {}",
         ahead.cells.len(),
-        start.generation
+        start.generation()
     );
     Ok(ahead)
 }
@@ -359,8 +362,8 @@ pub fn walk_reserve(
             let mut candidates = lineage_discovery::discover(
                 set,
                 LineageKind::Reserve,
-                &start.reserve_id,
-                start.generation,
+                start.reserve_id(),
+                start.generation(),
             )
             .await;
             // A checkpoint names cells to read only for the segment that
@@ -389,9 +392,9 @@ pub fn walk_reserve(
                     // A final release means the walk is behind the head: the
                     // cells after it are located and read together.
                     if let SuccessorRead::Final { child, .. } = &read {
-                        if child.generation > read_through {
+                        if child.generation() > read_through {
                             read_ahead(set, child, RESERVE_LOOKAHEAD).await?;
-                            read_through = child.generation + RESERVE_LOOKAHEAD as u64;
+                            read_through = child.generation() + RESERVE_LOOKAHEAD as u64;
                         }
                     }
                     Ok(read)
@@ -403,7 +406,7 @@ pub fn walk_reserve(
                 .map_err(|e| storage_err("reserve memo write", e))
         },
     )?;
-    owe_after_walk(set, &genesis, start.generation, &candidates)?;
+    owe_after_walk(set, &genesis, start.generation(), &candidates)?;
     Ok(stop)
 }
 
@@ -417,14 +420,14 @@ fn established_chain(
     // One memoised release at a time: its step digest is taken and the
     // release let go before the next is read (SA-75).
     memo::fold_memoised_lineage(genesis, |state, envelope| {
-        if state.generation != chain.head().generation() + 1 {
+        if state.generation() != chain.head().generation() + 1 {
             return Ok(std::ops::ControlFlow::Break(()));
         }
         let step = release_evidence_addr(envelope);
         chain
             .push(state.root(), step)
             .map_err(|e| anyhow::anyhow!("reserve generation chain: {e}"))?;
-        steps.insert(state.generation, step);
+        steps.insert(state.generation(), step);
         Ok(std::ops::ControlFlow::Continue(()))
     })
     .map_err(|e| storage_err("reserve memo", e))?;
@@ -497,7 +500,7 @@ pub fn release_at(
     generation: u64,
 ) -> Result<Option<ReserveReleaseWin>, DsmError> {
     let genesis = genesis_state(network_id)?;
-    if *reserve_id != genesis.reserve_id {
+    if reserve_id != genesis.reserve_id() {
         return Err(DsmError::invalid_operation(
             "the named reserve is not this network's native reserve",
         ));
@@ -549,7 +552,7 @@ pub async fn keep_release_completion(
     if release.envelope_bytes != envelope {
         log::info!(
             "reserve completion: another release holds generation {}",
-            child.generation
+            child.generation()
         );
         return Ok(false);
     }
@@ -571,10 +574,11 @@ mod tests {
                 recipient_devid, recipient_position, envelope)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
             rusqlite::params![
-                genesis.reserve_id.as_slice(),
-                child.generation as i64,
-                (child.remaining_supply + 1_000) as i64,
-                child.remaining_supply as i64,
+                genesis.reserve_id().as_slice(),
+                child.generation() as i64,
+                (child.remaining_supply() + dsm::economic::native_reserve::ERA_FAUCET_PAYOUT)
+                    as i64,
+                child.remaining_supply() as i64,
                 [0x61u8; 32].as_slice(),
                 [0x62u8; 32].as_slice(),
                 envelope,
@@ -595,13 +599,10 @@ mod tests {
         crate::storage::client_db::init_database().expect("init db");
         let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
         let mut expected = GenerationChain::from_genesis(&shared_genesis(&genesis));
-        let mut state = genesis;
         for g in [1u64, 2, 3, 5] {
-            state = NativeReserveState {
-                generation: g,
-                remaining_supply: state.remaining_supply - 1_000,
-                ..genesis
-            };
+            let state = genesis
+                .at_generation(g)
+                .expect("a generation of the lineage");
             let envelope = [0xC0 | g as u8; 40];
             memo_row(&genesis, &state, &envelope);
             if g <= 3 {

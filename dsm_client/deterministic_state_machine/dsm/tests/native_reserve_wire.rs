@@ -83,8 +83,8 @@ struct Fixture {
 
 fn fixture_at(parent: NativeReserveState, position: u64, amount: u64) -> Fixture {
     let (pk, sk) = trader().clone();
-    let reserve_id = parent.reserve_id;
-    let generation = parent.generation + 1;
+    let reserve_id = *parent.reserve_id();
+    let generation = parent.generation() + 1;
     let op = claim_op(reserve_id, generation);
     let op_digest = dsm_operation_digest(&op.to_bytes());
     let body = NativeReserveReleaseBody {
@@ -334,10 +334,10 @@ fn a_final_release_funds_exactly_what_it_released() {
         &ctx(1, &fx.pk),
     )
     .expect("a final canonical release funds the credit");
-    assert_eq!(funded.amount, ERA_FAUCET_PAYOUT);
-    assert_eq!(funded.policy_commit, era_commit());
+    assert_eq!(funded.amount(), ERA_FAUCET_PAYOUT);
+    assert_eq!(*funded.policy_commit(), era_commit());
     assert_eq!(
-        funded.source_id,
+        *funded.source_id(),
         release_source_id(&fx.descriptor.reserve_id, fx.descriptor.generation)
     );
 }
@@ -358,16 +358,16 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
             &ctx(position, &fx.pk),
         )
         .expect("each release funds its credit");
-        credited += funded.amount;
+        credited += funded.amount();
         let release = dsm::economic::native_reserve::decode_and_verify_release(&fx.envelope)
             .expect("verifies");
         parent = release_constructible(&parent, &release).expect("the walk's next state");
         assert_eq!(
-            parent.remaining_supply + credited,
+            parent.remaining_supply() + credited,
             reserve_genesis_supply().expect("ERA's genesis supply")
         );
     }
-    assert_eq!(parent.generation, 3);
+    assert_eq!(parent.generation(), 3);
 
     // A release of any other amount funds nothing: it is not a release the
     // claim policy allows, so it never became the reserve's successor.
@@ -388,9 +388,14 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
 /// predicate) and this goes red.
 #[test]
 fn a_release_that_is_not_its_parents_successor_funds_nothing() {
-    let mut low = genesis();
-    low.remaining_supply = 50;
-    let fx = fixture_at(low, 1, 51);
+    // The last generation: one payout left, and a release of two.
+    let last = genesis()
+        .at_generation(
+            reserve_genesis_supply().expect("ERA's genesis supply") / ERA_FAUCET_PAYOUT - 1,
+        )
+        .expect("the last generation");
+    assert_eq!(last.remaining_supply(), ERA_FAUCET_PAYOUT);
+    let fx = fixture_at(last, 1, 2 * ERA_FAUCET_PAYOUT);
     assert!(matches!(
         verify_credit_source(
             &fx.witness.credit_sources[0],
@@ -403,12 +408,10 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
         ))
     ));
     // The same bytes presented against a parent whose root they do not
-    // commit — a fabricated reserve state — fund nothing either.
+    // commit — another state of the lineage — fund nothing either.
     let fx = fixture(1);
-    let mut fabricated = genesis();
-    fabricated.remaining_supply = u64::MAX;
     let resolver = OneRelease {
-        parent: fabricated,
+        parent: genesis().at_generation(5).expect("generation 5"),
         ..OneRelease::of(&fx)
     };
     assert!(matches!(
@@ -430,8 +433,8 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
 /// checked, each invented id would be a second genesis supply.
 #[test]
 fn wrong_reserve_id_cannot_create_a_second_genesis_supply() {
-    let mut other = genesis();
-    other.reserve_id = [0xF4; 32];
+    let other = NativeReserveState::genesis(b"another-network", SET_ID).expect("R_0");
+    assert_ne!(other.reserve_id(), genesis().reserve_id());
     let fx = fixture_at(other, 1, ERA_FAUCET_PAYOUT);
     assert!(matches!(
         verify_credit_source(
@@ -467,10 +470,10 @@ fn faucet_claim_names_its_claimant_as_recipient() {
     // The release names another recipient than the identity under validation.
     let (pk, sk) = keypair();
     let parent = genesis();
-    let op = claim_op(parent.reserve_id, 1);
+    let op = claim_op(*parent.reserve_id(), 1);
     let paid_to_someone_else = sign_release(
         &NativeReserveReleaseBody {
-            reserve_id: parent.reserve_id,
+            reserve_id: *parent.reserve_id(),
             parent_root: parent.root(),
             generation: 1,
             amount: ERA_FAUCET_PAYOUT,

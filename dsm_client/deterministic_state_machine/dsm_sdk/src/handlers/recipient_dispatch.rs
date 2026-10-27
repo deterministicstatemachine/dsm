@@ -1132,6 +1132,61 @@ mod tests {
         nothing_staged();
     }
 
+    /// MR-DSM-0050: a receipt is evidence of its own relationship's step and
+    /// never advances another. A pays B; C, which holds A as a contact too, is
+    /// handed both halves of that step on C's own route for A. Neither is C's:
+    /// the receipt names B as its recipient and the transfer pays B, so
+    /// nothing is staged at C and C's relationship with A has not moved.
+    ///
+    /// MUTATION CONTROL: dropping the recipient check from `candidate_receipt`
+    /// turns this red: C stages A's receipt for B.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_step_of_one_relationship_never_advances_another() {
+        let (p, one) = sent().await;
+        let mut c = crate::test_support::two_device::TestDevice::create("C", 0x0C);
+        c.boot(&p.fleet).await;
+        c.add_contact(&p.a).await;
+        p.a.add_contact(&c).await;
+        c.enter();
+        let tip = |device: &crate::test_support::two_device::TestDevice| {
+            device.enter();
+            let a = client_db::get_contact_by_device_id(&p.a.device_id)
+                .expect("C's contacts")
+                .expect("C holds A as a contact");
+            crate::handlers::app_router_impl::contact_relationship_tip(&a)
+                .expect("C's relationship tip with A")
+        };
+        let before = tip(&c);
+        let route =
+            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&c.genesis, &c.device_id, &before)
+                .expect("C's route for A");
+
+        c.enter();
+        let receipt = ingested(ingest_evidence_half(
+            &one.evidence_bytes,
+            &route,
+            &one.evidence_message_id,
+        ));
+        assert!(
+            matches!(&receipt, Ingested::NotRecognized(why) if why.contains("another device")),
+            "{receipt:?}"
+        );
+        let transfer = ingested(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &route,
+            &one.message_id,
+        ));
+        assert!(
+            matches!(&transfer, Ingested::NotRecognized(why) if why.contains("another device")),
+            "{transfer:?}"
+        );
+        c.enter();
+        nothing_staged();
+        assert_eq!(tip(&c), before, "C's relationship with A has not moved");
+    }
+
     /// A receipt whose `sig_a` does not verify is not recognized; the
     /// transfer it would pair with stays unbound.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

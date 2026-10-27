@@ -52,13 +52,31 @@ use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::witness::EconomicTransitionWitness;
 
-/// What a verified source establishes.
+/// What a verified source establishes. Only Core's verification makes one
+/// (MR-SOFI-0017).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FundedCredit {
     /// Derived from authenticated facts, never supplied.
-    pub source_id: [u8; 32],
-    pub policy_commit: [u8; 32],
-    pub amount: u64,
+    pub(crate) source_id: [u8; 32],
+    pub(crate) policy_commit: [u8; 32],
+    pub(crate) amount: u64,
+}
+
+impl FundedCredit {
+    /// The source the credit consumes, derived from authenticated facts.
+    pub fn source_id(&self) -> &[u8; 32] {
+        &self.source_id
+    }
+
+    /// The asset funded.
+    pub fn policy_commit(&self) -> &[u8; 32] {
+        &self.policy_commit
+    }
+
+    /// The amount funded, in base units.
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
 }
 
 /// A peer transition this verifier has **already validated**, carrying the
@@ -1282,7 +1300,7 @@ pub fn verify_credit_source(
             // then forces the credit mutation to be exactly that.
             FundedCredit {
                 source_id: native_reserve::release_source_id(&d.reserve_id, d.generation),
-                policy_commit: win.parent.policy_commit,
+                policy_commit: *win.parent.policy_commit(),
                 amount: release.body.amount,
             }
         }

@@ -1,17 +1,27 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! The calls a source file makes, read with syn: every call and method call
-//! by the name it calls, in the order it appears in the source. Shared by the
-//! tests that hold a production path to the order or the doors of its calls.
+//! What a source file's production code does, read with syn: every call by
+//! its path, every method call, every field read, in the order they appear in
+//! the source. Shared by the tests that hold production paths to the order,
+//! the doors and the inputs of what they call.
 
-use std::path::PathBuf;
-use syn::{Attribute, Block, Expr, ImplItem, Item, Stmt};
+use std::path::{Path, PathBuf};
+use syn::{Attribute, Block, Expr, ImplItem, Item, Stmt, TraitItem};
 
-/// `rel`, under this crate's `src`, parsed.
-pub fn sdk_source(rel: &str) -> syn::File {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join(rel);
-    let text = match std::fs::read_to_string(&path) {
+/// One thing an expression does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Event {
+    /// A call through a path: every segment, `["SystemTime", "now"]`.
+    Call(Vec<String>),
+    /// A method call, by the method's name.
+    Method(String),
+    /// A field read: the binding or field it is read from, when that is a
+    /// name (`evidence` in `evidence.setups`), and the field's name.
+    Field { base: Option<String>, name: String },
+}
+
+/// The source file at `path`, parsed.
+pub fn parse(path: &Path) -> syn::File {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => panic!("read {}: {e}", path.display()),
     };
@@ -21,33 +31,91 @@ pub fn sdk_source(rel: &str) -> syn::File {
     }
 }
 
-fn test_only(attrs: &[Attribute]) -> bool {
+/// `rel`, under this crate's `src`, parsed.
+pub fn sdk_source(rel: &str) -> syn::File {
+    parse(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join(rel),
+    )
+}
+
+/// Core's source directory.
+pub fn core_src() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dsm/src")
+}
+
+/// Every `.rs` file under `dir`, in a stable order.
+pub fn rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let entries = match std::fs::read_dir(&next) {
+            Ok(entries) => entries,
+            Err(e) => panic!("read {}: {e}", next.display()),
+        };
+        for entry in entries {
+            let path = match entry {
+                Ok(entry) => entry.path(),
+                Err(e) => panic!("an entry of {}: {e}", next.display()),
+            };
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Whether an item is compiled only under a `cfg` (tests, features).
+pub fn cfg_gated(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg"))
 }
 
-/// Every production function body in `file` — free functions and methods,
-/// skipping every item under a `cfg` attribute — with the name it is
-/// defined under.
+/// Every production function body in `file` — free functions, methods,
+/// trait default methods, and those of inline modules — with the name it is
+/// defined under, skipping every item under a `cfg` attribute.
 pub fn production_fns(file: &syn::File) -> Vec<(String, Block)> {
     let mut out = Vec::new();
-    for item in &file.items {
+    collect_fns(&file.items, &mut out);
+    out
+}
+
+fn collect_fns(items: &[Item], out: &mut Vec<(String, Block)>) {
+    for item in items {
         match item {
-            Item::Fn(f) if !test_only(&f.attrs) => {
+            Item::Fn(f) if !cfg_gated(&f.attrs) => {
                 out.push((f.sig.ident.to_string(), (*f.block).clone()));
             }
-            Item::Impl(i) if !test_only(&i.attrs) => {
+            Item::Impl(i) if !cfg_gated(&i.attrs) => {
                 for inner in &i.items {
                     if let ImplItem::Fn(f) = inner {
-                        if !test_only(&f.attrs) {
+                        if !cfg_gated(&f.attrs) {
                             out.push((f.sig.ident.to_string(), f.block.clone()));
                         }
                     }
                 }
             }
+            Item::Trait(t) if !cfg_gated(&t.attrs) => {
+                for inner in &t.items {
+                    if let TraitItem::Fn(f) = inner {
+                        if let Some(block) = f.default.as_ref().filter(|_| !cfg_gated(&f.attrs)) {
+                            out.push((f.sig.ident.to_string(), block.clone()));
+                        }
+                    }
+                }
+            }
+            Item::Mod(m) if !cfg_gated(&m.attrs) => {
+                if let Some((_, inner)) = &m.content {
+                    collect_fns(inner, out);
+                }
+            }
             _ => {}
         }
     }
-    out
 }
 
 /// The production function `name` in `file`.
@@ -61,125 +129,169 @@ pub fn production_fn(file: &syn::File, name: &str) -> Block {
     block
 }
 
+/// Everything `block` does, in the order it appears in the source.
+pub fn events(block: &Block) -> Vec<Event> {
+    let mut out = Vec::new();
+    block_events(block, &mut out);
+    out
+}
+
 /// Every call in `block` by the name it calls, in the order they appear in
 /// the source: a function by the last segment of its path (`sign_release`),
 /// a method with a leading dot (`.advance`), so a store function and a head
 /// transition that share a name stay apart.
 pub fn calls_in_order(block: &Block) -> Vec<String> {
-    let mut out = Vec::new();
-    for stmt in &block.stmts {
-        stmt_calls(stmt, &mut out);
-    }
-    out
+    events(block)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::Call(path) => path.last().cloned(),
+            Event::Method(name) => Some(format!(".{name}")),
+            Event::Field { .. } => None,
+        })
+        .collect()
 }
 
-fn stmt_calls(stmt: &Stmt, out: &mut Vec<String>) {
-    match stmt {
-        Stmt::Local(local) => {
-            if let Some(init) = &local.init {
-                expr_calls(&init.expr, out);
-                if let Some((_, diverge)) = &init.diverge {
-                    expr_calls(diverge, out);
+fn block_events(block: &Block, out: &mut Vec<Event>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Local(local) => {
+                if let Some(init) = &local.init {
+                    expr_events(&init.expr, out);
+                    if let Some((_, diverge)) = &init.diverge {
+                        expr_events(diverge, out);
+                    }
                 }
             }
+            Stmt::Expr(expr, _) => expr_events(expr, out),
+            Stmt::Item(_) | Stmt::Macro(_) => {}
         }
-        Stmt::Expr(expr, _) => expr_calls(expr, out),
-        Stmt::Item(_) | Stmt::Macro(_) => {}
     }
 }
 
-fn expr_calls(expr: &Expr, out: &mut Vec<String>) {
+fn expr_events(expr: &Expr, out: &mut Vec<Event>) {
     match expr {
         Expr::Call(call) => {
-            if let Expr::Path(path) = &*call.func {
-                if let Some(last) = path.path.segments.last() {
-                    out.push(last.ident.to_string());
-                }
+            match &*call.func {
+                Expr::Path(path) => out.push(Event::Call(
+                    path.path
+                        .segments
+                        .iter()
+                        .map(|s| s.ident.to_string())
+                        .collect(),
+                )),
+                other => expr_events(other, out),
             }
             for arg in &call.args {
-                expr_calls(arg, out);
+                expr_events(arg, out);
             }
         }
         Expr::MethodCall(call) => {
-            expr_calls(&call.receiver, out);
-            out.push(format!(".{}", call.method));
+            expr_events(&call.receiver, out);
+            out.push(Event::Method(call.method.to_string()));
             for arg in &call.args {
-                expr_calls(arg, out);
+                expr_events(arg, out);
             }
         }
-        Expr::Try(e) => expr_calls(&e.expr, out),
-        Expr::Await(e) => expr_calls(&e.base, out),
-        Expr::Paren(e) => expr_calls(&e.expr, out),
-        Expr::Reference(e) => expr_calls(&e.expr, out),
-        Expr::Field(e) => expr_calls(&e.base, out),
-        Expr::Unary(e) => expr_calls(&e.expr, out),
-        Expr::Cast(e) => expr_calls(&e.expr, out),
+        Expr::Field(e) => {
+            expr_events(&e.base, out);
+            if let syn::Member::Named(name) = &e.member {
+                let base = match &*e.base {
+                    Expr::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
+                    Expr::Field(inner) => match &inner.member {
+                        syn::Member::Named(field) => Some(field.to_string()),
+                        syn::Member::Unnamed(..) => None,
+                    },
+                    _ => None,
+                };
+                out.push(Event::Field {
+                    base,
+                    name: name.to_string(),
+                });
+            }
+        }
+        Expr::Try(e) => expr_events(&e.expr, out),
+        Expr::Await(e) => expr_events(&e.base, out),
+        Expr::Paren(e) => expr_events(&e.expr, out),
+        Expr::Reference(e) => expr_events(&e.expr, out),
+        Expr::Unary(e) => expr_events(&e.expr, out),
+        Expr::Cast(e) => expr_events(&e.expr, out),
         Expr::Binary(e) => {
-            expr_calls(&e.left, out);
-            expr_calls(&e.right, out);
+            expr_events(&e.left, out);
+            expr_events(&e.right, out);
         }
         Expr::Assign(e) => {
-            expr_calls(&e.left, out);
-            expr_calls(&e.right, out);
+            expr_events(&e.left, out);
+            expr_events(&e.right, out);
         }
-        Expr::Let(e) => expr_calls(&e.expr, out),
+        Expr::Let(e) => expr_events(&e.expr, out),
         Expr::Return(e) => {
             if let Some(inner) = &e.expr {
-                expr_calls(inner, out);
+                expr_events(inner, out);
             }
         }
         Expr::Break(e) => {
             if let Some(inner) = &e.expr {
-                expr_calls(inner, out);
+                expr_events(inner, out);
             }
         }
-        Expr::Closure(e) => expr_calls(&e.body, out),
-        Expr::Block(e) => out.extend(calls_in_order(&e.block)),
-        Expr::Async(e) => out.extend(calls_in_order(&e.block)),
-        Expr::Unsafe(e) => out.extend(calls_in_order(&e.block)),
-        Expr::Loop(e) => out.extend(calls_in_order(&e.body)),
+        Expr::Closure(e) => expr_events(&e.body, out),
+        Expr::Block(e) => block_events(&e.block, out),
+        Expr::Async(e) => block_events(&e.block, out),
+        Expr::Unsafe(e) => block_events(&e.block, out),
+        Expr::Loop(e) => block_events(&e.body, out),
         Expr::While(e) => {
-            expr_calls(&e.cond, out);
-            out.extend(calls_in_order(&e.body));
+            expr_events(&e.cond, out);
+            block_events(&e.body, out);
         }
         Expr::ForLoop(e) => {
-            expr_calls(&e.expr, out);
-            out.extend(calls_in_order(&e.body));
+            expr_events(&e.expr, out);
+            block_events(&e.body, out);
         }
         Expr::If(e) => {
-            expr_calls(&e.cond, out);
-            out.extend(calls_in_order(&e.then_branch));
+            expr_events(&e.cond, out);
+            block_events(&e.then_branch, out);
             if let Some((_, otherwise)) = &e.else_branch {
-                expr_calls(otherwise, out);
+                expr_events(otherwise, out);
             }
         }
         Expr::Match(e) => {
-            expr_calls(&e.expr, out);
+            expr_events(&e.expr, out);
             for arm in &e.arms {
                 if let Some((_, guard)) = &arm.guard {
-                    expr_calls(guard, out);
+                    expr_events(guard, out);
                 }
-                expr_calls(&arm.body, out);
+                expr_events(&arm.body, out);
             }
         }
         Expr::Struct(e) => {
             for field in &e.fields {
-                expr_calls(&field.expr, out);
+                expr_events(&field.expr, out);
+            }
+            if let Some(rest) = &e.rest {
+                expr_events(rest, out);
             }
         }
         Expr::Tuple(e) => {
             for elem in &e.elems {
-                expr_calls(elem, out);
+                expr_events(elem, out);
             }
         }
         Expr::Array(e) => {
             for elem in &e.elems {
-                expr_calls(elem, out);
+                expr_events(elem, out);
             }
         }
         Expr::Index(e) => {
-            expr_calls(&e.expr, out);
-            expr_calls(&e.index, out);
+            expr_events(&e.expr, out);
+            expr_events(&e.index, out);
+        }
+        Expr::Range(e) => {
+            if let Some(start) = &e.start {
+                expr_events(start, out);
+            }
+            if let Some(end) = &e.end {
+                expr_events(end, out);
+            }
         }
         _ => {}
     }

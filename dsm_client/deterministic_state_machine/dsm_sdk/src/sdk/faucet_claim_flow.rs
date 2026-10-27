@@ -175,7 +175,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
         // allows succeeds a reserve that holds less than one payout.
         dsm::economic::native_reserve::faucet_claim_admissible(&parent)
             .map_err(|refusal| DsmError::invalid_operation(format!("faucet: {refusal}")))?;
-        let generation = parent.generation + 1;
+        let generation = parent.generation() + 1;
         let op = Operation::FaucetClaim {
             reserve_id,
             generation,

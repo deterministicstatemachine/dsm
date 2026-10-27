@@ -1811,6 +1811,35 @@ mod tests {
         );
     }
 
+    /// MR-DSM-0216: visibility to the storage set grants no priority. Every
+    /// later seat holds a copy of `ok-b` — its bytes seen across the set —
+    /// before `ok-a` reaches the leader. `ok-a` is first at the leader and its
+    /// chain holds the cell final; `ok-b`, written in full afterwards, holds
+    /// nothing.
+    ///
+    /// MUTATION CONTROL: taking the first recognized value at any seat, not
+    /// at the leader, turns this red.
+    #[test]
+    fn a_value_the_set_saw_first_holds_nothing_unless_it_is_first_at_the_leader() {
+        let mut c = cell();
+        let routed = c.routed();
+        let seen = RouteEntry::at_leader(
+            routed.namespace().to_vec(),
+            *routed.key(),
+            b"ok-b".to_vec(),
+            routed.route(),
+        );
+        for position in 1..ROUTE_LEN {
+            c.put(position, seen.encode());
+        }
+        c.write(b"ok-a", ROUTE_LEN - 1, &[]);
+        c.write(b"ok-b", ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
+            held(ChainState::Final, b"ok-a")
+        );
+    }
+
     /// Rule 7: the leader link is checkable only once a ByteCommit of the
     /// leader's commits its record.
     #[test]

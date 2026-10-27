@@ -149,15 +149,17 @@ pub fn release_evidence_addr(envelope_bytes: &[u8]) -> D32 {
 }
 
 /// One state of the reserve lineage. Never stored: `R_0` is computed from
-/// public inputs and every later state from the releases that won.
+/// public inputs and every later state from the releases that won. Its fields
+/// are Core's: no other layer builds, repairs or adjusts a reserve state
+/// (SoFi §2, MR-SOFI-0017).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeReserveState {
-    pub reserve_id: D32,
-    pub policy_commit: D32,
-    pub remaining_supply: u64,
-    pub generation: u64,
+    reserve_id: D32,
+    policy_commit: D32,
+    remaining_supply: u64,
+    generation: u64,
     /// The committed set every release must name (Part II §6).
-    pub storage_set_id: D32,
+    storage_set_id: D32,
 }
 
 impl NativeReserveState {
@@ -174,6 +176,60 @@ impl NativeReserveState {
             generation: 0,
             storage_set_id,
         })
+    }
+
+    /// The state at `generation` of the lineage this genesis starts. Every
+    /// release releases exactly the claim policy's payout — the construction
+    /// predicate admits no other amount ([`release_constructible`]) — so the
+    /// state at `g` is a function of the genesis and `g`, and a device's memo
+    /// of a generation it walked past names `g` and nothing else. Refused
+    /// from a state that is not a genesis, and past exhaustion.
+    pub fn at_generation(&self, generation: u64) -> Result<Self, crate::types::error::DsmError> {
+        if self.generation != 0 {
+            return Err(crate::types::error::DsmError::invalid_operation(
+                "a reserve state is derived from its lineage's genesis",
+            ));
+        }
+        let released = generation.checked_mul(ERA_FAUCET_PAYOUT).ok_or_else(|| {
+            crate::types::error::DsmError::invalid_operation(format!(
+                "the reserve has no generation {generation}: its releases overflow"
+            ))
+        })?;
+        let remaining_supply = self.remaining_supply.checked_sub(released).ok_or_else(|| {
+            crate::types::error::DsmError::invalid_operation(format!(
+                "the reserve has no generation {generation}: it is exhausted before it"
+            ))
+        })?;
+        Ok(Self {
+            remaining_supply,
+            generation,
+            ..*self
+        })
+    }
+
+    /// The reserve this is a state of.
+    pub fn reserve_id(&self) -> &D32 {
+        &self.reserve_id
+    }
+
+    /// ERA's policy commitment: the asset the reserve releases.
+    pub fn policy_commit(&self) -> &D32 {
+        &self.policy_commit
+    }
+
+    /// What is left to release, in base units.
+    pub fn remaining_supply(&self) -> u64 {
+        self.remaining_supply
+    }
+
+    /// `n`: releases since the genesis.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The committed set every release must name.
+    pub fn storage_set_id(&self) -> &D32 {
+        &self.storage_set_id
     }
 
     /// `R_n`.

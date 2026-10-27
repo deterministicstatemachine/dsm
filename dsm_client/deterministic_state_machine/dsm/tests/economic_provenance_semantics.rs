@@ -359,9 +359,9 @@ fn a_genesis_release_funds_its_creators_whole_supply() {
     let op = create_token(pc, 1_000);
     let funded = verify_release(&Anchors(policy), &release_witness(pc, 1_000), Some(&op))
         .expect("the creator's release of the whole supply");
-    assert_eq!((funded.policy_commit, funded.amount), (pc, 1_000));
+    assert_eq!((*funded.policy_commit(), funded.amount()), (pc, 1_000));
     assert_eq!(
-        funded.source_id,
+        *funded.source_id(),
         dsm::economic::provenance::genesis_release_source_id(&G, &DEV, 4, &pc)
     );
 }
@@ -408,7 +408,7 @@ fn a_genesis_release_to_a_creator_its_allowlist_leaves_out_is_refused() {
     let op = create_token(pc, 1_000);
     let funded = verify_release(&Anchors(included), &release_witness(pc, 1_000), Some(&op))
         .expect("a creator the allowlist names receives its supply");
-    assert_eq!((funded.policy_commit, funded.amount), (pc, 1_000));
+    assert_eq!((*funded.policy_commit(), funded.amount()), (pc, 1_000));
 }
 
 /// SoFi §49: the allowlist has no market meaning, and a token trades freely
