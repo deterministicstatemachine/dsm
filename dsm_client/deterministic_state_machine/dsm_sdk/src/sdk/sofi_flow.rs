@@ -256,6 +256,29 @@ pub(crate) fn identity(core: &CoreSDK) -> Result<(D32, D32), DsmError> {
 
 // ── §28 Creating a vault ───────────────────────────────────────────────────
 
+/// The committed policies of the tokens a vault creation funds, which the
+/// creation carries (MR-SOFI-0311), each held or fetched and re-hashed to its
+/// token. Core's own check is asked of them here, before anything is
+/// published or signed: a token whose policy forbids it to move between
+/// holders cannot be locked in a vault, and the owner learns that now rather
+/// than from a refused admission. Core refuses the same creation in its write
+/// set whatever this producer does.
+pub(crate) async fn vault_funding_policies(
+    set: &StorageSet,
+    funded: &[D32],
+) -> Result<Vec<Vec<u8>>, DsmError> {
+    let mut carried = Vec::new();
+    for commit in dsm::economic::write_set::carried_policy_commits(funded) {
+        carried.push(
+            crate::sdk::economic_registers::anchored_policy_bytes_async(set, &commit)
+                .await
+                .map_err(|e| storage("funded token policy", e))?,
+        );
+    }
+    dsm::economic::write_set::funded_tokens_permitted(funded, &carried).map_err(refuse)?;
+    Ok(carried)
+}
+
 /// §28: the owner's creation. The three policy objects and the genesis
 /// preimage are published and read back `Stored` first: a genesis nobody's
 /// creation carried is refused by `genesis_accepted`, so publishing first
@@ -267,6 +290,25 @@ pub async fn create_vault(
     core: &CoreSDK,
     set: &StorageSet,
     intent: &CreateVaultIntent,
+) -> Result<VaultCreated, DsmError> {
+    let funding_policies = vault_funding_policies(
+        set,
+        &[intent.token_a_policy_commit, intent.token_b_policy_commit],
+    )
+    .await?;
+    create_vault_carrying(core, set, intent, funding_policies).await
+}
+
+/// [`create_vault`] carrying `funding_policies` as the funded tokens'
+/// committed policies. Core refuses the creation in its write set unless
+/// they are exactly those policies and each lets its token be locked, so a
+/// producer that skips [`vault_funding_policies`] meets the same refusal
+/// there, before anything is debited.
+pub(crate) async fn create_vault_carrying(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &CreateVaultIntent,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<VaultCreated, DsmError> {
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
@@ -322,7 +364,7 @@ pub async fn create_vault(
         create_position,
         state,
     };
-    let produced = build_vault_create(&preimage, &market).map_err(refuse)?;
+    let produced = build_vault_create(&preimage, &market, funding_policies).map_err(refuse)?;
     // The genesis is indexed under its genesis locator and under each token
     // of its pair, so any trader finds it by the tokens it trades (Amendment
     // S16). None of the four objects waits on another's answer.

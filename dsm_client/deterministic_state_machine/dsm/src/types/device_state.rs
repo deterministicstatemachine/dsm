@@ -2416,6 +2416,7 @@ pub(crate) mod tests {
             genesis_preimage: Vec::new(),
             creation: creation.encode(),
             terms: terms.encode(),
+            funding_policies: Vec::new(),
             signature: Vec::new(),
         };
         let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
@@ -2460,6 +2461,7 @@ pub(crate) mod tests {
             market_policy_preimage: Vec::new(),
             funding_a_policy_commit: asset_a,
             funding_b_policy_commit: asset_b,
+            funding_policies: Vec::new(),
             signature: Vec::new(),
         };
         let debit = |amount: u64, policy_commit: [u8; 32]| BalanceDelta {
@@ -4081,6 +4083,7 @@ pub(crate) mod tests {
                 market_policy_preimage: Vec::new(),
                 funding_a_policy_commit: era,
                 funding_b_policy_commit: token,
+                funding_policies: Vec::new(),
                 signature: Vec::new(),
             };
             let signature = signed(sign(&unsigned.signing_bytes()));
@@ -4103,6 +4106,7 @@ pub(crate) mod tests {
                     market_policy_preimage: Vec::new(),
                     funding_a_policy_commit: era,
                     funding_b_policy_commit: token,
+                    funding_policies: Vec::new(),
                     signature,
                 },
                 deltas,

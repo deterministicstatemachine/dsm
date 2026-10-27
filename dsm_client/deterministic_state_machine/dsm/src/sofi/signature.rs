@@ -464,6 +464,7 @@ mod tests {
             market_policy_preimage: vec![0x00, 0x07],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
+            funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
             signature: Vec::new(),
         };
         let bytes = operation.signing_bytes();
@@ -473,6 +474,7 @@ mod tests {
             market_policy_preimage: vec![0x00, 0x07],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
+            funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
             signature: sphincs_sign(&sk, &bytes).unwrap(),
         };
         assert_eq!(verify_operation(&signed, &pk), Ok(()));
@@ -496,6 +498,7 @@ mod tests {
             market_policy_preimage: policy,
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
+            funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
             signature,
         };
         let honest = vec![0x00, 0x07, 0x00, 0x01];
@@ -512,6 +515,38 @@ mod tests {
         assert!(
             verify_operation(&build(swapped, signature), &pk).is_err(),
             "the carried market policy must be covered by the operation signature"
+        );
+    }
+
+    /// The carried token policies are under the signature too (MR-SOFI-0311):
+    /// the policies a creation was checked against cannot be swapped after
+    /// the owner signed it.
+    #[test]
+    fn altering_the_carried_token_policies_after_signing_is_refused() {
+        let (pk, sk) = keys();
+        let build = |policies: Vec<Vec<u8>>, signature: Vec<u8>| Operation::SofiVaultCreate {
+            genesis_preimage: vec![0x01, 0x02],
+            creation: vec![0x03, 0x04],
+            market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
+            funding_a_policy_commit: [0x5C; 32],
+            funding_b_policy_commit: [0x5D; 32],
+            funding_policies: policies,
+            signature,
+        };
+        let honest = vec![vec![0x5C, 0x01], vec![0x5D, 0x01]];
+        let signature =
+            sphincs_sign(&sk, &build(honest.clone(), Vec::new()).signing_bytes()).unwrap();
+        assert_eq!(
+            verify_operation(&build(honest, signature.clone()), &pk),
+            Ok(())
+        );
+        let swapped = vec![vec![0x5C, 0x01], vec![0x5D, 0x02]];
+        assert_eq!(
+            verify_operation(&build(swapped, signature), &pk),
+            Err(SignatureError::DoesNotVerify {
+                what: "SofiVaultCreate"
+            }),
+            "the carried token policies must be covered by the operation signature"
         );
     }
 

@@ -387,6 +387,7 @@ pub(crate) async fn create_vault(
     token: D32,
     amount: u64,
 ) -> Result<(D32, u64), DsmError> {
+    let funding_policies = crate::sdk::sofi_flow::vault_funding_policies(set, &[token]).await?;
     let validated = validated_root_or_activate(core)?;
     let create_position = next_position(validated.economic_position()).map_err(refuse)?;
     let terms_object = Publication::ComputedEscrowTerms(terms);
@@ -409,7 +410,8 @@ pub(crate) async fn create_vault(
             status: VAULT_STATUS_ACTIVE,
         },
     };
-    let produced = build_computed_vault_create(&preimage, terms).map_err(refuse)?;
+    let produced =
+        build_computed_vault_create(&preimage, terms, funding_policies).map_err(refuse)?;
     let genesis_object = Publication::ComputedEscrowVaultGenesis {
         preimage: &preimage,
         terms,

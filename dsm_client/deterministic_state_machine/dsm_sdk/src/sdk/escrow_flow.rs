@@ -234,6 +234,21 @@ pub async fn create(
     set: &StorageSet,
     intent: &CreateEscrowIntent,
 ) -> Result<EscrowCreated, DsmError> {
+    let funding_policies =
+        crate::sdk::sofi_flow::vault_funding_policies(set, &[intent.token]).await?;
+    create_carrying(core, set, intent, funding_policies).await
+}
+
+/// [`create`] carrying `funding_policies` as the staked token's committed
+/// policy. Core refuses the creation in its write set unless it is exactly
+/// that policy and it lets the token be locked, so a producer that skips the
+/// early check meets the same refusal there, before anything is debited.
+pub(crate) async fn create_carrying(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &CreateEscrowIntent,
+    funding_policies: Vec<Vec<u8>>,
+) -> Result<EscrowCreated, DsmError> {
     if intent.amount == 0 {
         return Err(refuse("an escrow vault holds a non-zero stake"));
     }
@@ -274,7 +289,8 @@ pub async fn create(
             status: VAULT_STATUS_ACTIVE,
         },
     };
-    let produced = build_escrow_vault_create(&preimage, &terms).map_err(refuse)?;
+    let produced =
+        build_escrow_vault_create(&preimage, &terms, funding_policies).map_err(refuse)?;
     let genesis_object = Publication::EscrowVaultGenesis {
         preimage: &preimage,
         terms: &terms,

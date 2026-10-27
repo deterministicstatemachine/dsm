@@ -117,6 +117,18 @@ pub enum WriteSetError {
     /// [`TOKEN_CREATION_FEE_ERA`](crate::core::token::TOKEN_CREATION_FEE_ERA)
     /// (SoFi Amendment S18). The fee is never the operation's to choose.
     CreationFeeNotTheProtocols { fee_amount: u64 },
+    /// A vault creation's carried token policies are not exactly the
+    /// committed policies of its funded tokens that are not pre-rooted, in
+    /// the funded order (MR-SOFI-0311).
+    FundingPoliciesNotTheFundedTokens,
+    /// A funded token's committed policy does not parse, and why.
+    FundingPolicyDoesNotParse { token: [u8; 32], reason: String },
+    /// A funded token's committed policy forbids it to move between holders,
+    /// so it cannot be locked in a vault (SoFi §49; MR-SOFI-0311).
+    FundedTokenNotPermitted {
+        token: [u8; 32],
+        refusal: crate::economic::issuance::MarketLegRefusal,
+    },
     /// A mutation or state constructor refused (zero-amount leaf, sibling
     /// arity, ...) — carried through from the CCB layer.
     Ccb(String),
@@ -176,6 +188,21 @@ impl core::fmt::Display for WriteSetError {
                 "a token creation pays the protocol's creation fee of {} ERA base units, not \
                  {fee_amount}",
                 crate::core::token::TOKEN_CREATION_FEE_ERA
+            ),
+            Self::FundingPoliciesNotTheFundedTokens => write!(
+                f,
+                "a vault creation carries exactly the committed policy of each funded token \
+                 that is not pre-rooted, in the funded order"
+            ),
+            Self::FundingPolicyDoesNotParse { token, reason } => write!(
+                f,
+                "the committed policy of funded token {} does not parse: {reason}",
+                crate::utils::text_id::encode_base32_crockford(token)
+            ),
+            Self::FundedTokenNotPermitted { token, refusal } => write!(
+                f,
+                "funded token {} cannot be locked in a vault: {refusal}",
+                crate::utils::text_id::encode_base32_crockford(token)
             ),
             Self::Ccb(e) => write!(f, "write set: {e}"),
         }
@@ -474,6 +501,7 @@ fn semantic_write_set(
             market_policy_preimage,
             funding_a_policy_commit,
             funding_b_policy_commit,
+            funding_policies,
             ..
         } => {
             let preimage = crate::sofi::wire::VaultGenesisPreimage::decode(genesis_preimage)
@@ -589,6 +617,10 @@ fn semantic_write_set(
                     detail: "the funded assets are not the pair the market policy authorizes",
                 });
             }
+            funded_tokens_permitted(
+                &[*funding_a_policy_commit, *funding_b_policy_commit],
+                funding_policies,
+            )?;
             let (vault_id, leg_a, leg_b) = pair_legs(
                 &vault_id,
                 (*funding_a_policy_commit, record.amount_a),
@@ -608,11 +640,12 @@ fn semantic_write_set(
             genesis_preimage,
             creation,
             terms,
+            funding_policies,
             ..
         } => escrow_creation_write_set(
             genesis_preimage,
             creation,
-            terms,
+            (terms, funding_policies),
             (local_genesis, local_devid),
             economic_position,
         ),
@@ -625,6 +658,61 @@ fn semantic_write_set(
     }
 }
 
+/// The funded tokens whose committed policies a vault creation carries, in
+/// the funded order: every one that is not pre-rooted (ERA, dBTC).
+pub fn carried_policy_commits(funded: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    funded
+        .iter()
+        .filter(|commit| crate::core::token::builtin_token_id_for_policy_commit(commit).is_none())
+        .copied()
+        .collect()
+}
+
+/// `transferable` binds vault creation (SoFi §49; MR-SOFI-0311). A vault's
+/// units leave it only by trades, releases and its owner's close, each a
+/// movement between holders, and every verifier refuses the genesis of a
+/// vault whose token forbids that (`sofi::lineage::genesis_accepted`): a
+/// creation not refused here would debit reserves nobody could ever move
+/// again, its owner's close included. So it is refused in the write set,
+/// before anything is debited. ERA and dBTC are pre-rooted and consult no
+/// policy. Every other funded token's policy is carried in the funded order
+/// and re-hashed to that token's commit before anything is read out of it.
+///
+/// Public so the producer can ask the same question before it publishes or
+/// signs anything; this, in the write set, is where the creation is refused.
+pub fn funded_tokens_permitted(
+    funded: &[[u8; 32]],
+    carried: &[Vec<u8>],
+) -> Result<(), WriteSetError> {
+    let policied = carried_policy_commits(funded);
+    if policied.len() != carried.len() {
+        return Err(WriteSetError::FundingPoliciesNotTheFundedTokens);
+    }
+    for (commit, bytes) in policied.iter().zip(carried) {
+        let derived = crate::crypto::blake3::domain_hash_bytes(
+            crate::common::domain_tags::TAG_DSM_POLICY,
+            bytes,
+        );
+        if derived != *commit {
+            return Err(WriteSetError::FundingPoliciesNotTheFundedTokens);
+        }
+        let policy =
+            crate::economic::token_policy::parse_token_policy(bytes).map_err(|reason| {
+                WriteSetError::FundingPolicyDoesNotParse {
+                    token: *commit,
+                    reason,
+                }
+            })?;
+        crate::economic::issuance::check_market_leg_permitted(&policy).map_err(|refusal| {
+            WriteSetError::FundedTokenNotPermitted {
+                token: *commit,
+                refusal,
+            }
+        })?;
+    }
+    Ok(())
+}
+
 /// The write set of an escrow vault's creation (SoFi Amendment S21), every
 /// conjunct a separate reason to refuse: the preimage is the owner's own and
 /// agrees with itself, `p_create` is the position the operation lands at,
@@ -634,7 +722,7 @@ fn semantic_write_set(
 fn escrow_creation_write_set(
     genesis_preimage: &[u8],
     creation: &[u8],
-    terms: &[u8],
+    (terms, funding_policies): (&[u8], &[Vec<u8>]),
     (local_genesis, local_devid): (&[u8; 32], &[u8; 32]),
     economic_position: u64,
 ) -> Result<SemanticWriteSet, WriteSetError> {
@@ -711,6 +799,7 @@ fn escrow_creation_write_set(
             "the carried terms are not the object all three of the genesis state's slots name",
         ));
     }
+    funded_tokens_permitted(&[*parsed.token()], funding_policies)?;
     Ok(SemanticWriteSet::EscrowVaultCreate {
         vault_id,
         stake: (*parsed.token(), record.amount_a),
@@ -1798,6 +1887,7 @@ mod sofi_refusal_tests {
                 market_policy_preimage: vec![0x00, 0x07],
                 funding_a_policy_commit: [0x5C; 32],
                 funding_b_policy_commit: [0x5D; 32],
+                funding_policies: vec![vec![0x5C], vec![0x5D]],
                 signature: vec![0xA1; 8],
             },
             Operation::SofiFulfill {
@@ -1898,10 +1988,35 @@ mod vault_create_binding_tests {
         state: VaultStateLeaf,
         policy_bytes: Vec<u8>,
         pair: ([u8; 32], [u8; 32]),
+        /// The funded tokens' committed policies the creation carries.
+        funding_policies: Vec<Vec<u8>>,
+    }
+
+    /// Fixture token `i` with the policy flags `flags`: its commit, and the
+    /// policy bytes that commit names.
+    fn token(i: u8, flags: u8) -> ([u8; 32], Option<Vec<u8>>) {
+        let (commit, bytes) = crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(i, flags),
+        );
+        (commit, Some(bytes))
+    }
+
+    /// ERA: pre-rooted, so a creation carries no policy for it.
+    fn era() -> ([u8; 32], Option<Vec<u8>>) {
+        (crate::core::token::era_policy::era_policy_commit(), None)
     }
 
     fn valid() -> Valid {
-        let (a, b) = (tok(0x40), tok(0x41));
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        valid_over(token(1, transferable), token(2, transferable))
+    }
+
+    /// A valid creation over the two tokens, in canonical order, carrying
+    /// the policy of each that is not pre-rooted.
+    fn valid_over(x: ([u8; 32], Option<Vec<u8>>), y: ([u8; 32], Option<Vec<u8>>)) -> Valid {
+        let (first, second) = if x.0 < y.0 { (x, y) } else { (y, x) };
+        let (a, b) = (first.0, second.0);
+        let funding_policies = [first.1, second.1].into_iter().flatten().collect();
         let market = MarketPolicy::beta_constant_product(a, b).unwrap();
         let policy_bytes = market.encode();
         let fee = FeePolicy::new(30).unwrap();
@@ -1923,6 +2038,7 @@ mod vault_create_binding_tests {
             state,
             policy_bytes,
             pair: (a, b),
+            funding_policies,
         }
     }
 
@@ -1936,7 +2052,6 @@ mod vault_create_binding_tests {
         root: Option<[u8; 32]>,
         vault_id: Option<[u8; 32]>,
     ) -> Operation {
-        let _ = v;
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: DEV,
@@ -1957,6 +2072,7 @@ mod vault_create_binding_tests {
             market_policy_preimage: policy_bytes.to_vec(),
             funding_a_policy_commit: pair.0,
             funding_b_policy_commit: pair.1,
+            funding_policies: v.funding_policies.clone(),
             signature: vec![0xA1; 8],
         }
     }
@@ -2161,6 +2277,85 @@ mod vault_create_binding_tests {
             "the funded assets are not the pair the market policy authorizes"
         );
     }
+    /// MR-SOFI-0311: a vault over a token whose committed policy forbids
+    /// transfer is refused in the write set, so nothing is debited. Every
+    /// verifier refuses such a vault's genesis, its owner's close included,
+    /// so a creation that went through would strand both reserves.
+    #[test]
+    fn a_creation_over_a_token_whose_policy_forbids_transfer_has_no_write_set() {
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        let locked = token(3, crate::economic::token_policy::POLICY_FLAG_BURN);
+        let locked_commit = locked.0;
+        for v in [
+            valid_over(token(1, transferable), locked.clone()),
+            valid_over(era(), locked),
+        ] {
+            match semantic_write_set(&good(&v), &G, &DEV, POS) {
+                Err(WriteSetError::FundedTokenNotPermitted { token, refusal }) => {
+                    assert_eq!(token, locked_commit, "the refused token is the locked one");
+                    assert_eq!(
+                        refusal,
+                        crate::economic::issuance::MarketLegRefusal::NotTransferable
+                    );
+                }
+                Err(e) => panic!("expected the funded token refused, got {e:?}"),
+                Ok(_) => panic!("a vault over a non-transferable token has no write set"),
+            }
+        }
+    }
+
+    /// The carried policies are the funded tokens' committed policies, each
+    /// re-hashed to its token before it is read: another token's policy, the
+    /// two in the wrong order, one missing or one extra establish nothing.
+    #[test]
+    fn carried_policies_that_are_not_exactly_the_funded_tokens_are_refused() {
+        let v = valid();
+        let other = token(4, crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+            .1
+            .expect("a fixture token carries its policy");
+        let carried = &v.funding_policies;
+        for wrong in [
+            vec![carried[0].clone(), other.clone()],
+            vec![carried[1].clone(), carried[0].clone()],
+            vec![carried[0].clone()],
+            vec![carried[0].clone(), carried[1].clone(), other],
+            Vec::new(),
+        ] {
+            let mut carrying = valid();
+            carrying.funding_policies = wrong;
+            match semantic_write_set(&good(&carrying), &G, &DEV, POS) {
+                Err(WriteSetError::FundingPoliciesNotTheFundedTokens) => {}
+                Err(e) => panic!("expected the carried policies refused, got {e:?}"),
+                Ok(_) => {
+                    panic!("carried policies that are not the funded tokens' authorize nothing")
+                }
+            }
+        }
+    }
+
+    /// ERA is pre-rooted: a creation funding it carries no policy for it,
+    /// and carrying one anyway is not the creation's encoding.
+    #[test]
+    fn a_pre_rooted_leg_carries_no_policy() {
+        let transferable = crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE;
+        let v = valid_over(era(), token(1, transferable));
+        assert_eq!(v.funding_policies.len(), 1);
+        match semantic_write_set(&good(&v), &G, &DEV, POS) {
+            Ok(SemanticWriteSet::SofiVaultCreate { leg_a, leg_b, .. }) => {
+                assert_eq!((leg_a.0, leg_b.0), v.pair, "both legs are debited");
+            }
+            Ok(_) => panic!("expected a creation write set, got another variant"),
+            Err(e) => panic!("an ERA leg needs no carried policy, got {e:?}"),
+        }
+        let mut carrying_era = v;
+        carrying_era
+            .funding_policies
+            .push(crate::core::token::era_policy::era_policy_bytes().to_vec());
+        assert!(matches!(
+            semantic_write_set(&good(&carrying_era), &G, &DEV, POS),
+            Err(WriteSetError::FundingPoliciesNotTheFundedTokens)
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2179,13 +2374,27 @@ mod escrow_create_binding_tests {
     const DEV: [u8; 32] = [0x22; 32];
     const POS: u64 = 7;
     const STAKE: u64 = 2_500;
-    const TOKEN: [u8; 32] = [0x40; 32];
+    /// The staked token: a fixture token whose committed policy transfers,
+    /// and the policy bytes its commit names.
+    fn token() -> ([u8; 32], Vec<u8>) {
+        token_with(crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+    }
+
+    fn token_with(flags: u8) -> ([u8; 32], Vec<u8>) {
+        crate::sofi::validation::fixtures::committed(
+            crate::sofi::validation::fixtures::token_policy_bytes_with(1, flags),
+        )
+    }
 
     fn terms() -> EscrowTerms {
+        terms_over(token().0)
+    }
+
+    fn terms_over(staked: [u8; 32]) -> EscrowTerms {
         let referee = EscrowSigner::new(crate::ccb::sigalg::SPHINCS_PLUS_SPX256F, &[0x5A; 64])
             .expect("a declared key");
         EscrowTerms::new(
-            TOKEN,
+            staked,
             crate::sofi::escrow::external_commitment(b"a match"),
             vec![EscrowBranch::new(
                 EscrowOutcome::new(b"void", vec![referee]).expect("an outcome"),
@@ -2216,6 +2425,16 @@ mod escrow_create_binding_tests {
     /// The creation from its parts, with the record funding `amounts` and the
     /// record's root and vault the ones the preimage derives.
     fn op_from(state: &VaultStateLeaf, terms_bytes: &[u8], amounts: (u64, u64)) -> Operation {
+        op_carrying(state, terms_bytes, amounts, vec![token().1])
+    }
+
+    /// The creation carrying `funding_policies` as the staked token's policy.
+    fn op_carrying(
+        state: &VaultStateLeaf,
+        terms_bytes: &[u8],
+        amounts: (u64, u64),
+        funding_policies: Vec<Vec<u8>>,
+    ) -> Operation {
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: DEV,
@@ -2233,6 +2452,7 @@ mod escrow_create_binding_tests {
             genesis_preimage: preimage.encode().expect("a preimage"),
             creation: creation.encode(),
             terms: terms_bytes.to_vec(),
+            funding_policies,
             signature: vec![0xA1; 8],
         }
     }
@@ -2266,21 +2486,22 @@ mod escrow_create_binding_tests {
         else {
             panic!("a valid escrow creation has a write set")
         };
+        let staked = token().0;
         assert_eq!(
             stake,
-            (TOKEN, STAKE),
+            (staked, STAKE),
             "the one debit is the stake of the terms' token"
         );
         assert_eq!((creation.amount_a, creation.amount_b), (STAKE, 0));
 
         // The witness the producer builds: the stake leaves the owner's
         // balance and the record is inserted from nothing, and that is all.
-        let balances = BTreeMap::from([(TOKEN, STAKE + 40)]);
+        let balances = BTreeMap::from([(staked, STAKE + 40)]);
         let mut tree = EconomicSmt::new();
         tree.insert(
-            crate::economic::keys::balance_key(&G, &DEV, &TOKEN),
+            crate::economic::keys::balance_key(&G, &DEV, &staked),
             EconomicLeafState::Balance(crate::economic::state::EconomicBalanceState {
-                policy_commit: TOKEN,
+                policy_commit: staked,
                 amount: STAKE + 40,
             })
             .leaf_value()
@@ -2301,7 +2522,7 @@ mod escrow_create_binding_tests {
             built.mutations.iter().map(|m| &m.post_state).collect();
         assert!(posts.iter().any(|p| matches!(
             p,
-            Some(EconomicLeafState::Balance(b)) if b.policy_commit == TOKEN && b.amount == 40
+            Some(EconomicLeafState::Balance(b)) if b.policy_commit == staked && b.amount == 40
         )));
         assert!(posts.iter().any(
             |p| matches!(p, Some(EconomicLeafState::VaultCreation(c)) if c.amount_a == STAKE)
@@ -2319,7 +2540,7 @@ mod escrow_create_binding_tests {
                 .expect("a declared key")
         };
         let computed = ComputedEscrowTerms::new(
-            [0x42; 32],
+            token().0,
             crate::sofi::escrow::external_commitment(b"a match"),
             ComputedTable::new([0x9A; 32], [0x5E; 32], key(0x3A), key(0x3B)).expect("table"),
             vec![
@@ -2340,7 +2561,7 @@ mod escrow_create_binding_tests {
         else {
             panic!("a valid computed escrow creation has a write set")
         };
-        assert_eq!(stake, ([0x42; 32], STAKE));
+        assert_eq!(stake, (token().0, STAKE));
     }
 
     #[test]
@@ -2412,6 +2633,67 @@ mod escrow_create_binding_tests {
             Err(WriteSetError::MalformedVaultOperation { detail })
                 if detail.contains("its own owner's balances")
         ));
+    }
+
+    /// MR-SOFI-0311 for escrow: a stake of a token whose committed policy
+    /// forbids transfer could never be released to any branch, so the
+    /// creation has no write set and nothing is debited.
+    #[test]
+    fn an_escrow_over_a_token_whose_policy_forbids_transfer_has_no_write_set() {
+        let (locked, bytes) = token_with(crate::economic::token_policy::POLICY_FLAG_BURN);
+        let t = terms_over(locked);
+        let op = op_carrying(
+            &state(crate::sofi::escrow::terms_address(&t)),
+            &t.encode(),
+            (STAKE, 0),
+            vec![bytes],
+        );
+        match semantic_write_set(&op, &G, &DEV, POS) {
+            Err(WriteSetError::FundedTokenNotPermitted { token, refusal }) => {
+                assert_eq!(token, locked);
+                assert_eq!(
+                    refusal,
+                    crate::economic::issuance::MarketLegRefusal::NotTransferable
+                );
+            }
+            Err(e) => panic!("expected the staked token refused, got {e:?}"),
+            Ok(_) => panic!("an escrow over a non-transferable token has no write set"),
+        }
+    }
+
+    /// The staked token's policy is carried and re-hashed to it; an ERA
+    /// stake carries none.
+    #[test]
+    fn an_escrow_carries_exactly_its_staked_tokens_policy() {
+        let t = terms();
+        let addr = crate::sofi::escrow::terms_address(&t);
+        let other = token_with(
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE
+                | crate::economic::token_policy::POLICY_FLAG_BURN,
+        )
+        .1;
+        for wrong in [Vec::new(), vec![other], vec![token().1, token().1]] {
+            let op = op_carrying(&state(addr), &t.encode(), (STAKE, 0), wrong);
+            assert!(matches!(
+                semantic_write_set(&op, &G, &DEV, POS),
+                Err(WriteSetError::FundingPoliciesNotTheFundedTokens)
+            ));
+        }
+        let era = crate::core::token::era_policy::era_policy_commit();
+        let on_era = terms_over(era);
+        let op = op_carrying(
+            &state(crate::sofi::escrow::terms_address(&on_era)),
+            &on_era.encode(),
+            (STAKE, 0),
+            Vec::new(),
+        );
+        match semantic_write_set(&op, &G, &DEV, POS) {
+            Ok(SemanticWriteSet::EscrowVaultCreate { stake, .. }) => {
+                assert_eq!(stake, (era, STAKE))
+            }
+            Ok(_) => panic!("expected an escrow creation write set, got another variant"),
+            Err(e) => panic!("an ERA stake needs no carried policy, got {e:?}"),
+        }
     }
 }
 

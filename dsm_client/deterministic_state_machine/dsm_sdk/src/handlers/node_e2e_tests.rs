@@ -3780,6 +3780,134 @@ async fn a_route_search_that_cannot_see_its_vaults_says_so() {
     assert_eq!(route[0].amount_out, out);
 }
 
+/// `d`'s token `ticker`, created with a policy that forbids it to move
+/// between holders.
+pub(super) async fn create_non_transferable_token(d: &TestDevice, ticker: &str) -> [u8; 32] {
+    let created = invoke(
+        d,
+        "token.create",
+        args(&super::sender_admission_tests::non_transferable_request(
+            ticker,
+        )),
+    )
+    .await;
+    assert!(created.success, "token.create: {:?}", created.error_message);
+    d.enter();
+    crate::storage::client_db::token_registry::get_token_by_ticker(ticker)
+        .expect("registry read")
+        .expect("created token is registered")
+        .policy_commit
+}
+
+/// Every row every node of `p` holds, in one sorted list.
+pub(super) async fn rows_on_the_nodes(p: &Pair) -> Vec<String> {
+    let mut rows = Vec::new();
+    for node in &p.nodes.nodes {
+        rows.extend(node.stored_rows().await);
+    }
+    rows.sort();
+    rows
+}
+
+/// What a refused creation must leave as it was: `d`'s balances of `tokens`
+/// and its admitted position.
+fn holdings(d: &TestDevice, tokens: &[[u8; 32]]) -> (Vec<u64>, u64) {
+    (
+        tokens.iter().map(|token| balance(d, token)).collect(),
+        admitted_position(d),
+    )
+}
+
+/// MR-SOFI-0311 (SoFi §49, `transferable` at vault creation): an owner's
+/// vault over a token whose committed policy forbids transfer is refused
+/// before anything moves or is published. Before this, A's own device took
+/// the creation and debited both reserves, and every verifier then refused
+/// the vault's genesis, B's trade and A's own close alike: the units were
+/// stranded (§6.96).
+///
+/// MUTATION CONTROL: drop the check in `sofi_flow::vault_funding_policies`
+/// and the creation publishes its policies and genesis before Core refuses
+/// it: the nodes' rows change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_over_a_token_whose_policy_forbids_transfer_is_refused_before_anything_moves() {
+    let p = Pair::boot(500, 200).await;
+    let notx = create_non_transferable_token(&p.a, "NOTX").await;
+    let era = era();
+    let before = holdings(&p.a, &[era, notx]);
+    let rows = rows_on_the_nodes(&p).await;
+    let request = generated::SofiCreateVaultRequest {
+        token_a_policy_commit: era.to_vec(),
+        token_b_policy_commit: notx.to_vec(),
+        reserve_a_entered: entered(&p.a, &era, 100),
+        reserve_b_entered: entered(&p.a, &notx, 1_000),
+        fee_bps: 30,
+        label: String::new(),
+    };
+    let made = invoke(&p.a, "sofi.createVault", args(&request)).await;
+    assert!(
+        !made.success,
+        "a vault over a non-transferable token is refused"
+    );
+    let why = made.error_message.expect("a refusal says why");
+    assert!(why.contains("cannot be locked in a vault"), "{why}");
+    assert_eq!(holdings(&p.a, &[era, notx]), before, "nothing moved");
+    assert_eq!(rows_on_the_nodes(&p).await, rows, "nothing was published");
+}
+
+/// MR-SOFI-0311: the enforcement is Core's. A producer that skips the SDK's
+/// early check, here the creation past it (`create_vault_carrying`), is
+/// refused in Core's write set before the admission, and nothing moves:
+/// carrying the token's own committed policy, which forbids transfer, or
+/// carrying no policy at all.
+///
+/// MUTATION CONTROL: drop the market-leg check in Core's
+/// `write_set::funded_tokens_permitted` and A's device admits the creation
+/// carrying NOTX's policy: both balances drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_creation_past_the_sdk_check_is_refused_by_core_and_moves_nothing() {
+    let p = Pair::boot(500, 200).await;
+    let notx = create_non_transferable_token(&p.a, "NOTX").await;
+    let era = era();
+    p.a.enter();
+    let policy = crate::storage::client_db::token_registry::load_policy_verified(&notx)
+        .expect("the policy store reads")
+        .expect("A holds its own token's policy");
+    let (token_a, token_b) = if era < notx { (era, notx) } else { (notx, era) };
+    let intent = crate::sdk::sofi_flow::CreateVaultIntent {
+        token_a_policy_commit: token_a,
+        token_b_policy_commit: token_b,
+        reserve_a: 100,
+        reserve_b: 100,
+        fee_bps: 30,
+    };
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let before = holdings(&p.a, &[era, notx]);
+    for (carried, refusal) in [
+        (vec![policy], "cannot be locked in a vault"),
+        (
+            Vec::new(),
+            "carries exactly the committed policy of each funded token",
+        ),
+    ] {
+        p.a.enter();
+        let created = crate::sdk::sofi_flow::create_vault_carrying(
+            &p.a.router().core_sdk,
+            &set,
+            &intent,
+            carried,
+        )
+        .await;
+        let why = match created {
+            Err(e) => e.to_string(),
+            Ok(done) => panic!("Core admitted a vault over NOTX: {done:?}"),
+        };
+        assert!(why.contains(refusal), "{why}");
+        assert_eq!(holdings(&p.a, &[era, notx]), before, "nothing moved");
+    }
+}
+
 /// CONFORMANCE §6.39, SoFi Amendment S12: once a trader has traded through a
 /// vault, the owner's close still resolves. The owner judges the trader's
 /// exercise from the exercise's own bytes: the trader's balance before the

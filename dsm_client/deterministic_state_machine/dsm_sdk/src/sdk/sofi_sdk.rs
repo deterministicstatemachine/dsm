@@ -387,6 +387,7 @@ pub fn build_setup(
 pub fn build_vault_create(
     preimage: &VaultGenesisPreimage,
     market_policy_bytes: &[u8],
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
     let vault_id = preimage.vault_id();
     // THE FUNDING ASSETS ARE DERIVED, NOT TAKEN. A caller that could pass the
@@ -427,6 +428,9 @@ pub fn build_vault_create(
         market_policy_preimage: market_policy_bytes.to_vec(),
         funding_a_policy_commit: token_a,
         funding_b_policy_commit: token_b,
+        // The funded tokens' committed policies, which Core re-hashes and
+        // checks before it debits anything (MR-SOFI-0311).
+        funding_policies,
         signature: Vec::new(),
     };
     Ok(Produced {
@@ -447,8 +451,9 @@ pub fn build_vault_create(
 pub fn build_escrow_vault_create(
     preimage: &VaultGenesisPreimage,
     terms: &dsm::sofi::wire::EscrowTerms,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
-    escrow_vault_create(preimage, &terms.encode())
+    escrow_vault_create(preimage, &terms.encode(), funding_policies)
 }
 
 /// `EscrowVaultCreate` of a computed escrow vault (SoFi Amendment S22): the
@@ -457,8 +462,9 @@ pub fn build_escrow_vault_create(
 pub fn build_computed_vault_create(
     preimage: &VaultGenesisPreimage,
     terms: &dsm::sofi::wire::ComputedEscrowTerms,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
-    escrow_vault_create(preimage, &terms.encode())
+    escrow_vault_create(preimage, &terms.encode(), funding_policies)
 }
 
 /// The creation of an escrow vault of either kind whose three slots name
@@ -466,6 +472,7 @@ pub fn build_computed_vault_create(
 fn escrow_vault_create(
     preimage: &VaultGenesisPreimage,
     terms_bytes: &[u8],
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
     let addr = dsm::sofi::escrow::terms_address_of(terms_bytes);
     let state = &preimage.state;
@@ -485,6 +492,7 @@ fn escrow_vault_create(
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
         terms: terms_bytes.to_vec(),
+        funding_policies,
         signature: Vec::new(),
     };
     Ok(Produced {

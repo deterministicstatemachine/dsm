@@ -767,6 +767,73 @@ fn sofi_genesis_state(market: ([u8; 32], [u8; 32])) -> dsm::sofi::wire::VaultSta
     }
 }
 
+/// Fixture token `i`: a native token whose committed policy transfers. Its
+/// commit, and the `TokenPolicyV3` bytes that commit names.
+fn sofi_token(i: u8) -> ([u8; 32], Vec<u8>) {
+    use dsm::economic::token_policy as tp;
+    let mut blob = vec![
+        tp::TOKEN_POLICY_VERSION,
+        tp::TOKEN_KIND_FUNGIBLE,
+        tp::SUPPLY_CLASS_NATIVE,
+        tp::POLICY_FLAG_TRANSFERABLE,
+        tp::ReleaseRule::AllAtCreation.code(),
+    ];
+    blob.extend_from_slice(&G);
+    blob.extend_from_slice(&DEV);
+    blob.extend_from_slice(&[1, 1]);
+    blob.extend_from_slice(&3u16.to_be_bytes());
+    blob.extend_from_slice(b"key");
+    let ticker = format!("T{i:02}");
+    blob.push(ticker.len() as u8);
+    blob.extend_from_slice(ticker.as_bytes());
+    blob.extend_from_slice(&5u16.to_be_bytes());
+    blob.extend_from_slice(b"Token");
+    blob.push(0);
+    blob.extend_from_slice(&1_000_000u128.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.push(tp::ALLOWLIST_KIND_NONE);
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    let bytes =
+        prost::Message::encode_to_vec(&dsm::types::proto::TokenPolicyV3 { policy_bytes: blob });
+    (
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &bytes),
+        bytes,
+    )
+}
+
+/// The fixture tokens a creation may fund.
+fn sofi_tokens() -> Vec<([u8; 32], Vec<u8>)> {
+    (0..64).map(sofi_token).collect()
+}
+
+/// Two fixture tokens, in canonical order.
+fn sofi_pair() -> ([u8; 32], [u8; 32]) {
+    let (x, y) = (sofi_token(1).0, sofi_token(2).0);
+    if x < y {
+        (x, y)
+    } else {
+        (y, x)
+    }
+}
+
+/// The policies a creation funding `funded` carries (MR-SOFI-0311): each
+/// fixture token's, in the funded order. A commit no fixture token has
+/// carries none, which only a creation refused before its policies are read
+/// funds.
+fn sofi_carried(funded: &[[u8; 32]]) -> Vec<Vec<u8>> {
+    let tokens = sofi_tokens();
+    funded
+        .iter()
+        .filter_map(|commit| {
+            tokens
+                .iter()
+                .find(|(c, _)| c == commit)
+                .map(|(_, bytes)| bytes.clone())
+        })
+        .collect()
+}
+
 fn sofi_create_operation(
     market: ([u8; 32], [u8; 32]),
     funding_a: [u8; 32],
@@ -794,6 +861,7 @@ fn sofi_create_operation(
         market_policy_preimage: sofi_market_policy(market).encode(),
         funding_a_policy_commit: funding_a,
         funding_b_policy_commit: funding_b,
+        funding_policies: sofi_carried(&[funding_a, funding_b]),
         signature: vec![0xA1; 8],
     }
 }
@@ -864,7 +932,7 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
 /// P15-12: two debits and the record, as ONE write set, through both halves.
 #[test]
 fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
     let witness = round_trip(
         &sofi_create_operation((a, b), a, b, 1_000, 2_000),
@@ -898,7 +966,7 @@ fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
 /// The creation's own conjuncts, each refusing on its own.
 #[test]
 fn a_creation_is_refused_on_each_missing_conjunct() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let balances = |x: u64, y: u64| {
         let mut m = BTreeMap::new();
         m.insert(a, x);
@@ -957,7 +1025,7 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
 /// relationship leaf, has to be refused BY CLASS.
 #[test]
 fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let (mut tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
 
     // The witness a CREATION produces, verified against a SETUP.
@@ -1019,7 +1087,13 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
 /// rather than quietly becoming a duplicate of the happy path.
 #[test]
 fn a_creation_verifies_when_key_order_opposes_asset_order() {
-    let (a, b) = ([0x00; 32], [0x01; 32]);
+    let key = |asset: &[u8; 32]| dsm::economic::keys::balance_key(&G, &DEV, asset);
+    let tokens = sofi_tokens();
+    let (a, b) = tokens
+        .iter()
+        .flat_map(|x| tokens.iter().map(move |y| (x.0, y.0)))
+        .find(|(a, b)| a < b && key(a) > key(b))
+        .expect("an inverting pair among the fixture tokens");
     assert!(a < b, "the assets are in canonical order");
     assert!(
         dsm::economic::keys::balance_key(&G, &DEV, &a)
@@ -1052,7 +1126,7 @@ fn a_creation_verifies_when_key_order_opposes_asset_order() {
 /// producer.
 #[test]
 fn funding_assets_outside_the_declared_market_are_refused_even_when_funded() {
-    let market = ([0x40; 32], [0x41; 32]);
+    let market = sofi_pair();
     let (junk_a, junk_b) = ([0x70; 32], [0x71; 32]);
     assert!(
         junk_a < junk_b,

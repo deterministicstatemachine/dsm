@@ -27,6 +27,7 @@ fn sofi_operations() -> Vec<Operation> {
             market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
             funding_a_policy_commit: [0x5C; 32],
             funding_b_policy_commit: [0x5D; 32],
+            funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
             signature: Vec::new(),
         },
         Operation::SofiFulfill {
@@ -39,6 +40,7 @@ fn sofi_operations() -> Vec<Operation> {
             genesis_preimage: vec![0x5A, 0x00],
             creation: vec![0x5B, 0x00],
             terms: vec![0x00, 0x63, 0x00, 0x01],
+            funding_policies: vec![vec![0x40, 0x01]],
             signature: Vec::new(),
         },
     ]
@@ -255,6 +257,7 @@ fn each_sofi_operation_signs_its_own_rule_and_not_the_other() {
         market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
         funding_a_policy_commit: [0x5C; 32],
         funding_b_policy_commit: [0x5D; 32],
+        funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
         signature: Vec::new(),
     };
 
@@ -362,6 +365,7 @@ fn a_creation_round_trips_both_funding_commits_in_order() {
         market_policy_preimage: vec![0x00, 0x07, 0x00, 0x01],
         funding_a_policy_commit: [0xA1; 32],
         funding_b_policy_commit: [0xB2; 32],
+        funding_policies: vec![vec![0xA1, 0x01], vec![0xB2, 0x02, 0x03]],
         signature: SIG.to_vec(),
     };
     let decoded = Operation::from_bytes(&op.to_bytes()).expect("decodes");
@@ -370,8 +374,14 @@ fn a_creation_round_trips_both_funding_commits_in_order() {
             market_policy_preimage,
             funding_a_policy_commit,
             funding_b_policy_commit,
+            funding_policies,
             ..
         } => {
+            assert_eq!(
+                funding_policies,
+                vec![vec![0xA1, 0x01], vec![0xB2, 0x02, 0x03]],
+                "the carried token policies survive, in order"
+            );
             assert_eq!(
                 market_policy_preimage,
                 vec![0x00, 0x07, 0x00, 0x01],

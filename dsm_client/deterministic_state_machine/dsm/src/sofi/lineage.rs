@@ -2082,12 +2082,14 @@ pub(crate) mod genesis_acceptance {
             amount_b: preimage.state.reserve_b,
         };
         let preimage_bytes = preimage.encode().unwrap();
+        let funding_policies = carried_for(&[pair.0, pair.1]);
         let build = |signature: Vec<u8>| Operation::SofiVaultCreate {
             genesis_preimage: preimage_bytes.clone(),
             creation: record.encode(),
             market_policy_preimage: market_bytes.clone(),
             funding_a_policy_commit: pair.0,
             funding_b_policy_commit: pair.1,
+            funding_policies: funding_policies.clone(),
             signature,
         };
         let signing = (build(Vec::new())).signing_bytes();
@@ -2334,9 +2336,41 @@ pub(crate) mod genesis_acceptance {
         }
     }
 
-    /// The escrow creation of `state`, carrying `terms_bytes`, as the owner
-    /// signs it.
+    /// The policies a creation funding `funded` carries: that of each token
+    /// that is not pre-rooted, from the fixture tokens or the
+    /// non-transferable token 9.
+    fn carried_for(funded: &[D32]) -> Vec<Vec<u8>> {
+        let locked = committed(token_policy_bytes_with(9, 0));
+        funded
+            .iter()
+            .filter(|c| crate::core::token::builtin_token_id_for_policy_commit(c).is_none())
+            .map(|c| {
+                tokens()
+                    .iter()
+                    .chain(std::iter::once(&locked))
+                    .find(|(commit, _)| commit == c)
+                    .map(|(_, bytes)| bytes.clone())
+                    .expect("a fixture token")
+            })
+            .collect()
+    }
+
+    /// The escrow creation of `state`, carrying `terms_bytes` and the staked
+    /// token's policy, as the owner signs it.
     fn escrow_creation_of(state: VaultStateLeaf, terms_bytes: Vec<u8>) -> Creation {
+        let staked = *crate::sofi::wire::EscrowKind::decode(&terms_bytes)
+            .expect("fixture terms decode")
+            .token();
+        escrow_creation_carrying(state, terms_bytes, carried_for(&[staked]))
+    }
+
+    /// The escrow creation of `state` carrying `funding_policies`: terms that
+    /// do not decode name no staked token, so their creation carries none.
+    fn escrow_creation_carrying(
+        state: VaultStateLeaf,
+        terms_bytes: Vec<u8>,
+        funding_policies: Vec<Vec<u8>>,
+    ) -> Creation {
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: dev(),
@@ -2355,6 +2389,7 @@ pub(crate) mod genesis_acceptance {
             genesis_preimage: preimage_bytes.clone(),
             creation: record.encode(),
             terms: terms_bytes.clone(),
+            funding_policies: funding_policies.clone(),
             signature,
         };
         let signing = build(Vec::new()).signing_bytes();
@@ -2414,9 +2449,10 @@ pub(crate) mod genesis_acceptance {
         );
         // Bytes the slots name that are not escrow terms.
         let garbage = b"no terms".to_vec();
-        let c = escrow_creation_of(
+        let c = escrow_creation_carrying(
             escrow_state(crate::sofi::escrow::terms_address_of(&garbage), 2_500, 0),
             garbage,
+            Vec::new(),
         );
         assert!(matches!(
             accept(&c),
@@ -2547,9 +2583,10 @@ pub(crate) mod genesis_acceptance {
             amount_b: 0,
         }
         .encode();
-        let c = escrow_creation_of(
+        let c = escrow_creation_carrying(
             escrow_state(crate::sofi::escrow::terms_address_of(&not_terms), 2_500, 0),
             not_terms,
+            Vec::new(),
         );
         assert!(matches!(
             accept(&c),

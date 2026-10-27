@@ -756,35 +756,55 @@ pub(crate) fn anchored_policy_bytes(
     policy_commit: &[u8; 32],
     runtime: &tokio::runtime::Handle,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => tokio::task::block_in_place(|| {
+            runtime.block_on(fetched_policy_bytes(set, policy_commit))
+        }),
+    }
+}
+
+/// [`anchored_policy_bytes`] for a caller already on the runtime.
+pub(crate) async fn anchored_policy_bytes_async(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => fetched_policy_bytes(set, policy_commit).await,
+    }
+}
+
+/// The policy this device already holds for `policy_commit`, or none.
+fn held_policy_bytes(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
     // ERA's policy is Core's own (SoFi Amendment S11): answered from its
     // bytes, never fetched and never stored.
     if *policy_commit == dsm::core::token::token_state_manager::era_policy_commit() {
-        return Ok(dsm::core::token::era_policy::era_policy_bytes().to_vec());
+        return Ok(Some(
+            dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        ));
     }
-    match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
-        Ok(Some(bytes)) => return Ok(bytes),
-        Ok(None) => {}
-        Err(e) => {
-            return Err(PeerLineageFailure::Incomplete(format!(
-                "the local token policy store is unreadable: {e}"
-            )))
-        }
-    }
-    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
-    let bytes = tokio::task::block_in_place(|| {
-        runtime.block_on(crate::sdk::storage_io::fetch_immutable(
-            set,
-            tag,
-            policy_commit,
-        ))
+    crate::storage::client_db::token_registry::load_policy_verified(policy_commit).map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("the local token policy store is unreadable: {e}"))
     })
-    .map_err(|e| incomplete("token policy fetch", e))?
-    .ok_or_else(|| {
-        PeerLineageFailure::Incomplete(format!(
-            "no member holds the policy {}",
-            text_id::encode_base32_crockford(policy_commit)
-        ))
-    })?;
+}
+
+/// The policy object `policy_commit` names, fetched from `set`, re-hashed,
+/// and kept.
+async fn fetched_policy_bytes(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
+    let bytes = crate::sdk::storage_io::fetch_immutable(set, tag, policy_commit)
+        .await
+        .map_err(|e| incomplete("token policy fetch", e))?
+        .ok_or_else(|| {
+            PeerLineageFailure::Incomplete(format!(
+                "no member holds the policy {}",
+                text_id::encode_base32_crockford(policy_commit)
+            ))
+        })?;
     if dsm::crypto::blake3::domain_hash_bytes(tag, &bytes) != *policy_commit {
         return Err(PeerLineageFailure::Incomplete(format!(
             "the bytes served for policy {} are not that policy",

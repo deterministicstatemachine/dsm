@@ -714,6 +714,15 @@ pub enum Operation {
         /// two assets and Core refused nothing.
         funding_a_policy_commit: [u8; 32],
         funding_b_policy_commit: [u8; 32],
+        /// Canonical `TokenPolicyV3` bytes of each funded token that is not
+        /// pre-rooted (ERA, dBTC), in the funded order (MR-SOFI-0311).
+        ///
+        /// CARRIED for the reason the market policy is: whether the tokens
+        /// may be locked in a vault (SoFi §49, `transferable` at vault
+        /// creation) is then a function of the operation's bytes. Core
+        /// re-hashes each to the funded commit it stands for, so bytes that
+        /// are not that token's committed policy establish nothing.
+        funding_policies: Vec<Vec<u8>>,
         /// SPHINCS+ over the operation's canonical unsigned bytes. A creation
         /// is the ONE SoFi operation that signs those: `vault_id` and `R_0`
         /// are derivations of the preimage it carries, so it has no protocol
@@ -755,6 +764,10 @@ pub enum Operation {
         /// terms namespace and refuses unless the address is the one the state
         /// commits; the token they name is the one debited.
         terms: Vec<u8>,
+        /// The staked token's canonical `TokenPolicyV3` bytes, or none when
+        /// that token is pre-rooted (ERA, dBTC): checked at creation as
+        /// `SofiVaultCreate`'s `funding_policies` are (MR-SOFI-0311).
+        funding_policies: Vec<Vec<u8>>,
         /// SPHINCS+ over the operation's canonical unsigned bytes, as for
         /// `SofiVaultCreate`: a creation has no object digest of its own.
         signature: Vec<u8>,
@@ -1047,6 +1060,7 @@ impl Operation {
                 market_policy_preimage,
                 funding_a_policy_commit,
                 funding_b_policy_commit,
+                funding_policies,
                 signature,
             } => {
                 put_u8(&mut out, 35);
@@ -1055,6 +1069,7 @@ impl Operation {
                 put_bytes(&mut out, market_policy_preimage);
                 put_bytes(&mut out, funding_a_policy_commit);
                 put_bytes(&mut out, funding_b_policy_commit);
+                put_vec_bytes(&mut out, funding_policies);
                 put_bytes(&mut out, signature);
             }
             SofiFulfill {
@@ -1071,12 +1086,14 @@ impl Operation {
                 genesis_preimage,
                 creation,
                 terms,
+                funding_policies,
                 signature,
             } => {
                 put_u8(&mut out, 38);
                 put_bytes(&mut out, genesis_preimage);
                 put_bytes(&mut out, creation);
                 put_bytes(&mut out, terms);
+                put_vec_bytes(&mut out, funding_policies);
                 put_bytes(&mut out, signature);
             }
             Genesis => {
@@ -2116,6 +2133,7 @@ impl Operation {
                 // assets than the one whose signature was checked.
                 funding_a_policy_commit: get_arr32(&mut input)?,
                 funding_b_policy_commit: get_arr32(&mut input)?,
+                funding_policies: dec_vec_bytes(&mut input)?,
                 signature: get_bytes(&mut input)?,
             },
             36 => SofiFulfill {
@@ -2127,6 +2145,7 @@ impl Operation {
                 genesis_preimage: get_bytes(&mut input)?,
                 creation: get_bytes(&mut input)?,
                 terms: get_bytes(&mut input)?,
+                funding_policies: dec_vec_bytes(&mut input)?,
                 signature: get_bytes(&mut input)?,
             },
             _ => return Err(DsmError::invalid_operation("unknown op tag")),
