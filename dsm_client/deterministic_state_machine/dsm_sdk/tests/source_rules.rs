@@ -490,6 +490,7 @@ const CORE_STATES: &[(&str, &str)] = &[
     ("economic/register.rs", "RegisteredEconomicRoot"),
     ("economic/provenance.rs", "FundedCredit"),
     ("economic/native_reserve.rs", "NativeReserveState"),
+    ("economic/native_reserve.rs", "ReserveLineage"),
     ("sofi/validation.rs", "VaultPostState"),
     ("sofi/lineage.rs", "AcceptedVaultGenesis"),
     ("sofi/exercise.rs", "RecognizedExercise"),

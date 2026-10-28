@@ -57,6 +57,8 @@
 
 use prost::Message;
 
+use std::collections::BTreeMap;
+
 use crate::ccb::decode::DecodeError;
 use crate::common::domain_tags::{
     TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE, TAG_DSM_NATIVE_RESERVE_CELL,
@@ -391,6 +393,109 @@ impl EstablishedReserve {
             .extended(state.root(), release_evidence_addr(&release.envelope_bytes))
             .map_err(ReserveHeadError::Lineage)?;
         Ok(Self { head, state })
+    }
+}
+
+/// The reserve's lineage as a reader re-establishes it from the releases it
+/// kept (DSM Amendment A15): the genesis, then one generation per release,
+/// each taken only once Core has checked it against the head before it. The
+/// envelope must decode and verify, and the release must succeed the head by
+/// the construction predicate ([`EstablishedReserve::succeeded_by`]). A kept
+/// release is this device's own earlier conclusion, read back: it reaches
+/// the chain only through that check, never as a root. The one way a reserve
+/// generation enters a [`GenerationChain`].
+///
+/// What the check does not re-prove is finality: that this release, and no
+/// other release of the same parent, is the value final at its cell. The
+/// reads that showed it final are not kept (owner decision 2 of
+/// `CONFORMANCE_GAPS.md` §6.106).
+#[derive(Debug, Clone)]
+pub struct ReserveLineage {
+    chain: GenerationChain,
+    head: EstablishedReserve,
+    steps: BTreeMap<u64, D32>,
+}
+
+/// Why a kept release does not extend the lineage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveLineageRefusal {
+    /// The envelope offered for `generation` is not a release that verifies.
+    NotARelease { generation: u64, why: ReleaseError },
+    /// The release offered for `generation` does not succeed the head before
+    /// it.
+    NotTheSuccessor {
+        generation: u64,
+        why: ReserveHeadError,
+    },
+}
+
+impl core::fmt::Display for ReserveLineageRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotARelease { generation, why } => write!(
+                f,
+                "the release kept for generation {generation} is not a release: {why}"
+            ),
+            Self::NotTheSuccessor { generation, why } => write!(
+                f,
+                "the release kept for generation {generation} does not extend the lineage: {why}"
+            ),
+        }
+    }
+}
+
+impl ReserveLineage {
+    /// The lineage of the reserve whose genesis is `genesis`, at its genesis.
+    pub fn from_genesis(genesis: &NativeReserveState) -> Result<Self, ReserveHeadError> {
+        let chain = GenerationChain::from_genesis(&reserve_lineage_genesis(genesis)?);
+        let head = EstablishedReserve::of(genesis, &chain.head())?;
+        Ok(Self {
+            chain,
+            head,
+            steps: BTreeMap::new(),
+        })
+    }
+
+    /// Establish the next generation from `envelope`, the release kept for
+    /// it, and extend the chain by it. A release Core does not establish
+    /// leaves the lineage as it was.
+    pub fn establish(
+        &mut self,
+        envelope: &[u8],
+    ) -> Result<&EstablishedReserve, ReserveLineageRefusal> {
+        let generation = self.head.head().generation().saturating_add(1);
+        let release = decode_and_verify_release(envelope)
+            .map_err(|why| ReserveLineageRefusal::NotARelease { generation, why })?;
+        let next = self
+            .head
+            .succeeded_by(&release)
+            .map_err(|why| ReserveLineageRefusal::NotTheSuccessor { generation, why })?;
+        let step = release_evidence_addr(envelope);
+        self.chain.push(next.state().root(), step).map_err(|e| {
+            ReserveLineageRefusal::NotTheSuccessor {
+                generation,
+                why: ReserveHeadError::Lineage(e),
+            }
+        })?;
+        self.steps.insert(generation, step);
+        self.head = next;
+        Ok(&self.head)
+    }
+
+    /// The generation chain this lineage established.
+    pub fn chain(&self) -> &GenerationChain {
+        &self.chain
+    }
+
+    /// The head it established last.
+    pub fn head(&self) -> &EstablishedReserve {
+        &self.head
+    }
+
+    /// Each established generation's step digest, its release's evidence
+    /// address.
+    pub fn steps(&self) -> &BTreeMap<u64, D32> {
+        &self.steps
     }
 }
 
@@ -1720,6 +1825,54 @@ mod tests {
             EstablishedReserve::of(&r1, &honest),
             Err(ReserveHeadError::NotTheGenesis { generation: 1 })
         );
+    }
+
+    /// DSM Amendment A15, MR-DSM-0310: a kept release enters the reserve's
+    /// lineage only once Core establishes it from the head before it. The
+    /// honest releases, kept in order, re-establish the walk's own chain. A
+    /// kept envelope that does not verify, and a release of another parent,
+    /// are each refused and leave the lineage where it was.
+    ///
+    /// MUTATION CONTROL: taking a kept release into the chain without the
+    /// checks of `ReserveLineage::establish` (`reserve_memo_unchecked`) turns
+    /// this red.
+    #[test]
+    fn a_kept_release_enters_the_lineage_only_as_the_successor_core_establishes() {
+        let r0 = genesis();
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
+        let r1 = release_constructible(&r0, &rel1).unwrap();
+        let rel2 = signed(&r1, ERA_FAUCET_PAYOUT);
+        let r2 = release_constructible(&r1, &rel2).unwrap();
+        let mut lineage = ReserveLineage::from_genesis(&r0).expect("R_0");
+        lineage
+            .establish(&rel1.envelope_bytes)
+            .expect("generation 1");
+        lineage
+            .establish(&rel2.envelope_bytes)
+            .expect("generation 2");
+        assert_eq!(*lineage.head().state(), r2);
+        assert_eq!(
+            lineage.chain().head(),
+            chain_head(&r0, &[(&rel1, &r1), (&rel2, &r2)])
+        );
+        assert_eq!(lineage.steps().len(), 2);
+
+        let mut kept = ReserveLineage::from_genesis(&r0).expect("R_0");
+        kept.establish(&rel1.envelope_bytes).expect("generation 1");
+        let before = kept.chain().clone();
+        let mut bent = rel2.envelope_bytes.clone();
+        let last = bent.len() - 1;
+        bent[last] ^= 0x01;
+        assert!(matches!(
+            kept.establish(&bent),
+            Err(ReserveLineageRefusal::NotARelease { generation: 2, .. })
+        ));
+        assert!(matches!(
+            kept.establish(&rel1.envelope_bytes),
+            Err(ReserveLineageRefusal::NotTheSuccessor { generation: 2, .. })
+        ));
+        assert_eq!(kept.chain(), &before, "a refused release enters nothing");
+        assert_eq!(kept.head().head().generation(), 1);
     }
 
     /// A head extends only by a release that succeeds its state, and the head

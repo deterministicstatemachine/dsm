@@ -368,26 +368,18 @@ impl ProvenanceResolver for OneTicket {
                 "this fixture's walk reached generation 1 only, not {generation} of {reserve_id:?}"
             )));
         }
-        // The reader's heads around the release: the genesis, and the chain
-        // with this release as generation 1's step.
-        let mut chain = dsm::shared_lineage::GenerationChain::from_genesis(
-            &dsm::economic::native_reserve::reserve_lineage_genesis(&parent)
-                .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?,
-        );
-        let before = chain.head();
-        let state = parent
-            .at_generation(1)
+        // The reader's heads around the release: the genesis, and this
+        // release established on it by Core as generation 1.
+        let mut lineage = dsm::economic::native_reserve::ReserveLineage::from_genesis(&parent)
             .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
-        chain
-            .push(
-                state.root(),
-                dsm::economic::native_reserve::release_evidence_addr(&self.envelope),
-            )
-            .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))?;
+        let before = lineage.chain().head();
+        lineage
+            .establish(&self.envelope)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
             parent: before,
-            child: chain.head(),
+            child: lineage.chain().head(),
         })
     }
 

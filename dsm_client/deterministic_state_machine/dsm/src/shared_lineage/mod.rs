@@ -85,6 +85,9 @@ pub enum LineageObjectError {
     GenerationOverflow,
     /// A hint for a generation the chain has not established.
     NotEstablished { generation: u64 },
+    /// A recorded generation offered to a chain of a kind Core establishes
+    /// from evidence: only a vault generation is taken from a record.
+    NotRecordedForThisKind { kind: LineageKind },
 }
 
 impl core::fmt::Display for LineageObjectError {
@@ -352,9 +355,13 @@ impl EstablishedSharedHead {
 
 /// The digests `d_0 … d_n` of the generations a reader established, in
 /// order. The digests are a commitment a reader computes for itself; feeding
-/// it anything but generations the reader's own Core walk established makes
-/// its digests describe something nobody established, and nothing here can
-/// tell. Hints and checkpoints are compared against these, never the other
+/// it anything but generations Core established makes its digests describe
+/// something nobody established, and nothing here can tell. So a generation
+/// enters a chain only from Core: a reserve generation through
+/// [`crate::economic::native_reserve::ReserveLineage::establish`], which
+/// checks the release against the head before it, and a vault generation
+/// through [`GenerationChain::push_recorded_vault_generation`], the one open
+/// hole. Hints and checkpoints are compared against these, never the other
 /// way round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationChain {
@@ -373,11 +380,35 @@ impl GenerationChain {
         }
     }
 
-    /// Append the next established generation, its root and step digest.
-    pub fn push(&mut self, state_root: D32, step_digest: D32) -> Result<(), LineageObjectError> {
+    /// Append the next generation, its root and step digest. Crate-private:
+    /// only Core, having established the generation, appends it.
+    pub(crate) fn push(
+        &mut self,
+        state_root: D32,
+        step_digest: D32,
+    ) -> Result<(), LineageObjectError> {
         let next = self.head().extended(state_root, step_digest)?;
         self.generations.push((state_root, next.generation_digest));
         Ok(())
+    }
+
+    /// Append a vault generation from this device's record of its own walks
+    /// (`sdk::vault_history::recorded_chain`). This is an open hole, owner
+    /// decision 1 of `CONFORMANCE_GAPS.md` §6.106: nothing here, and nothing
+    /// in Core, establishes the generation from the evidence it was
+    /// established on, because that evidence is not kept. The record holds
+    /// the generation's root, its parent's root and the consumption, and the
+    /// vault walk's own start (`sofi::resolution`) checks only that the
+    /// records link. A chain of any other kind refuses it.
+    pub fn push_recorded_vault_generation(
+        &mut self,
+        state_root: D32,
+        step_digest: D32,
+    ) -> Result<(), LineageObjectError> {
+        if self.kind != LineageKind::Vault {
+            return Err(LineageObjectError::NotRecordedForThisKind { kind: self.kind });
+        }
+        self.push(state_root, step_digest)
     }
 
     /// The head: the last generation pushed, or the genesis.

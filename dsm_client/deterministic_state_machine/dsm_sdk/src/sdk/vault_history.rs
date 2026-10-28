@@ -488,12 +488,16 @@ fn recorded_chain(
             break;
         };
         let step = vault_step_digest(&consumed_by);
-        chain.push(row.root, step).map_err(|e| {
-            DsmError::storage(
-                format!("vault generation chain: {e}"),
-                None::<std::io::Error>,
-            )
-        })?;
+        // The open hole of owner decision 1 (§6.106): the recorded generation
+        // is taken as this device recorded it.
+        chain
+            .push_recorded_vault_generation(row.root, step)
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("vault generation chain: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
         steps.insert(row.generation, step);
     }
     Ok((chain, steps))

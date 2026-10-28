@@ -20,8 +20,8 @@ use dsm::economic::credit::{CreditSource, CreditSourceNativeReserveRelease};
 use dsm::economic::mutation::EconomicLeafMutation;
 use dsm::economic::native_reserve::{
     era_reserve_id, release_constructible, release_evidence_addr, release_source_id,
-    reserve_genesis_supply, reserve_lineage_genesis, sign_release, NativeReserveReleaseBody,
-    NativeReserveState, ReleaseRefusal, ReserveHeadError, ReleaseSource, ERA_FAUCET_PAYOUT,
+    reserve_genesis_supply, sign_release, NativeReserveReleaseBody, NativeReserveState,
+    ReleaseRefusal, ReleaseSource, ReserveHeadError, ReserveLineage, ERA_FAUCET_PAYOUT,
 };
 use dsm::economic::provenance::{
     verify_credit_source, PeerLineageFailure, ProvenanceContext, ProvenanceError,
@@ -30,7 +30,7 @@ use dsm::economic::provenance::{
 use dsm::economic::state::{EconomicBalanceState, EconomicLeafState};
 use dsm::economic::tree::EconomicSmt;
 use dsm::economic::witness::EconomicTransitionWitness;
-use dsm::shared_lineage::{EstablishedSharedHead, GenerationChain};
+use dsm::shared_lineage::{EstablishedSharedHead, GenerationChain, LineageKind, SharedGenesisV1};
 use dsm::types::operations::Operation;
 
 const G: [u8; 32] = [0x11; 32];
@@ -84,20 +84,21 @@ struct Fixture {
     pk: Vec<u8>,
 }
 
-/// The established chain of the reserve whose genesis is `genesis`, through
-/// the releases `history` names, one a generation: what a reader's walk of
-/// those releases established.
-fn chain_through(genesis: &NativeReserveState, history: &[Vec<u8>]) -> GenerationChain {
-    let mut chain = GenerationChain::from_genesis(&reserve_lineage_genesis(genesis).expect("R_0"));
-    for (i, envelope) in history.iter().enumerate() {
-        let state = genesis
-            .at_generation(i as u64 + 1)
-            .expect("a generation of the lineage");
-        chain
-            .push(state.root(), release_evidence_addr(envelope))
-            .expect("the next generation");
+/// The lineage of the reserve whose genesis is `genesis`, through the
+/// releases `history` names, one a generation, each established by Core
+/// from the head before it: what a reader's walk of those releases
+/// established.
+fn lineage_through(genesis: &NativeReserveState, history: &[Vec<u8>]) -> ReserveLineage {
+    let mut lineage = ReserveLineage::from_genesis(genesis).expect("R_0");
+    for envelope in history {
+        lineage.establish(envelope).expect("the next generation");
     }
-    chain
+    lineage
+}
+
+/// The chain of [`lineage_through`].
+fn chain_through(genesis: &NativeReserveState, history: &[Vec<u8>]) -> GenerationChain {
+    lineage_through(genesis, history).chain().clone()
 }
 
 fn fixture_at(
@@ -114,22 +115,28 @@ fn fixture_at(
     let generation = parent.generation() + 1;
     let op = claim_op(reserve_id, generation);
     let op_digest = dsm_operation_digest(&op.to_bytes());
-    let body = NativeReserveReleaseBody {
-        reserve_id,
-        parent_root: parent.root(),
-        generation,
-        amount,
-        recipient_genesis: G,
-        recipient_devid: *dev(),
-        recipient_economic_position: position,
-        recipient_operation_digest: op_digest,
-        storage_set_id: SET_ID,
-        source: ReleaseSource::FaucetClaimant {
-            claimant_public_key: pk.clone(),
-            claimant_att_a: ATTA,
-        },
+    let release_of = |amount: u64| {
+        sign_release(
+            &NativeReserveReleaseBody {
+                reserve_id,
+                parent_root: parent.root(),
+                generation,
+                amount,
+                recipient_genesis: G,
+                recipient_devid: *dev(),
+                recipient_economic_position: position,
+                recipient_operation_digest: op_digest,
+                storage_set_id: SET_ID,
+                source: ReleaseSource::FaucetClaimant {
+                    claimant_public_key: pk.clone(),
+                    claimant_att_a: ATTA,
+                },
+            },
+            &sk,
+        )
+        .expect("signable")
     };
-    let envelope = sign_release(&body, &sk).expect("signable");
+    let envelope = release_of(amount);
 
     // The credited transition: empty tree -> +amount ERA.
     let mut tree = EconomicSmt::new();
@@ -160,21 +167,23 @@ fn fixture_at(
     )
     .expect("valid witness");
 
-    // The heads a reader holds once its walk passed this release: the chain
-    // through the history, and that chain with this release as the next
-    // generation's step on the lineage's next state.
-    let mut chain = chain_through(genesis, history);
-    let parent_head = chain.head();
-    let child_state = genesis
-        .at_generation(parent.generation() + 1)
-        .expect("the lineage's next state");
-    chain
-        .push(child_state.root(), release_evidence_addr(&envelope))
-        .expect("the next generation");
+    // The heads a reader holds once its walk passed this release: the
+    // lineage through the history, and this release established on it. A
+    // release of another amount is no successor Core establishes; the
+    // reader's chain then holds the honest release of that generation.
+    let mut lineage = lineage_through(genesis, history);
+    let parent_head = lineage.chain().head();
+    let child_head = match lineage.establish(&envelope) {
+        Ok(next) => *next.head(),
+        Err(..) => *lineage
+            .establish(&release_of(ERA_FAUCET_PAYOUT))
+            .expect("the honest release of the generation")
+            .head(),
+    };
     Fixture {
         envelope,
         parent_head,
-        child_head: chain.head(),
+        child_head,
         witness,
         descriptor,
         pk,
@@ -481,9 +490,14 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
 
 /// DSM Amendment A15, MR-DSM-0315: the verifier takes the reserve's state
 /// only from the reader's established heads. A parent head that is not a
-/// state of this reserve funds nothing, and neither does a release that is
-/// not the step between the heads: here the reader's chain holds another
-/// release at that generation, its own next state's root the same.
+/// state of this reserve funds nothing (here a vault lineage's head under
+/// the reserve's id), and neither does a release that is not the step
+/// between the heads: here the reader's chain holds another release at that
+/// generation, its own next state's root the same. A reserve head whose
+/// root is not the state at its generation cannot be built outside Core:
+/// only Core extends a reserve chain (`ReserveLineage::establish`), and
+/// `EstablishedReserve::of` refusing one is Core's own test
+/// (`a_reserve_state_is_taken_only_from_a_head_of_this_reserve`).
 ///
 /// MUTATION CONTROL: dropping the child-head comparison in the arm turns the
 /// step assertion red.
@@ -491,15 +505,14 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
 fn a_reserve_credit_is_checked_against_the_readers_established_heads() {
     let r0 = genesis();
     let fx = fixture(1);
-    let mut forged = GenerationChain::from_genesis(&reserve_lineage_genesis(&r0).expect("R_0"));
-    forged
-        .push(
-            r0.at_generation(2).expect("generation 2").root(),
-            release_evidence_addr(&fx.envelope),
-        )
-        .expect("a generation");
+    let vault = GenerationChain::from_genesis(&SharedGenesisV1::new(
+        LineageKind::Vault,
+        *r0.reserve_id(),
+        r0.root(),
+        [0x2F; 32],
+    ));
     let resolver = OneRelease {
-        parent: forged.head(),
+        parent: vault.head(),
         ..OneRelease::of(&fx)
     };
     assert!(matches!(
@@ -510,7 +523,7 @@ fn a_reserve_credit_is_checked_against_the_readers_established_heads() {
             &ctx(1, &fx.pk),
         ),
         Err(ProvenanceError::ReleaseParentNotOnTheReserve(
-            ReserveHeadError::RootIsNotTheState { generation: 1 }
+            ReserveHeadError::NotThisReserve
         ))
     ));
 
@@ -596,13 +609,7 @@ fn faucet_claim_names_its_claimant_as_recipient() {
     )
     .expect("signable");
     // The reader's chain holds that release at generation 1.
-    let mut chain = chain_through(&genesis(), &[]);
-    chain
-        .push(
-            parent.at_generation(1).expect("generation 1").root(),
-            release_evidence_addr(&paid_to_someone_else),
-        )
-        .expect("generation 1");
+    let chain = chain_through(&genesis(), std::slice::from_ref(&paid_to_someone_else));
     let resolver = OneRelease {
         envelope: paid_to_someone_else.clone(),
         child: chain.head(),

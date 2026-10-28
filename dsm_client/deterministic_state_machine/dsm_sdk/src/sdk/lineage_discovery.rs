@@ -446,20 +446,28 @@ fn lineage_err(what: &str, e: impl core::fmt::Display) -> DsmError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dsm::shared_lineage::{BundleStep, SharedGenesisV1};
+    use dsm::economic::native_reserve::{NativeReserveState, ReserveLineage};
+    use dsm::shared_lineage::BundleStep;
 
-    const LINEAGE: D32 = [0x31; 32];
+    /// The reserve these tests walk, on a network of their own.
+    fn reserve_genesis() -> NativeReserveState {
+        NativeReserveState::genesis(b"discovery-test", [0x30; 32]).expect("R_0")
+    }
 
-    /// A reserve lineage `generations` long, as a walk would establish it.
+    /// The reserve's lineage id.
+    fn lineage_id() -> D32 {
+        *reserve_genesis().reserve_id()
+    }
+
+    /// The reserve's lineage `generations` long, as a walk establishes it:
+    /// real releases, each taken by Core from the head before it.
     fn chain_of(generations: u64) -> GenerationChain {
-        let genesis = SharedGenesisV1::new(LineageKind::Reserve, LINEAGE, [0x30; 32], [0x2F; 32]);
-        let mut chain = GenerationChain::from_genesis(&genesis);
-        for g in 1..=generations {
-            chain
-                .push([g as u8; 32], [0x80 | g as u8; 32])
-                .expect("the next generation");
+        let genesis = reserve_genesis();
+        let mut lineage = ReserveLineage::from_genesis(&genesis).expect("R_0");
+        for envelope in crate::test_support::reserve::signed_releases(&genesis, generations) {
+            lineage.establish(&envelope).expect("the next generation");
         }
-        chain
+        lineage.chain().clone()
     }
 
     /// A checkpoint whose first root is `first` and whose other 32 roots are
@@ -505,15 +513,15 @@ mod tests {
         let (r_s, d_s) = (*head.state_root(), *head.generation_digest());
         let (r_0, d_0) = chain.at(0).expect("the genesis");
         let s = EPOCH_GENERATIONS;
-        let eligible = checkpoint(LineageKind::Reserve, LINEAGE, s, d_s, r_s, 0xE1);
+        let eligible = checkpoint(LineageKind::Reserve, lineage_id(), s, d_s, r_s, 0xE1);
         let mut found = Candidates::default();
         for object in [
             eligible.clone(),
             checkpoint(LineageKind::Reserve, [0x32; 32], s, d_s, r_s, 0xE2),
-            checkpoint(LineageKind::Vault, LINEAGE, s, d_s, r_s, 0xE3),
-            checkpoint(LineageKind::Reserve, LINEAGE, 0, d_0, r_0, 0xE4),
-            checkpoint(LineageKind::Reserve, LINEAGE, s, [0x77; 32], r_s, 0xE5),
-            checkpoint(LineageKind::Reserve, LINEAGE, s, d_s, [0x78; 32], 0xE6),
+            checkpoint(LineageKind::Vault, lineage_id(), s, d_s, r_s, 0xE3),
+            checkpoint(LineageKind::Reserve, lineage_id(), 0, d_0, r_0, 0xE4),
+            checkpoint(LineageKind::Reserve, lineage_id(), s, [0x77; 32], r_s, 0xE5),
+            checkpoint(LineageKind::Reserve, lineage_id(), s, d_s, [0x78; 32], 0xE6),
         ] {
             found.add(LineageObject::Checkpoint(object));
         }
@@ -551,7 +559,7 @@ mod tests {
         let (_, d_end) = walked.at(EPOCH_GENERATIONS).expect("the segment's end");
         let honest = CheckpointV1::new(
             LineageKind::Reserve,
-            LINEAGE,
+            lineage_id(),
             0,
             d_0,
             d_end,
@@ -561,11 +569,11 @@ mod tests {
             [0x7B; 32],
         )
         .expect("the segment's checkpoint");
-        let lying = checkpoint(LineageKind::Reserve, LINEAGE, 0, d_0, r_0, 0xE7);
+        let lying = checkpoint(LineageKind::Reserve, lineage_id(), 0, d_0, r_0, 0xE7);
         let hinted_root = [0x5C; 32];
         let hint = GenerationHintV1::new(
             LineageKind::Reserve,
-            LINEAGE,
+            lineage_id(),
             7,
             hinted_root,
             [0x5D; 32],
@@ -637,7 +645,7 @@ mod tests {
             root[..8].copy_from_slice(&g.to_be_bytes());
             let hint = GenerationHintV1::new(
                 LineageKind::Reserve,
-                LINEAGE,
+                lineage_id(),
                 g,
                 root,
                 [0x5B; 32],
@@ -670,7 +678,7 @@ mod tests {
                 release_evidence_addr: [0x90 | g as u8; 32],
             })
             .collect();
-        let bundle = TransitionBundleV1::new(LineageKind::Reserve, LINEAGE, 0, steps)
+        let bundle = TransitionBundleV1::new(LineageKind::Reserve, lineage_id(), 0, steps)
             .expect("the segment's bundle");
         let roots: Vec<D32> = (0..=EPOCH_GENERATIONS)
             .map(|g| chain.at(g).expect("established").0)
@@ -678,7 +686,7 @@ mod tests {
         let digest = |g: u64| chain.at(g).expect("established").1;
         let own = CheckpointV1::new(
             LineageKind::Reserve,
-            LINEAGE,
+            lineage_id(),
             0,
             digest(0),
             digest(EPOCH_GENERATIONS),
@@ -690,7 +698,7 @@ mod tests {
         lying_roots[5] = [0x79; 32];
         let lie = CheckpointV1::new(
             LineageKind::Reserve,
-            LINEAGE,
+            lineage_id(),
             0,
             digest(0),
             digest(EPOCH_GENERATIONS),
