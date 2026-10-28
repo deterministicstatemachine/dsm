@@ -5192,6 +5192,11 @@ Each item below turns on one of four clauses:
 **Questions for the owner.**
 1. **The tip mirror (MR-DSM-0069, MR-STOR-0033).** Is the per-device tip mirror's public head in beta? Its encrypted leaves are G16 privacy, deferred. If it is in beta, it is a new storage namespace, an SDK writer and a verifier read, with no consumer yet.
 2. **MR-DSM-0201 and `Generic`.** A zero-effect transition is not a transition. Refusing a `Generic` that moves nothing in Core removes the dBTC exit flow's lock and unlock, which are built as `Generic`. Refuse it now (the dBTC path leaves with it, to be rebuilt when dBTC is scheduled), or leave `Generic` until the dBTC round?
+3. **MR-DSM-0248 and the length prefix.** `crypto::canonical_lp::write_lp` writes a 4-byte length and saturates it at `u32::MAX` (`unwrap_or(u32::MAX)`), so two inputs over 4 GiB of different lengths would hash with the same prefix. No input reaches that size today: the spool payload is capped at 512 KiB, and objects and cells are capped lower still. But the fallback is a made-up value. There are two clean fixes, each a wide change:
+   - an 8-byte length prefix, which changes every length-prefixed hash and the golden values that pin them;
+   - refusing an input over the bound, which puts an error on `write_lp` and its 18 callers.
+
+   Which, or leave it as recorded?
 
 ### 6.109 Identity storage traced on the real nodes; the descendant fence's stale texts corrected (`test/identity-anchoring-trace`, 2026-10-27)
 
