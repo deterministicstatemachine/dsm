@@ -1546,7 +1546,8 @@ impl AppRouterImpl {
                         &signed_parent,
                         &v.canonical_operation_bytes,
                         &transition_entropy,
-                    );
+                    )
+                    .map_err(|e| format!("the signed step's C_pre: {e}"))?;
                     let projection_parent: [u8; 32] =
                         crate::storage::client_db::get_contact_chain_tip(&sender_device)
                             .map_err(|e| {
@@ -1554,11 +1555,13 @@ impl AppRouterImpl {
                             })?
                             .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
-                        let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
-                            &projection_parent,
-                            &v.canonical_operation_bytes,
-                            &transition_entropy,
-                        );
+                        let sigma_sym =
+                            dsm::core::bilateral_transaction_manager::compute_precommit(
+                                &projection_parent,
+                                &v.canonical_operation_bytes,
+                                &transition_entropy,
+                            )
+                            .map_err(|e| format!("the projected step's C_pre: {e}"))?;
                         dsm::core::bilateral_transaction_manager::compute_successor_tip(
                             &projection_parent,
                             &v.canonical_operation_bytes,
@@ -1801,8 +1804,25 @@ impl AppRouterImpl {
                 failures.push(format!("split transfer {name} history: {e}"));
                 continue;
             }
+            // Only the ids an honest sender spools this pair's halves under
+            // are consumed, recomputed here from the halves themselves: the
+            // transfer's from its receipt's commitment, the evidence's from
+            // its own bytes. A copy of this pair observed under any other id
+            // was re-posted under an id its content does not name, and
+            // consuming that id would hide whatever honest message holds it.
+            // That copy is read once more, decided, and passed over by its
+            // content.
+            let evidence_name = crate::storage::client_db::derive_artifact_submission_id(
+                &crate::storage::client_db::evidence_content_digest(
+                    crate::storage::client_db::ArtifactRole::EvidenceA,
+                    &v.evidence_bytes,
+                ),
+            );
             match recipient_staging::observed_ids_of_pair(&pair) {
-                Ok(ids) => consumed.extend(ids),
+                Ok(ids) => consumed.extend(
+                    ids.into_iter()
+                        .filter(|(_, id)| *id == name || *id == evidence_name),
+                ),
                 Err(e) => {
                     failures.push(format!(
                         "split transfer {name}: observations unreadable: {e}"
@@ -1988,9 +2008,9 @@ enum StaleOrIngested {
     Stale(crate::handlers::recipient_dispatch::StaleCopy),
 }
 
-/// What a sync records about the copies it read, by route: copies of decided
-/// objects consumed by the id the spool holds them by, and copies that never
-/// will be anything this device can take passed over by their content.
+/// What a sync records about the copies it read, by route: the ids of what
+/// this device verified and took in under them consumed, and copies that
+/// never will be anything this device can take passed over by their content.
 #[derive(Default)]
 struct CopiesTaken {
     consume: std::collections::BTreeMap<String, Vec<String>>,
@@ -2015,8 +2035,8 @@ impl CopiesTaken {
 
 /// Act on what the boundary made of one copy read at `address` under
 /// `message_id`, whose content key is `copy_key`. A copy of an object the
-/// canonical apply has decided is consumed, under the id the spool holds it
-/// by; a copy that is not recognized is passed over by its content.
+/// canonical apply has decided, and a copy that is not recognized, are each
+/// passed over by their content; neither consumes the id it was read under.
 fn take_in_copy(
     copy: Result<StaleOrIngested, String>,
     address: &str,
@@ -2064,7 +2084,17 @@ fn take_in_copy(
     };
     match ingested {
         Ingested::Staged => {}
-        Ingested::Decided => taken.consume(address, message_id),
+        // That its step is decided is a fact about the object, and for a
+        // receipt whose commitment this device already accepted it is read
+        // before any signature is checked. The id the copy was read under is
+        // not a fact about the object: no class's id is recomputed from its
+        // content here, and whoever seals a copy chooses the id it travels
+        // under. Consuming that id hid, on every member and for good, the
+        // honest copy another message holds under it (SA-66; storage spec §8:
+        // the recipient takes a payload's content only on the signature that
+        // content carries). So the copy is passed over by its content, as a
+        // finality certificate or countersign delta reached unverified is.
+        Ingested::Decided => taken.pass_over(address, copy_key),
         // Its sender's backlog is full (SA-100): neither consumed nor passed
         // over, so it is taken on a later sync once that backlog clears.
         Ingested::Held(why) => log::info!(
@@ -2111,6 +2141,15 @@ fn take_in_finality_certificate(
             taken.consume(address, &certificate.message_id);
         }
         O::AlreadyFinalized | O::NoJournal => taken.pass_over(address, &certificate.copy_key),
+        // Bytes that are not a certificate never will be one: passed over by
+        // their content after this read, never read and refused again.
+        O::WireRejected(why) => {
+            log::info!(
+                "[storage.sync] finality checkpoint {} is not a certificate: {why}",
+                certificate.message_id
+            );
+            taken.pass_over(address, &certificate.copy_key);
+        }
         other => report.errors.push(format!(
             "finality checkpoint {}: {other:?}",
             certificate.message_id
@@ -2136,6 +2175,23 @@ fn take_in_countersign_delta(
             taken.consume(address, &delta.message_id);
         }
         CountersignOutcome::AlreadyFinalized => taken.pass_over(address, &delta.copy_key),
+        // A body that is not a countersign delta, or a delta for no proposal
+        // of this device's, never will be one it finalizes on: passed over by
+        // its content after this read, never read and refused again.
+        CountersignOutcome::WireRejected(why) => {
+            log::info!(
+                "[storage.sync] countersign delta {} is not a delta: {why}",
+                delta.message_id
+            );
+            taken.pass_over(address, &delta.copy_key);
+        }
+        CountersignOutcome::NoProposal => {
+            log::info!(
+                "[storage.sync] countersign delta {} names no proposal of this device's",
+                delta.message_id
+            );
+            taken.pass_over(address, &delta.copy_key);
+        }
         other => report
             .errors
             .push(format!("countersign delta {}: {other:?}", delta.message_id)),
@@ -2169,10 +2225,12 @@ async fn record_copies_taken(
     }
 }
 
-/// Act on what became of one cert-resync message read at `address`. One its
-/// own bytes say never will be taken is passed over by its content, so it is
-/// not read and refused again on every sync; one that could not be taken now
-/// is read again.
+/// Act on what became of one cert-resync message read at `address`. One this
+/// device verified and handled is taken in, and one its own bytes say never
+/// will be taken is passed over: each by its content, so it is not read,
+/// handled or refused again on every sync. A cert-resync message carries no
+/// id of its own at this end; its content is what names it. One that could
+/// not be taken now is read again.
 fn take_in_cert_resync(
     outcome: Result<(), super::cert_resync_flow::CertResyncRefusal>,
     address: &str,
@@ -2182,7 +2240,7 @@ fn take_in_cert_resync(
 ) {
     use super::cert_resync_flow::CertResyncRefusal;
     match outcome {
-        Ok(()) => {}
+        Ok(()) => taken.pass_over(address, &message.copy_key),
         Err(CertResyncRefusal::NotRecognized(e)) => {
             errors.push(format!("cert resync {}: {e}; passed over", message.method));
             taken.pass_over(address, &message.copy_key);
@@ -2347,8 +2405,8 @@ impl AppRouterImpl {
                 // inbox address hashes the relationship's tip (storage node spec
                 // §8). Every item on a previous-tip route steps from a tip this
                 // device has already advanced past: nothing on it is staged. A copy
-                // of an object the canonical apply has decided is consumed; any
-                // other is left where it is.
+                // of an object the canonical apply has decided is passed over by
+                // its content; any other is left where it is.
                 let stale = tagged.freshness == RouteFreshness::PreviousTip;
                 for artifact in route_sdk.take_evidence_artifacts() {
                     let copy = if stale {
@@ -2476,7 +2534,7 @@ impl AppRouterImpl {
         for (route, ids) in taken.consume {
             if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
                 report.errors.push(format!(
-                    "consume decided copies on {}..: {e}",
+                    "consume taken copies on {}..: {e}",
                     short_route(&route)
                 ));
             }
@@ -2486,7 +2544,7 @@ impl AppRouterImpl {
                 crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
             {
                 report.errors.push(format!(
-                    "pass over unrecognized copies on {}..: {e}",
+                    "pass over copies on {}..: {e}",
                     short_route(&route)
                 ));
             }
@@ -2494,6 +2552,13 @@ impl AppRouterImpl {
 
         self.complete_split_transfers(&mut b0x_sdk, &mut report)
             .await;
+
+        // SA-91: payments received offline are settled once their payers'
+        // online histories expose the spends.
+        let (settled, failures) =
+            crate::sdk::economic_admission_flow::settle_received_offline(&self.core_sdk).await;
+        report.processed += settled;
+        report.errors.extend(failures);
 
         // §16.6 on-access acceptance recovery, from the durable apply record.
         match crate::init::current_chain_head_at_rest_key() {
@@ -2864,7 +2929,6 @@ mod tests {
             &mut taken,
             &mut errors,
         );
-        take_in_cert_resync(Ok(()), "ROUTE", &message("TAKEN"), &mut taken, &mut errors);
 
         assert_eq!(
             taken.pass_over.get("ROUTE").cloned(),
@@ -2872,6 +2936,33 @@ mod tests {
         );
         assert!(taken.consume.is_empty());
         assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    /// MR-DSM-0332. A cert-resync message this device verified and handled is
+    /// taken in by its content, so it is not read and handled again on every
+    /// sync: a request it answered is not answered again, nor an ack it
+    /// finalized on refused for want of a pending resync. A cert-resync
+    /// message carries no id of its own at this end, so nothing is consumed
+    /// by id.
+    /// MUTATION CONTROL: leaving a handled message where it lies, as the poll
+    /// did, turns this red.
+    #[test]
+    fn a_handled_cert_resync_message_is_taken_in_by_its_content() {
+        use super::{take_in_cert_resync, CopiesTaken};
+        let message = crate::sdk::b0x_sdk::CertResyncMessage {
+            method: crate::storage::client_db::CERT_RESYNC_ACK_METHOD.to_string(),
+            body: vec![0x03, 0x04],
+            copy_key: "HANDLED".to_string(),
+        };
+        let mut taken = CopiesTaken::default();
+        let mut errors = Vec::new();
+        take_in_cert_resync(Ok(()), "ROUTE", &message, &mut taken, &mut errors);
+        assert_eq!(
+            taken.pass_over.get("ROUTE").cloned(),
+            Some(vec!["HANDLED".to_string()])
+        );
+        assert!(taken.consume.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     /// SA-66. A finality certificate or countersign delta reached with no

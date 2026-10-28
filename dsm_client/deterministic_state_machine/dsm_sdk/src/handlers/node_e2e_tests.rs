@@ -1011,7 +1011,7 @@ async fn a_sofi_trade_executes_end_to_end() {
 /// the members taking writes again, B's next trade completes the one it
 /// prepared.
 ///
-/// MUTATION CONTROL: dropping `require_stored` from `publish_prepared` turns
+/// MUTATION CONTROL: dropping `require_stored` from `publish_gated` turns
 /// this red: the trade goes on to its transition over objects no reader can
 /// fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1745,6 +1745,184 @@ async fn a_trader_who_has_traded_can_pay() {
         a_before + 5,
         "the payee accepted the payment"
     );
+}
+
+/// MR-SOFI-0260: a producer stops drafting a route Core's validation refuses.
+/// Through the production builders, B prices ERA→TKN→TKB at both vaults'
+/// walked heads and drafts the route with `draft_route`, as `draft_trade`
+/// does, except that the second hop takes one unit of TKN less than the first
+/// hop gives. The planner never builds that route; the producer's gate must
+/// still stop it. `check_draft`, over evidence acquired for the draft, answers
+/// `RouteDoesNotChain` at hop 1, and nothing is published or advanced. The
+/// same composition with the hops chaining passes the gate, so the refusal is
+/// the link's.
+///
+/// MUTATION CONTROL: `validate` without its hop-to-hop link check turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_producer_refuses_a_route_that_does_not_chain() {
+    use crate::sdk::sofi_flow::{
+        context, own_setup_ref, price_hop, relationship_base, standing, trader_core, vault_at_head,
+        vault_core,
+    };
+    use crate::sdk::sofi_sdk::{check_draft, draft_route, BuildError};
+    use dsm::sofi::resolve::Acquired;
+    use dsm::sofi::validation::Invalid;
+
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let tkb = create_token(&p.a, "TKB", 10_000).await;
+    let first = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    let second = create_vault(&p.a, (tkn, 1_000), (tkb, 1_000)).await;
+    for token in [&tkn, &tkb] {
+        adopt(&p.b, token).await;
+    }
+    set_up(&p.b, &first).await;
+    set_up(&p.b, &second).await;
+    let position = admitted_position(&p.b);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+    let kept = crate::sdk::sofi_reads::KeptReadings::default();
+    let standing = standing(core).expect("B's standing");
+    let verifying = standing
+        .context_kept(&set, &accepted, &kept)
+        .expect("a verifier");
+    let verifier = verifying.verifier();
+    let (one, ..) = vault_at_head(&set, &verifier, &first)
+        .await
+        .expect("the first vault's head");
+    let (two, ..) = vault_at_head(&set, &verifier, &second)
+        .await
+        .expect("the second vault's head");
+    let public_key = crate::sdk::signing_authority::current_public_key().expect("B's public key");
+
+    let ref_one = own_setup_ref(&set, &standing.genesis, &standing.device_id, &first)
+        .await
+        .expect("B's setup with the first vault");
+    let ref_two = own_setup_ref(&set, &standing.genesis, &standing.device_id, &second)
+        .await
+        .expect("B's setup with the second vault");
+    let base_one = relationship_base(&standing, &first).expect("a base");
+    let base_two = relationship_base(&standing, &second).expect("a base");
+    let (hop_one, post_one) = price_hop(&one, era, 10, ref_one, 0).expect("hop 0 priced");
+
+    // The route through both heads, its second hop taking `second_in` TKN,
+    // assembled as `draft_trade` assembles it.
+    let draft_with = |second_in: u64| {
+        let (hop_two, post_two) =
+            price_hop(&two, tkn, second_in, ref_two, 1).expect("hop 1 priced");
+        let cores = vec![
+            vault_core(&standing, &one, &post_one, base_one).expect("V° of the first"),
+            vault_core(&standing, &two, &post_two, base_two).expect("V° of the second"),
+        ];
+        let trader = trader_core(
+            &standing,
+            &[(tkb, hop_two.amount_out, 0), (era, 0, 10)],
+            &[(first, base_one), (second, base_two)],
+        )
+        .expect("T°");
+        let ctx = context(&standing, &set, &public_key, trader).expect("the context");
+        draft_route(vec![hop_one, hop_two], cores, &ctx, &standing.local)
+            .expect("the producer assembles the route")
+    };
+    // The producer's gate over evidence acquired for the draft (stage 3).
+    let checked = |draft: crate::sdk::sofi_sdk::UncheckedDraft| {
+        let evidence = match verifier
+            .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
+            .expect("the evidence reads")
+        {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => panic!("evidence not in hand: {missing:?}"),
+        };
+        check_draft(draft, &evidence).map(|draft| draft.precommit_id())
+    };
+
+    let chaining = draft_with(hop_one.amount_out);
+    let chaining_id = derive::precommit_id(chaining.precommit());
+    assert_eq!(
+        checked(chaining),
+        Ok(chaining_id),
+        "the route whose hops chain passes the producer's gate"
+    );
+    assert_eq!(
+        checked(draft_with(hop_one.amount_out - 1)),
+        Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
+            hop: 1
+        })),
+        "hop 1 takes less than hop 0 gives"
+    );
+    assert_eq!(pending_position(&p.b), None, "nothing was advanced");
+    assert_eq!(admitted_position(&p.b), position);
+}
+
+/// SoFi §2.1, MR-SOFI-0037: the producer's tree is Core's. B's leaf cache is
+/// rewritten so its ERA row holds more than B's admitted root does, with the
+/// row's key, value and bytes agreeing with each other. B's send is refused
+/// before anything is built: no pending position, the admitted position and
+/// the balance where they were.
+///
+/// MUTATION CONTROL: `tree_of_rows` without its root check turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing() {
+    let p = Pair::boot(500, 200).await;
+    let position = admitted_position(&p.b);
+    let before = p.b.era_balance();
+    p.b.enter();
+    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let rows = economic_lineage::load_leaf_cache().expect("the leaf cache");
+    let (key, held) = rows
+        .iter()
+        .find_map(
+            |(key, _, ccb)| match dsm::economic::decode::decode_leaf_state(ccb) {
+                Ok(dsm::economic::state::EconomicLeafState::Balance(b))
+                    if b.policy_commit == era =>
+                {
+                    Some((*key, b.amount))
+                }
+                _ => None,
+            },
+        )
+        .expect("B's admitted root holds its ERA");
+    let inflated = dsm::economic::state::EconomicLeafState::Balance(
+        dsm::economic::state::EconomicBalanceState::new(era, held + 1_000_000).expect("a balance"),
+    );
+    {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        let changed = conn
+            .execute(
+                "UPDATE economic_leaf_cache SET leaf_value = ?1, state_ccb = ?2 WHERE leaf_key = ?3",
+                rusqlite::params![
+                    inflated.leaf_value().expect("a value").as_slice(),
+                    inflated.encode().expect("bytes"),
+                    key.as_slice()
+                ],
+            )
+            .expect("the row rewritten");
+        assert_eq!(changed, 1);
+    }
+
+    let sent = p.b.send(&p.a, 5).await;
+    assert!(
+        !sent.success,
+        "a send built on a balance the root does not hold"
+    );
+    assert!(
+        sent.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("leaf cache does not recompute the root")),
+        "{:?}",
+        sent.error_message
+    );
+    assert_eq!(pending_position(&p.b), None, "nothing was advanced");
+    assert_eq!(admitted_position(&p.b), position);
+    assert_eq!(p.b.era_balance(), before);
 }
 
 /// MR-SOFI-0346 (owner ruling 2026-09-30): resolving another trader's
@@ -4524,6 +4702,181 @@ async fn a_creation_past_the_sdk_check_is_refused_by_core_and_moves_nothing() {
         assert!(why.contains(refusal), "{why}");
         assert_eq!(holdings(&p.a, &[era, notx]), before, "nothing moved");
     }
+}
+
+/// SoFi L1738 (CONFORMANCE §6.105 A7, MR-SOFI-0217): a producer obtains
+/// Valid before it publishes F, and before its head moves. B holds, frozen
+/// against its next parent, a prepared trade whose F does not conform (its
+/// position is not P's successor), built with the producer's own builders
+/// and signed with B's key, as a fault in its producer or its store would
+/// leave it. Asked to trade, B completes the prepared fulfillment first
+/// (SA-71): its P, P(E) and witnesses are published, F's conformance is
+/// Invalid, and F is put to no member, neither by the producer nor by the
+/// republish sweep, while B's head does not move and nothing it holds moves.
+///
+/// MUTATION CONTROL: publishing F before deciding its conformance
+/// (`sofi_flow::publish_gated`) turns this red: F is at the members. So does
+/// freezing a fulfillment owed to its set instead of withheld
+/// (`frozen_publication_artifact::freeze_artifact_with_conn`): the sweep puts
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_that_does_not_conform_is_never_published() {
+    use crate::sdk::sofi_sdk::ToPublish;
+    use crate::storage::client_db::frozen_publication_artifact as fpa;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let era_before = balance(&p.b, &m.era);
+    let position = admitted_position(&p.b);
+
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+    let kept = crate::sdk::sofi_reads::KeptReadings::default();
+    let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+    let verifying = standing
+        .context_kept(&set, &accepted, &kept)
+        .expect("a verifier");
+    let intent = crate::sdk::sofi_flow::TradeIntent {
+        vault_ids: vec![m.vault_id],
+        token_in_policy_commit: m.era,
+        token_out_policy_commit: m.tkn,
+        amount_in: 10,
+        min_amount_out: 1,
+    };
+    let draft =
+        crate::sdk::sofi_flow::draft_trade(core, &set, &intent, &standing, &verifying.verifier())
+            .await
+            .expect("a draft");
+    let evidence = match verifying
+        .verifier()
+        .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
+        .expect("the evidence reads")
+    {
+        dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
+        dsm::sofi::resolve::Acquired::Exhausted(missing) => {
+            panic!("the draft's evidence is in hand: {missing:?}")
+        }
+    };
+    let checked = crate::sdk::sofi_sdk::check_draft(draft, &evidence).expect("a valid draft");
+    let (public_key, secret_key) =
+        crate::sdk::signing_authority::current_keypair().expect("B's key");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let precommit_signature =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &checked.precommit_signing_digest())
+            .expect("B signs P");
+    let attempts: Vec<_> = checked
+        .precommit()
+        .legs()
+        .iter()
+        .map(|leg| (leg.vault_id, 0))
+        .collect();
+    let produced =
+        crate::sdk::sofi_sdk::build_fulfillment(&checked, precommit_signature, &attempts, att_a)
+            .expect("the producer builds F");
+    let built = produced
+        .publish
+        .iter()
+        .find_map(|item| match item {
+            ToPublish::Fulfillment(body) => Some(body.clone()),
+            _ => None,
+        })
+        .expect("the producer's F");
+    let skipping = TraderFulfillmentBody::new(
+        *built.precommit_id(),
+        built.policy_fulfillment_set().to_vec(),
+        built.attempts().to_vec(),
+        built.position() + 1,
+        built.signature_alg(),
+        &public_key,
+        att_a,
+    )
+    .expect("a well-formed F");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &secret_key,
+        &derive::fulfillment_signing_digest(&skipping),
+    )
+    .expect("B signs F");
+
+    // The prepared trade, frozen against B's parent as the producer freezes
+    // what it prepares (SA-71), with that F in place of the producer's.
+    let parent = *checked.precommit().void_root();
+    let purpose = crate::sdk::sofi_flow::prepared_purpose(checked.precommit().position());
+    let key_of = |publication: &Publication<'_>| {
+        let bytes = publication.object_bytes().expect("the object encodes");
+        (
+            crate::sdk::economic_registers::immutable_object_key(publication.namespace(), &bytes),
+            dsm::storage_object::immutable_addr(publication.namespace(), &bytes),
+            bytes,
+        )
+    };
+    {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let mut conn = binding.lock().expect("the store");
+        let tx = conn.transaction().expect("a transaction");
+        for item in &produced.publish {
+            let publication = match item {
+                ToPublish::Fulfillment(..) => Publication::Fulfillment {
+                    body: &skipping,
+                    signature: &signature,
+                },
+                ToPublish::Precommit(signed) => Publication::Precommit {
+                    body: &signed.body,
+                    signature: &signed.signature,
+                },
+                ToPublish::Preimage(preimage) => Publication::Preimage(preimage),
+                ToPublish::PolicyFulfillment(body) => Publication::PolicyFulfillment(body),
+                ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
+                ToPublish::Setup(..) => panic!("B is set up with the vault already"),
+            };
+            let (key, _, bytes) = key_of(&publication);
+            fpa::freeze_artifact_with_conn(&tx, &set.id(), &key, &bytes, &parent, &purpose)
+                .expect("frozen");
+        }
+        tx.commit().expect("the prepared trade is frozen");
+    }
+    let (f_key, f_addr, _) = key_of(&Publication::Fulfillment {
+        body: &skipping,
+        signature: &signature,
+    });
+
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 7))).await;
+    let client = SetClient::new(&set).expect("a client of the set");
+    assert_eq!(
+        client.fetch_verified(&f_addr).await,
+        None,
+        "the producer put nothing of F"
+    );
+    assert!(!r.success, "the prepared trade does not complete");
+    assert!(
+        r.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("does not conform")),
+        "refused for its conformance, before Core's advance is asked: {:?}",
+        r.error_message
+    );
+    p.b.enter();
+    crate::handlers::artifact_republish::republish_unpublished_artifacts()
+        .await
+        .expect("the sweep runs");
+    assert_eq!(
+        client.fetch_verified(&f_addr).await,
+        None,
+        "the sweep put nothing of F"
+    );
+    assert_eq!(
+        fpa::get_artifact(&f_key)
+            .expect("the store reads")
+            .expect("F is kept")
+            .state,
+        fpa::ArtifactState::Withheld,
+        "F stays withheld"
+    );
+    assert_eq!(pending_position(&p.b), None, "no transition was made");
+    assert_eq!(admitted_position(&p.b), position, "the head did not move");
+    assert_eq!(balance(&p.b, &m.era), era_before, "nothing B holds moved");
 }
 
 /// CONFORMANCE §6.39, SoFi Amendment S12: once a trader has traded through a

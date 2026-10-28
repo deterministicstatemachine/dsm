@@ -90,7 +90,7 @@ fn golden_tag_precommit() {
     let h_n = [0xAAu8; 32];
     let op_bytes: &[u8] = &[0x01];
     let entropy = [0x02u8; 32];
-    let result = compute_precommit(&h_n, op_bytes, &entropy);
+    let result = compute_precommit(&h_n, op_bytes, &entropy).expect("C_pre");
     assert_eq!(
         to_b32(&result),
         GOLDEN_PRECOMMIT,
@@ -103,7 +103,7 @@ fn golden_tag_precommit_is_v2_only() {
     let h_n = [0xAAu8; 32];
     let op_bytes: &[u8] = &[0x01];
     let entropy = [0x02u8; 32];
-    let result = compute_precommit(&h_n, op_bytes, &entropy);
+    let result = compute_precommit(&h_n, op_bytes, &entropy).expect("C_pre");
     assert_ne!(
         to_b32(&result),
         PRE_V2_PRECOMMIT,

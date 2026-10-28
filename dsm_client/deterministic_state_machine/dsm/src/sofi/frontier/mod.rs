@@ -517,6 +517,116 @@ fn witness_wire(
     }
 }
 
+/// A vault's whole tree at a root, rebuilt from a record of its leaves: its
+/// state leaf, and every relationship leaf by key.
+#[derive(Debug, Clone)]
+pub struct VaultTree {
+    pub tree: EconomicSmt,
+    pub state: VaultStateLeaf,
+    pub relationships: std::collections::BTreeMap<D32, VaultRelationshipLeaf>,
+}
+
+/// Why a record of a vault's leaves is not its tree at a root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VaultTreeError {
+    /// The bytes at the vault's state key are not a canonical state leaf.
+    StateDoesNotDecode(crate::ccb::decode::DecodeError),
+    /// The bytes at another key are not a canonical relationship leaf.
+    RelationshipDoesNotDecode {
+        key: D32,
+        why: crate::ccb::decode::DecodeError,
+    },
+    /// The state leaf has no canonical bytes, so it has no leaf value.
+    StateHasNoBytes(SofiWireError),
+    /// A row's value is not the hash of the leaf its bytes decode to.
+    RowIsNotItsLeaf { key: D32 },
+    /// The record holds no state leaf.
+    NoStateLeaf,
+    /// The rows do not recompute the root.
+    DoesNotRecomputeTheRoot { root: D32, recomputed: D32 },
+}
+
+impl core::fmt::Display for VaultTreeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let id = crate::utils::text_id::encode_base32_crockford;
+        match self {
+            Self::StateDoesNotDecode(why) => {
+                write!(f, "the vault's state leaf does not decode: {why:?}")
+            }
+            Self::RelationshipDoesNotDecode { key, why } => write!(
+                f,
+                "the relationship leaf at {} does not decode: {why:?}",
+                id(key)
+            ),
+            Self::StateHasNoBytes(why) => {
+                write!(f, "the vault's state leaf has no canonical bytes: {why}")
+            }
+            Self::RowIsNotItsLeaf { key } => write!(
+                f,
+                "the vault leaf at {} holds a value that is not its leaf's",
+                id(key)
+            ),
+            Self::NoStateLeaf => write!(f, "the vault's record holds no state leaf"),
+            Self::DoesNotRecomputeTheRoot { root, recomputed } => write!(
+                f,
+                "the vault's record does not recompute the root {}: it gives {}",
+                id(root),
+                id(recomputed)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for VaultTreeError {}
+
+/// `vault_id`'s tree at `root`, from `rows` (key, value and the leaf's
+/// canonical bytes): the state leaf at the vault's state key, a relationship
+/// leaf at every other key. Every row is bound to the leaf its bytes decode
+/// to, and the rows are refused unless they recompute `root`. The root
+/// commits every key and value, so the leaves that pass are the vault's own.
+/// What an owner states witnesses from ([`witness_from_tree`]); the SDK
+/// computes no root of its own (SoFi §2.1).
+pub fn vault_tree_at(
+    vault_id: &D32,
+    root: &D32,
+    rows: &[(D32, D32, Vec<u8>)],
+) -> Result<VaultTree, VaultTreeError> {
+    let state_key = derive::vault_state_key(vault_id);
+    let mut tree = EconomicSmt::new();
+    let mut state = None;
+    let mut relationships = std::collections::BTreeMap::new();
+    for (key, value, bytes) in rows {
+        let leaf_value = if *key == state_key {
+            let leaf = VaultStateLeaf::decode(bytes).map_err(VaultTreeError::StateDoesNotDecode)?;
+            let leaf_value =
+                derive::vault_state_leaf_value(&leaf).map_err(VaultTreeError::StateHasNoBytes)?;
+            state = Some(leaf);
+            leaf_value
+        } else {
+            let leaf = VaultRelationshipLeaf::decode(bytes)
+                .map_err(|why| VaultTreeError::RelationshipDoesNotDecode { key: *key, why })?;
+            relationships.insert(*key, leaf);
+            derive::vault_relationship_leaf_value(&leaf)
+        };
+        if leaf_value != *value {
+            return Err(VaultTreeError::RowIsNotItsLeaf { key: *key });
+        }
+        tree.insert(*key, *value);
+    }
+    let recomputed = tree.root();
+    if recomputed != *root {
+        return Err(VaultTreeError::DoesNotRecomputeTheRoot {
+            root: *root,
+            recomputed,
+        });
+    }
+    Ok(VaultTree {
+        tree,
+        state: state.ok_or(VaultTreeError::NoStateLeaf)?,
+        relationships,
+    })
+}
+
 /// The witness a holder of the whole tree states for one trader: what a
 /// vault's owner hands a reader. It carries no authority — the reader checks
 /// it against a root it authenticated — and `relationship` is the leaf the

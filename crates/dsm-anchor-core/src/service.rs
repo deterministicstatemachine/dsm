@@ -26,6 +26,8 @@ pub mod err {
     pub const MISSING_FIELD: u32 = 101;
     pub const BAD_OP: u32 = 102;
     pub const FRAME_TOO_LARGE: u32 = 103;
+    /// OP_PROVISION to an anchor that is already provisioned: an anchor is provisioned once.
+    pub const ALREADY_PROVISIONED: u32 = 104;
 }
 
 /// Protocol-level ceiling on a request frame, a backstop against absurd inputs before prost
@@ -77,6 +79,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         pin_enrolled_counter: 0,
         pin_partition_pk: Vec::new(),
         pin_chip_pk: Vec::new(),
+        pin_birth_commitment: Vec::new(),
     }
 }
 
@@ -160,12 +163,16 @@ pub fn dispatch<T: Tropic, P: PartitionSig>(
             pin_enrolled_counter: u64::from(app.h0),
             pin_partition_pk: app.partition_pk.clone(),
             pin_chip_pk: app.chip_pk.clone(),
+            pin_birth_commitment: app.birth_commitment.to_vec(),
             ..base(op)
         },
         Ok(pb::Op::Cancel) => match app.cancel() {
             Ok(()) => ok(op),
             Err(e) => fail(op, appliance_code(e)),
         },
+        // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
+        // once: provisioning it again is refused.
+        Ok(pb::Op::Provision) => fail(op, err::ALREADY_PROVISIONED),
         // OP_SPI_PASSTHROUGH is not an appliance op; the software-authority firmware offers no
         // raw-SPI relay, so it is rejected as an unknown op.
         Ok(pb::Op::SpiPassthrough) => fail(op, err::BAD_OP),

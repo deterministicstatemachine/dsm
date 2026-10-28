@@ -3865,7 +3865,6 @@ rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/mod.rs	5539e4652c7dde96
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/mod.rs	6bff2c15ad7b0bb8
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/core/state_machine/random_walk.rs	e2a4c239e9c7da6f
-rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/crypto/canonical_lp.rs	2875a8c05726ee4c
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/mutation.rs	c98833eb7f2dfa2e
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/provenance.rs	3521cd84d1c2ccda
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/economic/provenance.rs	3521cd84d1c2ccda
@@ -6488,7 +6487,6 @@ rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.r
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	b41c2477f4e535f8
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/common/device_tree.rs	ed43c65838af0c51
-rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	1e71b461050d7d49
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	7932d388fe3e0826
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	81c928f1f71fb3c2
 rust-zero-id	dsm_client/deterministic_state_machine/dsm/src/core/bilateral_transaction_manager.rs	ed43c65838af0c51

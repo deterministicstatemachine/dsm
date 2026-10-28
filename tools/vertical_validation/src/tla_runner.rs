@@ -18,8 +18,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::tla_trace_replay::{
-    replay_trace_file, replay_trace_into_implementation, simulation_profile_for_spec,
-    TlaImplementationReplayResult, TlaTraceReplayResult,
+    replay_trace_file, simulation_profile_for_spec, TlaTraceReplayResult,
 };
 
 /// Configuration for a single TLA+ model check run.
@@ -37,8 +36,24 @@ use crate::tla_trace_replay::{
 /// `OfflineFinality/commit-without-owed-confirm` and
 /// `OfflineFinality/sender-ahead-reachable`. 95 since the reserve takes its
 /// finality from the route chain (G15): `NativeReserveRelease/copy-rule`;
-/// 96 with the successor cells' `SofiSuccessorCells/copy-rule`.
-pub const EXPECTED_STANDARD_SPECS: usize = 96;
+/// 96 with the successor cells' `SofiSuccessorCells/copy-rule`. 95 since the
+/// offline door carries only the offline-bearer transfer (MR-DSM-0219): no step
+/// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
+pub const EXPECTED_STANDARD_SPECS: usize = 95;
+
+/// The TLC simulation trace a spec replays in Rust. No trace is replayed into
+/// the code: a model's code-level checks are its linked implementation traces
+/// (§6.103).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum TraceReplay {
+    /// TLC checks the model; no simulation trace is replayed.
+    None,
+    /// A simulation trace is replayed in Rust against the model alone: through
+    /// the model's transition rules for Tripwire and DSM.tla, and for
+    /// OfflineFinality and NonInterference only as a check that every state
+    /// names the model's variables.
+    Literal,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -54,8 +69,8 @@ pub struct TlaSpec {
     pub properties: Vec<String>,
     /// Real-code traces linked to this spec for integrated validation.
     pub linked_implementation_traces: Vec<String>,
-    /// Whether this spec supports TLC trace replay into Rust shadow models.
-    pub supports_trace_replay: bool,
+    /// The TLC simulation traces this spec replays ([`TraceReplay`]).
+    pub trace_replay: TraceReplay,
     /// `Some(invariant)` when this config is a DELIBERATE FALSIFICATION: the
     /// run passes the gate only if TLC reports exactly that invariant violated.
     ///
@@ -269,33 +284,11 @@ impl TlaRunner {
         Ok(trace_file)
     }
 
-    /// Generate one deterministic TLC simulation trace and run both replay layers over it.
-    pub async fn run_integrated_trace_replays(
-        &self,
-        spec: &TlaSpec,
-    ) -> anyhow::Result<(TlaTraceReplayResult, TlaImplementationReplayResult)> {
+    /// Generate one deterministic TLC simulation trace and replay it in Rust
+    /// against the model ([`TraceReplay::Literal`]).
+    pub async fn run_trace_replay(&self, spec: &TlaSpec) -> anyhow::Result<TlaTraceReplayResult> {
         let trace_file = self.generate_trace_file(spec).await?;
-        let literal = replay_trace_file(spec, &trace_file)?;
-        let implementation = replay_trace_into_implementation(spec, &trace_file)?;
-        Ok((literal, implementation))
-    }
-
-    /// Generate a deterministic TLC simulation trace and replay it inside Rust.
-    #[allow(dead_code)]
-    pub async fn run_literal_trace_replay(
-        &self,
-        spec: &TlaSpec,
-    ) -> anyhow::Result<TlaTraceReplayResult> {
-        Ok(self.run_integrated_trace_replays(spec).await?.0)
-    }
-
-    /// Generate a deterministic TLC simulation trace and replay it against actual DSM code.
-    #[allow(dead_code)]
-    pub async fn run_implementation_trace_replay(
-        &self,
-        spec: &TlaSpec,
-    ) -> anyhow::Result<TlaImplementationReplayResult> {
-        Ok(self.run_integrated_trace_replays(spec).await?.1)
+        replay_trace_file(spec, &trace_file)
     }
 
     /// Return the standard set of specs to run for vertical validation.
@@ -323,7 +316,7 @@ impl TlaRunner {
             ],
             properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
             linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
-            supports_trace_replay: true,
+            trace_replay: TraceReplay::Literal,
             expect_violation: None,
             exhaustive: true,
         };
@@ -352,7 +345,7 @@ impl TlaRunner {
                     "token_manager_balance_replay".into(),
                     "token_manager_overspend_rejection".into(),
                 ],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -382,7 +375,7 @@ impl TlaRunner {
                     "token_manager_balance_replay".into(),
                     "token_manager_overspend_rejection".into(),
                 ],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -412,7 +405,7 @@ impl TlaRunner {
                     "token_manager_balance_replay".into(),
                     "token_manager_overspend_rejection".into(),
                 ],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -432,24 +425,14 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![
-                    "receiver_tripwire".into(),
-                    "tripwire_first_contact_binding".into(),
                     "bilateral_precommit_tripwire".into(),
                     "bilateral_precomputed_finalize_hash".into(),
                 ],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
             offline_finality.clone(),
-            // The same step for one that moves no value: its proposer commits
-            // on the ack (finalize_sender_step), not when it confirms.
-            same_module_under(
-                &offline_finality,
-                "OfflineFinality/commit-on-ack",
-                "DSM_OfflineFinality_CommitOnAck.cfg",
-                &["ConfirmFollowsSenderCommit"],
-            ),
             // Each rule of the offline step removed, one at a time: the
             // invariant it holds up fails.
             expect_violation(
@@ -518,7 +501,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -544,7 +527,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -578,7 +561,7 @@ impl TlaRunner {
                 ],
                 properties: vec!["HonestBearerStepAccepted".into()],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -627,7 +610,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -695,7 +678,7 @@ impl TlaRunner {
                 ],
                 properties: vec!["FinalityStable".into(), "LeaderHeldStable".into()],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -793,7 +776,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -828,7 +811,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -992,7 +975,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -1068,7 +1051,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -1098,7 +1081,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: true,
             },
@@ -1302,7 +1285,7 @@ impl TlaRunner {
                     "token_manager_balance_replay".into(),
                     "token_manager_overspend_rejection".into(),
                 ],
-                supports_trace_replay: true,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -1323,7 +1306,7 @@ impl TlaRunner {
                     "DLVLiveness".into(),
                 ],
                 linked_implementation_traces: vec![],
-                supports_trace_replay: false,
+                trace_replay: TraceReplay::None,
                 expect_violation: None,
                 exhaustive: false,
             },
@@ -1468,25 +1451,6 @@ fn crashed_without_a_finding(result: &TlcResult) -> bool {
             .any(|e| e.starts_with("Invariant violated:"))
 }
 
-/// `base`'s module checked under another of its configs: the module's own
-/// trace replay and exhaustiveness carry over, the invariants `without` (which
-/// the config does not state) are not checked, and the implementation traces
-/// linked to `base`'s behaviour are not replayed against it.
-fn same_module_under(base: &TlaSpec, label: &str, config_file: &str, without: &[&str]) -> TlaSpec {
-    TlaSpec {
-        label: label.into(),
-        config_file: config_file.into(),
-        invariants: base
-            .invariants
-            .iter()
-            .filter(|i| !without.contains(&i.as_str()))
-            .cloned()
-            .collect(),
-        linked_implementation_traces: Vec::new(),
-        ..base.clone()
-    }
-}
-
 /// A registry entry whose config must violate exactly `invariant`: a deliberate
 /// falsification (one gate removed) or a negated non-vacuity claim. The config
 /// lists that invariant alone, so no other invariant can report first.
@@ -1513,7 +1477,7 @@ fn expect_property_violation(
         invariants: vec![],
         properties: vec![property.into()],
         linked_implementation_traces: vec![],
-        supports_trace_replay: false,
+        trace_replay: TraceReplay::None,
         expect_violation: Some(property.into()),
         exhaustive: exhaustive_by_construction(spec_file),
     }
@@ -1527,7 +1491,7 @@ fn expect_violation(label: &str, spec_file: &str, config_file: &str, invariant: 
         invariants: vec![invariant.into()],
         properties: vec![],
         linked_implementation_traces: vec![],
-        supports_trace_replay: false,
+        trace_replay: TraceReplay::None,
         expect_violation: Some(invariant.into()),
         exhaustive: exhaustive_by_construction(spec_file),
     }

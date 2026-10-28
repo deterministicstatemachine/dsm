@@ -290,11 +290,14 @@ impl<'a> EconomicPreState<'a> {
 }
 
 /// The producer's output: key-ordered mutations with progressive proofs, the
-/// matching credit sources, and the resulting root.
+/// matching credit sources, the root they start from and the resulting root.
+/// Both roots are the builder's own, so a producer that names them in a
+/// witness computes none (SoFi §2.1).
 #[derive(Debug, Clone)]
 pub struct BuiltWriteSet {
     pub mutations: Vec<EconomicLeafMutation>,
     pub credit_sources: Vec<CreditSource>,
+    pub pre_root: [u8; 32],
     pub post_root: [u8; 32],
 }
 
@@ -713,7 +716,7 @@ fn semantic_write_set(
 /// commit before anything is read out of them, so the check is a function of
 /// the operation alone: the producer and every verifier read the same bytes,
 /// and bytes that are not the token's make the operation itself invalid.
-fn moved_token_policy(
+pub(crate) fn moved_token_policy(
     policy_commit: &[u8; 32],
     carried: &[u8],
 ) -> Result<crate::economic::token_policy::TokenPolicy, WriteSetError> {
@@ -912,6 +915,7 @@ pub fn build_write_set(
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
 ) -> Result<BuiltWriteSet, WriteSetError> {
+    let pre_root = tree.root();
     let pre_balances = pre_state.balances;
     let economic_position = pre_state.economic_position;
     let semantic = semantic_write_set(operation, genesis, device_id, economic_position)?;
@@ -1251,6 +1255,7 @@ pub fn build_write_set(
     Ok(BuiltWriteSet {
         mutations,
         credit_sources,
+        pre_root,
         post_root: tree.root(),
     })
 }
@@ -1733,6 +1738,7 @@ pub fn build_boundary_write_set(
     tree: &mut EconomicSmt,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     use crate::types::device_state::OfflineBoundaryKind;
+    let pre_root = tree.root();
     let BoundaryEffect {
         kind,
         asset,
@@ -1772,7 +1778,10 @@ pub fn build_boundary_write_set(
                 balance_state(*asset, rest)?,
             ));
         }
-        OfflineBoundaryKind::Unload => {
+        // An unload credits what its own account debit funds; a settlement
+        // credits what the payer's exposed spend funds (SA-91). Each consumes
+        // the source its own identity derives, once.
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
             let next = match have {
                 Some(held) => held
                     .checked_add(amount)
@@ -1808,8 +1817,10 @@ pub fn build_boundary_write_set(
     let mut credit_sources = Vec::new();
     for (index, (key, pre, post)) in planned.into_iter().enumerate() {
         let siblings = tree.siblings(&key).to_vec();
-        let funded = kind == OfflineBoundaryKind::Unload
-            && matches!(&post, Some(EconomicLeafState::Balance(_)));
+        let funded = matches!(
+            kind,
+            OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle
+        ) && matches!(&post, Some(EconomicLeafState::Balance(_)));
         let mutation = EconomicLeafMutation::new(pre, post.clone(), siblings)
             .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
         match &post {
@@ -1835,6 +1846,7 @@ pub fn build_boundary_write_set(
     Ok(BuiltWriteSet {
         mutations,
         credit_sources,
+        pre_root,
         post_root: tree.root(),
     })
 }
@@ -1884,7 +1896,7 @@ pub fn verify_boundary_write_set(
             }
             Ok(())
         }
-        OfflineBoundaryKind::Unload => {
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
             let expected_source =
                 crate::economic::offline_boundary::offline_boundary_debit_source_id(
                     genesis,
@@ -2583,6 +2595,7 @@ mod escrow_create_binding_tests {
             .leaf_value()
             .expect("a leaf"),
         );
+        let pre = tree.root();
         let built = build_write_set(
             &op,
             &G,
@@ -2593,6 +2606,10 @@ mod escrow_create_binding_tests {
             &CreditSourceFacts::None,
         )
         .expect("a write set");
+        // Both roots a witness names are the builder's: the tree it started
+        // from, and the tree it left (SoFi §2.1).
+        assert_eq!((built.pre_root, built.post_root), (pre, tree.root()));
+        assert_ne!(built.pre_root, built.post_root);
         assert_eq!(built.mutations.len(), 2);
         let posts: Vec<&Option<EconomicLeafState>> =
             built.mutations.iter().map(|m| &m.post_state).collect();

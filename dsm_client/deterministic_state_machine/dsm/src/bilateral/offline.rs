@@ -37,20 +37,106 @@ pub struct PinnedPeer<'a> {
 }
 
 /// The operation a proposal carries, if the offline protocol may carry it at
-/// all. Offline, the only value that moves is the bearer tier; an online-tier
-/// transfer has the network transport.
+/// all ([`offline_door`]).
 pub fn offline_operation(operation_bytes: &[u8]) -> Result<Operation, DsmError> {
     let operation = Operation::from_bytes(operation_bytes)
         .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
-    if matches!(operation, Operation::Transfer { .. })
-        && !operation_requires_offline_bearer(&operation)
-    {
+    offline_door(&operation)?;
+    Ok(operation)
+}
+
+/// The offline door, at the sender's and the receiver's alike (MR-DSM-0219;
+/// §6.105 C1, decided 2026-10-27). The offline protocol carries exactly what
+/// the offline rulings name: the offline-bearer transfer. Every other
+/// operation is refused here, before anything is written or signed — SoFi
+/// and vault operations because SoFi is online and does not inherit the
+/// offline-bearer path (Explainer §63, SoFi §4), an online-tier transfer
+/// because it has the network transport, and the rest because offline nothing
+/// but the bearer transfer moves. A load, an unload and a settlement are not
+/// operations on this door: they are the device's own admitted transitions
+/// online. The match has no wildcard arm, so a variant added to `Operation`
+/// does not compile until it is classified here.
+pub fn offline_door(operation: &Operation) -> Result<(), DsmError> {
+    let refused = |what: &str, why: &str| {
+        Err(DsmError::invalid_operation(format!(
+            "the offline door carries only the offline-bearer transfer: {what} is refused — {why}"
+        )))
+    };
+    const SOFI_IS_ONLINE: &str =
+        "SoFi is online and does not inherit the offline-bearer path (Explainer §63, SoFi §4)";
+    const NOT_OFFLINE: &str =
+        "offline, value moves only as the offline-bearer transfer the offline rulings name";
+    match operation {
+        Operation::Transfer { .. } if operation_requires_offline_bearer(operation) => Ok(()),
+        Operation::Transfer { .. } => refused(
+            "an online-tier transfer",
+            "BLE/USB carries offline-bearer transfers only; an online-tier transfer uses the \
+             network transport",
+        ),
+        Operation::SofiSetup { .. }
+        | Operation::SofiVaultCreate { .. }
+        | Operation::SofiFulfill { .. } => refused("a SoFi operation", SOFI_IS_ONLINE),
+        Operation::DlvCreate { .. }
+        | Operation::DlvUnlock { .. }
+        | Operation::DlvClaim { .. }
+        | Operation::DlvInvalidate { .. }
+        | Operation::EscrowVaultCreate { .. } => refused("a vault operation", SOFI_IS_ONLINE),
+        Operation::FaucetClaim { .. }
+        | Operation::AdoptToken { .. }
+        | Operation::CreateToken { .. }
+        | Operation::Burn { .. }
+        | Operation::LockToken { .. }
+        | Operation::UnlockToken { .. }
+        | Operation::Lock { .. }
+        | Operation::Unlock { .. }
+        | Operation::Receive { .. } => refused("a token operation", NOT_OFFLINE),
+        Operation::Genesis
+        | Operation::Create { .. }
+        | Operation::Update { .. }
+        | Operation::AddRelationship { .. }
+        | Operation::CreateRelationship { .. }
+        | Operation::RemoveRelationship { .. }
+        | Operation::Recovery { .. }
+        | Operation::Delete { .. }
+        | Operation::Link { .. }
+        | Operation::Unlink { .. }
+        | Operation::Invalidate { .. } => {
+            refused("an identity or relationship operation", NOT_OFFLINE)
+        }
+        Operation::Generic { .. } | Operation::Noop => {
+            refused("a step that moves no value", NOT_OFFLINE)
+        }
+    }
+}
+
+/// An offline-bearer transfer moves only a token its committed policy lets
+/// move between holders (owner question 9, 2026-10-27: "Core must be the
+/// authoritative enforcement boundary ... Any policy supplied to Core must be
+/// authenticated against the committed token policy"). The transfer carries
+/// the token's committed `TokenPolicyV3` bytes; they must re-hash to its
+/// `policy_commit` (`economic::write_set::moved_token_policy`, the one check
+/// the write set runs online), and the policy must be `transferable`. An
+/// offline step has no economic write set, so its sender's and its receiver's
+/// Core hold it to this here, before anything is written.
+pub fn bearer_token_moves(operation: &Operation) -> Result<(), DsmError> {
+    let Operation::Transfer {
+        policy_commit,
+        token_policy,
+        ..
+    } = operation
+    else {
         return Err(DsmError::invalid_operation(
-            "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
-             online-tier transfer uses the network transport",
+            "an offline-bearer token policy is the policy of a transfer",
+        ));
+    };
+    let policy = crate::economic::write_set::moved_token_policy(policy_commit, token_policy)
+        .map_err(|e| DsmError::invalid_operation(format!("offline-bearer transfer: {e}")))?;
+    if !policy.transferable {
+        return Err(DsmError::invalid_operation(
+            "offline-bearer transfer: the token's committed policy makes it non-transferable",
         ));
     }
-    Ok(operation)
+    Ok(())
 }
 
 /// The keys a message carries for its sender: its AK, its Kyber key and the
@@ -187,7 +273,10 @@ pub struct PrepareClaims<'a> {
 /// The proposal must come from the pinned sender (its keys, and its
 /// signature over the commitment); it is refused while another step is in
 /// flight; and its commitment must be its operation's commitment on the held
-/// tip — the receiver never signs a commitment it did not recompute.
+/// tip — the receiver never signs a commitment it did not recompute. A
+/// bearer transfer moves only a token its committed policy lets move; the
+/// allocation it spends is proven to be its sender's at the confirm, from the
+/// account this device recorded ([`spend_starts_at_the_record`]).
 pub fn decide_prepare(
     commitment_hash: [u8; 32],
     operation: &Operation,
@@ -204,19 +293,10 @@ pub fn decide_prepare(
     if claims.addressed_to != local_device_id.as_slice() || transfer_addressed_elsewhere {
         return Ok(PrepareDecision::NotAddressed);
     }
-    // Offline-bearer receipt is disabled. A receiver that takes a bearer
-    // transfer credits an allocation its sender asserts: nothing yet binds the
-    // sender's parent root to the allocation the spend debits (§52, §67), so a
-    // modified sender app mints or re-spends value offline (SA-61). Owner,
-    // 2026-10-18: "Disable the vulnerable acceptance path until the complete
-    // proof is implemented." The proposal is refused on its operation alone,
-    // before anything is verified or written; the confirm path behind it stays
-    // for the complete proof, unreached.
+    // Owner question 9: no economic write set checks a bearer transfer offline,
+    // so its token's committed policy is checked here, before anything else.
     if operation_requires_offline_bearer(operation) {
-        return Err(DsmError::invalid_operation(
-            "offline-bearer receipt is disabled until the allocation a bearer transfer spends \
-             is proven to be its sender's (SA-61): this device takes no offline-bearer transfer",
-        ));
+        bearer_token_moves(operation)?;
     }
     verify_pinned_peer_keys(sender, claims.credentials)?;
     verify_step_signature(sender, &commitment_hash, claims.signature, "proposal")?;
@@ -227,17 +307,18 @@ pub fn decide_prepare(
         return Ok(PrepareDecision::StepInFlight { in_flight });
     }
     if claims.expected_tip != Some(held_tip) {
-        let expected_recomputes = claims.expected_tip.is_some_and(|tip| {
-            BilateralPreCommitment::new(tip, operation.clone()).bilateral_commitment_hash
-                == commitment_hash
-        });
+        let expected_recomputes = claims
+            .expected_tip
+            .map(|tip| BilateralPreCommitment::new(tip, operation.clone()))
+            .transpose()?
+            .is_some_and(|pre| pre.bilateral_commitment_hash == commitment_hash);
         return Ok(PrepareDecision::StaleTip {
             expected: claims.expected_tip,
             held: held_tip,
             expected_recomputes,
         });
     }
-    let own = BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
+    let own = BilateralPreCommitment::new(held_tip, operation.clone())?.bilateral_commitment_hash;
     if own != commitment_hash {
         return Err(DsmError::invalid_operation(
             "the proposal's commitment is not its operation's commitment on this relationship",
@@ -315,7 +396,7 @@ pub struct ConfirmClaims<'a> {
 }
 
 /// What the receiver holds for a step it accepted.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct AcceptedStep<'a> {
     pub commitment_hash: [u8; 32],
     pub operation: &'a Operation,
@@ -327,15 +408,35 @@ pub struct AcceptedStep<'a> {
     /// The sender's EK chain head on this relationship, once a step has been
     /// received; before that, its pinned AK signs the first EK.
     pub sender_chain_head: Option<&'a [u8]>,
-    /// For an offline-bearer step, the sender's anchor-state leaves as this
-    /// device derived them from the step's release under the sender's pinned
-    /// bundle.
-    pub bearer: Option<BearerLeaves>,
-    /// For an offline-bearer step, the sender's offline account under the
-    /// release's bundle as this device last validated it from the sender's
-    /// online history (`economic_lineage::latest_offline_account`); `None`
-    /// when it has validated none.
-    pub bearer_origin: Option<crate::economic::peer_lineage::PeerOfflineAccount>,
+    /// The sender's anchor-state leaves as this device derived them from the
+    /// step's release under the sender's pinned bundle. Every step the
+    /// offline door admits is an offline-bearer transfer ([`offline_door`]),
+    /// so a confirm carries them, always.
+    pub bearer: BearerLeaves,
+    /// Where this device holds the sender's offline account from
+    /// ([`BearerOrigin`]).
+    pub bearer_origin: &'a BearerOrigin<'a>,
+}
+
+/// What a receiver holds of a sender's offline account, independently of the
+/// confirm, and what the confirm carries to bring it forward.
+#[derive(Clone, Debug)]
+pub struct BearerOrigin<'a> {
+    /// The sender's offline account under the release's bundle as this device
+    /// last validated it from the sender's online history
+    /// (`economic_lineage::latest_offline_account`); `None` when this device
+    /// has validated none of it — a real state (it has not walked the
+    /// sender's load), and Core refuses the spend for it.
+    pub recorded: Option<crate::economic::peer_lineage::PeerOfflineAccount>,
+    /// The sender's anchor: its bundle and the keys it commits, as this device
+    /// pins it, or admits it from a disclosure whose bundle recomputes.
+    pub anchor: crate::types::offline_chain::ChainAnchor,
+    /// The sender's spends since the recorded account, as the confirm carries
+    /// them (SA-116).
+    pub chain: &'a [crate::types::offline_chain::SpendHop],
+    /// Where this device last accepted a spend from the sender to leave its
+    /// account — the frontier and the counter — if it ever has.
+    pub accepted: Option<([u8; 32], u64)>,
 }
 
 /// A confirm the receiver may commit. Only [`decide_confirm`] makes one,
@@ -345,7 +446,8 @@ pub struct AcceptedStep<'a> {
 pub struct VerifiedConfirm {
     receipt: StitchedReceiptV2,
     successor_tip: [u8; 32],
-    bearer: Option<BearerLeaves>,
+    bearer: BearerLeaves,
+    bearer_start: crate::types::offline_chain::AccountPoint,
 }
 
 impl VerifiedConfirm {
@@ -360,55 +462,107 @@ impl VerifiedConfirm {
         self.successor_tip
     }
 
-    /// For an offline-bearer step, the sender's anchor-state leaves the
-    /// verified receipt proves its step moved, before and after.
-    pub fn bearer(&self) -> Option<&BearerLeaves> {
-        self.bearer.as_ref()
+    /// The sender's anchor-state leaves the verified receipt proves its step
+    /// moved, before and after.
+    pub fn bearer(&self) -> &BearerLeaves {
+        &self.bearer
+    }
+
+    /// For an offline-bearer step, the account its spend starts from as this
+    /// device established it: its recorded account carried forward by the
+    /// sender's verified chain of spends, at the counter and frontier the
+    /// release starts from.
+    pub fn bearer_start(&self) -> &crate::types::offline_chain::AccountPoint {
+        &self.bearer_start
     }
 }
 
 /// The owner's receive rule (2026-10-22): an offline-bearer spend is taken
 /// only from the offline account its receiver validated itself, from the
-/// sender's online history. `recorded` is that account, as the sender's latest
-/// boundary the receiver walked left it, under the spend's anchor bundle. The
-/// receipt's offline-account write names the account the spend started from
-/// (its pre-root, which `verify_receipt_state` folds under the sender's device
-/// root): a spend from another sender's or another bundle's account, or from
-/// any other state of this one, is refused.
+/// sender's online history — carried forward, when the sender has paid offline
+/// since, by the sender's chain of spends (SA-116).
+///
+/// The recorded account must be the sender's, under the spend's bundle, and
+/// the anchor the chain is verified under must be that bundle's. The chain is
+/// verified hop by hop from the recorded account
+/// ([`crate::types::offline_chain::verify_spend_chain`]); the receipt's
+/// offline-account write names the account the spend started from (its
+/// pre-root, which `verify_receipt_state` folds under the sender's device
+/// root), and that must be the account the chain leaves, at the counter and
+/// frontier the release starts from. A spend from another sender's or another
+/// bundle's account, or from any other state of this one, is refused.
+///
+/// Forward only: once this device accepted a spend from the sender, the next
+/// one must pass through the point that spend left the account at — unless
+/// the recorded account is newer, validated online since. A spend that starts
+/// before it, or beside it, is refused.
+///
+/// Answers the account the spend starts from.
 pub fn spend_starts_at_the_record(
     receipt: &StitchedReceiptV2,
     leaves: &BearerLeaves,
     sender_genesis: &[u8; 32],
-    recorded: &crate::economic::peer_lineage::PeerOfflineAccount,
-) -> Result<(), DsmError> {
+    origin: &BearerOrigin<'_>,
+) -> Result<crate::types::offline_chain::AccountPoint, DsmError> {
+    use crate::types::offline_chain::{chain_end, verify_spend_chain, AccountPoint};
+    let recorded = origin.recorded.as_ref().ok_or_else(|| {
+        DsmError::invalid_operation(
+            "offline-bearer confirm: this device has validated none of the sender's offline \
+             account online, so no offline payment from it is taken",
+        )
+    })?;
     if recorded.device_id() != &receipt.devid_a
         || recorded.genesis() != sender_genesis
         || recorded.bundle() != &leaves.bundle
+        || origin.anchor.bundle != leaves.bundle
     {
         return Err(DsmError::invalid_operation(
             "offline-bearer spend: the recorded offline account is not the sender's under this \
              spend's anchor bundle",
         ));
     }
+    let payments = verify_spend_chain(recorded.account_root(), &origin.anchor, origin.chain)?;
+    let carried = chain_end(recorded.account_root(), &payments);
     let started_from = receipt
         .step_writes
         .iter()
         .find_map(|write| match &write.leaf {
             ReceiptLeaf::OfflineAccount(witness) => Some(witness.pre_account_root),
-            _ => None,
+            ReceiptLeaf::Relationship => None,
         })
         .ok_or_else(|| {
             DsmError::invalid_operation(
                 "offline-bearer spend: the receipt writes no offline account",
             )
         })?;
-    if &started_from != recorded.account_root() {
+    if started_from != carried {
         return Err(DsmError::invalid_operation(
             "offline-bearer spend: it does not start from the offline account this device \
-             validated online for the sender",
+             validated online for the sender, carried forward by the sender's chain of spends",
         ));
     }
-    Ok(())
+    if let Some((frontier, counter)) = origin.accepted {
+        let recorded_counter = match payments.first() {
+            Some(first) => first.before.counter,
+            None => leaves.counter,
+        };
+        let passes_through = payments
+            .iter()
+            .map(|p| (p.before.counter, p.before.frontier))
+            .chain([(leaves.counter, leaves.frontier)])
+            .any(|point| point == (counter, frontier));
+        if counter >= recorded_counter && !passes_through {
+            return Err(DsmError::invalid_operation(
+                "offline-bearer spend: it does not extend the spend this device last accepted \
+                 from the sender",
+            ));
+        }
+    }
+    Ok(AccountPoint {
+        root: carried,
+        counter: leaves.counter,
+        frontier: leaves.frontier,
+    })
 }
 
 /// The receiver's decision on a confirm for a step it accepted: σ_A under
@@ -455,7 +609,7 @@ pub fn decide_confirm(
             ),
             author_genesis: sender.genesis,
             operation: step.operation,
-            bearer: step.bearer,
+            bearer: Some(step.bearer),
         },
     )?;
     verify_per_step_ek_signing(
@@ -465,15 +619,8 @@ pub fn decide_confirm(
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
-    if let Some(leaves) = step.bearer.as_ref() {
-        let recorded = step.bearer_origin.ok_or_else(|| {
-            DsmError::invalid_operation(
-                "offline-bearer confirm: this device has validated none of the sender's offline \
-                 account online, so no offline payment from it is taken",
-            )
-        })?;
-        spend_starts_at_the_record(&receipt, leaves, &sender.genesis, &recorded)?;
-    }
+    let bearer_start =
+        spend_starts_at_the_record(&receipt, &step.bearer, &sender.genesis, step.bearer_origin)?;
 
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
         DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
@@ -491,7 +638,7 @@ pub fn decide_confirm(
         .successor_tip
         .ok_or_else(|| DsmError::invalid_operation("missing shared_chain_tip_new in confirm"))?;
     let op_bytes = step.operation.to_bytes();
-    let sigma = compute_precommit(&step.held_tip, &op_bytes, &pre_entropy);
+    let sigma = compute_precommit(&step.held_tip, &op_bytes, &pre_entropy)?;
     if compute_successor_tip(&step.held_tip, &op_bytes, &pre_entropy, &sigma) != successor_tip {
         return Err(DsmError::invalid_operation(
             "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
@@ -501,6 +648,7 @@ pub fn decide_confirm(
         receipt,
         successor_tip,
         bearer: step.bearer,
+        bearer_start,
     })
 }
 
@@ -723,10 +871,28 @@ mod tests {
         );
     }
 
+    /// A bearer transfer to `to` of a token whose committed policy lets it
+    /// move.
     fn bearer_transfer(to: [u8; 32]) -> Operation {
+        bearer_transfer_of(
+            to,
+            crate::sofi::validation::fixtures::committed(
+                crate::sofi::validation::fixtures::token_policy_bytes_with(
+                    0x0F,
+                    crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+                ),
+            ),
+        )
+    }
+
+    /// A bearer transfer to `to` of the token `(policy_commit, token_policy)`.
+    fn bearer_transfer_of(
+        to: [u8; 32],
+        (policy_commit, token_policy): ([u8; 32], Vec<u8>),
+    ) -> Operation {
         Operation::Transfer {
-            policy_commit: [0x0F; 32],
-            token_policy: Vec::new(),
+            policy_commit,
+            token_policy,
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"TOK".to_vec(),
                 nonce: vec![1; 8],
@@ -772,8 +938,9 @@ mod tests {
         let receiver = [0x43u8; 32];
         let held = [0x70u8; 32];
         let operation = step(0x01);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the step's precommitment")
+            .bilateral_commitment_hash;
         let decide = |commitment: [u8; 32], expected_tip: Option<[u8; 32]>, signature: &[u8]| {
             decide_prepare(
                 commitment,
@@ -808,7 +975,9 @@ mod tests {
 
         // A commitment the sender signed that is not its operation's
         // commitment on the held tip: the receiver never signs it.
-        let foreign = BilateralPreCommitment::new(held, step(0x02)).bilateral_commitment_hash;
+        let foreign = BilateralPreCommitment::new(held, step(0x02))
+            .expect("the foreign step's precommitment")
+            .bilateral_commitment_hash;
         refused(
             decide(foreign, Some(held), &sender.sign_step(&foreign)),
             "not its operation's commitment on this relationship",
@@ -845,8 +1014,9 @@ mod tests {
         let receiver = [0x47u8; 32];
         let held = [0x72u8; 32];
         let operation = step(0x03);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the step's precommitment")
+            .bilateral_commitment_hash;
         let own_step = [0x73u8; 32];
         let decide = |expected_tip: Option<[u8; 32]>, signature: &[u8], in_flight| {
             decide_prepare(
@@ -903,7 +1073,7 @@ mod tests {
         let held = [0x75u8; 32];
         let decide = |operation: &Operation, addressed_to: &[u8], in_flight| {
             let commitment =
-                BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+                BilateralPreCommitment::new(held, operation.clone())?.bilateral_commitment_hash;
             decide_prepare(
                 commitment,
                 operation,
@@ -938,21 +1108,20 @@ mod tests {
         refused(decide(&step(0x04), &receiver, None), "carries no signature");
     }
 
-    /// Offline-bearer receipt is disabled (SA-61; owner, 2026-10-18): a
-    /// bearer transfer addressed to this device is refused on its operation
-    /// alone, however its sender signed it and whatever tip it claims, and
-    /// nothing else of it is consulted. One addressed to another device is
-    /// still not addressed here.
-    /// MUTATION CONTROL: dropping the refusal lets the sender's own signed
-    /// bearer transfer on the held tip be considered and turns this red.
+    /// SA-61, opened in phase 4: the allocation a bearer transfer spends is
+    /// proven at the confirm, from the account the receiver recorded
+    /// (`spend_starts_at_the_record`), so its prepare is decided as any step's
+    /// is — put to the user when its pinned sender signed it on the held tip,
+    /// refused unsigned, and answered as in flight while another step is.
     #[test]
-    fn a_bearer_transfer_addressed_here_is_refused_on_its_operation_alone() {
+    fn a_bearer_transfer_addressed_here_is_decided_as_any_step() {
         let sender = Peer::new(0x4D);
         let receiver = [0x4Eu8; 32];
         let held = [0x7Bu8; 32];
         let operation = bearer_transfer(receiver);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the bearer transfer's precommitment")
+            .bilateral_commitment_hash;
         let decide = |signature: &[u8], in_flight| {
             decide_prepare(
                 commitment,
@@ -969,14 +1138,69 @@ mod tests {
                 in_flight,
             )
         };
-        refused(
-            decide(&sender.sign_step(&commitment), None),
-            "offline-bearer receipt is disabled",
-        );
-        refused(
-            decide(&[], Some([0x7Cu8; 32])),
-            "offline-bearer receipt is disabled",
-        );
+        match decide(&sender.sign_step(&commitment), None)
+            .expect("a signed bearer transfer on the held tip is decided")
+        {
+            PrepareDecision::Consider { commitment_hash } => {
+                assert_eq!(commitment_hash, commitment, "the proposal put to the user")
+            }
+            other => panic!("expected Consider, got {other:?}"),
+        }
+        refused(decide(&[], None), "carries no signature");
+        match decide(&sender.sign_step(&commitment), Some([0x7Cu8; 32]))
+            .expect("a bearer transfer while another step is in flight is decided")
+        {
+            PrepareDecision::StepInFlight { in_flight } => assert_eq!(in_flight, [0x7Cu8; 32]),
+            other => panic!("expected StepInFlight, got {other:?}"),
+        }
+    }
+
+    /// Owner question 9, offline: the receiver's Core refuses, at the
+    /// prepare and before anything is verified or written, a bearer transfer
+    /// of a token whose committed policy does not let it move, or whose
+    /// carried policy bytes are not the token's.
+    /// MUTATION CONTROL: dropping `bearer_token_moves` from `decide_prepare`
+    /// lets both proposals on to the next refusal and turns this red.
+    #[test]
+    fn a_bearer_transfer_of_a_token_that_may_not_move_is_refused_at_its_receivers_prepare() {
+        use crate::sofi::validation::fixtures::{committed, token_policy_bytes_with};
+        let sender = Peer::new(0x4F);
+        let receiver = [0x50u8; 32];
+        let held = [0x7Bu8; 32];
+        let locked = committed(token_policy_bytes_with(0x10, 0));
+        let (moving, _) = committed(token_policy_bytes_with(
+            0x11,
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        ));
+        let not_its_own = (moving, locked.1.clone());
+        for (operation, reason) in [
+            (bearer_transfer_of(receiver, locked), "non-transferable"),
+            (
+                bearer_transfer_of(receiver, not_its_own),
+                "are not the committed policy",
+            ),
+        ] {
+            let commitment = BilateralPreCommitment::new(held, operation.clone())
+                .expect("the step's precommitment")
+                .bilateral_commitment_hash;
+            refused(
+                decide_prepare(
+                    commitment,
+                    &operation,
+                    PrepareClaims {
+                        addressed_to: &receiver,
+                        expected_tip: Some(held),
+                        credentials: credentials(&sender),
+                        signature: &sender.sign_step(&commitment),
+                    },
+                    &sender.pinned(),
+                    &receiver,
+                    held,
+                    None,
+                ),
+                reason,
+            );
+        }
     }
 
     /// A stale proposal's claimed tip is evidence of the sender's tip only
@@ -989,8 +1213,9 @@ mod tests {
         let held = [0x78u8; 32];
         let claimed = [0x79u8; 32];
         let operation = step(0x05);
-        let on_claimed =
-            BilateralPreCommitment::new(claimed, operation.clone()).bilateral_commitment_hash;
+        let on_claimed = BilateralPreCommitment::new(claimed, operation.clone())
+            .expect("the step's precommitment on the claimed tip")
+            .bilateral_commitment_hash;
         let decide = |commitment: [u8; 32]| {
             decide_prepare(
                 commitment,
@@ -1029,15 +1254,8 @@ mod tests {
     /// refused at the door.
     #[test]
     fn an_online_tier_transfer_is_not_an_offline_operation() {
-        let mut online = bearer_transfer([0x45; 32]);
-        if let Operation::Transfer {
-            authority_policy, ..
-        } = &mut online
-        {
-            *authority_policy = None;
-        }
         refused(
-            offline_operation(&online.to_bytes()),
+            offline_operation(&online_tier_transfer().to_bytes()),
             "offline-bearer transfers only",
         );
         offline_operation(&bearer_transfer([0x45; 32]).to_bytes()).expect("a bearer transfer");
@@ -1045,6 +1263,393 @@ mod tests {
             offline_operation(&[0xFF, 0x00]),
             "invalid operation payload",
         );
+    }
+
+    /// A bearer transfer with its authority policy taken off: the online tier.
+    fn online_tier_transfer() -> Operation {
+        let mut online = bearer_transfer([0x45; 32]);
+        if let Operation::Transfer {
+            authority_policy, ..
+        } = &mut online
+        {
+            *authority_policy = None;
+        }
+        online
+    }
+
+    /// One operation of every variant, each by its class at the offline door.
+    fn one_of_every_variant() -> Vec<(Operation, &'static str)> {
+        use crate::types::operations::TransactionMode::{Bilateral, Unilateral};
+        let b = |v: u8, n: usize| vec![v; n];
+        let id = |v: u8| [v; 32];
+        let amount = Balance::amount;
+        const NONE: &str = "a step that moves no value";
+        const TOKEN: &str = "a token operation";
+        const IDENTITY: &str = "an identity or relationship operation";
+        const VAULT: &str = "a vault operation";
+        const SOFI: &str = "a SoFi operation";
+        vec![
+            (bearer_transfer([0x45; 32]), "admitted"),
+            (online_tier_transfer(), "an online-tier transfer"),
+            (Operation::Noop, NONE),
+            (
+                Operation::Generic {
+                    operation_type: b(0x01, 4),
+                    data: b(0x02, 5),
+                    message: "generic".into(),
+                    signature: b(0x03, 32),
+                },
+                NONE,
+            ),
+            (Operation::Genesis, IDENTITY),
+            (
+                Operation::Create {
+                    message: "create".into(),
+                    identity_data: b(0x01, 3),
+                    public_key: b(0x02, 3),
+                    metadata: b(0x03, 2),
+                    commitment: b(0x04, 1),
+                    proof: b(0x05, 2),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Update {
+                    message: "update".into(),
+                    identity_id: b(0xAA, 16),
+                    updated_data: b(0xBB, 8),
+                    proof: b(0xCC, 4),
+                    forward_link: Some(b(0xDD, 32)),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::AddRelationship {
+                    from_id: id(0x01),
+                    to_id: id(0x02),
+                    relationship_type: b(0x03, 4),
+                    metadata: b(0x04, 4),
+                    proof: b(0x05, 64),
+                    mode: Bilateral,
+                    message: "add".into(),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::CreateRelationship {
+                    message: "create".into(),
+                    counterparty_id: b(0x01, 32),
+                    commitment: b(0x02, 16),
+                    proof: b(0x03, 64),
+                    mode: Unilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::RemoveRelationship {
+                    from_id: id(0x0A),
+                    to_id: id(0x0B),
+                    relationship_type: b(0x0C, 4),
+                    proof: b(0x0D, 64),
+                    mode: Bilateral,
+                    message: "remove".into(),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Recovery {
+                    message: "recover".into(),
+                    state_number: 42,
+                    state_hash: b(0x11, 32),
+                    state_entropy: b(0x22, 32),
+                    invalidation_data: b(0x33, 16),
+                    new_state_data: b(0x44, 64),
+                    new_state_number: 43,
+                    new_state_hash: b(0x55, 32),
+                    new_state_entropy: b(0x66, 32),
+                    compromise_proof: b(0x77, 128),
+                    authority_sigs: vec![b(0x88, 64)],
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Delete {
+                    reason: "expired".into(),
+                    proof: b(0xAA, 64),
+                    mode: Unilateral,
+                    id: b(0xBB, 16),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Link {
+                    target_id: b(0x01, 32),
+                    link_type: b(0x02, 7),
+                    proof: b(0x03, 64),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Unlink {
+                    target_id: b(0x01, 32),
+                    proof: b(0x02, 64),
+                    mode: Unilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Invalidate {
+                    reason: "clone".into(),
+                    proof: b(0xDE, 64),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::FaucetClaim {
+                    reserve_id: id(0x52),
+                    generation: 7,
+                },
+                TOKEN,
+            ),
+            (
+                Operation::AdoptToken {
+                    policy_commit: id(0x5A),
+                    signature: b(0xCD, 64),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::CreateToken {
+                    token_id: b(0x54, 3),
+                    initial_supply: amount(21),
+                    name: "Token".into(),
+                    symbol: "TOK".into(),
+                    decimals: 2,
+                    metadata_uri: None,
+                    policy_commit: id(0xAB),
+                    fee_amount: 10,
+                    signature: b(0xCD, 64),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Burn {
+                    amount: amount(200),
+                    token_id: b(0x54, 3),
+                    policy_commit: id(0xAC),
+                    token_policy: b(0x0A, 40),
+                    message: "burn".into(),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::LockToken {
+                    token_id: b(0x54, 3),
+                    amount: 500,
+                    purpose: b(0x65, 6),
+                    mode: Unilateral,
+                    signature: b(0xDD, 32),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::UnlockToken {
+                    token_id: b(0x54, 3),
+                    amount: 250,
+                    purpose: b(0x65, 6),
+                    mode: Bilateral,
+                    signature: b(0xEE, 32),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Lock {
+                    token_id: b(0x54, 3),
+                    amount: amount(100),
+                    purpose: b(0x63, 10),
+                    owner: b(0x11, 32),
+                    message: "lock".into(),
+                    signature: b(0x22, 48),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Unlock {
+                    token_id: b(0x54, 3),
+                    amount: amount(50),
+                    purpose: b(0x63, 10),
+                    owner: b(0x33, 32),
+                    message: "unlock".into(),
+                    signature: b(0x44, 48),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Receive {
+                    token_id: b(0x54, 3),
+                    from_device_id: b(0x01, 32),
+                    amount: amount(777),
+                    recipient: b(0x02, 32),
+                    message: "receive".into(),
+                    mode: Bilateral,
+                    nonce: b(0x03, 16),
+                    sender_state_hash: None,
+                },
+                TOKEN,
+            ),
+            (
+                Operation::DlvCreate {
+                    vault_id: b(0x01, 32),
+                    creator_public_key: b(0x02, 64),
+                    parameters_hash: b(0x03, 32),
+                    fulfillment_condition: b(0x04, 16),
+                    intended_recipient: None,
+                    signature: b(0x06, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvUnlock {
+                    vault_id: b(0x01, 32),
+                    fulfillment_proof: b(0x02, 128),
+                    requester_public_key: b(0x03, 64),
+                    signature: b(0x04, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvClaim {
+                    vault_id: b(0x01, 32),
+                    claim_proof: b(0x02, 64),
+                    claimant_public_key: b(0x03, 64),
+                    signature: b(0x04, 48),
+                    mode: Bilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvInvalidate {
+                    vault_id: b(0x01, 32),
+                    reason: "timeout".into(),
+                    creator_public_key: b(0x02, 64),
+                    signature: b(0x03, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::EscrowVaultCreate {
+                    genesis_preimage: vec![0x5A, 0x01],
+                    creation: vec![0x5B, 0x01],
+                    terms: vec![0x01, 0x63, 0x01, 0x01],
+                    funding_policies: vec![vec![0x40, 0x01]],
+                    signature: b(0xA4, 64),
+                },
+                VAULT,
+            ),
+            (
+                Operation::SofiSetup {
+                    setup_body: vec![0x36, 0x01],
+                    signature: b(0xA1, 64),
+                },
+                SOFI,
+            ),
+            (
+                Operation::SofiVaultCreate {
+                    genesis_preimage: vec![0x5A, 0x01],
+                    creation: vec![0x5B, 0x01],
+                    market_policy_preimage: vec![0x01, 0x07, 0x01, 0x01],
+                    funding_a_policy_commit: id(0x5C),
+                    funding_b_policy_commit: id(0x5D),
+                    funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
+                    signature: b(0xA2, 64),
+                },
+                SOFI,
+            ),
+            (
+                Operation::SofiFulfill {
+                    fulfillment_body: vec![0x39, 0x01],
+                    precommit_id: b(0x11, 32),
+                    signature: b(0xA3, 64),
+                },
+                SOFI,
+            ),
+        ]
+    }
+
+    /// MR-DSM-0219 (§6.105 C1): the offline door, from the bytes a proposal
+    /// carries, admits the offline-bearer transfer and refuses every other
+    /// variant by its class — SoFi and vault operations as online. Every
+    /// variant has an operation here (the door's match has no wildcard, and
+    /// this list is checked against the variant count).
+    /// MUTATION CONTROL: a wildcard arm admitting what is not classified turns
+    /// this red on the SoFi operations.
+    #[test]
+    fn the_offline_door_admits_the_bearer_transfer_and_refuses_every_other_variant() {
+        // The variant an operation is. No wildcard: a variant added to
+        // `Operation` does not compile here until it has an index, and then
+        // fails this test until it has an operation in the list.
+        fn index(op: &Operation) -> usize {
+            match op {
+                Operation::Genesis => 0,
+                Operation::Create { .. } => 1,
+                Operation::Update { .. } => 2,
+                Operation::Transfer { .. } => 3,
+                Operation::FaucetClaim { .. } => 4,
+                Operation::AdoptToken { .. } => 5,
+                Operation::Burn { .. } => 6,
+                Operation::LockToken { .. } => 7,
+                Operation::UnlockToken { .. } => 8,
+                Operation::Lock { .. } => 9,
+                Operation::Unlock { .. } => 10,
+                Operation::AddRelationship { .. } => 11,
+                Operation::CreateRelationship { .. } => 12,
+                Operation::RemoveRelationship { .. } => 13,
+                Operation::Recovery { .. } => 14,
+                Operation::Delete { .. } => 15,
+                Operation::Link { .. } => 16,
+                Operation::Unlink { .. } => 17,
+                Operation::Invalidate { .. } => 18,
+                Operation::Generic { .. } => 19,
+                Operation::Receive { .. } => 20,
+                Operation::CreateToken { .. } => 21,
+                Operation::Noop => 22,
+                Operation::DlvCreate { .. } => 23,
+                Operation::DlvUnlock { .. } => 24,
+                Operation::DlvClaim { .. } => 25,
+                Operation::SofiSetup { .. } => 26,
+                Operation::SofiVaultCreate { .. } => 27,
+                Operation::SofiFulfill { .. } => 28,
+                Operation::EscrowVaultCreate { .. } => 29,
+                Operation::DlvInvalidate { .. } => 30,
+            }
+        }
+        const VARIANTS: usize = 31;
+        let every = one_of_every_variant();
+        let mut held = [0usize; VARIANTS];
+        for (operation, _) in &every {
+            held[index(operation)] += 1;
+        }
+        for (variant, count) in held.iter().enumerate() {
+            assert_ne!(
+                *count, 0,
+                "operation variant {variant} has no operation here"
+            );
+        }
+        for (operation, class) in every {
+            let carried = offline_operation(&operation.to_bytes());
+            match class {
+                "admitted" => {
+                    carried.expect("the offline-bearer transfer passes the door");
+                }
+                class => refused(carried, class),
+            }
+        }
     }
 
     /// The proposer takes an acceptance — its signature and its challenge —
@@ -1149,10 +1754,17 @@ mod tests {
     /// side by the sender's per-step EK certified by its AK over the
     /// session-bound target of the step's commitment on the tip the receiver
     /// holds, and the successor both derive from the sender's entropy.
+    /// A sender's offline-bearer payment to a receiver, at the confirm: the
+    /// sender's load and spend on its anchor, the spend's receipt answered by
+    /// the sender's per-step EK, and the receiver's record of the account the
+    /// load left.
     struct BuiltConfirm {
         sender: Peer,
         receiver: Peer,
-        transfer: Step,
+        operation: Operation,
+        bearer: BearerLeaves,
+        recorded: crate::economic::peer_lineage::PeerOfflineAccount,
+        anchor: crate::types::offline_chain::ChainAnchor,
         commitment_hash: [u8; 32],
         receipt: Vec<u8>,
         device_tree_root: [u8; 32],
@@ -1188,30 +1800,33 @@ mod tests {
                 ),
             )
             .expect("the established relationship has a tip");
-        let commitment =
-            BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held_tip, operation.clone())
+            .expect("the step's precommitment on the held tip")
+            .bilateral_commitment_hash;
         (held_tip, commitment)
     }
 
-    /// `author`'s receipt of `step` toward `toward`, answered on `side` by
+    /// `author`'s `receipt` toward `toward`, of the step precommitted as
+    /// `c_pre`, answered on `side` by
     /// the author's per-step EK certified by its AK over the session-bound
     /// target of `commitment_hash`. Returns the receipt's wire bytes and the
     /// author's Device Tree root.
     fn signed_receipt(
         author: &Peer,
         toward: &Peer,
-        step: &Step,
+        receipt: &StitchedReceiptV2,
+        c_pre: &[u8; 32],
         side: BilateralSide,
         commitment_hash: &[u8; 32],
     ) -> (Vec<u8>, [u8; 32]) {
         use crate::types::receipt_types::compute_receipt_challenge_response_target;
 
-        let mut receipt = step.receipt.clone();
+        let mut receipt = receipt.clone();
         let commitment = receipt.compute_commitment().expect("commitment");
         let answer = author.party.answer(
             &toward.party,
             &receipt.parent_tip,
-            &step.c_pre,
+            c_pre,
             &compute_receipt_challenge_response_target(&commitment, commitment_hash),
         );
         match side {
@@ -1234,31 +1849,64 @@ mod tests {
         )
     }
 
+    impl BuiltConfirm {
+        /// Where the receiver holds the sender's offline account from: its
+        /// record of the load, with no spend between.
+        fn origin(&self) -> BearerOrigin<'static> {
+            BearerOrigin {
+                recorded: Some(self.recorded),
+                anchor: self.anchor.clone(),
+                chain: &[],
+                accepted: None,
+            }
+        }
+    }
+
     fn built_confirm() -> BuiltConfirm {
+        use crate::types::offline_chain::fixture::{bearer_op, Payer};
+
         let sender = Peer::new(0x61);
         let receiver = Peer::new(0x62);
-        let (transfer, _) = steps(&sender, &receiver);
-        let (held_tip, commitment_hash) =
-            held_tip_and_commitment(&receiver, &sender, &transfer.operation);
+        let mut payer = Payer::loaded_on(
+            sender.party.head(),
+            sender.genesis,
+            0x61,
+            40,
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        );
+        let recorded = super::receive_rule_tests::record(&payer);
+        let operation = bearer_op(receiver.device_id, payer.token, &payer.token_policy, 7);
+        let (_, spent, bearer) = payer.spend(receiver.device_id, 7);
+        let (held_tip, commitment_hash) = held_tip_and_commitment(&receiver, &sender, &operation);
+        let pre_entropy = spent.transition_entropy;
+        let c_pre = compute_precommit(
+            &spent.parent_tip,
+            &operation.with_cleared_signature().to_bytes(),
+            &pre_entropy,
+        )
+        .expect("the step's C_pre");
         let (receipt, device_tree_root) = signed_receipt(
             &sender,
             &receiver,
-            &transfer,
+            &spent,
+            &c_pre,
             BilateralSide::A,
             &commitment_hash,
         );
-        let pre_entropy = transfer.outcome.transition_entropy();
-        let op_bytes = transfer.operation.to_bytes();
+        let op_bytes = operation.to_bytes();
         let successor_tip = compute_successor_tip(
             &held_tip,
             &op_bytes,
             &pre_entropy,
-            &compute_precommit(&held_tip, &op_bytes, &pre_entropy),
+            &compute_precommit(&held_tip, &op_bytes, &pre_entropy).expect("the step's C_pre"),
         );
         BuiltConfirm {
             sender,
             receiver,
-            transfer,
+            operation,
+            bearer,
+            recorded,
+            anchor: payer.pin,
             commitment_hash,
             receipt,
             device_tree_root,
@@ -1270,15 +1918,18 @@ mod tests {
 
     /// The receiver commits only a confirm its pinned sender signed, whose
     /// receipt is from that sender to this device and holds (state rules,
-    /// A-side EK chaining from the sender's head), and whose successor tip
-    /// the held tip, the operation and the sender's entropy reproduce.
+    /// A-side EK chaining from the sender's head), whose spend starts at the
+    /// sender's offline account as this device validated it online, and
+    /// whose successor tip the held tip, the operation and the sender's
+    /// entropy reproduce.
     /// MUTATION CONTROLS: dropping the σ_A check, the receipt's device
     /// binding, or the successor recompute lets a refused confirm through and
     /// turns this red.
     #[test]
     fn a_confirm_is_committed_only_as_its_sender_signed_and_derived_it() {
         let c = built_confirm();
-        let operation = c.transfer.operation.clone();
+        let operation = c.operation.clone();
+        let origin = c.origin();
         let other = Peer::new(0x65);
         let decide = |signature: &[u8],
                       receipt: &[u8],
@@ -1300,8 +1951,8 @@ mod tests {
                     receiver_device_id,
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head,
-                    bearer: None,
-                    bearer_origin: None,
+                    bearer: c.bearer,
+                    bearer_origin: &origin,
                 },
                 &c.sender.pinned(),
             )
@@ -1385,6 +2036,34 @@ mod tests {
             ),
             "128 KiB",
         );
+
+        // A device that has validated none of the sender's offline account
+        // online takes no offline payment from it.
+        refused(
+            decide_confirm(
+                ConfirmClaims {
+                    signature: &sigma_a,
+                    receipt: &c.receipt,
+                    pre_entropy: &c.pre_entropy,
+                    successor_tip: Some(c.successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id: c.receiver.device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer: c.bearer,
+                    bearer_origin: &BearerOrigin {
+                        recorded: None,
+                        ..c.origin()
+                    },
+                },
+                &c.sender.pinned(),
+            ),
+            "has validated none of the sender's offline account online",
+        );
     }
 
     /// SA-11. The confirm's entropy and successor tip ride unsigned beside
@@ -1398,7 +2077,8 @@ mod tests {
     #[test]
     fn a_confirm_whose_entropy_is_not_its_receipts_moves_nothing() {
         let c = built_confirm();
-        let operation = c.transfer.operation.clone();
+        let operation = c.operation.clone();
+        let origin = c.origin();
         let tampered_entropy = [0x6Bu8; 32];
         assert_ne!(tampered_entropy, c.pre_entropy);
         let op_bytes = operation.to_bytes();
@@ -1406,7 +2086,8 @@ mod tests {
             &c.held_tip,
             &op_bytes,
             &tampered_entropy,
-            &compute_precommit(&c.held_tip, &op_bytes, &tampered_entropy),
+            &compute_precommit(&c.held_tip, &op_bytes, &tampered_entropy)
+                .expect("the tampered step's C_pre"),
         );
         assert_ne!(tampered_successor, c.successor_tip);
         let decide = |entropy: &[u8], successor_tip: [u8; 32]| {
@@ -1424,8 +2105,8 @@ mod tests {
                     receiver_device_id: c.receiver.device_id,
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head: None,
-                    bearer: None,
-                    bearer_origin: None,
+                    bearer: c.bearer,
+                    bearer_origin: &origin,
                 },
                 &c.sender.pinned(),
             )
@@ -1441,6 +2122,81 @@ mod tests {
             decide(&tampered_entropy, tampered_successor),
             "is not the transition entropy its signed receipt commits",
         );
+    }
+
+    /// The receiver takes a bearer confirm only with the anchor-state leaves
+    /// its receipt's spend moved. The counter and both frontiers the
+    /// receipt's offline account starts from and advances to must be the ones
+    /// the release signed, and the account's leaf, under the release's bundle,
+    /// must fold with the relationship leaf from the receipt's parent root to
+    /// its child root.
+    /// MUTATION CONTROL: dropping the comparison of the receipt's offline
+    /// account with the release's leaves lets the counter and frontier cases
+    /// through and turns this red.
+    #[test]
+    fn a_confirm_whose_bearer_leaves_are_not_its_receipts_spend_is_refused() {
+        let c = built_confirm();
+        let operation = c.operation.clone();
+        let origin = c.origin();
+        let sigma_a = c.sender.sign_step(&c.commitment_hash);
+        let decide = |bearer: BearerLeaves| {
+            decide_confirm(
+                ConfirmClaims {
+                    signature: &sigma_a,
+                    receipt: &c.receipt,
+                    pre_entropy: &c.pre_entropy,
+                    successor_tip: Some(c.successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id: c.receiver.device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer,
+                    bearer_origin: &origin,
+                },
+                &c.sender.pinned(),
+            )
+        };
+
+        decide(c.bearer).expect("the confirm with its own spend's leaves");
+        let other = [0x6Cu8; 32];
+        for (leaves, why) in [
+            (
+                BearerLeaves {
+                    counter: c.bearer.counter + 1,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    frontier: other,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    next_frontier: other,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    bundle: other,
+                    ..c.bearer
+                },
+                // The account's leaf under another bundle is another key: its
+                // write's path is not the tree's.
+                "the receipt's writes: ",
+            ),
+        ] {
+            refused(decide(leaves), why);
+        }
     }
 
     /// The sender takes as the step's acknowledgment only the receiver's
@@ -1495,7 +2251,8 @@ mod tests {
         let (ack, root) = signed_receipt(
             &receiver,
             &sender,
-            &credit,
+            &credit.receipt,
+            &credit.c_pre,
             BilateralSide::B,
             &commitment_hash,
         );
@@ -1539,13 +2296,176 @@ mod tests {
         let (a_side, _) = signed_receipt(
             &receiver,
             &sender,
-            &credit,
+            &credit.receipt,
+            &credit.c_pre,
             BilateralSide::A,
             &commitment_hash,
         );
         refused(
             decide(commitment_hash, &a_side, step(sender_device_id)),
             "B-side artifacts",
+        );
+    }
+}
+
+/// The receive rule against real spends: a payer's anchor-released spends,
+/// built through its own `advance`, and the receiver's record of the account
+/// the payer's load left.
+#[cfg(test)]
+mod receive_rule_tests {
+    use super::*;
+    use crate::economic::peer_lineage::PeerOfflineAccount;
+    use crate::types::offline_chain::fixture::Payer;
+
+    const RECEIVER: [u8; 32] = [0xB0; 32];
+    const OTHER: [u8; 32] = [0xC0; 32];
+
+    fn refused<T: core::fmt::Debug>(result: Result<T, DsmError>, reason: &str) {
+        let error = result.expect_err(reason);
+        assert!(error.to_string().contains(reason), "{error}");
+    }
+
+    pub(super) fn record(payer: &Payer) -> PeerOfflineAccount {
+        let account = payer
+            .head
+            .offline_account(&payer.pin.bundle)
+            .expect("the account is open");
+        PeerOfflineAccount::rehydrate_recorded(
+            payer.genesis,
+            payer.head.devid(),
+            1,
+            payer.pin.bundle,
+            account.root(),
+            account.funding_chain().expect("a load funded it"),
+        )
+    }
+
+    fn origin<'a>(
+        recorded: &PeerOfflineAccount,
+        payer: &Payer,
+        chain: &'a [crate::types::offline_chain::SpendHop],
+        accepted: Option<([u8; 32], u64)>,
+    ) -> BearerOrigin<'a> {
+        BearerOrigin {
+            recorded: Some(*recorded),
+            anchor: payer.pin.clone(),
+            chain,
+            accepted,
+        }
+    }
+
+    /// SA-116. A payer that paid someone else offline since its load pays
+    /// this receiver from the account its chain of spends leaves: taken with
+    /// the chain, from the receiver's record of the load; refused without it.
+    /// MUTATION CONTROL: taking the spend's start from the record alone,
+    /// without the chain, turns this red.
+    #[test]
+    fn a_second_offline_spend_is_taken_with_the_chain_from_the_record() {
+        let mut payer = Payer::loaded(0x41, 40);
+        let recorded = record(&payer);
+        let (first, first_receipt, first_leaves) = payer.spend(OTHER, 10);
+        let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
+        let start = spend_starts_at_the_record(
+            &second_receipt,
+            &second_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, std::slice::from_ref(&first), None),
+        )
+        .expect("the second spend is taken with the chain");
+        assert_eq!((start.counter, start.frontier), (1, second_leaves.frontier));
+        spend_starts_at_the_record(
+            &first_receipt,
+            &first_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, &[], None),
+        )
+        .expect("the first spend starts at the record");
+        refused(
+            spend_starts_at_the_record(
+                &second_receipt,
+                &second_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[], None),
+            ),
+            "carried forward by the sender's chain of spends",
+        );
+    }
+
+    /// A chain that does not reach the release's start, or under another
+    /// anchor, or a record of another sender, is refused.
+    #[test]
+    fn a_spend_whose_chain_does_not_carry_the_record_to_it_is_refused() {
+        let mut payer = Payer::loaded(0x42, 40);
+        let other = Payer::loaded(0x43, 40);
+        let recorded = record(&payer);
+        let (first, _, _) = payer.spend(OTHER, 10);
+        let (second, _, _) = payer.spend(OTHER, 3);
+        let (_, receipt, leaves) = payer.spend(RECEIVER, 5);
+        refused(
+            spend_starts_at_the_record(
+                &receipt,
+                &leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, std::slice::from_ref(&first), None),
+            ),
+            "carried forward by the sender's chain of spends",
+        );
+        let both = [first.clone(), second.clone()];
+        let mut foreign = origin(&recorded, &payer, &both, None);
+        foreign.anchor = other.pin.clone();
+        refused(
+            spend_starts_at_the_record(&receipt, &leaves, &payer.genesis, &foreign),
+            "not the sender's under this spend's anchor bundle",
+        );
+        refused(
+            spend_starts_at_the_record(
+                &receipt,
+                &leaves,
+                &payer.genesis,
+                &origin(&record(&other), &payer, &[first, second], None),
+            ),
+            "not the sender's under this spend's anchor bundle",
+        );
+    }
+
+    /// Forward only: once a receiver accepted a spend from a payer, the next
+    /// spend must pass through the point that spend left the account at. A
+    /// spend replayed from before it, or a spend whose chain bypasses it, is
+    /// refused.
+    /// MUTATION CONTROL: dropping the forward-only check takes the replayed
+    /// spend and turns this red.
+    #[test]
+    fn a_spend_before_the_one_last_accepted_is_refused() {
+        let mut payer = Payer::loaded(0x44, 40);
+        let recorded = record(&payer);
+        let (first, first_receipt, first_leaves) = payer.spend(RECEIVER, 10);
+        let (_, second_receipt, second_leaves) = payer.spend(RECEIVER, 5);
+        let after_first = Some((first_leaves.next_frontier, first_leaves.counter + 1));
+        spend_starts_at_the_record(
+            &second_receipt,
+            &second_leaves,
+            &payer.genesis,
+            &origin(&recorded, &payer, std::slice::from_ref(&first), after_first),
+        )
+        .expect("the next spend passes through the one accepted");
+        let after_second = Some((second_leaves.next_frontier, second_leaves.counter + 1));
+        refused(
+            spend_starts_at_the_record(
+                &first_receipt,
+                &first_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[], after_second),
+            ),
+            "does not extend the spend this device last accepted",
+        );
+        refused(
+            spend_starts_at_the_record(
+                &second_receipt,
+                &second_leaves,
+                &payer.genesis,
+                &origin(&recorded, &payer, &[first], Some(([0x5C; 32], 1))),
+            ),
+            "does not extend the spend this device last accepted",
         );
     }
 }

@@ -151,27 +151,11 @@ pub struct ReceiptWrite {
 
 impl ReceiptWrite {
     fn to_proto(&self) -> crate::types::proto::StepWrite {
-        use crate::types::proto::{
-            step_write::Leaf, SmtPath, StepWriteOfflineAccount, StepWriteRelationship,
-        };
+        use crate::types::proto::{step_write::Leaf, StepWriteRelationship};
         crate::types::proto::StepWrite {
             leaf: Some(match &self.leaf {
                 ReceiptLeaf::Relationship => Leaf::Relationship(StepWriteRelationship {}),
-                ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(StepWriteOfflineAccount {
-                    pre_account_root: w.pre_account_root.to_vec(),
-                    pre_allocation: w.pre_allocation,
-                    pre_counter: w.pre_counter,
-                    pre_frontier: w.pre_frontier.to_vec(),
-                    next_frontier: w.next_frontier.to_vec(),
-                    account_paths: w
-                        .account_paths
-                        .iter()
-                        .map(|p| SmtPath {
-                            heights: p.explicit_heights.to_vec(),
-                            siblings: p.siblings.clone(),
-                        })
-                        .collect(),
-                }),
+                ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(w.to_proto()),
             }),
             path_heights: self.path.explicit_heights.to_vec(),
             path_siblings: self.path.siblings.clone(),
@@ -185,38 +169,9 @@ impl ReceiptWrite {
         let leaf = match w.leaf {
             None => return Err(DsmError::invalid_operation("a receipt write names no leaf")),
             Some(Leaf::Relationship(_)) => ReceiptLeaf::Relationship,
-            Some(Leaf::OfflineAccount(a)) => {
-                let fixed = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
-                    bytes.try_into().map_err(|e| {
-                        DsmError::invalid_operation(format!(
-                            "a receipt's offline account {what}: {e}"
-                        ))
-                    })
-                };
-                let account_paths = a
-                    .account_paths
-                    .into_iter()
-                    .map(|p| {
-                        decode::<DeviceSmtHashes>(&p.heights, &p.siblings).map_err(|e| {
-                            DsmError::invalid_operation(format!(
-                                "a receipt's offline account path: {e}"
-                            ))
-                        })?;
-                        Ok(EncodedPath {
-                            explicit_heights: fixed(&p.heights, "path height set")?,
-                            siblings: p.siblings,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, DsmError>>()?;
-                ReceiptLeaf::OfflineAccount(Box::new(crate::types::offline_account::SpendWitness {
-                    pre_account_root: fixed(&a.pre_account_root, "pre-root")?,
-                    pre_allocation: a.pre_allocation,
-                    pre_counter: a.pre_counter,
-                    pre_frontier: fixed(&a.pre_frontier, "pre-frontier")?,
-                    next_frontier: fixed(&a.next_frontier, "next frontier")?,
-                    account_paths,
-                }))
-            }
+            Some(Leaf::OfflineAccount(a)) => ReceiptLeaf::OfflineAccount(Box::new(
+                crate::types::offline_account::SpendWitness::from_proto(a)?,
+            )),
         };
         // Only the one canonical encoding of a device-tree path is a path.
         decode::<DeviceSmtHashes>(&w.path_heights, &w.path_siblings)

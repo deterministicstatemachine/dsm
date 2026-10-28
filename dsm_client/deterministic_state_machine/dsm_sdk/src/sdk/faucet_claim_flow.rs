@@ -327,7 +327,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
     // the claim contributes only its facts (the release's evidence address)
     // and its extra frozen artifact (the exact final release).
     let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
-    let pre_root = tree.root();
+    let pre_root = validated.economic_root();
     let op = Operation::FaucetClaim {
         reserve_id,
         generation,

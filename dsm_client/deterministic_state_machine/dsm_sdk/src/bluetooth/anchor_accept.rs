@@ -100,18 +100,14 @@ impl ChipSig for Ed25519ChipSig {
 }
 
 /// SPHINCS+ partition (`σ^host`) verifier — reuses the host `dsm::crypto::sphincs` scheme under the
-/// receiver-pinned `pk_host`.
+/// receiver-pinned `pk_host`. The receiver only verifies.
 struct SphincsPart;
-impl anchor_core::tropic::PartitionSig for SphincsPart {
-    fn part_keygen(_seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        // The receiver never generates a partition key; it only verifies.
-        (Vec::new(), Vec::new())
-    }
-    fn part_sign(_sk: &[u8], _digest: &[u8; 32]) -> Vec<u8> {
-        Vec::new()
-    }
-    fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-        dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig).unwrap_or(false)
+impl anchor_core::tropic::HostSig for SphincsPart {
+    fn verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(
+            dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
+            Ok(valid) if valid
+        )
     }
 }
 
@@ -207,15 +203,43 @@ pub(crate) enum PinAdmitDecision {
     Reject(&'static str),
 }
 
-/// Decide admit/no-change/reject for a disclosed pin. `disclosed.uncompromised` is ignored — the
-/// admitted flag is set true and thereafter only invalidated out of band.
+/// Decide admit/no-change/reject for a disclosed pin. A first pin is admitted
+/// only when its bundle recomputes for the sender — from the disclosed keys,
+/// enrolled counter and `birth_commitment`, the sender's pinned online key
+/// `sender_online_key`, its device id and the disclosed policy: the bundle is
+/// then the one the sender's online load named. `disclosed.uncompromised` is
+/// ignored: admission marks the pin uncompromised, and only an event out of
+/// band invalidates it.
 pub(crate) fn pin_admit_decision(
     device_id: [u8; 32],
+    sender_online_key: &[u8],
     disclosed_policy: [u8; 32],
+    birth_commitment: &[u8; 32],
     disclosed: &dsm::crypto::anchor_enrollment::FusedAnchorPin,
     existing: Option<&dsm::crypto::anchor_enrollment::AnchorEnrollment>,
 ) -> PinAdmitDecision {
     let Some(cur) = existing else {
+        let recomputes = dsm::crypto::anchor_enrollment::require_bundle_of(
+            dsm::crypto::anchor_enrollment::PinKeys {
+                bundle: &disclosed.bundle,
+                anchor_id: &disclosed.anchor_id,
+                pk_chip: &disclosed.pk_chip,
+                partition_pk: &disclosed.partition_pk,
+                enrolled_counter: disclosed.enrolled_counter,
+            },
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: sender_online_key,
+                device_id: &device_id,
+                policy: &disclosed_policy,
+                birth_commitment,
+            },
+        );
+        if let Err(e) = recomputes {
+            log::warn!("[anchor-accept] a disclosed anchor whose bundle does not recompute: {e}");
+            return PinAdmitDecision::Reject(
+                "the disclosed bundle does not recompute for the sender",
+            );
+        }
         return PinAdmitDecision::Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment {
             device_id,
             policy_hash: disclosed_policy,
@@ -297,25 +321,24 @@ pub struct AdoptedAnchorState {
 /// a verified receipt, and the device roots and anchor leaves are the receipt's, never values the
 /// caller supplies.
 ///
-/// `accepted_frontier`: the frontier adopted from the holder's last accepted release. `None` =
-/// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
-/// authenticity rests on the offline-state proofs + the three signatures, the same trust
-/// root as the first-transfer pin admit.
+/// The frontier the release must start from is the one Core established for the spend
+/// ([`dsm::bilateral::offline::VerifiedConfirm::bearer_start`]): this device's record of the
+/// holder's account carried forward by the holder's verified chain of spends, forward of the last
+/// spend it accepted from the holder.
 pub fn accept_offline_release(
     verified: &dsm::bilateral::offline::VerifiedConfirm,
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_frontier: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
     let rel = decode_release(offline_release)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
-    let spend = verified
-        .bearer()
-        .filter(|leaves| leaves.bundle == pinned.bundle)
-        .ok_or(OfflineRecover::NotTheStepsSpend)?;
+    let spend = verified.bearer();
+    if spend.bundle != pinned.bundle {
+        return Err(OfflineRecover::NotTheStepsSpend);
+    }
 
     // Tie the cert's device roots to the roots the verified receipt proves (its write set folds the
     // one to the other). The predicate checks Π against the CERT roots; if the cert roots were not
@@ -329,11 +352,6 @@ pub fn accept_offline_release(
     }
 
     let t = rel.transition.as_transition();
-    // The receiver's adopted frontier for this holder, or (genesis) the release's own prev_root TOFU.
-    let effective_frontier: [u8; 32] = match accepted_frontier {
-        Some(r) => *r,
-        None => *t.prev_root,
-    };
     let adopted = AdoptedAnchorState {
         next_root: *t.next_root,
         next_anchor_counter: t.next_anchor_counter,
@@ -344,7 +362,7 @@ pub fn accept_offline_release(
         pinned_anchor_id: &pinned.anchor_id,
         pinned_pk_chip: &pinned.pk_chip,
         pinned_pk_host: &pinned.partition_pk,
-        accepted_frontier: &effective_frontier,
+        accepted_frontier: &verified.bearer_start().frontier,
         expected_receiver_challenge,
         expected_recipient: receiver_device_id,
         expected_policy_hash,
@@ -497,9 +515,24 @@ mod tests {
 
     // --- receiver-admit fold: pin_admit_decision matrix ---
 
+    /// The sender's pinned online key, and the birth its anchor's bundle commits.
+    const ONLINE_KEY: [u8; 64] = [0x0E; 64];
+    const BIRTH: [u8; 32] = [0xB7; 32];
+
+    /// A pin whose bundle is the one an anchor born for device `0x11` under
+    /// policy `0x9A` has.
     fn fused_pin() -> dsm::crypto::anchor_enrollment::FusedAnchorPin {
         dsm::crypto::anchor_enrollment::FusedAnchorPin {
-            bundle: [0xB1; 32],
+            bundle: anchor_core::enrollment::anchor_bundle(
+                &ONLINE_KEY,
+                &[0xA1; 32],
+                &[0x0C; 32],
+                &[0x07; 64],
+                1_000_000,
+                &[0x11; 32],
+                &[0x9A; 32],
+                &BIRTH,
+            ),
             anchor_id: [0xA1; 32],
             enrolled_counter: 1_000_000,
             partition_pk: vec![0x07; 64],
@@ -519,7 +552,7 @@ mod tests {
     #[test]
     fn pin_admit_decision_first_transfer_admits_under_disclosed_policy() {
         let d = fused_pin();
-        match pin_admit_decision([0x11; 32], [0x9A; 32], &d, None) {
+        match pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, None) {
             PinAdmitDecision::Admit(e) => {
                 assert_eq!(e.device_id, [0x11; 32]);
                 assert_eq!(e.policy_hash, [0x9A; 32]);
@@ -531,11 +564,38 @@ mod tests {
         }
     }
 
+    /// A first disclosure is admitted only when its bundle recomputes for the
+    /// sender: under another online key, another device, another policy or
+    /// another birth commitment, the same bundle is not this sender's anchor.
+    /// MUTATION CONTROL: admitting without the recomputation turns this red.
+    #[test]
+    fn a_first_disclosure_whose_bundle_does_not_recompute_is_not_admitted() {
+        let d = fused_pin();
+        for (device, key, policy, birth) in [
+            ([0x12; 32], ONLINE_KEY.to_vec(), [0x9A; 32], BIRTH),
+            ([0x11; 32], vec![0x0F; 64], [0x9A; 32], BIRTH),
+            ([0x11; 32], ONLINE_KEY.to_vec(), [0x9B; 32], BIRTH),
+            ([0x11; 32], ONLINE_KEY.to_vec(), [0x9A; 32], [0xB8; 32]),
+        ] {
+            assert_eq!(
+                pin_admit_decision(device, &key, policy, &birth, &d, None),
+                PinAdmitDecision::Reject("the disclosed bundle does not recompute for the sender"),
+            );
+        }
+    }
+
     #[test]
     fn pin_admit_decision_no_change_when_disclosure_matches() {
         let cur = pinned();
         assert_eq!(
-            pin_admit_decision([0x11; 32], [0x9A; 32], &fused_pin(), Some(&cur)),
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9A; 32],
+                &BIRTH,
+                &fused_pin(),
+                Some(&cur)
+            ),
             PinAdmitDecision::NoChange
         );
     }
@@ -559,7 +619,7 @@ mod tests {
         for d in [&anchor, &bundle, &h0, &host, &chip] {
             assert!(
                 matches!(
-                    pin_admit_decision([0x11; 32], [0x9A; 32], d, Some(&cur)),
+                    pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, d, Some(&cur)),
                     PinAdmitDecision::Reject(_)
                 ),
                 "conflicting disclosure must be rejected: {d:?}"
@@ -567,7 +627,14 @@ mod tests {
         }
         // Differing policy rejects too.
         assert!(matches!(
-            pin_admit_decision([0x11; 32], [0x9B; 32], &base, Some(&cur)),
+            pin_admit_decision(
+                [0x11; 32],
+                &ONLINE_KEY,
+                [0x9B; 32],
+                &BIRTH,
+                &base,
+                Some(&cur)
+            ),
             PinAdmitDecision::Reject(_)
         ));
     }

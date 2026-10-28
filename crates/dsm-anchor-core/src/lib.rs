@@ -34,6 +34,7 @@ extern crate alloc;
 pub mod accept;
 pub mod appliance;
 pub mod domain;
+pub mod durable;
 pub mod enrollment;
 pub mod hash;
 pub mod proto;

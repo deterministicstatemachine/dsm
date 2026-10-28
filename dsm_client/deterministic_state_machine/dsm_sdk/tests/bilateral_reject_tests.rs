@@ -17,6 +17,28 @@ fn fixed_device(id_byte: u8) -> [u8; 32] {
     [id_byte; 32]
 }
 
+/// An offline-bearer transfer of 7 base units of ERA to `to`, with the terms it
+/// commits to: the one operation the offline door carries (MR-DSM-0219), built
+/// as the wallet builds it.
+fn bearer_transfer(to: [u8; 32]) -> (Operation, dsm::types::operations::TransferTerms) {
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"ERA".to_vec(),
+        Vec::new(),
+        dsm::types::operations::TransactionMode::Bilateral,
+        String::new(),
+    );
+    let operation = Operation::Transfer {
+        to_device_id: to.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(7),
+        policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+        terms_commitment: terms.commitment(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        signature: Vec::new(),
+        authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+    };
+    (operation, terms)
+}
+
 #[tokio::test]
 async fn bilateral_reject_session_emits_event_and_updates_phase() {
     // A device made as wallet creation makes one: its own identity, AK and
@@ -89,7 +111,8 @@ async fn bilateral_reject_session_emits_event_and_updates_phase() {
     // Create a prepared session via normal prepare path (acts as sender side)
     let (_envelope_bytes, commitment_hash) = {
         let h = &handler; // borrow
-        h.prepare_bilateral_transaction(remote_device, Operation::Noop)
+        let (operation, terms) = bearer_transfer(remote_device);
+        h.prepare_bilateral_step(remote_device, operation, Some(terms))
             .await
             .unwrap()
     };

@@ -40,6 +40,57 @@ pub struct FusedAnchorPin {
     pub uncompromised: bool,
 }
 
+/// What an anchor's bundle `B` binds besides its pin keys: the owner it was
+/// provisioned for and its birth.
+#[derive(Clone, Copy, Debug)]
+pub struct BundleOwner<'a> {
+    /// The owner's online key `pk_on` (`B` binds `H(pk_on)`).
+    pub online_key: &'a [u8],
+    /// The owner's device id.
+    pub device_id: &'a [u8; 32],
+    /// The policy the anchor is enrolled under.
+    pub policy: &'a [u8; 32],
+    /// The public birth commitment `S_birth`.
+    pub birth_commitment: &'a [u8; 32],
+}
+
+/// The keys and identity an anchor's pin names beside its bundle.
+#[derive(Clone, Copy, Debug)]
+pub struct PinKeys<'a> {
+    pub bundle: &'a [u8; 32],
+    pub anchor_id: &'a [u8; 32],
+    pub pk_chip: &'a [u8],
+    pub partition_pk: &'a [u8],
+    pub enrolled_counter: u64,
+}
+
+/// `pin`'s bundle is the anchor bundle of `owner`: `B` recomputes
+/// (`anchor_core::enrollment::anchor_bundle`) from the pin's anchor id, chip
+/// and partition keys and enrolled counter, and the owner's online key, device
+/// id, policy and birth commitment. An anchor whose bundle binds another device,
+/// another key or other pin material is not this owner's.
+pub fn require_bundle_of(pin: PinKeys<'_>, owner: BundleOwner<'_>) -> Result<(), DsmError> {
+    let enrolled = u32::try_from(pin.enrolled_counter)
+        .map_err(|e| DsmError::invalid_operation(format!("an anchor's enrolled counter: {e}")))?;
+    let recomputed = anchor_core::enrollment::anchor_bundle(
+        owner.online_key,
+        pin.anchor_id,
+        pin.pk_chip,
+        pin.partition_pk,
+        enrolled,
+        owner.device_id,
+        owner.policy,
+        owner.birth_commitment,
+    );
+    if recomputed != *pin.bundle {
+        return Err(DsmError::invalid_operation(
+            "the anchor's bundle does not recompute for its owner: it binds another device, \
+             online key, policy or pin material",
+        ));
+    }
+    Ok(())
+}
+
 /// The pinned admission record for one counterparty's fused anchor.
 ///
 /// Filed under the counterparty's 32-byte DSM `device_id`. Populated ONLY through the normal

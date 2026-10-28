@@ -18,9 +18,11 @@
 //! and `F` and never reads it out of a register, checks the parent claim
 //! against the one this device itself registered at `p`, and selects the
 //! root — `P.R_realize` for Realized, the predecessor's for Void. The leaves
-//! that form the installed root are recomputed by Core too
-//! (`trader_post_states`) and bound to the values `T°` states; the cache is
-//! written only once it recomputes exactly that root.
+//! that form the installed root are Core's too
+//! (`ResolvedAdvance::installed_leaves`): the states `T°` writes, bound to the
+//! values it states, put into this device's cache, and refused unless the
+//! whole cache recomputes exactly that root. This module writes them and
+//! computes no root of its own (SoFi §2.1).
 use std::collections::BTreeMap;
 
 use dsm::economic::admission::{
@@ -28,8 +30,6 @@ use dsm::economic::admission::{
 };
 use dsm::economic::lineage::{AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::economic::register::read_root_cell;
-use dsm::economic::state::EconomicLeafState;
-use dsm::economic::tree::EconomicSmt;
 use dsm::route_chain::{CellReading, ChainState, Missing as CellMissing};
 use dsm::sofi::conformance::ConformanceMissing;
 use dsm::sofi::derive;
@@ -40,7 +40,7 @@ use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, SofiReads as _};
 use dsm::sofi::storage::Resolved;
-use dsm::sofi::validation::{trader_balance_changes, trader_post_states};
+use dsm::sofi::validation::trader_balance_changes;
 use dsm::sofi::wire::{
     next_position, ParentClaimRef, SettlementBody, SettlementPreimage, TraderFulfillmentBody,
     TraderPrecommitBody, ValidationRef,
@@ -384,7 +384,8 @@ fn pending_fulfillment(core: &CoreSDK) -> Result<(PendingEconomicAdmission, D32)
         PendingAdmissionKind::SofiFulfillment { fulfillment_id } => Ok((pending, fulfillment_id)),
         PendingAdmissionKind::DsmBacked
         | PendingAdmissionKind::OfflineLoad { .. }
-        | PendingAdmissionKind::OfflineUnload { .. } => Err(refuse(format!(
+        | PendingAdmissionKind::OfflineUnload { .. }
+        | PendingAdmissionKind::OfflineSettle { .. } => Err(refuse(format!(
             "the pending admission at position {} is not a SoFi fulfillment",
             pending.economic_position
         ))),
@@ -674,31 +675,6 @@ pub(crate) fn own_parent_claim(
     }
 }
 
-/// The full post-transition leaf cache: the current cache with the states
-/// `T°` wrote replaced (or removed), as Core recomputed and bound them.
-fn post_leaf_cache(
-    current: Vec<(D32, D32, Vec<u8>)>,
-    post: &[(D32, Option<EconomicLeafState>)],
-) -> Result<Vec<(D32, D32, Vec<u8>)>, DsmError> {
-    let mut cache: BTreeMap<D32, (D32, Vec<u8>)> = current
-        .into_iter()
-        .map(|(k, v, ccb)| (k, (v, ccb)))
-        .collect();
-    for (key, state) in post {
-        match state {
-            Some(state) => {
-                let value = state.leaf_value().map_err(|e| storage("leaf value", e))?;
-                let ccb = state.encode().map_err(|e| storage("leaf state", e))?;
-                cache.insert(*key, (value, ccb));
-            }
-            None => {
-                cache.remove(key);
-            }
-        }
-    }
-    Ok(cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect())
-}
-
 /// A vault or position named in a log line by its first five bytes.
 fn short_id(id: &D32) -> String {
     crate::util::text_id::encode_base32_crockford(&id[..5])
@@ -897,17 +873,17 @@ pub async fn resolve_pending_position(
         Err(e) => return Err(refuse(e.to_string())),
     };
 
-    // The leaves behind the installed root. Void moved nothing; Realized
-    // wrote exactly what T° states, recomputed by Core from the evidence the
-    // verdict was reached on — the evidence inside the established facts,
-    // the same bytes the advance derived the balances from. Either way the
-    // cache must recompute the root before it is written.
+    // The leaves behind the installed root, as Core binds them to it. Void
+    // moved nothing; Realized wrote exactly what T° states, recomputed by
+    // Core from the evidence the verdict was reached on — the same bytes the
+    // advance derived the balances from.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
+    let leaves = advanced
+        .installed_leaves(current)
+        .map_err(|e| refuse(format!("nothing written: {e}")))?;
     let mut realized = None;
-    let leaves = match (advanced.resolution, &established) {
+    match (advanced.resolution, &established) {
         (Resolution::Realized, Established::Facts(facts)) => {
-            let post = trader_post_states(&precommit, facts.preimage(), facts.evidence())
-                .map_err(|e| refuse(format!("post states: {e:?}")))?;
             // What realized, and every token it moved, from the same
             // evidence: what the history row names once the position is
             // installed.
@@ -927,9 +903,8 @@ pub async fn resolve_pending_position(
                 ));
             }
             realized = Some((what, moved));
-            post_leaf_cache(current, &post)?
         }
-        (Resolution::Void, _) => current,
+        (Resolution::Void, _) => {}
         // The advance answers Realized over established facts only, and
         // never Invalid; stated so that a change to it is refused here.
         (Resolution::Realized, Established::RefutedInHand(..)) | (Resolution::Invalid, _) => {
@@ -937,15 +912,6 @@ pub async fn resolve_pending_position(
                 "the advance installed a root these facts cannot have produced",
             ))
         }
-    };
-    let mut tree = EconomicSmt::new();
-    for (key, value, ..) in &leaves {
-        tree.insert(*key, *value);
-    }
-    if tree.root() != advanced.root.economic_root() {
-        return Err(refuse(
-            "the post leaves do not recompute the installed root — nothing written",
-        ));
     }
     core.admit_resolved_sofi_position(
         &advanced,

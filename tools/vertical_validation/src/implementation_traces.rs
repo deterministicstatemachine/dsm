@@ -32,9 +32,7 @@ use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 use dsm::vault::{DLVManager, FulfillmentMechanism, VaultState};
 
-use crate::live_device::{
-    commit, connect, faucet_claim, marked, Decision, LiveDevice, Stage, Step,
-};
+use crate::live_device::{connect, faucet_claim, LiveDevice};
 
 const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 type TraceFn = fn(&[u8; 32], &[u8], &[u8]) -> ImplementationTraceResult;
@@ -112,7 +110,7 @@ pub fn collect_named_implementation_trace_results(
     }
 }
 
-fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
+fn implementation_trace_catalog() -> [(&'static str, TraceFn); 13] {
     [
         (
             "state_machine_transfer_chain",
@@ -133,11 +131,6 @@ fn implementation_trace_catalog() -> [(&'static str, TraceFn); 15] {
         (
             "bilateral_precomputed_finalize_hash",
             trace_bilateral_precomputed_finalize_hash,
-        ),
-        ("receiver_tripwire", trace_receiver_tripwire),
-        (
-            "tripwire_first_contact_binding",
-            trace_tripwire_first_contact_binding,
         ),
         ("djte_emission_happy_path", trace_djte_emission_happy_path),
         (
@@ -327,6 +320,10 @@ fn trace_state_machine_signature_rejection(
     }
 }
 
+/// Two transfers advanced from one tip are two children of it: they share the
+/// parent tip and differ in their child tips. That the receiver takes one of
+/// them is decided with Core's `decide_confirm`, and runs on real bearer pairs
+/// in the SDK's offline step tests (§6.103).
 fn trace_state_machine_fork_divergence(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
@@ -334,7 +331,7 @@ fn trace_state_machine_fork_divergence(
 ) -> ImplementationTraceResult {
     let start = Instant::now();
     let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("fork");
+    let (alice, bob) = trace_pair("fork");
     let parent_tip = alice.tip_with(&bob).expect("established");
 
     let op_a = alice.transfer(&bob, 1, &[1; 8]).expect("transfer a");
@@ -347,33 +344,6 @@ fn trace_state_machine_fork_divergence(
             }
             if pair_a.1 == pair_b.1 {
                 failures.push("different operations produced the same child tip".into());
-            }
-            // The receiver takes one of two children of its tip.
-            let step_a = alice.propose(&bob, op_a.clone());
-            let step_b = alice.propose(&bob, op_b.clone());
-            match (step_a, step_b) {
-                (Ok(step_a), Ok(step_b)) => {
-                    match bob.decide(&alice, &step_a) {
-                        Decision::Accepted(verified) => {
-                            if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
-                                failures.push(format!("the first child did not commit: {e}"));
-                            }
-                        }
-                        other => failures.push(format!("the first child was refused: {other}")),
-                    }
-                    match bob.decide(&alice, &step_b) {
-                        Decision::Accepted(_) => {
-                            failures.push("the second child of one tip was accepted".into())
-                        }
-                        Decision::StaleTip => {}
-                        other => failures.push(format!(
-                            "the second child was refused for another reason: {other}"
-                        )),
-                    }
-                }
-                (Err(e), _) | (_, Err(e)) => {
-                    failures.push(format!("a step could not be proposed: {e}"))
-                }
             }
         }
         (Err(e), _) | (_, Err(e)) => failures.push(format!("advance refused: {e}")),
@@ -911,172 +881,6 @@ fn trace_token_manager_overspend_rejection(
     }
 }
 
-/// The receiver's decision on `step`, reported as a trace failure message
-/// when it does not match `want`: `None` for accepted, `Some(needle)` for a
-/// refusal whose reason holds `needle` ("stale tip" for a stale tip).
-fn expect_decision(
-    failures: &mut Vec<String>,
-    label: &str,
-    receiver: &LiveDevice,
-    sender: &LiveDevice,
-    step: &Step,
-    want: Option<&str>,
-) -> Option<dsm::bilateral::offline::VerifiedConfirm> {
-    match (receiver.decide(sender, step), want) {
-        (Decision::Accepted(verified), None) => return Some(verified),
-        (Decision::Accepted(_), Some(_)) => failures.push(format!("{label}: ACCEPTED")),
-        (Decision::StaleTip, Some("stale tip")) => {}
-        (decided, Some(needle))
-            if decided
-                .refusal_at(Stage::Prepare)
-                .or(decided.refusal_at(Stage::Confirm))
-                .is_some_and(|e| e.to_string().contains(needle)) => {}
-        (other, want) => failures.push(format!("{label}: {other}, wanted {want:?}")),
-    }
-    None
-}
-
-fn trace_receiver_tripwire(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("receiver-tripwire");
-
-    let step_a = alice.propose(&bob, marked(0xA1)).expect("step a");
-    let step_b = alice.propose(&bob, marked(0xB1)).expect("step b");
-    let replayed = step_a.clone();
-    let successor = step_a.successor_tip;
-    if let Some(verified) = expect_decision(&mut failures, "the step", &bob, &alice, &step_a, None)
-    {
-        if let Err(e) = commit(&mut alice, &mut bob, step_a, &verified) {
-            failures.push(format!("the step did not commit: {e}"));
-        }
-    }
-    if alice.shared_tip_with(&bob) != Some(successor)
-        || bob.shared_tip_with(&alice) != Some(successor)
-    {
-        failures.push("the two devices do not hold the committed successor".into());
-    }
-    expect_decision(
-        &mut failures,
-        "its replay",
-        &bob,
-        &alice,
-        &replayed,
-        Some("stale tip"),
-    );
-    expect_decision(
-        &mut failures,
-        "a second child of the tip",
-        &bob,
-        &alice,
-        &step_b,
-        Some("stale tip"),
-    );
-
-    // The sender signs a receipt whose writes no longer fold to the
-    // pre-state root: one sibling changed.
-    let mut bent = alice.propose(&bob, marked(0xC1)).expect("step c");
-    bent.receipt.step_writes[0].path.siblings[0] ^= 0x01;
-    let bent = bent.resigned().expect("re-signed");
-    expect_decision(
-        &mut failures,
-        "a signed receipt over a bent path",
-        &bob,
-        &alice,
-        &bent,
-        Some("do not fold to the claimed pre-root"),
-    );
-    if bob.shared_tip_with(&alice) != Some(successor) {
-        failures.push("a refused step moved the receiver's tip".into());
-    }
-
-    ImplementationTraceResult {
-        trace_name: "receiver_tripwire".into(),
-        steps: 4,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
-fn trace_tripwire_first_contact_binding(
-    _seed_bytes: &[u8; 32],
-    _pk: &[u8],
-    _sk: &[u8],
-) -> ImplementationTraceResult {
-    let start = Instant::now();
-    let mut failures = Vec::new();
-    let (mut alice, mut bob) = trace_pair("first-contact");
-    let h0 = bob.shared_tip_with(&alice).expect("established");
-    if alice.shared_tip_with(&bob) != Some(h0) {
-        failures.push("the two devices do not hold one h_0".into());
-    }
-
-    // First contact: the relationship's first step extends h_0; an
-    // alternate first step extends it too.
-    let first = alice.propose(&bob, marked(0x51)).expect("first step");
-    let alternate = alice
-        .propose(&bob, marked(0x52))
-        .expect("alternate first step");
-    if first.expected_tip != h0 || alternate.expected_tip != h0 {
-        failures.push("a first step does not extend the relationship's h_0".into());
-    }
-    let first_successor = first.successor_tip;
-    if let Some(verified) = expect_decision(
-        &mut failures,
-        "the first-contact step",
-        &bob,
-        &alice,
-        &first,
-        None,
-    ) {
-        if let Err(e) = commit(&mut alice, &mut bob, first, &verified) {
-            failures.push(format!("the first-contact step did not commit: {e}"));
-        }
-    }
-
-    let extension = alice.propose(&bob, marked(0x53)).expect("extension step");
-    if extension.expected_tip != first_successor {
-        failures.push("the extension does not extend the first step's successor".into());
-    }
-    let extension_successor = extension.successor_tip;
-    if let Some(verified) = expect_decision(
-        &mut failures,
-        "the extension",
-        &bob,
-        &alice,
-        &extension,
-        None,
-    ) {
-        if let Err(e) = commit(&mut alice, &mut bob, extension, &verified) {
-            failures.push(format!("the extension did not commit: {e}"));
-        }
-    }
-    expect_decision(
-        &mut failures,
-        "an alternate first-contact branch",
-        &bob,
-        &alice,
-        &alternate,
-        Some("stale tip"),
-    );
-    if bob.shared_tip_with(&alice) != Some(extension_successor) {
-        failures.push("the receiver does not hold the extension's successor".into());
-    }
-
-    ImplementationTraceResult {
-        trace_name: "tripwire_first_contact_binding".into(),
-        steps: 3,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    }
-}
-
 fn trace_bilateral_precomputed_finalize_hash(
     _seed_bytes: &[u8; 32],
     _pk: &[u8],
@@ -1115,12 +919,18 @@ fn trace_bilateral_precomputed_finalize_hash(
             failures.push("Core's transition entropy derivation is not deterministic".into());
         }
         let op_bytes = pre.operation.to_bytes();
-        let sigma = compute_precommit(&h_n, &op_bytes, &entropy);
+        let sigma = match compute_precommit(&h_n, &op_bytes, &entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the step's C_pre was refused: {e}")],
+        };
         let predicted_tip = compute_successor_tip(&h_n, &op_bytes, &entropy, &sigma);
 
         let mut alternate_entropy = entropy;
         alternate_entropy[0] ^= 0xFF;
-        let alternate_sigma = compute_precommit(&h_n, &op_bytes, &alternate_entropy);
+        let alternate_sigma = match compute_precommit(&h_n, &op_bytes, &alternate_entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the alternate step's C_pre was refused: {e}")],
+        };
         if compute_successor_tip(&h_n, &op_bytes, &alternate_entropy, &alternate_sigma)
             == predicted_tip
         {
@@ -1692,7 +1502,8 @@ async fn trace_commit_prepared(
         .map_err(|e| format!("the sender's advance was refused: {e}"))?;
     let entropy = outcome.transition_entropy();
     let op_bytes = prepared.operation.to_bytes();
-    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy);
+    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy)
+        .map_err(|e| format!("the step's C_pre was refused: {e}"))?;
     let new_tip = compute_successor_tip(&prepared.parent_tip, &op_bytes, &entropy, &sigma);
     if !tips
         .set_contact_chain_tip(remote_device_id, prepared.parent_tip, new_tip)
@@ -1940,22 +1751,6 @@ mod tests {
     #[test]
     fn repeated_djte_emission_alignment_trace_passes() {
         let result = trace_djte_repeated_emission_alignment(&[0u8; 32], &[], &[]);
-        assert!(result.passed, "{}", result.failures.join("; "));
-    }
-
-    #[test]
-    fn receiver_tripwire_trace_passes() {
-        let seed = dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_TRACE_DEVICE,
-            b"receiver-tripwire-trace",
-        );
-        let result = trace_receiver_tripwire(&seed, &[], &[]);
-        assert!(result.passed, "{}", result.failures.join("; "));
-    }
-
-    #[test]
-    fn tripwire_first_contact_binding_trace_passes() {
-        let result = trace_tripwire_first_contact_binding(&[0u8; 32], &[], &[]);
         assert!(result.passed, "{}", result.failures.join("; "));
     }
 }

@@ -634,7 +634,7 @@ fn a_producer_signs_freezes_and_publishes_only_a_draft_core_found_valid() {
             "check_draft",
             "sign",
             "freeze_prepared",
-            "publish_prepared",
+            "publish_gated",
         ],
         "prepare_fulfillment",
     );
@@ -647,20 +647,33 @@ fn a_producer_signs_freezes_and_publishes_only_a_draft_core_found_valid() {
 
 /// SoFi §31 stages 4 to 6, MR-SOFI-0261: `P`, its preimage and its closure
 /// are published with the durability required — each read back Stored —
-/// before the transition that exercises them.
+/// before the transition that exercises them. And L1738, MR-SOFI-0217: `F`
+/// is released and published only after its conformance is decided.
 ///
-/// MUTATION CONTROL: dropping `require_stored` from `publish_prepared`, or
+/// MUTATION CONTROL: dropping `require_stored` from `publish_gated`,
+/// releasing or publishing `F` before `fulfillment_conformance`, or
 /// fulfilling before publishing in `finish_prepared`, turns this red.
 #[test]
 fn a_producer_exercises_only_what_it_has_read_back_stored() {
     let flow = sdk_source("sdk/sofi_flow.rs");
-    first_calls(
-        &calls_in_order(&production_fn(&flow, "publish_prepared")),
-        &["publish_all", "require_stored"],
-        "publish_prepared",
+    let gated = calls_in_order(&production_fn(&flow, "publish_gated"));
+    let at = first_calls(
+        &gated,
+        &[
+            "publish_all",
+            "require_stored",
+            "fulfillment_conformance",
+            "release_withheld",
+            "publish",
+        ],
+        "publish_gated",
+    );
+    assert!(
+        at.windows(2).all(|pair| pair[0] < pair[1]),
+        "publish_gated puts F before its conformance is decided: {gated:?}"
     );
     let finish = calls_in_order(&production_fn(&flow, "finish_prepared"));
-    let at = first_calls(&finish, &["publish_prepared", "fulfill"], "finish_prepared");
+    let at = first_calls(&finish, &["publish_gated", "fulfill"], "finish_prepared");
     assert!(
         at[0] < at[1],
         "finish_prepared fulfills before it publishes: {finish:?}"

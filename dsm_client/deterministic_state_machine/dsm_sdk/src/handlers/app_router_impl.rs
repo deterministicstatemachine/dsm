@@ -1186,7 +1186,7 @@ impl AppRouterImpl {
         let admission_op = signed_op.clone();
         let admission_op_digest =
             dsm::economic::admission::dsm_operation_digest(&admission_op.to_bytes());
-        let econ_pre_root = econ_tree.borrow().root();
+        let econ_pre_root = econ_validated.economic_root();
         let econ_prepared = dsm::economic::admission::PendingEconomicAdmission::prepared(
             dsm::economic::admission::PendingAdmissionKind::DsmBacked,
             econ_target_position,
@@ -1256,7 +1256,7 @@ impl AppRouterImpl {
                 &chain_tip_arr,
                 &op_bytes,
                 &transition_entropy,
-            );
+            )?;
             let new_chain_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
                 &chain_tip_arr,
                 &op_bytes,

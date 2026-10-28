@@ -10,7 +10,6 @@
 //!
 //! All ambiguous features fail-closed with `DsmError`.
 
-use blake3::Hasher;
 use parking_lot::Mutex;
 use prost::Message;
 use std::collections::HashMap;
@@ -54,11 +53,19 @@ pub struct CoreSDK {
     device_info: DeviceInfo,
     policy_system: TokenPolicySystem,
     /// Device-level fused-anchor appliance (Software-Authority / Hardware-Identity; the
-    /// silicon). Lazily birthed on the first offline-bearer transfer; persists across transfers so
-    /// its down-counter + fused-anchor lineage advance. The device's offline account is opened at
-    /// the chip's enrolled origin; each bearer transfer steps the account's software counter and
-    /// frontier in `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
-    anchor_appliance: Mutex<Option<Box<dyn crate::anchor::AnchorAppliance + Send>>>,
+    /// silicon), attached on first use and kept: its down-counter + fused-anchor lineage advance
+    /// across transfers. It is attached only once it is provisioned for this device
+    /// ([`CoreSDK::anchor_for_this_device`]). The device's offline account is opened at the chip's
+    /// enrolled origin; each bearer transfer steps the account's software counter and frontier in
+    /// `DeviceState::advance` and drives PREPARE→COMMIT→EMIT→FINALIZE to match.
+    anchor_appliance: Mutex<Option<AttachedAnchor>>,
+}
+
+/// An anchor appliance attached to this device, with the pin it was checked to be provisioned
+/// for this device under.
+struct AttachedAnchor {
+    appliance: Box<dyn crate::anchor::AnchorAppliance + Send>,
+    pin: crate::anchor::AnchorPin,
 }
 
 /// The pending economic admission each device's head carried when THIS PROCESS
@@ -74,14 +81,6 @@ static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /* ------------------------------- Helpers -------------------------------- */
-
-fn blake3_cat(parts: &[&[u8]]) -> [u8; 32] {
-    let mut h = Hasher::new();
-    for p in parts {
-        h.update(p);
-    }
-    *h.finalize().as_bytes()
-}
 
 fn u64_le(n: u64) -> [u8; 8] {
     n.to_le_bytes()
@@ -372,18 +371,19 @@ impl CoreSDK {
     }
 
     /// The terminal admission of a SoFi position `advance_resolved` resolved:
-    /// the position is admitted at the root the resolution selected, the vault
-    /// heads it selected are recorded, and the unfenced head takes the trader
-    /// balances that root holds — all in the one admission transaction, so the
-    /// head and the admitted root cannot disagree about what this device holds.
-    /// The vault heads are the advance's own (spec §44.4), so a head and the
-    /// position that chose it cannot disagree either.
+    /// the position is admitted at the root the resolution selected with the
+    /// leaves Core bound to that root, the vault heads it selected are
+    /// recorded, and the unfenced head takes the trader balances that root
+    /// holds — all in the one admission transaction, so the head and the
+    /// admitted root cannot disagree about what this device holds. The vault
+    /// heads are the advance's own (spec §44.4), so a head and the position
+    /// that chose it cannot disagree either.
     pub(crate) fn admit_resolved_sofi_position(
         &self,
         advanced: &dsm::sofi::lineage::ResolvedAdvance,
         fulfillment_id: [u8; 32],
         operation_digest: &[u8; 32],
-        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        leaves: &dsm::sofi::lineage::InstalledLeaves,
         storage_set_id: &[u8; 32],
     ) -> Result<(), DsmError> {
         let admitted = dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
@@ -396,7 +396,7 @@ impl CoreSDK {
             &admitted,
             advanced.root.economic_root(),
             operation_digest,
-            leaves,
+            leaves.rows(),
             storage_set_id,
             &[],
             advanced.vault_generations(),
@@ -740,6 +740,15 @@ impl CoreSDK {
                     )
                 },
             )?;
+            // The boundary's body carries every spend since the last boundary: they are
+            // exposed with it, and the next chain starts from the account it leaves.
+            crate::storage::client_db::offline_spends::expose_own_offline_spends_in_tx(&tx, bundle)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline boundary: expose the spends it carries: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
             tx.commit().map_err(|e| {
                 DsmError::storage(
                     format!("offline boundary: commit: {e}"),
@@ -751,6 +760,81 @@ impl CoreSDK {
         drop(sm);
         Self::reproject_committed_head(&new_head);
         Ok((outcome, pending))
+    }
+
+    /// Take a settlement of value received offline (SA-91) as Core takes it:
+    /// the head credited by the payment `receipt` records
+    /// (`RealizedHead::settle_offline_receipt`), with its prepared admission, and
+    /// that head, the pending row, the frozen evidence and the receipt's settled
+    /// mark commit in ONE transaction. A head already fenced by another admission
+    /// takes no settlement.
+    pub(crate) fn admitted_settlement(
+        &self,
+        receipt: &crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        prepare: impl FnOnce() -> Result<
+            (
+                dsm::economic::admission::PendingEconomicAdmission,
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+    ) -> Result<dsm::economic::admission::PendingEconomicAdmission, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline settlement: DeviceState not initialized")
+        })?;
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "offline settlement: the admission at position {} is still pending — finish it \
+                 first",
+                pending.economic_position
+            )));
+        }
+        let settled = head.settle_offline_receipt(&receipt.asset, receipt.amount)?;
+        let (prepared, coords, artifacts) = prepare()?;
+        let pending = prepared
+            .into_locally_accepted(coords)
+            .map_err(DsmError::invalid_operation)?;
+        let new_head = settled.with_pending_economic_admission(Some(pending.clone()));
+        let devid = new_head.devid();
+        let bound_root = new_head.root();
+        {
+            let storage = |what: &str, e: &dyn std::fmt::Display| {
+                DsmError::storage(
+                    format!("offline settlement: {what}: {e}"),
+                    None::<std::io::Error>,
+                )
+            };
+            let binding = crate::storage::client_db::get_connection()
+                .map_err(|e| storage("the store", &e))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|e| storage("the database lock is poisoned", &e))?;
+            let tx = conn.transaction().map_err(|e| storage("tx", &e))?;
+            Self::make_admission_durable_in_tx(
+                &tx,
+                &devid,
+                &pending,
+                &artifacts,
+                storage_set_id,
+                &bound_root,
+            )?;
+            crate::storage::client_db::update_bcr_device_head_with_conn(&tx, &new_head)
+                .map_err(|e| storage("persist device head", &e))?;
+            crate::storage::client_db::offline_receipts::settle_offline_receipt_in_tx(
+                &tx,
+                &receipt.release_message,
+                pending.economic_position,
+            )
+            .map_err(|e| storage("the receipt settled", &e))?;
+            tx.commit().map_err(|e| storage("commit", &e))?;
+        }
+        sm.set_device_head(new_head.clone());
+        drop(sm);
+        Self::reproject_committed_head(&new_head);
+        Ok(pending)
     }
 
     fn dual_write_advance_outcome_with_extra(
@@ -1555,10 +1639,7 @@ impl CoreSDK {
         // Recovery egress gate (spec R3) + capsule currency (spec §5.1). Classify
         // before `operation` is moved into the advance.
         let is_egress = operation.is_value_egress();
-        let frontier_changed = !matches!(
-            operation,
-            dsm::types::operations::Operation::Noop | dsm::types::operations::Operation::Genesis
-        );
+        let frontier_changed = !matches!(operation, dsm::types::operations::Operation::Genesis);
 
         // R2′ optimistic self-heal (BEFORE the lock, only when the capsule is
         // stale): re-seal so a current device is not needlessly blocked, while
@@ -1825,12 +1906,21 @@ impl CoreSDK {
     /// is keyed by the appliance's bundle, which only the appliance states, so
     /// a device that has not attached one cannot say what it holds offline:
     /// that is unknown, not zero.
+    /// The pin of the anchor attached in this process, checked to be
+    /// provisioned for this device; `None` while none is attached.
+    pub(crate) fn attached_anchor_pin(&self) -> Option<crate::anchor::AnchorPin> {
+        self.anchor_appliance
+            .lock()
+            .as_ref()
+            .map(|attached| attached.pin.clone())
+    }
+
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance
             .lock()
             .as_ref()
-            .map(|appliance| appliance.pin().bundle)?;
+            .map(|attached| attached.pin.bundle)?;
         let sm = self.state_machine.lock();
         sm.device_head()?.offline_allocation(&bundle, asset)
     }
@@ -1846,7 +1936,7 @@ impl CoreSDK {
     /// Used by the BLE sender in `send_bilateral_confirm` to build the
     /// stitched receipt (§4.2) with the real post-advance SMT roots + proofs
     /// *before* the sender advances canonical state — the canonical commit
-    /// happens later in `finalize_sender_step` via
+    /// happens when the anchor commits, in `commit_released_bearer_step`, via
     /// `execute_on_relationship_for_bilateral`, which re-runs prepare and
     /// then commits. Identical inputs → identical outcome, so the simulated
     /// receipt is byte-exact with the eventual canonical advance.
@@ -1968,6 +2058,78 @@ pub struct AnchorStatusSnapshot {
 }
 
 impl CoreSDK {
+    /// The anchor appliance attached to this device: attached through the installed factory on
+    /// first use and kept. An anchor is attached only once it is provisioned for this device: one
+    /// never provisioned is provisioned here, once, with this device's id, online key, the
+    /// offline-bearer policy and its genesis; one provisioned for any other device, key or policy
+    /// is refused. Its pin is kept with it.
+    fn anchor_for_this_device<'a>(
+        &self,
+        slot: &'a mut Option<AttachedAnchor>,
+    ) -> Result<&'a mut AttachedAnchor, DsmError> {
+        if let Some(attached) = slot {
+            return Ok(attached);
+        }
+        let mut appliance = match crate::bridge::anchor_appliance_factory() {
+            Some(factory) => factory()?,
+            None => hardware_appliance_or_fail()?,
+        };
+        let pin = match appliance.provisioned_pin()? {
+            Some(pin) => pin,
+            None => appliance.provision(&self.anchor_provisioning()?)?,
+        };
+        self.require_anchor_for_this_device(&pin)?;
+        Ok(slot.insert(AttachedAnchor { appliance, pin }))
+    }
+
+    /// What this device provisions an anchor with: its device id, its online key, the
+    /// offline-bearer policy and its genesis.
+    fn anchor_provisioning(&self) -> Result<anchor_core::enrollment::Provisioning, DsmError> {
+        let genesis = self
+            .state_machine
+            .lock()
+            .device_head()
+            .ok_or_else(|| {
+                DsmError::state_machine("anchor provisioning: DeviceState not initialized")
+            })?
+            .genesis();
+        Ok(anchor_core::enrollment::Provisioning {
+            device_id: self.device_info.device_id,
+            online_id_pk: self.device_info.public_key.clone(),
+            policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+            genesis_root: genesis,
+        })
+    }
+
+    /// The anchor `pin` describes is provisioned for this device: its bundle `B` recomputes from
+    /// its pin keys, its birth commitment, this device's online key and id and the offline-bearer
+    /// policy. An anchor provisioned for another device is never attached.
+    fn require_anchor_for_this_device(
+        &self,
+        pin: &crate::anchor::AnchorPin,
+    ) -> Result<(), DsmError> {
+        dsm::crypto::anchor_enrollment::require_bundle_of(
+            dsm::crypto::anchor_enrollment::PinKeys {
+                bundle: &pin.bundle,
+                anchor_id: &pin.anchor_id,
+                pk_chip: &pin.pk_chip,
+                partition_pk: &pin.partition_pk,
+                enrolled_counter: pin.enrolled_counter,
+            },
+            dsm::crypto::anchor_enrollment::BundleOwner {
+                online_key: &self.device_info.public_key,
+                device_id: &self.device_info.device_id,
+                policy: &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                birth_commitment: &pin.birth_commitment,
+            },
+        )
+        .map_err(|e| {
+            DsmError::invalid_operation(format!(
+                "the anchor is not provisioned for this device: {e}"
+            ))
+        })
+    }
+
     /// The offline account of `bundle` standing exactly where the anchor stands, at `frontier`
     /// and `counter`. The account is the authority and the chip its mirror, so nothing is ever
     /// rewritten to follow the chip: an account not yet open is opened here only at the chip's
@@ -2024,40 +2186,19 @@ impl CoreSDK {
     /// the diagnostics panel can render "no anchor connected" instead of failing.
     #[must_use]
     pub fn anchor_appliance_status(&self) -> AnchorStatusSnapshot {
-        let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            let attached: Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory(),
-                    None => hardware_appliance_or_fail(&seed, dev),
-                };
-            match attached {
-                Ok(a) => *guard = Some(a),
-                Err(e) => {
-                    log::info!("[anchor.status] no anchor appliance attached: {e}");
-                    return AnchorStatusSnapshot {
-                        status: "no anchor appliance connected".into(),
-                        ..Default::default()
-                    };
-                }
-            }
-        }
-
-        let app = match guard.as_mut() {
-            Some(a) => a,
-            None => {
+        let attached = match self.anchor_for_this_device(&mut guard) {
+            Ok(a) => a,
+            Err(e) => {
+                log::info!("[anchor.status] no anchor appliance attached: {e}");
                 return AnchorStatusSnapshot {
-                    status: "no anchor appliance connected".into(),
+                    status: format!("no anchor appliance connected: {e}"),
                     ..Default::default()
-                }
+                };
             }
         };
-
-        let pin = app.pin();
-        match app.status() {
+        let pin = attached.pin.clone();
+        match attached.appliance.status() {
             Ok(s) => AnchorStatusSnapshot {
                 connected: true,
                 anchor_id: pin.anchor_id,
@@ -2107,26 +2248,13 @@ impl CoreSDK {
         use anchor_core::root_advance::{anchor_root_advance, transition_digest};
 
         let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
-
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory. On device
-            // an absent factory FAILS CLOSED ("offline = chips"); the in-process mock is the test-only
-            // producer. The factory is called once and cached (stateful appliance). Construction only —
-            // the check against the offline account is made PER stage call below, not once at birth.
-            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory()?,
-                    None => hardware_appliance_or_fail(&seed, dev)?,
-                };
-            *guard = Some(a);
-        }
-
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
-        let pin = app.pin();
+        // Sender-side appliance: the physical RP2350/TROPIC01 via the installed factory, attached
+        // once and kept (stateful appliance), and only once it is provisioned for this device. The
+        // check against the offline account is made PER stage call below.
+        let attached = self.anchor_for_this_device(&mut guard)?;
+        let pin = attached.pin.clone();
+        let app = &mut attached.appliance;
 
         // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
         // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
@@ -2196,9 +2324,12 @@ impl CoreSDK {
         sender_device_root_after: [u8; 32],
     ) -> Result<OfflineBearerArtifacts, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
 
         app.prepare(
             &staged.transition.as_transition(),
@@ -2218,12 +2349,12 @@ impl CoreSDK {
     /// counter moved before its software side committed.
     pub fn reemit_offline_bearer(&self) -> Result<OfflineBearerArtifacts, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
+        let attached = guard.as_mut().ok_or_else(|| {
+            DsmError::state_machine("offline-bearer: anchor appliance not attached")
         })?;
         Ok(OfflineBearerArtifacts {
-            offline_release: app.emit()?,
-            pin: app.pin(),
+            offline_release: attached.appliance.emit()?,
+            pin: attached.pin.clone(),
         })
     }
 
@@ -2233,21 +2364,8 @@ impl CoreSDK {
     pub fn observe_offline_bearer_recovery(
         &self,
     ) -> Result<anchor_core::appliance::RecoverOutcome, DsmError> {
-        let dev = self.device_info.device_id;
-        let seed = |tag: &str| blake3_cat(&[tag.as_bytes(), &dev]);
         let mut guard = self.anchor_appliance.lock();
-        if guard.is_none() {
-            let a: Box<dyn crate::anchor::AnchorAppliance + Send> =
-                match crate::bridge::anchor_appliance_factory() {
-                    Some(factory) => factory()?,
-                    None => hardware_appliance_or_fail(&seed, dev)?,
-                };
-            *guard = Some(a);
-        }
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
-        app.recover()
+        self.anchor_for_this_device(&mut guard)?.appliance.recover()
     }
 
     /// Advance the appliance's frontier to the committed successor, once the step that spends it
@@ -2255,9 +2373,12 @@ impl CoreSDK {
     /// step names.
     pub fn finalize_offline_bearer(&self, appliance_next_root: [u8; 32]) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let app = guard.as_mut().ok_or_else(|| {
-            DsmError::state_machine("offline-bearer: anchor appliance not birthed")
-        })?;
+        let app = &mut guard
+            .as_mut()
+            .ok_or_else(|| {
+                DsmError::state_machine("offline-bearer: anchor appliance not attached")
+            })?
+            .appliance;
         let new_frontier = app.finalize()?;
         if new_frontier != appliance_next_root {
             return Err(DsmError::state_machine(
@@ -2274,8 +2395,8 @@ impl CoreSDK {
     /// it is not `Prepared`.
     pub fn cancel_offline_bearer_release(&self) -> Result<(), DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        if let Some(app) = guard.as_mut() {
-            match app.cancel() {
+        if let Some(attached) = guard.as_mut() {
+            match attached.appliance.cancel() {
                 Ok(()) => log::info!(
                     "[offline-bearer] cancelled an abandoned prepared bearer (appliance → Ready)"
                 ),
@@ -2304,7 +2425,7 @@ impl CoreSDK {
         prepared_owned_by_session: bool,
     ) -> Result<crate::anchor::RecoveryAction, DsmError> {
         let mut guard = self.anchor_appliance.lock();
-        let Some(app) = guard.as_mut() else {
+        let Some(app) = guard.as_mut().map(|attached| &mut attached.appliance) else {
             // No appliance attached yet -> nothing is prepared -> Ready.
             return Ok(crate::anchor::RecoveryAction::Ready);
         };
@@ -2333,10 +2454,8 @@ pub(crate) const OFFLINE_BEARER_NO_APPLIANCE_MSG: &str =
 
 /// The sender-side appliance when no hardware factory is installed: none.
 /// Offline-bearer requires the physical anchor device ("offline = chips").
-fn hardware_appliance_or_fail(
-    _seed: &impl Fn(&str) -> [u8; 32],
-    _dev: [u8; 32],
-) -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError> {
+fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance + Send>, DsmError>
+{
     Err(DsmError::invalid_operation(OFFLINE_BEARER_NO_APPLIANCE_MSG))
 }
 
@@ -2724,7 +2843,7 @@ impl CoreSDK {
             &parent_tip,
             canonical_operation_bytes,
             &sender_transition_entropy,
-        );
+        )?;
         let operation_digest = {
             let mut h = dsm::crypto::blake3::dsm_domain_hasher(
                 dsm::crypto::domain::TaggedHashDomain::from_static(

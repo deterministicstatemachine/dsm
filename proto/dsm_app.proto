@@ -1721,6 +1721,9 @@ message AnchorDisclosure {
   bytes  policy_hash           = 5 [(dsm_fixed_len)=32];   // policy the anchor is admitted under
   reserved 6, 7, 8; // removed v1 counter-era fields: verifier_slot(+present), chip_static_pubkey
   bytes  pk_chip               = 9 [(dsm_fixed_len)=32];   // resident chip Ed25519 key (σ^chip)
+  // The public birth commitment S_birth B commits: with the keys above, the sender's pinned
+  // online key and its device id, the receiver recomputes B from what is disclosed.
+  bytes  birth_commitment      = 10 [(dsm_fixed_len)=32];
 }
 
 message BilateralPrepareResponse {
@@ -1902,6 +1905,10 @@ message BilateralConfirmRequest {
   // release. B pins it TOFU on the first transfer (already-verified contact, bound to this
   // transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
   AnchorDisclosure anchor_disclosure = 15;
+  // The sender's offline spends since the boundary of its online history that left the account
+  // its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
+  // spend starts at that account.
+  OfflineSpendChain offline_spend_chain = 16;
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -2041,6 +2048,22 @@ message OfflineStateProof {
   SmtPath account_leaf = 2;
   SmtPath counter = 3;
   SmtPath frontier = 4;
+}
+
+// One offline-bearer spend of an offline account as its anchor released it: the release
+// (dsm.anchor.OfflineRelease — Δ, Π_i, Π_{i+1} and the certificate carrying σ^chip and σ^host),
+// the spend's account witness, and what it moved. Π_i and Π_{i+1} prove the release's device
+// roots commit the account before and after; the witness folds the one into the other.
+message OfflineSpendHop {
+  bytes release = 1 [(dsm_max_len)=262144];
+  StepWriteOfflineAccount spend = 2;
+  bytes asset = 3 [(dsm_fixed_len)=32];
+  uint64 amount = 4;
+}
+
+// An offline account's spends, in order.
+message OfflineSpendChain {
+  repeated OfflineSpendHop hops = 1;
 }
 
 // Bilateral event notifications for frontend

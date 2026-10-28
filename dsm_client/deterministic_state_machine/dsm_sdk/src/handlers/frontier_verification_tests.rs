@@ -494,14 +494,16 @@ async fn a_faucet_claim_reads_the_cell_it_won_once() {
         other => panic!("the claim's release is final: {other:?}"),
     };
     // Two readings over the route's seats — the walk that found the cell
-    // open, the read that found the release final — the writer's pre-read
-    // at the leader, and its read of each later seat's log, which bears out
-    // the record that seat returned before it is carried (SA-98).
+    // open, the read that found the release final — the writer's reads of
+    // the leader's log before its put and after it, the second deciding
+    // whether another value got there first (MR-STOR-0134, owner ruling 4),
+    // and its read of each later seat's log, which bears out the record that
+    // seat returned before it is carried (SA-98).
     let won = successor_read(&r0);
     let seats = asked.iter().filter(|r| **r == won).count();
     let members = d.nodes.nodes.len();
     assert!(
-        seats <= 2 * members + 1 + (members - 1),
+        seats <= 2 * members + 2 + (members - 1),
         "the cell the claim won was asked for {seats} times over {members} seats"
     );
     let past = successor_read(&r1);
