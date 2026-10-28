@@ -214,9 +214,9 @@ lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.FenceInv.reach	Quot.sound,propext
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.FenceInv.step	Quot.sound,propext
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.HashModel.dominates	(none)
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.HashModel.injective	(none)
+lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.Judged.and_comm	(none)
+lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.Judged.and_invalid_right	(none)
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.Refines.rfl	propext
-lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.Validation.and_comm	(none)
-lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.Validation.and_invalid_right	(none)
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.a_candidate_that_never_registers_stays_pending	propext
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.a_misbodied_pair_is_invalid	propext
 lean4/DSMSofiAtomicity.lean	DSMSofiAtomicity.a_missing_p_waits_and_only_an_unsigned_f_refuses	(none)
