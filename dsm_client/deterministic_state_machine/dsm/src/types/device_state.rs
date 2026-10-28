@@ -1308,6 +1308,16 @@ impl DeviceState {
         deltas: &[BalanceDelta],
         offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
+        // A zero-effect transition is not a transition (MR-DSM-0201; the
+        // explainer's spam-resistance aside: "send nothing a million times" is
+        // not representable). An operation that is nothing at all advances no
+        // relationship, online or offline.
+        if let Operation::Noop = operation {
+            return Err(DsmError::invalid_operation(
+                "advance: a Noop is no transition — an operation that does nothing advances no \
+                 relationship (MR-DSM-0201)",
+            ));
+        }
         // The leaf a step moves is the one its two device ids name (§18.1),
         // whatever key the caller passed beside them.
         if rel_key
@@ -3778,6 +3788,27 @@ pub(crate) mod tests {
     // ─────────────────────────────────────────────────────────────
     // A relationship is established before its first step (§26)
     // ─────────────────────────────────────────────────────────────
+
+    /// MR-DSM-0201, its `Noop` half: a zero-effect transition is not a
+    /// transition (the explainer's spam-resistance aside), so Core's advance —
+    /// the one chokepoint of a step, online and offline — refuses `Noop` on an
+    /// established relationship. The `Generic` half waits for the dBTC round.
+    /// MUTATION CONTROL: dropping the refusal lets the `Noop` advance and turns
+    /// this red.
+    #[test]
+    fn a_noop_is_no_transition() {
+        let dev = fresh_device(0x73);
+        let cp = devid(0x74);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let refused = established
+            .advance(rk, cp, Operation::Noop, &[], None)
+            .expect_err("a Noop advances nothing");
+        assert!(refused.to_string().contains("no transition"), "{refused}");
+        established
+            .advance(rk, cp, op(), &[], None)
+            .expect("the relationship still steps by an operation");
+    }
 
     /// Establishing a relationship is a root advance that writes `h_0` into
     /// the tree; a step on a relationship this device never established is

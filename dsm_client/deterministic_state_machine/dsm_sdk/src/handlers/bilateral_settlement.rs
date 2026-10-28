@@ -384,12 +384,20 @@ mod tests {
             .expect("establish the relationship");
         let before = core.device_head().expect("head").root();
 
+        // A step that moves no value: Core refuses `Noop` (MR-DSM-0201), and a
+        // zero-effect `Generic` still advances until the dBTC round decides it.
+        let step = Operation::Generic {
+            operation_type: b"zero-effect-step".to_vec(),
+            data: vec![0x01],
+            message: String::new(),
+            signature: Vec::new(),
+        };
         let settlement = super::StepSettlement::resolve(
             identity.device_id,
             counterparty,
             [0x34u8; 32],
             [0x71u8; 32],
-            Operation::Noop.to_bytes(),
+            step.to_bytes(),
             None,
             dsm::verification::receipt_verification::BilateralSide::B,
         )
@@ -401,7 +409,7 @@ mod tests {
                     &counterparty,
                 ),
                 counterparty,
-                Operation::Noop,
+                step,
                 &[],
                 None,
                 None,

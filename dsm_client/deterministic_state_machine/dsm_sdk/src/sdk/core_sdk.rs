@@ -1631,10 +1631,7 @@ impl CoreSDK {
         // Recovery egress gate (spec R3) + capsule currency (spec §5.1). Classify
         // before `operation` is moved into the advance.
         let is_egress = operation.is_value_egress();
-        let frontier_changed = !matches!(
-            operation,
-            dsm::types::operations::Operation::Noop | dsm::types::operations::Operation::Genesis
-        );
+        let frontier_changed = !matches!(operation, dsm::types::operations::Operation::Genesis);
 
         // R2′ optimistic self-heal (BEFORE the lock, only when the capsule is
         // stale): re-seal so a current device is not needlessly blocked, while
