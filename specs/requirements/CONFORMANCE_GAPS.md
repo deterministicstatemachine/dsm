@@ -4736,7 +4736,7 @@ The release is also on the nodes although only the sender reads it, from an addr
     - a mutation of each gate, before the put and at install.
   - (b) "Publishes F" means the install at Kful(q). F's content object is noneconomic, as P's is, and R8 is reconciled with stage 4. *Requires:* spec text only, plus the missing test for the install gate.
   - (c) Stop storing F as a content object. *Requires:* rewriting every reader that fetches F by FulfillmentId (`sofi_relay`, `sofi_reads`, `sofi_advance`) and amending R8.
-- *Proposed.* (a).
+- *Proposed.* (a). *Applied 2026-10-27 (§6.113).*
 
 **A8. The staged tree store §34 still names: MR-SOFI-0267 (Partial).**
 - *Requirement.* "Validate staged post-tree frontiers before installation and retain only nodes reachable from validated roots." (derived; found by one of the two extractions)
@@ -5278,16 +5278,41 @@ Each item below turns on one of four clauses:
 
 **Rows.** Notes for MR-DSM-0020, 0082, 0095, 0101, 0102, 0215, 0245, 0250 and MR-SOFI-0078, 0092, 0126, 0284, with MR-DSM-0215's and MR-DSM-0250's Test cells extended. Eight matrix rows added.
 
+### 6.113 A producer publishes F only once its conformance is Valid (§6.105 A7, MR-SOFI-0217; `fix/beta-requirements-completion`, 2026-10-27)
+
+**Why.** SoFi L1738: "A producer MUST obtain Valid before it publishes F." §6.105 A7 found F's content object Stored at stages 4 and 5, and the trader's stage-6 head advance made, before full conformance was decided. Full conformance ran only at the install. Option (a), the reorder, is applied: the owner directed the remaining beta code done without routing each item back.
+
+**Built.**
+- `sofi_flow::publish_gated`, used by `prepare_fulfillment` and by `finish_prepared` (the SA-71 resume path):
+  - publish every prepared object but F, each read back Stored;
+  - then decide `fulfillment_conformance` over evidence the verifier acquires, the same predicate the install decides;
+  - only on Valid, release F and publish it, then the head advance.
+  - An Invalid F is refused with nothing of it put and no transition asked of Core. Evidence not in hand leaves F withheld, the network's status.
+- **The sweep.** The republish sweep put every frozen artifact whatever its purpose, so a gate in the producer alone would have been bypassed at the next sync (found reading the sweep). The store now freezes every trader fulfillment `withheld` (`frozen_publication_artifact::freeze_artifact_with_conn`, by its namespace). The sweep lists only frozen and pending rows, a publication state cannot move a withheld row, and only `release_withheld` makes it owed to its set. Client schema 34 → 35 (the state's CHECK); beta does not migrate.
+- No wire change.
+
+**Tests.**
+- `dsm_sdk::handlers::node_e2e_tests::a_fulfillment_that_does_not_conform_is_never_published`, on the real nodes. B holds, frozen against its next parent, a prepared trade whose F is not P's successor, built with the producer's own builders and signed with B's key. Asked to trade, B completes the prepared fulfillment first (SA-71). F's conformance is Invalid; F is at no member, before and after the republish sweep runs, and stays withheld; B's head and balances do not move. The refusal comes from the gate, before Core's stage-6 advance is asked: Core's own advance also refuses that F ("F is not this P's fulfillment at p + 1"), a second layer, seen under the first mutant.
+- `dsm_sdk::storage::client_db::frozen_publication_artifact::tests::a_fulfillment_is_withheld_until_it_is_released`. The store's five other tests now set their own storage directory (`use_test_storage_dir`, which every storage test calls first); they passed only when an earlier test had set it, and failed run alone.
+- The SA-71 resume test, a full SoFi trade, the held-pair trade and the install-refusal test pass, each in its own run.
+
+**Mutation controls** (one `DSM_MUTANT` build, unmutated control green):
+- F published before its conformance is decided → the end-to-end test red: F is at the members.
+- A fulfillment frozen owed to its set instead of withheld → red: the sweep puts it.
+- The sweep listing withheld rows → red: the sweep puts it.
+
+**Also fixed here.** `dsm_sdk::handlers::frontier_verification_tests::a_faucet_claim_reads_the_cell_it_won_once` was red on the branch (16 reads against a bound of 15), found by the shared-lineage session. The bound predated owner ruling 4 (MR-STOR-0134): the route writer reads the leader's log before its put and again after it. The bound now counts both, the same correction made earlier to `a_trade_reads_its_vaults_open_head_once_per_walk`.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
 | DSM high-level (MR-DSM) | 332 | 198 | 61 | 20 | 0 | 35 | 18 |
-| SoFi (MR-SOFI) | 423 | 374 | 18 | 13 | 1 | 17 | 0 |
+| SoFi (MR-SOFI) | 423 | 375 | 17 | 13 | 1 | 17 | 0 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 75 | 15 | 49 | 0 | 18 | 1 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1059** | **658** | **94** | **82** | **1** | **70** | **154** |
+| **All** | **1059** | **659** | **93** | **82** | **1** | **70** | **154** |
 
 ## 8 Per-requirement results
 
@@ -5848,7 +5873,7 @@ Each item below turns on one of four clauses:
 | MR-SOFI-0214 | Met | `dsm::sofi::conformance` (item 6, L438-475) | `dsm::sofi::conformance::tests::item_6_setup_registered_holds_for_every_leg` | — |
 | MR-SOFI-0215 | Met | `dsm::sofi::conformance` (items 7/8, L477-549) | `dsm::sofi::conformance::tests::item_7_identities_and_bounds_hold` | — |
 | MR-SOFI-0216 | Met | `dsm::sofi::conformance::fulfillment_conformance`; `dsm::sofi::resolution::resolve_position` | `dsm::sofi::resolution::tests::registration_is_not_conformance`; `dsm::sofi::resolution::tests::realized_requires_conformance` | fulfillment_conformance takes no registration input, and the resolution ladder resolves a registered but non-conforming F as Invalid, never Realized. |
-| MR-SOFI-0217 | Partial | `dsm_sdk::sdk::sofi_register::install_fulfillment`; prepare_fulfillment | `dsm_sdk::handlers::node_e2e_tests::a_fulfillment_that_does_not_conform_is_not_installed` | Rechecked 2026-10-27 (§6.107). The K_ful/K_root write waits on Valid conformance and is reached from sofi.trade. The e2e test installs, from B's own stored P and P(E), a signed F whose position is not P's successor: refused as not conforming, nothing at either cell. Mutation: the install's refusal of an Invalid F removed → red (the pair is installed). F's object is put to the store (stages 4-5) before full conformance; only the structural subset runs first. [NEEDS-OWNER] that publication order is the owner's question A7 (§6.105), unchanged here. |
+| MR-SOFI-0217 | Met | `dsm_sdk::sdk::sofi_flow::prepare_fulfillment`; `dsm_sdk::sdk::sofi_flow::publish_gated`; `dsm_sdk::storage::client_db::frozen_publication_artifact::freeze_artifact_with_conn`; `dsm_sdk::storage::client_db::frozen_publication_artifact::release_withheld`; `dsm_sdk::sdk::sofi_register::install_fulfillment` | `dsm_sdk::handlers::node_e2e_tests::a_fulfillment_that_does_not_conform_is_never_published`; `dsm_sdk::storage::client_db::frozen_publication_artifact::tests::a_fulfillment_is_withheld_until_it_is_released`; `dsm_sdk::handlers::node_e2e_tests::a_fulfillment_that_does_not_conform_is_not_installed`; `dsm_sdk::handlers::node_e2e_tests::a_fulfillment_prepared_and_published_is_completed_never_signed_again` | Rechecked 2026-10-27 (§6.113, §6.105 A7 applied). A producer publishes P, P(E), its witnesses and pre-balances, decides F's full conformance over evidence it acquires, and only on Valid puts F's content object and asks Core for the head advance (`publish_gated`, on the prepare and the resume paths). Every trader fulfillment is frozen withheld (client schema 35): the republish sweep never puts it until the gate releases it. The install still decides conformance before the pair is written. Mutation: the gate removed, a fulfillment frozen owed to its set, or the sweep listing withheld rows, each turns the end-to-end test red (verification matrix). |
 | MR-SOFI-0218 | Met | `dsm::sofi::registration::fulfillment_registered`; `dsm_sdk::sdk::sofi_relay::relay_fulfillment`; `dsm_sdk::sdk::sofi_relay::relay_exercise`; resolve_position | `dsm::sofi::registration::tests::registration_needs_both_cells_final_and_the_root_on_this_claim`; `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer`; `dsm_sdk::handlers::node_e2e_tests::an_exercise_whose_trader_withholds_its_pair_is_registered_from_its_own_bytes` | Rechecked 2026-10-26 on main ad831f53 (was Partial). Registration is the exercise in Core. On nodes another device relays a trader's registered position (sofi.relay, 4 cells), registers a withheld pair from the exercise's signed C_q, and carries a held exercise to final (SA-72). [STALE-NOTE] |
 | MR-SOFI-0219 | Met | `dsm::sofi::exercise::attempt_resolution` (derived each time from raw reads, no stored outcome) | `dsm::sofi::exercise::tests::a_successor_key_resolves_to_the_e_of_the_exercise_that_names_it_or_stays_open` | — |
 | MR-SOFI-0220 | Met | `dsm_storage_node::api::cells::put_cell`; `dsm::sofi::exercise::exercise_names_key`; `dsm::sofi::resolution::consumed_route` | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm::sofi::exercise::tests::a_successor_key_resolves_to_the_e_of_the_exercise_that_names_it_or_stays_open`; `dsm::sofi::resolution::tests::a_final_leg_of_an_invalid_route_is_not_consumed` | Storage members keep every value at a key and refuse none, while Core counts only an exercise naming the key and consumes only a valid registered route, so a stored value alone confers nothing. |

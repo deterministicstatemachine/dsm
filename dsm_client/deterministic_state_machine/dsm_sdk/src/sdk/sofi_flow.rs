@@ -25,7 +25,11 @@ use dsm::sofi::frontier::VaultWitness;
 use dsm::sofi::publication::{Publication, Signed, VaultPolicyClass};
 use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
-use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
+use dsm::sofi::conformance::{fulfillment_conformance, FulfillmentConformance};
+use dsm::sofi::resolve::{
+    AcceptedGeneses, Acquired, ExerciseObjects, LocalLeaves, SofiReads, VaultGenesis, Verifier,
+    WALK_BUDGET,
+};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
     movement_shape, retire_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
@@ -2076,7 +2080,7 @@ pub(crate) async fn exercise_draft_at_head(
 /// The purpose a fulfillment built on position `position` freezes its
 /// objects under before any is published (SA-71). The position is part of
 /// it because a root can repeat: a Void position keeps its parent's root.
-fn prepared_purpose(position: u64) -> String {
+pub(crate) fn prepared_purpose(position: u64) -> String {
     format!("sofi-prepared-fulfillment/{position}")
 }
 
@@ -2246,7 +2250,8 @@ pub(crate) fn prepared_fulfillment(
 }
 
 /// Freeze every object of `prepared`, bound to `parent`, in one transaction,
-/// before any is published.
+/// before any is published. The store freezes the fulfillment withheld,
+/// owed to no set until its conformance is Valid ([`publish_gated`]).
 fn freeze_prepared(
     set: &StorageSet,
     position: u64,
@@ -2286,7 +2291,8 @@ fn freeze_prepared(
 }
 
 /// Stages 3 to 5 of §31: validate the draft over acquired evidence, sign it,
-/// freeze what it publishes, and publish it. The head does not move: a
+/// freeze what it publishes, and publish it, the fulfillment only once its
+/// conformance is Valid ([`publish_gated`]). The head does not move: a
 /// device that stops here finds this fulfillment frozen against its parent
 /// and completes it, and signs no other there (SA-71).
 pub(crate) async fn prepare_fulfillment(
@@ -2359,36 +2365,99 @@ pub(crate) async fn prepare_fulfillment(
         &prepared,
     )?;
     // Stages 4 and 5.
-    publish_prepared(set, &prepared).await?;
+    publish_gated(set, &verifier, &prepared).await?;
     Ok(Prepared::Published(prepared))
 }
 
-/// Publish every object of `prepared` and read each back Stored.
-async fn publish_prepared(
+/// Publish `prepared` in the order SoFi's producer rule fixes (L1738: "A
+/// producer MUST obtain Valid before it publishes F"): every object but `F`,
+/// each read back Stored; then `F`'s conformance over evidence the verifier
+/// acquires, the predicate the install decides; and `F` itself only on
+/// Valid, released from where it was withheld and read back Stored. An
+/// Invalid `F` is refused with nothing of it put and the head unmoved;
+/// evidence not yet in hand is the network's status, and `F` stays withheld.
+async fn publish_gated<R: SofiReads>(
     set: &StorageSet,
+    verifier: &Verifier<'_, R>,
     prepared: &PreparedFulfillment,
 ) -> Result<(), DsmError> {
-    let publications: Vec<Publication<'_>> = prepared
+    let ahead: Vec<Publication<'_>> = prepared
         .objects
         .iter()
+        .filter(|object| !matches!(object, PreparedObject::Fulfillment(..)))
         .map(PreparedObject::publication)
         .collect();
-    for published in publish_all(set, &publications).await? {
+    for published in publish_all(set, &ahead).await? {
         require_stored("route object", &published)?;
     }
-    Ok(())
+    let precommit = prepared.precommit()?;
+    let preimage = prepared.preimage()?;
+    let fulfillment = prepared.fulfillment()?;
+    let own_objects = own_closure_objects(set, &precommit.body, preimage).await?;
+    let objects = ExerciseObjects {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage,
+        fulfillment: &fulfillment.body,
+        fulfillment_signature: &fulfillment.signature,
+        own_objects: &own_objects,
+    };
+    let evidence = match verifier
+        .acquire_conformance_evidence(&objects)
+        .map_err(verifier_error)?
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) => {
+            return Err(storage(
+                "conformance evidence",
+                format!(
+                    "not in hand after the acquisition rounds: {missing:?}; the fulfillment stays \
+                     withheld"
+                ),
+            ))
+        }
+    };
+    match fulfillment_conformance(&fulfillment.body, &fulfillment.signature, &evidence) {
+        Ok(FulfillmentConformance::Valid) => {}
+        Ok(FulfillmentConformance::Invalid(why)) => {
+            return Err(refuse(format!(
+                "the fulfillment does not conform ({why:?}): it is not published, and the head \
+                 does not move"
+            )))
+        }
+        Err(missing) => {
+            return Err(storage(
+                "conformance evidence",
+                format!("{missing:?} not in hand; the fulfillment stays withheld"),
+            ))
+        }
+    }
+    let publication = Publication::Fulfillment {
+        body: &fulfillment.body,
+        signature: &fulfillment.signature,
+    };
+    let bytes = publication
+        .object_bytes()
+        .map_err(|e| refuse(format!("the fulfillment does not encode: {e:?}")))?;
+    let key = crate::sdk::economic_registers::immutable_object_key(publication.namespace(), &bytes);
+    crate::storage::client_db::frozen_publication_artifact::release_withheld(&key)
+        .map_err(|e| storage("prepared fulfillment", e))?;
+    require_stored("fulfillment", &publish(set, &publication).await?)
 }
 
 /// Stages 6 to 10 for a prepared fulfillment: published again (a device
-/// that stopped may not have finished publishing), then the transition, the
-/// install and the exercise, and the resolution rounds.
+/// that stopped may not have finished publishing), `F` only once its
+/// conformance is Valid, then the transition, the install and the exercise,
+/// and the resolution rounds.
 async fn finish_prepared(
     core: &CoreSDK,
     set: &StorageSet,
     accepted: &AcceptedGeneses,
     prepared: &PreparedFulfillment,
 ) -> Result<PositionOutcome, DsmError> {
-    publish_prepared(set, prepared).await?;
+    let standing = standing(core)?;
+    let ctx = standing.context(set, accepted)?;
+    publish_gated(set, &ctx.verifier(), prepared).await?;
     let precommit = prepared.precommit()?;
     let preimage = prepared.preimage()?;
     let fulfillment = prepared.fulfillment()?;

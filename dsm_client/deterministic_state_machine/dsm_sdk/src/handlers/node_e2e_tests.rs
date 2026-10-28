@@ -4526,6 +4526,181 @@ async fn a_creation_past_the_sdk_check_is_refused_by_core_and_moves_nothing() {
     }
 }
 
+/// SoFi L1738 (CONFORMANCE §6.105 A7, MR-SOFI-0217): a producer obtains
+/// Valid before it publishes F, and before its head moves. B holds, frozen
+/// against its next parent, a prepared trade whose F does not conform (its
+/// position is not P's successor), built with the producer's own builders
+/// and signed with B's key, as a fault in its producer or its store would
+/// leave it. Asked to trade, B completes the prepared fulfillment first
+/// (SA-71): its P, P(E) and witnesses are published, F's conformance is
+/// Invalid, and F is put to no member, neither by the producer nor by the
+/// republish sweep, while B's head does not move and nothing it holds moves.
+///
+/// MUTATION CONTROL: publishing F before deciding its conformance
+/// (`sofi_flow::publish_gated`) turns this red: F is at the members. So does
+/// freezing a fulfillment owed to its set instead of withheld
+/// (`frozen_publication_artifact::freeze_artifact_with_conn`): the sweep puts
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_that_does_not_conform_is_never_published() {
+    use crate::sdk::sofi_sdk::ToPublish;
+    use crate::storage::client_db::frozen_publication_artifact as fpa;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let era_before = balance(&p.b, &m.era);
+    let position = admitted_position(&p.b);
+
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+    let kept = crate::sdk::sofi_reads::KeptReadings::default();
+    let standing = crate::sdk::sofi_flow::standing(core).expect("B's standing");
+    let verifying = standing
+        .context_kept(&set, &accepted, &kept)
+        .expect("a verifier");
+    let intent = crate::sdk::sofi_flow::TradeIntent {
+        vault_ids: vec![m.vault_id],
+        token_in_policy_commit: m.era,
+        token_out_policy_commit: m.tkn,
+        amount_in: 10,
+        min_amount_out: 1,
+    };
+    let draft =
+        crate::sdk::sofi_flow::draft_trade(core, &set, &intent, &standing, &verifying.verifier())
+            .await
+            .expect("a draft");
+    let evidence = match verifying
+        .verifier()
+        .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
+        .expect("the evidence reads")
+    {
+        dsm::sofi::resolve::Acquired::Complete(evidence) => evidence,
+        dsm::sofi::resolve::Acquired::Exhausted(missing) => {
+            panic!("the draft's evidence is in hand: {missing:?}")
+        }
+    };
+    let checked = crate::sdk::sofi_sdk::check_draft(draft, &evidence).expect("a valid draft");
+    let (public_key, secret_key) =
+        crate::sdk::signing_authority::current_keypair().expect("B's key");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let precommit_signature =
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &checked.precommit_signing_digest())
+            .expect("B signs P");
+    let attempts: Vec<_> = checked
+        .precommit()
+        .legs()
+        .iter()
+        .map(|leg| (leg.vault_id, 0))
+        .collect();
+    let produced =
+        crate::sdk::sofi_sdk::build_fulfillment(&checked, precommit_signature, &attempts, att_a)
+            .expect("the producer builds F");
+    let built = produced
+        .publish
+        .iter()
+        .find_map(|item| match item {
+            ToPublish::Fulfillment(body) => Some(body.clone()),
+            _ => None,
+        })
+        .expect("the producer's F");
+    let skipping = TraderFulfillmentBody::new(
+        *built.precommit_id(),
+        built.policy_fulfillment_set().to_vec(),
+        built.attempts().to_vec(),
+        built.position() + 1,
+        built.signature_alg(),
+        &public_key,
+        att_a,
+    )
+    .expect("a well-formed F");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &secret_key,
+        &derive::fulfillment_signing_digest(&skipping),
+    )
+    .expect("B signs F");
+
+    // The prepared trade, frozen against B's parent as the producer freezes
+    // what it prepares (SA-71), with that F in place of the producer's.
+    let parent = *checked.precommit().void_root();
+    let purpose = crate::sdk::sofi_flow::prepared_purpose(checked.precommit().position());
+    let key_of = |publication: &Publication<'_>| {
+        let bytes = publication.object_bytes().expect("the object encodes");
+        (
+            crate::sdk::economic_registers::immutable_object_key(publication.namespace(), &bytes),
+            dsm::storage_object::immutable_addr(publication.namespace(), &bytes),
+            bytes,
+        )
+    };
+    {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let mut conn = binding.lock().expect("the store");
+        let tx = conn.transaction().expect("a transaction");
+        for item in &produced.publish {
+            let publication = match item {
+                ToPublish::Fulfillment(..) => Publication::Fulfillment {
+                    body: &skipping,
+                    signature: &signature,
+                },
+                ToPublish::Precommit(signed) => Publication::Precommit {
+                    body: &signed.body,
+                    signature: &signed.signature,
+                },
+                ToPublish::Preimage(preimage) => Publication::Preimage(preimage),
+                ToPublish::PolicyFulfillment(body) => Publication::PolicyFulfillment(body),
+                ToPublish::PreBalance(balance) => Publication::TraderPreBalance(balance),
+                ToPublish::Setup(..) => panic!("B is set up with the vault already"),
+            };
+            let (key, _, bytes) = key_of(&publication);
+            fpa::freeze_artifact_with_conn(&tx, &set.id(), &key, &bytes, &parent, &purpose)
+                .expect("frozen");
+        }
+        tx.commit().expect("the prepared trade is frozen");
+    }
+    let (f_key, f_addr, _) = key_of(&Publication::Fulfillment {
+        body: &skipping,
+        signature: &signature,
+    });
+
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(&p, &m, 7))).await;
+    let client = SetClient::new(&set).expect("a client of the set");
+    assert_eq!(
+        client.fetch_verified(&f_addr).await,
+        None,
+        "the producer put nothing of F"
+    );
+    assert!(!r.success, "the prepared trade does not complete");
+    assert!(
+        r.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("does not conform")),
+        "refused for its conformance, before Core's advance is asked: {:?}",
+        r.error_message
+    );
+    p.b.enter();
+    crate::handlers::artifact_republish::republish_unpublished_artifacts()
+        .await
+        .expect("the sweep runs");
+    assert_eq!(
+        client.fetch_verified(&f_addr).await,
+        None,
+        "the sweep put nothing of F"
+    );
+    assert_eq!(
+        fpa::get_artifact(&f_key)
+            .expect("the store reads")
+            .expect("F is kept")
+            .state,
+        fpa::ArtifactState::Withheld,
+        "F stays withheld"
+    );
+    assert_eq!(pending_position(&p.b), None, "no transition was made");
+    assert_eq!(admitted_position(&p.b), position, "the head did not move");
+    assert_eq!(balance(&p.b, &m.era), era_before, "nothing B holds moved");
+}
+
 /// CONFORMANCE §6.39, SoFi Amendment S12: once a trader has traded through a
 /// vault, the owner's close still resolves. The owner judges the trader's
 /// exercise from the exercise's own bytes: the trader's balance before the

@@ -538,7 +538,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// generation's bundle step (SoFi Amendment S23). A database made at 33
 /// holds frontiers without the digest and generations without their steps,
 /// and is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 34;
+///
+/// v35: a frozen artifact may be `withheld`, kept and owed to no set until
+/// the check that withheld it releases it: a trader's fulfillment, frozen
+/// before its conformance is Valid (SoFi L1738). A database made at 34
+/// refuses that state, and is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 35;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -676,7 +681,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             purpose           TEXT NOT NULL,
             storage_set_id    BLOB NOT NULL,
             state             TEXT NOT NULL CHECK (state IN
-                                ('frozen','publication_pending','stored')),
+                                ('withheld','frozen','publication_pending','stored')),
             last_error        TEXT NOT NULL DEFAULT ''
         );
 
