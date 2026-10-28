@@ -5150,6 +5150,18 @@ Each item below turns on one of four clauses:
 - The module checks with `-DwarningAsError=true`. The axiom ledger changes only by the two renamed conjunction lemmas (`Judged.and_comm`, `Judged.and_invalid_right`), and `--check`, the claim trace (670 references) and the evidence gate pass.
 - The thirteen header mutation controls that touch these types were re-run against the new definitions (9, 16, 25, 26, 29–32, 34–36, 38, 39). Each named theorem went red: ten by a kernel error in the theorem itself; 29–31 through `sorryAx` in their axioms, the unmutated control resting only on `propext` and `Quot.sound`.
 
+**An independent review of question 9 (7cf6483e).** A read-only agent reviewed the code diff; read from source, not run.
+- No production-reachable bug was found:
+  - every admitted path to a Transfer's or Burn's state change passes `semantic_write_set`;
+  - the field's encoding is symmetric and covered by the operation's signature;
+  - the re-hash takes the same `TokenPolicyV3` wrapper `token.create` and ERA commit;
+  - the deleted checks covered nothing the write set does not;
+  - no production producer leaves `token_policy` empty.
+- One test regression was found, and is fixed. `a_debit_of_the_wrong_amount_or_asset_is_refused` asserted only `is_err()`, and its asset near-miss carried ERA's policy under a made-up token, so the policy re-hash refused it first and the pure-debit asset comparison went untested. The near-miss now burns another burnable token carrying its own committed policy, and each assertion names its refusal. The comparison removed → the test red (one `DSM_MUTANT` build, control green).
+- Noted, out of this round (dBTC):
+  - dBTC's commit is a raw hash of its legacy CTPA blob, not a `TokenPolicyV3`, so no dBTC Transfer or Burn can carry bytes that re-hash to it; the deleted verifier check could not either.
+  - `TokenSDK::execute_generic_token_operation` and `validate_and_charge_fee` advance with no admission, so no write set is built. Their only production callers are the Bitcoin routes, and the fee is ERA.
+
 **Not done here.**
 - The write-count control (matrix, MR-DSM-0116..0119) needs the three-write bearer tests: the offline phases, §6.103.
 - "An item on a previous-tip route is never applied" still has no executable test. It is spool behaviour, waiting with §6.104.

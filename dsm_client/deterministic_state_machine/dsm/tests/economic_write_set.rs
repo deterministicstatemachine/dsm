@@ -631,15 +631,37 @@ fn a_debit_with_an_extra_mutation_is_refused() {
     }
 }
 
+/// Same witness, different claimed operations: each is refused by the check
+/// for exactly what it changes. The near-miss on the asset names a burnable
+/// token and carries its own committed policy, so the policy check passes and
+/// only the asset binding can refuse it.
+///
+/// MUTATION CONTROL: delete the asset comparison in the pure-debit arm of
+/// `verify_operation_write_set` and the asset near-miss is accepted: red.
 #[test]
 fn a_debit_of_the_wrong_amount_or_asset_is_refused() {
+    use dsm::economic::token_policy::POLICY_FLAG_BURN;
     let (tree, balances) = funded_tree(era(), 100);
     let op = burn(40, era());
     let witness = round_trip(&op, tree, balances, &CreditSourceFacts::None);
-    // Same witness, different claimed operations.
-    assert!(verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE).is_err());
-    assert!(
-        verify_operation_write_set(&burn(40, [0xEE; 32]), &G, &DEV, &witness, P_CREATE).is_err()
+    assert_eq!(
+        verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit delta is not exactly the operation amount"
+        })
+    );
+    let (other, other_policy) = policy_token(74, POLICY_FLAG_BURN);
+    assert_eq!(
+        verify_operation_write_set(
+            &burn_carrying(40, other, &other_policy),
+            &G,
+            &DEV,
+            &witness,
+            P_CREATE
+        ),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit touches a different asset than the operation names"
+        })
     );
     // And the role near-miss: the same delta presented as a transfer TO us
     // (credit role) is refused.
