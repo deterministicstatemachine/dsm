@@ -1747,6 +1747,184 @@ async fn a_trader_who_has_traded_can_pay() {
     );
 }
 
+/// MR-SOFI-0260: a producer stops drafting a route Core's validation refuses.
+/// Through the production builders, B prices ERA→TKN→TKB at both vaults'
+/// walked heads and drafts the route with `draft_route`, as `draft_trade`
+/// does, except that the second hop takes one unit of TKN less than the first
+/// hop gives. The planner never builds that route; the producer's gate must
+/// still stop it. `check_draft`, over evidence acquired for the draft, answers
+/// `RouteDoesNotChain` at hop 1, and nothing is published or advanced. The
+/// same composition with the hops chaining passes the gate, so the refusal is
+/// the link's.
+///
+/// MUTATION CONTROL: `validate` without its hop-to-hop link check turns this
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_producer_refuses_a_route_that_does_not_chain() {
+    use crate::sdk::sofi_flow::{
+        context, own_setup_ref, price_hop, relationship_base, standing, trader_core, vault_at_head,
+        vault_core,
+    };
+    use crate::sdk::sofi_sdk::{check_draft, draft_route, BuildError};
+    use dsm::sofi::resolve::Acquired;
+    use dsm::sofi::validation::Invalid;
+
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let tkb = create_token(&p.a, "TKB", 10_000).await;
+    let first = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    let second = create_vault(&p.a, (tkn, 1_000), (tkb, 1_000)).await;
+    for token in [&tkn, &tkb] {
+        adopt(&p.b, token).await;
+    }
+    set_up(&p.b, &first).await;
+    set_up(&p.b, &second).await;
+    let position = admitted_position(&p.b);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+
+    p.b.enter();
+    let core = &p.b.router().core_sdk;
+    let accepted = dsm::sofi::resolve::AcceptedGeneses::default();
+    let kept = crate::sdk::sofi_reads::KeptReadings::default();
+    let standing = standing(core).expect("B's standing");
+    let verifying = standing
+        .context_kept(&set, &accepted, &kept)
+        .expect("a verifier");
+    let verifier = verifying.verifier();
+    let (one, ..) = vault_at_head(&set, &verifier, &first)
+        .await
+        .expect("the first vault's head");
+    let (two, ..) = vault_at_head(&set, &verifier, &second)
+        .await
+        .expect("the second vault's head");
+    let public_key = crate::sdk::signing_authority::current_public_key().expect("B's public key");
+
+    let ref_one = own_setup_ref(&set, &standing.genesis, &standing.device_id, &first)
+        .await
+        .expect("B's setup with the first vault");
+    let ref_two = own_setup_ref(&set, &standing.genesis, &standing.device_id, &second)
+        .await
+        .expect("B's setup with the second vault");
+    let base_one = relationship_base(&standing, &first).expect("a base");
+    let base_two = relationship_base(&standing, &second).expect("a base");
+    let (hop_one, post_one) = price_hop(&one, era, 10, ref_one, 0).expect("hop 0 priced");
+
+    // The route through both heads, its second hop taking `second_in` TKN,
+    // assembled as `draft_trade` assembles it.
+    let draft_with = |second_in: u64| {
+        let (hop_two, post_two) =
+            price_hop(&two, tkn, second_in, ref_two, 1).expect("hop 1 priced");
+        let cores = vec![
+            vault_core(&standing, &one, &post_one, base_one).expect("V° of the first"),
+            vault_core(&standing, &two, &post_two, base_two).expect("V° of the second"),
+        ];
+        let trader = trader_core(
+            &standing,
+            &[(tkb, hop_two.amount_out, 0), (era, 0, 10)],
+            &[(first, base_one), (second, base_two)],
+        )
+        .expect("T°");
+        let ctx = context(&standing, &set, &public_key, trader).expect("the context");
+        draft_route(vec![hop_one, hop_two], cores, &ctx, &standing.local)
+            .expect("the producer assembles the route")
+    };
+    // The producer's gate over evidence acquired for the draft (stage 3).
+    let checked = |draft: crate::sdk::sofi_sdk::UncheckedDraft| {
+        let evidence = match verifier
+            .acquire_evidence(draft.precommit(), draft.preimage(), &draft.carried())
+            .expect("the evidence reads")
+        {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => panic!("evidence not in hand: {missing:?}"),
+        };
+        check_draft(draft, &evidence).map(|draft| draft.precommit_id())
+    };
+
+    let chaining = draft_with(hop_one.amount_out);
+    let chaining_id = derive::precommit_id(chaining.precommit());
+    assert_eq!(
+        checked(chaining),
+        Ok(chaining_id),
+        "the route whose hops chain passes the producer's gate"
+    );
+    assert_eq!(
+        checked(draft_with(hop_one.amount_out - 1)),
+        Err(BuildError::StaticallyInvalid(Invalid::RouteDoesNotChain {
+            hop: 1
+        })),
+        "hop 1 takes less than hop 0 gives"
+    );
+    assert_eq!(pending_position(&p.b), None, "nothing was advanced");
+    assert_eq!(admitted_position(&p.b), position);
+}
+
+/// SoFi §2.1, MR-SOFI-0037: the producer's tree is Core's. B's leaf cache is
+/// rewritten so its ERA row holds more than B's admitted root does, with the
+/// row's key, value and bytes agreeing with each other. B's send is refused
+/// before anything is built: no pending position, the admitted position and
+/// the balance where they were.
+///
+/// MUTATION CONTROL: `tree_of_rows` without its root check turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing() {
+    let p = Pair::boot(500, 200).await;
+    let position = admitted_position(&p.b);
+    let before = p.b.era_balance();
+    p.b.enter();
+    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let rows = economic_lineage::load_leaf_cache().expect("the leaf cache");
+    let (key, held) = rows
+        .iter()
+        .find_map(
+            |(key, _, ccb)| match dsm::economic::decode::decode_leaf_state(ccb) {
+                Ok(dsm::economic::state::EconomicLeafState::Balance(b))
+                    if b.policy_commit == era =>
+                {
+                    Some((*key, b.amount))
+                }
+                _ => None,
+            },
+        )
+        .expect("B's admitted root holds its ERA");
+    let inflated = dsm::economic::state::EconomicLeafState::Balance(
+        dsm::economic::state::EconomicBalanceState::new(era, held + 1_000_000).expect("a balance"),
+    );
+    {
+        let binding = crate::storage::client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        let changed = conn
+            .execute(
+                "UPDATE economic_leaf_cache SET leaf_value = ?1, state_ccb = ?2 WHERE leaf_key = ?3",
+                rusqlite::params![
+                    inflated.leaf_value().expect("a value").as_slice(),
+                    inflated.encode().expect("bytes"),
+                    key.as_slice()
+                ],
+            )
+            .expect("the row rewritten");
+        assert_eq!(changed, 1);
+    }
+
+    let sent = p.b.send(&p.a, 5).await;
+    assert!(
+        !sent.success,
+        "a send built on a balance the root does not hold"
+    );
+    assert!(
+        sent.error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("leaf cache does not recompute the root")),
+        "{:?}",
+        sent.error_message
+    );
+    assert_eq!(pending_position(&p.b), None, "nothing was advanced");
+    assert_eq!(admitted_position(&p.b), position);
+    assert_eq!(p.b.era_balance(), before);
+}
+
 /// MR-SOFI-0346 (owner ruling 2026-09-30): resolving another trader's
 /// position reads only the verifier's frontier-to-parent segment of that
 /// trader — within it the position, its predecessor and the accepted claim

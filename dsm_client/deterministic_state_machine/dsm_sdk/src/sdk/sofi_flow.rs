@@ -842,18 +842,18 @@ fn head_witness(
             VaultWitness::at_genesis(&accepted, own.0, own.1).map_err(refuse)?
         }
         _ => {
-            let (tree, state, relationships) = crate::sdk::vault_baseline::tree_at(
-                vault_id, generation, &root,
-            )?
-            .ok_or_else(|| {
-                refuse("this device holds no witness of the vault's head, and not its whole tree")
-            })?;
+            let whole = crate::sdk::vault_baseline::tree_at(vault_id, generation, &root)?
+                .ok_or_else(|| {
+                    refuse(
+                        "this device holds no witness of the vault's head, and not its whole tree",
+                    )
+                })?;
             let rel_key = derive::relationship_key(&own.0, &own.1, vault_id);
             let wire = dsm::sofi::frontier::witness_from_tree(
-                &tree,
+                &whole.tree,
                 vault_id,
-                &state,
-                relationships.get(&rel_key).copied(),
+                &whole.state,
+                whole.relationships.get(&rel_key).copied(),
                 &own.0,
                 &own.1,
             );
@@ -934,7 +934,7 @@ fn quote(
 
 /// One hop priced at a vault's head, naming this device's setup with it, and
 /// the post state Core computes from it.
-fn price_hop(
+pub(crate) fn price_hop(
     vault: &VaultAtHead,
     token_in: D32,
     amount_in: u64,

@@ -16,10 +16,11 @@
 //! | `sofi_vault_baseline` | `vault -> generation, baseline` | the owner baseline a chain starts at, when it does not start at the genesis |
 //!
 //! **A read is checked, never trusted.** The rows are a cache of this
-//! device's own conclusions. `tree_at_head` rebuilds the head's tree and
-//! requires the recomputed root to equal the recorded one, which is exactly
-//! what detects an INCOMPLETE record; a witness is checked by Core against
-//! the root it is read at before anything stands on it.
+//! device's own conclusions. A whole tree is rebuilt from them only by Core
+//! (`sofi::frontier::vault_tree_at`), which binds every leaf and requires the
+//! rows to recompute the recorded root, which is exactly what detects an
+//! INCOMPLETE record; a witness is checked by Core against the root it is
+//! read at before anything stands on it.
 //!
 //! This replaces the persistent node store R14 deleted. A node store returned
 //! leaf VALUES; evidence needs the preimages, so the values alone could never
@@ -29,7 +30,6 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, Result};
 use rusqlite::{params, OptionalExtension, Transaction};
 
-use dsm::economic::tree::EconomicSmt;
 use dsm::shared_lineage::BundleStep;
 use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
@@ -534,34 +534,6 @@ fn rows_with_conn(
         ));
     }
     Ok(out)
-}
-
-/// The vault's whole tree at its established head, rebuilt from every stored
-/// leaf and CHECKED against the head's own root, with its state leaf: what a
-/// producer builds `V°` against. `None` when no head is established, or the
-/// record cannot reproduce its own root (another trader moved the vault
-/// between this device's trades).
-pub fn tree_at_head(vault_id: &D32) -> Result<Option<(VaultHead, EconomicSmt, VaultStateLeaf)>> {
-    let Some(head) = head(vault_id)? else {
-        return Ok(None);
-    };
-    let rows = leaf_rows(vault_id, head.generation)?;
-    let mut tree = EconomicSmt::new();
-    for (key, value, ..) in &rows {
-        tree.insert(*key, *value);
-    }
-    if tree.root() != head.root {
-        return Ok(None);
-    }
-    let state_key = derive::vault_state_key(vault_id);
-    let state = match rows.iter().find(|(key, ..)| *key == state_key) {
-        Some((.., kind, preimage)) if *kind == KIND_STATE => {
-            VaultStateLeaf::decode(preimage).map_err(|e| anyhow!("state leaf: {e}"))?
-        }
-        Some(row) => return Err(anyhow!("the vault's state key holds leaf kind {}", row.2)),
-        None => return Err(anyhow!("the vault's record holds no state leaf")),
-    };
-    Ok(Some((head, tree, state)))
 }
 
 /// The generation this verifier established `root` at for `vault_id`, if it

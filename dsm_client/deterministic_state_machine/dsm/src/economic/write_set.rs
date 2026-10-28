@@ -290,11 +290,14 @@ impl<'a> EconomicPreState<'a> {
 }
 
 /// The producer's output: key-ordered mutations with progressive proofs, the
-/// matching credit sources, and the resulting root.
+/// matching credit sources, the root they start from and the resulting root.
+/// Both roots are the builder's own, so a producer that names them in a
+/// witness computes none (SoFi §2.1).
 #[derive(Debug, Clone)]
 pub struct BuiltWriteSet {
     pub mutations: Vec<EconomicLeafMutation>,
     pub credit_sources: Vec<CreditSource>,
+    pub pre_root: [u8; 32],
     pub post_root: [u8; 32],
 }
 
@@ -912,6 +915,7 @@ pub fn build_write_set(
     tree: &mut EconomicSmt,
     facts: &CreditSourceFacts,
 ) -> Result<BuiltWriteSet, WriteSetError> {
+    let pre_root = tree.root();
     let pre_balances = pre_state.balances;
     let economic_position = pre_state.economic_position;
     let semantic = semantic_write_set(operation, genesis, device_id, economic_position)?;
@@ -1251,6 +1255,7 @@ pub fn build_write_set(
     Ok(BuiltWriteSet {
         mutations,
         credit_sources,
+        pre_root,
         post_root: tree.root(),
     })
 }
@@ -1733,6 +1738,7 @@ pub fn build_boundary_write_set(
     tree: &mut EconomicSmt,
 ) -> Result<BuiltWriteSet, WriteSetError> {
     use crate::types::device_state::OfflineBoundaryKind;
+    let pre_root = tree.root();
     let BoundaryEffect {
         kind,
         asset,
@@ -1835,6 +1841,7 @@ pub fn build_boundary_write_set(
     Ok(BuiltWriteSet {
         mutations,
         credit_sources,
+        pre_root,
         post_root: tree.root(),
     })
 }
@@ -2583,6 +2590,7 @@ mod escrow_create_binding_tests {
             .leaf_value()
             .expect("a leaf"),
         );
+        let pre = tree.root();
         let built = build_write_set(
             &op,
             &G,
@@ -2593,6 +2601,10 @@ mod escrow_create_binding_tests {
             &CreditSourceFacts::None,
         )
         .expect("a write set");
+        // Both roots a witness names are the builder's: the tree it started
+        // from, and the tree it left (SoFi §2.1).
+        assert_eq!((built.pre_root, built.post_root), (pre, tree.root()));
+        assert_ne!(built.pre_root, built.post_root);
         assert_eq!(built.mutations.len(), 2);
         let posts: Vec<&Option<EconomicLeafState>> =
             built.mutations.iter().map(|m| &m.post_state).collect();

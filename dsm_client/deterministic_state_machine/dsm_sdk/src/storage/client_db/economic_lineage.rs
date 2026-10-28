@@ -521,8 +521,10 @@ pub fn record_admitted_with_conn(
 }
 
 /// Load the cached leaves: `(leaf_key, leaf_value, state CCB bytes)`.
-/// The CALLER must recompute the root over these and compare it with the
-/// admitted root — a mismatched cache is discarded, never trusted.
+/// Never trusted: Core binds every row to its state and refuses the rows
+/// unless they recompute the root they are offered for
+/// (`ValidatedEconomicRoot::admitted_tree`,
+/// `ResolvedAdvance::installed_leaves`).
 pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
