@@ -1117,12 +1117,31 @@ message AuthorityEvidenceV1 {
 // chain, so the acceptance bundle references each side's predecessor by
 // signer identity through these objects. `prior_step_addr` absent means
 // relationship genesis: the expected certifying key is the signer's
-// P0-P6-proven AK.
+// P0-P6-proven AK. A step's authority is either the previous key's
+// certificate or, for a restart (DSM Amendment A20), both devices' AK
+// signatures over one restart statement; a restart's `h_n` is the agreed
+// accepted tip and its `prior_step_addr` is the step it continues.
 message EkCertStepV1 {
   bytes  ek_pk           = 1 [(dsm_max_len)=65535];
-  bytes  ek_cert         = 2 [(dsm_max_len)=65535]; // Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+  oneof authority {
+    bytes         ek_cert = 2 [(dsm_max_len)=65535]; // Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+    CertRestartV1 restart = 5;
+  }
   bytes  h_n             = 3 [(dsm_fixed_len)=32];
   optional bytes prior_step_addr = 4 [(dsm_fixed_len)=32];
+}
+
+// The authority of a restart step (DSM Amendment A20): the epoch, the
+// preserved acceptance commitment of the agreed accepted step, and both
+// devices' AK signatures over
+// H(DSM/cert-restart/v1 ‖ relationship ‖ predecessor ‖ agreed tip ‖ epoch ‖
+// commitment ‖ new key). The relationship is the two devices' own; the
+// predecessor, agreed tip and new key are the step's own fields.
+message CertRestartV1 {
+  uint64 epoch                           = 1;
+  bytes  preserved_acceptance_commitment = 2 [(dsm_fixed_len)=32];
+  bytes  restarting_sig                  = 3 [(dsm_max_len)=65535];
+  bytes  counterparty_sig                = 4 [(dsm_max_len)=65535];
 }
 
 // Portable bilateral-acceptance evidence for a peer-funded economic credit —

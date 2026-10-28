@@ -564,8 +564,8 @@ pub fn mark_contact_needs_online_reconcile(device_id: &[u8]) -> Result<()> {
 
     if updated > 0 {
         info!(
-            "Marked contact for online reconciliation: device_id={:02x}{:02x}...",
-            device_id[0], device_id[1]
+            "Marked contact for online reconciliation: device_id={}",
+            crate::util::text_id::encode_base32_crockford(device_id)
         );
     }
 

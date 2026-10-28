@@ -629,14 +629,18 @@ async fn finalize_from_countersign_delta(
         };
         let a_step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: receipt.ek_pk_a.clone(),
-            ek_cert: receipt.ek_cert_a.clone(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                receipt.ek_cert_a.clone(),
+            )),
             h_n: receipt.parent_tip.to_vec(),
             prior_step_addr: a_prior.map(|a| a.to_vec()),
         }
         .encode_to_vec();
         let b_step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: receipt.ek_pk_b.clone(),
-            ek_cert: receipt.ek_cert_b.clone(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                receipt.ek_cert_b.clone(),
+            )),
             h_n: receipt.parent_tip.to_vec(),
             prior_step_addr: b_prior.map(|a| a.to_vec()),
         }
@@ -2383,6 +2387,7 @@ impl AppRouterImpl {
         // Copies that never will be anything this device can take, by their
         // content: passed over.
         let mut taken = CopiesTaken::default();
+        let mut resyncs_answered = std::collections::BTreeSet::<[u8; 32]>::new();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
@@ -2455,14 +2460,43 @@ impl AppRouterImpl {
                     );
                 }
                 for message in route_sdk.take_cert_resync_messages() {
-                    let outcome = if message.method
-                        == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
-                    {
-                        self.handle_cert_resync_request(&message.body, storage_endpoints.to_vec())
-                            .await
-                    } else {
-                        self.handle_cert_resync_ack(&message.body).await
+                    use crate::storage::client_db::{
+                        CERT_RESYNC_CONFIRM_METHOD, CERT_RESYNC_DONE_METHOD,
+                        CERT_RESYNC_OFFER_METHOD, CERT_RESYNC_REQUEST_METHOD,
                     };
+                    let endpoints = storage_endpoints.to_vec();
+                    let outcome = match message.method.as_str() {
+                        CERT_RESYNC_REQUEST_METHOD => {
+                            self.handle_cert_resync_request(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_OFFER_METHOD => {
+                            self.handle_cert_resync_offer(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_CONFIRM_METHOD => {
+                            self.handle_cert_resync_confirm(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_DONE_METHOD => {
+                            self.handle_cert_resync_done(&message.body).await
+                        }
+                        other => Err(
+                            crate::handlers::cert_resync_flow::CertResyncRefusal::NotRecognized(
+                                dsm::types::error::DsmError::invalid_operation(format!(
+                                    "cert resync: no leg answers the method {other}"
+                                )),
+                            ),
+                        ),
+                    };
+                    // An offer this device answered with its restart step is
+                    // a resync in progress: it is not asked again this sync.
+                    if let (CERT_RESYNC_OFFER_METHOD, Ok(())) = (message.method.as_str(), &outcome)
+                    {
+                        if let Some(rel) = message.body.first_chunk::<32>() {
+                            resyncs_answered.insert(*rel);
+                        }
+                    }
                     take_in_cert_resync(
                         outcome,
                         &tagged.address,
@@ -2551,7 +2585,7 @@ impl AppRouterImpl {
         // A resync this device owes starts, or starts again, once per sync and
         // only after every route was read: an ack waiting on any route meets
         // the epoch it answers, not one this sync raised while reading.
-        self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
+        self.initiate_required_cert_resyncs(storage_endpoints, &resyncs_answered, &mut report)
             .await;
 
         // At most `limit` per route, which the request bounds by
@@ -2686,10 +2720,13 @@ impl AppRouterImpl {
     }
 
     /// Every relationship the send gate marked REQUIRED gets its resync
-    /// request sent (which moves it to PENDING).
+    /// request sent (which moves it to PENDING), and every PENDING one is
+    /// asked again under a later epoch, recovering a message lost on the way;
+    /// except those `answered` this sync, whose restart step is on its way.
     async fn initiate_required_cert_resyncs(
         &self,
         storage_endpoints: &[String],
+        answered: &std::collections::BTreeSet<[u8; 32]>,
         report: &mut StorageSyncReport,
     ) {
         let relationships = match crate::storage::client_db::relationships_requiring_resync() {
@@ -2699,10 +2736,10 @@ impl AppRouterImpl {
                 return;
             }
         };
-        for relationship in relationships {
+        for relationship in relationships.iter().filter(|r| !answered.contains(*r)) {
             match crate::handlers::cert_resync_flow::peer_device_for_relationship(
                 &self.device_id_bytes,
-                &relationship,
+                relationship,
             ) {
                 Ok(Some(peer)) => {
                     if let Err(e) = self
@@ -2977,7 +3014,7 @@ mod tests {
     fn a_handled_cert_resync_message_is_taken_in_by_its_content() {
         use super::{take_in_cert_resync, CopiesTaken};
         let message = crate::sdk::b0x_sdk::CertResyncMessage {
-            method: crate::storage::client_db::CERT_RESYNC_ACK_METHOD.to_string(),
+            method: crate::storage::client_db::CERT_RESYNC_DONE_METHOD.to_string(),
             body: vec![0x03, 0x04],
             copy_key: "HANDLED".to_string(),
         };

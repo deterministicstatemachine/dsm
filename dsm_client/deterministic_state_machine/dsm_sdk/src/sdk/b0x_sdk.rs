@@ -1051,9 +1051,7 @@ impl B0xSDK {
             let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
                 continue;
             };
-            if invoke.method == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
-                || invoke.method == crate::storage::client_db::CERT_RESYNC_ACK_METHOD
-            {
+            if crate::storage::client_db::CERT_RESYNC_METHODS.contains(&invoke.method.as_str()) {
                 if let Some(args) = &invoke.args {
                     return Some((invoke.method.clone(), args.body.clone()));
                 }

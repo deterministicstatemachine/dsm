@@ -749,10 +749,10 @@ impl AppRouterImpl {
         // Detect head-loss on an ESTABLISHED relationship. The Local cert head
         // is lost when there is none, no pending one either — a sent step not
         // yet finalized holds its head pending, which is in flight, not lost —
-        // and THIS device sent on the relationship before. A receive-
-        // established relationship's first send has no prior proposal: the
-        // normal root-AK genesis bootstrap, allowed through. Any of these
-        // reads failing fails the send closed.
+        // and the relationship has had a step, sent or received: every
+        // accepted step leaves this device a head. A relationship with no
+        // step yet is the normal root-AK genesis bootstrap, allowed through.
+        // Any of these reads failing fails the send closed.
         let local_head_present = match crate::storage::client_db::load_cert_chain_head_pubkey(
             &resync_rel_key,
             crate::storage::client_db::CertChainSide::Local,
@@ -773,16 +773,16 @@ impl AppRouterImpl {
                     )))
                 }
             };
-        let had_prior_send =
-            match crate::storage::client_db::relationship_had_prior_send(&resync_rel_key) {
-                Ok(sent) => sent,
+        let had_prior_step =
+            match crate::storage::client_db::relationship_had_prior_step(&resync_rel_key) {
+                Ok(stepped) => stepped,
                 Err(e) => {
                     return OnlineSent::NotDebited(err(format!(
-                        "wallet.send: prior-send read failed: {e}"
+                        "wallet.send: prior-step read failed: {e}"
                     )))
                 }
             };
-        if !local_head_present && !pending_head_present && had_prior_send {
+        if !local_head_present && !pending_head_present && had_prior_step {
             if let Err(e) = crate::storage::client_db::mark_cert_resync_required(&resync_rel_key) {
                 return OnlineSent::NotDebited(err(format!(
                     "wallet.send: the lost cert-chain head could not be recorded: {e}"

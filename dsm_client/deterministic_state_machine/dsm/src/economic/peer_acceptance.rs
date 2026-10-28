@@ -25,7 +25,10 @@
 //! one certificate, and nothing behind it is read. A verifier outside the
 //! relationship holds none of it and replays the chain to the signer's
 //! P0–P6-proven AK (whitepaper §11.1). A non-portable ancestry step fails
-//! closed as `Incomplete`, never silently assumed A→A/B→B.
+//! closed as `Incomplete`, never silently assumed A→A/B→B. A restart step
+//! (DSM Amendment A20) is walked through like any step: its predecessor is
+//! checked as any step is, and its new key is taken only on both devices'
+//! AK signatures over its own fields (`bilateral::cert_resync`).
 //!
 //! Production preimages, verbatim: `sig_a` over
 //! `H_bind(commitment ‖ commitment)`; `sig_b` over
@@ -34,6 +37,7 @@
 
 use prost::Message;
 
+use crate::bilateral::cert_resync::{check_restart_step, RestartParty};
 use crate::common::domain_tags::{TAG_DSM_EK_CERT_STEP, TAG_DSM_PEER_TRANSFER_ACCEPTANCE};
 use crate::crypto::ephemeral_key::verify_ek_cert;
 use crate::crypto::sphincs::sphincs_verify;
@@ -109,13 +113,16 @@ fn invalid(what: &str) -> PeerLineageFailure {
 /// of the step `prior_step_addr` names. A held step answers at once. A step
 /// this verifier does not hold is fetched, and so on back to the first step
 /// it holds or to relationship genesis (the signer's AK); the fetched steps
-/// are then verified forward from there.
+/// are then verified forward from there. A restart step's key is taken on
+/// the signer's and `counterparty`'s AK signatures over its own fields, its
+/// epoch past any restart before it in the walk.
 ///
-/// Budget exhaustion and unfetchable steps are `Incomplete`; a cycle or a
-/// failed certificate is `Invalid`.
+/// Budget exhaustion and unfetchable steps are `Incomplete`; a cycle, a
+/// failed certificate or a restart that does not chain is `Invalid`.
 fn resolve_expected_prev_pk(
     prior_step_addr: Option<[u8; 32]>,
     signer: &AcceptanceParty<'_>,
+    counterparty: &AcceptanceParty<'_>,
     steps: &dyn EkSteps,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
     // Phase 1: collect the unheld steps (worklist, no recursion).
@@ -157,20 +164,57 @@ fn resolve_expected_prev_pk(
     }
     // Phase 2: verify forward from the held step, or from the AK.
     let mut expected = base;
+    let mut last_restart: Option<u64> = None;
     for step in chain.iter().rev() {
-        let h_n: [u8; 32] = step
-            .h_n
-            .as_slice()
-            .try_into()
-            .map_err(|_| invalid("EK step h_n is not 32 bytes"))?;
-        let ok = verify_ek_cert(&expected, &step.ek_pk, &h_n, &step.ek_cert)
-            .map_err(|e| malformed("EK cert verify", e))?;
-        if !ok {
-            return Err(invalid("EK step certificate does not chain"));
+        match &step.authority {
+            Some(generated::ek_cert_step_v1::Authority::EkCert(cert)) => {
+                let h_n: [u8; 32] = step
+                    .h_n
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| invalid("EK step h_n is not 32 bytes"))?;
+                let ok = verify_ek_cert(&expected, &step.ek_pk, &h_n, cert)
+                    .map_err(|e| malformed("EK cert verify", e))?;
+                if !ok {
+                    return Err(invalid("EK step certificate does not chain"));
+                }
+            }
+            Some(generated::ek_cert_step_v1::Authority::Restart(restart)) => {
+                let epoch = check_restart_step(
+                    step,
+                    restart,
+                    RestartParty {
+                        devid: signer.devid,
+                        proven_ak: signer.proven_ak,
+                    },
+                    RestartParty {
+                        devid: counterparty.devid,
+                        proven_ak: counterparty.proven_ak,
+                    },
+                    last_restart,
+                )
+                .map_err(|e| malformed("EK restart step", e))?;
+                last_restart = Some(epoch);
+            }
+            None => return Err(invalid("EK step carries no authority")),
         }
         expected = step.ek_pk.clone();
     }
     Ok(expected)
+}
+
+/// The key the step at `addr` in `signer`'s chain certifies, verified as an
+/// acceptance verifies a predecessor: forward from a held step or the
+/// signer's AK, a restart step on both devices' AK signatures. A restarting
+/// device checks the steps its counterparty offers with this (DSM Amendment
+/// A20).
+pub fn certified_key_at(
+    addr: [u8; 32],
+    signer: &AcceptanceParty<'_>,
+    counterparty: &AcceptanceParty<'_>,
+    steps: &dyn EkSteps,
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    resolve_expected_prev_pk(Some(addr), signer, counterparty, steps)
 }
 
 /// Verify a portable acceptance bundle.
@@ -250,7 +294,7 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_a = resolve_expected_prev_pk(a_prior, sender, steps)?;
+    let expected_prev_a = resolve_expected_prev_pk(a_prior, sender, recipient, steps)?;
     let cert_a_ok = verify_ek_cert(
         &expected_prev_a,
         &receipt.ek_pk_a,
@@ -302,7 +346,7 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_b = resolve_expected_prev_pk(b_prior, recipient, steps)?;
+    let expected_prev_b = resolve_expected_prev_pk(b_prior, recipient, sender, steps)?;
     let cert_b_ok = verify_ek_cert(
         &expected_prev_b,
         &countersign.ek_pk_b,

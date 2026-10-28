@@ -206,7 +206,9 @@ mod tests {
     // declared it outside the registry).
     // +2 with the spool submission ids of a transfer and of its artifacts
     // moving into Core (§6.119; the SDK declared them inline).
-    const EXPECTED_TAG_COUNT: usize = 422;
+    // +2 with the restart request and done statements of a certificate
+    // restart (DSM Amendment A20).
+    const EXPECTED_TAG_COUNT: usize = 424;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

@@ -105,6 +105,9 @@ fn successor_evidence_round_trips_and_refuses_tampering() {
 struct AcceptanceFixture {
     bundle_bytes: Vec<u8>,
     sender_ak_pk: Vec<u8>,
+    /// The sender's AK secret: it countersigns a restart of the recipient's
+    /// chain on their relationship.
+    sender_ak_sk: Vec<u8>,
     recipient_ak_pk: Vec<u8>,
     transfer_bytes: Vec<u8>,
     child_tip: [u8; 32],
@@ -263,6 +266,7 @@ fn acceptance_fixture() -> AcceptanceFixture {
     AcceptanceFixture {
         bundle_bytes: bundle.encode_to_vec(),
         sender_ak_pk,
+        sender_ak_sk,
         recipient_ak_pk,
         transfer_bytes,
         child_tip,
@@ -369,6 +373,7 @@ fn acceptance_clone(fx: &AcceptanceFixture) -> AcceptanceFixture {
     AcceptanceFixture {
         bundle_bytes: fx.bundle_bytes.clone(),
         sender_ak_pk: fx.sender_ak_pk.clone(),
+        sender_ak_sk: fx.sender_ak_sk.clone(),
         recipient_ak_pk: fx.recipient_ak_pk.clone(),
         transfer_bytes: fx.transfer_bytes.clone(),
         child_tip: fx.child_tip,
@@ -390,7 +395,9 @@ fn ek_ancestry_walks_one_step_and_refuses_unhashed_substitution() {
     let h_prior = [0x41; 32];
     let prior_step = generated::EkCertStepV1 {
         ek_pk: prior_pk.clone(),
-        ek_cert: sign_ek_cert(&recipient_ak_sk, &prior_pk, &h_prior).unwrap(),
+        authority: Some(generated::ek_cert_step_v1::Authority::EkCert(
+            sign_ek_cert(&recipient_ak_sk, &prior_pk, &h_prior).unwrap(),
+        )),
         h_n: h_prior.to_vec(),
         prior_step_addr: None,
     };
@@ -517,6 +524,231 @@ fn a_party_to_the_relationship_checks_one_certificate_from_the_step_it_holds() {
         "got: {verdict:?}"
     );
     assert_eq!(fetched, vec![prior_addr]);
+}
+
+// ── A restarted chain (DSM Amendment A20) ─────────────────────────────────
+
+/// The recipient's chain on its relationship with the sender, restarted: its
+/// first step, certified by its AK, then a restart step continuing it at
+/// `epoch`, both AKs signing the statement over the restart step's own
+/// fields. `edit` changes the restart step after it is signed, given the
+/// statement and the address of a second genuine first step of the
+/// recipient. The countersign is certified by the restarted key, and the
+/// bundle names the restart step as the recipient's predecessor; all three
+/// steps are in the store.
+fn restarted_chain(
+    fx: &AcceptanceFixture,
+    epoch: u64,
+    edit: impl FnOnce(&mut generated::EkCertStepV1, &[u8; 32], [u8; 32]),
+) -> AcceptanceFixture {
+    use dsm::bilateral::cert_resync::RestartFields;
+    let (recipient_ak_pk, recipient_ak_sk) = generate_sphincs_keypair().unwrap();
+    let first_step = |h: [u8; 32]| {
+        let (pk, _) = generate_sphincs_keypair().unwrap();
+        generated::EkCertStepV1 {
+            authority: Some(generated::ek_cert_step_v1::Authority::EkCert(
+                sign_ek_cert(&recipient_ak_sk, &pk, &h).unwrap(),
+            )),
+            ek_pk: pk,
+            h_n: h.to_vec(),
+            prior_step_addr: None,
+        }
+        .encode_to_vec()
+    };
+    let (first, another) = (first_step([0x41; 32]), first_step([0x42; 32]));
+    let (first_addr, another_first) = (ek_cert_step_addr(&first), ek_cert_step_addr(&another));
+
+    let (restart_pk, restart_sk) = generate_sphincs_keypair().unwrap();
+    let fields = RestartFields {
+        relationship_key: dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &DEV_RECIP,
+            &DEV_SENDER,
+        ),
+        predecessor: first_addr,
+        agreed_tip: [0x43; 32],
+        epoch,
+        preserved_acceptance_commitment: [0x44; 32],
+        new_key: &restart_pk,
+    };
+    let statement = fields.statement();
+    let mut restart = fields.step(
+        sphincs_sign(&recipient_ak_sk, &statement).unwrap(),
+        sphincs_sign(&fx.sender_ak_sk, &statement).unwrap(),
+    );
+    edit(&mut restart, &statement, another_first);
+    let restart_bytes = restart.encode_to_vec();
+    let restart_addr = ek_cert_step_addr(&restart_bytes);
+
+    let mut after = countersigned_after(fx, restart_addr, &restart_sk);
+    after.recipient_ak_pk = recipient_ak_pk;
+    after.steps.insert(first_addr, first);
+    after.steps.insert(another_first, another);
+    after.steps.insert(restart_addr, restart_bytes);
+    after
+}
+
+fn restart_authority(step: &mut generated::EkCertStepV1) -> &mut generated::CertRestartV1 {
+    match &mut step.authority {
+        Some(generated::ek_cert_step_v1::Authority::Restart(r)) => r,
+        _ => panic!("not a restart step"),
+    }
+}
+
+/// A verifier outside the relationship walks the restarted chain: it fetches
+/// the restart step and the step it continues, checks the predecessor as any
+/// step, takes the restarted key on both AKs' signatures, and the acceptance
+/// under that key verifies.
+#[test]
+fn a_restarted_chain_is_walked_through_its_restart_step() {
+    let fx = acceptance_fixture();
+    let restarted = restarted_chain(&fx, 1, |_, _, _| {});
+    let (verdict, fetched) =
+        verify_fixture_counting(&restarted, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("the acceptance under the restarted key verifies");
+    assert_eq!(fetched.len(), 2, "the restart step and its predecessor");
+}
+
+/// Every way a restart step can fail to be the one both devices signed over
+/// its own fields leaves an acceptance under it unverified: another
+/// predecessor (a genuine step of the same chain), another agreed tip, epoch,
+/// commitment or key, one device's signature alone, a signature by another
+/// key, the two signatures swapped, and a restart naming no predecessor.
+#[test]
+fn a_restart_step_both_devices_did_not_sign_over_its_own_fields_does_not_chain() {
+    let fx = acceptance_fixture();
+    let another_key = generate_sphincs_keypair().unwrap().0;
+    let another_sk = generate_sphincs_keypair().unwrap().1;
+    type Edit = Box<dyn Fn(&mut generated::EkCertStepV1, &[u8; 32], [u8; 32])>;
+    let cases: Vec<(&str, Edit)> = vec![
+        (
+            "another predecessor",
+            Box::new(|s, _, another_first| s.prior_step_addr = Some(another_first.to_vec())),
+        ),
+        (
+            "another agreed tip",
+            Box::new(|s, _, _| s.h_n = vec![0x45; 32]),
+        ),
+        (
+            "another epoch",
+            Box::new(|s, _, _| restart_authority(s).epoch = 2),
+        ),
+        (
+            "another commitment",
+            Box::new(|s, _, _| {
+                restart_authority(s).preserved_acceptance_commitment = vec![0x46; 32]
+            }),
+        ),
+        (
+            "another key",
+            Box::new(move |s, _, _| s.ek_pk = another_key.clone()),
+        ),
+        (
+            "the restarting device's signature alone",
+            Box::new(|s, _, _| restart_authority(s).counterparty_sig = Vec::new()),
+        ),
+        (
+            "the counterparty's signature by another key",
+            Box::new(move |s, statement, _| {
+                restart_authority(s).counterparty_sig =
+                    sphincs_sign(&another_sk, statement).unwrap()
+            }),
+        ),
+        (
+            "the two signatures swapped",
+            Box::new(|s, _, _| {
+                let r = restart_authority(s);
+                std::mem::swap(&mut r.restarting_sig, &mut r.counterparty_sig);
+            }),
+        ),
+        (
+            "no predecessor",
+            Box::new(|s, _, _| s.prior_step_addr = None),
+        ),
+    ];
+    for (label, edit) in cases {
+        let restarted = restarted_chain(&fx, 1, |s, statement, another_first| {
+            edit(s, statement, another_first)
+        });
+        let verdict = verify_fixture(&restarted, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+        assert!(
+            matches!(&verdict, Err(PeerLineageFailure::Invalid(m)) if m.contains("EK restart step")),
+            "{label}: {verdict:?}"
+        );
+    }
+}
+
+/// A chain restarted twice: the second restart continues the first and must
+/// carry a greater epoch. The same epoch again does not chain; a greater one
+/// does. A verifier that holds the second restart step checks the one
+/// certificate after it and fetches nothing.
+#[test]
+fn a_second_restart_chains_only_past_the_first_epoch() {
+    use dsm::bilateral::cert_resync::RestartFields;
+    let fx = acceptance_fixture();
+    let (recipient_ak_pk, recipient_ak_sk) = generate_sphincs_keypair().unwrap();
+    let (first_pk, _) = generate_sphincs_keypair().unwrap();
+    let first = generated::EkCertStepV1 {
+        authority: Some(generated::ek_cert_step_v1::Authority::EkCert(
+            sign_ek_cert(&recipient_ak_sk, &first_pk, &[0x41; 32]).unwrap(),
+        )),
+        ek_pk: first_pk,
+        h_n: vec![0x41; 32],
+        prior_step_addr: None,
+    }
+    .encode_to_vec();
+    let rel = dsm::core::bilateral_transaction_manager::compute_smt_key(&DEV_RECIP, &DEV_SENDER);
+    let restart = |predecessor: [u8; 32], epoch: u64, key: &[u8]| {
+        let fields = RestartFields {
+            relationship_key: rel,
+            predecessor,
+            agreed_tip: [0x43; 32],
+            epoch,
+            preserved_acceptance_commitment: [0x44; 32],
+            new_key: key,
+        };
+        let statement = fields.statement();
+        fields
+            .step(
+                sphincs_sign(&recipient_ak_sk, &statement).unwrap(),
+                sphincs_sign(&fx.sender_ak_sk, &statement).unwrap(),
+            )
+            .encode_to_vec()
+    };
+    let (key_one, _) = generate_sphincs_keypair().unwrap();
+    let (key_two, sk_two) = generate_sphincs_keypair().unwrap();
+    let first_addr = ek_cert_step_addr(&first);
+    let one = restart(first_addr, 3, &key_one);
+    let one_addr = ek_cert_step_addr(&one);
+
+    let chain = |second_epoch: u64| {
+        let two = restart(one_addr, second_epoch, &key_two);
+        let two_addr = ek_cert_step_addr(&two);
+        let mut after = countersigned_after(&fx, two_addr, &sk_two);
+        after.recipient_ak_pk = recipient_ak_pk.clone();
+        after.steps.insert(first_addr, first.clone());
+        after.steps.insert(one_addr, one.clone());
+        after.steps.insert(two_addr, two);
+        (after, two_addr)
+    };
+
+    let (same, _) = chain(3);
+    let verdict = verify_fixture(&same, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    assert!(
+        matches!(&verdict, Err(PeerLineageFailure::Invalid(m)) if m.contains("does not exceed")),
+        "{verdict:?}"
+    );
+    let (later, two_addr) = chain(4);
+    let (verdict, fetched) =
+        verify_fixture_counting(&later, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("a restart past the first epoch chains");
+    assert_eq!(fetched.len(), 3);
+
+    let mut holding = acceptance_clone(&later);
+    holding.held.insert((DEV_RECIP, two_addr), key_two.clone());
+    let (verdict, fetched) =
+        verify_fixture_counting(&holding, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("from the held restart step");
+    assert!(fetched.is_empty(), "fetched {} EK steps", fetched.len());
 }
 
 // ── The exact peer-debit predicate's refusal clauses ───────────────────────

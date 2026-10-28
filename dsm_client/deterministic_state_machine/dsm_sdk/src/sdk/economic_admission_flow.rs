@@ -2247,14 +2247,18 @@ pub(crate) fn build_recipient_admission(
         .map(|(_, addr, _)| addr);
     let a_step_bytes = dsm::types::proto::EkCertStepV1 {
         ek_pk: receipt.ek_pk_a.clone(),
-        ek_cert: receipt.ek_cert_a.clone(),
+        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+            receipt.ek_cert_a.clone(),
+        )),
         h_n: receipt.parent_tip.to_vec(),
         prior_step_addr: a_prior.map(|a| a.to_vec()),
     }
     .encode_to_vec();
     let b_step_bytes = dsm::types::proto::EkCertStepV1 {
         ek_pk: b.ek_pk_b.clone(),
-        ek_cert: b.ek_cert_b.clone(),
+        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+            b.ek_cert_b.clone(),
+        )),
         h_n: receipt.parent_tip.to_vec(),
         prior_step_addr: b_prior.map(|a| a.to_vec()),
     }
@@ -2484,7 +2488,9 @@ pub(crate) fn record_ble_ek_steps_in_tx(
             .map(|(_, addr, _)| addr);
         let step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: step.ek_pk.to_vec(),
-            ek_cert: step.ek_cert.to_vec(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                step.ek_cert.to_vec(),
+            )),
             h_n: step.h_n.to_vec(),
             prior_step_addr: prior.map(|a| a.to_vec()),
         }

@@ -8663,7 +8663,10 @@ export class AuthorityEvidenceV1 extends Message<AuthorityEvidenceV1> {
  * chain, so the acceptance bundle references each side's predecessor by
  * signer identity through these objects. `prior_step_addr` absent means
  * relationship genesis: the expected certifying key is the signer's
- * P0-P6-proven AK.
+ * P0-P6-proven AK. A step's authority is either the previous key's
+ * certificate or, for a restart (DSM Amendment A20), both devices' AK
+ * signatures over one restart statement; a restart's `h_n` is the agreed
+ * accepted tip and its `prior_step_addr` is the step it continues.
  *
  * @generated from message dsm.EkCertStepV1
  */
@@ -8674,11 +8677,23 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   ekPk = new Uint8Array(0);
 
   /**
-   * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
-   *
-   * @generated from field: bytes ek_cert = 2;
+   * @generated from oneof dsm.EkCertStepV1.authority
    */
-  ekCert = new Uint8Array(0);
+  authority: {
+    /**
+     * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+     *
+     * @generated from field: bytes ek_cert = 2;
+     */
+    value: Uint8Array;
+    case: "ekCert";
+  } | {
+    /**
+     * @generated from field: dsm.CertRestartV1 restart = 5;
+     */
+    value: CertRestartV1;
+    case: "restart";
+  } | { case: undefined; value?: undefined } = { case: undefined };
 
   /**
    * @generated from field: bytes h_n = 3;
@@ -8699,7 +8714,8 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   static readonly typeName = "dsm.EkCertStepV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "ek_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "authority" },
+    { no: 5, name: "restart", kind: "message", T: CertRestartV1, oneof: "authority" },
     { no: 3, name: "h_n", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
@@ -8718,6 +8734,68 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
 
   static equals(a: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined, b: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined): boolean {
     return proto3.util.equals(EkCertStepV1, a, b);
+  }
+}
+
+/**
+ * The authority of a restart step (DSM Amendment A20): the epoch, the
+ * preserved acceptance commitment of the agreed accepted step, and both
+ * devices' AK signatures over
+ * H(DSM/cert-restart/v1 ‖ relationship ‖ predecessor ‖ agreed tip ‖ epoch ‖
+ * commitment ‖ new key). The relationship is the two devices' own; the
+ * predecessor, agreed tip and new key are the step's own fields.
+ *
+ * @generated from message dsm.CertRestartV1
+ */
+export class CertRestartV1 extends Message<CertRestartV1> {
+  /**
+   * @generated from field: uint64 epoch = 1;
+   */
+  epoch = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes preserved_acceptance_commitment = 2;
+   */
+  preservedAcceptanceCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes restarting_sig = 3;
+   */
+  restartingSig = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_sig = 4;
+   */
+  counterpartySig = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CertRestartV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CertRestartV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "epoch", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "preserved_acceptance_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "restarting_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CertRestartV1 | PlainMessage<CertRestartV1> | undefined, b: CertRestartV1 | PlainMessage<CertRestartV1> | undefined): boolean {
+    return proto3.util.equals(CertRestartV1, a, b);
   }
 }
 
