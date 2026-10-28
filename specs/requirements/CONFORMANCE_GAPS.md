@@ -5047,11 +5047,33 @@ Each item below turns on one of four clauses:
    - *Why it stays green.* A read-ahead keeps only the releases from the root it was asked about (`named_successor_keeps`), and the walk looks up only its own cell. So the read-ahead of the walk's own cell holds what the walk's own read holds.
    - *What would tell them apart.* A read cut short by the 24 MiB read-ahead window (`READ_AHEAD_BYTES`), or a cell that turns final between the read-ahead and the walk reaching it. No test builds either: the first needs a cell flooded past the window, the second a race inside one walk.
    - *What the mutant can do.* Even under it, the walk can only stop short. Every generation it establishes is still one Core read final.
-   - *Owed.* A test that makes a read-ahead read of the walk's own cell incomplete.
+   - *Owed.* A test that makes a read-ahead read of the walk's own cell incomplete. Closed by the follow-up below, which also corrects the second bullet: no flooding is needed.
 2. *The vault read-ahead has no SDK gate to remove (MR-DSM-0310, MR-DSM-0312, vault row).* This is read from source and was not run. `vault_history::read_ahead` returns a report and nothing else. A cell is kept for the walk only when Core's completion proof holds (`LiveSofiReads::keep_completion`), and the walk is `Verifier::chain`. What protects the row is Core's walk, together with the constructor gate [7], whose mutation is recorded above.
-3. *Observation, not run (MR-SOFI-0399).* `owe_missing_hints` skips a generation that any hint names, whatever root that hint names. Whether a lying hint at a generation can stop a walker from owing the honest hint there was not tested.
+3. *Observation, not run (MR-SOFI-0399).* `owe_missing_hints` skips a generation that any hint names, whatever root that hint names. Whether a lying hint at a generation can stop a walker from owing the honest hint there was not tested. Run in the follow-up below: it did, and is fixed.
 
 **Rows.** No status changes. The matrix rows gain their mutation cells, and two Negative test cells gain the tests these runs used: `a_resolution_answered_for_another_coordinate_is_invalid` and `a_checkpoint_end_matches_only_the_head_the_walk_reached`.
+
+**Follow-up: findings 1 and 3 (`test/reserve-read-ahead-and-owed-hints`, 2026-10-27).**
+- *Method.* As above:
+  - one DSM_MUTANT build, in a fresh scratch worktree at `0e567964` carrying this branch's changes, with its own target;
+  - each test run by exact name, `--release`, unmutated, mutated and unmutated again;
+  - node tests on `dsm_node_test_lineage`.
+
+  The scratch tree also carried a probe that printed what the read-ahead window gave and refused. Like the switches, it is not in this branch.
+- *Finding 3, run: a lying hint did stop the honest hint being owed.*
+  - *The test.* `dsm_sdk::handlers::faucet_flow_tests::a_lying_hint_does_not_stop_a_walker_owing_the_generations_own`. A device makes three claims. Each claim walks before it releases, so after the third no walk has established generation 3 and nothing owes its hint. A hint naming another root at generation 3 is then appended. A walk and the sweep follow.
+  - *On the code before the fix* the test failed: generation 3's own root was not in the index, and the lie was the only hint there. Every later walker would have skipped the generation in the same way.
+  - *The fix.* `Candidates` now keeps the hints it found, by generation. `owe_missing_hints` owes a generation's hint unless that very hint was found (`Candidates::holds`), as `owe_checkpoint` already treats another checkpoint for a start. Another hint at the generation, which anyone may append naming any root, is not the generation's own.
+  - *Results.* The test passes, with `a_reserve_walker_publishes_a_hint_for_each_generation_it_established`, `lying_reserve_hints_change_nothing_a_walk_establishes` and the five `lineage_discovery` unit tests (8/0). Restoring the old rule (`owe_hint_any_root`) turns the test red at generation 3.
+  - *What the defect cost.* Discovery only: a reader read that generation's cell when it reached it, rather than ahead of time.
+- *Finding 1, a test that needs no seam.* `dsm_sdk::handlers::faucet_flow_tests::a_walk_past_what_its_read_ahead_holds_establishes_the_whole_lineage`.
+  - *Setup.* 140 releases, each generation hinted by the walkers that established it. A device that keeps nothing of the reserve then walks to the head.
+  - *Why no seam is needed.* The read-ahead window charges only what a read keeps (the releases from the named root). It is the production `READ_AHEAD_BYTES` (24 MiB), and the honest index fills it. Finding 1's second bullet was wrong: no flooding is needed.
+  - *The probe.* The fresh walk read ahead 112 named cells, seven chunks of 16. The window refused 63 of their 560 seat reads and was left with about 44 KB, less than one release copy. The 497 copies it kept were about 50.6 KB each.
+  - *Unmutated,* the walk read again the cells the window had cut short, reached generation 140, and established the lineage the claimant's walks did (about 70 s).
+  - *Under `reserve_ahead_unresolved`* the walk took the first of those reads as it was. It stopped `Unavailable` at generation 97, the first cell of the chunk in which the window ran out.
+  - So the filter is load-bearing for the walk reaching its head. That a read-ahead never establishes a generation Core did not read final holds with the filter or without it.
+- *Findings 1 and 3 are closed. Finding 2 stands.* The matrix rows for the reserve walk and for MR-SOFI-0399 gain the two tests and their mutation controls. The MR-SOFI-0399 row now reads: unless that very hint was found.
 
 ### 6.107 Twelve rows with no test of their own: tests on the real nodes and the production builders, and a mutation control for each gate (`test/sofi-missing-tests`, 2026-10-27)
 
