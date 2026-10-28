@@ -94,9 +94,9 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.r
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	212	dispatch_envelope_via_ingress	ingress dispatch; unproved	f719b4eb5d2a15ddc1c3b404c6e47df8d9efb951
 dsm_client/deterministic_state_machine/dsm_sdk/src/jni/unified_protobuf_bridge.rs	986	Java_com_dsm_wallet_bridge_UnifiedNativeApi_processEnvelopeV3	JNI byte-array and unwind boundary; unproved	f719b4eb5d2a15ddc1c3b404c6e47df8d9efb951
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/core_bridge_adapters.rs	100	install_app_router_adapter	router installation; unproved	e8c13660a518419c200f790a980030300b4528ee
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	46	signing_digest	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	51	sign_own	AK sphincs_sign on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	60	verify	sphincs_verify on signing_digest; unproved	d776a226e2f5f3a0dd52b0406eb1e0f68238e975
+dsm_client/deterministic_state_machine/dsm/src/connect.rs	114	statement	WrapperInjective.lean: connect_signing_injective / signing_domain_separation	fcd2fbc8578b591006fa9cbefb5ac8f8dd1f25f8
+dsm_client/deterministic_state_machine/dsm/src/connect.rs	120	verify	sphincs_verify on statement; unproved	fcd2fbc8578b591006fa9cbefb5ac8f8dd1f25f8
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/connect/signed.rs	16	sign_own	AK sphincs_sign on dsm::connect::statement; unproved	7a29b33e781803d3373406aff3af4bb27d4ec669
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	101	statement	WrapperInjective.lean: escrow_statement_injective / signing_domain_separation	b88c48793f371ead186b2df61c2ed13063e2fdc3
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	128	sign_statement	sphincs_sign on statement digest; unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3
 dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_authority	signer set + verify per signature; tested, unproved	b88c48793f371ead186b2df61c2ed13063e2fdc3

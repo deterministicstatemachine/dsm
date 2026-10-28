@@ -135,8 +135,8 @@ theorem escrow_statement_injective (k₁ k₂ : Wire 32) (o₁ o₂ : Bytes)
 
 /-! ## DSM Connect signed objects (DSM Amendment A11)
 
-`signing_digest(kind, body) = H(<kind tag> ‖ body)`,
-`dsm_sdk::sdk::connect::signed::signing_digest`. -/
+`statement(kind, body) = H(<kind tag> ‖ body)`,
+`dsm::connect::statement`. -/
 
 inductive ConnectKind where
   | offer | accept | request | response

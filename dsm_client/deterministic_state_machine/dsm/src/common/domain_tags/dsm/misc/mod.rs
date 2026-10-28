@@ -51,9 +51,9 @@ pub(super) fn shared_lineage_tags() -> &'static [TaggedHashDomain<'static>] {
 #[cfg(test)]
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
-    TAG_DSM_ADDR_D,
-    TAG_DSM_ADDR_G,
-    TAG_DSM_ADDR_T,
+    TAG_DSM_AUTHORED_LOCATOR,
+    TAG_DSM_AUTHORED_OBJECT,
+    TAG_DSM_AUTHORED_STATEMENT,
     TAG_DSM_BTC_DEPOSIT_ID,
     TAG_DSM_BTC_KEY_ENC,
     TAG_DSM_CANONICAL_LP,

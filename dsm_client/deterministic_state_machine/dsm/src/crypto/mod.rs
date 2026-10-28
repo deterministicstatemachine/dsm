@@ -70,6 +70,7 @@ pub mod kyber;
 pub mod rng;
 pub mod signatures;
 pub mod sphincs;
+pub mod spool_address;
 pub mod spool_seal;
 
 // Micro-level determinism property tests.

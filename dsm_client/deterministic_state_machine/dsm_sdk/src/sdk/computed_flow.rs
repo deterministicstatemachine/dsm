@@ -314,8 +314,7 @@ pub async fn create(
         .as_deref()
         .ok_or_else(|| refuse("no proof that the opponent holds the creatures it fields"))?;
     let their_holdings: dsm::types::proto::HoldingsProofV1 =
-        crate::sdk::connect::signed::canonical(relayed, "the opponent's holdings proof")
-            .map_err(refuse)?;
+        dsm::connect::canonical(relayed, "the opponent's holdings proof").map_err(refuse)?;
     crate::sdk::outcome_programs::check_teams(
         core,
         set,

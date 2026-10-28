@@ -751,12 +751,11 @@ fn build_relationship_finalized_artifact(
             Ok(None) => return Err("no contact for the recipient".to_string()),
             Err(e) => return Err(format!("recipient contact lookup: {e}")),
         };
-    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+    let route = dsm::crypto::spool_address::inbox_address(
         &recipient_genesis,
         &proposal.counterparty_device_id,
         &proposal.projection_target,
-    )
-    .map_err(|e| format!("certificate route: {e}"))?;
+    );
     let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
         .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
         .ok_or_else(|| "local genesis unavailable".to_string())?;

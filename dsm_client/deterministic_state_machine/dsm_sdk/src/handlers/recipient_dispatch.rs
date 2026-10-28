@@ -1047,12 +1047,8 @@ mod tests {
             Some(paid_from.as_slice()),
             "the tip A paid from is B's previous tip with A"
         );
-        let previous_route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &p.b.genesis,
-            &p.b.device_id,
-            &paid_from,
-        )
-        .expect("B's route for that tip");
+        let previous_route =
+            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &paid_from);
         assert_eq!(
             previous_route, one.route,
             "the honest payment arrived on that route"
@@ -1297,9 +1293,7 @@ mod tests {
                 .expect("C's relationship tip with A")
         };
         let before = tip(&c);
-        let route =
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&c.genesis, &c.device_id, &before)
-                .expect("C's route for A");
+        let route = dsm::crypto::spool_address::inbox_address(&c.genesis, &c.device_id, &before);
 
         c.enter();
         let receipt = ingested(ingest_evidence_half(
@@ -2133,7 +2127,7 @@ mod tests {
             &outer,
         )
         .expect("B opens it");
-        crate::sdk::b0x_sdk::envelope_merge_key(&inner)
+        dsm::crypto::spool_address::envelope_merge_key(&inner)
     }
 
     /// On each of `members`, the honest copy under `message_id` at `route`
@@ -2322,7 +2316,7 @@ mod tests {
                 }
             }
         }
-        let copy_key = crate::sdk::b0x_sdk::envelope_merge_key(&inner);
+        let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
         from.enter();
         crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec()).expect("seal");
         let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(

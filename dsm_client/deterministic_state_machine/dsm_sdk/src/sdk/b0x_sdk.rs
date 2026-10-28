@@ -15,6 +15,10 @@
 //! sealed once and its bytes are kept by message id (`client_db::b0x_sealed`),
 //! so every member and every retry gets the same bytes. No wall clocks, no
 //! JSON, no hex in protocol logic.
+//!
+//! Where a payload goes and the ids it goes under are Core's
+//! (`dsm::crypto::spool_address`): its sender and its recipient compute them
+//! identically. This module is the transport that writes and reads there.
 
 use dsm::spool::{MAX_BATCH_RETRIEVE, MAX_ENVELOPE_BYTES};
 use dsm::types::error::DsmError;
@@ -413,8 +417,8 @@ pub struct B0xSubmissionParams {
     pub transaction: Operation,
     pub signature: Vec<u8>,
     pub sender_genesis_hash: String, // base32 of 32-byte genesis
-    /// Tip-scoped b0x routing address (§16.4).
-    /// Computed via `B0xSDK::compute_b0x_address(recipient_genesis, recipient_device, chain_tip)`.
+    /// Tip-scoped b0x routing address (storage spec §8): Core's
+    /// `spool_address::inbox_address(recipient_genesis, recipient_device, chain_tip)`.
     pub routing_address: String,
     /// §4.2.1 Canonical unsigned Operation bytes (signing preimage).
     /// The exact bytes the sender signed with SPHINCS+.  The receiver MUST
@@ -446,8 +450,6 @@ pub struct B0xSDK {
     /// names there: it accepts only that member's certificate.
     member_clients: HashMap<String, reqwest::Client>,
     circuit_breaker: CircuitBreaker,
-    salt_genesis: [u8; 32],
-    salt_device: [u8; 32],
     /// Write quorum K for multi-node ops (submit/ack). Default 3.
     quorum_k: usize,
     /// ADR 0003 B-side countersign deltas decoded during the most recent
@@ -543,56 +545,6 @@ impl CircuitBreaker {
             info!("CircuitBreaker: {} back to healthy", endpoint);
         }
     }
-}
-
-/// Spool message id for an acceptance reply: 16 opaque bytes derived from the
-/// transition's own commitment (never wall-clock), stable across reposts so
-/// the recipient's replay check recognizes a redelivery (impact-table row
-/// B5).
-pub(crate) fn reply_message_id(commitment: &[u8], sender_projection_tip: &[u8]) -> Vec<u8> {
-    let mut h =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-reply-message-id"));
-    h.update(commitment);
-    h.update(sender_projection_tip);
-    h.finalize().as_bytes()[..16].to_vec()
-}
-
-/// Cross-endpoint merge key for a polled envelope: `(message_id, CONTENT digest)`,
-/// deliberately NOT `message_id` alone.
-///
-/// Identical replicas of one message still collapse to a single entry, so the
-/// honest case is unchanged. Two copies that DISAGREE under one message id are
-/// both surfaced, and the consumer decides which (if either) verifies.
-///
-/// Keying on `message_id` alone made the merge first-responder-wins: whichever
-/// endpoint answered first durably shadowed every other copy of that message.
-/// These ids are DETERMINISTIC (see [`reply_message_id`]), so the shadowing
-/// repeated identically on every poll — a single replica serving a tampered copy
-/// could suppress the honest copies indefinitely, and no amount of retrying
-/// would ever surface a good one. Recovering from a bad acceptance artifact is
-/// meaningless if a correct replacement can never be seen.
-pub(crate) fn envelope_merge_key(env: &dsm::types::proto::Envelope) -> String {
-    let mut h =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-envelope-content"));
-    h.update(&env.encode_to_vec());
-    format!(
-        "{}:{}",
-        text_id::encode_base32_crockford(&env.message_id),
-        text_id::encode_base32_crockford(&h.finalize().as_bytes()[..8]),
-    )
-}
-
-/// Transport-local spool id for a cert-resync message, from method + route + a
-/// digest of the body. IMPACT-TABLE ROW B6, same defect and same extraction
-/// reason as [`reply_message_id`].
-pub(crate) fn certresync_message_id(method: &str, recipient_tip: &[u8], body: &[u8]) -> Vec<u8> {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
-        b"DSM/b0x-certresync-message-id"
-    ));
-    h.update(method.as_bytes());
-    h.update(recipient_tip);
-    h.update(body);
-    h.finalize().as_bytes()[..16].to_vec()
 }
 
 /// Where `storage.sync` last read each member's spool at each address to its
@@ -789,41 +741,6 @@ pub(crate) async fn wait_on_member(
 }
 
 impl B0xSDK {
-    fn hash_b0x_component(
-        domain_tag: dsm::crypto::domain::TaggedHashDomain<'_>,
-        input: &[u8],
-    ) -> [u8; 32] {
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(domain_tag);
-        hasher.update(input);
-        *hasher.finalize().as_bytes()
-    }
-
-    /// Derive a per-device blinding salt from domain tag and device identity.
-    ///
-    /// §16.4: salt = BLAKE3("DSM/b0x-salt-{G|D}\0" || genesis_hash || device_id)
-    /// where genesis_hash is obtained from AppState (master secret Smaster).
-    /// Falls back to device_id-only derivation if genesis is not yet available
-    /// (e.g. during initial registration before genesis is stored).
-    fn derive_salt(domain_tag: &[u8], device_id_bytes: &[u8]) -> [u8; 32] {
-        // §16.4: salt = BLAKE3("DSM/b0x-salt-{G|D}\0" || genesis_hash || device_id).
-        // genesis_hash is the public Genesis v2 digest `G`; combined with device_id it
-        // gives per-device, domain-separated salts. (A future §16.4 hardening can fold the secret
-        // Smaster here once b0x salt derivation is wired through the unlocked-wallet path.)
-        // Runtime domain: validated at construction, falling back to a fixed
-        // static domain rather than silently normalizing a malformed one.
-        let tag = dsm::crypto::domain::TaggedHashDomain::try_new(domain_tag)
-            .unwrap_or(dsm::tagged_domain!(b"DSM/b0x-salt"));
-        let mut hasher = dsm::crypto::blake3::dsm_domain_hasher(tag);
-        // Augment with public genesis material for domain separation when storage is available.
-        if crate::storage_utils::get_storage_base_dir().is_some() {
-            if let Some(genesis) = crate::sdk::app_state::AppState::get_genesis_hash() {
-                hasher.update(&genesis);
-            }
-        }
-        hasher.update(device_id_bytes);
-        *hasher.finalize().as_bytes()
-    }
-
     /// The delivery quorum this SDK fans out to.
     pub fn delivery_quorum(&self) -> usize {
         self.quorum_k
@@ -922,8 +839,6 @@ impl B0xSDK {
             storage_node_endpoints: storage_endpoints,
             member_clients,
             circuit_breaker: CircuitBreaker::new(),
-            salt_genesis: Self::derive_salt(b"DSM/b0x-salt-G", &decoded),
-            salt_device: Self::derive_salt(b"DSM/b0x-salt-D", &decoded),
             quorum_k,
             pending_countersign_deltas: Vec::new(),
             pending_relationship_finalized: Vec::new(),
@@ -934,175 +849,9 @@ impl B0xSDK {
         Ok(sdk)
     }
 
-    /// Compute the deterministic b0x routing key for (genesis, device, tip).
-    ///
-    /// Each input is first domain-separated on its own axis, then folded into
-    /// a single 32-byte routing digest:
-    /// `Base32Crockford(BLAKE3-256("DSM/b0x\0" || h_g || h_d || h_t))`
-    /// where `h_g = BLAKE3("DSM/b0x-G\0" || genesis)`,
-    /// `h_d = BLAKE3("DSM/b0x-D\0" || device)`,
-    /// and `h_t = BLAKE3("DSM/b0x-T\0" || tip)`.
-    /// Each input MUST be exactly 32 bytes.
-    pub fn compute_b0x_address(
-        genesis: &[u8],
-        device: &[u8],
-        tip: &[u8],
-    ) -> Result<String, DsmError> {
-        if genesis.len() != 32 || device.len() != 32 || tip.len() != 32 {
-            return Err(DsmError::invalid_parameter(
-                "genesis/device/tip must be 32 bytes",
-            ));
-        }
-        let h_g = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), genesis);
-        let h_d = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), device);
-        let h_t = Self::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), tip);
-
-        let mut hasher =
-            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
-        hasher.update(&h_g);
-        hasher.update(&h_d);
-        hasher.update(&h_t);
-        let h = hasher.finalize();
-        let addr = crate::util::text_id::encode_base32_crockford(h.as_bytes());
-        validate_b0x_address(&addr)?;
-        Ok(addr)
-    }
-
-    /// Compute the canonical rotated b0x routing key from an explicit bilateral
-    /// relationship tip. Missing or malformed tips are rejected instead of being
-    /// normalized to a legacy zero-tip route.
-    pub fn compute_b0x_address_for_optional_tip(
-        genesis: &[u8],
-        device: &[u8],
-        chain_tip: Option<&[u8]>,
-    ) -> Result<String, DsmError> {
-        match chain_tip {
-            Some(tip) if tip.len() == 32 => Self::compute_b0x_address(genesis, device, tip),
-            Some(tip) => Err(DsmError::invalid_parameter(format!(
-                "relationship tip must be exactly 32 bytes, got {}",
-                tip.len()
-            ))),
-            None => Err(DsmError::invalid_parameter(
-                "relationship tip is required for rotated b0x routing",
-            )),
-        }
-    }
-
     #[inline]
     pub fn device_id(&self) -> &str {
         &self.device_id
-    }
-
-    // ------------------------------------------------------------------------
-    // b0x ID derivation (deterministic salts; no clocks)
-    // ------------------------------------------------------------------------
-    pub async fn b0x_id(&mut self, chain_tip_b32: &str) -> Result<String, DsmError> {
-        // Use nonce=0 for stable routing key per relationship-step.
-        // The receiver derives the address from the shared chain tip and expects nonce=0.
-        let nonce = 0;
-
-        // Prefer persisted canonical genesis from AppState; use core path for tests
-        let local_genesis_bytes: [u8; 32] =
-            match crate::sdk::app_state::AppState::get_genesis_hash() {
-                Some(g) if g.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&g);
-                    arr
-                }
-                _ => {
-                    let g = self.core_sdk.local_genesis_hash().await?;
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&g);
-                    arr
-                }
-            };
-
-        // Decode inputs
-        let device_id_bytes = crate::util::text_id::decode_base32_crockford(&self.device_id)
-            .ok_or_else(|| {
-                DsmError::internal("device_id base32 decode failed", None::<std::io::Error>)
-            })?;
-        let chain_tip_bytes = crate::util::text_id::decode_base32_crockford(chain_tip_b32)
-            .ok_or_else(|| {
-                DsmError::internal("chain_tip base32 decode failed", None::<std::io::Error>)
-            })?;
-        let mut dev_arr = [0u8; 32];
-        dev_arr.copy_from_slice(&device_id_bytes[..32]);
-        let mut tip_arr = [0u8; 32];
-        tip_arr.copy_from_slice(&chain_tip_bytes[..32]);
-
-        Self::b0x_id_for_device_with_salts(
-            &local_genesis_bytes,
-            &tip_arr,
-            &dev_arr,
-            &self.salt_genesis,
-            &self.salt_device,
-            nonce,
-        )
-        .await
-    }
-
-    pub async fn b0x_id_for_device(
-        &mut self,
-        recipient_genesis: &[u8; 32],
-        chain_tip: &[u8; 32],
-        device_id: &[u8; 32],
-    ) -> Result<String, DsmError> {
-        // Use nonce=0 for stable routing key
-        let nonce = 0;
-        Self::b0x_id_for_device_with_salts(
-            recipient_genesis,
-            chain_tip,
-            device_id,
-            &self.salt_genesis,
-            &self.salt_device,
-            nonce,
-        )
-        .await
-    }
-
-    pub async fn b0x_id_for_device_with_salts(
-        recipient_genesis: &[u8; 32],
-        chain_tip: &[u8; 32],
-        device_id: &[u8; 32],
-        salt_genesis: &[u8; 32],
-        salt_device: &[u8; 32],
-        nonce: u64,
-    ) -> Result<String, DsmError> {
-        // §16.4: Domain-separated blinded address components
-        // h_G = BLAKE3("DSM/addr-G\0" || genesis || salt_genesis)
-        let h_g = {
-            let mut h =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_G);
-            h.update(recipient_genesis);
-            h.update(salt_genesis);
-            h.finalize()
-        };
-
-        // h_D = BLAKE3("DSM/addr-D\0" || device_id || salt_device)
-        let h_d = {
-            let mut h =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_D);
-            h.update(device_id);
-            h.update(salt_device);
-            h.finalize()
-        };
-
-        // h_T = BLAKE3("DSM/addr-T\0" || chain_tip || nonce)
-        let h_t = {
-            let mut h =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_T);
-            h.update(chain_tip);
-            h.update(&nonce.to_be_bytes());
-            h.finalize()
-        };
-
-        let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
-        h.update(h_g.as_bytes());
-        h.update(h_d.as_bytes());
-        h.update(h_t.as_bytes());
-        let id = crate::util::text_id::encode_base32_crockford(h.finalize().as_bytes());
-        Ok(id)
     }
 
     // ------------------------------------------------------------------------
@@ -1425,7 +1174,9 @@ impl B0xSDK {
         // Transport-local id: 16 opaque bytes derived from the transition's own
         // commitment (never wall-clock). Stable across reposts, so a redelivery
         // collapses onto the same spool row instead of piling up duplicates.
-        let message_id_bytes = reply_message_id(&commitment, sender_projection_tip);
+        let message_id_bytes =
+            dsm::crypto::spool_address::reply_message_id(&commitment, sender_projection_tip)
+                .to_vec();
         let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         // CARRIER CHOICE (deliberate): storage nodes validate transport envelopes
@@ -1531,8 +1282,11 @@ impl B0xSDK {
         b_pair: ([u8; 32], [u8; 32]),
         release_bytes: &[u8],
     ) -> Result<String, DsmError> {
-        let routing_key =
-            Self::compute_b0x_address(sender_genesis, sender_device_id, sender_projection_tip)?;
+        let routing_key = dsm::crypto::spool_address::inbox_address(
+            sender_genesis,
+            sender_device_id,
+            sender_projection_tip,
+        );
         let local_genesis = self.resolve_local_genesis().await?;
         let built = self.build_countersign_reply_envelope(
             &local_genesis,
@@ -1702,11 +1456,16 @@ impl B0xSDK {
         recipient_tip: &[u8; 32],
     ) -> Result<String, DsmError> {
         use prost::Message as _;
-        let routing_key =
-            Self::compute_b0x_address(recipient_genesis, recipient_device, recipient_tip)?;
+        let routing_key = dsm::crypto::spool_address::inbox_address(
+            recipient_genesis,
+            recipient_device,
+            recipient_tip,
+        );
 
         // Deterministic transport id from method + route + a digest of the body.
-        let message_id_bytes = certresync_message_id(method, recipient_tip, &body);
+        let message_id_bytes =
+            dsm::crypto::spool_address::certresync_message_id(method, recipient_tip, &body)
+                .to_vec();
         let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         let local_device_bytes =
@@ -2756,7 +2515,7 @@ impl B0xSDK {
                             // A copy this device passed over is not read
                             // again: by its content, so another copy under
                             // the same id still is.
-                            let copy_key = envelope_merge_key(&inner);
+                            let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
                             if b0x_consumed::is_passed_over(b0x_address, &copy_key)
                                 .map_err(local)?
                             {
@@ -2991,137 +2750,6 @@ impl B0xSDK {
 #[allow(clippy::disallowed_methods, clippy::useless_conversion)]
 mod tests {
 
-    /// IMPACT-TABLE ROWS B5 and B6, asserted in both directions.
-    ///
-    /// Both derive a spool message id. The double-NUL spelling carried its own
-    /// NUL into `dsm_domain_hasher`, which appends another, so its preimage
-    /// began `"…id" || 0x00 || 0x00`; it is reconstructed below to show the
-    /// id moved.
-    #[test]
-    fn b5_and_b6_message_ids_moved_off_the_double_nul_digest() {
-        fn old_id(tag_with_nul: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-            let mut h = blake3::Hasher::new();
-            h.update(tag_with_nul); // the literal, NUL included
-            h.update(&[0u8]); // the helper's appended NUL
-            for p in parts {
-                h.update(p);
-            }
-            h.finalize().as_bytes()[..16].to_vec()
-        }
-        fn canonical_id(tag: &[u8], parts: &[&[u8]]) -> Vec<u8> {
-            let mut h = blake3::Hasher::new();
-            h.update(tag);
-            h.update(&[0u8]);
-            for p in parts {
-                h.update(p);
-            }
-            h.finalize().as_bytes()[..16].to_vec()
-        }
-
-        // B5
-        let commitment = [0xA1u8; 32];
-        let tip = [0xB2u8; 32];
-        let b5 = super::reply_message_id(&commitment, &tip);
-        assert_ne!(
-            b5,
-            old_id(b"DSM/b0x-reply-message-id\0", &[&commitment, &tip]),
-            "B5 still produces the doubled-NUL id"
-        );
-        assert_eq!(
-            b5,
-            canonical_id(b"DSM/b0x-reply-message-id", &[&commitment, &tip]),
-            "B5 did not land on the canonical id"
-        );
-        assert_eq!(b5.len(), 16, "the spool id is 16 truncated bytes");
-
-        // B6
-        let method = "cert.resync";
-        let rtip = [0xC3u8; 32];
-        let body = [0xD4u8; 48];
-        let b6 = super::certresync_message_id(method, &rtip, &body);
-        assert_ne!(
-            b6,
-            old_id(
-                b"DSM/b0x-certresync-message-id\0",
-                &[method.as_bytes(), &rtip, &body]
-            ),
-            "B6 still produces the doubled-NUL id"
-        );
-        assert_eq!(
-            b6,
-            canonical_id(
-                b"DSM/b0x-certresync-message-id",
-                &[method.as_bytes(), &rtip, &body]
-            ),
-            "B6 did not land on the canonical id"
-        );
-
-        // The two domains stay separated from each other.
-        assert_ne!(b5, b6, "B5 and B6 must not share an id space");
-    }
-
-    /// The property the ids exist for, preserved across the cut: a repost of the
-    /// same logical message derives the SAME id, so a redelivery collapses onto
-    /// one spool row rather than piling up.
-    #[test]
-    fn a_repost_still_derives_the_same_spool_id() {
-        let c = [0x11u8; 32];
-        let t = [0x22u8; 32];
-        assert_eq!(
-            super::reply_message_id(&c, &t),
-            super::reply_message_id(&c, &t)
-        );
-        assert_ne!(
-            super::reply_message_id(&c, &t),
-            super::reply_message_id(&c, &[0x23u8; 32]),
-            "a different projection tip must give a different id"
-        );
-    }
-
-    /// Cross-endpoint merge must not be first-responder-wins.
-    ///
-    /// Because spool ids are deterministic, a merge keyed on `message_id` alone
-    /// let ONE replica serving a tampered copy shadow every honest copy, on every
-    /// poll, forever. That is what made a bad acceptance artifact unrecoverable:
-    /// the corrected copy existed on other replicas and could never be seen.
-    #[test]
-    fn divergent_copies_of_one_message_id_do_not_shadow_each_other() {
-        // `genesis_hash` stands in for "the bytes a middlebox could alter": any
-        // encoded-byte difference under one message id must survive the merge.
-        let envelope = |message_id: &[u8; 16], content: u8| dsm::types::proto::Envelope {
-            version: 3,
-            headers: Some(dsm::types::proto::Headers {
-                device_id: vec![0x11; 32],
-                genesis_hash: vec![content; 32],
-            }),
-            message_id: message_id.to_vec(),
-            payload: None,
-        };
-        let (id1, id2) = (&[0xA1u8; 16], &[0xB2u8; 16]);
-
-        // Identical replicas of the same message still collapse: the honest
-        // multi-replica case is unchanged.
-        assert_eq!(
-            super::envelope_merge_key(&envelope(id1, 0xAA)),
-            super::envelope_merge_key(&envelope(id1, 0xAA)),
-            "identical replicas must still merge to one entry"
-        );
-
-        // A tampered copy under the SAME id gets its own key, so both survive the
-        // merge and the consumer can reject one and accept the other.
-        assert_ne!(
-            super::envelope_merge_key(&envelope(id1, 0xAA)),
-            super::envelope_merge_key(&envelope(id1, 0xBB)),
-            "two copies that disagree under one message id must BOTH survive"
-        );
-
-        // The message id is still part of the key -- identical bytes under
-        // different ids remain distinct messages.
-        assert_ne!(
-            super::envelope_merge_key(&envelope(id1, 0xAA)),
-            super::envelope_merge_key(&envelope(id2, 0xAA)),
-        );
-    }
     use super::*;
 
     /// A device with a real identity, over a fresh database: its device id
@@ -3138,154 +2766,6 @@ mod tests {
     }
 
     use std::sync::Arc;
-
-    #[test]
-    fn test_b0x_id_generation() {
-        // Use domain-separated salt derivation per §16.4
-        let device_id = [0x33u8; 32];
-        let salt_g = B0xSDK::derive_salt(b"DSM/b0x-salt-G", &device_id);
-        let salt_d = B0xSDK::derive_salt(b"DSM/b0x-salt-D", &device_id);
-        let recipient_genesis = [0x11u8; 32];
-        let chain_tip = [0x22u8; 32];
-        let id = futures::executor::block_on(B0xSDK::b0x_id_for_device_with_salts(
-            &recipient_genesis,
-            &chain_tip,
-            &device_id,
-            &salt_g,
-            &salt_d,
-            0,
-        ))
-        .unwrap();
-        assert!(base32_decodes_to_32_bytes(&id));
-    }
-
-    #[test]
-    fn test_salts_are_domain_separated() {
-        let dev = [0xAAu8; 32];
-        let salt_g = B0xSDK::derive_salt(b"DSM/b0x-salt-G", &dev);
-        let salt_d = B0xSDK::derive_salt(b"DSM/b0x-salt-D", &dev);
-        // Different domain tags must produce different salts
-        assert_ne!(salt_g, salt_d, "genesis and device salts must differ");
-    }
-
-    #[test]
-    fn test_salts_vary_per_device() {
-        let dev_a = [0x01u8; 32];
-        let dev_b = [0x02u8; 32];
-        let salt_a = B0xSDK::derive_salt(b"DSM/b0x-salt-G", &dev_a);
-        let salt_b = B0xSDK::derive_salt(b"DSM/b0x-salt-G", &dev_b);
-        // Different devices must produce different salts (correlation resistance)
-        assert_ne!(salt_a, salt_b, "salts must vary per device");
-    }
-
-    #[test]
-    fn test_address_components_domain_separated() {
-        // Verify that address components use different domain tags
-        let data = [0x11u8; 32];
-        let salt = [0x33u8; 32];
-
-        // h_G uses "DSM/addr-G"
-        let h_g = {
-            let mut h =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_G);
-            h.update(&data);
-            h.update(&salt);
-            *h.finalize().as_bytes()
-        };
-        // h_D uses "DSM/addr-D" with SAME input data
-        let h_d = {
-            let mut h =
-                dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_ADDR_D);
-            h.update(&data);
-            h.update(&salt);
-            *h.finalize().as_bytes()
-        };
-        // Even with identical data, different domain tags must produce different results
-        assert_ne!(
-            h_g, h_d,
-            "domain tags must differentiate address components"
-        );
-    }
-
-    #[test]
-    fn test_compute_b0x_address_rotation() {
-        let genesis = dsm::crypto::rng::generate_secure_random(32).expect("rand");
-        let device = dsm::crypto::rng::generate_secure_random(32).expect("rand");
-        let tip1 = dsm::crypto::rng::generate_secure_random(32).expect("rand");
-        let tip2 = dsm::crypto::rng::generate_secure_random(32).expect("rand");
-
-        let a1 = B0xSDK::compute_b0x_address(&genesis, &device, &tip1).expect("ok");
-        let a2 = B0xSDK::compute_b0x_address(&genesis, &device, &tip2).expect("ok");
-        assert_ne!(a1, a2, "addresses must rotate when tip changes");
-        assert_eq!(a1.len(), 52, "expected 52 base32 chars for 32-byte digest");
-        assert!(base32_decodes_to_32_bytes(&a1));
-        assert!(base32_decodes_to_32_bytes(&a2));
-    }
-
-    #[test]
-    fn test_compute_b0x_address_matches_domain_hashed_formula() {
-        let genesis = [0x11u8; 32];
-        let device = [0x22u8; 32];
-        let tip = [0x33u8; 32];
-
-        let actual = B0xSDK::compute_b0x_address(&genesis, &device, &tip).expect("ok");
-
-        let h_g = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-G"), &genesis);
-        let h_d = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-D"), &device);
-        let h_t = B0xSDK::hash_b0x_component(dsm::tagged_domain!(b"DSM/b0x-T"), &tip);
-
-        let mut hasher =
-            dsm::crypto::blake3::dsm_domain_hasher(dsm::common::domain_tags::TAG_DSM_B0X);
-        hasher.update(&h_g);
-        hasher.update(&h_d);
-        hasher.update(&h_t);
-        let expected = crate::util::text_id::encode_base32_crockford(hasher.finalize().as_bytes());
-
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn test_compute_b0x_address_allowed_chars() {
-        let genesis = [0u8; 32];
-        let device = [1u8; 32];
-        let tip = [2u8; 32];
-        let a = B0xSDK::compute_b0x_address(&genesis, &device, &tip).expect("ok");
-        assert_eq!(a.len(), 52);
-        for ch in a.chars() {
-            assert!(
-                "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(ch),
-                "invalid char {}",
-                ch
-            );
-        }
-    }
-
-    #[test]
-    fn test_compute_b0x_address_for_optional_tip_rejects_missing_tip() {
-        let genesis = [7u8; 32];
-        let device = [8u8; 32];
-        let err = B0xSDK::compute_b0x_address_for_optional_tip(&genesis, &device, None)
-            .expect_err("missing tip must fail");
-        assert!(
-            err.to_string().contains("relationship tip is required"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_compute_b0x_address_for_optional_tip_rejects_invalid_tip() {
-        let genesis = [9u8; 32];
-        let device = [10u8; 32];
-        let invalid_tip = [11u8; 16];
-        let err =
-            B0xSDK::compute_b0x_address_for_optional_tip(&genesis, &device, Some(&invalid_tip))
-                .expect_err("invalid tip must fail");
-        assert!(
-            err.to_string()
-                .contains("relationship tip must be exactly 32 bytes"),
-            "unexpected error: {err}"
-        );
-    }
 
     #[test]
     fn test_validate_b0x_address_rejects_legacy_bracketed_format() {
@@ -3360,7 +2840,7 @@ mod tests {
             p.fleet.endpoints(),
         )
         .expect("B's spool client");
-        let copy_key = envelope_merge_key(&inner);
+        let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
         let entry = sdk
             .envelope_to_b0x_entry(inner.clone(), &copy_key)
             .expect("a transfer entry");
@@ -3404,7 +2884,7 @@ mod tests {
             };
             invoke.args = None;
         }
-        let copy_key = envelope_merge_key(&stripped);
+        let copy_key = dsm::crypto::spool_address::envelope_merge_key(&stripped);
         let entry = sdk
             .envelope_to_b0x_entry(stripped, &copy_key)
             .expect("still listed");
@@ -4344,7 +3824,7 @@ mod tests {
         assert!(B0xSDK::decode_receipt_evidence_a(&legacy).is_none());
         let (device_b32, core, fleet) = test_device();
         let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
-        let copy_key = envelope_merge_key(&legacy);
+        let copy_key = dsm::crypto::spool_address::envelope_merge_key(&legacy);
         assert!(
             sdk.envelope_to_b0x_entry(legacy, &copy_key).is_none(),
             "a legacy full-receipt reply is not a transfer"

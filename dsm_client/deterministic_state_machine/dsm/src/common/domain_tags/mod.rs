@@ -197,7 +197,12 @@ mod tests {
     // and twelve Expand / keyed labels replace the six v2 key-tree tags,
     // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
     // +1 for an offline settlement's operation id (SA-91, §6.103).
-    const EXPECTED_TAG_COUNT: usize = 413;
+    // +9 with the rules a counterparty computes moving into Core (owner,
+    // 2026-10-28): the inbox address's three axes, the reply and cert-resync
+    // message ids and the copy key's content digest, which the SDK declared
+    // inline, and the authored object's namespace, statement and locator.
+    // -3 with the salted address no caller derived: `DSM/addr-{G,D,T}`.
+    const EXPECTED_TAG_COUNT: usize = 419;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

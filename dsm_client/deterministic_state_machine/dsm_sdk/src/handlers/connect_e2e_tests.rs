@@ -141,7 +141,7 @@ impl ForwardRelay {
         let made = rcgen::generate_simple_self_signed(vec!["127.0.0.1".into(), "localhost".into()])
             .expect("the relay's certificate");
         let cert = made.cert.der().to_vec();
-        let pin = crate::sdk::connect::signed::cert_pin(&cert);
+        let pin = dsm::connect::cert_pin(&cert);
         let config = axum_server::tls_rustls::RustlsConfig::from_der(
             vec![cert],
             made.signing_key.serialize_der(),
@@ -849,7 +849,7 @@ async fn a_wallet_refuses_an_offer_the_code_does_not_vouch_for() {
     // The genuine offer behind a code pinning another certificate.
     relay.held().offer = Some((code.offer_digest, made.offer.clone()));
     let mut wrong_pin = code.clone();
-    wrong_pin.cert_pin = crate::sdk::connect::signed::cert_pin(b"another certificate");
+    wrong_pin.cert_pin = dsm::connect::cert_pin(b"another certificate");
     let pinned = query(
         &p.b,
         "connect.preview",

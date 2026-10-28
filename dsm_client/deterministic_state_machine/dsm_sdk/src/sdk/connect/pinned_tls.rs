@@ -23,7 +23,7 @@ use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvi
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 
-use super::signed::cert_pin;
+use dsm::connect::cert_pin;
 use crate::sdk::bounded_read::{self, Bound, Budget};
 use crate::util::text_id::encode_base32_crockford;
 

@@ -478,7 +478,7 @@ async fn spool_sealed(
     sdk.submit_stored_envelope(route, &id)
         .await
         .expect("delivered to its quorum");
-    crate::sdk::b0x_sdk::envelope_merge_key(inner)
+    dsm::crypto::spool_address::envelope_merge_key(inner)
 }
 
 /// Junk `from` seals to `to` on `route`: a `wallet.send` that carries no
@@ -510,8 +510,7 @@ fn route_with(b: &TestDevice, contact: &TestDevice) -> String {
         .expect("a contact of B's");
     let tip = crate::handlers::app_router_impl::contact_relationship_tip(record)
         .expect("a relationship tip");
-    crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&b.genesis, &b.device_id, &tip)
-        .expect("the route's address")
+    dsm::crypto::spool_address::inbox_address(&b.genesis, &b.device_id, &tip)
 }
 
 /// Pre-audit item 11, the owner's ruling (2026-10-01): each inbox route has
@@ -556,9 +555,7 @@ async fn a_route_full_of_junk_keeps_no_other_route_unread_and_is_worked_through(
         .find(|k| {
             let tip = crate::handlers::app_router_impl::contact_relationship_tip(k)
                 .expect("a relationship tip");
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&p.b.genesis, &p.b.device_id, &tip)
-                .expect("the route's address")
-                == junked
+            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &tip) == junked
         })
         .expect("the route read first is a contact's");
     let (junker, payer) = if first_read.device_id == p.a.device_id.to_vec() {

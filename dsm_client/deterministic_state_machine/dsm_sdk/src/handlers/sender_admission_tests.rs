@@ -921,13 +921,12 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
         .expect("B's contacts")
         .expect("B holds A as a contact");
-    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+    let route = dsm::crypto::spool_address::inbox_address(
         &p.b.genesis,
         &p.b.device_id,
         &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
             .expect("B's relationship tip with A"),
-    )
-    .expect("B's route for A");
+    );
     ingest_transfer_half(
         &transfer_bytes,
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
@@ -1160,13 +1159,12 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
     let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
         .expect("B's contacts")
         .expect("B holds A as a contact");
-    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+    let route = dsm::crypto::spool_address::inbox_address(
         &p.b.genesis,
         &p.b.device_id,
         &crate::handlers::app_router_impl::contact_relationship_tip(&a_contact)
             .expect("B's relationship tip with A"),
-    )
-    .expect("B's route for A");
+    );
     let half = ingest_transfer_half(
         &transfer_bytes,
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),

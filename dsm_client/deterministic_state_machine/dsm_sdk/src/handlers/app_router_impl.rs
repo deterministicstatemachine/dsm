@@ -1651,24 +1651,15 @@ impl AppRouterImpl {
                 chain_tip_arr == [0u8; 32],
             );
 
-            let routing_address = match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+            let routing_address = dsm::crypto::spool_address::inbox_address(
                 &recipient_genesis_raw,
                 &to_device_id,
                 &chain_tip_arr,
-            ) {
-                Ok(addr) => {
-                    log::info!(
-                        "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
-                        &addr[..16.min(addr.len())]
-                    );
-                    addr
-                }
-                Err(e) => {
-                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                        "wallet.send: b0x address rotation failed: {e}"
-                    )));
-                }
-            };
+            );
+            log::info!(
+                "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
+                &routing_address[..16.min(routing_address.len())]
+            );
 
             // ADR 0003: content address of the A-side evidence artifact, over the
             // EXACT wire bytes the receiver will verify signatures against --
@@ -2221,15 +2212,14 @@ pub(crate) fn collect_tagged_inbox_addresses(
     contacts: &[crate::storage::client_db::ContactRecord],
 ) -> Result<Vec<TaggedInboxAddress>, String> {
     let address_for = |tip: &[u8; 32]| {
-        crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&local_genesis, &local_device_id, tip)
-            .map_err(|e| format!("inbox address derivation failed: {e}"))
+        dsm::crypto::spool_address::inbox_address(&local_genesis, &local_device_id, tip)
     };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
         let current_tip = contact_relationship_tip(contact)?;
         addresses.push(TaggedInboxAddress {
-            address: address_for(&current_tip)?,
+            address: address_for(&current_tip),
             freshness: RouteFreshness::Current,
         });
 
@@ -2243,7 +2233,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             })?;
             if prev_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: address_for(&prev_tip)?,
+                    address: address_for(&prev_tip),
                     freshness: RouteFreshness::PreviousTip,
                 });
             }
@@ -2261,7 +2251,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             })?;
             if next_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: address_for(&next_tip)?,
+                    address: address_for(&next_tip),
                     freshness: RouteFreshness::Current,
                 });
             }
@@ -2964,9 +2954,7 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let expected =
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&genesis, &device, &stored_tip)
-                .expect("canonical route");
+        let expected = dsm::crypto::spool_address::inbox_address(&genesis, &device, &stored_tip);
 
         assert_eq!(addresses, vec![expected]);
     }
@@ -3119,12 +3107,8 @@ mod tests {
         };
 
         let recipient_addresses = inbox_addresses(bob_genesis, bob_device, &[alice_as_bob_contact]);
-        let sender_route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &bob_genesis,
-            &bob_device,
-            &initial_tip,
-        )
-        .expect("sender route");
+        let sender_route =
+            dsm::crypto::spool_address::inbox_address(&bob_genesis, &bob_device, &initial_tip);
 
         assert!(
             recipient_addresses.contains(&sender_route),

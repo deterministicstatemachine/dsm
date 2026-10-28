@@ -5,6 +5,21 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 pub const TAG_DSM_B0X: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/b0x");
+/// An inbox address's genesis axis (`crypto::spool_address`).
+pub const TAG_DSM_B0X_G: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-G");
+/// An inbox address's device axis.
+pub const TAG_DSM_B0X_D: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-D");
+/// An inbox address's relationship-tip axis.
+pub const TAG_DSM_B0X_T: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/b0x-T");
+/// An acceptance reply's spool message id.
+pub const TAG_DSM_B0X_REPLY_MESSAGE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-reply-message-id");
+/// A certificate resync message's spool message id.
+pub const TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-certresync-message-id");
+/// The content digest a reader keeps one copy of a spool message by.
+pub const TAG_DSM_B0X_ENVELOPE_CONTENT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/b0x-envelope-content");
 pub const TAG_DSM_B0X_UNILATERAL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/B0X/UNILATERAL");
 pub const TAG_DSM_BILATERAL_COMMIT: TaggedHashDomain<'static> =
@@ -43,6 +58,12 @@ pub const TAG_DSM_SDK_BILATERAL_ENTRY_V1: TaggedHashDomain<'static> =
 #[cfg(test)]
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_B0X,
+    TAG_DSM_B0X_G,
+    TAG_DSM_B0X_D,
+    TAG_DSM_B0X_T,
+    TAG_DSM_B0X_REPLY_MESSAGE_ID,
+    TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
+    TAG_DSM_B0X_ENVELOPE_CONTENT,
     TAG_DSM_B0X_UNILATERAL,
     TAG_DSM_BILATERAL_COMMIT,
     TAG_DSM_BILATERAL_OP_COMMIT,
