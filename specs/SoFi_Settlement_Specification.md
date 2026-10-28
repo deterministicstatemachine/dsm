@@ -987,7 +987,7 @@ key
 
 **Code**
 Body:  CORE/sofi/wire/objects.rs:121, class 0x0036.     Signature              check:     verify_setup, CORE/sofi/
-signature.rs:172. Builder: build_setup, SDK/sdk/sofi_sdk.rs:210.
+signature.rs:172. Builder: setup_body, CORE/sofi/lineage.rs:745, packaged by build_setup, SDK/sdk/sofi_sdk.rs:297.
 
 Equality of setups is equality of ρ. Alternative valid envelopes over one body are the same setup. The setup body is
 published as a content addressed object (Section II); Core recomputes ρ from the fetched bytes.
@@ -2055,7 +2055,7 @@ eration to the accepted owner transition, and genesis_root (:575), which gives R
 
 <!-- spec-section: SOFI-029 -->
 ### 29 Setting up with a vault
-1. build_setup builds the signed setup body; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
+1. setup_body (CORE/sofi/lineage.rs:745) builds the setup body, which build_setup (SDK/sdk/sofi_sdk.rs:297) packages to be signed; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
 setup id with setup_id (:118).
 2. The setup body is put as an object and indexed under ρ. SetupRegistered holds once it is Stored.
 3. The trader’s transition carries SofiSetup: verify_operation checks it, and the relationship leaf h0 from
@@ -2797,7 +2797,7 @@ R5       real evidence acquisition         Evidence built only from fetched byte
 R6       the producer fails closed         SDK/sdk/sofi_sdk.rs:376 validates with real evidence and stops on
 Unavailable (T5, G5)
 R7       Core FulfillmentConformance       the full predicate of Part IV, one named test per item
-R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:210) publishes and indexes the
+R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:297), over Core's setup_body (CORE/sofi/lineage.rs:745), publishes and indexes the
 the setup body                    setup body, which it does not at 817123c (line 266)
 R9       the two position cells            Kful (q) and Kroot (q) written together at the leader of s(q); Cq computed
 from F and P ; PositionPairAtomic as a test

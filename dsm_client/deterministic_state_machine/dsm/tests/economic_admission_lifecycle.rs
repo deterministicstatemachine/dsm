@@ -846,29 +846,36 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 /// E2: `advance_validated` already holds the predecessor and the root derived
 /// from the verified mutation sequence, which is exactly the normative
 /// relation. (`ClaimRef_p` still needs the parent envelope, so it stays E2's.)
+///
+/// The body that passes both is Core's own producer's
+/// (`sofi::lineage::setup_body`, SoFi §2.1): the root it derives on the
+/// predecessor's tree is the root the verifier derives from the transition.
+/// MUTATION CONTROL: the setup-root check removed turns this red.
 #[test]
 fn a_setup_transition_binds_its_position_and_its_derived_root() {
-    use dsm::economic::state::EconomicLeafState;
     use dsm::economic::tree::EconomicSmt;
 
     let vault_id = dsm::sofi::derive::vault_id(&G, dev(), 7);
     // The predecessor is the activation root at position 0, so `p` is 0.
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    let sigma = dsm::sofi::derive::setup_id(&G, dev(), zero.economic_position(), &vault_id);
-    let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
-        vault_id,
-        leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
-    });
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-    tree.insert(
-        state.leaf_key(&G, dev()),
-        state.leaf_value().expect("a leaf value"),
-    );
-    let derived_root = tree.root();
+    let pre_tree = EconomicSmt::new();
+    let pre_root = pre_tree.root();
+    let produced = dsm::sofi::lineage::setup_body(
+        &zero,
+        &pre_tree,
+        &dsm::sofi::lineage::SetupNames {
+            genesis: G,
+            device_id: *dev(),
+            vault_id,
+            claim_ref: [0x66; 32],
+            signature_alg: dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            claimant_public_key: &[0x01; 64],
+        },
+    )
+    .expect("Core builds the setup body on the activation root");
+    let derived_root = *produced.setup_root();
 
-    // A body whose `p` and `R_T^setup` are the derived ones, and three that
-    // are wrong in exactly one way each.
+    // The producer's body, and two that are wrong in exactly one way each.
     let body = |position: u64, setup_root: [u8; 32]| {
         dsm::sofi::wire::SofiSetupBody::new(
             G,
@@ -957,11 +964,12 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         "R_T^setup is derived, never asserted"
     );
 
-    // And the correct body reaches the conjuncts and passes them. It may be
-    // refused further down for faucet-fixture reasons; what this asserts is
-    // that it is NOT refused by either setup conjunct, which is what makes
+    // And the producer's body reaches the conjuncts and passes them. It may
+    // be refused further down for faucet-fixture reasons; what this asserts
+    // is that it is NOT refused by either setup conjunct, which is what makes
     // the two refusals above meaningful rather than unreachable.
-    let outcome = go(&body(zero.economic_position(), derived_root));
+    assert_eq!(produced.position(), zero.economic_position());
+    let outcome = go(&produced);
     assert!(
         !matches!(
             outcome,

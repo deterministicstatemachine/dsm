@@ -22,6 +22,7 @@ use dsm::economic::tree::{EconomicSmt, ABSENT_LEAF};
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
+use dsm::sofi::lineage::SetupNames;
 use dsm::sofi::publication::{Publication, Signed, VaultPolicyClass};
 use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
@@ -511,12 +512,14 @@ async fn setup(
     let produced = build_setup(
         &validated,
         &pre_tree,
-        genesis,
-        device_id,
-        intent.vault_id,
-        claim_ref,
-        SIGNATURE_ALG,
-        &public_key,
+        &SetupNames {
+            genesis,
+            device_id,
+            vault_id: intent.vault_id,
+            claim_ref,
+            signature_alg: SIGNATURE_ALG,
+            claimant_public_key: &public_key,
+        },
     )
     .map_err(refuse)?;
     let signature = sign(produced.signs.bytes())?;

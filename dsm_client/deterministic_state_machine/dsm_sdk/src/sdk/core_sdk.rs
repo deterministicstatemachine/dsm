@@ -372,16 +372,17 @@ impl CoreSDK {
     }
 
     /// The terminal admission of a SoFi position `advance_resolved` resolved:
-    /// the position is admitted at the root the resolution selected, the vault
-    /// heads it selected are recorded, and the unfenced head takes the trader
-    /// balances that root holds — all in the one admission transaction, so the
-    /// head and the admitted root cannot disagree about what this device holds.
+    /// the position is admitted at the root the resolution selected with the
+    /// leaves Core bound to that root, the vault heads it selected are
+    /// recorded, and the unfenced head takes the trader balances that root
+    /// holds — all in the one admission transaction, so the head and the
+    /// admitted root cannot disagree about what this device holds.
     pub(crate) fn admit_resolved_sofi_position(
         &self,
         advanced: &dsm::sofi::lineage::ResolvedAdvance,
         fulfillment_id: [u8; 32],
         operation_digest: &[u8; 32],
-        leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
+        leaves: &dsm::sofi::lineage::InstalledLeaves,
         storage_set_id: &[u8; 32],
         // The vault heads this position selected (spec §44.4), recorded in
         // THIS transaction so a head and the position that chose it cannot
@@ -398,7 +399,7 @@ impl CoreSDK {
             &admitted,
             advanced.root.economic_root(),
             operation_digest,
-            leaves,
+            leaves.rows(),
             storage_set_id,
             &[],
             vault_heads,
