@@ -148,6 +148,19 @@ impl TestDevice {
         economic_fixtures::publish_identity(&self.device_id, &self.genesis).await;
     }
 
+    /// A backup of this device taken now, to be restored later: its database
+    /// as it stands, copied into `slot`. The returned device is this one —
+    /// the same identity and wallet — over that copy, not yet booted.
+    pub fn backed_up_into(&self, slot: &'static str) -> TestDevice {
+        self.enter();
+        client_db::copy_test_database_to_slot(slot).expect("back up the device's database");
+        TestDevice {
+            slot,
+            router: None,
+            ..self.clone()
+        }
+    }
+
     /// The device's router. Only meaningful while [`enter`](Self::enter)ed.
     pub fn router(&self) -> &AppRouterImpl {
         self.router.as_deref().expect("device not booted")

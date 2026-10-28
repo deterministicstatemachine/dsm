@@ -3317,3 +3317,724 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         "{refused}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The validation harness's confirm cases, on real bearer pairs (§6.103): each
+// is the harness's attack, trace or property as production's two devices run
+// it, every frame carried as bytes through the doors.
+// ---------------------------------------------------------------------------
+
+/// The prepare request `prepare` carries.
+fn prepare_request(prepare: &[u8]) -> crate::generated::BilateralPrepareRequest {
+    use prost::Message;
+    let envelope = crate::envelope::from_canonical_bytes(prepare).expect("the prepare's envelope");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload else {
+        panic!("a prepare carries a transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
+        panic!("a prepare is an invoke");
+    };
+    crate::generated::BilateralPrepareRequest::decode(
+        invoke.args.as_ref().expect("arguments").body.as_slice(),
+    )
+    .expect("the prepare request decodes")
+}
+
+/// `prepare` with σ_A, its proposer's signature over the commitment, replaced
+/// by `signature`.
+fn with_prepare_signature(prepare: &[u8], signature: Vec<u8>) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(prepare).expect("the prepare's envelope");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a prepare carries a transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a prepare is an invoke");
+    };
+    let args = invoke.args.as_mut().expect("the prepare's arguments");
+    let mut request =
+        crate::generated::BilateralPrepareRequest::decode(args.body.as_slice()).expect("decodes");
+    request.sender_signature = signature;
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// `confirm` carrying `receipt` as the wire carries a confirm's receipt: in
+/// full, its per-step EK artifacts and signatures with it.
+fn with_signed_receipt(
+    confirm: &[u8],
+    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+) -> Vec<u8> {
+    use prost::Message;
+    let mut envelope =
+        crate::envelope::from_canonical_bytes(confirm).expect("the confirm's envelope");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload.as_mut()
+    else {
+        panic!("a confirm carries a transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = tx.ops[0].kind.as_mut() else {
+        panic!("a confirm is an invoke");
+    };
+    let args = invoke.args.as_mut().expect("the confirm's arguments");
+    let mut request =
+        crate::generated::BilateralConfirmRequest::decode(args.body.as_slice()).expect("decodes");
+    request.stitched_receipt = receipt.to_full_protobuf().expect("the receipt encodes");
+    args.body = request.encode_to_vec();
+    envelope.encode_to_vec()
+}
+
+/// The stitched receipt `confirm` carries.
+fn confirm_receipt(confirm: &[u8]) -> dsm::types::receipt_types::StitchedReceiptV2 {
+    use prost::Message;
+    let envelope = crate::envelope::from_canonical_bytes(confirm).expect("the confirm");
+    let Some(crate::generated::envelope::Payload::UniversalTx(tx)) = envelope.payload else {
+        panic!("a confirm carries a transaction");
+    };
+    let Some(crate::generated::universal_op::Kind::Invoke(invoke)) = &tx.ops[0].kind else {
+        panic!("a confirm is an invoke");
+    };
+    let request = crate::generated::BilateralConfirmRequest::decode(
+        invoke.args.as_ref().expect("arguments").body.as_slice(),
+    )
+    .expect("decodes");
+    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&request.stitched_receipt)
+        .expect("the sender's receipt")
+}
+
+/// `receipt`, altered by its own sender, signed again on A's side by the
+/// per-step EK `sender`'s chain derives for the step `commitment`: what a
+/// sender that alters its own receipt can sign.
+fn resigned_by(
+    sender: &OfflineDevice,
+    receiver: &OfflineDevice,
+    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    commitment: &[u8; 32],
+) -> dsm::types::receipt_types::StitchedReceiptV2 {
+    sender.device.enter();
+    let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+        .expect("the sender's wallet is unlocked");
+    let ak = crate::init::derive_device_signing_keypair(&wallet_seed, &sender.device.genesis)
+        .expect("the sender's AK");
+    let recipient_kyber_pk =
+        crate::storage::client_db::get_contact_by_device_id(&receiver.device.device_id)
+            .expect("read the contact")
+            .expect("the receiver is a contact")
+            .kyber_public_key;
+    let mut resigned = receipt.clone();
+    let signed = crate::sdk::receipts::sign_receipt_with_per_step_ek(
+        &crate::sdk::receipts::PerStepSigningInputs {
+            commitment: &resigned
+                .compute_commitment()
+                .expect("the receipt's commitment"),
+            h_n: resigned.parent_tip,
+            c_pre: *commitment,
+            devid_sender: sender.device.device_id,
+            relationship_key: sender.device.rel_key_with(&receiver.device),
+            root_ak_keypair: Some((ak.public_key.as_slice(), ak.secret_key())),
+            recipient_kyber_pk: &recipient_kyber_pk,
+            session_binding: commitment,
+        },
+    )
+    .expect("the sender's per-step EK signs");
+    resigned.set_ek_pk_a(signed.ek_pk);
+    resigned.set_ek_cert_a(signed.ek_cert);
+    resigned.set_kyber_ct_a(signed.kyber_ct);
+    resigned.sig_a.clear();
+    resigned.add_sig_a(signed.sig);
+    resigned
+}
+
+/// `receipt` signed under a fresh EK that `certifier`'s key certifies over the
+/// receipt's parent tip: an EK the sender's own chain never certified, every
+/// other artifact of the receipt genuine.
+fn under_a_foreign_ek(
+    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    commitment: &[u8; 32],
+    certifier: &dsm::crypto::signatures::SignatureKeyPair,
+) -> dsm::types::receipt_types::StitchedReceiptV2 {
+    let (ek_pk, ek_sk) = dsm::crypto::ephemeral_key::generate_ephemeral_keypair(
+        &blake3::derive_key("DSM SDK offline test foreign EK", commitment),
+    )
+    .expect("the foreign EK");
+    let mut foreign = receipt.clone();
+    foreign.set_ek_cert_a(
+        dsm::crypto::ephemeral_key::sign_ek_cert(
+            certifier.secret_key(),
+            &ek_pk,
+            &foreign.parent_tip,
+        )
+        .expect("the certifier certifies the EK"),
+    );
+    foreign.set_ek_pk_a(ek_pk);
+    let target = dsm::types::receipt_types::compute_receipt_challenge_response_target(
+        &foreign
+            .compute_commitment()
+            .expect("the receipt's commitment"),
+        commitment,
+    );
+    foreign.sig_a.clear();
+    foreign.add_sig_a(dsm::crypto::sphincs::sphincs_sign(&ek_sk, &target).expect("the EK signs"));
+    foreign
+}
+
+/// `prepare`, proposed by `sender` as the step `commitment`, taken by
+/// `receiver`, accepted by its user, confirmed, committed and acknowledged:
+/// every frame carried as bytes.
+async fn deliver_and_commit(
+    sender: &OfflineDevice,
+    receiver: &OfflineDevice,
+    prepare: &[u8],
+    commitment: [u8; 32],
+) {
+    receiver.device.enter();
+    let (answer, _meta) = receiver
+        .handler
+        .handle_prepare_request(prepare, None)
+        .await
+        .expect("the receiver takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for the user");
+    let response = receiver
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("the receiver's user accepts");
+    sender.device.enter();
+    let (confirm, _meta) = sender
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the sender confirms");
+    receiver.device.enter();
+    let ack = receiver
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the receiver commits");
+    sender.device.enter();
+    sender
+        .handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("the sender commits");
+    assert_committed_on_both(sender, receiver, &commitment);
+}
+
+/// `answer` is a signed refusal of a proposal that does not extend the tip its
+/// receiver holds.
+fn refused_as_stale(answer: &[u8], what: &str) {
+    let reply = crate::envelope::from_canonical_bytes(answer).expect("decode the reply");
+    match reply.payload {
+        Some(crate::generated::envelope::Payload::BilateralPrepareReject(reject)) => assert!(
+            reject.reason.contains("Chain tip mismatch"),
+            "{what}: {}",
+            reject.reason
+        ),
+        other => panic!("{what} is refused as stale, not {other:?}"),
+    }
+}
+
+/// Two fully signed children of one tip — A's bearer payments of 1 and 2 base
+/// units on the tip it holds with B — and B takes one: the first commits on
+/// both devices, and the second, delivered after, does not extend the tip B
+/// holds and is refused as stale, with nothing of it kept and B's tip where
+/// the first left it.
+/// (Moved from the validation harness: adversarial_bilateral's
+/// `double_spend_second_child` and implementation_traces'
+/// `state_machine_fork_divergence`, §6.103.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_signed_children_of_one_tip_the_first_commits_and_the_second_is_refused_as_stale() {
+    let (_pair, a, b, _appliance, _payment) = bearer_pair().await;
+    let tip = b.tip_with(&a);
+
+    // The second child is signed first and held back: A's own door takes one
+    // proposal at a time, so it ends the step it will not send.
+    a.device.enter();
+    let (second, second_commitment) = a
+        .propose(&b, marked(&b, 0x02))
+        .await
+        .expect("the second child");
+    a.handler
+        .cancel_proposal(second_commitment, "held back".to_string())
+        .await
+        .expect("A ends the held-back child");
+    let (first, first_commitment) = a
+        .propose(&b, marked(&b, 0x01))
+        .await
+        .expect("the first child");
+    let tip_claimed = |prepare: &[u8]| {
+        prepare_request(prepare)
+            .expected_counterparty_state_hash
+            .map(|h| h.v)
+    };
+    assert_eq!(
+        (tip_claimed(&first), tip_claimed(&second)),
+        (Some(tip.to_vec()), Some(tip.to_vec())),
+        "the two steps are not two children of one tip"
+    );
+    assert_ne!(
+        first_commitment, second_commitment,
+        "two different operations on one tip are one step"
+    );
+
+    deliver_and_commit(&a, &b, &first, first_commitment).await;
+    let successor = b.tip_with(&a);
+    assert_ne!(successor, tip, "the first child did not move the tip");
+
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&second, None)
+        .await
+        .expect("the second child is answered");
+    refused_as_stale(&answer, "the second child of a committed tip");
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&second_commitment)
+            .expect("read the session")
+            .is_none(),
+        "B holds a session for the second child"
+    );
+    assert!(
+        !history_row_exists(&second_commitment),
+        "B kept the second child"
+    );
+    assert_eq!(b.tip_with(&a), successor, "the second child moved B's tip");
+}
+
+/// A step whose σ_A is not its pinned sender's — a valid signature over the
+/// right commitment by another key, or bytes that are no signature at all at
+/// the production size — is refused at B's door before anything is kept, and
+/// a confirm whose receipt is signed under an EK the sender's chain never
+/// certified is refused before anything commits. The honest step is then
+/// taken and commits, so each refusal is of its forgery and not of the step.
+/// (Moved from the validation harness: adversarial_bilateral's
+/// `forged_sender_signature`, §6.103. The harness decided the honest step
+/// first; here it goes last, since a receiver that holds a proposal answers
+/// its commitment from the session it holds.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_step_its_pinned_sender_did_not_sign_or_whose_ek_its_chain_never_certified_is_refused() {
+    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+    let mallory = dsm::crypto::signatures::SignatureKeyPair::generate_from_entropy(
+        b"DSM SDK offline test mallory",
+    )
+    .expect("Mallory's key");
+
+    a.device.enter();
+    let (prepare, commitment) = a.propose(&b, payment).await.expect("A proposes");
+    let honest_signature = prepare_request(&prepare).sender_signature;
+    let wrong_signer = with_prepare_signature(
+        &prepare,
+        mallory
+            .sign(&dsm::core::bilateral_transaction_manager::bilateral_sign_message(&commitment))
+            .expect("Mallory signs the commitment"),
+    );
+    let garbage = with_prepare_signature(&prepare, vec![0xDE; honest_signature.len()]);
+
+    b.device.enter();
+    for (forged, what) in [
+        (wrong_signer, "a step signed by the wrong key"),
+        (garbage, "a garbage signature"),
+    ] {
+        let refused = b
+            .handler
+            .handle_prepare_request(&forged, None)
+            .await
+            .expect_err(what);
+        assert!(
+            refused
+                .to_string()
+                .contains("is not signed over its commitment by the pinned AK"),
+            "{what}: {refused}"
+        );
+        assert!(
+            crate::storage::client_db::get_bilateral_session(&commitment)
+                .expect("read the session")
+                .is_none(),
+            "{what}: B holds a session"
+        );
+    }
+
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the honest proposal");
+    assert!(answer.is_empty(), "the honest proposal waits for the user");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    let (confirm, _meta) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A confirms");
+
+    let foreign = under_a_foreign_ek(&confirm_receipt(&confirm), &commitment, &mallory);
+    b.device.enter();
+    let refused = b
+        .handler
+        .handle_confirm_request(&with_signed_receipt(&confirm, &foreign))
+        .await
+        .expect_err("a receipt under a foreign EK");
+    assert!(
+        refused.to_string().contains("does NOT chain"),
+        "a receipt under a foreign EK: {refused}"
+    );
+    assert!(
+        !history_row_exists(&commitment),
+        "B kept the forged confirm"
+    );
+    assert_eq!(
+        pending_era(),
+        0,
+        "B holds a payment from the forged confirm"
+    );
+
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the honest confirm commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// A receipt its sender signs over roots the step's writes do not produce is
+/// refused before anything commits: a child root one bit off, and a write's
+/// path with one sibling changed, each signed again by the sender's own
+/// per-step EK, so the signature holds and the state does not. So is a receipt
+/// whose offline account advances to a frontier the step's release did not
+/// sign. The honest confirm then commits.
+/// (Moved from the validation harness: adversarial_bilateral's
+/// `forged_post_state`, §6.103; the offline-account case is added, since the
+/// harness's steps wrote no account.)
+/// MUTATION CONTROL: dropping the comparison of the receipt's offline account
+/// with the release's leaves in Core's `decide_confirm` turns the last case
+/// red: the forgery is then refused by the fold instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_signed_receipt_whose_roots_its_writes_do_not_produce_is_refused() {
+    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+    let (commitment, confirm) = to_the_confirm(&a, &b, payment).await;
+    let honest = confirm_receipt(&confirm);
+
+    let mut forged = honest.clone();
+    forged.child_root[0] ^= 0x01;
+    let forged = resigned_by(&a, &b, &forged, &commitment);
+    let mut bent = honest.clone();
+    let siblings = &mut bent.step_writes[0].path.siblings;
+    assert!(
+        !siblings.is_empty(),
+        "the write's path carries no sibling to bend"
+    );
+    siblings[0] ^= 0x01;
+    let bent = resigned_by(&a, &b, &bent, &commitment);
+    let mut unreleased = honest.clone();
+    let witness = unreleased
+        .step_writes
+        .iter_mut()
+        .find_map(|write| match &mut write.leaf {
+            dsm::types::receipt_types::ReceiptLeaf::OfflineAccount(witness) => Some(witness),
+            dsm::types::receipt_types::ReceiptLeaf::Relationship => None,
+        })
+        .expect("a bearer step writes its offline account");
+    witness.next_frontier[0] ^= 0x01;
+    let unreleased = resigned_by(&a, &b, &unreleased, &commitment);
+
+    b.device.enter();
+    for (receipt, what, why) in [
+        (
+            forged,
+            "a signed receipt over a forged post-state root",
+            "do not fold from its parent root to its child root",
+        ),
+        // A bearer step writes two leaves; one bent sibling makes their paths
+        // disagree, which the batch fold refuses before it reaches a root.
+        (
+            bent,
+            "a signed receipt over a bent path",
+            "the receipt's writes: ",
+        ),
+        (
+            unreleased,
+            "a signed receipt whose offline account its release did not advance",
+            "is not the one its release advances",
+        ),
+    ] {
+        let refused = b
+            .handler
+            .handle_confirm_request(&with_signed_receipt(&confirm, &receipt))
+            .await
+            .expect_err(what);
+        assert!(refused.to_string().contains(why), "{what}: {refused}");
+        assert!(!history_row_exists(&commitment), "{what}: B kept the step");
+        assert_eq!(pending_era(), 0, "{what}: B holds a payment");
+    }
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the honest confirm commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
+/// A genuine step on a tip its receiver does not hold is refused as stale: B
+/// restored from a backup taken before the relationship's first step holds
+/// the tip as it stood then, and A's second step — taken by B at its own tip —
+/// is refused by the restored B, whose tip does not move.
+/// (Moved from the validation harness: adversarial_bilateral's
+/// `receiver_behind`, §6.103.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_genuine_step_on_a_tip_a_restored_receiver_does_not_hold_is_refused_as_stale() {
+    let (pair, a, b, _appliance, payment) = bearer_pair().await;
+    let mut restored = b.device.backed_up_into("B-restored");
+    let behind = b.tip_with(&a);
+
+    offline_step(&a, &b, payment.clone()).await;
+    a.device.enter();
+    let (second, second_commitment) = a.propose(&b, payment).await.expect("A's second step");
+    deliver_and_commit(&a, &b, &second, second_commitment).await;
+
+    restored.boot(&pair.fleet).await;
+    let restored = OfflineDevice::new(&restored);
+    assert_eq!(
+        restored.tip_with(&a),
+        behind,
+        "the restored B does not hold the tip from before the first step"
+    );
+    restored.device.enter();
+    let (answer, _meta) = restored
+        .handler
+        .handle_prepare_request(&second, None)
+        .await
+        .expect("the restored B answers");
+    refused_as_stale(&answer, "a step on a tip the receiver does not hold");
+    assert_eq!(
+        restored.tip_with(&a),
+        behind,
+        "the refused step moved the restored B's tip"
+    );
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&second_commitment)
+            .expect("read the session")
+            .is_none(),
+        "the restored B holds a session for the step"
+    );
+}
+
+/// The validation harness's seed for its properties, and the iterations CI
+/// ran them for (`property-tests --iterations 5 --seed 42`).
+const FORK_EXCLUSION_SEED: u64 = 42;
+const FORK_EXCLUSION_ITERATIONS: u64 = 5;
+
+/// Of two children of one tip, the receiver takes one: over seeded rounds, A
+/// signs two bearer payments of different amounts on the tip it holds with B;
+/// the first commits on both devices and the second, delivered after, is
+/// refused as stale. The amounts are drawn from the harness's ChaCha20 stream
+/// under its seed, each round's pair funded by A's load.
+/// (Moved from the validation harness: property_tests' `fork_exclusion`,
+/// §6.103.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn of_two_children_of_one_tip_the_receiver_takes_one() {
+    use rand::{Rng, SeedableRng};
+    let (_pair, a, b, _appliance, _payment) = bearer_pair().await;
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(FORK_EXCLUSION_SEED ^ 0x464f_524b);
+
+    for round in 0..FORK_EXCLUSION_ITERATIONS {
+        // The harness's mark: the first byte of an eight-byte draw, even. Its
+        // pair of amounts is the mark and the next unit, kept above zero.
+        let draw: Vec<u8> = (0..8).map(|_| rng.random()).collect();
+        let first_amount = u64::from(draw[0] & 0xFE) + 2;
+        let tip = b.tip_with(&a);
+
+        a.device.enter();
+        let (second, second_commitment) = a
+            .propose(&b, bearer_transfer(&b, first_amount + 1))
+            .await
+            .expect("the second child");
+        a.handler
+            .cancel_proposal(second_commitment, "held back".to_string())
+            .await
+            .expect("A ends the held-back child");
+        let (first, first_commitment) = a
+            .propose(&b, bearer_transfer(&b, first_amount))
+            .await
+            .expect("the first child");
+        assert_ne!(
+            first_commitment, second_commitment,
+            "round {round}: two different operations on one tip are one step"
+        );
+
+        deliver_and_commit(&a, &b, &first, first_commitment).await;
+        assert_ne!(b.tip_with(&a), tip, "round {round}: the tip did not move");
+
+        b.device.enter();
+        let (answer, _meta) = b
+            .handler
+            .handle_prepare_request(&second, None)
+            .await
+            .expect("the second child is answered");
+        refused_as_stale(&answer, &format!("round {round}: the second child"));
+        assert!(
+            !history_row_exists(&second_commitment),
+            "round {round}: FORK: B kept a second child of one tip"
+        );
+    }
+}
+
+/// The receiver holds one successor of its tip and nothing moves it after: A's
+/// step commits and both devices hold its successor; the step delivered again
+/// is answered with nothing (a device never signs a rejection of a step it
+/// committed) and commits nothing more; a second child of the committed
+/// step's tip is refused as stale; and a later step's confirm, whose receipt
+/// its sender signs over a write path with one sibling changed, is refused —
+/// none of them moves B's tip.
+/// (Moved from the validation harness: implementation_traces'
+/// `receiver_tripwire`, formerly a linked trace of the Tripwire model, §6.103.
+/// The harness's replay was refused by Core as a stale tip; production answers
+/// a committed step's prepare before Core decides it.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_holds_one_successor_and_refuses_a_sibling_and_a_bent_receipt() {
+    let (_pair, a, b, _appliance, _payment) = bearer_pair().await;
+
+    a.device.enter();
+    let (sibling, sibling_commitment) = a
+        .propose(&b, marked(&b, 0xB1))
+        .await
+        .expect("the step's sibling");
+    a.handler
+        .cancel_proposal(sibling_commitment, "held back".to_string())
+        .await
+        .expect("A ends the held-back sibling");
+    let (step, commitment) = a.propose(&b, marked(&b, 0xA1)).await.expect("the step");
+    deliver_and_commit(&a, &b, &step, commitment).await;
+    let successor = b.tip_with(&a);
+    assert_eq!(
+        a.tip_with(&b),
+        successor,
+        "the two devices do not hold the committed successor"
+    );
+
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&step, None)
+        .await
+        .expect("its replay is answered");
+    assert!(
+        answer.is_empty(),
+        "B refused a step it committed ({} bytes)",
+        answer.len()
+    );
+    assert_eq!(history_rows(&commitment), 1, "the replay committed again");
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&sibling, None)
+        .await
+        .expect("a second child of the tip is answered");
+    refused_as_stale(&answer, "a second child of the tip");
+
+    let (later, confirm) = to_the_confirm(&a, &b, marked(&b, 0xC1)).await;
+    let mut bent = confirm_receipt(&confirm);
+    bent.step_writes[0].path.siblings[0] ^= 0x01;
+    let bent = resigned_by(&a, &b, &bent, &later);
+    b.device.enter();
+    let refused = b
+        .handler
+        .handle_confirm_request(&with_signed_receipt(&confirm, &bent))
+        .await
+        .expect_err("a signed receipt over a bent path");
+    // A bearer step writes two leaves; one bent sibling makes their paths
+    // disagree, which the batch fold refuses before it reaches a root.
+    assert!(
+        refused.to_string().contains("the receipt's writes: "),
+        "a signed receipt over a bent path: {refused}"
+    );
+    assert_eq!(b.tip_with(&a), successor, "a refused step moved B's tip");
+}
+
+/// First contact binds the relationship's `h_0`: both devices hold one `h_0`,
+/// and a first step and an alternate first step both extend it. The first
+/// commits; the next step extends the first's successor and commits; the
+/// alternate first-contact branch, delivered after, is refused as stale, and B
+/// holds the extension's successor.
+/// (Moved from the validation harness: implementation_traces'
+/// `tripwire_first_contact_binding`, formerly a linked trace of the Tripwire
+/// model, §6.103.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_first_contact_step_extends_h_0_and_an_alternate_first_step_is_refused_after_it() {
+    let (_pair, a, b, _appliance, _payment) = bearer_pair().await;
+    let h0 = b.tip_with(&a);
+    assert_eq!(a.tip_with(&b), h0, "the two devices do not hold one h_0");
+    let tip_claimed = |prepare: &[u8]| {
+        prepare_request(prepare)
+            .expected_counterparty_state_hash
+            .map(|h| h.v)
+    };
+
+    a.device.enter();
+    let (alternate, alternate_commitment) = a
+        .propose(&b, marked(&b, 0x52))
+        .await
+        .expect("the alternate first step");
+    a.handler
+        .cancel_proposal(alternate_commitment, "held back".to_string())
+        .await
+        .expect("A ends the alternate");
+    let (first, first_commitment) = a
+        .propose(&b, marked(&b, 0x51))
+        .await
+        .expect("the first step");
+    assert_eq!(
+        (tip_claimed(&first), tip_claimed(&alternate)),
+        (Some(h0.to_vec()), Some(h0.to_vec())),
+        "a first step does not extend the relationship's h_0"
+    );
+    deliver_and_commit(&a, &b, &first, first_commitment).await;
+    let first_successor = b.tip_with(&a);
+
+    a.device.enter();
+    let (extension, extension_commitment) = a
+        .propose(&b, marked(&b, 0x53))
+        .await
+        .expect("the extension");
+    assert_eq!(
+        tip_claimed(&extension),
+        Some(first_successor.to_vec()),
+        "the extension does not extend the first step's successor"
+    );
+    deliver_and_commit(&a, &b, &extension, extension_commitment).await;
+    let extension_successor = b.tip_with(&a);
+
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&alternate, None)
+        .await
+        .expect("the alternate first-contact branch is answered");
+    refused_as_stale(&answer, "an alternate first-contact branch");
+    assert_eq!(
+        b.tip_with(&a),
+        extension_successor,
+        "the receiver does not hold the extension's successor"
+    );
+}

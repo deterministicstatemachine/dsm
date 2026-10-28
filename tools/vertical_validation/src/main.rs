@@ -774,7 +774,7 @@ async fn collect_tla_trace_replays(
     let mut implementation_replays = HashMap::with_capacity(results.len());
 
     for (spec, _) in results {
-        if !spec.supports_trace_replay {
+        if spec.trace_replay == tla_runner::TraceReplay::None {
             eprintln!("    {} -> trace replay skipped", spec.label);
             continue;
         }
@@ -785,22 +785,23 @@ async fn collect_tla_trace_replays(
         } else {
             "FAIL"
         };
-        let implementation_verdict = if implementation_replay.passed {
-            "PASS"
-        } else {
-            "FAIL"
+        let implementation_verdict = match &implementation_replay {
+            Some(replay) if replay.passed => format!("PASS, {:.1}ms", replay.duration_ms),
+            Some(replay) => format!("FAIL, {:.1}ms", replay.duration_ms),
+            None => "none".to_string(),
         };
         eprintln!(
-            "    {} -> literal={} direct={} ({} steps, {:.1}ms / {:.1}ms)",
+            "    {} -> literal={} ({} steps, {:.1}ms) direct={}",
             spec.label,
             literal_verdict,
-            implementation_verdict,
             literal_replay.steps,
             literal_replay.duration_ms,
-            implementation_replay.duration_ms
+            implementation_verdict,
         );
         trace_replays.insert(spec.label.clone(), literal_replay);
-        implementation_replays.insert(spec.label.clone(), implementation_replay);
+        if let Some(replay) = implementation_replay {
+            implementation_replays.insert(spec.label.clone(), replay);
+        }
     }
 
     Ok((trace_replays, implementation_replays))

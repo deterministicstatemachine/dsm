@@ -155,6 +155,22 @@ pub(crate) fn switch_test_database_slot(slot: &'static str) {
     // slot's URI and initializes its schema.
 }
 
+/// The active slot's database as it stands now, copied to `slot`'s file: the
+/// same device restored later from a backup taken at this point. `slot` is
+/// one no test has opened yet.
+#[cfg(test)]
+pub(crate) fn copy_test_database_to_slot(slot: &'static str) -> Result<()> {
+    // The file `get_database_path` names for `slot` in this generation.
+    let base = crate::storage_utils::get_storage_base_dir()
+        .ok_or_else(|| anyhow!("Storage base directory not set"))?;
+    let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let target = base.join(format!("{gen}_{slot}_{DB_FILE_NAME}"));
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
+    Ok(())
+}
+
 pub fn init_database() -> Result<()> {
     {
         #[cfg(test)]
