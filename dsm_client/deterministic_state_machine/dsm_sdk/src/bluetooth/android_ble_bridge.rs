@@ -1175,6 +1175,30 @@ mod tests {
             assert!(!devices.contains_key("11:22"));
         }
     }
+
+    /// An offline-bearer transfer of 7 base units of ERA to `to`, with its
+    /// terms: the one operation the offline door carries (MR-DSM-0219).
+    fn bearer_transfer_to(
+        to: [u8; 32],
+    ) -> (
+        dsm::types::operations::Operation,
+        dsm::types::operations::TransferTerms,
+    ) {
+        let (bytes, terms) =
+            crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+                &to,
+                7,
+                "ERA",
+                "",
+                &dsm::core::token::token_state_manager::era_policy_commit(),
+                dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            );
+        (
+            dsm::types::operations::Operation::from_bytes(&bytes).expect("a bearer transfer"),
+            terms,
+        )
+    }
+
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
@@ -1204,9 +1228,9 @@ mod tests {
         }
 
         // Create a prepare message chunks directly via coordinator (simulate receiving from counterparty)
-        let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope = transport_adapter
-            .create_prepare_message(counterparty, op)
+        let (op, terms) = bearer_transfer_to(counterparty);
+        let (prepare_envelope, _commitment) = transport_adapter
+            .create_transfer_prepare_with_commitment(counterparty, op, terms)
             .await
             .expect("prepare envelope");
         let chunks = coord
@@ -1286,10 +1310,15 @@ mod tests {
         });
 
         // Test that we can create prepare message chunks directly from coordinator
-        let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope = match rt.block_on(transport_adapter.create_prepare_message(cp, op)) {
-            Ok(payload) => payload,
-            Err(e) => panic!("create_prepare_message failed in test: {}", e),
+        let (op, terms) = bearer_transfer_to(cp);
+        let prepare_envelope = match rt
+            .block_on(transport_adapter.create_transfer_prepare_with_commitment(cp, op, terms))
+        {
+            Ok((payload, _commitment)) => payload,
+            Err(e) => panic!(
+                "create_transfer_prepare_with_commitment failed in test: {}",
+                e
+            ),
         };
         let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,

@@ -37,20 +37,76 @@ pub struct PinnedPeer<'a> {
 }
 
 /// The operation a proposal carries, if the offline protocol may carry it at
-/// all. Offline, the only value that moves is the bearer tier; an online-tier
-/// transfer has the network transport.
+/// all ([`offline_door`]).
 pub fn offline_operation(operation_bytes: &[u8]) -> Result<Operation, DsmError> {
     let operation = Operation::from_bytes(operation_bytes)
         .map_err(|_| DsmError::invalid_operation("invalid operation payload"))?;
-    if matches!(operation, Operation::Transfer { .. })
-        && !operation_requires_offline_bearer(&operation)
-    {
-        return Err(DsmError::invalid_operation(
-            "bilateral prepare refused: BLE/USB carries offline-bearer transfers only — an \
-             online-tier transfer uses the network transport",
-        ));
-    }
+    offline_door(&operation)?;
     Ok(operation)
+}
+
+/// The offline door, at the sender's and the receiver's alike (MR-DSM-0219;
+/// §6.105 C1, decided 2026-10-27). The offline protocol carries exactly what
+/// the offline rulings name: the offline-bearer transfer. Every other
+/// operation is refused here, before anything is written or signed — SoFi
+/// and vault operations because SoFi is online and does not inherit the
+/// offline-bearer path (Explainer §63, SoFi §4), an online-tier transfer
+/// because it has the network transport, and the rest because offline nothing
+/// but the bearer transfer moves. A load, an unload and a settlement are not
+/// operations on this door: they are the device's own admitted transitions
+/// online. The match has no wildcard arm, so a variant added to `Operation`
+/// does not compile until it is classified here.
+pub fn offline_door(operation: &Operation) -> Result<(), DsmError> {
+    let refused = |what: &str, why: &str| {
+        Err(DsmError::invalid_operation(format!(
+            "the offline door carries only the offline-bearer transfer: {what} is refused — {why}"
+        )))
+    };
+    const SOFI_IS_ONLINE: &str =
+        "SoFi is online and does not inherit the offline-bearer path (Explainer §63, SoFi §4)";
+    const NOT_OFFLINE: &str =
+        "offline, value moves only as the offline-bearer transfer the offline rulings name";
+    match operation {
+        Operation::Transfer { .. } if operation_requires_offline_bearer(operation) => Ok(()),
+        Operation::Transfer { .. } => refused(
+            "an online-tier transfer",
+            "BLE/USB carries offline-bearer transfers only; an online-tier transfer uses the \
+             network transport",
+        ),
+        Operation::SofiSetup { .. }
+        | Operation::SofiVaultCreate { .. }
+        | Operation::SofiFulfill { .. } => refused("a SoFi operation", SOFI_IS_ONLINE),
+        Operation::DlvCreate { .. }
+        | Operation::DlvUnlock { .. }
+        | Operation::DlvClaim { .. }
+        | Operation::DlvInvalidate { .. }
+        | Operation::EscrowVaultCreate { .. } => refused("a vault operation", SOFI_IS_ONLINE),
+        Operation::FaucetClaim { .. }
+        | Operation::AdoptToken { .. }
+        | Operation::CreateToken { .. }
+        | Operation::Burn { .. }
+        | Operation::LockToken { .. }
+        | Operation::UnlockToken { .. }
+        | Operation::Lock { .. }
+        | Operation::Unlock { .. }
+        | Operation::Receive { .. } => refused("a token operation", NOT_OFFLINE),
+        Operation::Genesis
+        | Operation::Create { .. }
+        | Operation::Update { .. }
+        | Operation::AddRelationship { .. }
+        | Operation::CreateRelationship { .. }
+        | Operation::RemoveRelationship { .. }
+        | Operation::Recovery { .. }
+        | Operation::Delete { .. }
+        | Operation::Link { .. }
+        | Operation::Unlink { .. }
+        | Operation::Invalidate { .. } => {
+            refused("an identity or relationship operation", NOT_OFFLINE)
+        }
+        Operation::Generic { .. } | Operation::Noop => {
+            refused("a step that moves no value", NOT_OFFLINE)
+        }
+    }
 }
 
 /// An offline-bearer transfer moves only a token its committed policy lets
@@ -1198,15 +1254,8 @@ mod tests {
     /// refused at the door.
     #[test]
     fn an_online_tier_transfer_is_not_an_offline_operation() {
-        let mut online = bearer_transfer([0x45; 32]);
-        if let Operation::Transfer {
-            authority_policy, ..
-        } = &mut online
-        {
-            *authority_policy = None;
-        }
         refused(
-            offline_operation(&online.to_bytes()),
+            offline_operation(&online_tier_transfer().to_bytes()),
             "offline-bearer transfers only",
         );
         offline_operation(&bearer_transfer([0x45; 32]).to_bytes()).expect("a bearer transfer");
@@ -1214,6 +1263,393 @@ mod tests {
             offline_operation(&[0xFF, 0x00]),
             "invalid operation payload",
         );
+    }
+
+    /// A bearer transfer with its authority policy taken off: the online tier.
+    fn online_tier_transfer() -> Operation {
+        let mut online = bearer_transfer([0x45; 32]);
+        if let Operation::Transfer {
+            authority_policy, ..
+        } = &mut online
+        {
+            *authority_policy = None;
+        }
+        online
+    }
+
+    /// One operation of every variant, each by its class at the offline door.
+    fn one_of_every_variant() -> Vec<(Operation, &'static str)> {
+        use crate::types::operations::TransactionMode::{Bilateral, Unilateral};
+        let b = |v: u8, n: usize| vec![v; n];
+        let id = |v: u8| [v; 32];
+        let amount = Balance::amount;
+        const NONE: &str = "a step that moves no value";
+        const TOKEN: &str = "a token operation";
+        const IDENTITY: &str = "an identity or relationship operation";
+        const VAULT: &str = "a vault operation";
+        const SOFI: &str = "a SoFi operation";
+        vec![
+            (bearer_transfer([0x45; 32]), "admitted"),
+            (online_tier_transfer(), "an online-tier transfer"),
+            (Operation::Noop, NONE),
+            (
+                Operation::Generic {
+                    operation_type: b(0x01, 4),
+                    data: b(0x02, 5),
+                    message: "generic".into(),
+                    signature: b(0x03, 32),
+                },
+                NONE,
+            ),
+            (Operation::Genesis, IDENTITY),
+            (
+                Operation::Create {
+                    message: "create".into(),
+                    identity_data: b(0x01, 3),
+                    public_key: b(0x02, 3),
+                    metadata: b(0x03, 2),
+                    commitment: b(0x04, 1),
+                    proof: b(0x05, 2),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Update {
+                    message: "update".into(),
+                    identity_id: b(0xAA, 16),
+                    updated_data: b(0xBB, 8),
+                    proof: b(0xCC, 4),
+                    forward_link: Some(b(0xDD, 32)),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::AddRelationship {
+                    from_id: id(0x01),
+                    to_id: id(0x02),
+                    relationship_type: b(0x03, 4),
+                    metadata: b(0x04, 4),
+                    proof: b(0x05, 64),
+                    mode: Bilateral,
+                    message: "add".into(),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::CreateRelationship {
+                    message: "create".into(),
+                    counterparty_id: b(0x01, 32),
+                    commitment: b(0x02, 16),
+                    proof: b(0x03, 64),
+                    mode: Unilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::RemoveRelationship {
+                    from_id: id(0x0A),
+                    to_id: id(0x0B),
+                    relationship_type: b(0x0C, 4),
+                    proof: b(0x0D, 64),
+                    mode: Bilateral,
+                    message: "remove".into(),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Recovery {
+                    message: "recover".into(),
+                    state_number: 42,
+                    state_hash: b(0x11, 32),
+                    state_entropy: b(0x22, 32),
+                    invalidation_data: b(0x33, 16),
+                    new_state_data: b(0x44, 64),
+                    new_state_number: 43,
+                    new_state_hash: b(0x55, 32),
+                    new_state_entropy: b(0x66, 32),
+                    compromise_proof: b(0x77, 128),
+                    authority_sigs: vec![b(0x88, 64)],
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Delete {
+                    reason: "expired".into(),
+                    proof: b(0xAA, 64),
+                    mode: Unilateral,
+                    id: b(0xBB, 16),
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Link {
+                    target_id: b(0x01, 32),
+                    link_type: b(0x02, 7),
+                    proof: b(0x03, 64),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Unlink {
+                    target_id: b(0x01, 32),
+                    proof: b(0x02, 64),
+                    mode: Unilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::Invalidate {
+                    reason: "clone".into(),
+                    proof: b(0xDE, 64),
+                    mode: Bilateral,
+                },
+                IDENTITY,
+            ),
+            (
+                Operation::FaucetClaim {
+                    reserve_id: id(0x52),
+                    generation: 7,
+                },
+                TOKEN,
+            ),
+            (
+                Operation::AdoptToken {
+                    policy_commit: id(0x5A),
+                    signature: b(0xCD, 64),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::CreateToken {
+                    token_id: b(0x54, 3),
+                    initial_supply: amount(21),
+                    name: "Token".into(),
+                    symbol: "TOK".into(),
+                    decimals: 2,
+                    metadata_uri: None,
+                    policy_commit: id(0xAB),
+                    fee_amount: 10,
+                    signature: b(0xCD, 64),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Burn {
+                    amount: amount(200),
+                    token_id: b(0x54, 3),
+                    policy_commit: id(0xAC),
+                    token_policy: b(0x0A, 40),
+                    message: "burn".into(),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::LockToken {
+                    token_id: b(0x54, 3),
+                    amount: 500,
+                    purpose: b(0x65, 6),
+                    mode: Unilateral,
+                    signature: b(0xDD, 32),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::UnlockToken {
+                    token_id: b(0x54, 3),
+                    amount: 250,
+                    purpose: b(0x65, 6),
+                    mode: Bilateral,
+                    signature: b(0xEE, 32),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Lock {
+                    token_id: b(0x54, 3),
+                    amount: amount(100),
+                    purpose: b(0x63, 10),
+                    owner: b(0x11, 32),
+                    message: "lock".into(),
+                    signature: b(0x22, 48),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Unlock {
+                    token_id: b(0x54, 3),
+                    amount: amount(50),
+                    purpose: b(0x63, 10),
+                    owner: b(0x33, 32),
+                    message: "unlock".into(),
+                    signature: b(0x44, 48),
+                },
+                TOKEN,
+            ),
+            (
+                Operation::Receive {
+                    token_id: b(0x54, 3),
+                    from_device_id: b(0x01, 32),
+                    amount: amount(777),
+                    recipient: b(0x02, 32),
+                    message: "receive".into(),
+                    mode: Bilateral,
+                    nonce: b(0x03, 16),
+                    sender_state_hash: None,
+                },
+                TOKEN,
+            ),
+            (
+                Operation::DlvCreate {
+                    vault_id: b(0x01, 32),
+                    creator_public_key: b(0x02, 64),
+                    parameters_hash: b(0x03, 32),
+                    fulfillment_condition: b(0x04, 16),
+                    intended_recipient: None,
+                    signature: b(0x06, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvUnlock {
+                    vault_id: b(0x01, 32),
+                    fulfillment_proof: b(0x02, 128),
+                    requester_public_key: b(0x03, 64),
+                    signature: b(0x04, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvClaim {
+                    vault_id: b(0x01, 32),
+                    claim_proof: b(0x02, 64),
+                    claimant_public_key: b(0x03, 64),
+                    signature: b(0x04, 48),
+                    mode: Bilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::DlvInvalidate {
+                    vault_id: b(0x01, 32),
+                    reason: "timeout".into(),
+                    creator_public_key: b(0x02, 64),
+                    signature: b(0x03, 48),
+                    mode: Unilateral,
+                },
+                VAULT,
+            ),
+            (
+                Operation::EscrowVaultCreate {
+                    genesis_preimage: vec![0x5A, 0x01],
+                    creation: vec![0x5B, 0x01],
+                    terms: vec![0x01, 0x63, 0x01, 0x01],
+                    funding_policies: vec![vec![0x40, 0x01]],
+                    signature: b(0xA4, 64),
+                },
+                VAULT,
+            ),
+            (
+                Operation::SofiSetup {
+                    setup_body: vec![0x36, 0x01],
+                    signature: b(0xA1, 64),
+                },
+                SOFI,
+            ),
+            (
+                Operation::SofiVaultCreate {
+                    genesis_preimage: vec![0x5A, 0x01],
+                    creation: vec![0x5B, 0x01],
+                    market_policy_preimage: vec![0x01, 0x07, 0x01, 0x01],
+                    funding_a_policy_commit: id(0x5C),
+                    funding_b_policy_commit: id(0x5D),
+                    funding_policies: vec![vec![0x5C, 0x01], vec![0x5D, 0x01]],
+                    signature: b(0xA2, 64),
+                },
+                SOFI,
+            ),
+            (
+                Operation::SofiFulfill {
+                    fulfillment_body: vec![0x39, 0x01],
+                    precommit_id: b(0x11, 32),
+                    signature: b(0xA3, 64),
+                },
+                SOFI,
+            ),
+        ]
+    }
+
+    /// MR-DSM-0219 (§6.105 C1): the offline door, from the bytes a proposal
+    /// carries, admits the offline-bearer transfer and refuses every other
+    /// variant by its class — SoFi and vault operations as online. Every
+    /// variant has an operation here (the door's match has no wildcard, and
+    /// this list is checked against the variant count).
+    /// MUTATION CONTROL: a wildcard arm admitting what is not classified turns
+    /// this red on the SoFi operations.
+    #[test]
+    fn the_offline_door_admits_the_bearer_transfer_and_refuses_every_other_variant() {
+        // The variant an operation is. No wildcard: a variant added to
+        // `Operation` does not compile here until it has an index, and then
+        // fails this test until it has an operation in the list.
+        fn index(op: &Operation) -> usize {
+            match op {
+                Operation::Genesis => 0,
+                Operation::Create { .. } => 1,
+                Operation::Update { .. } => 2,
+                Operation::Transfer { .. } => 3,
+                Operation::FaucetClaim { .. } => 4,
+                Operation::AdoptToken { .. } => 5,
+                Operation::Burn { .. } => 6,
+                Operation::LockToken { .. } => 7,
+                Operation::UnlockToken { .. } => 8,
+                Operation::Lock { .. } => 9,
+                Operation::Unlock { .. } => 10,
+                Operation::AddRelationship { .. } => 11,
+                Operation::CreateRelationship { .. } => 12,
+                Operation::RemoveRelationship { .. } => 13,
+                Operation::Recovery { .. } => 14,
+                Operation::Delete { .. } => 15,
+                Operation::Link { .. } => 16,
+                Operation::Unlink { .. } => 17,
+                Operation::Invalidate { .. } => 18,
+                Operation::Generic { .. } => 19,
+                Operation::Receive { .. } => 20,
+                Operation::CreateToken { .. } => 21,
+                Operation::Noop => 22,
+                Operation::DlvCreate { .. } => 23,
+                Operation::DlvUnlock { .. } => 24,
+                Operation::DlvClaim { .. } => 25,
+                Operation::SofiSetup { .. } => 26,
+                Operation::SofiVaultCreate { .. } => 27,
+                Operation::SofiFulfill { .. } => 28,
+                Operation::EscrowVaultCreate { .. } => 29,
+                Operation::DlvInvalidate { .. } => 30,
+            }
+        }
+        const VARIANTS: usize = 31;
+        let every = one_of_every_variant();
+        let mut held = [0usize; VARIANTS];
+        for (operation, _) in &every {
+            held[index(operation)] += 1;
+        }
+        for (variant, count) in held.iter().enumerate() {
+            assert_ne!(
+                *count, 0,
+                "operation variant {variant} has no operation here"
+            );
+        }
+        for (operation, class) in every {
+            let carried = offline_operation(&operation.to_bytes());
+            match class {
+                "admitted" => {
+                    carried.expect("the offline-bearer transfer passes the door");
+                }
+                class => refused(carried, class),
+            }
+        }
     }
 
     /// The proposer takes an acceptance — its signature and its challenge —

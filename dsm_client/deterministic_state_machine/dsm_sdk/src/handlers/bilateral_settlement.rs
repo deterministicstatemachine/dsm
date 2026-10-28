@@ -263,11 +263,6 @@ impl StepSettlement {
         )
         .map_err(|e| DsmError::storage(format!("bilateral settle: {e}"), None::<std::io::Error>))
     }
-
-    /// The operation bytes the step settles.
-    pub(crate) fn operation_bytes(&self) -> &[u8] {
-        &self.operation_bytes
-    }
 }
 
 /// Display metadata for the offline protocol's events; the application

@@ -37,8 +37,10 @@ use crate::tla_trace_replay::{
 /// `OfflineFinality/commit-without-owed-confirm` and
 /// `OfflineFinality/sender-ahead-reachable`. 95 since the reserve takes its
 /// finality from the route chain (G15): `NativeReserveRelease/copy-rule`;
-/// 96 with the successor cells' `SofiSuccessorCells/copy-rule`.
-pub const EXPECTED_STANDARD_SPECS: usize = 96;
+/// 96 with the successor cells' `SofiSuccessorCells/copy-rule`. 95 since the
+/// offline door carries only the offline-bearer transfer (MR-DSM-0219): no step
+/// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
+pub const EXPECTED_STANDARD_SPECS: usize = 95;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaSpec {
@@ -442,14 +444,6 @@ impl TlaRunner {
                 exhaustive: false,
             },
             offline_finality.clone(),
-            // The same step for one that moves no value: its proposer commits
-            // on the ack (finalize_sender_step), not when it confirms.
-            same_module_under(
-                &offline_finality,
-                "OfflineFinality/commit-on-ack",
-                "DSM_OfflineFinality_CommitOnAck.cfg",
-                &["ConfirmFollowsSenderCommit"],
-            ),
             // Each rule of the offline step removed, one at a time: the
             // invariant it holds up fails.
             expect_violation(
@@ -1466,25 +1460,6 @@ fn crashed_without_a_finding(result: &TlcResult) -> bool {
             .errors
             .iter()
             .any(|e| e.starts_with("Invariant violated:"))
-}
-
-/// `base`'s module checked under another of its configs: the module's own
-/// trace replay and exhaustiveness carry over, the invariants `without` (which
-/// the config does not state) are not checked, and the implementation traces
-/// linked to `base`'s behaviour are not replayed against it.
-fn same_module_under(base: &TlaSpec, label: &str, config_file: &str, without: &[&str]) -> TlaSpec {
-    TlaSpec {
-        label: label.into(),
-        config_file: config_file.into(),
-        invariants: base
-            .invariants
-            .iter()
-            .filter(|i| !without.contains(&i.as_str()))
-            .cloned()
-            .collect(),
-        linked_implementation_traces: Vec::new(),
-        ..base.clone()
-    }
 }
 
 /// A registry entry whose config must violate exactly `invariant`: a deliberate

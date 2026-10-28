@@ -558,7 +558,7 @@ mod tests {
 
     /// Regression test: the sender-cached signed stitched receipt (with §11.1
     /// per-step EK signing artifacts already stamped) must round-trip through
-    /// SQLite so post-crash recovery in `finalize_sender_step`
+    /// SQLite so post-crash recovery (`commit_released_bearer_step`)
     /// can reuse it verbatim instead of attempting an unsigned rebuild.
     #[test]
     #[serial]
