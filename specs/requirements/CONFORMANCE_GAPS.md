@@ -4607,6 +4607,11 @@ The release is also on the nodes although only the sender reads it, from an addr
 9. *An offline step moves each side's pin of the peer's head* by the peer's own verified receipt, so online and offline steps share one relationship lineage per device.
 10. *Settlement runs in `storage.sync`,* after split-transfer completion, walking each payer of a pending payment toward the head its register holds.
 
+**Core's dependency on `dsm-anchor-core` (checked 2026-10-27, at the main session's three conditions).** Core depends on the appliance's verify-side crate since `4db3fb2a`: the chain verifier uses its release certificate and signature checks.
+1. *No cycle.* `dsm-anchor-core`'s tree, on normal, build and dev edges, holds no `dsm` crate, in either workspace.
+2. *Nothing hardware-, TROPIC- or embedded-specific enters Core's graph.* `cargo tree -p dsm -e normal` before the edge (`e65ca74e`) and after differ by exactly `dsm-anchor-core`. Its own dependencies (`blake3`, `prost` 0.14) were already Core's.
+3. *Each lockfile changes by that one entry.* The four lockfiles whose graph holds `dsm` each gain only the edge: the root and DSM lockfiles in `4db3fb2a`, the workspace-excluded `dsm-anchor-hw-verifier` and `dsm-android-anchor` lockfiles in `7f9d1210`. No version changes anywhere. The branch's only other lockfile change is `dsm-anchor-core`'s own test dependencies (`0f255526`: `dsm-sphincs` and `ed25519-dalek`, both already locked).
+
 **Not changed.** `scripts/real_code_guard.py` and its baseline; `dsm/src/sofi/`; `dsm/src/economic/lineage.rs`; `dsm/src/types/operations.rs`; `ci/conformance_evidence.py`; the storage-spec documents. `dsm/src/economic/write_set.rs` (the `Settle` arm, `moved_token_policy` made crate-visible) and `dsm/src/economic/provenance.rs` (`0x0075` accepts `Settle`) were touched, as announced before the change.
 
 **Open.**
