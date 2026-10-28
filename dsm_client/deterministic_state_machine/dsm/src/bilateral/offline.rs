@@ -17,8 +17,8 @@ use crate::core::bilateral_transaction_manager::{
 };
 use crate::types::receipt_types::{DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2};
 use crate::verification::receipt_verification::{
-    verify_per_step_ek_signing, verify_receipt_state, BearerLeaves, BilateralSide,
-    ReceiptStateContext,
+    per_step_ek_predecessor, verify_per_step_ek_signing, verify_receipt_state, BearerLeaves,
+    BilateralSide, ReceiptStateContext,
 };
 use crate::crypto::signatures::SignatureKeyPair;
 use crate::types::error::DsmError;
@@ -615,7 +615,7 @@ pub fn decide_confirm(
     verify_per_step_ek_signing(
         &receipt,
         BilateralSide::A,
-        step.sender_chain_head.unwrap_or(sender.signing_key),
+        per_step_ek_predecessor(step.sender_chain_head, sender.signing_key),
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
@@ -732,7 +732,7 @@ pub fn decide_commit_ack(
     verify_per_step_ek_signing(
         &receipt,
         BilateralSide::B,
-        step.receiver_chain_head.unwrap_or(receiver.signing_key),
+        per_step_ek_predecessor(step.receiver_chain_head, receiver.signing_key),
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;

@@ -197,7 +197,9 @@ mod tests {
     // and twelve Expand / keyed labels replace the six v2 key-tree tags,
     // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
     // +1 for an offline settlement's operation id (SA-91, §6.103).
-    const EXPECTED_TAG_COUNT: usize = 413;
+    // +1 with the cert-restart statement moving into Core (§6.117; the SDK
+    // declared it outside the registry).
+    const EXPECTED_TAG_COUNT: usize = 414;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

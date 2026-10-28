@@ -139,7 +139,11 @@ pub(crate) fn verify_inbound_receipt_sig_a(
     commitment: &[u8; 32],
     ak_pk_genesis: &[u8],
 ) -> Result<Result<(), String>, String> {
-    let expected_prev_pk = expected_counterparty_ek_root(receipt, ak_pk_genesis)?;
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
+    let expected_prev_pk = counterparty_ek_predecessor(&rel_key, ak_pk_genesis)?;
     Ok(
         dsm::verification::receipt_verification::verify_per_step_ek_signing(
             receipt,
@@ -152,28 +156,27 @@ pub(crate) fn verify_inbound_receipt_sig_a(
     )
 }
 
-/// The key an inbound receipt's `ek_cert_a` must chain to. From the receiver's
-/// viewpoint the SENDER (A-side) is the Counterparty; at relationship genesis
-/// (no Counterparty head yet) the sender's `ek_cert_a` chains back to the
-/// sender's AK — the legitimate predecessor. A head that could not be READ is
-/// not "no head": the check cannot be made, and that is an error.
-fn expected_counterparty_ek_root(
-    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
-    ak_pk_genesis: &[u8],
+/// The key the counterparty's next `ek_cert` must chain to on `rel_key`:
+/// Core's [`per_step_ek_predecessor`](dsm::verification::receipt_verification::per_step_ek_predecessor)
+/// of the Counterparty cert-chain head this device stored and the
+/// counterparty's AK. A head that could not be READ is not "no head": the
+/// check cannot be made, and the caller retries rather than judging the chain
+/// against the root AK.
+pub(crate) fn counterparty_ek_predecessor(
+    rel_key: &[u8; 32],
+    counterparty_ak: &[u8],
 ) -> Result<Vec<u8>, String> {
     use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 
-    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
-    match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty) {
-        Ok(Some(head)) => Ok(head),
-        Ok(None) => Ok(ak_pk_genesis.to_vec()),
-        Err(e) => Err(format!(
-            "the counterparty's cert-chain head could not be read: {e}"
-        )),
-    }
+    let head = load_cert_chain_head_pubkey(rel_key, CertChainSide::Counterparty)
+        .map_err(|e| format!("the counterparty's cert-chain head could not be read: {e}"))?;
+    Ok(
+        dsm::verification::receipt_verification::per_step_ek_predecessor(
+            head.as_deref(),
+            counterparty_ak,
+        )
+        .to_vec(),
+    )
 }
 
 /// What one B-side countersign delta did on the sender. Every arm is a
@@ -211,8 +214,8 @@ pub(crate) enum CountersignOutcome {
 ///
 /// The recipient never ships the whole countersigned receipt (218 KB, over the
 /// node cap). It ships `ReceiptCountersignB`; this overlays it onto the A-side
-/// receipt the sender froze at send time and runs the UNCHANGED acceptance
-/// verifier and the UNCHANGED atomic finalization. That reconstruction is the
+/// receipt the sender froze at send time and runs Core's acceptance verifier
+/// and the UNCHANGED atomic finalization. That reconstruction is the
 /// load-bearing binding — B material is only ever judged against the A side the
 /// sender itself authored.
 async fn finalize_from_countersign_delta(
@@ -337,17 +340,37 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    // The recipient's chain as this device holds it: its EK head, or at the
+    // relationship's first step its AK. A head that could not be read is no
+    // verdict; the delta is read again.
+    let expected_prev_pk_b = match counterparty_ek_predecessor(
+        &dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self_device_id,
+            &proposal.counterparty_device_id,
+        ),
+        &recipient_ak_pk,
+    ) {
+        Ok(key) => key,
+        Err(e) => {
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}.. verification errored: {e}"
+            );
+            return CountersignOutcome::Unverifiable(format!("verification errored: {e}"));
+        }
+    };
+
     let receipt = &bound.receipt;
-    match crate::handlers::online_finalize::verify_acceptance_receipt(
+    match dsm::verification::receipt_verification::verify_acceptance_receipt(
         &self_device_id,
         &proposal.counterparty_device_id,
         receipt,
-        &proposal,
-        &recipient_ak_pk,
+        (proposal.canonical_parent, proposal.canonical_child),
+        &proposal.commitment,
+        &expected_prev_pk_b,
         bound.b_pair(),
     ) {
-        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
-        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
+        Ok(dsm::verification::receipt_verification::ReceiptVerifyOutcome::Verified { .. }) => {}
+        Ok(dsm::verification::receipt_verification::ReceiptVerifyOutcome::Rejected { reason }) => {
             // The gate is retained (correct — this artifact proved nothing), but
             // the step must NOT be left stranded at `submitted` with no exit.
             // Receipt fields 12-20 are outside every signature, so a middlebox or

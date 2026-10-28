@@ -183,6 +183,10 @@ pub const TAG_DSM_RELATIONSHIP_FINALIZED: TaggedHashDomain<'static> =
 /// like the evidence tags above).
 pub const TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-finalized-artifact/v1");
+/// The joint cert-restart statement both AKs of a relationship sign to restart
+/// its per-step EK cert chain at an agreed tip (cert resync).
+pub const TAG_DSM_CERT_RESTART: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/cert-restart/v1");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");
 pub const TAG_DSM_SPARSE_IDX: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/sparse-idx");
 pub const TAG_DSM_STATE_ENTROPY: TaggedHashDomain<'static> =

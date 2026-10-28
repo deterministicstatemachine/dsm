@@ -221,6 +221,17 @@ pub enum BilateralSide {
     B,
 }
 
+/// The key a side's `ek_cert` must chain to (§11.1): the side's EK head on the
+/// relationship, or, at the relationship's first step, where the side has no
+/// EK head yet, its AK. A head the caller could not read is not "no head":
+/// it is the caller's to report, never to pass here as `None`.
+pub fn per_step_ek_predecessor<'k>(ek_head: Option<&'k [u8]>, ak: &'k [u8]) -> &'k [u8] {
+    match ek_head {
+        Some(head) => head,
+        None => ak,
+    }
+}
+
 /// One side's per-step EK artifacts on `receipt` (§11.1) answer the standard
 /// session-bound response target of the receipt's commitment. See
 /// [`verify_per_step_ek_signing_target`].
@@ -299,6 +310,101 @@ pub fn verify_per_step_ek_signing_target(
         )));
     }
     Ok(())
+}
+
+/// The sender's verdict on a recipient acceptance receipt (§16.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptVerifyOutcome {
+    /// The receipt binds the exact step the sender proposed and its per-step
+    /// EK countersignature (`sig_b`) verifies. `commitment` is the receipt
+    /// commitment the finalization records for idempotent replay.
+    Verified { commitment: [u8; 32] },
+    /// The receipt names another step (party, parent, child or roots), or its
+    /// countersignature does not verify. The sender's gate is retained.
+    Rejected { reason: String },
+}
+
+fn rejected(reason: &str) -> ReceiptVerifyOutcome {
+    ReceiptVerifyOutcome::Rejected {
+        reason: reason.to_string(),
+    }
+}
+
+/// The sender's online finality predicate (§16.6): a recipient acceptance
+/// receipt finalizes the sender's step only when, in order,
+///
+///  1. `receipt.devid_a` is `sender_device_id` and `receipt.devid_b` is
+///     `counterparty_device_id`;
+///  2. its parent and child tips are `canonical_pair`, the step's pair in the
+///     ASYMMETRIC canonical space (a symmetric routing pair is another formula
+///     space, and comparing across the two rejects valid countersignatures);
+///  3. its commitment is `commitment`. The commitment covers the receipt's
+///     parent and child roots, so a receipt naming other roots fails here;
+///  4. `ek_pk_b` and `kyber_ct_b` are present together;
+///  5. `ek_cert_b` chains `ek_pk_b` to `expected_prev_pk_b` over the parent tip
+///     ([`per_step_ek_predecessor`] of the recipient's head and AK), and
+///     `sig_b` verifies under `ek_pk_b` over the B-canonical target: the
+///     session-bound target of the commitment extended with `b_pair`, the
+///     recipient's canonical pair. A pair the recipient did not sign fails
+///     here, so the pair the sender pins as the peer's head is authenticated.
+///
+/// `Err` means the receipt's commitment could not be computed. A validly
+/// signed receipt naming another step is `Rejected`.
+pub fn verify_acceptance_receipt(
+    sender_device_id: &[u8; 32],
+    counterparty_device_id: &[u8; 32],
+    receipt: &StitchedReceiptV2,
+    canonical_pair: ([u8; 32], [u8; 32]),
+    commitment: &[u8; 32],
+    expected_prev_pk_b: &[u8],
+    b_pair: ([u8; 32], [u8; 32]),
+) -> Result<ReceiptVerifyOutcome, DsmError> {
+    if &receipt.devid_a != sender_device_id {
+        return Ok(rejected("receipt devid_a is not this sender"));
+    }
+    if &receipt.devid_b != counterparty_device_id {
+        return Ok(rejected("receipt devid_b is not the proposal counterparty"));
+    }
+    if receipt.parent_tip != canonical_pair.0 {
+        return Ok(rejected(
+            "receipt parent_tip != proposal canonical_parent (A-space)",
+        ));
+    }
+    if receipt.child_tip != canonical_pair.1 {
+        return Ok(rejected(
+            "receipt child_tip != proposal canonical_child (A-space)",
+        ));
+    }
+    let receipt_commitment = receipt.compute_commitment()?;
+    if &receipt_commitment != commitment {
+        return Ok(rejected("receipt commitment != proposal commitment"));
+    }
+    if !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
+        return Ok(rejected(
+            "receipt ek_pk_b set but kyber_ct_b missing — per-step EK derivation \
+             requires both halves of the Kyber context",
+        ));
+    }
+    let b_target = crate::types::receipt_types::compute_receipt_b_canonical_target(
+        &receipt_commitment,
+        &receipt_commitment,
+        &b_pair.0,
+        &b_pair.1,
+    );
+    if let Err(e) = verify_per_step_ek_signing_target(
+        receipt,
+        BilateralSide::B,
+        expected_prev_pk_b,
+        &receipt.parent_tip,
+        &b_target,
+    ) {
+        return Ok(rejected(&format!(
+            "recipient per-step EK countersignature (sig_b) failed verification: {e}"
+        )));
+    }
+    Ok(ReceiptVerifyOutcome::Verified {
+        commitment: receipt_commitment,
+    })
 }
 
 #[cfg(test)]
@@ -463,5 +569,226 @@ mod tests {
             .is_err(),
             "another Device Tree"
         );
+    }
+
+    /// The predecessor is the side's EK head once it has one, and its AK only
+    /// before.
+    #[test]
+    fn the_predecessor_is_the_head_and_the_ak_only_before_one_exists() {
+        let (head, ak) = ([0xE1u8; 64], [0xA1u8; 64]);
+        assert_eq!(per_step_ek_predecessor(Some(&head), &ak), &head[..]);
+        assert_eq!(per_step_ek_predecessor(None, &ak), &ak[..]);
+    }
+
+    /// Everything the sender's finality predicate is handed, as the sender of
+    /// the world's transfer holds it after the receiver's honest countersign:
+    /// the receiver's per-step EK answer over the B-canonical target of the
+    /// transfer's commitment and the receiver's own pair (its credit of the
+    /// transfer), certified by the receiver's AK at the relationship's first
+    /// step.
+    #[derive(Clone)]
+    struct Judged {
+        sender: [u8; 32],
+        counterparty: [u8; 32],
+        receipt: StitchedReceiptV2,
+        canonical_pair: ([u8; 32], [u8; 32]),
+        commitment: [u8; 32],
+        predecessor: Vec<u8>,
+        b_pair: ([u8; 32], [u8; 32]),
+    }
+
+    impl Judged {
+        fn verdict(&self) -> ReceiptVerifyOutcome {
+            verify_acceptance_receipt(
+                &self.sender,
+                &self.counterparty,
+                &self.receipt,
+                self.canonical_pair,
+                &self.commitment,
+                &self.predecessor,
+                self.b_pair,
+            )
+            .expect("the receipt's commitment computes")
+        }
+
+        /// Rejected, for a reason naming `why`.
+        fn rejected_for(&self, why: &str) {
+            match self.verdict() {
+                ReceiptVerifyOutcome::Rejected { reason } => {
+                    assert!(reason.contains(why), "expected {why}, got: {reason}")
+                }
+                verified => panic!("expected a rejection naming {why}, got {verified:?}"),
+            }
+        }
+    }
+
+    fn countersigned() -> &'static Judged {
+        static HONEST: std::sync::OnceLock<Judged> = std::sync::OnceLock::new();
+        HONEST.get_or_init(|| {
+            let w = world();
+            let mut receipt = w.transfer.receipt.clone();
+            let commitment = receipt.compute_commitment().expect("the commitment");
+            let credit = crate::types::step_fixture::credit_step(
+                &w.receiver,
+                &w.sender,
+                &w.transfer.operation,
+            );
+            let b_pair = (credit.receipt.parent_tip, credit.receipt.child_tip);
+            let answer = w.receiver.answer(
+                &w.sender,
+                &receipt.parent_tip,
+                &w.transfer.c_pre,
+                &crate::types::receipt_types::compute_receipt_b_canonical_target(
+                    &commitment,
+                    &commitment,
+                    &b_pair.0,
+                    &b_pair.1,
+                ),
+            );
+            receipt.set_ek_pk_b(answer.ek_pk);
+            receipt.set_ek_cert_b(answer.ek_cert);
+            receipt.set_kyber_ct_b(answer.kyber_ct);
+            receipt.add_sig_b(answer.sig);
+            Judged {
+                sender: w.sender.device_id(),
+                counterparty: w.receiver.device_id(),
+                canonical_pair: (receipt.parent_tip, receipt.child_tip),
+                commitment,
+                predecessor: per_step_ek_predecessor(None, w.receiver.signing_public_key())
+                    .to_vec(),
+                b_pair,
+                receipt,
+            }
+        })
+    }
+
+    #[test]
+    fn an_honest_countersign_verifies_and_names_its_commitment() {
+        let honest = countersigned();
+        assert_eq!(
+            honest.verdict(),
+            ReceiptVerifyOutcome::Verified {
+                commitment: honest.commitment
+            }
+        );
+    }
+
+    /// The honest countersign, judged by a device that is not its sender.
+    #[test]
+    fn rejects_receipt_naming_a_different_sender() {
+        Judged {
+            sender: world().receiver.device_id(),
+            ..countersigned().clone()
+        }
+        .rejected_for("devid_a");
+    }
+
+    /// The honest countersign, judged against a proposal to another device.
+    #[test]
+    fn rejects_receipt_naming_a_different_counterparty() {
+        Judged {
+            counterparty: world().sender.device_id(),
+            ..countersigned().clone()
+        }
+        .rejected_for("devid_b");
+    }
+
+    /// The honest countersign, judged against a proposal whose canonical
+    /// parent or child is another step's, though its commitment is this one's.
+    #[test]
+    fn rejects_receipt_with_different_parent_or_child() {
+        let honest = countersigned();
+        let other = &world().fork.receipt;
+        Judged {
+            canonical_pair: (other.child_tip, honest.canonical_pair.1),
+            ..honest.clone()
+        }
+        .rejected_for("parent_tip");
+        Judged {
+            canonical_pair: (honest.canonical_pair.0, other.child_tip),
+            ..honest.clone()
+        }
+        .rejected_for("child_tip");
+    }
+
+    /// A receipt whose child tip is forged, with the commitment recomputed
+    /// over the forgery, is refused at the child tip: retargeting the check
+    /// onto the proposal's canonical pair tightened it.
+    #[test]
+    fn forged_canonical_child_is_rejected() {
+        let mut forged = countersigned().clone();
+        forged.receipt.child_tip = world().fork.receipt.child_tip;
+        forged.commitment = forged.receipt.compute_commitment().expect("the commitment");
+        forged.rejected_for("child_tip");
+    }
+
+    /// The commitment covers the receipt's roots: a receipt naming other roots
+    /// is refused at the commitment, and so is the honest countersign judged
+    /// against another step's commitment.
+    #[test]
+    fn a_receipt_naming_other_roots_than_the_committed_ones_is_rejected() {
+        let other = &world().fork.receipt;
+        let mutations: [fn(&mut StitchedReceiptV2, &StitchedReceiptV2); 2] = [
+            |r, other| r.parent_root = other.child_root,
+            |r, other| r.child_root = other.child_root,
+        ];
+        for mutate in mutations {
+            let mut forged = countersigned().clone();
+            mutate(&mut forged.receipt, other);
+            forged.rejected_for("commitment");
+        }
+        Judged {
+            commitment: other.compute_commitment().expect("the fork's commitment"),
+            ..countersigned().clone()
+        }
+        .rejected_for("commitment");
+    }
+
+    /// `kyber_ct_b` is outside every signature: stripped, `sig_b` still
+    /// verifies, so the consistency gate is what refuses it. Its refusal
+    /// records nothing (MR-DSM-0018), and a valid artifact for the same
+    /// commitment still finalizes the step.
+    #[test]
+    fn a_stripped_kyber_ct_b_is_rejected_by_the_live_gate() {
+        let mut stripped = countersigned().clone();
+        stripped.receipt.set_kyber_ct_b(Vec::new());
+        assert_eq!(
+            stripped
+                .receipt
+                .compute_commitment()
+                .expect("the commitment"),
+            stripped.commitment,
+            "the canonical form leaves the B-side fields out of the commitment"
+        );
+        stripped.rejected_for("kyber_ct_b missing");
+    }
+
+    /// A raw `sig_b` with no per-step EK and no certificate is a static-key
+    /// signature, not finalization evidence.
+    #[test]
+    fn rejects_static_key_receipt_without_per_step_ek_artifacts() {
+        let mut bare = countersigned().clone();
+        bare.receipt.set_ek_pk_b(Vec::new());
+        bare.receipt.set_ek_cert_b(Vec::new());
+        bare.receipt.set_kyber_ct_b(Vec::new());
+        bare.rejected_for("per-step EK");
+    }
+
+    /// The honest countersign answers for the receiver's pair from the
+    /// receiver's chain: judged over another pair, or as chained from the
+    /// sender's AK, `sig_b` does not verify.
+    #[test]
+    fn a_countersign_over_another_pair_or_from_another_chain_is_rejected() {
+        let honest = countersigned();
+        Judged {
+            b_pair: (honest.b_pair.1, honest.b_pair.0),
+            ..honest.clone()
+        }
+        .rejected_for("sig_b");
+        Judged {
+            predecessor: world().sender.signing_public_key().to_vec(),
+            ..honest.clone()
+        }
+        .rejected_for("sig_b");
     }
 }

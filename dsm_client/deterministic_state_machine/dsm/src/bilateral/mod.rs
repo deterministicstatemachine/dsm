@@ -6,7 +6,9 @@
 //! and verification logic in the verification sub-module. The core bilateral
 //! transaction manager lives in [`crate::core::bilateral_transaction_manager`].
 //! The offline protocol's decisions are [`offline`]; the Kyber identity
-//! binding they check is [`identity_binding`].
+//! binding they check is [`identity_binding`]. The jointly authorized restart
+//! of a relationship's cert chain is [`cert_resync`].
 
+pub mod cert_resync;
 pub mod identity_binding;
 pub mod offline;
