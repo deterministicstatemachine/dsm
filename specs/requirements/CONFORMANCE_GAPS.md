@@ -5278,6 +5278,76 @@ Each item below turns on one of four clauses:
 
 **Rows.** Notes for MR-DSM-0020, 0082, 0095, 0101, 0102, 0215, 0245, 0250 and MR-SOFI-0078, 0092, 0126, 0284, with MR-DSM-0215's and MR-DSM-0250's Test cells extended. Eight matrix rows added.
 
+### 6.112 MR-DSM-0248: a field the length prefix cannot frame is refused, never hashed (`fix/length-prefix-refuses-oversize`, 2026-10-27)
+
+**Why.** §6.108 asked the owner question 3. `write_lp` wrote the prefix `u32::MAX` for every field over 4 GiB (`unwrap_or(u32::MAX)`), so two such fields of different lengths hashed with one prefix, and the prefix was a made-up value.
+
+**Decided** by the coordinating session, 2026-10-27 (the owner said this work need not wait on them):
+- The 4-byte prefix stays, so every length-prefixed digest and every golden value is unchanged.
+- A field longer than `u32::MAX` bytes is refused with an error and never hashed.
+- The four specifications fix no prefix width, so no protocol text changes.
+
+**The change.**
+- **One function decides the prefix.** `canonical_lp::lp_prefix(len)` returns `len` as a `u32` little-endian, or `DsmError::InvalidParameter` when `len` exceeds `u32::MAX`.
+- **The writers return a `Result`.** `write_lp` takes its prefix from `lp_prefix` before it writes anything, and returns `Result<(), DsmError>`. `hash_lp1`..`hash_lp3` return `Result<[u8; 32], DsmError>`. A refusal yields no digest.
+- **Callers.** The error reaches an error each caller already returns, with no `unwrap`, `expect` or default on a production path:
+  - the precommit `C_pre`: `commitments::precommit::branch_commitment_hash` and `core::bilateral_transaction_manager::compute_precommit`;
+  - `BilateralPreCommitment::new`, so `create_bilateral_precommitment`, `restore_pre_commitment` and the receiver's `decide_prepare` (both of its recomputes) refuse;
+  - the receiver's confirm in `bilateral::offline`;
+  - in `dsm_sdk`: the BLE sender, bearer and commit paths; the online send; the staged apply in `complete_staged_pairs`, which returns `String` errors; `CoreSdk`'s incoming apply;
+  - `TombstoneReceipt::compute_hash` and `SuccessionReceipt::compute_hash`, so their `create_*` and `verify_*` refuse (recovery is out of scope; this is its dependency boundary only);
+  - `tools/vertical_validation`'s traces and live device.
+- **Tests.** Test code calls these with `?`, or with `.expect` naming the value, as the tests around it do.
+- **Cleanup.** `BilateralPreCommitment::new` no longer fills a zero buffer; it takes the digest from the hasher.
+
+**The test, over the length.** `dsm::crypto::canonical_lp::tests::a_length_one_byte_over_the_prefix_bound_is_refused` checks `lp_prefix` at the boundary:
+- 0, 1, `u32::MAX` − 1 and `u32::MAX` are framed as their exact little-endian values;
+- `u32::MAX` + 1, + 2 and `usize::MAX` are refused with `InvalidParameter`.
+
+It runs on 64-bit targets, where the bound is reachable. On a 32-bit target no slice exceeds it.
+
+**Why a function over the length, not a slice.** A `&[u8]` one byte over the bound cannot be built for `write_lp` without backing it:
+- `dsm` is `#![forbid(unsafe_code)]`, so there is no slice over unbacked memory;
+- every safe construction allocates the 4 GiB the test may not.
+
+`lp_prefix` is the only place `write_lp` gets its prefix, so the test covers the decision `write_lp` makes.
+
+**Mutation control.** One `DSM_MUTANT` build in a scratch worktree with its own target directory:
+- the prefix saturated at `u32::MAX` again (the old behaviour) → red;
+- the prefix truncated to 32 bits → red;
+- the unmutated control → green.
+
+The other 13 `canonical_lp` tests stayed green under both mutants, so before this test nothing tested the bound.
+
+**Digests unchanged.** Each touched test passed in its own `--release` run, one process per test:
+- The `canonical_lp` tests and its three properties (`determinism_pbt_tests`).
+- The frozen digests:
+  - `commitments::precommit::tests::rule3_precommit_domain_is_frozen_across_the_delimiter_cut`;
+  - `dsm::smt_tripwire_vectors::golden_tag_precommit` and `golden_tag_precommit_is_v2_only`.
+- The framing tests:
+  - `core::bilateral_transaction_manager::tests::a_precommitment_is_hashed_under_its_own_tag_not_h0s`;
+  - `recovery::tombstone::tests::receipt_hashes_frame_every_variable_length_field`.
+- The rest of `bilateral::offline`, `core::bilateral_transaction_manager`, `commitments::precommit` and `recovery::tombstone`, the recovery suites that build receipts, and the two `device_state` entropy tests: 102 Core library tests in all.
+- `dsm::smt_tripwire_theorem::theorem2_two_successors_same_parent_rejected`.
+- In `dsm_sdk`, 72 tests on five storage nodes over Postgres:
+  - the tests whose code changed (`recipient_dispatch`, `sender_admission_tests`, `bilateral_ble_handler`);
+  - every test built on `test_support::receipts`' steps (`sdk::receipts`, `online_finalize`, `b0x_sdk`, the wallet's receipt badge);
+  - the changed production paths, end to end: `bluetooth::offline_step_tests::offline_steps_commit_on_both_devices_over_a_byte_carrier`, `a_claimed_tip_that_does_not_recompute_is_not_kept` (the receiver's recompute of a claimed tip), `a_restored_step_that_does_not_hash_to_its_commitment_commits_nothing` and `an_old_proposal_delivered_after_the_tip_moved_is_not_kept_as_the_senders_tip`; `handlers::bilateral_finality_tests::harness_carries_one_generation_a_to_b_through_production_code` (the online send and the staged apply).
+  - One test, `a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is_read`, first failed at its setup's `token.create` ("the claim is not final yet … Preserved") while other sessions loaded the shared Postgres server. That is the recorded connection-pressure symptom, and it is before the line this change touched. Run alone, it passed.
+- In `tools/vertical_validation`, its four implementation-trace tests, which run the precomputed-finalize trace and the live devices' proposals.
+
+`write_lp_prepends_length_prefix` and `write_lp_empty_input` used to assert only that the output is 32 bytes. They now compare against the explicit `u32le(len) ‖ bytes` preimage, so they pin the framing.
+
+**Baseline.** The guard's baseline only shrinks. Its two entries for lines this change deleted are removed: the `unwrap_or(u32::MAX)` line, and `BilateralPreCommitment::new`'s zero buffer.
+- `--write-baseline` was not used. On this tree it would also drop 638 entries that other branches' deletions left, and those are their changes to make.
+- The guard is untouched, and passes over every scope.
+
+**Intent pins.** `INTENT_PINS.tsv` pins `dsm::crypto::canonical_lp::write_lp` for MR-DSM-0248 with its production closure. That closure moved, so the pin is stale until it is repinned from CI's code map on the merged branch. So is any pin whose closure includes `write_lp`, `hash_lp*`, `compute_precommit` or a receipt's `compute_hash`.
+
+**Verification.** `make lint` passed: fmt and clippy, and the frontend's eslint through a temporary `node_modules` symlink to the main checkout (same eslint and TypeScript versions), since removed. `ci/production_safety_checks.sh`, `python3 ci/conformance_evidence.py` and the real-code guard over every scope passed.
+
+**Rows.** MR-DSM-0248 stays Met: its Code cell gains `lp_prefix` and its Test cell the new test, and the "Minor" note is replaced. One matrix row added. Totals unchanged.
+
 ### 6.113 A producer publishes F only once its conformance is Valid (§6.105 A7, MR-SOFI-0217; `fix/beta-requirements-completion`, 2026-10-27)
 
 **Why.** SoFi L1738: "A producer MUST obtain Valid before it publishes F." §6.105 A7 found F's content object Stored at stages 4 and 5, and the trader's stage-6 head advance made, before full conformance was decided. Full conformance ran only at the install. Option (a), the reorder, is applied: the owner directed the remaining beta code done without routing each item back.
@@ -5567,7 +5637,7 @@ Each item below turns on one of four clauses:
 | MR-DSM-0245 | Met | `dsm::types::device_state::DeviceState::advance`; `dsm::economic::register::economic_root_register_key` | `dsm::types::device_state::tests::a_relationships_steps_depend_on_its_own_chain_and_have_no_deadline`; `dsm::economic_admission_lifecycle::a_registration_at_the_wrong_position_is_refused` | Rechecked 2026-10-27 on `fix/beta-requirements-completion` (was Partial). Relationships invent no order between them (each step depends on its own chain only), and the order that matters is kept as state: a registration is refused anywhere but the committed successor position. Mutation (§6.110): a step hashing the device root instead of its own chain's tip → the first test red. |
 | MR-DSM-0246 | Not code | — | — | Cryptographic safety assumption (collision resistance), not a testable code requirement; BLAKE3 itself is implemented (see 0259). |
 | MR-DSM-0247 | Not code | — | — | Cryptographic safety assumption (unforgeability); SPHINCS+ itself is implemented (see 0259). |
-| MR-DSM-0248 | Met | `dsm::crypto::canonical_lp::write_lp`; ccb (canonical encoders); sofi/wire | `dsm::crypto::canonical_lp::tests::length_prefix_prevents_concatenation_collision`; `dsm::ccb_conformance::production_and_independent_encoders_agree_on_every_lifecycle_state`; `dsm::sofi_v8_independent::every_object_matches_the_independent_encoder_and_round_trips` | Rechecked 2026-10-26 on main ad831f53 (was Partial). [STALE-NOTE] canonical_lp now has unit tests (prefix-separated domains, no concatenation collision), and production encoders are checked byte for byte against independent encoders and frozen goldens. Minor: write_lp saturates the length at u32::MAX for inputs over 4 GiB. |
+| MR-DSM-0248 | Met | `dsm::crypto::canonical_lp::write_lp`; `dsm::crypto::canonical_lp::lp_prefix`; ccb (canonical encoders); sofi/wire | `dsm::crypto::canonical_lp::tests::length_prefix_prevents_concatenation_collision`; `dsm::crypto::canonical_lp::tests::a_length_one_byte_over_the_prefix_bound_is_refused`; `dsm::ccb_conformance::production_and_independent_encoders_agree_on_every_lifecycle_state`; `dsm::sofi_v8_independent::every_object_matches_the_independent_encoder_and_round_trips` | Rechecked 2026-10-26 on main ad831f53 (was Partial). [STALE-NOTE] canonical_lp now has unit tests (prefix-separated domains, no concatenation collision), and production encoders are checked byte for byte against independent encoders and frozen goldens. A field longer than `u32::MAX` bytes, which the 4-byte prefix cannot frame, is refused and never hashed; the prefix of every other field is unchanged (§6.112). |
 | MR-DSM-0249 | Met | `dsm::core::bilateral_transaction_manager::compute_smt_key` | `dsm::smt_tripwire_vectors::golden_tag_smt_key`; `dsm::smt_tripwire_vectors::smt_key_determinism_reversed_args` | Re-verified 2026-09-30 (§6.51). The one derivation is `compute_smt_key`, under the `DSM/smt-key` tag DSM Amendment A9 makes canonical, pinned by a golden vector and order-invariant. |
 | MR-DSM-0250 | Met | `dsm::sofi::derive::vault_id`; `dsm::sofi::derive::successor_attempt_key`; `dsm::sofi::escrow::verdict_cell_key`; `dsm::economic::register::economic_root_register_key` | `dsm::sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests`; `dsm::sofi::escrow::tests::the_derivations_are_the_specified_hashes`; `dsm::sofi::computed::tests::the_derivations_are_the_specified_hashes`; `dsm::seed_and_key_vectors::a_root_register_key_is_the_specifications_hash_of_the_position` | Rechecked 2026-10-27 (§6.110). Resource derivations (vault id, successor attempt keys, verdict and match cells) are checked against an independent hasher and frozen golden digests. The economic register key has its isolated golden test, typed from the spec's `K_root(q)` line and pinned to a b3sum digest (`seed_and_key_vectors`, added in `5135a65e`). Mutation (§6.110): another tag → red; q as a u32 → red. |
 | MR-DSM-0251 | Met | `dsm::sofi::derive::successor_attempt_key`; `dsm::sofi::escrow::verdict_cell_of` | `dsm::sofi::escrow::tests::vaults_share_a_cell_exactly_when_they_share_y_and_the_table`; `dsm::sofi_v8_independent::derivations_match_the_independent_hasher_and_the_frozen_golden_digests`; `dsm::sofi::resolution::tests::a_reserved_key_another_operation_reached_first_voids` | Rechecked 2026-10-26 on main ad831f53 (was Partial). Conflicting branches derive one key: every exercise of a vault parent derives its attempt key from vault and parent only (A15), and escrow stakes with different recipients share one verdict cell. A second operation at a taken key is Void. No generic κres abstraction. [STALE-NOTE] |

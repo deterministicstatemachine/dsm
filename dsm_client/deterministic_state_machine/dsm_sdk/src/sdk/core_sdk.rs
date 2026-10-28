@@ -2717,7 +2717,7 @@ impl CoreSDK {
             &parent_tip,
             canonical_operation_bytes,
             &sender_transition_entropy,
-        );
+        )?;
         let operation_digest = {
             let mut h = dsm::crypto::blake3::dsm_domain_hasher(
                 dsm::crypto::domain::TaggedHashDomain::from_static(

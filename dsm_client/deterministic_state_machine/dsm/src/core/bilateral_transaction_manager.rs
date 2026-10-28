@@ -114,7 +114,11 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
 /// Canonical bilateral pre-commit digest.
 ///
 /// `C_pre = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
-pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8; 32] {
+pub fn compute_precommit(
+    h_n: &[u8; 32],
+    op_bytes: &[u8],
+    entropy: &[u8],
+) -> Result<[u8; 32], DsmError> {
     crate::commitments::precommit::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
@@ -193,17 +197,17 @@ pub struct BilateralPreCommitment {
     pub parent_tip: [u8; 32],
 }
 impl BilateralPreCommitment {
-    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Self {
+    /// The precommitment of `operation` on `parent_tip`, refused when the
+    /// operation's bytes are longer than the length prefix can frame.
+    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Result<Self, DsmError> {
         let mut h = dsm_domain_hasher(TAG_BILATERAL_PRECOMMIT);
-        canonical_lp::write_lp(&mut h, &parent_tip);
-        canonical_lp::write_lp(&mut h, &operation.to_bytes());
-        let mut bilateral_commitment_hash = [0u8; 32];
-        bilateral_commitment_hash.copy_from_slice(h.finalize().as_bytes());
-        Self {
-            bilateral_commitment_hash,
+        canonical_lp::write_lp(&mut h, &parent_tip)?;
+        canonical_lp::write_lp(&mut h, &operation.to_bytes())?;
+        Ok(Self {
+            bilateral_commitment_hash: *h.finalize().as_bytes(),
             operation,
             parent_tip,
-        }
+        })
     }
 }
 
@@ -607,7 +611,7 @@ impl BilateralTransactionManager {
         // acceptance proof this step finalizes on. Contact exchange / online
         // verification comes before an offline prepare.
         self.require_contact_signing_key(remote_device_id)?;
-        let bilateral = BilateralPreCommitment::new(parent_tip, operation);
+        let bilateral = BilateralPreCommitment::new(parent_tip, operation)?;
         self.pending_commitments
             .insert(bilateral.bilateral_commitment_hash, bilateral.clone());
         Ok(bilateral)
@@ -816,7 +820,7 @@ impl BilateralTransactionManager {
         if !self.relationships.contains_key(remote_device_id) {
             return Err(DsmError::RelationshipNotFound("remote device".into()));
         }
-        let pre = BilateralPreCommitment::new(parent_tip, operation);
+        let pre = BilateralPreCommitment::new(parent_tip, operation)?;
         if &pre.bilateral_commitment_hash != commitment_hash {
             return Err(DsmError::invalid_operation(
                 "the persisted step does not hash to the session's commitment",
@@ -881,24 +885,25 @@ mod tests {
     /// MUTATION CONTROL: hash the precommitment under `TAG_BILATERAL_SESSION`
     /// again and this goes red.
     #[test]
-    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() {
+    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() -> Result<(), DsmError> {
         let parent_tip = [0x5Eu8; 32];
-        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop);
-        let under = |tag| {
+        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop)?;
+        let under = |tag| -> Result<[u8; 32], DsmError> {
             let mut h = dsm_domain_hasher(tag);
-            canonical_lp::write_lp(&mut h, &parent_tip);
-            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes());
-            bytes32(h.finalize().as_bytes())
+            canonical_lp::write_lp(&mut h, &parent_tip)?;
+            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes())?;
+            Ok(bytes32(h.finalize().as_bytes()))
         };
         assert_eq!(
             pre.bilateral_commitment_hash,
-            under(TAG_BILATERAL_PRECOMMIT)
+            under(TAG_BILATERAL_PRECOMMIT)?
         );
-        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION));
+        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION)?);
         assert_ne!(
             TAG_BILATERAL_PRECOMMIT.source_bytes(),
             TAG_BILATERAL_SESSION.source_bytes()
         );
+        Ok(())
     }
 
     /// Formatting the manager names its identity and its signing public key,

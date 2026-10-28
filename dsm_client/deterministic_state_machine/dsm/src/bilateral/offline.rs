@@ -227,17 +227,18 @@ pub fn decide_prepare(
         return Ok(PrepareDecision::StepInFlight { in_flight });
     }
     if claims.expected_tip != Some(held_tip) {
-        let expected_recomputes = claims.expected_tip.is_some_and(|tip| {
-            BilateralPreCommitment::new(tip, operation.clone()).bilateral_commitment_hash
-                == commitment_hash
-        });
+        let expected_recomputes = claims
+            .expected_tip
+            .map(|tip| BilateralPreCommitment::new(tip, operation.clone()))
+            .transpose()?
+            .is_some_and(|pre| pre.bilateral_commitment_hash == commitment_hash);
         return Ok(PrepareDecision::StaleTip {
             expected: claims.expected_tip,
             held: held_tip,
             expected_recomputes,
         });
     }
-    let own = BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
+    let own = BilateralPreCommitment::new(held_tip, operation.clone())?.bilateral_commitment_hash;
     if own != commitment_hash {
         return Err(DsmError::invalid_operation(
             "the proposal's commitment is not its operation's commitment on this relationship",
@@ -491,7 +492,7 @@ pub fn decide_confirm(
         .successor_tip
         .ok_or_else(|| DsmError::invalid_operation("missing shared_chain_tip_new in confirm"))?;
     let op_bytes = step.operation.to_bytes();
-    let sigma = compute_precommit(&step.held_tip, &op_bytes, &pre_entropy);
+    let sigma = compute_precommit(&step.held_tip, &op_bytes, &pre_entropy)?;
     if compute_successor_tip(&step.held_tip, &op_bytes, &pre_entropy, &sigma) != successor_tip {
         return Err(DsmError::invalid_operation(
             "h_{n+1} mismatch: pre_entropy cannot reproduce shared_chain_tip_new (§4.1)",
@@ -772,8 +773,9 @@ mod tests {
         let receiver = [0x43u8; 32];
         let held = [0x70u8; 32];
         let operation = step(0x01);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the step's precommitment")
+            .bilateral_commitment_hash;
         let decide = |commitment: [u8; 32], expected_tip: Option<[u8; 32]>, signature: &[u8]| {
             decide_prepare(
                 commitment,
@@ -808,7 +810,9 @@ mod tests {
 
         // A commitment the sender signed that is not its operation's
         // commitment on the held tip: the receiver never signs it.
-        let foreign = BilateralPreCommitment::new(held, step(0x02)).bilateral_commitment_hash;
+        let foreign = BilateralPreCommitment::new(held, step(0x02))
+            .expect("the foreign step's precommitment")
+            .bilateral_commitment_hash;
         refused(
             decide(foreign, Some(held), &sender.sign_step(&foreign)),
             "not its operation's commitment on this relationship",
@@ -845,8 +849,9 @@ mod tests {
         let receiver = [0x47u8; 32];
         let held = [0x72u8; 32];
         let operation = step(0x03);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the step's precommitment")
+            .bilateral_commitment_hash;
         let own_step = [0x73u8; 32];
         let decide = |expected_tip: Option<[u8; 32]>, signature: &[u8], in_flight| {
             decide_prepare(
@@ -903,7 +908,7 @@ mod tests {
         let held = [0x75u8; 32];
         let decide = |operation: &Operation, addressed_to: &[u8], in_flight| {
             let commitment =
-                BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+                BilateralPreCommitment::new(held, operation.clone())?.bilateral_commitment_hash;
             decide_prepare(
                 commitment,
                 operation,
@@ -951,8 +956,9 @@ mod tests {
         let receiver = [0x4Eu8; 32];
         let held = [0x7Bu8; 32];
         let operation = bearer_transfer(receiver);
-        let commitment =
-            BilateralPreCommitment::new(held, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held, operation.clone())
+            .expect("the bearer transfer's precommitment")
+            .bilateral_commitment_hash;
         let decide = |signature: &[u8], in_flight| {
             decide_prepare(
                 commitment,
@@ -989,8 +995,9 @@ mod tests {
         let held = [0x78u8; 32];
         let claimed = [0x79u8; 32];
         let operation = step(0x05);
-        let on_claimed =
-            BilateralPreCommitment::new(claimed, operation.clone()).bilateral_commitment_hash;
+        let on_claimed = BilateralPreCommitment::new(claimed, operation.clone())
+            .expect("the step's precommitment on the claimed tip")
+            .bilateral_commitment_hash;
         let decide = |commitment: [u8; 32]| {
             decide_prepare(
                 commitment,
@@ -1188,8 +1195,9 @@ mod tests {
                 ),
             )
             .expect("the established relationship has a tip");
-        let commitment =
-            BilateralPreCommitment::new(held_tip, operation.clone()).bilateral_commitment_hash;
+        let commitment = BilateralPreCommitment::new(held_tip, operation.clone())
+            .expect("the step's precommitment on the held tip")
+            .bilateral_commitment_hash;
         (held_tip, commitment)
     }
 
@@ -1253,7 +1261,7 @@ mod tests {
             &held_tip,
             &op_bytes,
             &pre_entropy,
-            &compute_precommit(&held_tip, &op_bytes, &pre_entropy),
+            &compute_precommit(&held_tip, &op_bytes, &pre_entropy).expect("the step's C_pre"),
         );
         BuiltConfirm {
             sender,
@@ -1406,7 +1414,8 @@ mod tests {
             &c.held_tip,
             &op_bytes,
             &tampered_entropy,
-            &compute_precommit(&c.held_tip, &op_bytes, &tampered_entropy),
+            &compute_precommit(&c.held_tip, &op_bytes, &tampered_entropy)
+                .expect("the tampered step's C_pre"),
         );
         assert_ne!(tampered_successor, c.successor_tip);
         let decide = |entropy: &[u8], successor_tip: [u8; 32]| {

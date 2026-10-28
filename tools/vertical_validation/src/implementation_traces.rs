@@ -1115,12 +1115,18 @@ fn trace_bilateral_precomputed_finalize_hash(
             failures.push("Core's transition entropy derivation is not deterministic".into());
         }
         let op_bytes = pre.operation.to_bytes();
-        let sigma = compute_precommit(&h_n, &op_bytes, &entropy);
+        let sigma = match compute_precommit(&h_n, &op_bytes, &entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the step's C_pre was refused: {e}")],
+        };
         let predicted_tip = compute_successor_tip(&h_n, &op_bytes, &entropy, &sigma);
 
         let mut alternate_entropy = entropy;
         alternate_entropy[0] ^= 0xFF;
-        let alternate_sigma = compute_precommit(&h_n, &op_bytes, &alternate_entropy);
+        let alternate_sigma = match compute_precommit(&h_n, &op_bytes, &alternate_entropy) {
+            Ok(sigma) => sigma,
+            Err(e) => return vec![format!("the alternate step's C_pre was refused: {e}")],
+        };
         if compute_successor_tip(&h_n, &op_bytes, &alternate_entropy, &alternate_sigma)
             == predicted_tip
         {
@@ -1692,7 +1698,8 @@ async fn trace_commit_prepared(
         .map_err(|e| format!("the sender's advance was refused: {e}"))?;
     let entropy = outcome.transition_entropy();
     let op_bytes = prepared.operation.to_bytes();
-    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy);
+    let sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &entropy)
+        .map_err(|e| format!("the step's C_pre was refused: {e}"))?;
     let new_tip = compute_successor_tip(&prepared.parent_tip, &op_bytes, &entropy, &sigma);
     if !tips
         .set_contact_chain_tip(remote_device_id, prepared.parent_tip, new_tip)

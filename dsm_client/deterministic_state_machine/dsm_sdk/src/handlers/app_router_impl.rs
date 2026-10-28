@@ -1256,7 +1256,7 @@ impl AppRouterImpl {
                 &chain_tip_arr,
                 &op_bytes,
                 &transition_entropy,
-            );
+            )?;
             let new_chain_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
                 &chain_tip_arr,
                 &op_bytes,
