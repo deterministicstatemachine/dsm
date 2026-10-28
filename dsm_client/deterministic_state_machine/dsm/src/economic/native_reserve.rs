@@ -405,10 +405,12 @@ impl EstablishedReserve {
 /// the chain only through that check, never as a root. The one way a reserve
 /// generation enters a [`GenerationChain`].
 ///
-/// What the check does not re-prove is finality: that this release, and no
-/// other release of the same parent, is the value final at its cell. The
-/// reads that showed it final are not kept (owner decision 2 of
-/// `CONFORMANCE_GAPS.md` §6.106).
+/// A release a reader relies on as the reserve's is also final: it, and no
+/// other release of the same parent, holds the parent's successor cell.
+/// [`ReserveLineage::establish_final`] proves that from the reads of the cell
+/// kept with the release, by the check a live reader runs
+/// ([`check_successor_completion`]), before the release is checked as a
+/// successor. That is how a reader takes a release it memoised.
 #[derive(Debug, Clone)]
 pub struct ReserveLineage {
     chain: GenerationChain,
@@ -427,6 +429,12 @@ pub enum ReserveLineageRefusal {
         generation: u64,
         why: ReserveHeadError,
     },
+    /// The reads offered for `generation` are of another cell than the
+    /// head's successor cell.
+    NotTheHeadsCell { generation: u64 },
+    /// The completion proof offered for `generation` does not hold against
+    /// the reads kept with it: no release is shown final there.
+    NotFinal { generation: u64, why: ProofRefusal },
 }
 
 impl core::fmt::Display for ReserveLineageRefusal {
@@ -439,6 +447,16 @@ impl core::fmt::Display for ReserveLineageRefusal {
             Self::NotTheSuccessor { generation, why } => write!(
                 f,
                 "the release kept for generation {generation} does not extend the lineage: {why}"
+            ),
+            Self::NotTheHeadsCell { generation } => write!(
+                f,
+                "the reads kept for generation {generation} are of another cell than the head's \
+                 successor cell"
+            ),
+            Self::NotFinal { generation, why } => write!(
+                f,
+                "the release kept for generation {generation} is not shown final by the reads \
+                 kept with it: {why:?}"
             ),
         }
     }
@@ -456,9 +474,11 @@ impl ReserveLineage {
         })
     }
 
-    /// Establish the next generation from `envelope`, the release kept for
-    /// it, and extend the chain by it. A release Core does not establish
-    /// leaves the lineage as it was.
+    /// Establish the next generation from `envelope`, a release whose
+    /// finality this lineage takes from its caller: a reader's own fixture,
+    /// or a verifier's view of a reader's heads. A release a reader memoised
+    /// is taken with [`ReserveLineage::establish_final`]. A release Core does
+    /// not establish leaves the lineage as it was.
     pub fn establish(
         &mut self,
         envelope: &[u8],
@@ -466,11 +486,40 @@ impl ReserveLineage {
         let generation = self.head.head().generation().saturating_add(1);
         let release = decode_and_verify_release(envelope)
             .map_err(|why| ReserveLineageRefusal::NotARelease { generation, why })?;
+        self.extend(generation, &release)
+    }
+
+    /// Establish the next generation from the release `proof` proves final
+    /// at `cell`, the head's successor cell, against `reads`, the reads of
+    /// the cell kept with it: the check a live reader runs
+    /// ([`check_successor_completion`]), then the construction predicate. A
+    /// proof that does not hold against the reads, or reads of another cell,
+    /// leave the lineage as it was.
+    pub fn establish_final(
+        &mut self,
+        cell: &SuccessorCell,
+        reads: &CellEvidence,
+        proof: &CompletionProof,
+    ) -> Result<&EstablishedReserve, ReserveLineageRefusal> {
+        let generation = self.head.head().generation().saturating_add(1);
+        if cell.parent != *self.head.state() {
+            return Err(ReserveLineageRefusal::NotTheHeadsCell { generation });
+        }
+        let (release, _) = check_successor_completion(cell, reads, proof)
+            .map_err(|why| ReserveLineageRefusal::NotFinal { generation, why })?;
+        self.extend(generation, &release)
+    }
+
+    fn extend(
+        &mut self,
+        generation: u64,
+        release: &VerifiedRelease,
+    ) -> Result<&EstablishedReserve, ReserveLineageRefusal> {
         let next = self
             .head
-            .succeeded_by(&release)
+            .succeeded_by(release)
             .map_err(|why| ReserveLineageRefusal::NotTheSuccessor { generation, why })?;
-        let step = release_evidence_addr(envelope);
+        let step = release_evidence_addr(&release.envelope_bytes);
         self.chain.push(next.state().root(), step).map_err(|e| {
             ReserveLineageRefusal::NotTheSuccessor {
                 generation,
@@ -1626,6 +1675,83 @@ mod tests {
             check_successor_completion(&at, &cell.evidence(), &proof),
             Ok((release, child))
         );
+    }
+
+    /// The reads a reader keeps with a final release read back to exactly
+    /// what was kept, and only from their own canonical bytes, at their own
+    /// cell: a byte more, or the reads offered at another cell, read back
+    /// as nothing.
+    #[test]
+    fn kept_reads_read_back_only_from_their_own_bytes_at_their_own_cell() {
+        let r0 = genesis();
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&release.envelope_bytes, ROUTE_LEN - 1, &[]);
+        let bytes = cell.evidence().encode_kept();
+        let kept = CellEvidence::decode_kept(at.routed(), &bytes, &at.keeps())
+            .expect("the kept reads read back");
+        assert_eq!(kept.encode_kept(), bytes);
+        assert_eq!(
+            resolve_successor(&at, &kept),
+            resolve_successor(&at, &cell.evidence()),
+            "Core reads the same from the kept reads as from the reads"
+        );
+        let mut longer = bytes.clone();
+        longer.push(0x00);
+        assert!(matches!(
+            CellEvidence::decode_kept(at.routed(), &longer, &at.keeps()),
+            Err(crate::route_chain::KeptReadsError::Undecodable(..))
+        ));
+        let r1 = release_constructible(&r0, &release).unwrap();
+        let (elsewhere, _) = successor_cell(&r1);
+        assert!(
+            matches!(
+                CellEvidence::decode_kept(elsewhere.routed(), &bytes, &elsewhere.keeps()),
+                Err(crate::route_chain::KeptReadsError::Malformed(..))
+            ),
+            "the copies kept are copies of their own cell"
+        );
+    }
+
+    /// DSM Amendment A15, MR-DSM-0310: a memoised release enters the
+    /// reserve's lineage only once the reads kept with it prove it final at
+    /// the head's successor cell, by the check a live reader runs. Reads with
+    /// every seat after the leader unread prove nothing, and reads of another
+    /// cell are not the head's; each leaves the lineage where it was.
+    ///
+    /// MUTATION CONTROL: taking the release without proving it final from the
+    /// kept reads (`reserve_memo_unproven`) turns this red.
+    #[test]
+    fn a_kept_release_enters_only_when_its_kept_reads_prove_it_final() {
+        let r0 = genesis();
+        let release = signed(&r0, ERA_FAUCET_PAYOUT);
+        let (at, mut cell) = successor_cell(&r0);
+        cell.write(&release.envelope_bytes, ROUTE_LEN - 1, &[]);
+        let reads = cell.evidence();
+        let Ok(Some((_, _, proof))) = successor_completion(&at, &reads) else {
+            panic!("a final release has a completion proof")
+        };
+        let mut lineage = ReserveLineage::from_genesis(&r0).expect("R_0");
+        let before = lineage.chain().clone();
+        let mut unread = reads.clone();
+        for seat in unread.seats.iter_mut().skip(1) {
+            seat.values = None;
+        }
+        assert!(matches!(
+            lineage.establish_final(&at, &unread, &proof),
+            Err(ReserveLineageRefusal::NotFinal { generation: 1, .. })
+        ));
+        let r1 = release_constructible(&r0, &release).unwrap();
+        let (elsewhere, _) = successor_cell(&r1);
+        assert_eq!(
+            lineage.establish_final(&elsewhere, &reads, &proof).err(),
+            Some(ReserveLineageRefusal::NotTheHeadsCell { generation: 1 })
+        );
+        assert_eq!(lineage.chain(), &before, "a refused release enters nothing");
+        lineage
+            .establish_final(&at, &reads, &proof)
+            .expect("the kept reads prove the release final");
+        assert_eq!(*lineage.head().state(), r1);
     }
 
     // ── The walk ─────────────────────────────────────────────────────────

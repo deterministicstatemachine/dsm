@@ -40,7 +40,7 @@ use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, SofiReads as _};
 use dsm::sofi::storage::Resolved;
-use dsm::sofi::validation::{trader_balance_changes, trader_post_states, vault_post_states};
+use dsm::sofi::validation::{trader_balance_changes, trader_post_states};
 use dsm::sofi::wire::{
     next_position, ParentClaimRef, SettlementBody, SettlementPreimage, TraderFulfillmentBody,
     TraderPrecommitBody, ValidationRef,
@@ -843,8 +843,9 @@ pub async fn resolve_pending_position(
 
     // What this verifier brings: its leaves, the position it resolved
     // itself, and the canonical chain of each vault a leg names — walked
-    // forward from the genesis or from the generations this device already
-    // recorded, so a parent past genesis is decided rather than deferred.
+    // forward by Core from the genesis or from the owner baseline this
+    // device adopted (MR-DSM-0331), so a parent past genesis is decided
+    // rather than deferred.
     log::info!("[sofi settle] position {q}: its exercise read back");
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
     for leg in precommit.legs() {
@@ -902,7 +903,6 @@ pub async fn resolve_pending_position(
     // the same bytes the advance derived the balances from. Either way the
     // cache must recompute the root before it is written.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
-    let mut vault_heads = Vec::new();
     let mut realized = None;
     let leaves = match (advanced.resolution, &established) {
         (Resolution::Realized, Established::Facts(facts)) => {
@@ -927,18 +927,6 @@ pub async fn resolve_pending_position(
                 ));
             }
             realized = Some((what, moved));
-            // The vaults moved too, and this device is the one that resolved
-            // it: the post state each leg selected is kept so the NEXT trade
-            // against that vault has evidence to stand on (§44.4). Recomputed
-            // from the same evidence the verdict used, and bound to what each
-            // `V°` states — never read back from anything the producer said.
-            vault_heads = vault_post_states(
-                &precommit,
-                &fulfillment.body,
-                facts.preimage(),
-                facts.evidence(),
-            )
-            .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
             post_leaf_cache(current, &post)?
         }
         (Resolution::Void, _) => current,
@@ -965,12 +953,13 @@ pub async fn resolve_pending_position(
         &pending.operation_digest,
         &leaves,
         &set.id(),
-        &vault_heads,
     )?;
     // The position is committed; what it owes each vault's epoch index comes
     // after, never on its path (SoFi Amendment S23, "who writes"). What is
     // not owed here, a later walk owes.
-    if let Err(e) = crate::sdk::vault_history::owe_realized(set, &verifier, &vault_heads) {
+    if let Err(e) =
+        crate::sdk::vault_history::owe_realized(set, &verifier, advanced.vault_generations())
+    {
         log::error!(
             "[sofi advance] the position stands; its vault generations are not owed to the \
              epoch index yet: {e}"

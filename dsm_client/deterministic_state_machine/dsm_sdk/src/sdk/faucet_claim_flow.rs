@@ -61,7 +61,9 @@ use crate::sdk::economic_admission_flow::{
     resume_pending_admission, validated_root_or_activate,
 };
 use crate::sdk::storage_set::canonical_set;
-use crate::sdk::native_reserve::{keep_release_completion, read_successor, walk_reserve, write_release};
+use crate::sdk::native_reserve::{
+    memoise_release_completion, read_successor, walk_reserve, write_release,
+};
 use crate::sdk::route_seats::AtLeader;
 use crate::storage::client_db::native_reserve as reserve_db;
 
@@ -128,20 +130,23 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                 .map_err(|e| storage_err("reserve memo", e))?
         {
             let reserve_genesis = crate::sdk::native_reserve::genesis_state(network_id)?;
-            let win =
-                crate::sdk::native_reserve::established_release_at(&reserve_genesis, generation)?
-                    .ok_or_else(|| {
-                    storage_err(
-                        "reserve memo",
-                        format!(
-                            "the release at generation {generation} is not on the head this \
-                                 device's walks established"
-                        ),
-                    )
-                })?;
+            let win = crate::sdk::native_reserve::established_release_at(
+                &set,
+                &reserve_genesis,
+                generation,
+            )?
+            .ok_or_else(|| {
+                storage_err(
+                    "reserve memo",
+                    format!(
+                        "the release at generation {generation} is not on the head this \
+                         device's walks established"
+                    ),
+                )
+            })?;
             let parent = EstablishedReserve::of(&reserve_genesis, &win.parent)
                 .map_err(|e| storage_err("reserve head", e))?;
-            if !keep_release_completion(&set, parent.state(), &envelope).await? {
+            if !memoise_release_completion(&set, parent.state(), &envelope).await? {
                 return Err(storage_err(
                     "reserve completion",
                     "the resumed release's completion proof could not be rebuilt from the \
@@ -272,8 +277,8 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
             }
         }
         match read_successor(&set, &parent).await? {
-            SuccessorRead::Final { release, child } if release.envelope_bytes == envelope => {
-                if !keep_release_completion(&set, &parent, &envelope).await? {
+            SuccessorRead::Final { release, .. } if release.envelope_bytes == envelope => {
+                if !memoise_release_completion(&set, &parent, &envelope).await? {
                     return Err(storage_err(
                         "reserve completion",
                         "the release read final but its completion proof could not be built \
@@ -281,13 +286,10 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                     ));
                 }
                 // The walk that found `parent` memoised every final release
-                // up to it; this one is final too, so the memo now reaches
-                // `child`, and the verifier asking for this generation reads
-                // it there rather than walking the reserve again.
-                crate::storage::client_db::native_reserve::record_final_release(
-                    &parent, &release, &child,
-                )
-                .map_err(|e| storage_err("reserve memo write", e))?;
+                // up to it; this one is final too and is memoised with the
+                // reads that show it, so the memo now reaches `child`, and
+                // the verifier asking for this generation reads it there
+                // rather than walking the reserve again.
                 won = Some((generation, envelope, op_digest));
                 break;
             }

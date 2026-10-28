@@ -588,7 +588,7 @@ fn forget_the_reserve() {
 /// The memoised lineage, generation by generation: what a walk established.
 fn walked_lineage() -> Vec<(u64, [u8; 32])> {
     let mut walked = Vec::new();
-    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |state, _| {
+    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |_, state, _, _| {
         walked.push((state.generation(), state.root()));
         Ok(std::ops::ControlFlow::Continue(()))
     })
@@ -1411,5 +1411,192 @@ async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
             .cloned(),
         Some(held),
         "the held admission is still the head's"
+    );
+}
+
+/// Generation `generation`'s memo row: its envelope and the reads kept with
+/// it.
+fn memo_row(generation: u64) -> (Vec<u8>, Vec<u8>) {
+    let binding = client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store is not poisoned");
+    conn.query_row(
+        "SELECT envelope, cell_reads FROM native_reserve_lineage_memo WHERE generation = ?1",
+        [generation as i64],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("the memo row")
+}
+
+/// Set generation `generation`'s memo row's `column` to `bytes`.
+fn set_memo_column(generation: u64, column: &str, bytes: &[u8]) {
+    let binding = client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store is not poisoned");
+    conn.execute(
+        &format!("UPDATE native_reserve_lineage_memo SET {column} = ?1 WHERE generation = ?2"),
+        rusqlite::params![bytes, generation as i64],
+    )
+    .expect("the memo row is changed");
+}
+
+/// DSM Amendment A15, MR-DSM-0315: a verifier is answered from the head
+/// this device's walks established. With generation 4's memo row gone, a
+/// memoised release on the chain comes with the chain's heads before and
+/// after it, and a release memoised past the gap is not established, so a
+/// verifier walks for it instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_memoised_release_past_a_gap_is_not_an_established_release() {
+    use crate::sdk::native_reserve::established_release_at;
+    let d = Device::start(0xAB).await;
+    for _ in 0..5 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), 5);
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let genesis = reserve_genesis();
+    let whole = established_release_at(&set, &genesis, 3)
+        .expect("the memo loads")
+        .expect("generation 3 is on the chain");
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute(
+            "DELETE FROM native_reserve_lineage_memo WHERE generation = 4",
+            [],
+        )
+        .expect("generation 4's row is gone");
+    }
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the memo loads"),
+        Some(whole),
+        "a release before the gap is answered with the chain's heads around it"
+    );
+    assert_eq!(
+        established_release_at(&set, &genesis, 5).expect("the memo loads"),
+        None,
+        "a release memoised past the gap is not established"
+    );
+    assert_eq!(
+        established_release_at(&set, &genesis, 4).expect("the memo loads"),
+        None
+    );
+}
+
+/// How one memo row is made something Core does not establish.
+enum Corruption {
+    /// The release's envelope, in place of the one memoised.
+    Envelope(Vec<u8>),
+    /// The reads kept with the release, in place of the ones memoised.
+    Reads(Vec<u8>),
+    /// The release's kept completion proof, gone.
+    NoProof,
+}
+
+/// DSM Amendment A15, MR-DSM-0310, MR-DSM-0315: a memoised release is
+/// established again by Core on load from what the memo keeps (the release,
+/// the reads of its cell that showed it final, and its kept completion
+/// proof), never taken as a root. After three claims, generation 2's row is
+/// changed one way at a time, and restored after each:
+/// - its envelope forged;
+/// - its envelope a real release of another parent, generation 1's;
+/// - its reads with every seat after the leader unread, which no longer show
+///   the release final;
+/// - its reads gone;
+/// - its completion proof gone.
+///
+/// Each time the real loader refuses at generation 2 and answers nothing.
+/// Restored, the memo loads as it did.
+///
+/// MUTATION CONTROL: taking a memoised release without proving it final from
+/// the reads kept with it (`reserve_memo_unproven`) turns the unread-seats
+/// case red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_forged_memo_row_is_refused_on_load_and_enters_no_chain() {
+    use crate::sdk::native_reserve::established_release_at;
+    use dsm::economic::native_reserve::SuccessorCell;
+    use dsm::route_chain::CellEvidence;
+    let d = Device::start(0xAC).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), 3);
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let genesis = reserve_genesis();
+    let honest = established_release_at(&set, &genesis, 3)
+        .expect("the honest memo loads")
+        .expect("generation 3 is on the chain");
+
+    let (envelope, reads) = memo_row(2);
+    let (other_parents, _) = memo_row(1);
+    let mut bent = envelope.clone();
+    let last = bent.len() - 1;
+    bent[last] ^= 0x01;
+    let members = as_ccb_members(&set).expect("the set's members");
+    let cell = SuccessorCell::of(&genesis.at_generation(1).expect("generation 1"), &members)
+        .expect("generation 2's cell");
+    let mut unread = CellEvidence::decode_kept(cell.routed(), &reads, &cell.keeps())
+        .expect("the kept reads decode");
+    for seat in unread.seats.iter_mut().skip(1) {
+        seat.values = None;
+    }
+    let kept_proof = client_db::completion_proofs::get(cell.routed(), &envelope)
+        .expect("the proof store")
+        .expect("the release's completion proof is kept");
+
+    for (what, corruption) in [
+        ("a forged envelope", Corruption::Envelope(bent)),
+        (
+            "another parent's release",
+            Corruption::Envelope(other_parents),
+        ),
+        (
+            "reads with the seats after the leader unread",
+            Corruption::Reads(unread.encode_kept()),
+        ),
+        ("no reads", Corruption::Reads(Vec::new())),
+        ("no completion proof", Corruption::NoProof),
+    ] {
+        match &corruption {
+            Corruption::Envelope(bytes) => set_memo_column(2, "envelope", bytes),
+            Corruption::Reads(bytes) => set_memo_column(2, "cell_reads", bytes),
+            Corruption::NoProof => {
+                let binding = client_db::get_connection().expect("the store");
+                let conn = binding.lock().expect("the store is not poisoned");
+                conn.execute(
+                    "DELETE FROM completion_proof_slot WHERE value_digest = ?1",
+                    [dsm::storage_cell::entry_digest(&envelope).as_slice()],
+                )
+                .expect("the proof's slots are gone");
+                conn.execute(
+                    "DELETE FROM completion_proof WHERE value_digest = ?1",
+                    [dsm::storage_cell::entry_digest(&envelope).as_slice()],
+                )
+                .expect("the proof is gone");
+            }
+        }
+        match established_release_at(&set, &genesis, 3) {
+            Err(refused) => assert!(
+                refused.to_string().contains("generation 2"),
+                "{what}: the refusal names the generation: {refused}"
+            ),
+            Ok(answer) => panic!("{what} was loaded into the lineage: {answer:?}"),
+        }
+        match corruption {
+            Corruption::Envelope(..) => set_memo_column(2, "envelope", &envelope),
+            Corruption::Reads(..) => set_memo_column(2, "cell_reads", &reads),
+            Corruption::NoProof => client_db::completion_proofs::keep(
+                cell.routed(),
+                &kept_proof.digest,
+                &kept_proof.proof,
+            )
+            .expect("the proof is kept again"),
+        }
+    }
+    assert_eq!(
+        established_release_at(&set, &genesis, 3)
+            .expect("the restored memo loads")
+            .expect("generation 3 is on the chain"),
+        honest
     );
 }

@@ -22,7 +22,10 @@
 //! position exists, it is terminal, and it moved nothing.
 
 use crate::economic::lineage::ValidatedEconomicRoot;
-use crate::sofi::validation::{trader_balance_changes, trader_credits, Evidence, TraderBalanceChange};
+use crate::sofi::validation::{
+    trader_balance_changes, trader_credits, vault_post_states, Evidence, TraderBalanceChange,
+    VaultPostState,
+};
 use crate::sofi::wire::SettlementPreimage;
 use crate::types::device_state::DeviceState;
 
@@ -72,6 +75,10 @@ pub enum AdvanceError {
     /// The balances a realized position moves could not be derived from the
     /// evidence the verdict was reached on, and validation's reason why.
     BalancesNotDerivable(crate::sofi::validation::Refusal),
+    /// The state a realized position selected for a vault it moved could
+    /// not be recomputed from the evidence the verdict was reached on, and
+    /// validation's reason why.
+    VaultStatesNotDerivable(crate::sofi::validation::Refusal),
     /// The preimage the facts were established over describes a different
     /// operation from the one being installed: its settlement does not
     /// recompute this `P`'s `E`.
@@ -125,6 +132,11 @@ impl core::fmt::Display for AdvanceError {
                 f,
                 "the balances this realized position moves are not derivable from its \
                  evidence: {why:?}"
+            ),
+            Self::VaultStatesNotDerivable(why) => write!(
+                f,
+                "the vault states this realized position selected are not derivable from \
+                 its evidence: {why:?}"
             ),
             Self::TokenNotAdopted { policy_commit } => write!(
                 f,
@@ -216,7 +228,8 @@ impl ResolvedBalances {
 
 /// What [`advance_resolved`] establishes at `q`: the resolution the ladder
 /// reached and its effect, the validated root, the claim `C_q` accepted
-/// there, and the trader balances the root moved.
+/// there, the trader balances the root moved, and the state each vault it
+/// moved is in after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdvance {
     pub resolution: Resolution,
@@ -224,6 +237,18 @@ pub struct ResolvedAdvance {
     pub root: ValidatedEconomicRoot,
     pub claim: crate::economic::lineage::AcceptedClaim,
     pub balances: ResolvedBalances,
+    vault_generations: Vec<VaultPostState>,
+}
+
+impl ResolvedAdvance {
+    /// The state each vault a `Realized` position moved is in after it,
+    /// recomputed by the fold from the evidence the verdict was reached on
+    /// (§44.4): what this device keeps so the next trade against that vault
+    /// has evidence to stand on, and what its record of the vault follows
+    /// (MR-DSM-0331). A Void moved no vault, and has none.
+    pub fn vault_generations(&self) -> &[VaultPostState] {
+        &self.vault_generations
+    }
 }
 
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
@@ -254,7 +279,7 @@ pub fn advance_resolved(
     receiver: &DeviceState,
 ) -> Result<ResolvedAdvance, AdvanceError> {
     let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
-    let balances = match derived.realized_over {
+    let (balances, vault_generations) = match derived.realized_over {
         Some(facts) => {
             // The adoption invariant, inside the function that installs the
             // root, so that no caller can reach a realized advance without
@@ -262,13 +287,19 @@ pub fn advance_resolved(
             adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
             // The balances the realize root holds for the tokens T° moves,
             // from the same bytes `adoption_admits` just bound to this `E`.
-            ResolvedBalances(
+            let balances = ResolvedBalances(
                 trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
                     .map_err(AdvanceError::BalancesNotDerivable)?,
-            )
+            );
+            // The state each leg selected, from the same bytes: recomputed by
+            // the fold, never read back from what the producer stated in `V°`.
+            let vaults =
+                vault_post_states(precommit, fulfillment, &facts.preimage, &facts.evidence)
+                    .map_err(AdvanceError::VaultStatesNotDerivable)?;
+            (balances, vaults)
         }
         // Zero mutations: the lineage continues exactly where it was.
-        None => ResolvedBalances(Vec::new()),
+        None => (ResolvedBalances(Vec::new()), Vec::new()),
     };
     Ok(ResolvedAdvance {
         resolution: derived.resolution,
@@ -276,6 +307,7 @@ pub fn advance_resolved(
         balances,
         root: derived.root,
         claim: derived.claim,
+        vault_generations,
     })
 }
 
@@ -947,14 +979,20 @@ mod tests {
         .unwrap()
     }
 
+    /// `F` of `p`: one attempt for each of its legs, as every fulfillment
+    /// names, which is what a realized advance derives each vault's
+    /// generation from.
     fn fulfillment(p: &TraderPrecommitBody) -> TraderFulfillmentBody {
         TraderFulfillmentBody::new(
             derive::precommit_id(p),
             vec![d(0x01)],
-            vec![crate::sofi::wire::AttemptEntry {
-                vault_id: d(0xC1),
-                attempt: 0,
-            }],
+            p.legs()
+                .iter()
+                .map(|leg| crate::sofi::wire::AttemptEntry {
+                    vault_id: leg.vault_id,
+                    attempt: 0,
+                })
+                .collect(),
             P_POS + 1,
             SIG_ALG,
             &[0x01; 64],

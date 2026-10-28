@@ -4721,6 +4721,54 @@ message CellCommitProofV1 {
   bytes  smt_proof    = 3 [(dsm_max_len)=8300];
 }
 
+// The reads of one cell a client kept with a final value it memoised, so
+// Core proves the value final again, offline, from what was read (storage
+// spec §9 rule 11). Client store only; never sent.
+message KeptCellReadsV1 {
+  repeated KeptSeatReadsV1 seats = 1; // one per route position, in route order
+}
+
+// What the client held about one seat: its folded arrival log at the cell,
+// its committed state there, and its mirror of the leader's ByteCommits.
+message KeptSeatReadsV1 {
+  KeptHeldLogV1   values      = 1; // absent when the seat was not read
+  KeptCommittedV1 committed   = 2;
+  KeptCommittedV1 leader_seen = 3;
+}
+
+// A seat's arrival log at one cell as the client folded it: the running hash
+// through every entry, and the copies of the cell it kept, each with where it
+// arrived. Each distinct value is held once.
+message KeptHeldLogV1 {
+  uint64 count = 1;                              // entries folded
+  bytes  head  = 2 [(dsm_fixed_len)=32];         // running hash after the last
+  repeated KeptRunningHashV1 marks = 3;          // running hashes a ByteCommit's proof asked for
+  repeated bytes values = 4 [(dsm_max_len)=327680];
+  repeated KeptHeldCopyV1 copies = 5;            // in arrival order
+}
+
+message KeptRunningHashV1 {
+  uint64 index        = 1;
+  bytes  running_hash = 2 [(dsm_fixed_len)=32];
+}
+
+message KeptHeldCopyV1 {
+  uint64 index        = 1;
+  bytes  running_hash = 2 [(dsm_fixed_len)=32];
+  bytes  seat         = 3 [(dsm_max_len)=128];
+  uint32 position     = 4;
+  repeated ChainSlotV1 chain = 5;
+  uint32 value        = 6; // index into the log's values
+}
+
+// A member's committed state at a cell: its ByteCommit, the one before it,
+// and the proof the ByteCommit commits the cell's latest entry.
+message KeptCommittedV1 {
+  ByteCommitV4      commit = 1;
+  ByteCommitV4      parent = 2; // absent at cycle 1
+  CellCommitProofV1 proof  = 3;
+}
+
 // One value for one key, as a batch put carries it. The member keeps it
 // after anything already at the key, exactly as a single put would.
 message CellPutV1 {

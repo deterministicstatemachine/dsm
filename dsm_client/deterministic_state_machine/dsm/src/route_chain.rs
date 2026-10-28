@@ -547,6 +547,12 @@ impl HeldLog {
         if entry.namespace != self.namespace || entry.key != self.key || !keep(&entry) {
             return;
         }
+        self.hold(self.count, self.head, entry);
+    }
+
+    /// Hold `entry`, a kept copy of the cell that arrived at `index` with the
+    /// seat's running hash `running_hash` after it.
+    fn hold(&mut self, index: u64, running_hash: [u8; 32], entry: RouteEntry) {
         let RouteEntry {
             value,
             seat,
@@ -574,8 +580,8 @@ impl HeldLog {
             .kept_bytes
             .saturating_add(HELD_COPY_COST + seat.len() + records);
         self.copies.push(HeldCopy {
-            index: self.count,
-            running_hash: self.head,
+            index,
+            running_hash,
             seat,
             position,
             chain,
@@ -650,6 +656,213 @@ impl RunningHashes for HeldLog {
             .get(at)
             .filter(|copy| copy.index == index)
             .map(|copy| copy.running_hash)
+    }
+}
+
+// ── reads kept with a final value ──────────────────────────────────────────
+
+/// Why bytes are not reads of a cell a client kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptReadsError {
+    /// The bytes do not decode.
+    Undecodable(String),
+    /// The bytes decode, but are not the one canonical encoding of what
+    /// they decode to.
+    NotCanonical,
+    /// Other than one seat per route position.
+    SeatCount { got: usize },
+    /// A field is out of its bounds, or a kept copy is not a copy of the
+    /// cell the reader keeps.
+    Malformed(String),
+}
+
+fn digest32(bytes: &[u8], what: &str) -> Result<[u8; 32], KeptReadsError> {
+    <[u8; 32]>::try_from(bytes).map_err(|e| KeptReadsError::Malformed(format!("{what}: {e}")))
+}
+
+impl HeldLog {
+    fn to_kept(&self) -> proto::KeptHeldLogV1 {
+        proto::KeptHeldLogV1 {
+            count: self.count,
+            head: self.head.to_vec(),
+            marks: self
+                .marks
+                .iter()
+                .map(|(index, hash)| proto::KeptRunningHashV1 {
+                    index: *index,
+                    running_hash: hash.to_vec(),
+                })
+                .collect(),
+            values: self.values.clone(),
+            copies: self
+                .copies
+                .iter()
+                .map(|copy| proto::KeptHeldCopyV1 {
+                    index: copy.index,
+                    running_hash: copy.running_hash.to_vec(),
+                    seat: copy.seat.clone(),
+                    position: copy.position as u32,
+                    chain: copy.chain.iter().map(ChainSlot::to_proto).collect(),
+                    value: copy.value as u32,
+                })
+                .collect(),
+        }
+    }
+
+    /// A log kept with a final value at `cell`, read back. Each kept copy
+    /// must be a well-formed copy of the cell that `keep` keeps, arriving
+    /// after the copy before it and no later than the last entry folded.
+    fn from_kept(
+        cell: &RoutedCell,
+        kept: &proto::KeptHeldLogV1,
+        keep: &dyn Fn(&RouteEntry) -> bool,
+    ) -> Result<Self, KeptReadsError> {
+        let malformed = |what: &str| KeptReadsError::Malformed(what.to_string());
+        let mut log = Self::new(&cell.namespace, &cell.key);
+        log.count = kept.count;
+        log.head = digest32(&kept.head, "the log's head")?;
+        for mark in &kept.marks {
+            if mark.index == 0 || mark.index > kept.count {
+                return Err(malformed("a running hash past the log"));
+            }
+            log.marks
+                .insert(mark.index, digest32(&mark.running_hash, "a running hash")?);
+        }
+        let mut last = 0u64;
+        for copy in &kept.copies {
+            let value_at = usize::try_from(copy.value)
+                .map_err(|e| KeptReadsError::Malformed(format!("a copy's value: {e}")))?;
+            let position = usize::try_from(copy.position)
+                .map_err(|e| KeptReadsError::Malformed(format!("a copy's position: {e}")))?;
+            let chain = copy
+                .chain
+                .iter()
+                .map(ChainSlot::from_proto)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| malformed("a copy's chain"))?;
+            let entry = RouteEntry {
+                namespace: cell.namespace.clone(),
+                key: cell.key,
+                value: kept
+                    .values
+                    .get(value_at)
+                    .ok_or_else(|| malformed("a copy names no value"))?
+                    .clone(),
+                seat: copy.seat.clone(),
+                position,
+                chain,
+            };
+            if copy.index <= last || copy.index > kept.count {
+                return Err(malformed("copies out of arrival order"));
+            }
+            if RouteEntry::decode(&entry.encode()).as_ref() != Some(&entry) || !keep(&entry) {
+                return Err(malformed("a copy the reader does not keep at this cell"));
+            }
+            last = copy.index;
+            log.hold(
+                copy.index,
+                digest32(&copy.running_hash, "a copy's running hash")?,
+                entry,
+            );
+        }
+        Ok(log)
+    }
+}
+
+impl CommittedAt {
+    fn to_kept(&self) -> proto::KeptCommittedV1 {
+        proto::KeptCommittedV1 {
+            commit: Some(self.commit.to_proto()),
+            parent: self.parent.as_ref().map(ByteCommit::to_proto),
+            proof: Some(self.proof.to_proto()),
+        }
+    }
+
+    fn from_kept(kept: &proto::KeptCommittedV1) -> Result<Self, KeptReadsError> {
+        let malformed = |what: &str| KeptReadsError::Malformed(what.to_string());
+        let commit = kept
+            .commit
+            .as_ref()
+            .and_then(ByteCommit::from_proto)
+            .ok_or_else(|| malformed("a ByteCommit"))?;
+        let parent = match &kept.parent {
+            Some(parent) => Some(
+                ByteCommit::from_proto(parent).ok_or_else(|| malformed("a parent ByteCommit"))?,
+            ),
+            None => None,
+        };
+        let proof = kept
+            .proof
+            .as_ref()
+            .and_then(CellCommitProof::from_proto)
+            .ok_or_else(|| malformed("a cell commit proof"))?;
+        Ok(Self {
+            commit,
+            parent,
+            proof,
+        })
+    }
+}
+
+impl CellEvidence {
+    /// The reads of a cell a client keeps with a final value it memoised,
+    /// as canonical bytes ([`CellEvidence::decode_kept`] reads them back),
+    /// so Core can prove the value final again from what was read.
+    pub fn encode_kept(&self) -> Vec<u8> {
+        use prost::Message;
+        proto::KeptCellReadsV1 {
+            seats: self
+                .seats
+                .iter()
+                .map(|seat| proto::KeptSeatReadsV1 {
+                    values: seat.values.as_ref().map(HeldLog::to_kept),
+                    committed: seat.committed.as_ref().map(CommittedAt::to_kept),
+                    leader_seen: seat.leader_seen.as_ref().map(CommittedAt::to_kept),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Reads kept with a final value at `cell`, read back: only the one
+    /// canonical encoding of reads of `cell`, one seat per route position,
+    /// each kept copy a well-formed copy of the cell that `keep` keeps. What
+    /// they show is Core's to evaluate, as any reads.
+    pub fn decode_kept(
+        cell: &RoutedCell,
+        bytes: &[u8],
+        keep: &dyn Fn(&RouteEntry) -> bool,
+    ) -> Result<Self, KeptReadsError> {
+        use prost::Message;
+        let kept = proto::KeptCellReadsV1::decode(bytes)
+            .map_err(|e| KeptReadsError::Undecodable(e.to_string()))?;
+        if kept.seats.len() != ROUTE_LEN {
+            return Err(KeptReadsError::SeatCount {
+                got: kept.seats.len(),
+            });
+        }
+        let mut seats = Vec::with_capacity(ROUTE_LEN);
+        for seat in &kept.seats {
+            seats.push(SeatEvidence {
+                values: match &seat.values {
+                    Some(log) => Some(HeldLog::from_kept(cell, log, keep)?),
+                    None => None,
+                },
+                committed: match &seat.committed {
+                    Some(at) => Some(CommittedAt::from_kept(at)?),
+                    None => None,
+                },
+                leader_seen: match &seat.leader_seen {
+                    Some(at) => Some(CommittedAt::from_kept(at)?),
+                    None => None,
+                },
+            });
+        }
+        let reads = Self { seats };
+        if reads.encode_kept() != bytes {
+            return Err(KeptReadsError::NotCanonical);
+        }
+        Ok(reads)
     }
 }
 

@@ -28780,6 +28780,342 @@ export class CellCommitProofV1 extends Message<CellCommitProofV1> {
 }
 
 /**
+ * The reads of one cell a client kept with a final value it memoised, so
+ * Core proves the value final again, offline, from what was read (storage
+ * spec §9 rule 11). Client store only; never sent.
+ *
+ * @generated from message dsm.KeptCellReadsV1
+ */
+export class KeptCellReadsV1 extends Message<KeptCellReadsV1> {
+  /**
+   * one per route position, in route order
+   *
+   * @generated from field: repeated dsm.KeptSeatReadsV1 seats = 1;
+   */
+  seats: KeptSeatReadsV1[] = [];
+
+  constructor(data?: PartialMessage<KeptCellReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCellReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "seats", kind: "message", T: KeptSeatReadsV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined, b: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptCellReadsV1, a, b);
+  }
+}
+
+/**
+ * What the client held about one seat: its folded arrival log at the cell,
+ * its committed state there, and its mirror of the leader's ByteCommits.
+ *
+ * @generated from message dsm.KeptSeatReadsV1
+ */
+export class KeptSeatReadsV1 extends Message<KeptSeatReadsV1> {
+  /**
+   * absent when the seat was not read
+   *
+   * @generated from field: dsm.KeptHeldLogV1 values = 1;
+   */
+  values?: KeptHeldLogV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 committed = 2;
+   */
+  committed?: KeptCommittedV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 leader_seen = 3;
+   */
+  leaderSeen?: KeptCommittedV1;
+
+  constructor(data?: PartialMessage<KeptSeatReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptSeatReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "values", kind: "message", T: KeptHeldLogV1 },
+    { no: 2, name: "committed", kind: "message", T: KeptCommittedV1 },
+    { no: 3, name: "leader_seen", kind: "message", T: KeptCommittedV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined, b: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptSeatReadsV1, a, b);
+  }
+}
+
+/**
+ * A seat's arrival log at one cell as the client folded it: the running hash
+ * through every entry, and the copies of the cell it kept, each with where it
+ * arrived. Each distinct value is held once.
+ *
+ * @generated from message dsm.KeptHeldLogV1
+ */
+export class KeptHeldLogV1 extends Message<KeptHeldLogV1> {
+  /**
+   * entries folded
+   *
+   * @generated from field: uint64 count = 1;
+   */
+  count = protoInt64.zero;
+
+  /**
+   * running hash after the last
+   *
+   * @generated from field: bytes head = 2;
+   */
+  head = new Uint8Array(0);
+
+  /**
+   * running hashes a ByteCommit's proof asked for
+   *
+   * @generated from field: repeated dsm.KeptRunningHashV1 marks = 3;
+   */
+  marks: KeptRunningHashV1[] = [];
+
+  /**
+   * @generated from field: repeated bytes values = 4;
+   */
+  values: Uint8Array[] = [];
+
+  /**
+   * in arrival order
+   *
+   * @generated from field: repeated dsm.KeptHeldCopyV1 copies = 5;
+   */
+  copies: KeptHeldCopyV1[] = [];
+
+  constructor(data?: PartialMessage<KeptHeldLogV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldLogV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "count", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "head", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "marks", kind: "message", T: KeptRunningHashV1, repeated: true },
+    { no: 4, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 5, name: "copies", kind: "message", T: KeptHeldCopyV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined, b: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldLogV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptRunningHashV1
+ */
+export class KeptRunningHashV1 extends Message<KeptRunningHashV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<KeptRunningHashV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptRunningHashV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined, b: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined): boolean {
+    return proto3.util.equals(KeptRunningHashV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptHeldCopyV1
+ */
+export class KeptHeldCopyV1 extends Message<KeptHeldCopyV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes seat = 3;
+   */
+  seat = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 position = 4;
+   */
+  position = 0;
+
+  /**
+   * @generated from field: repeated dsm.ChainSlotV1 chain = 5;
+   */
+  chain: ChainSlotV1[] = [];
+
+  /**
+   * index into the log's values
+   *
+   * @generated from field: uint32 value = 6;
+   */
+  value = 0;
+
+  constructor(data?: PartialMessage<KeptHeldCopyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldCopyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "seat", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "chain", kind: "message", T: ChainSlotV1, repeated: true },
+    { no: 6, name: "value", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined, b: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldCopyV1, a, b);
+  }
+}
+
+/**
+ * A member's committed state at a cell: its ByteCommit, the one before it,
+ * and the proof the ByteCommit commits the cell's latest entry.
+ *
+ * @generated from message dsm.KeptCommittedV1
+ */
+export class KeptCommittedV1 extends Message<KeptCommittedV1> {
+  /**
+   * @generated from field: dsm.ByteCommitV4 commit = 1;
+   */
+  commit?: ByteCommitV4;
+
+  /**
+   * absent at cycle 1
+   *
+   * @generated from field: dsm.ByteCommitV4 parent = 2;
+   */
+  parent?: ByteCommitV4;
+
+  /**
+   * @generated from field: dsm.CellCommitProofV1 proof = 3;
+   */
+  proof?: CellCommitProofV1;
+
+  constructor(data?: PartialMessage<KeptCommittedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCommittedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "commit", kind: "message", T: ByteCommitV4 },
+    { no: 2, name: "parent", kind: "message", T: ByteCommitV4 },
+    { no: 3, name: "proof", kind: "message", T: CellCommitProofV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined, b: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined): boolean {
+    return proto3.util.equals(KeptCommittedV1, a, b);
+  }
+}
+
+/**
  * One value for one key, as a batch put carries it. The member keeps it
  * after anything already at the key, exactly as a single put would.
  *

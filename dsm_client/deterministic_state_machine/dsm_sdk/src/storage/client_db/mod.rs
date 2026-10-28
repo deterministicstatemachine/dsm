@@ -538,7 +538,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// generation's bundle step (SoFi Amendment S23). A database made at 33
 /// holds frontiers without the digest and generations without their steps,
 /// and is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 34;
+///
+/// v35: every memoised reserve release keeps the reads of its cell that
+/// showed it final (`native_reserve_lineage_memo.cell_reads`), so Core
+/// proves it final again on load (`ReserveLineage::establish_final`). A
+/// database made at 34 holds releases without their reads, and is refused
+/// at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 35;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -706,9 +712,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             generation  INTEGER NOT NULL CHECK (generation >= 0),
             root        BLOB NOT NULL CHECK (length(root) = 32),
             -- v24: past genesis, the root this generation was built on and
-            -- the E of the operation that consumed it, so the recorded
-            -- chain links row to row and Core can check the links before it
-            -- stands on this device's memo (`VaultChain::from_recorded`).
+            -- the E of the operation that consumed it. A record says where
+            -- a walk may read ahead; Core's walk establishes every
+            -- generation from the genesis or an adopted baseline
+            -- (MR-DSM-0331), and stands on no row here.
             pre_root    BLOB CHECK (pre_root IS NULL OR length(pre_root) = 32),
             consumed_by BLOB CHECK (consumed_by IS NULL OR length(consumed_by) = 32),
             PRIMARY KEY (vault_id, generation)
@@ -810,6 +817,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             recipient_devid    BLOB NOT NULL CHECK (length(recipient_devid) = 32),
             recipient_position INTEGER NOT NULL,
             envelope           BLOB NOT NULL,
+            -- The reads of the release's cell that showed it final
+            -- (dsm::route_chain::CellEvidence::encode_kept), so Core proves
+            -- it final again on load.
+            cell_reads         BLOB NOT NULL,
             PRIMARY KEY (reserve_id, generation)
         );
 

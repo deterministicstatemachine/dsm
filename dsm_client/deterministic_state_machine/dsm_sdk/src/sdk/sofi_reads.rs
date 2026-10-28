@@ -27,7 +27,7 @@ use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
     AcceptedGeneses, JudgedKey, KeptCompletion, KeptJudgement, LocalLeaves, PeerPositionResolver,
-    ReadFailure, RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
+    ReadFailure, SofiReads, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -704,15 +704,10 @@ impl SofiReads for LiveSofiReads<'_> {
             .map_err(|unresolved| PeerLineageFailure::Unresolved(unresolved.to_string()))
     }
 
-    fn recorded_generations(
+    fn record_generation(
         &self,
-        vault_id: &D32,
-    ) -> Result<Vec<RecordedGenerationRow>, ReadFailure> {
-        sofi_vault_head::recorded_generations(vault_id)
-            .map_err(|e| ReadFailure(format!("recorded generations: {e}")))
-    }
-
-    fn record_generation(&self, post: &VaultPostState) -> Result<(), ReadFailure> {
+        post: &VaultPostState,
+    ) -> Result<Option<dsm::sofi::resolve::ReplacedRecord>, ReadFailure> {
         sofi_vault_head::record_walked(post)
             .map_err(|e| ReadFailure(format!("record generation: {e}")))
     }

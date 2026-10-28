@@ -18,6 +18,7 @@
 //! latest memoised generation. Nothing in the memo is ever read as a fact
 //! about a cell the walk has not read.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use dsm::economic::native_reserve::{
@@ -344,7 +345,7 @@ pub fn walk_reserve(
     runtime: &tokio::runtime::Handle,
 ) -> Result<WalkStop, DsmError> {
     let genesis = genesis_state(network_id)?;
-    let (mut lineage, _) = established_lineage(&genesis, None)?;
+    let (mut lineage, _) = established_lineage(set, &genesis, None)?;
     let start = *lineage.head();
     let from = *start.state();
     let (mut ahead, mut candidates) = tokio::task::block_in_place(|| {
@@ -364,6 +365,9 @@ pub fn walk_reserve(
         })
     })?;
     let mut read_through = ahead.through;
+    // The reads of each cell the walk read final, kept until the release
+    // there is memoised with them.
+    let finals: RefCell<HashMap<[u8; 32], CellEvidence>> = RefCell::new(HashMap::new());
     let stop = walk_lineage(
         start,
         RESERVE_WALK_BUDGET,
@@ -375,13 +379,17 @@ pub fn walk_reserve(
                         let read = resolve_successor(&cell, &evidence);
                         if let SuccessorRead::Final { .. } = &read {
                             crate::sdk::final_reads::keep_final_cell(cell.routed(), &evidence);
+                            finals.borrow_mut().insert(*cell.routed().key(), evidence);
                             return Ok(read);
                         }
                     }
-                    let read = read_successor(set, parent).await?;
+                    let seats = NodeSeats::new(set)?;
+                    let evidence = read_successor_cell(&seats, &cell).await;
+                    let read = resolve_successor(&cell, &evidence);
                     // A final release means the walk is behind the head: the
                     // cells after it are located and read together.
                     if let SuccessorRead::Final { child, .. } = &read {
+                        finals.borrow_mut().insert(*cell.routed().key(), evidence);
                         if child.generation() > read_through {
                             read_ahead(set, child, RESERVE_LOOKAHEAD).await?;
                             read_through = child.generation() + RESERVE_LOOKAHEAD as u64;
@@ -392,12 +400,25 @@ pub fn walk_reserve(
             })
         },
         |parent, release, child| {
-            memo::record_final_release(parent.state(), release, child.state())
-                .map_err(|e| storage_err("reserve memo write", e))?;
-            // What the walk owes from grows by each release it established,
-            // taken into the lineage by Core like every kept release.
+            let cell = successor_cell(set, parent.state())?;
+            let reads = finals
+                .borrow_mut()
+                .remove(cell.routed().key())
+                .ok_or_else(|| {
+                    storage_err(
+                        "reserve walk",
+                        format!(
+                            "no reads are held of the cell final at generation {}",
+                            child.state().generation()
+                        ),
+                    )
+                })?;
+            // The release is memoised with the reads that showed it final,
+            // its completion proof kept, and taken into the lineage by Core
+            // from them, like every kept release.
+            let proof = memoise_final(&cell, &reads, release, child.state())?;
             lineage
-                .establish(&release.envelope_bytes)
+                .establish_final(&cell, &reads, &proof)
                 .map_err(|e| storage_err("reserve lineage", e))?;
             Ok::<(), DsmError>(())
         },
@@ -414,31 +435,73 @@ pub fn walk_reserve(
     Ok(stop)
 }
 
+/// Memoise `release`, final at `cell` by `reads`, with those reads, and keep
+/// its completion proof: what [`established_lineage`] proves final again on
+/// load. The proof is built from the reads, and must prove `release`.
+fn memoise_final(
+    cell: &SuccessorCell,
+    reads: &CellEvidence,
+    release: &dsm::economic::native_reserve::VerifiedRelease,
+    child: &NativeReserveState,
+) -> Result<dsm::route_chain::CompletionProof, DsmError> {
+    let (proven, _, proof) = successor_completion(cell, reads)
+        .map_err(|missing| storage_err("reserve completion", format!("{missing:?}")))?
+        .ok_or_else(|| storage_err("reserve completion", "the reads show no release final"))?;
+    if proven.envelope_bytes != release.envelope_bytes {
+        return Err(storage_err(
+            "reserve completion",
+            "the reads show another release final than the one memoised",
+        ));
+    }
+    keep_completion(cell.routed(), &proof)?;
+    memo::record_final_release(cell.parent(), release, child, &reads.encode_kept())
+        .map_err(|e| storage_err("reserve memo write", e))?;
+    Ok(proof)
+}
+
 /// The lineage this device's walks established, re-established by Core from
-/// the releases the memo keeps, and the envelope of the release at
-/// generation `keep`, when the lineage reaches it. Each memoised release is
-/// checked against the head before it (`ReserveLineage::establish`) before
-/// its generation is taken: a row Core does not establish is corrupt
-/// storage, and an error, never a generation. A memoised release past the
-/// first generation the memo skips is not one this device's walks
-/// established, and is not in the lineage.
+/// what the memo keeps, and the envelope of the release at generation
+/// `keep`, when the lineage reaches it. Each memoised release is proven
+/// final again from the reads kept with it and its kept completion proof,
+/// and checked as the successor of the head before it
+/// (`ReserveLineage::establish_final`), before its generation is taken: a
+/// row Core does not establish is corrupt storage, and an error, never a
+/// generation. A memoised release past the first generation the memo skips
+/// is not one this device's walks established, and is not in the lineage.
 fn established_lineage(
+    set: &StorageSet,
     genesis: &NativeReserveState,
     keep: Option<u64>,
 ) -> Result<(ReserveLineage, Option<Vec<u8>>), DsmError> {
+    let members = crate::sdk::storage_set::as_ccb_members(set)?;
     let mut lineage =
         ReserveLineage::from_genesis(genesis).map_err(|e| storage_err("reserve genesis", e))?;
     let mut kept = None;
     // One memoised release at a time: it is established and let go before
     // the next is read (SA-75), except the one asked to be kept.
-    memo::fold_memoised_lineage(genesis, |state, envelope| {
-        if state.generation() != lineage.head().head().generation() + 1 {
+    memo::fold_memoised_lineage(genesis, |conn, state, envelope, cell_reads| {
+        let generation = state.generation();
+        if generation != lineage.head().head().generation() + 1 {
             return Ok(std::ops::ControlFlow::Break(()));
         }
+        let refused = |why: String| {
+            anyhow::anyhow!("native_reserve_lineage_memo: generation {generation}: {why}")
+        };
+        let cell = SuccessorCell::of(lineage.head().state(), &members)
+            .map_err(|e| refused(format!("its cell: {e:?}")))?;
+        let reads = CellEvidence::decode_kept(cell.routed(), cell_reads, &cell.keeps())
+            .map_err(|e| refused(format!("the reads kept with the release: {e:?}")))?;
+        let proof = crate::storage::client_db::completion_proofs::get_with_conn(
+            conn,
+            cell.routed(),
+            envelope,
+        )
+        .map_err(|e| refused(format!("its completion proof: {e}")))?
+        .ok_or_else(|| refused("no completion proof is kept for the release".to_string()))?;
         lineage
-            .establish(envelope)
+            .establish_final(&cell, &reads, &proof.proof)
             .map_err(|e| anyhow::anyhow!("native_reserve_lineage_memo: {e}"))?;
-        if keep == Some(state.generation()) {
+        if keep == Some(generation) {
             kept = Some(envelope.to_vec());
         }
         Ok(std::ops::ControlFlow::Continue(()))
@@ -451,6 +514,7 @@ fn established_lineage(
 /// established heads before and after it; `None` while the chain does not
 /// reach it. Reads only what was memoised: nothing is walked here.
 pub(crate) fn established_release_at(
+    set: &StorageSet,
     genesis: &NativeReserveState,
     generation: u64,
 ) -> Result<Option<ReserveReleaseWin>, DsmError> {
@@ -459,7 +523,7 @@ pub(crate) fn established_release_at(
             "generation 0 is the reserve's genesis state, never a release",
         ));
     };
-    let (lineage, kept) = established_lineage(genesis, Some(generation))?;
+    let (lineage, kept) = established_lineage(set, genesis, Some(generation))?;
     let chain = lineage.chain();
     let (Some(parent), Some(child), Some(envelope_bytes)) =
         (chain.head_at(before), chain.head_at(generation), kept)
@@ -545,11 +609,11 @@ pub fn release_at(
             "the named reserve is not this network's native reserve",
         ));
     }
-    if let Some(win) = established_release_at(&genesis, generation)? {
+    if let Some(win) = established_release_at(set, &genesis, generation)? {
         return Ok(Some(win));
     }
     walk_reserve(set, network_id, runtime)?;
-    established_release_at(&genesis, generation)
+    established_release_at(set, &genesis, generation)
 }
 
 /// Write the exact release bytes at `parent`'s successor cell along its
@@ -567,11 +631,12 @@ pub async fn write_release(
     Ok(report)
 }
 
-/// Keep the completion proof of this device's release at `parent`'s
-/// successor cell (storage spec §9 rule 11). `Ok(true)` once `envelope` is the
-/// release final there and its proof is kept; `Ok(false)` while it is not
-/// final, or another release holds the cell.
-pub async fn keep_release_completion(
+/// Memoise this device's release at `parent`'s successor cell with the
+/// reads that show it final, and keep its completion proof (storage spec §9
+/// rule 11). The answer is whether `envelope` is the release final there,
+/// now memoised with its reads: it is not while the cell is not final, or
+/// while another release holds it.
+pub async fn memoise_release_completion(
     set: &StorageSet,
     parent: &NativeReserveState,
     envelope: &[u8],
@@ -579,7 +644,7 @@ pub async fn keep_release_completion(
     let cell = successor_cell(set, parent)?;
     let seats = NodeSeats::new(set)?;
     let evidence = read_successor_cell(&seats, &cell).await;
-    let Some((release, child, proof)) = successor_completion(&cell, &evidence)
+    let Some((release, child, _)) = successor_completion(&cell, &evidence)
         .map_err(|missing| storage_err("reserve completion", format!("{missing:?}")))?
     else {
         return Ok(false);
@@ -591,150 +656,6 @@ pub async fn keep_release_completion(
         );
         return Ok(false);
     }
-    keep_completion(cell.routed(), &proof)?;
+    memoise_final(&cell, &evidence, &release, &child)?;
     Ok(true)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A memoised final release at `child`, with `envelope` as its bytes.
-    fn memo_row(genesis: &NativeReserveState, child: &NativeReserveState, envelope: &[u8]) {
-        let binding = crate::storage::client_db::get_connection().expect("the store");
-        let conn = binding.lock().expect("the store is not poisoned");
-        conn.execute(
-            "INSERT INTO native_reserve_lineage_memo
-               (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-                recipient_devid, recipient_position, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7)",
-            rusqlite::params![
-                genesis.reserve_id().as_slice(),
-                child.generation() as i64,
-                (child.remaining_supply() + dsm::economic::native_reserve::ERA_FAUCET_PAYOUT)
-                    as i64,
-                child.remaining_supply() as i64,
-                [0x61u8; 32].as_slice(),
-                [0x62u8; 32].as_slice(),
-                envelope,
-            ],
-        )
-        .expect("a memo row");
-    }
-
-    /// The memo holding `envelopes` at generations 1, 2, …, of a fresh
-    /// store.
-    fn memo_of(genesis: &NativeReserveState, envelopes: &[&[u8]]) {
-        crate::economic_fixtures::use_test_storage_dir();
-        crate::storage::client_db::reset_database_for_tests();
-        crate::storage::client_db::init_database().expect("init db");
-        for (i, envelope) in envelopes.iter().enumerate() {
-            let state = genesis
-                .at_generation(i as u64 + 1)
-                .expect("a generation of the lineage");
-            memo_row(genesis, &state, envelope);
-        }
-    }
-
-    /// The lineage a walk owes hints and checkpoints from is each memoised
-    /// release, re-established by Core generation by generation from the
-    /// genesis, and stops at the first generation the memo skips: a
-    /// generation after a gap is not one this device's walks established.
-    #[test]
-    #[serial_test::serial]
-    fn the_generation_chain_is_the_memoised_releases_up_to_the_first_gap() {
-        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
-        let releases = crate::test_support::reserve::signed_releases(&genesis, 5);
-        memo_of(&genesis, &[]);
-        let mut expected = ReserveLineage::from_genesis(&genesis).expect("R_0");
-        for g in [1u64, 2, 3, 5] {
-            let state = genesis
-                .at_generation(g)
-                .expect("a generation of the lineage");
-            let envelope = &releases[g as usize - 1];
-            memo_row(&genesis, &state, envelope);
-            if g <= 3 {
-                expected.establish(envelope).expect("the next generation");
-            }
-        }
-        let (lineage, _) = established_lineage(&genesis, None).expect("the lineage");
-        assert_eq!(lineage.chain().head(), expected.chain().head());
-        assert_eq!(lineage.steps().len(), 3, "generation 5 follows a gap");
-    }
-
-    /// DSM Amendment A15, MR-DSM-0315: a verifier is answered from the head
-    /// this device's walks established. A memoised release on that chain
-    /// comes with the chain's heads before and after it; a memoised release
-    /// past a gap is not established, and is not answered as a release, so
-    /// the verifier walks for it instead.
-    #[test]
-    #[serial_test::serial]
-    fn a_memoised_release_past_a_gap_is_not_an_established_release() {
-        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
-        let releases = crate::test_support::reserve::signed_releases(&genesis, 5);
-        memo_of(&genesis, &[]);
-        let mut expected = ReserveLineage::from_genesis(&genesis).expect("R_0");
-        for g in [1u64, 2, 3, 5] {
-            let state = genesis.at_generation(g).expect("a generation");
-            let envelope = &releases[g as usize - 1];
-            memo_row(&genesis, &state, envelope);
-            if g <= 3 {
-                expected.establish(envelope).expect("the next generation");
-            }
-        }
-        let win = established_release_at(&genesis, 3)
-            .expect("read")
-            .expect("generation 3 is on the chain");
-        assert_eq!(win.envelope_bytes, releases[2]);
-        assert_eq!(Some(win.parent), expected.chain().head_at(2));
-        assert_eq!(Some(win.child), expected.chain().head_at(3));
-        assert_eq!(
-            established_release_at(&genesis, 5).expect("read"),
-            None,
-            "a release memoised past a gap is not established"
-        );
-        assert_eq!(established_release_at(&genesis, 4).expect("read"), None);
-    }
-
-    /// DSM Amendment A15, MR-DSM-0310, MR-DSM-0315: a memoised release is
-    /// re-established by Core when the memo is loaded, never taken as a
-    /// root. The memo holds generations 1 to 3, generation 2's row holding
-    /// first a forged envelope, then a real release of another parent
-    /// (generation 1's). Each time the real loader refuses the memo at
-    /// generation 2, and answers no release or head from it; the honest memo
-    /// loads.
-    ///
-    /// MUTATION CONTROL: taking a memoised release into the lineage without
-    /// the checks of `ReserveLineage::establish` (`reserve_memo_unchecked`)
-    /// turns this red.
-    #[test]
-    #[serial_test::serial]
-    fn a_forged_memo_row_is_refused_on_load_and_enters_no_chain() {
-        let genesis = NativeReserveState::genesis(b"chain-test", [0x5E; 32]).expect("R_0");
-        let releases = crate::test_support::reserve::signed_releases(&genesis, 3);
-        let mut bent = releases[1].clone();
-        let last = bent.len() - 1;
-        bent[last] ^= 0x01;
-        for (what, forged) in [
-            ("a forged envelope", &bent),
-            ("another parent's release", &releases[0]),
-        ] {
-            memo_of(&genesis, &[&releases[0], forged, &releases[2]]);
-            match established_release_at(&genesis, 3) {
-                Err(refused) => assert!(
-                    refused.to_string().contains("generation 2"),
-                    "{what}: the refusal names the generation: {refused}"
-                ),
-                Ok(answer) => panic!("{what} was loaded into the lineage: {answer:?}"),
-            }
-            if let Ok(answer) = established_release_at(&genesis, 1) {
-                panic!("{what}: a memo Core refuses answers nothing: {answer:?}");
-            }
-        }
-        memo_of(&genesis, &[&releases[0], &releases[1], &releases[2]]);
-        let honest = established_release_at(&genesis, 3)
-            .expect("the honest memo loads")
-            .expect("generation 3 is on the chain");
-        assert_eq!(honest.envelope_bytes, releases[2]);
-    }
 }

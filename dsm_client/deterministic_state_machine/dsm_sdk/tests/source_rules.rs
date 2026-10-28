@@ -699,3 +699,41 @@ fn the_reachability_gate_names_an_uncalled_public_sofi_method_and_an_unused_type
     assert!(control.status.success(), "{said}");
     assert!(said.contains("G1 negative control:"), "{said}");
 }
+
+// ── MR-DSM-0310, MR-DSM-0315: a memoised reserve release is proven final ───
+
+/// DSM Amendment A15: the SDK takes a reserve release into a lineage only
+/// through `ReserveLineage::establish_final`, which proves the release final
+/// from the reads of its cell before Core checks it as the successor of the
+/// head before it. `ReserveLineage::establish`, which takes the release's
+/// finality from its caller, is called from no production code of the SDK,
+/// and `establish_final` is.
+///
+/// MUTATION CONTROL: taking a memoised release with `establish` in
+/// `established_lineage` turns this red.
+#[test]
+fn the_sdk_takes_a_reserve_release_into_a_lineage_only_as_proven_final() {
+    let sdk = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut proven = Vec::new();
+    for path in rust_files(&sdk) {
+        let file = parse(&path);
+        for (name, block) in production_fns(&file) {
+            for event in events(&block) {
+                if let Event::Method(method) = &event {
+                    assert!(
+                        method != "establish",
+                        "{}: {name} takes a reserve release without proving it final",
+                        path.display()
+                    );
+                    if method == "establish_final" {
+                        proven.push(name.clone());
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        proven.iter().any(|name| name == "established_lineage"),
+        "the memo loader proves each release final: {proven:?}"
+    );
+}

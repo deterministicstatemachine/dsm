@@ -672,14 +672,15 @@ pub(crate) async fn vault_at_head(
     head_of(set, verifier, vault_id, chain).await
 }
 
-/// Start the record of each vault `offered` that this device holds nothing
-/// of at the owner baseline offered for it (SoFi Amendment S24): what a
-/// quote and a swap do before they walk the vaults' heads.
+/// Start the record of each vault `offered` at the owner baseline offered
+/// for it, when that is later than the one the record starts at (SoFi
+/// Amendment S24; MR-DSM-0331): what a quote and a swap do before they walk
+/// the vaults' heads. Names each baseline the record contradicts.
 pub(crate) async fn adopt_offered(
     core: &CoreSDK,
     set: &StorageSet,
     offered: &[dsm::types::proto::ConnectVaultWitnessV1],
-) -> Result<(), DsmError> {
+) -> Result<Vec<crate::sdk::vault_baseline::ContradictedBaseline>, DsmError> {
     let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
@@ -762,6 +763,16 @@ pub(crate) async fn head_of(
         sofi_vault_head::quarantined(vault_id).map_err(|e| storage("vault quarantine", e))?
     {
         return Err(refuse(format!("the vault is quarantined: {why}")));
+    }
+    // A walk that stopped where what it read did not decide the next
+    // generation has not reached the vault's head: its last generation is
+    // not the head, and is never read as one (MR-DSM-0331). A network
+    // status: the caller asks again.
+    if let Some(why) = chain.not_complete() {
+        return Err(storage(
+            "vault walk",
+            format!("not complete yet, retry: {why}"),
+        ));
     }
     let (.., root) = chain
         .head()

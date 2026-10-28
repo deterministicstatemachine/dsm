@@ -74,19 +74,22 @@ pub fn get_frozen_release(
 
 // ── The lineage memo ─────────────────────────────────────────────────────────
 
-/// Memoise one final release with the state it succeeded.
+/// Memoise one final release with the state it succeeded, and `cell_reads`,
+/// the reads of its cell that showed it final
+/// (`dsm::route_chain::CellEvidence::encode_kept`).
 pub fn record_final_release(
     parent: &NativeReserveState,
     release: &VerifiedRelease,
     child: &NativeReserveState,
+    cell_reads: &[u8],
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
         "INSERT OR IGNORE INTO native_reserve_lineage_memo
            (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-            recipient_devid, recipient_position, envelope)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            recipient_devid, recipient_position, envelope, cell_reads)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             parent.reserve_id().as_slice(),
             i64_of(child.generation(), "generation")?,
@@ -99,6 +102,7 @@ pub fn record_final_release(
                 "recipient position"
             )?,
             release.envelope_bytes.as_slice(),
+            cell_reads,
         ],
     )?;
     Ok(())
@@ -128,21 +132,30 @@ fn memoised(
 
 /// Fold every memoised generation of the reserve whose genesis is `genesis`,
 /// in generation order, into `step`: the state each final release installed,
-/// and the release's envelope. What this device's own walks established.
+/// the release's envelope, and the reads kept with it. What this device's
+/// own walks established; Core establishes each again from those bytes.
 /// One row is read at a time, so a walk holds one release, never the memo
-/// (SA-75). `step` answers whether to read on. A row whose supplies are not
+/// (SA-75). `step` is handed the connection the fold holds, for what it
+/// reads of the release elsewhere in the store: asking the store for
+/// another connection while the fold holds this one never returns. `step`
+/// answers whether to read on. A row whose supplies are not
 /// the ones the lineage holds at its generation and the one before is
 /// corrupt storage, and an error.
 pub fn fold_memoised_lineage(
     genesis: &NativeReserveState,
-    mut step: impl FnMut(NativeReserveState, &[u8]) -> Result<std::ops::ControlFlow<()>>,
+    mut step: impl FnMut(
+        &rusqlite::Connection,
+        NativeReserveState,
+        &[u8],
+        &[u8],
+    ) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<()> {
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("native reserve memo: the store is poisoned: {e}"))?;
     let mut stmt = conn.prepare(
-        "SELECT generation, remaining, parent_remaining, envelope
+        "SELECT generation, remaining, parent_remaining, envelope, cell_reads
            FROM native_reserve_lineage_memo
           WHERE reserve_id = ?1 ORDER BY generation ASC",
     )?;
@@ -165,7 +178,8 @@ pub fn fold_memoised_lineage(
             u64_of(row.get::<_, i64>(2)?, "parent remaining")?,
         )?;
         let envelope = row.get_ref(3)?.as_blob()?;
-        if step(state, envelope)?.is_break() {
+        let cell_reads = row.get_ref(4)?.as_blob()?;
+        if step(&conn, state, envelope, cell_reads)?.is_break() {
             break;
         }
     }
@@ -219,8 +233,8 @@ mod tests {
         conn.execute(
             "INSERT INTO native_reserve_lineage_memo
                (reserve_id, generation, parent_remaining, remaining, recipient_genesis,
-                recipient_devid, recipient_position, envelope)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
+                recipient_devid, recipient_position, envelope, cell_reads)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
             params![
                 genesis.reserve_id().as_slice(),
                 generation,
@@ -229,6 +243,7 @@ mod tests {
                 [0x61u8; 32].as_slice(),
                 [0x62u8; 32].as_slice(),
                 [0x63u8; 8].as_slice(),
+                [0x64u8; 8].as_slice(),
             ],
         )
         .expect("memo row");
@@ -247,7 +262,7 @@ mod tests {
         let genesis = NativeReserveState::genesis(b"memo-test", [0x5E; 32]).expect("R_0");
         let folded = |genesis: &NativeReserveState| -> Result<Vec<u64>> {
             let mut seen = Vec::new();
-            fold_memoised_lineage(genesis, |state, _| {
+            fold_memoised_lineage(genesis, |_, state, _, _| {
                 seen.push(state.generation());
                 Ok(std::ops::ControlFlow::Continue(()))
             })?;

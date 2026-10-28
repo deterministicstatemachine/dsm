@@ -376,6 +376,8 @@ impl CoreSDK {
     /// heads it selected are recorded, and the unfenced head takes the trader
     /// balances that root holds — all in the one admission transaction, so the
     /// head and the admitted root cannot disagree about what this device holds.
+    /// The vault heads are the advance's own (spec §44.4), so a head and the
+    /// position that chose it cannot disagree either.
     pub(crate) fn admit_resolved_sofi_position(
         &self,
         advanced: &dsm::sofi::lineage::ResolvedAdvance,
@@ -383,10 +385,6 @@ impl CoreSDK {
         operation_digest: &[u8; 32],
         leaves: &[([u8; 32], [u8; 32], Vec<u8>)],
         storage_set_id: &[u8; 32],
-        // The vault heads this position selected (spec §44.4), recorded in
-        // THIS transaction so a head and the position that chose it cannot
-        // disagree.
-        vault_heads: &[dsm::sofi::validation::VaultPostState],
     ) -> Result<(), DsmError> {
         let admitted = dsm::economic::lineage::AdmittedEconomicPosition::ResolvedSofi {
             economic_position: advanced.root.economic_position(),
@@ -401,7 +399,7 @@ impl CoreSDK {
             leaves,
             storage_set_id,
             &[],
-            vault_heads,
+            advanced.vault_generations(),
             Some(&advanced.balances),
         )
     }
@@ -459,11 +457,20 @@ impl CoreSDK {
                 &tx, admitted, leaves,
             )
             .map_err(|e| DsmError::storage(format!("admit record: {e}"), None::<std::io::Error>))?;
+            // The record follows what Core's advance selected (MR-DSM-0331):
+            // a contradicting record is replaced, and named.
             for post in vault_heads {
-                crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
-                    .map_err(|e| {
-                        DsmError::storage(format!("admit vault head: {e}"), None::<std::io::Error>)
-                    })?;
+                if let Some(replaced) =
+                    crate::storage::client_db::sofi_vault_head::record_resolved_with_conn(&tx, post)
+                        .map_err(|e| {
+                            DsmError::storage(
+                                format!("admit vault head: {e}"),
+                                None::<std::io::Error>,
+                            )
+                        })?
+                {
+                    log::warn!("[sofi admit] {replaced}");
+                }
             }
             crate::storage::client_db::economic_admission::clear_pending_admission_with_conn(
                 &tx, &devid,

@@ -850,6 +850,8 @@ pub fn route_invalid_in_hand(
 /// Built by [`vault_post_states`] from the fold and by nothing else: what a
 /// vault chain grows by (`VaultChain::extend`) and what the head store
 /// records is always a state Core recomputed, never one a caller stated.
+/// Another layer holds one only as Core hands it over, established: a
+/// walk's generation or a realized advance's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPostState {
     vault_id: D32,
@@ -1016,7 +1018,14 @@ fn vault_bundle_step(
 /// The root is the fold's, so it is authenticated by the same arithmetic the
 /// verdict used: the core's entries against the pre-root the core states. A
 /// caller that stored a root from anywhere else would be storing an opinion.
-pub fn vault_post_states(
+///
+/// Core's own: a recomputation is not an establishment. What reaches another
+/// layer is a generation Core established — one a walk classified `Consumed`
+/// ([`super::resolve::SofiReads::record_generation`]) or one a realized
+/// advance selected ([`super::lineage::ResolvedAdvance::vault_generations`])
+/// — so a device's record of a vault, which follows Core (MR-DSM-0331), is
+/// written from nothing else.
+pub(crate) fn vault_post_states(
     precommit: &TraderPrecommitBody,
     fulfillment: &TraderFulfillmentBody,
     preimage: &SettlementPreimage,

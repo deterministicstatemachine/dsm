@@ -4668,6 +4668,128 @@ async fn a_vault_walk_over_settled_history_closes_no_cycle() {
     );
 }
 
+/// MR-DSM-0331, the record follows Core: what a device recorded of a vault
+/// is a cache of what Core established, and no root of a walk. After three
+/// trades the owner's record is forged at an established generation —
+/// another root at 2, with generation 3 built on it — and the owner walks
+/// the vault as production does, its history read ahead from what it
+/// recorded. The forged row changes nothing the walk establishes: it starts
+/// at the genesis, establishes all three trades, and the forged root is in
+/// no chain. The record gives way where it contradicts Core, from that
+/// generation up, in the walk's own transaction, and the walk names the
+/// replacement: the generation, the root recorded there and the root Core
+/// established. It decides nothing about the contradiction (the Frozen(K)
+/// item stays open): a second walk finds the record following Core and
+/// names nothing.
+/// MUTATION CONTROLS: the walk standing on the recorded rows
+/// (`vault_rows_trusted`); the record refusing Core's generation over the
+/// forged row (`vault_record_kept`); the replacement left unnamed
+/// (`vault_replacement_unreported`) — each turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_forged_vault_record_changes_nothing_a_walk_establishes_and_gives_way_by_name() {
+    use crate::storage::client_db::sofi_vault_head;
+    use dsm::sofi::resolve::{Contradicted, ReplacedRecord};
+    const FORGED: [u8; 32] = [0x5A; 32];
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    for _ in 0..3 {
+        realized_trade(&p, &m, 5).await;
+    }
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let walk = || async {
+        let (own, parents) = standing_of(&p.a);
+        let mut history = crate::sdk::vault_history::discover(&set, &m.vault_id)
+            .await
+            .expect("the history");
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        let verifier = ctx.verifier();
+        let chain = tokio::task::block_in_place(|| {
+            crate::sdk::vault_history::walk(&set, &verifier, &mut history)
+        })
+        .expect("the walk");
+        (
+            chain,
+            verifier.replaced_records().expect("what the walk replaced"),
+        )
+    };
+    let (chain, replaced) = walk().await;
+    assert_eq!(chain.head().map(|(generation, _)| generation), Some(3));
+    assert_eq!(
+        replaced,
+        Vec::new(),
+        "an honest record gives way to nothing"
+    );
+    let root_at = |generation: u64| {
+        let Some(root) = sofi_vault_head::root_at(&m.vault_id, generation).expect("A's record")
+        else {
+            panic!("A recorded no generation {generation}");
+        };
+        root
+    };
+    let established = root_at(2);
+    assert!(chain.names(&established));
+
+    {
+        let binding = crate::storage::client_db::get_connection().expect("A's store");
+        let conn = binding.lock().expect("A's store is not poisoned");
+        conn.execute(
+            "UPDATE sofi_vault_root SET root = ?2 WHERE vault_id = ?1 AND generation = 2",
+            [m.vault_id.as_slice(), FORGED.as_slice()],
+        )
+        .expect("forge generation 2");
+        conn.execute(
+            "UPDATE sofi_vault_root SET pre_root = ?2 WHERE vault_id = ?1 AND generation = 3",
+            [m.vault_id.as_slice(), FORGED.as_slice()],
+        )
+        .expect("build generation 3 on the forged root");
+    }
+    assert_eq!(root_at(2), FORGED, "the record is forged");
+
+    let (chain, replaced) = walk().await;
+    assert_eq!(
+        chain.head().map(|(generation, _)| generation),
+        Some(3),
+        "the walk established all three trades"
+    );
+    assert!(!chain.names(&FORGED), "the forged root is in no chain");
+    assert!(chain.names(&established));
+    assert_eq!(
+        replaced,
+        vec![ReplacedRecord {
+            vault_id: m.vault_id,
+            generation: 2,
+            recorded_root: Some(FORGED),
+            established_root: established,
+            contradicted: Contradicted::Root,
+        }],
+        "the walk names the replacement"
+    );
+    assert_eq!(root_at(2), established, "the record follows Core");
+    {
+        let binding = crate::storage::client_db::get_connection().expect("A's store");
+        let conn = binding.lock().expect("A's store is not poisoned");
+        let naming: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sofi_vault_root
+                  WHERE vault_id = ?1 AND (root = ?2 OR pre_root = ?2)",
+                [m.vault_id.as_slice(), FORGED.as_slice()],
+                |r| r.get(0),
+            )
+            .expect("count the rows naming the forged root");
+        assert_eq!(naming, 0, "no row names the forged root");
+    }
+
+    let (chain, replaced) = walk().await;
+    assert_eq!(chain.head().map(|(generation, _)| generation), Some(3));
+    assert_eq!(
+        replaced,
+        Vec::new(),
+        "a record that follows Core gives way to nothing"
+    );
+}
+
 /// Forget everything `d` holds of `vault_id`'s chain, and every read this
 /// process kept: a device that keeps nothing of the vault.
 fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
@@ -4728,7 +4850,7 @@ async fn offered_to_b(p: &Pair, m: &Market) -> Vec<generated::ConnectVaultWitnes
 async fn adopt_at_b(
     p: &Pair,
     offered: &[generated::ConnectVaultWitnessV1],
-) -> Result<(), dsm::types::error::DsmError> {
+) -> Result<Vec<crate::sdk::vault_baseline::ContradictedBaseline>, dsm::types::error::DsmError> {
     p.b.enter();
     let set = canonical_set(NETWORK).expect("the pinned set");
     crate::sdk::sofi_flow::adopt_offered(&p.b.router().core_sdk, &set, offered).await
@@ -4868,6 +4990,350 @@ async fn a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades() 
         chain.head(),
         "the owner's walk from the genesis and B's from the baseline agree"
     );
+}
+
+/// MR-DSM-0331, the audit decision on the generation budget: a walk that
+/// cannot read what follows a generation ends as "not complete yet", never
+/// as a shorter chain read as the head. After two trades, B's verifier
+/// accepts the vault's genesis, then forgets every read it kept, and three
+/// of the five members go down: no cell of the vault reads final. B's walk
+/// stops at the genesis and says it is not complete. With every member back
+/// up, the vault's head read from that chain is the network status "not
+/// complete yet", not the genesis.
+/// MUTATION CONTROL: `head_of` reading the head of a chain that is not
+/// complete (`not_complete_read_as_head`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_walk_that_cannot_read_what_follows_is_not_complete_and_never_the_head() {
+    let mut p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..2 {
+        realized_trade(&p, &m, 2).await;
+    }
+    let (own, parents) = standing_of(&p.b);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    assert!(
+        matches!(
+            verifier
+                .vault_genesis(&m.vault_id)
+                .expect("the genesis read"),
+            dsm::sofi::resolve::VaultGenesis::Accepted(..)
+        ),
+        "B accepts the vault's genesis"
+    );
+    crate::sdk::final_reads::forget_everything();
+    let everyone: Vec<String> = p.nodes.members().into_iter().map(|(id, ..)| id).collect();
+    let down = everyone[..3].to_vec();
+    p.nodes.take_down(&down).await;
+
+    let chain = verifier
+        .chain(&m.vault_id)
+        .expect("a walk that reads too little is no error");
+    assert_eq!(
+        chain.head().map(|h| h.0),
+        Some(0),
+        "the walk stands at the genesis"
+    );
+    let Some(why) = chain.not_complete() else {
+        panic!("a walk that could not read past the genesis says it is complete");
+    };
+    log::info!("[sofi chain] not complete: {why}");
+    p.nodes.bring_up(&down).await;
+    let Err(head) = crate::sdk::sofi_flow::head_of(&set, &verifier, &m.vault_id, chain).await
+    else {
+        panic!("the head of a walk that is not complete was read as the vault's head");
+    };
+    assert!(
+        head.to_string().contains("not complete yet"),
+        "the head is the network status: {head}"
+    );
+}
+
+/// B's walk of the vault from nothing this process kept, and the reads it
+/// asked the members for.
+fn cold_walk_at_b(p: &Pair, m: &Market) -> (dsm::sofi::resolution::VaultChain, usize) {
+    crate::sdk::final_reads::forget_everything();
+    for node in &p.nodes.nodes {
+        node.forget_requests();
+    }
+    let chain = chain_at_b(p, m);
+    let reads = p
+        .nodes
+        .nodes
+        .iter()
+        .flat_map(|node| node.requests())
+        .filter(|request| request.starts_with("GET "))
+        .count();
+    (chain, reads)
+}
+
+/// The generation the baseline B's record starts at, and the generations it
+/// records.
+fn b_starts_at(p: &Pair, m: &Market) -> (Option<u64>, Vec<u64>) {
+    use crate::storage::client_db::sofi_vault_head;
+    p.b.enter();
+    (
+        sofi_vault_head::baseline(&m.vault_id)
+            .expect("B's store")
+            .map(|(generation, ..)| generation),
+        sofi_vault_head::recorded_generations(&m.vault_id)
+            .expect("B's record")
+            .into_iter()
+            .map(|row| row.generation)
+            .collect(),
+    )
+}
+
+/// MR-DSM-0331, MR-SOFI-0405: a reader composes from the latest
+/// authenticated owner baseline. B, holding its own record of the vault
+/// from the genesis, adopts the owner's baseline at generation 3: its record
+/// then starts there and holds no generation below it. Two forged baselines
+/// at generation 6 — one whose anchor signature no longer covers the
+/// authentication it presents, one whose frontier is not the one the owner
+/// bound — are not taken. The owner's baseline at 5 is: B's next walk
+/// starts at 5 and reads fewer cells and objects than its walk from 3, its
+/// own witness past the baseline stands, and B trades on. The baseline at 3,
+/// offered again, is not taken.
+/// MUTATION CONTROLS: the anchor's signature not checked
+/// (`baseline_signature_unchecked`); the frontier not re-hashed to the
+/// commitment the owner bound (`baseline_frontier_unhashed`); a baseline at
+/// or below the held one taken (`baseline_not_later_taken`) — each turns
+/// this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_later_authenticated_baseline_replaces_the_held_one_and_nothing_else_does() {
+    use crate::storage::client_db::sofi_vault_head;
+    use dsm::sofi::frontier::{baseline_commitment, frontier_commitment};
+    use dsm::sofi::wire::{OwnerBaselineAuthV1, VaultFrontierV1};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..3 {
+        realized_trade(&p, &m, 2).await;
+    }
+    let at_three = offered_to_b(&p, &m).await;
+    assert_eq!(at_three[0].generation, 3);
+    assert_eq!(
+        b_starts_at(&p, &m),
+        (None, vec![0, 1, 2, 3]),
+        "B holds its own record from the genesis"
+    );
+    adopt_at_b(&p, &at_three)
+        .await
+        .expect("B adopts the baseline at 3");
+    assert_eq!(
+        b_starts_at(&p, &m),
+        (Some(3), vec![3]),
+        "B's record starts at the baseline and holds nothing below it"
+    );
+
+    for _ in 0..2 {
+        realized_trade(&p, &m, 2).await;
+    }
+    let at_five = offered_to_b(&p, &m).await;
+    assert_eq!(at_five[0].generation, 5);
+    p.a.enter();
+    let bundle = sofi_vault_head::owner_baseline(&m.vault_id, 5)
+        .expect("A's store")
+        .expect("A signed its baseline at 5");
+    realized_trade(&p, &m, 2).await;
+
+    // Two baselines at generation 6 made from the owner's at 5, published
+    // where anyone may append, and offered with B's own witness at 6.
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let at_six = chain_at_b(&p, &m);
+    let (six, root_six) = at_six.head().expect("B's head");
+    assert_eq!(six, 6);
+    let signed = generated::VaultBaselineV1::decode(bundle.as_slice()).expect("the bundle");
+    let five = VaultFrontierV1::decode(&signed.frontier_ccb).expect("the frontier at 5");
+    let frontier_six = VaultFrontierV1 {
+        generation: 6,
+        root: root_six,
+        ..five
+    };
+    let unhashed = generated::VaultBaselineV1 {
+        frontier_ccb: frontier_six.encode(),
+        ..signed.clone()
+    };
+    let auth_five = OwnerBaselineAuthV1::decode(&signed.auth_ccb).expect("the authentication");
+    let auth_six = OwnerBaselineAuthV1 {
+        frontier_commitment: frontier_commitment(&frontier_six),
+        ..auth_five
+    };
+    let mut presentation = signed.presentation.clone().expect("a presentation");
+    presentation.state_commitment = baseline_commitment(&auth_six).to_vec();
+    let unsigned = generated::VaultBaselineV1 {
+        presentation: Some(presentation),
+        auth_ccb: auth_six.encode(),
+        frontier_ccb: frontier_six.encode(),
+    };
+    for forged in [&unhashed, &unsigned] {
+        crate::sdk::vault_baseline::publish(&set, &frontier_six, &forged.encode_to_vec())
+            .await
+            .expect("anyone may publish under a locator");
+    }
+    p.b.enter();
+    let witness = sofi_vault_head::witness(&m.vault_id)
+        .expect("B's store")
+        .expect("B keeps a witness");
+    assert_eq!((witness.generation, witness.root), (6, root_six));
+    let forged_offer = vec![generated::ConnectVaultWitnessV1 {
+        vault_id: m.vault_id.to_vec(),
+        generation: 6,
+        witness_ccb: witness.witness.encode().expect("B's witness"),
+    }];
+    adopt_at_b(&p, &forged_offer)
+        .await
+        .expect("a baseline that does not authenticate refuses nothing");
+    assert_eq!(
+        b_starts_at(&p, &m).0,
+        Some(3),
+        "no forged baseline is taken"
+    );
+
+    let (from_three, reads_from_three) = cold_walk_at_b(&p, &m);
+    assert_eq!(
+        (from_three.base(), from_three.head().map(|h| h.0)),
+        (3, Some(6))
+    );
+    adopt_at_b(&p, &at_five)
+        .await
+        .expect("B adopts the baseline at 5");
+    assert_eq!(
+        b_starts_at(&p, &m),
+        (Some(5), vec![5, 6]),
+        "B's record starts at the later baseline"
+    );
+    p.b.enter();
+    assert_eq!(
+        sofi_vault_head::witness(&m.vault_id)
+            .expect("B's store")
+            .map(|held| (held.generation, held.root)),
+        Some((6, root_six)),
+        "B's own witness past the baseline stands"
+    );
+    let (from_five, reads_from_five) = cold_walk_at_b(&p, &m);
+    assert_eq!(
+        (from_five.base(), from_five.head()),
+        (5, from_three.head()),
+        "the walk starts at the later baseline and reaches the same head"
+    );
+    log::info!(
+        "[measure] B's cold walk to generation 6: {reads_from_three} reads from the baseline at \
+         3, {reads_from_five} from the baseline at 5"
+    );
+    assert!(
+        reads_from_five < reads_from_three,
+        "a walk from the later baseline reads less: {reads_from_five} against {reads_from_three}"
+    );
+
+    adopt_at_b(&p, &at_three)
+        .await
+        .expect("an earlier baseline refuses nothing");
+    assert_eq!(
+        b_starts_at(&p, &m).0,
+        Some(5),
+        "a baseline below the one held is not taken"
+    );
+    adopt_at_b(&p, &at_five)
+        .await
+        .expect("the same baseline again refuses nothing");
+    assert_eq!(b_starts_at(&p, &m), (Some(5), vec![5, 6]));
+
+    let tkn_before = balance(&p.b, &m.tkn);
+    realized_trade(&p, &m, 2).await;
+    assert!(balance(&p.b, &m.tkn) > tkn_before, "B trades on");
+    let chain = chain_at_b(&p, &m);
+    assert_eq!((chain.base(), chain.head().map(|h| h.0)), (5, Some(7)));
+}
+
+/// MR-DSM-0331, SoFi Amendment S26: a baseline the record contradicts is
+/// named, and decides nothing. B's own record holds another root at
+/// generation 3 than the owner's authenticated baseline there names. The
+/// adoption names the vault, the generation, the root held and the
+/// baseline's root, keeps the record as it is and does not take the
+/// baseline. B's next walk follows Core: it replaces the row with the root
+/// Core establishes and names that. The baseline is taken after.
+/// MUTATION CONTROL: the contradicted row replaced by the baseline's root
+/// (`baseline_replaces_contradiction`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_baseline_the_record_contradicts_is_named_and_taken_once_a_walk_heals_the_record() {
+    use crate::sdk::vault_baseline::ContradictedBaseline;
+    use crate::storage::client_db::sofi_vault_head;
+    use dsm::sofi::resolve::{Contradicted, ReplacedRecord};
+    const FORGED: [u8; 32] = [0x5B; 32];
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..3 {
+        realized_trade(&p, &m, 2).await;
+    }
+    let at_three = offered_to_b(&p, &m).await;
+    p.b.enter();
+    let root_at = |generation: u64| {
+        let Some(root) = sofi_vault_head::root_at(&m.vault_id, generation).expect("B's record")
+        else {
+            panic!("B recorded no generation {generation}");
+        };
+        root
+    };
+    let established = root_at(3);
+    {
+        let binding = crate::storage::client_db::get_connection().expect("B's store");
+        let conn = binding.lock().expect("B's store is not poisoned");
+        conn.execute(
+            "UPDATE sofi_vault_root SET root = ?2 WHERE vault_id = ?1 AND generation = 3",
+            [m.vault_id.as_slice(), FORGED.as_slice()],
+        )
+        .expect("forge generation 3");
+    }
+
+    let named = adopt_at_b(&p, &at_three)
+        .await
+        .expect("a contradiction refuses nothing");
+    assert_eq!(
+        named,
+        vec![ContradictedBaseline {
+            vault_id: m.vault_id,
+            generation: 3,
+            held_root: FORGED,
+            baseline_root: established,
+        }],
+        "the adoption names the contradiction"
+    );
+    assert_eq!(
+        b_starts_at(&p, &m),
+        (None, vec![0, 1, 2, 3]),
+        "the baseline is not taken"
+    );
+    p.b.enter();
+    assert_eq!(root_at(3), FORGED, "the held record is kept as it is");
+
+    let (own, parents) = standing_of(&p.b);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("B's walk");
+    assert_eq!(chain.head().map(|h| h.0), Some(3));
+    assert_eq!(
+        verifier.replaced_records().expect("what the walk replaced"),
+        vec![ReplacedRecord {
+            vault_id: m.vault_id,
+            generation: 3,
+            recorded_root: Some(FORGED),
+            established_root: established,
+            contradicted: Contradicted::Root,
+        }],
+        "the walk heals the record and names it"
+    );
+    assert_eq!(root_at(3), established);
+
+    let named = adopt_at_b(&p, &at_three)
+        .await
+        .expect("B adopts the baseline");
+    assert_eq!(named, Vec::new(), "nothing contradicts it now");
+    assert_eq!(b_starts_at(&p, &m), (Some(3), vec![3]));
 }
 
 /// A reader at an owner baseline that meets a trader whose lineage reaches
@@ -6242,17 +6708,10 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
     {
         self.live.accepted_claim_at(genesis, device_id, position)
     }
-    fn recorded_generations(
-        &self,
-        vault_id: &[u8; 32],
-    ) -> Result<Vec<dsm::sofi::resolve::RecordedGenerationRow>, dsm::sofi::resolve::ReadFailure>
-    {
-        self.live.recorded_generations(vault_id)
-    }
     fn record_generation(
         &self,
         post: &dsm::sofi::validation::VaultPostState,
-    ) -> Result<(), dsm::sofi::resolve::ReadFailure> {
+    ) -> Result<Option<dsm::sofi::resolve::ReplacedRecord>, dsm::sofi::resolve::ReadFailure> {
         self.live.record_generation(post)
     }
     fn keep_completion(
