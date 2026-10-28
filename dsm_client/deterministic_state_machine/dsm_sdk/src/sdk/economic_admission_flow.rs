@@ -2220,10 +2220,8 @@ pub(crate) fn build_recipient_admission(
         .split_countersign_b()
         .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
         .1;
-    let evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-        evidence_bytes,
-    );
+    let evidence_digest_a =
+        dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(evidence_bytes);
     let countersign_bytes = dsm::types::proto::ReceiptCountersignB {
         commitment: b_artifacts.commitment.to_vec(),
         receipt_evidence_digest_a: evidence_digest_a.to_vec(),

@@ -2623,17 +2623,7 @@ impl CoreSDK {
             canonical_operation_bytes,
             &sender_transition_entropy,
         )?;
-        let operation_digest = {
-            let mut h = dsm::crypto::blake3::dsm_domain_hasher(
-                dsm::crypto::domain::TaggedHashDomain::from_static(
-                    b"DSM/canonical-apply-op-digest/v1",
-                ),
-            );
-            h.update(canonical_operation_bytes);
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&h.finalize().as_bytes()[..32]);
-            out
-        };
+        let operation_digest = cdb::canonical_apply_operation_digest(canonical_operation_bytes);
         // The nonce is spent in this relationship only (security pre-audit item
         // 5): another contact's transfer cannot spend it first.
         let nonce_hash = cdb::relationship_nonce_hash(&rel_key, &nonce);

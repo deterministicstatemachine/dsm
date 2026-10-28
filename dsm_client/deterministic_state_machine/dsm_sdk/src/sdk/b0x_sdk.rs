@@ -425,7 +425,7 @@ pub struct B0xSubmissionParams {
     /// use these directly for verification — no field-by-field reconstruction.
     pub canonical_operation_bytes: Vec<u8>,
     /// §16.6 defect zero: the DETERMINISTIC submission id, derived from the
-    /// receipt commitment (`sender_outbox::derive_submission_id`), so it is
+    /// receipt commitment (`dsm::crypto::spool_address::submission_id`), so it is
     /// known BEFORE the send is committed locally and is identical on every
     /// retry. Storage nodes enforce `UNIQUE(message_id)` with
     /// `ON CONFLICT DO NOTHING`, so a resend collapses onto the same spool row
@@ -1138,10 +1138,7 @@ impl B0xSDK {
         })?;
         // The exact A bytes B countersigned == what the sender froze at send.
         let a_bytes = a_side.to_full_protobuf()?;
-        let digest_a = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            &a_bytes,
-        );
+        let digest_a = dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(&a_bytes);
 
         let body = dsm::types::proto::ReceiptCountersignB {
             commitment: commitment.to_vec(),
@@ -1166,10 +1163,7 @@ impl B0xSDK {
         .encode_to_vec();
         // Content address of the delta itself, role-separated (op_id, as the
         // A-side builder does).
-        let digest_b = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::CountersignB,
-            &body,
-        );
+        let digest_b = dsm::crypto::spool_address::ArtifactRole::CountersignB.content_digest(&body);
 
         // Transport-local id: 16 opaque bytes derived from the transition's own
         // commitment (never wall-clock). Stable across reposts, so a redelivery
@@ -1584,10 +1578,8 @@ impl B0xSDK {
         full_receipt_bytes: &[u8],
     ) -> Result<BuiltEnvelope, DsmError> {
         // The artifact must be self-consistent before it is frozen.
-        let recomputed = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            full_receipt_bytes,
-        );
+        let recomputed =
+            dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(full_receipt_bytes);
         if &recomputed != evidence_digest {
             return Err(DsmError::internal(
                 "build_evidence_envelope: digest does not match full_receipt_bytes",
@@ -1710,7 +1702,7 @@ impl B0xSDK {
         // 2) Build Envelope v3 with the transfer request.
         //
         // MESSAGE ID: the submission id the send derived from the receipt
-        // commitment (`sender_outbox::derive_submission_id`). It is known
+        // commitment (`dsm::crypto::spool_address::submission_id`). It is known
         // before the send is committed locally and is identical on every retry;
         // storage nodes enforce `UNIQUE(message_id)`, so a resend collapses onto
         // the same spool row instead of spooling a duplicate.
@@ -1976,12 +1968,12 @@ impl B0xSDK {
         // sweep) reaching this primitive is a caller bug — refuse, never
         // relocate it under a route the node would silently dedup.
         for artifact in artifacts {
-            if !artifact.role.is_initial_send_artifact() {
+            if !crate::storage::client_db::is_initial_send_artifact(artifact.role) {
                 return Err(DsmError::internal(
                     format!(
                         "frozen send {}: artifact role {} is not part of the initial send",
                         outbox.submission_id,
-                        artifact.role.as_str()
+                        crate::storage::client_db::artifact_role_name(artifact.role)
                     ),
                     None::<std::io::Error>,
                 ));
@@ -2017,7 +2009,7 @@ impl B0xSDK {
                     format!(
                         "frozen send {}: {} artifact {} not delivered: {e}",
                         outbox.submission_id,
-                        artifact.role.as_str(),
+                        crate::storage::client_db::artifact_role_name(artifact.role),
                         artifact.submission_id
                     ),
                     None::<std::io::Error>,
@@ -3096,10 +3088,8 @@ mod tests {
     }
 
     fn evidence_content_digest_for_test() -> [u8; 32] {
-        crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            &production_sized_receipt_a(),
-        )
+        dsm::crypto::spool_address::ArtifactRole::EvidenceA
+            .content_digest(&production_sized_receipt_a())
     }
 
     /// A production-shaped transfer submission: production-sized SIG A and
@@ -3358,10 +3348,7 @@ mod tests {
 
         // A receipt larger than the cap on its own.
         let oversized = vec![0xAB; MAX_B0X_ENVELOPE_BYTES + 1];
-        let digest = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            &oversized,
-        );
+        let digest = dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(&oversized);
         let err = sdk
             .build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
@@ -3413,10 +3400,7 @@ mod tests {
         let sdk = B0xSDK::new(device_b32, core, fleet.endpoints()).expect("B0xSDK");
 
         let receipt = production_sized_receipt_a();
-        let digest = crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            &receipt,
-        );
+        let digest = dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(&receipt);
         let built = sdk
             .build_evidence_envelope(
                 &crate::util::text_id::encode_base32_crockford(&[0x44u8; 32]),
@@ -3497,8 +3481,8 @@ mod tests {
 
         // The submission id derived from that digest is stable too.
         assert_eq!(
-            crate::storage::client_db::derive_artifact_submission_id(&d1),
-            crate::storage::client_db::derive_artifact_submission_id(&d2),
+            dsm::crypto::spool_address::artifact_submission_id(&d1),
+            dsm::crypto::spool_address::artifact_submission_id(&d2),
         );
     }
 
@@ -3657,11 +3641,9 @@ mod tests {
             dsm::types::receipt_types::decode_receipt_countersign_b_wire(&body).expect("codec");
         assert_eq!(
             delta.receipt_evidence_digest_a,
-            crate::storage::client_db::evidence_content_digest(
-                crate::storage::client_db::ArtifactRole::EvidenceA,
-                &a_bytes
-            )
-            .to_vec()
+            dsm::crypto::spool_address::ArtifactRole::EvidenceA
+                .content_digest(&a_bytes)
+                .to_vec()
         );
         assert_eq!(delta.commitment, commitment_of(&full).to_vec());
     }

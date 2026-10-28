@@ -225,9 +225,8 @@ async fn finalize_from_countersign_delta(
     use crate::handlers::online_finalize::{
         bind_countersign_delta, load_retained_evidence_a, DeltaBinding,
     };
-    use crate::storage::client_db::sender_outbox::{
-        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
-    };
+    use crate::storage::client_db::sender_outbox::SenderOutboxArtifact;
+    use dsm::crypto::spool_address::ArtifactRole;
     use crate::storage::client_db::sender_proposal::{
         get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
     };
@@ -565,13 +564,13 @@ async fn finalize_from_countersign_delta(
         }
     }
 
-    let content_digest = evidence_content_digest(ArtifactRole::CountersignB, &delta.body);
+    let content_digest = ArtifactRole::CountersignB.content_digest(&delta.body);
     let countersign_artifact = SenderOutboxArtifact {
         relationship_key: proposal.relationship_key,
         canonical_parent: proposal.canonical_parent,
         proposal_nonce: proposal.nonce_hash,
         role: ArtifactRole::CountersignB,
-        submission_id: derive_artifact_submission_id(&content_digest),
+        submission_id: dsm::crypto::spool_address::artifact_submission_id(&content_digest),
         envelope_bytes: delta.envelope_bytes.clone(),
         content_digest,
         routing_address: None,
@@ -720,9 +719,8 @@ fn build_relationship_finalized_artifact(
     b_pair: ([u8; 32], [u8; 32]),
     receipt_ek_pk_a: &[u8],
 ) -> Result<crate::storage::client_db::SenderOutboxArtifact, String> {
-    use crate::storage::client_db::sender_outbox::{
-        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
-    };
+    use crate::storage::client_db::sender_outbox::SenderOutboxArtifact;
+    use dsm::crypto::spool_address::ArtifactRole;
     use prost::Message;
 
     let wrap_key = crate::init::current_chain_head_at_rest_key()
@@ -759,8 +757,8 @@ fn build_relationship_finalized_artifact(
     dsm::types::receipt_types::decode_relationship_finalized_wire(&wire)
         .map_err(|e| format!("certificate fails its own wire codec: {e}"))?;
 
-    let content_digest = evidence_content_digest(ArtifactRole::RelationshipFinalized, &wire);
-    let submission_id = derive_artifact_submission_id(&content_digest);
+    let content_digest = ArtifactRole::RelationshipFinalized.content_digest(&wire);
+    let submission_id = dsm::crypto::spool_address::artifact_submission_id(&content_digest);
 
     // Frozen route: the recipient polls at the tip it converged to — the
     // proposal's projection target — under ITS genesis and device.
@@ -825,8 +823,8 @@ async fn deliver_pending_finalization_checkpoints(
     use crate::storage::client_db::{
         finalization_checkpoint_pending_sender_outbox, get_sender_proposal_by_commitment,
         load_sender_outbox_artifacts, release_gate_on_finalization_checkpoint_atomically,
-        ArtifactRole,
     };
+    use dsm::crypto::spool_address::ArtifactRole;
 
     let rows = finalization_checkpoint_pending_sender_outbox().map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -1129,7 +1127,7 @@ impl AppRouterImpl {
             ) {
                 Ok(a) => a
                     .into_iter()
-                    .filter(|a| a.role.is_initial_send_artifact())
+                    .filter(|a| crate::storage::client_db::is_initial_send_artifact(a.role))
                     .collect(),
                 Err(e) => {
                     log::warn!(
@@ -1839,11 +1837,9 @@ impl AppRouterImpl {
             // consuming that id would hide whatever honest message holds it.
             // That copy is read once more, decided, and passed over by its
             // content.
-            let evidence_name = crate::storage::client_db::derive_artifact_submission_id(
-                &crate::storage::client_db::evidence_content_digest(
-                    crate::storage::client_db::ArtifactRole::EvidenceA,
-                    &v.evidence_bytes,
-                ),
+            let evidence_name = dsm::crypto::spool_address::artifact_submission_id(
+                &dsm::crypto::spool_address::ArtifactRole::EvidenceA
+                    .content_digest(&v.evidence_bytes),
             );
             match recipient_staging::observed_ids_of_pair(&pair) {
                 Ok(ids) => consumed.extend(
@@ -3209,11 +3205,9 @@ mod tests {
         // A-bytes this sender never retained: refused before any signature
         // work.
         let foreign_digest = tampered(&honest, |w| {
-            w.receipt_evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
-                dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-                &w.commitment,
-            )
-            .to_vec()
+            w.receipt_evidence_digest_a = dsm::crypto::spool_address::ArtifactRole::EvidenceA
+                .content_digest(&w.commitment)
+                .to_vec()
         });
         assert!(matches!(
             finalize_from_countersign_delta(&foreign_digest).await,

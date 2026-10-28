@@ -204,7 +204,9 @@ mod tests {
     // -3 with the salted address no caller derived: `DSM/addr-{G,D,T}`.
     // +1 with the cert-restart statement moving into Core (§6.117; the SDK
     // declared it outside the registry).
-    const EXPECTED_TAG_COUNT: usize = 420;
+    // +2 with the spool submission ids of a transfer and of its artifacts
+    // moving into Core (§6.119; the SDK declared them inline).
+    const EXPECTED_TAG_COUNT: usize = 422;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

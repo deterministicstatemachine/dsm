@@ -453,10 +453,8 @@ fn verify_candidate_receipt(
         relationship_key,
         parent_tip: receipt.parent_tip,
         evidence_bytes: full_receipt_bytes.to_vec(),
-        evidence_digest: crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            full_receipt_bytes,
-        ),
+        evidence_digest: dsm::crypto::spool_address::ArtifactRole::EvidenceA
+            .content_digest(full_receipt_bytes),
     };
     Ok(ReceiptRecognition::Verified(Box::new(RecognizedReceipt {
         receipt,

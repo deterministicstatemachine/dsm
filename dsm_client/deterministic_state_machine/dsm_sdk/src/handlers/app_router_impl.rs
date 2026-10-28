@@ -1515,14 +1515,8 @@ impl AppRouterImpl {
                         )));
                     }
                 };
-                let operation_digest = {
-                    let mut h =
-                        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/canonical-apply-op-digest/v1"));
-                    h.update(&op_bytes);
-                    let mut out32 = [0u8; 32];
-                    out32.copy_from_slice(&h.finalize().as_bytes()[..32]);
-                    out32
-                };
+                let operation_digest =
+                    crate::storage::client_db::canonical_apply_operation_digest(&op_bytes);
                 crate::storage::client_db::SenderOnlineProposal {
                     relationship_key: smt_key,
                     canonical_parent: parsed.parent_tip,
@@ -1563,7 +1557,7 @@ impl AppRouterImpl {
             };
 
             let submission_id =
-                crate::storage::client_db::derive_submission_id(&sender_proposal.commitment);
+                dsm::crypto::spool_address::submission_id(&sender_proposal.commitment);
 
             let mut outbox_record = crate::storage::client_db::SenderOutboxRecord {
                 relationship_key: sender_proposal.relationship_key,
@@ -1665,10 +1659,7 @@ impl AppRouterImpl {
             // EXACT wire bytes the receiver will verify signatures against --
             // never `compute_commitment()`, which hard-zeroes fields 12-20 and
             // would let a substituted-signature object satisfy the reference.
-            let evidence_digest = crate::storage::client_db::evidence_content_digest(
-                crate::storage::client_db::ArtifactRole::EvidenceA,
-                &receipt_commit_bytes,
-            );
+            let evidence_digest = dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(&receipt_commit_bytes);
 
             let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
                 // Deterministic, derived from the receipt commitment: known
@@ -1750,7 +1741,7 @@ impl AppRouterImpl {
             outbox_record.envelope_bytes = envelope_bytes.clone();
 
             let evidence_submission_id =
-                crate::storage::client_db::derive_artifact_submission_id(&evidence_digest);
+                dsm::crypto::spool_address::artifact_submission_id(&evidence_digest);
             let evidence_envelope = match evidence_builder.build_evidence_envelope(
                 &to_device_id_str,
                 &recipient_genesis_b32_for_evidence,
@@ -1779,7 +1770,7 @@ impl AppRouterImpl {
                 relationship_key: sender_proposal.relationship_key,
                 canonical_parent: sender_proposal.canonical_parent,
                 proposal_nonce: sender_proposal.nonce_hash,
-                role: crate::storage::client_db::ArtifactRole::EvidenceA,
+                role: dsm::crypto::spool_address::ArtifactRole::EvidenceA,
                 submission_id: evidence_submission_id,
                 envelope_bytes: evidence_envelope.bytes,
                 content_digest: evidence_digest,

@@ -62,7 +62,8 @@ pub struct RetainedEvidenceA {
 pub fn load_retained_evidence_a(
     proposal: &SenderOnlineProposal,
 ) -> Result<Option<RetainedEvidenceA>> {
-    use crate::storage::client_db::sender_outbox::{load_sender_outbox_artifacts, ArtifactRole};
+    use crate::storage::client_db::sender_outbox::load_sender_outbox_artifacts;
+    use dsm::crypto::spool_address::ArtifactRole;
     use prost::Message;
 
     let artifacts = load_sender_outbox_artifacts(
@@ -122,10 +123,10 @@ pub fn bind_countersign_delta(
     retained: &RetainedEvidenceA,
     delta: &dsm::types::proto::ReceiptCountersignB,
 ) -> Result<DeltaBinding> {
-    use crate::storage::client_db::sender_outbox::{evidence_content_digest, ArtifactRole};
+    use dsm::crypto::spool_address::ArtifactRole;
     use dsm::types::receipt_types::CountersignB;
 
-    let recomputed = evidence_content_digest(ArtifactRole::EvidenceA, &retained.full_receipt_bytes);
+    let recomputed = ArtifactRole::EvidenceA.content_digest(&retained.full_receipt_bytes);
     if recomputed != retained.content_digest {
         return Err(anyhow!(
             "retained evidence_a bytes ({} B) do not match their stored digest ({} vs {}) — \

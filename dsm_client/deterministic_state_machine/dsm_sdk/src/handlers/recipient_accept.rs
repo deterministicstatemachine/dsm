@@ -52,7 +52,7 @@ impl VerifiedTransfer {
     /// derives from the receipt commitment, recomputed here, never read off
     /// the spool.
     pub fn transfer_name(&self) -> String {
-        crate::storage::client_db::derive_submission_id(&self.pair.commitment)
+        dsm::crypto::spool_address::submission_id(&self.pair.commitment)
     }
 }
 

@@ -6234,6 +6234,62 @@ New:
 - The §4 note at the 2026-09-23 resolution names `B0xSDK::compute_b0x_address` as it stood then. It is dated history and is left as it was.
 - Frontend: no frontend or Android code computes a b0x address. A grep for the domains and the function names finds only display text, so the frontend renders only and has no finding.
 
+**Second pass: every inline domain left in the SDK, classified (2026-10-28).** The first pass covered `b0x_sdk.rs`. This pass takes every `tagged_domain!` left in `dsm_sdk/src`, and the `TaggedHashDomain::from_static` and raw-prefix spellings of a domain beside them, and asks one question of each: does a counterparty compute it identically?
+
+*A counterparty computes it: moved to Core.* Each was pinned before the move by a probe run on the SDK's code, and Core asserts those Base32 values (`dsm::crypto::spool_address::tests::the_submission_ids_and_content_addresses_keep_the_bytes_they_had_in_the_sdk`).
+- `DSM/b0x-submission-id/v1`: a transfer's spool message id, from its receipt commitment. The sender spools under it (`wallet.send`), and the recipient recomputes it from the commitment of the pair it accepted (`VerifiedTransfer::transfer_name`) and consumes only it. Now `dsm::crypto::spool_address::submission_id`, registry tag `TAG_DSM_B0X_SUBMISSION_ID`. The SDK's `sender_outbox::derive_submission_id` is deleted.
+- `DSM/b0x-artifact-submission-id/v1`: an artifact's spool message id, from its content digest (ADR 0003). The sender spools A's evidence under it, and the recipient recomputes the evidence's id from the bytes it verified (`storage_routes`'s split-transfer completion) and consumes only it. Now `dsm::crypto::spool_address::artifact_submission_id`, registry tag `TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID`. The SDK's `sender_outbox::derive_artifact_submission_id` is deleted.
+- The artifact content address under that id. It was not an inline domain (its three tags were already registry entries), but it is the rule the id is derived from, and the parties compute it on both sides: the recipient puts A's digest in its countersign delta (`receipt_evidence_digest_a`), and the sender recomputes it over the evidence it froze and parks a delta that names other bytes (`online_finalize::bind_countersign_delta`). It existed twice: `sender_outbox::evidence_content_digest`, and the recipient's admission spelling the A-side hash out again (`economic_admission_flow::build_recipient_admission`). Now `dsm::crypto::spool_address::ArtifactRole` and `ArtifactRole::content_digest`, once. The SDK keeps what is local to its outbox: the role's column name (`artifact_role_name`) and whether an artifact belongs to the initial send (`is_initial_send_artifact`).
+
+*Local: one copy in the SDK.*
+- `DSM/canonical-apply-op-digest/v1`, the operation digest. The sender records it on its proposal, and the recipient on its canonical apply. Neither sends it, and nothing compares one party's with the other's. It was built twice, as `tagged_domain!` in `app_router_impl` (`wallet.send`) and as `TaggedHashDomain::from_static` in `core_sdk` (the canonical apply). It is now one function, `storage::client_db::canonical_apply_operation_digest`, which both call. Its pin test is `canonical_apply::tests::the_operation_digest_keeps_the_bytes_both_copies_had`. The assignment named `DSM/canonical-apply-id/v1` as the duplicate. That domain is built only in `canonical_apply.rs`, and the second copy beside it was the operation digest.
+
+*Local and single: stays inline.* The registry's completeness test scans Core's source and nothing else (`common::domain_tags`, `declared_tags_from_source`), and the registry's doc does not require a local SDK domain to be registered. These stay where they are:
+- `DSM/canonical-apply-id/v1` and `DSM/canonical-apply-record/v1` (`storage/client_db/canonical_apply.rs`): the recipient's lookup key for an apply it already made, and its stored record's integrity hash. Both are local to the executing device.
+- `DSM/acceptance-artifact/v1` (`storage/client_db/recipient_receipt_fold.rs::acceptance_artifact_hash`): the recipient's journal binds the exact receipt bytes it persisted. Only the recipient computes it, over its own stored bytes.
+- `DSM/recipient-transfer-object/v1` (`handlers/recipient_dispatch.rs::transfer_object_id`): the key the recipient stages a transfer by, its signed operation bytes (MR-STOR-0012/0016). The sender never derives it.
+
+*Out of scope this round: recorded and left alone.*
+- `sdk/recovery_sdk.rs`: `DSM/generated-mnemonic/v1` (`tagged_domain!`) and the recovery-intent digest (`Hasher::new_derive_key("DSM/recovery-intent\0")`). Recovery is out of scope.
+- `bluetooth/bilateral_ble_handler.rs`: `DSM/bearer-object/v1` and `DSM/bearer-payload/v1` (`from_static`), staged for the offline bearer chip. The offline subsystem is out of scope.
+- `handlers/bitcoin_invoke_routes.rs`: `DSM/vault-device` (`from_static`) is written twice in that file, in `bitcoin.deposit.complete` and `await_and_complete`. dBTC is held for a later round, so this second copy is recorded and left alone.
+
+*Other spellings of a domain, local.* These are not `tagged_domain!` sites and no counterparty computes them: the seed vault's host nonce and key (`sdk/seed_vault.rs`, `new_derive_key`), the app lock's PIN and combo domains (`sdk/app_lock.rs`), and the cert-chain secret key's AEAD label (`storage/client_db/cert_chain.rs`). `sdk/device_directory.rs` and `sdk/kyber_identity.rs` spell domains out only in tests, to recompute a value independently of the code.
+
+Afterwards, `grep -rn 'tagged_domain!' dsm_sdk/src` finds six sites, each domain once:
+- `canonical-apply-id`, `canonical-apply-record` and `canonical-apply-op-digest` (`canonical_apply.rs`);
+- `acceptance-artifact` (`recipient_receipt_fold.rs`);
+- `recipient-transfer-object` (`recipient_dispatch.rs`);
+- `generated-mnemonic` (`recovery_sdk.rs`, out of scope).
+
+`git grep` for `derive_submission_id`, `derive_artifact_submission_id`, `evidence_content_digest(`, `client_db::ArtifactRole` and the two moved domains finds nothing outside Core's registry and `spool_address`. The `from_static` spellings left in the SDK are the three domains listed out of scope.
+
+**Tests moved with the code.** `sender_outbox::tests::submission_id_is_deterministic_in_the_commitment` and `artifact_submission_ids_are_distinct_per_role_and_from_the_transfer` now run against Core in `dsm::crypto::spool_address::tests`. The second also asserts that a transfer's id and an artifact's id over the same 32 bytes differ, and that all three roles separate. New: `dsm::crypto::spool_address::tests::a_content_address_names_its_exact_bytes`, which shows that one changed byte, as a substituted signature would make, changes the address and the id under every role. The tests that need the database stay in the SDK and call Core.
+
+**Mutation controls.** None of what moved in this pass is a verification. All of it is derivation, and both parties now call one copy, so a change to it changes both sides alike, and only a pin or a property test can see it. One `DSM_MUTANT` build in a scratch worktree outside the repository, with its own target, since removed. The unmutated control was green in each set: Core `crypto::spool_address` 10/0, and the SDK test below.
+- `role_blind`: every role hashed under the A side's evidence domain → `artifact_submission_ids_are_distinct_per_role_and_from_the_transfer` and the pin red.
+- `digest_unbound`: the content address taken over no bytes → `a_content_address_names_its_exact_bytes` and the pin red in Core. On the production path, `dsm_sdk::handlers::storage_routes::tests::a_poisoned_delta_records_nothing_and_the_honest_delta_still_finalizes` is red: a delta naming A-side bytes this sender never retained is no longer parked as `DigestMismatch`. That digest comparison is the sender's consistency check, not its authority. The binding is Core's verifier over the A side the sender froze (§6.117), so this is not a matrix row.
+- `ids_one_space`: a transfer's id derived under the artifact domain → `artifact_submission_ids_are_distinct_per_role_and_from_the_transfer` and the pin red.
+
+**Runs.** Release; the SDK runs are on `dsm_node_test_b0x`, one at a time.
+- Core `crypto::spool_address` and `common::domain_tags`: 18/0, before the exact-bytes test was added. The registry's count and completeness tests pass at 422.
+- `cargo test --release -p dsm --no-fail-fast -- --test-threads=1`: 1,935/0 in 23 binaries.
+- SDK modules, each alone:
+  - `storage::client_db::sender_outbox` 18/0, `storage::client_db::canonical_apply` 10/0 (with the operation-digest pin) and `storage::client_db::recipient_receipt_fold` 11/0;
+  - `handlers::recipient_dispatch` 23/0, `handlers::online_finalize` 2/0, `handlers::storage_routes::tests` 10/0 and `handlers::app_router_impl` 19/0;
+  - `handlers::bilateral_finality_tests` 12/0 and `sdk::b0x_sdk` 26/0.
+  - `handlers::recipient_accept` and `sdk::economic_admission_flow` have no tests of their own. The modules above exercise them.
+- Each test outside those modules whose path changed, alone, 5/5:
+  - `sender_admission_tests::a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is_read`, `…a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders_register_is_read` and `…online_transfer_request_locators_round_trip_on_the_wire`;
+  - `core_sdk::tests::an_apply_consults_the_signed_pair_never_the_projection`;
+  - `recipient_admission_tests::fabricated_sender_coordinates_are_refused_before_any_durable_state`.
+- Checks:
+  - `make lint` (fmt and clippy over the root workspace, and eslint) passes;
+  - `ci/production_safety_checks.sh`, `ci/conformance_evidence.py`, `scripts/check_claim_trace.py`, `scripts/check-spdx.sh`, `scripts/sphincs_source_map.py --check` and `scripts/real_code_guard.py --reference origin/main` pass;
+  - `cargo ndk -t arm64-v8a --platform 23 build --release --locked -p dsm_sdk --features=jni,bluetooth` builds.
+
+**Records.** The registry is now 422 tags (+2). The dated entries §6.98 and §6.104 name `derive_submission_id` and `derive_artifact_submission_id` as they stood then, and are left as they were. Nothing in §8, the matrix, `INTENT_PINS.tsv` or the SPHINCS+ map names a moved function. The SPHINCS+ caller inventory was regenerated because lines shifted in `recipient_dispatch.rs`, `storage_routes.rs` and `b0x_sdk.rs`.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |

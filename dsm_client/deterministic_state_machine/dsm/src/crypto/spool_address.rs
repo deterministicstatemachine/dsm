@@ -20,12 +20,19 @@
 //! h_t = H(DSM/b0x-T ‖ tip)
 //! address = Base32Crockford(H(DSM/b0x ‖ h_g ‖ h_d ‖ h_t))
 //! ```
+//!
+//! A transfer is spooled under an id its receipt commitment names, and each
+//! of its artifacts under an id its role-separated content digest names
+//! (ADR 0003). The recipient recomputes both from the pair it holds and
+//! consumes only those ids.
 
 use crate::common::domain_tags::{
-    TAG_DSM_B0X, TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID, TAG_DSM_B0X_D, TAG_DSM_B0X_ENVELOPE_CONTENT,
-    TAG_DSM_B0X_G, TAG_DSM_B0X_REPLY_MESSAGE_ID, TAG_DSM_B0X_T,
+    TAG_DSM_B0X, TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID, TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
+    TAG_DSM_B0X_D, TAG_DSM_B0X_ENVELOPE_CONTENT, TAG_DSM_B0X_G, TAG_DSM_B0X_REPLY_MESSAGE_ID,
+    TAG_DSM_B0X_SUBMISSION_ID, TAG_DSM_B0X_T, TAG_DSM_RECEIPT_EVIDENCE_A,
+    TAG_DSM_RECEIPT_EVIDENCE_B, TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
 };
-use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::blake3::{domain_hash_bytes, dsm_domain_hasher};
 use crate::crypto::domain::TaggedHashDomain;
 use crate::crypto::spool_seal::MESSAGE_ID_LEN;
 use crate::types::proto::Envelope;
@@ -88,6 +95,66 @@ pub fn certresync_message_id(
         TAG_DSM_B0X_CERTRESYNC_MESSAGE_ID,
         &[method.as_bytes(), recipient_tip, body],
     )
+}
+
+/// The spool message id a transfer goes under: its receipt commitment's, so
+/// it is known before the transfer is submitted and is the same on every
+/// retry. The recipient recomputes it from the commitment of the pair it
+/// accepted, and consumes only this id.
+///
+/// [`MESSAGE_ID_LEN`] bytes, the width deployed storage nodes require, in
+/// Base32 Crockford. The full commitment is what an equality test compares:
+/// this is an id, never the comparison.
+pub fn submission_id(commitment: &[u8; 32]) -> String {
+    encode_base32_crockford(&message_id(TAG_DSM_B0X_SUBMISSION_ID, &[commitment]))
+}
+
+/// The spool message id an artifact of a transfer goes under (ADR 0003):
+/// its content digest's ([`ArtifactRole::content_digest`]). The digest is
+/// already separated by role, so the A side's evidence, the B side's
+/// countersignature and the certificate of one transfer never share an id,
+/// and none shares the transfer's own, which is derived under another
+/// domain.
+pub fn artifact_submission_id(content_digest: &[u8; 32]) -> String {
+    encode_base32_crockford(&message_id(
+        TAG_DSM_B0X_ARTIFACT_SUBMISSION_ID,
+        &[content_digest],
+    ))
+}
+
+/// Which artifact of a transfer a spooled object is.
+///
+/// The role is part of the object's content address (ADR 0003), so an
+/// A-side object can never satisfy a reference obtained for a B-side one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactRole {
+    /// The A side's receipt evidence: the full `ReceiptCommit` the transfer
+    /// references.
+    EvidenceA,
+    /// The B side's countersign delta, `ReceiptCountersignB`.
+    CountersignB,
+    /// The sender's `RelationshipFinalizedV1` certificate.
+    RelationshipFinalized,
+}
+
+impl ArtifactRole {
+    /// The artifact's content address: its full wire bytes, hashed under its
+    /// role's domain.
+    ///
+    /// Over the FULL wire bytes, never `ReceiptCommit::compute_commitment()`:
+    /// the commitment covers fields 1-11 and zeroes 12-20, so an object
+    /// addressed by its commitment could be served with substituted
+    /// signatures. The digest binds the exact bytes whose signatures the
+    /// receiver verifies. The A side's is the `receipt_evidence_digest_a` a
+    /// countersign delta carries back to its sender.
+    pub fn content_digest(self, full_wire_bytes: &[u8]) -> [u8; 32] {
+        let tag = match self {
+            ArtifactRole::EvidenceA => TAG_DSM_RECEIPT_EVIDENCE_A,
+            ArtifactRole::CountersignB => TAG_DSM_RECEIPT_EVIDENCE_B,
+            ArtifactRole::RelationshipFinalized => TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
+        };
+        domain_hash_bytes(tag, full_wire_bytes)
+    }
 }
 
 /// The key a reader keeps one copy of a spool message by: its message id and
@@ -310,5 +377,133 @@ mod tests {
             envelope_merge_key(&envelope(id1, 0xAA)),
             envelope_merge_key(&envelope(id2, 0xAA)),
         );
+    }
+
+    /// The ids and content addresses the SDK derived before these rules
+    /// moved here (owner, 2026-10-28), pinned on fixed inputs: a sender and a
+    /// recipient on either side of the move name a transfer and its artifacts
+    /// alike.
+    #[test]
+    fn the_submission_ids_and_content_addresses_keep_the_bytes_they_had_in_the_sdk() {
+        assert_eq!(submission_id(&[0x07; 32]), "MAR3K3VW921YAS0J6Z1J5SA8KM");
+        assert_eq!(submission_id(&[0x5C; 32]), "18MM51PYFBS5G1AF16AAWHJNS0");
+        assert_eq!(
+            artifact_submission_id(&[0x5C; 32]),
+            "QV7GTYE5890X2CAE01TYPT5DJ0"
+        );
+        let payload = [0x11u8; 512];
+        for (role, digest, id) in [
+            (
+                ArtifactRole::EvidenceA,
+                "5M81RKSAXJYKD2QFX2X2D271GDF4Q0SVQGC8DWMM60DXCNX0S94G",
+                "WNCM5KH0RP6YEWG62ANJNFT7B0",
+            ),
+            (
+                ArtifactRole::CountersignB,
+                "ECARP8RJXY26BR61BMBS8QNBNERBN3A9V1RVVBKJ0JEEG0A3NW1G",
+                "WKSC48BR2N6S9CPYD1NBE3BYQR",
+            ),
+            (
+                ArtifactRole::RelationshipFinalized,
+                "W95RT1EWCCFDA2PJR2D2DQAQAZJFABSTXPP68GFARSZ5QPBBN16G",
+                "2WTFRHHVYZTKX4P35D6DT77ZF8",
+            ),
+        ] {
+            let content = role.content_digest(&payload);
+            assert_eq!(encode_base32_crockford(&content), digest, "{role:?}");
+            assert_eq!(artifact_submission_id(&content), id, "{role:?}");
+        }
+    }
+
+    /// The submission id must be a pure function of the commitment: known
+    /// before submitting, identical on every retry, so the node collapses
+    /// retries onto one spool row instead of piling up duplicates.
+    #[test]
+    fn submission_id_is_deterministic_in_the_commitment() {
+        let a = submission_id(&[0x07u8; 32]);
+        let b = submission_id(&[0x07u8; 32]);
+        let c = submission_id(&[0x08u8; 32]);
+        assert_eq!(a, b, "same commitment must yield the same submission id");
+        assert_ne!(a, c, "different commitments must not collide");
+        assert_eq!(
+            crate::utils::text_id::decode_base32_crockford(&a).map(|bytes| bytes.len()),
+            Some(MESSAGE_ID_LEN),
+            "deployed nodes hard-require a 16-byte message id"
+        );
+    }
+
+    /// A content address names the exact bytes it was taken over: two
+    /// artifacts of one role that differ in one byte, as a substituted
+    /// signature would, have different addresses and so different ids.
+    #[test]
+    fn a_content_address_names_its_exact_bytes() {
+        let honest = vec![0x11u8; 512];
+        let mut substituted = honest.clone();
+        substituted[400] ^= 0x01;
+        for role in [
+            ArtifactRole::EvidenceA,
+            ArtifactRole::CountersignB,
+            ArtifactRole::RelationshipFinalized,
+        ] {
+            let (a, b) = (
+                role.content_digest(&honest),
+                role.content_digest(&substituted),
+            );
+            assert_ne!(a, b, "{role:?}: one byte changed must change the address");
+            assert_ne!(
+                artifact_submission_id(&a),
+                artifact_submission_id(&b),
+                "{role:?}: and the id"
+            );
+        }
+    }
+
+    /// Distinct deterministic ids for the artifacts of one transfer.
+    ///
+    /// This proves DOMAIN SEPARATION for the tested artifacts -- it does not
+    /// prove ids cannot collide. The id is 16 bytes truncated from a 32-byte
+    /// digest, so collision is a 128-bit possibility: cryptographically
+    /// negligible, not impossible. Correctness therefore cannot rest on
+    /// uniqueness alone, because the node resolves `UNIQUE(message_id)` with
+    /// `ON CONFLICT DO NOTHING` -- a colliding id is accepted silently rather
+    /// than rejected. The SDK's content check
+    /// (`sender_outbox::tests::same_artifact_id_with_different_bytes_fails_closed`)
+    /// is what makes that safe: same id + different bytes must fail, not
+    /// disappear.
+    #[test]
+    fn artifact_submission_ids_are_distinct_per_role_and_from_the_transfer() {
+        let commitment = [0x5Cu8; 32];
+        let payload = vec![0x11u8; 512];
+
+        let transfer_id = submission_id(&commitment);
+        let a_digest = ArtifactRole::EvidenceA.content_digest(&payload);
+        let b_digest = ArtifactRole::CountersignB.content_digest(&payload);
+        let f_digest = ArtifactRole::RelationshipFinalized.content_digest(&payload);
+        let a_id = artifact_submission_id(&a_digest);
+        let b_id = artifact_submission_id(&b_digest);
+
+        assert_ne!(a_digest, b_digest, "role must separate the content address");
+        assert_ne!(a_digest, f_digest, "role must separate the content address");
+        assert_ne!(b_digest, f_digest, "role must separate the content address");
+        assert_ne!(a_id, b_id, "role separation must reach the submission id");
+        assert_ne!(
+            a_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+        assert_ne!(
+            b_id, transfer_id,
+            "artifact id must differ from the transfer id"
+        );
+        // The transfer's id and an artifact's id are separate spaces, even
+        // over the same 32 bytes.
+        assert_ne!(
+            submission_id(&commitment),
+            artifact_submission_id(&commitment),
+            "a transfer's id and an artifact's id must not share a space"
+        );
+
+        // Deterministic: a retry derives the same ids rather than new ones.
+        assert_eq!(a_id, artifact_submission_id(&a_digest));
+        assert_eq!(a_digest, ArtifactRole::EvidenceA.content_digest(&payload));
     }
 }

@@ -931,7 +931,7 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         &transfer_bytes,
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
         &route,
-        &client_db::derive_submission_id(&commitment),
+        &dsm::crypto::spool_address::submission_id(&commitment),
     )
     .expect("the transfer half is ingested");
     ingest_evidence_half(
@@ -1169,7 +1169,7 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
         &transfer_bytes,
         &crate::util::text_id::encode_base32_crockford(&p.a.device_id),
         &route,
-        &client_db::derive_submission_id(&commitment),
+        &dsm::crypto::spool_address::submission_id(&commitment),
     )
     .expect("the transfer half is ingested");
     assert_eq!(half.ingested, Ingested::Staged, "the transfer half");

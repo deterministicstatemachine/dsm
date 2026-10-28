@@ -33,6 +33,7 @@
 
 use super::get_connection;
 use anyhow::{anyhow, Result};
+use dsm::crypto::spool_address::ArtifactRole;
 use rusqlite::{params, Connection, OptionalExtension};
 
 /// Committed locally but HELD: the sender debit's economic admission has not
@@ -81,76 +82,32 @@ pub const OUTBOX_STATUSES: [&str; 8] = [
 /// holds the relationship's online gate. This is the one list that decides it.
 pub const OUTBOX_SETTLED_STATUSES: [&str; 2] = [OUTBOX_GC_PENDING, OUTBOX_COMPLETE];
 
-/// Which artifact of a proposal a row in `sender_outbox_artifacts` holds.
-///
-/// The role is not decoration: it is part of the content address (ADR 0003), so
-/// an A-side object can never satisfy a reference obtained for a B-side one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ArtifactRole {
-    /// A-side receipt evidence: the full `ReceiptCommit` the transfer references.
-    /// Frozen at send; the exact bytes the sender submits and replays.
-    EvidenceA,
-    /// B-side countersign delta returned by the recipient (ADR 0003 return
-    /// leg). Persisted by the sender inside the finalization transaction: the
-    /// exact envelope it verified and finalized on — its record of the
-    /// countersignature, since no full receipt ever crosses the wire.
-    CountersignB,
-    /// The `RelationshipFinalizedV1` certificate the sender issues on
-    /// finalization (finality barrier), frozen in the finalize transaction and
-    /// replayed by the checkpoint sweep to the recipient's frozen route until
-    /// it reaches quorum. Never part of the initial send.
-    RelationshipFinalized,
-}
-
-impl ArtifactRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ArtifactRole::EvidenceA => "evidence_a",
-            ArtifactRole::CountersignB => "countersign_b",
-            ArtifactRole::RelationshipFinalized => "relationship_finalized",
-        }
-    }
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "evidence_a" => Ok(ArtifactRole::EvidenceA),
-            "countersign_b" => Ok(ArtifactRole::CountersignB),
-            "relationship_finalized" => Ok(ArtifactRole::RelationshipFinalized),
-            other => Err(anyhow!("unknown sender_outbox_artifacts.role: {other}")),
-        }
-    }
-
-    /// Whether this artifact belongs to the INITIAL logical send — what
-    /// `deliver_frozen_logical_send` ships and the resubmit sweep replays under
-    /// the transfer's route. Only the A-side evidence does; the countersign
-    /// delta is received, and the certificate has its own frozen route and its
-    /// own sweep.
-    pub fn is_initial_send_artifact(self) -> bool {
-        matches!(self, ArtifactRole::EvidenceA)
-    }
-}
-
-/// Content address of an evidence payload, separated by role.
-///
-/// Hashes the FULL wire bytes, never `ReceiptCommit::compute_commitment()`: the
-/// commitment covers fields 1-11 and hard-zeroes 12-20, so a commitment-addressed
-/// object could be served with substituted signatures. The digest must bind the
-/// exact bytes whose signatures the receiver will verify.
-pub fn evidence_content_digest(role: ArtifactRole, full_wire_bytes: &[u8]) -> [u8; 32] {
+/// The name a row of `sender_outbox_artifacts` stores its artifact's role
+/// under.
+pub fn artifact_role_name(role: ArtifactRole) -> &'static str {
     match role {
-        ArtifactRole::EvidenceA => dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-            full_wire_bytes,
-        ),
-        ArtifactRole::CountersignB => dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_B,
-            full_wire_bytes,
-        ),
-        ArtifactRole::RelationshipFinalized => dsm::crypto::blake3::domain_hash_bytes(
-            dsm::common::domain_tags::TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT,
-            full_wire_bytes,
-        ),
+        ArtifactRole::EvidenceA => "evidence_a",
+        ArtifactRole::CountersignB => "countersign_b",
+        ArtifactRole::RelationshipFinalized => "relationship_finalized",
     }
+}
+
+fn artifact_role_from_name(s: &str) -> Result<ArtifactRole> {
+    match s {
+        "evidence_a" => Ok(ArtifactRole::EvidenceA),
+        "countersign_b" => Ok(ArtifactRole::CountersignB),
+        "relationship_finalized" => Ok(ArtifactRole::RelationshipFinalized),
+        other => Err(anyhow!("unknown sender_outbox_artifacts.role: {other}")),
+    }
+}
+
+/// Whether an artifact belongs to the INITIAL logical send — what
+/// `deliver_frozen_logical_send` ships and the resubmit sweep replays under
+/// the transfer's route. Only the A-side evidence does; the countersign delta
+/// is received, and the certificate has its own frozen route and its own
+/// sweep.
+pub fn is_initial_send_artifact(role: ArtifactRole) -> bool {
+    matches!(role, ArtifactRole::EvidenceA)
 }
 
 /// One frozen artifact belonging to a proposal, beyond the transfer envelope.
@@ -230,40 +187,6 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<SenderOutboxRecord> {
         status: row.get::<_, String>(12)?,
         message_ids: row.get::<_, Option<String>>(13)?,
     })
-}
-
-/// Deterministic submission id for a transfer, derived from its receipt
-/// commitment so it is known BEFORE submission and identical across retries.
-///
-/// Truncated to 16 bytes because deployed storage nodes hard-require that
-/// width (`api/transport/b0x.rs`, `.filter(|bytes| bytes.len() == 16)`). The
-/// full 32-byte commitment is retained on this row and is what a 409 is
-/// compared against — the truncation is an id, never the equality test.
-pub fn derive_submission_id(commitment: &[u8; 32]) -> String {
-    let mut h =
-        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/b0x-submission-id/v1"));
-    h.update(commitment);
-    crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
-}
-
-/// Deterministic submission id for a non-transfer artifact (ADR 0003).
-///
-/// Derived from the artifact's CONTENT DIGEST, which is already
-/// role-domain-separated, so the id inherits that separation: an A-side and a
-/// B-side artifact of the same transfer can never collide on
-/// `UNIQUE(submission_id)`, and neither can collide with the transfer's own id
-/// (derived from the commitment under a different tag).
-///
-/// Truncated to 16 bytes for the same reason as [`derive_submission_id`]:
-/// deployed storage nodes hard-require that width. The full digest stays on the
-/// row and is what an equality test uses -- the truncation is an id, never the
-/// comparison.
-pub fn derive_artifact_submission_id(content_digest: &[u8; 32]) -> String {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
-        b"DSM/b0x-artifact-submission-id/v1"
-    ));
-    h.update(content_digest);
-    crate::util::text_id::encode_base32_crockford(&h.finalize().as_bytes()[..16])
 }
 
 /// Insert the lifecycle row INSIDE the caller's advance transaction.
@@ -397,7 +320,7 @@ pub fn insert_sender_outbox_artifact_with_conn(
             artifact.relationship_key.as_slice(),
             artifact.canonical_parent.as_slice(),
             artifact.proposal_nonce.as_slice(),
-            artifact.role.as_str(),
+            artifact_role_name(artifact.role),
             artifact.submission_id,
             artifact.envelope_bytes,
             artifact.content_digest.as_slice(),
@@ -452,7 +375,7 @@ pub fn load_sender_outbox_artifacts(
                 relationship_key: rk,
                 canonical_parent: cp,
                 proposal_nonce: pn,
-                role: ArtifactRole::from_str(&role)?,
+                role: artifact_role_from_name(&role)?,
                 submission_id: sid,
                 envelope_bytes: bytes,
                 content_digest: digest,
@@ -648,13 +571,13 @@ pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Resu
     if countersign_b.role != ArtifactRole::CountersignB {
         return Err(anyhow!(
             "acceptance finalization: artifact role must be countersign_b, got {}",
-            countersign_b.role.as_str()
+            artifact_role_name(countersign_b.role)
         ));
     }
     if finalized.role != ArtifactRole::RelationshipFinalized {
         return Err(anyhow!(
             "acceptance finalization: certificate role must be relationship_finalized, got {}",
-            finalized.role.as_str()
+            artifact_role_name(finalized.role)
         ));
     }
     if finalized.routing_address.is_none() {
@@ -1168,7 +1091,7 @@ mod tests {
             projection_parent: [0xAAu8; 32],
             projection_target: [0xBBu8; 32],
             routing_address: "ROUTE".to_string(),
-            submission_id: derive_submission_id(&[0x44u8 ^ nonce; 32]),
+            submission_id: dsm::crypto::spool_address::submission_id(&[0x44u8 ^ nonce; 32]),
             envelope_bytes: vec![0xEEu8; 64],
             local_expected_prev: None,
             is_first_ek_step: true,
@@ -1186,12 +1109,11 @@ mod tests {
             canonical_parent: r.canonical_parent,
             proposal_nonce: r.proposal_nonce,
             role: ArtifactRole::CountersignB,
-            submission_id: derive_artifact_submission_id(&evidence_content_digest(
-                ArtifactRole::CountersignB,
-                &body,
-            )),
+            submission_id: dsm::crypto::spool_address::artifact_submission_id(
+                &ArtifactRole::CountersignB.content_digest(&body),
+            ),
             envelope_bytes: body.clone(),
-            content_digest: evidence_content_digest(ArtifactRole::CountersignB, &body),
+            content_digest: ArtifactRole::CountersignB.content_digest(&body),
             routing_address: None,
         }
     }
@@ -1205,12 +1127,11 @@ mod tests {
             canonical_parent: r.canonical_parent,
             proposal_nonce: r.proposal_nonce,
             role: ArtifactRole::RelationshipFinalized,
-            submission_id: derive_artifact_submission_id(&evidence_content_digest(
-                ArtifactRole::RelationshipFinalized,
-                &body,
-            )),
+            submission_id: dsm::crypto::spool_address::artifact_submission_id(
+                &ArtifactRole::RelationshipFinalized.content_digest(&body),
+            ),
             envelope_bytes: body.clone(),
-            content_digest: evidence_content_digest(ArtifactRole::RelationshipFinalized, &body),
+            content_digest: ArtifactRole::RelationshipFinalized.content_digest(&body),
             routing_address: Some("RECIPIENTROUTE".to_string()),
         }
     }
@@ -1637,24 +1558,6 @@ mod tests {
         assert_eq!(outbox_status, OUTBOX_FINALIZATION_CHECKPOINT_PENDING);
     }
 
-    /// The submission id must be a pure function of the commitment: known
-    /// before submitting, identical on every retry, so the node collapses
-    /// retries onto one spool row instead of piling up duplicates.
-    #[test]
-    fn submission_id_is_deterministic_in_the_commitment() {
-        let a = derive_submission_id(&[0x07u8; 32]);
-        let b = derive_submission_id(&[0x07u8; 32]);
-        let c = derive_submission_id(&[0x08u8; 32]);
-        assert_eq!(a, b, "same commitment must yield the same submission id");
-        assert_ne!(a, c, "different commitments must not collide");
-        let decoded = crate::util::text_id::decode_base32_crockford(&a).expect("base32");
-        assert_eq!(
-            decoded.len(),
-            16,
-            "deployed nodes hard-require a 16-byte message id"
-        );
-    }
-
     /// Existence of the row is the rollback gate — asserted directly because
     /// the whole value-safety argument rests on it.
     #[test]
@@ -1829,7 +1732,7 @@ mod tests {
             projection_parent: p.projection_parent,
             projection_target: p.projection_target,
             routing_address: "ROUTE-XYZ".to_string(),
-            submission_id: derive_submission_id(&p.commitment),
+            submission_id: dsm::crypto::spool_address::submission_id(&p.commitment),
             envelope_bytes: vec![0xE1u8; 96],
             local_expected_prev: expected_prev,
             is_first_ek_step: is_first,
@@ -1842,58 +1745,20 @@ mod tests {
         p: &super::super::sender_proposal::SenderOnlineProposal,
         bytes: Vec<u8>,
     ) -> SenderOutboxArtifact {
-        let digest = evidence_content_digest(ArtifactRole::EvidenceA, &bytes);
+        let digest = ArtifactRole::EvidenceA.content_digest(&bytes);
         SenderOutboxArtifact {
             relationship_key: p.relationship_key,
             canonical_parent: p.canonical_parent,
             proposal_nonce: p.nonce_hash,
             role: ArtifactRole::EvidenceA,
-            submission_id: format!("EVID-{}", derive_submission_id(&p.commitment)),
+            submission_id: format!(
+                "EVID-{}",
+                dsm::crypto::spool_address::submission_id(&p.commitment)
+            ),
             envelope_bytes: bytes,
             content_digest: digest,
             routing_address: None,
         }
-    }
-
-    /// Distinct deterministic ids for the artifacts of one transfer.
-    ///
-    /// This proves DOMAIN SEPARATION for the tested artifacts -- it does not
-    /// prove ids cannot collide. The id is 16 bytes truncated from a 32-byte
-    /// digest, so collision is a 128-bit possibility: cryptographically
-    /// negligible, not impossible. Correctness therefore cannot rest on
-    /// uniqueness alone, because the node resolves `UNIQUE(message_id)` with
-    /// `ON CONFLICT DO NOTHING` -- a colliding id is accepted silently rather
-    /// than rejected. The content check in
-    /// `same_artifact_id_with_different_bytes_fails_closed` is what makes that
-    /// safe: same id + different bytes must fail, not disappear.
-    #[test]
-    fn artifact_submission_ids_are_distinct_per_role_and_from_the_transfer() {
-        let commitment = [0x5Cu8; 32];
-        let payload = vec![0x11u8; 512];
-
-        let transfer_id = derive_submission_id(&commitment);
-        let a_digest = evidence_content_digest(ArtifactRole::EvidenceA, &payload);
-        let b_digest = evidence_content_digest(ArtifactRole::CountersignB, &payload);
-        let a_id = derive_artifact_submission_id(&a_digest);
-        let b_id = derive_artifact_submission_id(&b_digest);
-
-        assert_ne!(a_digest, b_digest, "role must separate the content address");
-        assert_ne!(a_id, b_id, "role separation must reach the submission id");
-        assert_ne!(
-            a_id, transfer_id,
-            "artifact id must differ from the transfer id"
-        );
-        assert_ne!(
-            b_id, transfer_id,
-            "artifact id must differ from the transfer id"
-        );
-
-        // Deterministic: a retry derives the same ids rather than new ones.
-        assert_eq!(a_id, derive_artifact_submission_id(&a_digest));
-        assert_eq!(
-            a_digest,
-            evidence_content_digest(ArtifactRole::EvidenceA, &payload)
-        );
     }
 
     /// Same submission id + DIFFERENT bytes must fail closed.
@@ -1939,8 +1804,7 @@ mod tests {
         // Same id, DIFFERENT bytes -> fail closed, never silently dropped.
         let mut impostor = original.clone();
         impostor.envelope_bytes = vec![0xBB; 128];
-        impostor.content_digest =
-            evidence_content_digest(ArtifactRole::EvidenceA, &impostor.envelope_bytes);
+        impostor.content_digest = ArtifactRole::EvidenceA.content_digest(&impostor.envelope_bytes);
         let err = insert_sender_outbox_artifact_with_conn(&conn, &impostor)
             .expect_err("same id with different bytes must fail closed");
         assert!(
@@ -2063,7 +1927,7 @@ mod tests {
         assert_eq!(arts[0].role, ArtifactRole::EvidenceA);
         assert_eq!(
             arts[0].content_digest,
-            evidence_content_digest(ArtifactRole::EvidenceA, &evidence_bytes),
+            ArtifactRole::EvidenceA.content_digest(&evidence_bytes),
             "content digest must bind the exact stored bytes"
         );
     }
@@ -2419,7 +2283,7 @@ mod tests {
         );
         assert_eq!(
             pending[0].submission_id,
-            derive_submission_id(&p.commitment),
+            dsm::crypto::spool_address::submission_id(&p.commitment),
             "under the same deterministic id, so the node dedupes the retry"
         );
     }
