@@ -106,6 +106,48 @@ async fn an_adopted_token_resolves_on_the_receiving_device() {
     );
 }
 
+/// Adoption registers a token exactly when its state stands behind it. B
+/// already holds a row under the token id A's anchor derives, written
+/// straight into the store under another ticker and adopted by nothing, so
+/// the adoption's own row cannot be written: the adoption is refused whole,
+/// B's head does not adopt the token, and the row stays what it was.
+/// MUTATION CONTROL: writing the row after the adoption commits, outside its
+/// transaction, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_adoption_whose_registry_row_cannot_be_written_adopts_nothing() {
+    let p = Pair::boot(100, 0).await;
+    p.a.enter();
+    let anchor = economic_fixtures::create_asset(p.a.router(), "ROLL", 2, 1_000).await;
+    p.b.enter();
+    let token_id = derive_token_id(&anchor, "ROLL");
+    token_registry::insert_token(&token_registry::TokenRegistryRow {
+        token_id: token_id.clone(),
+        policy_commit: [0x5E; 32],
+        ticker: "STALE".to_string(),
+        alias: "a row no adoption wrote".to_string(),
+        decimals: 2,
+        genesis_supply: 1_000,
+        creator_device_id: [0x5F; 32],
+    })
+    .expect("the row in the way");
+
+    let refused = adopt(p.b.router(), &anchor_text(&anchor)).await;
+    assert!(
+        !refused.success,
+        "an adoption whose row cannot be written is refused"
+    );
+    let head = p.b.router().core_sdk.device_head().expect("a head");
+    assert!(
+        !head.has_adopted(&anchor),
+        "B's head adopts nothing it registered no row for"
+    );
+    let row = token_registry::get_token(&token_id)
+        .expect("registry")
+        .expect("the row in the way");
+    assert_eq!(row.ticker, "STALE");
+}
+
 /// `balance.get` for `token_id`, as the wallet asks it.
 async fn balance_get(router: &AppRouterImpl, token_id: &str) -> AppResult {
     router

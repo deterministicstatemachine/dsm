@@ -1040,14 +1040,48 @@ impl AppRouterImpl {
         }
 
         // THE AUTHENTICATED PART OF ADDING A TOKEN (owner ruling
-        // 2026-09-13). The registry rows below are local bookkeeping;
-        // the adoption LEAF is what every later credit of this token is
+        // 2026-09-13). The registry rows are local bookkeeping; the
+        // adoption LEAF is what every later credit of this token is
         // checked against in `DeviceState::advance`, so the device can
         // validate what it accepts from its OWN committed state — with
         // no connectivity at the moment of receipt. No fee, no balance
-        // delta; committed first, so nothing is registered that the
-        // state does not stand behind. Idempotent: an adopted token is
-        // not re-advanced.
+        // delta. The policy bytes and the registry row land inside the
+        // adoption's own transaction, as creation's do: a token is
+        // registered exactly when the state stands behind it, and a row
+        // that cannot be written adopts nothing. Idempotent: an adopted
+        // token is not re-advanced, and its row is already there.
+        let row = crate::storage::client_db::token_registry::TokenRegistryRow {
+            token_id: token_id.clone(),
+            policy_commit: anchor,
+            ticker: parsed.ticker.clone(),
+            alias: parsed.alias.clone(),
+            decimals: parsed.decimals,
+            genesis_supply: parsed.genesis_supply,
+            creator_device_id,
+        };
+        let register = |tx: &rusqlite::Transaction<'_>,
+                        _: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), dsm::types::error::DsmError> {
+            crate::storage::client_db::token_registry::upsert_policy_with_conn(
+                tx,
+                &anchor,
+                &policy_bytes,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("the adopted policy: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            crate::storage::client_db::token_registry::insert_token_with_conn(tx, &row).map_err(
+                |e| {
+                    dsm::types::error::DsmError::invalid_operation(format!(
+                        "token {} could not be registered: {e}",
+                        row.ticker
+                    ))
+                },
+            )
+        };
         {
             let Some(head) = self.core_sdk.device_head() else {
                 return err(
@@ -1077,38 +1111,13 @@ impl AppRouterImpl {
                     dev_id,
                     signed,
                     &[],
-                    None,
+                    Some(&register),
                     None,
                 ) {
                     return err(format!(
                         "tokens.addByAnchor: adoption could not be committed to state: {e}"
                     ));
                 }
-            }
-        }
-
-        if let Err(e) =
-            crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
-        {
-            return err(format!("tokens.addByAnchor: could not store policy: {e}"));
-        }
-        let row = crate::storage::client_db::token_registry::TokenRegistryRow {
-            token_id: token_id.clone(),
-            policy_commit: anchor,
-            ticker: parsed.ticker.clone(),
-            alias: parsed.alias.clone(),
-            decimals: parsed.decimals,
-            genesis_supply: parsed.genesis_supply,
-            creator_device_id,
-        };
-        if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
-            // Already present is the idempotent case, not a failure.
-            if crate::storage::client_db::token_registry::get_token(&token_id)
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                return err(format!("tokens.addByAnchor: could not register token: {e}"));
             }
         }
 

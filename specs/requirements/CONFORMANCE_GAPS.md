@@ -5960,7 +5960,7 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 
 **Rows.** MR-DSM-0250 stays Met; its Test cell gains the new test, and its matrix row (with MR-SOFI-0126) names it. B8's in-beta status stays the owner's (§6.105 item 11).
 
-### 6.118 One copy of each rule a counterparty computes, in Core: the anchor pin decision and the circulating-supply fold; one SDK policy-commit lookup (owner ruling, 2026-10-28; `refactor/anchor-pin-and-supply-into-core`, 2026-10-28)
+### 6.118 One copy of each rule a counterparty computes, in Core: the anchor pin decision and the circulating-supply fold; one SDK policy-commit lookup; adoption registers inside its advance (owner ruling, 2026-10-28; `refactor/anchor-pin-and-supply-into-core`, 2026-10-28)
 
 **Ruling.** Owner, 2026-10-28: "If they belong in Core, they need to be in Core… There has to be one… There should not be two." Every rule a counterparty must compute identically lives once, in Core, beside the statement it checks. The SDK copy is deleted, with no forwarding wrapper or re-export, and every caller calls Core. Code duplicated only within the SDK becomes one copy there.
 
@@ -5993,6 +5993,7 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 - **No caller depended on the map.** Run: every touched module passes without it (below). The map's one write ahead of a registry row was `token.create`'s, made before the fee check. A refused creation therefore left its ticker resolving through TokenSDK's copy; that is read from source, not run. `an_unaffordable_creation_moves_nothing_and_registers_nothing` now asserts that the ticker is `NotFound`.
 - **The built-in bytes are pinned.** `dsm::core::token::token_state_manager::tests::the_builtin_policy_commits_are_pinned` holds ERA's and dBTC's commitments as the deleted SDK copy answered them. That copy returned `era_policy_commit()` and the `dbtc.commit32` file, neither changed by this branch.
 
+**Adoption writes its row inside its advance.** Creation writes its registry row inside the creating advance. `tokens.addByAnchor` did not: it committed the `AdoptToken` advance, then stored the policy bytes and the row in separate statements. A crash between them left a head that adopted a token the lookup refuses as not installed. A row that would not insert under the token id was answered as already present. Now the bytes and the row are written in the adoption's own transaction, so a row that cannot be written adopts nothing. Receive-side registration (`fetched_policy_bytes`) stores policy bytes only, never a row, so it cannot make a token resolvable. `an_adoption_whose_registry_row_cannot_be_written_adopts_nothing` puts a row under the token id A's anchor derives into B's store: the adoption is refused, B's head does not adopt, and the row stays.
 
 **Pins before the move.** Each was written against the SDK code first and passed there, run from the pre-move binary (`bluetooth::anchor_accept::` 8/0; the fold's pin 1/0). Each then moved and passes against Core.
 - `dsm::crypto::anchor_enrollment::tests::each_disclosure_against_each_pin_state_has_one_answer`: a first disclosure that recomputes is admitted as disclosed; one that does not is refused. Against a pin, a match is no change, whatever key, device or birth the confirm names. Each differing field is refused with its own reason, the anchor identity first.
@@ -6007,14 +6008,15 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 - Ignoring burns leaves the creation node test green, since a creation folds no burn. Only the Core test covers burns.
 - The lookup returning a row's commitment without re-hashing its bytes → `a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve` red (the damaged policy resolves).
 - The lookup answering "not installed" as a storage error → `builtins_resolve_and_an_unknown_token_fails_closed` red.
+- Adoption storing its bytes and row after its advance commits, as before → `an_adoption_whose_registry_row_cannot_be_written_adopts_nothing` red (the adoption succeeds). That mutant was the previous code in a second scratch build; the unmutated control is this tree's run.
 
 **Runs** (each in its own `--release` run; SDK tests on Postgres, one at a time):
 - `cargo test --release -p dsm --no-fail-fast -- --test-threads=1`: 1,898/0 in 23 binaries.
 - SDK modules: `bluetooth::anchor_accept::` 3/0, `storage::client_db::bcr::` 9/0, `policy::` 7/0, `sdk::core_sdk::tests::` 6/0.
 - `bluetooth::offline_step_tests::` 52/4 as a module while two cargo builds ran. The four failed at setup on node load ("not final yet … Preserved", and an admin connection the server refused). Each passed in its own run.
-- The one lookup, each module in its own run: `policy::` 7/0, `handlers::token_adoption_tests::` 12/0, `handlers::token_create_tests::` 10/0, `storage::client_db::projection_repair::` 8/0, `handlers::bilateral_settlement::` 5/0, `handlers::offline_cash_routes::` 6/0, `handlers::wallet_routes::` 27/0, `sdk::token_sdk::tests::` 17/0, `sdk::core_sdk::tests::` 6/0, `bluetooth::offline_step_tests::` 56/0. Core's `token_state_manager::tests::` 6/0.
+- The one lookup, each module in its own run: `policy::` 7/0, `handlers::token_adoption_tests::` 13/0, `handlers::token_create_tests::` 10/0, `storage::client_db::projection_repair::` 8/0, `handlers::bilateral_settlement::` 5/0, `handlers::offline_cash_routes::` 6/0, `handlers::wallet_routes::` 27/0, `sdk::token_sdk::tests::` 17/0, `sdk::core_sdk::tests::` 6/0, `bluetooth::offline_step_tests::` 56/0. Core's `token_state_manager::tests::` 6/0.
 - Each alone:
-  - `an_unaffordable_creation_moves_nothing_and_registers_nothing`
+  - `an_adoption_whose_registry_row_cannot_be_written_adopts_nothing`, `an_unaffordable_creation_moves_nothing_and_registers_nothing`
   - `a_created_token_releases_its_whole_genesis_supply_to_its_creator`
   - `an_admitted_burn_advances_the_lineage_and_is_foreign_walkable`
   - every test whose code this change edited: `a_holdings_status_reads_from_the_frontier_and_the_next_cell_every_time`, `a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing`, `a_created_tokens_amounts_render_at_its_own_decimals`, `a_mislabelled_received_transfer_does_not_break_history`, `a_transfer_whose_terms_name_another_ticker_than_its_policy_is_refused`, `a_transfer_without_terms_that_open_it_is_not_recognized`
@@ -6023,7 +6025,7 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 
 **Rows.**
 - The matrix row for the bundle recompute names Core's gate and test.
-- Three matrix rows are added: the pin is never replaced from a transfer; the fold the cap reads; the one lookup.
+- Four matrix rows are added: the pin is never replaced from a transfer; the fold the cap reads; the one lookup; adoption's row inside its advance.
 - S-TOFU and SA-15 name `pin_admit_decision` in Core.
 - No §8 row cites a moved name, `INTENT_PINS.tsv` names none, and the totals are unchanged.
 
