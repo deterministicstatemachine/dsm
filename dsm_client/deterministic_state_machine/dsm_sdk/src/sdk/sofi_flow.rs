@@ -2856,6 +2856,43 @@ mod tests {
         }
     }
 
+    /// MR-DSM-0215: a split is the same route whichever order its two legs
+    /// are listed in. A search builds each split in the order discovery
+    /// returned the pair's vaults (`find_route`), so two SDKs reading one
+    /// index can list one split in two hop orders. Four equal vaults, every
+    /// pair a split that beats any vault alone by more than the tolerance:
+    /// for each of twenty traders, the split chosen from the candidates as
+    /// built and the one chosen with every split's legs reversed spend the
+    /// same two vaults.
+    ///
+    /// MUTATION CONTROL: hashing the route lane over the legs in hop order,
+    /// not sorted, turns this red.
+    #[test]
+    fn a_split_is_chosen_the_same_whichever_order_its_legs_are_listed_in() {
+        let mut built: Vec<(u64, Vec<[u8; 32]>)> = (0..4).map(|i| (100, vec![lane(i)])).collect();
+        for i in 0..4 {
+            for j in i + 1..4 {
+                built.push((300, vec![lane(i), lane(j)]));
+            }
+        }
+        let reversed: Vec<(u64, Vec<[u8; 32]>)> = built
+            .iter()
+            .map(|(out, legs)| (*out, legs.iter().rev().copied().collect()))
+            .collect();
+        for t in 0..20 {
+            let (g, d) = trader(t);
+            let spent = |candidates: &[(u64, Vec<[u8; 32]>)]| {
+                let chosen = choose_route(candidates, (&g, &d)).expect("a route");
+                let mut legs = candidates[chosen].1.clone();
+                legs.sort();
+                legs
+            };
+            let as_built = spent(&built);
+            assert_eq!(as_built.len(), 2, "trader {t} takes a split");
+            assert_eq!(spent(&reversed), as_built, "trader {t}");
+        }
+    }
+
     /// Five equal vaults of a pair, each alone or split in two: a small
     /// trade's split is within the tolerance of a single vault, so each
     /// trader takes one vault alone — the same one every time — and traders
