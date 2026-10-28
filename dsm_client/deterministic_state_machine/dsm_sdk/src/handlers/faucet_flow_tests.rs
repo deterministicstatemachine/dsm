@@ -596,9 +596,10 @@ fn walked_lineage() -> Vec<(u64, [u8; 32])> {
     walked
 }
 
-/// A walker owes the epoch index a hint for every generation it established
-/// that no hint named, and the sweep publishes them: a later reader reads
-/// each generation's root there. What it owes is what it established.
+/// A walker owes the epoch index the hint of every generation it established
+/// unless that very hint was found, and the sweep publishes them: a later
+/// reader reads each generation's root there. What it owes is what it
+/// established.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() {
@@ -624,14 +625,10 @@ async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() 
     )
     .await;
     for (generation, root) in &established {
-        assert!(
-            found.hinted(*generation),
-            "generation {generation} is hinted"
-        );
         assert_eq!(
             found.roots_at(*generation).collect::<Vec<_>>(),
             vec![root],
-            "the hint names the root the walk established at {generation}"
+            "generation {generation} is hinted, naming the root the walk established"
         );
     }
 }
@@ -645,7 +642,7 @@ async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
-    use dsm::shared_lineage::{epoch_locator, epoch_of, GenerationHintV1, LineageKind};
+    use dsm::shared_lineage::{GenerationHintV1, LineageKind};
     let d = Device::start(0xA6).await;
     for _ in 0..3 {
         claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
@@ -669,23 +666,7 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
             [0x72; 32],
         )
         .expect("a hint");
-        let bytes = lie.encode();
-        let (addr, took) = crate::sdk::storage_io::put_immutable(
-            &set,
-            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
-            &bytes,
-        )
-        .await
-        .expect("anyone may put an object");
-        assert!(took > 0);
-        crate::sdk::storage_io::append_to_index(
-            &set,
-            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
-            &epoch_locator(LineageKind::Reserve, &reserve_id, epoch_of(generation)),
-            &addr,
-        )
-        .await
-        .expect("anyone may append");
+        append_hint(&set, &lie).await;
     }
     let found =
         crate::sdk::lineage_discovery::discover(&set, LineageKind::Reserve, &reserve_id, 0).await;
@@ -707,6 +688,143 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
         honest,
         "the walk established exactly what it established without the lies"
     );
+}
+
+/// Releases enough that the cells their hints name hold more than one walk's
+/// read-ahead window: each named cell's read keeps the release from every
+/// seat that holds it.
+const RELEASES_PAST_THE_WINDOW: u64 = 140;
+
+/// MR-DSM-0310, MR-DSM-0312: what a walk reads early never decides what it
+/// establishes. A walk reads ahead the cells the epoch index names within a
+/// window of `READ_AHEAD_BYTES`; a cell whose read the window cut short is a
+/// cell the walk reads again itself. Every generation of a reserve longer
+/// than the window holds is hinted, so a device that keeps nothing of it
+/// reads ahead until the window is spent, some cells only in part. Its walk
+/// still reaches the head and establishes exactly the lineage the claimant's
+/// walks did.
+///
+/// MUTATION CONTROL: taking a read-ahead read Core did not resolve final
+/// (`reserve_ahead_unresolved`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_walk_past_what_its_read_ahead_holds_establishes_the_whole_lineage() {
+    use dsm::shared_lineage::LineageKind;
+    let d = Device::start(0xAA).await;
+    for _ in 0..RELEASES_PAST_THE_WINDOW {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), RELEASES_PAST_THE_WINDOW);
+    let established = walked_lineage();
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let found = crate::sdk::lineage_discovery::discover(
+        &set,
+        LineageKind::Reserve,
+        reserve_genesis().reserve_id(),
+        0,
+    )
+    .await;
+    for (generation, root) in &established {
+        assert!(
+            found.roots_at(*generation).any(|named| named == root),
+            "generation {generation} is hinted, so the walk reads its cell ahead"
+        );
+    }
+
+    forget_the_reserve();
+    let head = reserve_head().await;
+    assert_eq!(
+        head.generation(),
+        RELEASES_PAST_THE_WINDOW,
+        "the walk reaches the head past what it read ahead"
+    );
+    assert_eq!(
+        walked_lineage(),
+        established,
+        "the walk established exactly what the claimant's walks did"
+    );
+}
+
+/// Put `hint` and append it to its epoch's index, as anyone may.
+async fn append_hint(
+    set: &crate::sdk::storage_set::StorageSet,
+    hint: &dsm::shared_lineage::GenerationHintV1,
+) {
+    use dsm::shared_lineage::{epoch_locator, epoch_of};
+    let (addr, took) = crate::sdk::storage_io::put_immutable(
+        set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+        &hint.encode(),
+    )
+    .await
+    .expect("anyone may put an object");
+    assert!(took > 0);
+    crate::sdk::storage_io::append_to_index(
+        set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+        &epoch_locator(hint.kind(), hint.lineage_id(), epoch_of(hint.generation())),
+        &addr,
+    )
+    .await
+    .expect("anyone may append");
+}
+
+/// A hint anyone appends names whatever root it likes. A walker owes the
+/// epoch index the hint of each generation it established unless that very
+/// hint was found: a hint naming another root at the generation is not the
+/// generation's own (SoFi Amendment S23), as another checkpoint for a start
+/// is not the segment's own (`owe_checkpoint`). The reserve's index holds a
+/// lie at generation 3, appended after the release at 3 and before any walk
+/// established it. A walk and the sweep later, the index names generation
+/// 3's own root beside the lie.
+///
+/// MUTATION CONTROL: owing a hint only for a generation no hint names
+/// (`owe_hint_any_root`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lying_hint_does_not_stop_a_walker_owing_the_generations_own() {
+    use dsm::shared_lineage::{GenerationHintV1, LineageKind};
+    let d = Device::start(0xA9).await;
+    // Each claim walks before it releases, so after the third no walk has
+    // established generation 3 and nothing owes its hint.
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let reserve_id = *reserve_genesis().reserve_id();
+    let lie = GenerationHintV1::new(
+        LineageKind::Reserve,
+        reserve_id,
+        3,
+        [0x6D; 32],
+        [0x71; 32],
+        [0x72; 32],
+    )
+    .expect("a hint");
+    append_hint(&set, &lie).await;
+
+    assert_eq!(reserve_head().await.generation(), 3);
+    let established = walked_lineage();
+    assert_eq!(established.len(), 3);
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+
+    let found =
+        crate::sdk::lineage_discovery::discover(&set, LineageKind::Reserve, &reserve_id, 0).await;
+    assert!(
+        found.roots_at(3).any(|named| named == lie.claimed_root()),
+        "the lie stays in the index: discovery decides nothing"
+    );
+    for (generation, root) in &established {
+        assert!(
+            found.roots_at(*generation).any(|named| named == root),
+            "generation {generation}'s own root is hinted, whatever else is"
+        );
+    }
 }
 
 /// SA-69. Anyone may append a checkpoint, and every root a walk is handed is
