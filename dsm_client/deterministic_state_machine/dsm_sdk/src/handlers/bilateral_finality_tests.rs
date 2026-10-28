@@ -907,6 +907,14 @@ async fn r8_a_next_generation_transfer_is_held_until_the_certificate_lands() {
     for pass in 0..2 {
         let b_sync = p.b.sync().await;
         assert_incomplete(&b_sync);
+        assert!(
+            b_sync
+                .errors
+                .iter()
+                .any(|e| e.contains("awaits the peer's finality certificate")),
+            "pass {pass}: the hold is reported: {:?}",
+            b_sync.errors
+        );
         assert_eq!(p.b.era_balance(), 10, "pass {pass}: held, not applied");
         p.b.enter();
         assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);

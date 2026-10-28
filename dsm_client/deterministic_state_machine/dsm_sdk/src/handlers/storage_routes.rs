@@ -1358,11 +1358,10 @@ impl AppRouterImpl {
                 match crate::storage::client_db::relationship_awaits_peer_finalization(&rel_key) {
                     Ok(awaiting) => {
                         if awaiting {
-                            log::info!(
-                                "[storage.sync] ADR 0003 completion: {name} HELD — a prior \
-                                 acceptance on this relationship awaits the peer's finality \
-                                 certificate"
-                            );
+                            failures.push(format!(
+                                "split transfer {name}: held: a prior acceptance on this \
+                                 relationship awaits the peer's finality certificate"
+                            ));
                             continue;
                         }
                     }
@@ -1475,7 +1474,10 @@ impl AppRouterImpl {
                         continue;
                     }
                 };
+                // Every locator's refusal, reported if none resolves: a hint
+                // that does not resolve is no verdict while another may.
                 let mut resolved = None;
+                let mut refused = Vec::new();
                 for hint in hints {
                     let incoming = crate::sdk::economic_admission_flow::IncomingTransfer {
                         canonical_operation_bytes: &v.canonical_operation_bytes,
@@ -1499,20 +1501,23 @@ impl AppRouterImpl {
                         }
                         Err(refusal) => {
                             use crate::sdk::economic_admission_flow::PrevalidationRefusal as PR;
-                            match &refusal {
-                                PR::Terminal(m) | PR::Quarantined(m) => log::warn!(
-                                    "[storage.sync] ADR 0003 completion: {name} not admissible \
-                                     at locator {hint:?} — economic prevalidation: {m}"
+                            refused.push(match &refusal {
+                                PR::Terminal(m) | PR::Quarantined(m) => format!(
+                                    "not admissible at locator {hint:?}: economic \
+                                     prevalidation: {m}"
                                 ),
-                                PR::Incomplete(m) => log::info!(
-                                    "[storage.sync] ADR 0003 completion: {name} held at locator \
-                                     {hint:?} — {m}"
-                                ),
-                            }
+                                PR::Incomplete(m) => format!("held at locator {hint:?}: {m}"),
+                            });
                         }
                     }
                 }
                 let Some((prereqs, admitted_hint)) = resolved else {
+                    let why = if refused.is_empty() {
+                        "held: no copy names a locator for the sender's debit".to_string()
+                    } else {
+                        refused.join("; ")
+                    };
+                    failures.push(format!("split transfer {name}: {why}"));
                     continue;
                 };
                 let wrap_key = match crate::init::current_chain_head_at_rest_key() {
@@ -1757,10 +1762,9 @@ impl AppRouterImpl {
                     )),
                 };
                 if let Err(e) = converged {
-                    log::warn!(
-                        "[storage.sync] ADR 0003 completion: {name} accepted but convergence \
-                         deferred: {e}"
-                    );
+                    failures.push(format!(
+                        "split transfer {name}: accepted; convergence deferred: {e}"
+                    ));
                     if let Err(e) = mark_contact_needs_online_reconcile_and_refresh(&sender_device)
                     {
                         failures.push(e);
@@ -1807,10 +1811,10 @@ impl AppRouterImpl {
                     )
                     .await
                     {
-                        log::warn!(
-                            "[storage.sync] ADR 0003 completion: {name} accepted; economic \
-                             admission HELD for resume ({e}) — release undelivered"
-                        );
+                        failures.push(format!(
+                            "split transfer {name}: accepted; economic admission held for \
+                             resume ({e}); release undelivered"
+                        ));
                         if let Err(e) =
                             mark_contact_needs_online_reconcile_and_refresh(&sender_device)
                         {

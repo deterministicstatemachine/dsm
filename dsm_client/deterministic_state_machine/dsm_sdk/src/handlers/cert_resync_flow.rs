@@ -483,6 +483,8 @@ mod tests {
     ///   unchanged head, and B's own head is untouched.
     /// - a further sync on each side is clean: no resync starts again and the
     ///   replaced ack is not read again.
+    /// - A's next transfer is held by B and reported as held, with its reason:
+    ///   the open defect §6.117 records.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_resync_request_is_taken_only_under_the_ak_the_responder_pins() {
@@ -599,5 +601,28 @@ mod tests {
         assert_eq!(resync_state(&p.a, &rel), (cdb::RESYNC_CLEAR, epoch));
         let quiet = p.b.sync().await;
         assert!(quiet.errors.is_empty(), "{:?}", quiet.errors);
+
+        // OPEN DEFECT (§6.117), asserted as it stands until the owner rules on
+        // how a restart is made portable; then this becomes "applied". A's
+        // next transfer reaches B and is held: B's tracked EK step for A is
+        // still the lost head, so the restarted EK has no portable ancestry.
+        // The hold is reported, never only logged, and nothing is credited.
+        let held = p.b.era_balance();
+        let next = p.a.send(&p.b, 5).await;
+        assert!(next.success, "{:?}", next.error_message);
+        let holding = p.b.sync().await;
+        assert!(
+            holding
+                .errors
+                .iter()
+                .any(|e| e.contains("held at locator") && e.contains("EK ancestry is not portable")),
+            "{:?}",
+            holding.errors
+        );
+        assert_eq!(
+            p.b.era_balance(),
+            held,
+            "nothing is credited while it is held"
+        );
     }
 }
