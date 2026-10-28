@@ -5960,7 +5960,7 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 
 **Rows.** MR-DSM-0250 stays Met; its Test cell gains the new test, and its matrix row (with MR-SOFI-0126) names it. B8's in-beta status stays the owner's (§6.105 item 11).
 
-### 6.118 One copy of each rule a counterparty computes, in Core: the anchor pin decision and the circulating-supply fold; the SDK's built-in policy commit deleted (owner ruling, 2026-10-28; `refactor/anchor-pin-and-supply-into-core`, 2026-10-28)
+### 6.118 One copy of each rule a counterparty computes, in Core: the anchor pin decision and the circulating-supply fold; one SDK policy-commit lookup (owner ruling, 2026-10-28; `refactor/anchor-pin-and-supply-into-core`, 2026-10-28)
 
 **Ruling.** Owner, 2026-10-28: "If they belong in Core, they need to be in Core… There has to be one… There should not be two." Every rule a counterparty must compute identically lives once, in Core, beside the statement it checks. The SDK copy is deleted, with no forwarding wrapper or re-export, and every caller calls Core. Code duplicated only within the SDK becomes one copy there.
 
@@ -5975,11 +5975,24 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 
 **The built-in policy commit.** `dsm_sdk::policy::builtin_policy_commit` answered exactly what Core's `builtin_policy_commit_for_token` answers: ERA's from `era_policy_commit`, and dBTC's 32 bytes, compared byte for byte. It is deleted. Its 14 SDK callers, and `crates/dsm-app-host`'s connection test, call Core.
 
-**Not done here: one SDK policy-commit lookup.** `CoreSDK::resolve_policy_commit_strict` and `TokenSDK::resolve_policy_commit_strict` are two SDK lookups with different fallbacks:
-- CoreSDK: builtin, then a registry row whose policy bytes load verified, then a walk of the device's own chain archive.
-- TokenSDK: builtin, then the in-memory metadata map, then a registry row with no policy-bytes check.
+**One SDK policy-commit lookup** (the coordinating session's call, 2026-10-28: "builtin … then a registry row by id or ticker whose policy bytes re-hash to the commit, then Err").
+- **Two copies, merged.** `CoreSDK::resolve_policy_commit_strict` and `TokenSDK::resolve_policy_commit_strict` disagreed. CoreSDK went from built-in to a verified registry row, then walked the device's chain archive. TokenSDK went from built-in to an in-memory metadata map, then a registry row whose policy bytes it never checked, swallowing read errors.
+- **The one copy.** `dsm_sdk::policy::resolve_policy_commit_strict` answers a built-in's commitment from Core. Otherwise it answers the commitment of the registry row for that token id, or failing one that ticker, whose stored policy bytes re-hash to it.
+- **Its refusals stay distinct.** No row is `NotFound`: the token is not installed here. A store that cannot be read, bytes that do not re-hash, or a row without its bytes is a storage error.
+- **Deleted outright:**
+  - both copies;
+  - the archive walk, with its two helpers and the registry-update message only it decoded;
+  - the in-memory metadata map, with its writers in `cache_token_metadata_strict` and the legacy `TokenOperation::Create`, and its reader in `token_exists`;
+  - the router trait's forwarding `resolve_policy_commit_strict`, and the pre-genesis router's refusal of it.
+- **Every caller uses the one copy:**
+  - the BLE sender and receiver sites;
+  - `wallet.sendOffline`, `wallet.sendSmart` and the offline-cash routes;
+  - `token_routes`, and TokenSDK's five internal callers;
+  - offline settlement and the startup projection repair, which had resolved built-ins only. An installed token's offline step therefore settles, and its projection repairs.
+- **The repair's resolver is no longer injected.** Its tests had passed a fabricated commit (`Some([7u8; 32])`). Their "unresolvable" drain never reached the resolver, since the fixture has no head. `a_repair_for_a_token_not_installed_here_is_retained` now drains a real device's queue, so its retain is tested.
+- **No caller depended on the map.** Run: every touched module passes without it (below). The map's one write ahead of a registry row was `token.create`'s, made before the fee check. A refused creation therefore left its ticker resolving through TokenSDK's copy; that is read from source, not run. `an_unaffordable_creation_moves_nothing_and_registers_nothing` now asserts that the ticker is `NotFound`.
+- **The built-in bytes are pinned.** `dsm::core::token::token_state_manager::tests::the_builtin_policy_commits_are_pinned` holds ERA's and dBTC's commitments as the deleted SDK copy answered them. That copy returned `era_policy_commit()` and the `dbtc.commit32` file, neither changed by this branch.
 
-Which one the single copy keeps is a design call, put to the coordinating session on 2026-10-28 and not answered in this change. Neither lookup is changed here beyond its built-in step, which now reads Core.
 
 **Pins before the move.** Each was written against the SDK code first and passed there, run from the pre-move binary (`bluetooth::anchor_accept::` 8/0; the fold's pin 1/0). Each then moved and passes against Core.
 - `dsm::crypto::anchor_enrollment::tests::each_disclosure_against_each_pin_state_has_one_answer`: a first disclosure that recomputes is admitted as disclosed; one that does not is refused. Against a pin, a match is no change, whatever key, device or birth the confirm names. Each differing field is refused with its own reason, the anchor identity first.
@@ -5992,21 +6005,25 @@ Which one the single copy keeps is a design call, put to the coordinating sessio
 - An unreadable history answered as zero → the fold test red (`Some(0)` where `None`).
 - The fold answering absent on every history → the creation node test red, as above.
 - Ignoring burns leaves the creation node test green, since a creation folds no burn. Only the Core test covers burns.
+- The lookup returning a row's commitment without re-hashing its bytes → `a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve` red (the damaged policy resolves).
+- The lookup answering "not installed" as a storage error → `builtins_resolve_and_an_unknown_token_fails_closed` red.
 
 **Runs** (each in its own `--release` run; SDK tests on Postgres, one at a time):
 - `cargo test --release -p dsm --no-fail-fast -- --test-threads=1`: 1,898/0 in 23 binaries.
 - SDK modules: `bluetooth::anchor_accept::` 3/0, `storage::client_db::bcr::` 9/0, `policy::` 7/0, `sdk::core_sdk::tests::` 6/0.
 - `bluetooth::offline_step_tests::` 52/4 as a module while two cargo builds ran. The four failed at setup on node load ("not final yet … Preserved", and an admin connection the server refused). Each passed in its own run.
+- The one lookup, each module in its own run: `policy::` 7/0, `handlers::token_adoption_tests::` 12/0, `handlers::token_create_tests::` 10/0, `storage::client_db::projection_repair::` 8/0, `handlers::bilateral_settlement::` 5/0, `handlers::offline_cash_routes::` 6/0, `handlers::wallet_routes::` 27/0, `sdk::token_sdk::tests::` 17/0, `sdk::core_sdk::tests::` 6/0, `bluetooth::offline_step_tests::` 56/0. Core's `token_state_manager::tests::` 6/0.
 - Each alone:
+  - `an_unaffordable_creation_moves_nothing_and_registers_nothing`
   - `a_created_token_releases_its_whole_genesis_supply_to_its_creator`
   - `an_admitted_burn_advances_the_lineage_and_is_foreign_walkable`
   - every test whose code this change edited: `a_holdings_status_reads_from_the_frontier_and_the_next_cell_every_time`, `a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing`, `a_created_tokens_amounts_render_at_its_own_decimals`, `a_mislabelled_received_transfer_does_not_break_history`, `a_transfer_whose_terms_name_another_ticker_than_its_policy_is_refused`, `a_transfer_without_terms_that_open_it_is_not_recognized`
 
-**No second copy.** `git grep` finds `fn pin_admit_decision` and `enum PinAdmitDecision` only in `dsm/src/crypto/anchor_enrollment.rs`. It finds `fn circulating_supply` only in `policy_enforcement.rs`, and no `derive_circulating_supply`. It finds `fn builtin_policy_commit` only as Core's `builtin_policy_commit_for_token`. No `anchor_accept::pin_admit_decision` or `policy::builtin_policy_commit` path remains.
+**No second copy.** `git grep` finds `fn pin_admit_decision` and `enum PinAdmitDecision` only in `dsm/src/crypto/anchor_enrollment.rs`. It finds `fn circulating_supply` only in `policy_enforcement.rs`, and no `derive_circulating_supply`. It finds `fn builtin_policy_commit` only as Core's `builtin_policy_commit_for_token`, and `fn resolve_policy_commit_strict` only in `dsm_sdk/src/policy/mod.rs`. No `anchor_accept::pin_admit_decision` or `policy::builtin_policy_commit` path remains, and no `token_metadata_for_operation` or in-memory `token_metadata` map.
 
 **Rows.**
 - The matrix row for the bundle recompute names Core's gate and test.
-- Two matrix rows are added: the pin is never replaced from a transfer, and the fold the cap reads.
+- Three matrix rows are added: the pin is never replaced from a transfer; the fold the cap reads; the one lookup.
 - S-TOFU and SA-15 name `pin_admit_decision` in Core.
 - No §8 row cites a moved name, `INTENT_PINS.tsv` names none, and the totals are unchanged.
 

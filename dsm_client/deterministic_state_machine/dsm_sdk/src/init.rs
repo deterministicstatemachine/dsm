@@ -263,9 +263,7 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                 let self_device: Option<[u8; 32]> = crate::sdk::app_state::AppState::get_device_id()
                     .and_then(|v| v.as_slice().try_into().ok());
                 if let Some(device_id) = self_device {
-                    match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
-                        dsm::core::token::builtin_policy_commit_for_token(token)
-                    }) {
+                    match crate::storage::client_db::drain_projection_repairs(&device_id) {
                         Ok((0, 0)) => {}
                         Ok((repaired, remaining)) => log::info!(
                             "[SDK] projection repair ({origin}): {repaired} rebuilt from canonical, \
@@ -415,10 +413,6 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 
             fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
                 None
-            }
-
-            fn resolve_policy_commit_strict(&self, _token_id: &[u8]) -> Result<[u8; 32], DsmError> {
-                Err(requires_genesis("resolve_policy_commit_strict"))
             }
 
             fn simulate_advance_for_confirm(

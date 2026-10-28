@@ -890,17 +890,15 @@ impl AppRouterImpl {
                         Ok(amount) => amount,
                         Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
                     };
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => {
-                        return err(format!(
-                            "wallet.sendOffline: policy_commit resolve failed: {e}"
-                        ))
-                    }
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
                 let token_policy =
                     match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
                         Ok(bytes) => bytes,
@@ -1146,13 +1144,11 @@ impl AppRouterImpl {
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                    };
                 let token_decimals = match token_of_commit(&policy_commit) {
                     Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),

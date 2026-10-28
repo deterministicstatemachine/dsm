@@ -11,7 +11,6 @@
 //! All ambiguous features fail-closed with `DsmError`.
 
 use parking_lot::Mutex;
-use prost::Message;
 use std::collections::HashMap;
 
 use dsm::core::state_machine::StateMachine;
@@ -19,10 +18,8 @@ use dsm::core::token::policy::TokenPolicySystem;
 use dsm::types::error::DsmError;
 use dsm::types::operations::Operation as DsmOperation;
 use dsm::types::state_types::{DeviceInfo, State};
-use dsm::types::token_types::TokenMetadata;
 
 use crate::storage::client_db;
-use crate::generated::TokenMetadataProto;
 
 use log;
 
@@ -105,12 +102,6 @@ pub(crate) fn value_egress_refusal(
     crate::storage::client_db::recovery::value_egress_block_reason()
         .map(str::to_string)
         .or_else(|| crate::storage::client_db::recovery::asset_egress_block_reason(operation))
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-struct TokenRegistryUpdateList {
-    #[prost(message, repeated, tag = "1")]
-    items: ::prost::alloc::vec::Vec<TokenMetadataProto>,
 }
 
 /* ------------------------------- Impl ----------------------------------- */
@@ -2427,184 +2418,6 @@ fn hardware_appliance_or_fail() -> Result<Box<dyn crate::anchor::AnchorAppliance
 }
 
 impl CoreSDK {
-    fn token_metadata_from_proto(proto: &TokenMetadataProto) -> TokenMetadata {
-        TokenMetadata {
-            token_id: proto.token_id.clone(),
-            name: proto.name.clone(),
-            symbol: proto.symbol.clone(),
-            description: proto.description.clone().filter(|s| !s.is_empty()),
-            icon_url: proto.icon_url.clone().filter(|s| !s.is_empty()),
-            decimals: (proto.decimals as u8).min(18),
-            token_type: match proto.token_type.to_uppercase().as_str() {
-                "NATIVE" => dsm::types::token_types::TokenType::Native,
-                "CREATED" => dsm::types::token_types::TokenType::Created,
-                "RESTRICTED" => dsm::types::token_types::TokenType::Restricted,
-                "WRAPPED" => dsm::types::token_types::TokenType::Wrapped,
-                _ => dsm::types::token_types::TokenType::Created,
-            },
-            owner_id: {
-                let bytes = crate::util::text_id::decode_base32_crockford(&proto.owner_id)
-                    .unwrap_or_default();
-                let mut arr = [0u8; 32];
-                if bytes.len() == 32 {
-                    arr.copy_from_slice(&bytes);
-                }
-                arr
-            },
-            metadata_uri: proto.metadata_uri.clone().filter(|s| !s.is_empty()),
-            policy_anchor: proto.policy_anchor.clone().filter(|s| !s.is_empty()),
-            fields: proto
-                .fields
-                .iter()
-                .map(|field| (field.key.clone(), field.value.clone()))
-                .collect(),
-        }
-    }
-
-    fn token_metadata_for_operation(
-        &self,
-        op: &dsm::types::operations::Operation,
-        token_id: &str,
-    ) -> Option<TokenMetadata> {
-        match op {
-            // The canonical creation operation. Recognising it here is what
-            // lets a token be recovered from the chain alone after a restart.
-            dsm::types::operations::Operation::CreateToken {
-                token_id: op_token_id,
-                symbol,
-                name,
-                decimals,
-                policy_commit,
-                metadata_uri,
-                ..
-            } => {
-                let op_token_id_str = String::from_utf8(op_token_id.clone()).ok()?;
-                if op_token_id_str != token_id && symbol != token_id {
-                    return None;
-                }
-                let anchor_b32 = crate::util::text_id::encode_base32_crockford(policy_commit);
-                Some(TokenMetadata {
-                    token_id: op_token_id_str,
-                    name: name.clone(),
-                    symbol: symbol.clone(),
-                    description: None,
-                    icon_url: None,
-                    decimals: *decimals,
-                    token_type: dsm::types::token_types::TokenType::Created,
-                    owner_id: self.device_info.device_id,
-                    metadata_uri: metadata_uri.clone(),
-                    policy_anchor: Some(format!("dsm:policy:{anchor_b32}")),
-                    fields: std::collections::HashMap::new(),
-                })
-            }
-            dsm::types::operations::Operation::Create { metadata, .. } => {
-                let proto = TokenMetadataProto::decode(metadata.as_slice()).ok()?;
-                let token_metadata = Self::token_metadata_from_proto(&proto);
-                if token_metadata.token_id == token_id || token_metadata.symbol == token_id {
-                    Some(token_metadata)
-                } else {
-                    None
-                }
-            }
-            dsm::types::operations::Operation::Generic {
-                operation_type,
-                data,
-                ..
-            } => {
-                if operation_type.as_slice() == b"token_create"
-                    || operation_type.as_slice() == b"token_registry_update"
-                {
-                    if let Ok(registry_update) = TokenRegistryUpdateList::decode(data.as_slice()) {
-                        if let Some(proto) = registry_update
-                            .items
-                            .into_iter()
-                            .find(|proto| proto.token_id == token_id || proto.symbol == token_id)
-                        {
-                            return Some(Self::token_metadata_from_proto(&proto));
-                        }
-                    }
-                    if let Ok(proto) = TokenMetadataProto::decode(data.as_slice()) {
-                        let token_metadata = Self::token_metadata_from_proto(&proto);
-                        if token_metadata.token_id == token_id || token_metadata.symbol == token_id
-                        {
-                            return Some(token_metadata);
-                        }
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    pub fn resolve_policy_commit_strict(&self, token_id: &[u8]) -> Result<[u8; 32], DsmError> {
-        let token_id = std::str::from_utf8(token_id)
-            .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
-
-        if let Some(commit) = dsm::core::token::builtin_policy_commit_for_token(token_id) {
-            return Ok(commit);
-        }
-
-        // The registry is authoritative for the persisted token IDENTITY
-        // mapping — ticker, token id, policy commitment, metadata — while
-        // canonical DeviceState stays authoritative for balances and
-        // transitions. Ask it before walking the archive.
-        //
-        // A device that ADOPTED a token by its CPTA anchor holds a registry
-        // row and the anchored policy bytes, and has no CreateToken of its own
-        // to find: adoption registers an identity, it is not a transition on
-        // this device's chain. So an archive-only lookup resolved on the
-        // CREATING device and could never resolve on the RECEIVING one, and
-        // every incoming transfer of an adopted token fail-closed with
-        // "Missing canonical policy anchor" after the sender had already
-        // debited.
-        //
-        // This is not trusting a mutable cache. `load_policy_verified`
-        // re-derives BLAKE3(TAG_DSM_POLICY, policy_bytes) and refuses bytes
-        // that do not hash to the commitment they are stored under, so a row
-        // that does not carry the real policy cannot resolve through here.
-        let registry = |e: anyhow::Error| {
-            DsmError::storage(format!("token registry: {e}"), None::<std::io::Error>)
-        };
-        let by_id =
-            crate::storage::client_db::token_registry::get_token(token_id).map_err(registry)?;
-        let by_ticker = crate::storage::client_db::token_registry::get_token_by_ticker(token_id)
-            .map_err(registry)?;
-        for row in [by_id, by_ticker].into_iter().flatten() {
-            if crate::storage::client_db::token_registry::load_policy_verified(&row.policy_commit)
-                .map_err(registry)?
-                .is_some()
-            {
-                return Ok(row.policy_commit);
-            }
-        }
-
-        // Per §4.3 there is no `state_number`. Walk the per-relationship
-        // chain-state archive newest-first looking for an op that registered
-        // metadata for `token_id`. Chains are keyed by chain tip and ordered
-        // by insertion time — no counter, no derived sparse index.
-        let device_id = self.device_info.device_id;
-        let states = crate::storage::client_db::get_bcr_chain_states(&device_id).map_err(|e| {
-            DsmError::state(format!(
-                "Failed to load BCR chain states for policy commit lookup: {e}"
-            ))
-        })?;
-        for state in states.into_iter().rev() {
-            if let Some(token_metadata) =
-                self.token_metadata_for_operation(&state.operation, token_id)
-            {
-                return crate::policy::strict_policy_commit_for_token(
-                    token_id,
-                    token_metadata.policy_anchor.as_deref(),
-                );
-            }
-        }
-
-        Err(DsmError::state(format!(
-            "Missing canonical policy anchor for token {token_id}"
-        )))
-    }
-
     pub async fn local_genesis_hash(&self) -> Result<Vec<u8>, DsmError> {
         // Return the genesis hash `G` from the genesis_records table.
         // This MUST match the genesis hash that contacts store during pairing,

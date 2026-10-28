@@ -201,7 +201,6 @@ pub struct CreateTokenParams {
 
 pub struct TokenSDK {
     core_sdk: Arc<CoreSDK>,
-    token_metadata: Arc<RwLock<HashMap<String, TokenMetadata>>>,
     balances: Arc<RwLock<HashMap<DevId, HashMap<String, Balance>>>>,
 }
 
@@ -224,51 +223,6 @@ impl TokenSDK {
                 message: "Converted operation".to_string(),
             },
         }
-    }
-
-    /// Resolve a token identity from the durable registry, accepting either the
-    /// canonical token id or a registered ticker.
-    ///
-    /// The registry is authoritative for the persisted identity mapping —
-    /// token_id, policy_commit, ticker, decimals, metadata. (Canonical
-    /// DeviceState remains authoritative for balances and transitions; this
-    /// answers "which asset", never "how much".)
-    ///
-    /// The live path resolved from the BCR archive instead, and on hardware a
-    /// send of a token the device had just created failed with
-    /// "Token metadata for RIGB not found in archived chain states". Two
-    /// reasons, either sufficient: the registry probe only ever looked up by
-    /// token id while the UI supplies a TICKER, and the archive matcher knew
-    /// `Operation::Create` but not `Operation::CreateToken`, which is what
-    /// creation actually emits now. So the archive could not match, and the
-    /// registry was never asked the question it could answer.
-    ///
-    /// Archive scanning is also the wrong instrument here. `get_bcr_chain_states`
-    /// SKIPS rows it cannot decode, so damaged history degrades into "token not
-    /// found" — a lookup miss that reads like the token never existed. And an
-    /// ADOPTED token has no creator-side `CreateToken` in this device's archive
-    /// at all, so no amount of scanning would ever find it. Reconstructing the
-    /// registry from the chain is a legitimate but SEPARATE recovery operation
-    /// that must fail loudly on undecodable rows; it is not a fallback for a
-    /// send.
-    fn resolve_registered_token(
-        &self,
-        identifier: &str,
-    ) -> Result<crate::storage::client_db::token_registry::TokenRegistryRow, DsmError> {
-        let id = identifier.trim();
-        if id.is_empty() {
-            return Err(DsmError::state("token identifier is empty"));
-        }
-        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token(id) {
-            return Ok(row);
-        }
-        if let Ok(Some(row)) = crate::storage::client_db::token_registry::get_token_by_ticker(id) {
-            return Ok(row);
-        }
-        Err(DsmError::state(format!(
-            "{id} is not a registered token on this device — create it, or add it by its CPTA \
-             anchor before using it"
-        )))
     }
 
     /// Locate the operation that registered metadata for `token_id` by
@@ -326,37 +280,6 @@ impl TokenSDK {
         }
     }
 
-    pub(crate) fn resolve_policy_commit_strict(
-        &self,
-        token_id: &str,
-    ) -> Result<[u8; 32], DsmError> {
-        if let Some(commit) = dsm::core::token::builtin_policy_commit_for_token(token_id) {
-            return Ok(commit);
-        }
-
-        {
-            let metadata = self.token_metadata.read();
-            if let Some(token_metadata) = metadata.get(token_id) {
-                return crate::policy::strict_policy_commit_for_token(
-                    token_id,
-                    token_metadata.policy_anchor.as_deref(),
-                );
-            }
-        }
-
-        // Durable registry. The in-memory metadata map is dropped on process
-        // exit, so without this a token created before a restart could not be
-        // resolved at all — which fails closed in the send path and in
-        // `dlv.create`, making the token unusable rather than merely invisible.
-        // Registry is authoritative for token identity, and accepts either the
-        // canonical id or a registered ticker — which is what the send form
-        // supplies. No archive scan on the live path: see
-        // resolve_registered_token for why that was both wrong and unusable
-        // for adopted tokens.
-        self.resolve_registered_token(token_id)
-            .map(|row| row.policy_commit)
-    }
-
     fn sync_projection_from_state(
         &self,
         device_id: &[u8; 32],
@@ -412,7 +335,7 @@ impl TokenSDK {
         token_id: &str,
     ) -> Result<Option<Balance>, DsmError> {
         let state = self.core_sdk.get_current_state()?;
-        let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+        let policy_commit = crate::policy::resolve_policy_commit_strict(token_id.as_bytes())?;
         let canonical = dsm::core::token::derive_canonical_balance_key(
             &policy_commit,
             &state.device_info.public_key,
@@ -498,17 +421,12 @@ impl TokenSDK {
         // the canonical key.
         dsm::core::token::register_policy_commit_ticker(policy_commit, &metadata.symbol);
 
-        self.token_metadata
-            .write()
-            .insert(metadata.token_id.clone(), metadata.clone());
-
         Ok(metadata)
     }
 
     pub fn new(core_sdk: Arc<CoreSDK>) -> Self {
         Self {
             core_sdk,
-            token_metadata: Arc::new(RwLock::new(HashMap::new())),
             balances: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -558,7 +476,8 @@ impl TokenSDK {
             } => {
                 let sender = self.core_sdk.get_current_state()?.device_info.device_id;
 
-                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                let policy_commit =
+                    crate::policy::resolve_policy_commit_strict(token_id.as_bytes())?;
                 let terms = dsm::types::operations::TransferTerms::new(
                     token_id.as_bytes().to_vec(),
                     Vec::new(),
@@ -585,7 +504,7 @@ impl TokenSDK {
                 // Route via relationship-aware path (§2.2)
                 let rel_key =
                     dsm::core::bilateral_transaction_manager::compute_smt_key(&sender, recipient);
-                let pc = self.resolve_policy_commit_strict(token_id)?;
+                let pc = crate::policy::resolve_policy_commit_strict(token_id.as_bytes())?;
                 let deltas = [dsm::types::device_state::BalanceDelta {
                     policy_commit: pc,
                     direction: dsm::types::device_state::BalanceDirection::Debit,
@@ -637,7 +556,8 @@ impl TokenSDK {
                     ));
                 }
                 let owner_id = self.core_sdk.get_current_state()?.device_info.device_id;
-                let policy_commit = self.resolve_policy_commit_strict(token_id)?;
+                let policy_commit =
+                    crate::policy::resolve_policy_commit_strict(token_id.as_bytes())?;
 
                 // Whether the holder may burn is the policy's burn flag,
                 // enforced as its operation restriction (SoFi §54).
@@ -718,11 +638,6 @@ impl TokenSDK {
 
                 let core_op = Self::convert_to_core_operation(op);
                 let new_state = self.core_sdk.execute_transition(core_op)?;
-
-                {
-                    let mut metadata_cache = self.token_metadata.write();
-                    metadata_cache.insert(token_id.clone(), token_metadata);
-                }
 
                 self.project_balance_cache_from_state(creator_id, &new_state)?;
 
@@ -1031,13 +946,6 @@ impl TokenSDK {
     }
 
     async fn token_exists(&self, token_id: &str) -> Result<bool, DsmError> {
-        {
-            let metadata = self.token_metadata.read();
-            if metadata.contains_key(token_id) {
-                return Ok(true);
-            }
-        }
-
         Ok(self.find_token_metadata_operation(token_id)?.is_some())
     }
 
@@ -1051,7 +959,7 @@ impl TokenSDK {
         }
 
         let current_state = self.core_sdk.get_current_state()?;
-        let fee_policy_commit = self.resolve_policy_commit_strict("ERA")?;
+        let fee_policy_commit = crate::policy::resolve_policy_commit_strict(b"ERA")?;
         // No nonce: nothing spends one for this transfer, and its fresh terms
         // salt already makes each fee transfer's operation bytes its own.
         let fee_terms = dsm::types::operations::TransferTerms::new(

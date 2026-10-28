@@ -59,10 +59,7 @@ impl AppRouterImpl {
         }
 
         // Resolve the asset's CPTA policy_commit (strict — no silent fallback).
-        let asset = match self
-            .core_sdk
-            .resolve_policy_commit_strict(req.token_id.as_bytes())
-        {
+        let asset = match crate::policy::resolve_policy_commit_strict(req.token_id.as_bytes()) {
             Ok(pc) => pc,
             Err(e) => return err(format!("wallet.{verb}: policy_commit resolve failed: {e}")),
         };

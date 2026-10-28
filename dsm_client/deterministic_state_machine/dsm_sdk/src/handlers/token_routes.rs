@@ -1610,9 +1610,7 @@ impl AppRouterImpl {
 
     /// Resolve a token to its committed policy commit, failing closed.
     fn resolve_token_for_value_op(&self, token_id: &str) -> Result<[u8; 32], String> {
-        self.wallet
-            .token_sdk
-            .resolve_policy_commit_strict(token_id)
+        crate::policy::resolve_policy_commit_strict(token_id.as_bytes())
             .map_err(|e| format!("unknown token {token_id}: {e}"))
     }
 

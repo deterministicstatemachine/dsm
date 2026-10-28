@@ -93,6 +93,12 @@ async fn an_unaffordable_creation_moves_nothing_and_registers_nothing() {
     assert!(token_registry::get_token_by_ticker("POOR")
         .expect("registry")
         .is_none());
+    let unresolved = crate::policy::resolve_policy_commit_strict(b"POOR")
+        .expect_err("a token whose creation was refused names no policy here");
+    assert!(
+        matches!(unresolved, dsm::types::error::DsmError::NotFound { .. }),
+        "a refused creation leaves its ticker not installed: {unresolved}"
+    );
 }
 
 async fn fee_schedule(router: &AppRouterImpl) -> generated::TokenFeeScheduleResponse {

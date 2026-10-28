@@ -79,11 +79,6 @@ fn parse_transfer(
     }))
 }
 
-fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], String> {
-    crate::policy::strict_policy_commit_for_token(token_id, None)
-        .map_err(|e| format!("resolve policy commit failed for {token_id}: {e}"))
-}
-
 /// A transfer's settlement inputs, resolved before the step's advance.
 #[derive(Debug, Clone)]
 struct SettledTransfer {
@@ -133,7 +128,10 @@ impl StepSettlement {
                 if t.token_id.is_empty() {
                     return Err("bilateral settle: the transfer names no token".to_string());
                 }
-                let policy_commit = resolve_policy_commit(&t.token_id)?;
+                let policy_commit = crate::policy::resolve_policy_commit_strict(
+                    t.token_id.as_bytes(),
+                )
+                .map_err(|e| format!("resolve policy commit failed for {}: {e}", t.token_id))?;
                 let locked = crate::storage::client_db::get_locked_balance(
                     &encode_base32_crockford(&local_device_id),
                     &t.token_id,

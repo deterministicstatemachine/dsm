@@ -92,15 +92,15 @@ fn adopted_token(result: &AppResult) -> crate::generated::TokenCreateResponse {
 #[serial]
 async fn an_adopted_token_resolves_on_the_receiving_device() {
     let (p, anchor) = created_on_a_adopted_on_b("RIGB").await;
-    let core = &p.b.router().core_sdk;
+    p.b.enter();
     assert_eq!(
-        core.resolve_policy_commit_strict(b"RIGB")
+        crate::policy::resolve_policy_commit_strict(b"RIGB")
             .expect("an adopted token resolves on the receiving device"),
         anchor
     );
     let token_id = derive_token_id(&anchor, "RIGB");
     assert_eq!(
-        core.resolve_policy_commit_strict(token_id.as_bytes())
+        crate::policy::resolve_policy_commit_strict(token_id.as_bytes())
             .expect("resolve by token id"),
         anchor
     );
@@ -207,12 +207,12 @@ async fn a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve(
             .expect("damage the stored policy");
         assert_eq!(damaged, 1, "B held the adopted policy");
     }
+    p.b.enter();
+    let refused = crate::policy::resolve_policy_commit_strict(b"LIAR")
+        .expect_err("a row that no longer carries the real policy must not resolve");
     assert!(
-        p.b.router()
-            .core_sdk
-            .resolve_policy_commit_strict(b"LIAR")
-            .is_err(),
-        "a row that no longer carries the real policy must not resolve"
+        matches!(refused, dsm::types::error::DsmError::Storage { .. }),
+        "bytes that do not re-hash are a storage error, not an uninstalled token: {refused}"
     );
 }
 
@@ -221,14 +221,17 @@ async fn a_policy_whose_stored_bytes_do_not_hash_to_its_commit_does_not_resolve(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn builtins_resolve_and_an_unknown_token_fails_closed() {
-    let d = Device::start(0xA1).await;
+    let _device = Device::start(0xA1).await;
     assert_eq!(
-        d.core()
-            .resolve_policy_commit_strict(b"ERA")
-            .expect("ERA is builtin"),
+        crate::policy::resolve_policy_commit_strict(b"ERA").expect("ERA is builtin"),
         dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA")
     );
-    assert!(d.core().resolve_policy_commit_strict(b"NEVERSEEN").is_err());
+    let unknown = crate::policy::resolve_policy_commit_strict(b"NEVERSEEN")
+        .expect_err("an unknown token fails closed");
+    assert!(
+        matches!(unknown, dsm::types::error::DsmError::NotFound { .. }),
+        "a token with no registry row is not installed, not a storage error: {unknown}"
+    );
 }
 
 /// A protocol asset is held by every device by construction and is never
@@ -347,7 +350,7 @@ async fn an_adopted_token_survives_a_restart() {
     let before = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
         .expect("adopted");
-    let restarted = economic_fixtures::restart_router(&p.fleet);
+    let _restarted = economic_fixtures::restart_router(&p.fleet);
     let after = token_registry::get_token_by_ticker("PERSIST")
         .expect("registry")
         .expect("still adopted after restart");
@@ -355,9 +358,7 @@ async fn an_adopted_token_survives_a_restart() {
     assert_eq!(before.policy_commit, after.policy_commit);
     assert_eq!(before.decimals, after.decimals);
     assert_eq!(
-        restarted
-            .core_sdk
-            .resolve_policy_commit_strict(b"PERSIST")
+        crate::policy::resolve_policy_commit_strict(b"PERSIST")
             .expect("the restarted device resolves it"),
         anchor
     );
