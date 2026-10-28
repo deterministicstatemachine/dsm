@@ -628,7 +628,12 @@ async fn a_grant_payment_pays_in_the_coin_it_names_never_the_wallets_era() {
 
 /// A wallet's answer is never evidence. An answer saying "paid" with no
 /// transfer behind it grants nothing, and a holdings proof the wallet forged
-/// proves no balance.
+/// proves no balance. The wallet's honest proof proves exactly what it holds,
+/// and only until it moves on. Core recomputes the holder's root from every
+/// path (`economic::holdings::proven_balances`).
+///
+/// MUTATION CONTROL: `proven_balances` without its root comparison turns this
+/// red: the forged 21 WILD are proven.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_wallets_answer_alone_establishes_nothing() {
@@ -732,6 +737,22 @@ async fn a_wallets_answer_alone_establishes_nothing() {
     })
     .expect("the wallet signs");
     reply(&invoke(&p.a, "connect.app.respond", args_raw(answered)).await);
+    let current = status(&p.a, &session, stale).await;
+    assert_eq!(
+        fact(&current),
+        generated::ConnectFact::Holdings,
+        "{}",
+        current.fact_detail
+    );
+    assert_eq!(
+        current
+            .holdings
+            .iter()
+            .map(|h| (h.policy_commit.clone(), h.amount))
+            .collect::<Vec<_>>(),
+        vec![(wild.to_vec(), 20)],
+        "the honest proof proves what the wallet holds"
+    );
     let spent = p.b.send_token(&p.a, "WILD", 5).await;
     assert!(spent.success, "{:?}", spent.error_message);
     let moved_on = status(&p.a, &session, stale).await;
