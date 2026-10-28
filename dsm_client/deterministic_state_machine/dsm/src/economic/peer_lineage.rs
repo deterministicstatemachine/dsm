@@ -317,21 +317,22 @@ pub struct PeerOfflineAccount {
 }
 
 impl PeerOfflineAccount {
-    /// The account `boundary` left, validated in the step at `position`.
+    /// The account `boundary` left, validated in the step at `position`;
+    /// `None` for a settlement, which moves no offline account.
     fn validated(
         genesis: [u8; 32],
         device_id: [u8; 32],
         position: u64,
         boundary: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             genesis,
             device_id,
             economic_position: position,
             bundle: boundary.bundle(),
-            account_root: boundary.post_account_root(),
+            account_root: boundary.post_account_root()?,
             funding_chain: boundary.operation_id(),
-        }
+        })
     }
 
     /// An offline account this device recorded, read back from its own store.
@@ -398,6 +399,100 @@ pub trait PeerFrontiers {
         device_id: &[u8; 32],
         position: u64,
     ) -> Result<Option<PeerFrontier>, PeerLineageFailure>;
+
+    /// The offline account under `bundle` of `(genesis, device_id)` as the
+    /// latest boundary this receiver recorded strictly below `position` left
+    /// it, or `None` when it recorded none there.
+    fn offline_account_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        bundle: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure>;
+}
+
+/// An offline boundary continues the account its previous boundary left
+/// (the owner's funding ancestry): the account's first boundary starts from
+/// the account opened empty, when this receiver holds no earlier boundary of
+/// it; every later one from the account the previous boundary left, as this
+/// receiver recorded it. A boundary after the first whose previous boundary
+/// this receiver never recorded leaves the step not established.
+pub fn continues_the_account(
+    since: crate::economic::offline_boundary::BoundarySince,
+    previous: Option<&PeerOfflineAccount>,
+) -> Result<(), PeerLineageFailure> {
+    use crate::economic::offline_boundary::BoundarySince;
+    match (since, previous) {
+        (BoundarySince::Opened { .. }, None) => Ok(()),
+        (BoundarySince::Previous { account_root }, Some(previous))
+            if account_root == previous.account_root =>
+        {
+            Ok(())
+        }
+        (BoundarySince::Previous { .. }, None) => Err(incomplete(
+            "an offline boundary after the account's first, whose previous boundary this \
+             receiver never recorded",
+        )),
+        (BoundarySince::Opened { .. }, Some(_)) | (BoundarySince::Previous { .. }, Some(_)) => {
+            Err(invalid(
+                "an offline boundary that does not continue the account its previous boundary \
+                 left",
+            ))
+        }
+    }
+}
+
+/// A payment a peer's offline boundary exposed online: one spend of the
+/// chain the boundary carried, verified hop by hop from the account the
+/// previous boundary left, at the economic position of the step that admitted
+/// the boundary. Built only in a walk, from a step that passed whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerOfflineExposure {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    bundle: [u8; 32],
+    payment: crate::types::offline_chain::ChainPayment,
+}
+
+impl PeerOfflineExposure {
+    /// An exposure this device recorded, read back from its own store.
+    ///
+    /// **Only the receiver's store may call this**, with exactly the fields of
+    /// an exposure this module produced and the receiver recorded.
+    pub fn rehydrate_recorded(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        bundle: [u8; 32],
+        payment: crate::types::offline_chain::ChainPayment,
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            bundle,
+            payment,
+        }
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+    /// The position of the step that admitted the boundary exposing it.
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+    pub fn bundle(&self) -> &[u8; 32] {
+        &self.bundle
+    }
+    pub fn payment(&self) -> &crate::types::offline_chain::ChainPayment {
+        &self.payment
+    }
 }
 
 /// Derives the root a conditional SoFi position selected, from SoFi's public
@@ -446,6 +541,7 @@ pub struct Checked<T> {
     cost: StepCost,
     reached: Vec<PeerFrontier>,
     offline_accounts: Vec<PeerOfflineAccount>,
+    offline_exposures: Vec<PeerOfflineExposure>,
 }
 
 impl<T> Checked<T> {
@@ -468,6 +564,12 @@ impl<T> Checked<T> {
     /// come only from a walk that passed, each from a step that passed whole.
     pub fn offline_accounts(&self) -> &[PeerOfflineAccount] {
         &self.offline_accounts
+    }
+
+    /// Every payment an offline boundary this walk validated exposed, in
+    /// order.
+    pub fn offline_exposures(&self) -> &[PeerOfflineExposure] {
+        &self.offline_exposures
     }
 
     pub fn into_answer(self) -> T {
@@ -845,6 +947,8 @@ struct Verifier<'a> {
     /// Every offline account a step this walk validated left: each boundary
     /// in a step that passed.
     offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
+    /// Every payment those boundaries exposed.
+    offline_exposures: std::cell::RefCell<Vec<PeerOfflineExposure>>,
 }
 
 impl<'a> Verifier<'a> {
@@ -867,6 +971,7 @@ impl<'a> Verifier<'a> {
             }),
             established: std::cell::RefCell::new(Vec::new()),
             offline_accounts: std::cell::RefCell::new(Vec::new()),
+            offline_exposures: std::cell::RefCell::new(Vec::new()),
         })
     }
 }
@@ -885,6 +990,7 @@ impl Verifier<'_> {
             cost,
             reached,
             offline_accounts: self.offline_accounts.into_inner(),
+            offline_exposures: self.offline_exposures.into_inner(),
         }
     }
 
@@ -1057,6 +1163,9 @@ impl Verifier<'_> {
         )?;
         let witness = crate::economic::decode::decode_transition_witness(&witness_bytes)
             .map_err(|e| invalid(format!("witness at {position}: {e}")))?;
+        // The payments an offline boundary at this step exposes, recorded once
+        // the step passes whole.
+        let mut exposed: Vec<crate::types::offline_chain::ChainPayment> = Vec::new();
         let (accepted, substrate) = match &manifest.substrate {
             AdmissionSubstrate::DsmSuccessor {
                 evidence_addr: successor_addr,
@@ -1112,12 +1221,55 @@ impl Verifier<'_> {
                 let body_bytes = self
                     .fetcher
                     .immutable(TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE, evidence_addr)?;
-                let verified = crate::economic::offline_boundary::OfflineBoundaryBody::verify(
-                    &body_bytes,
-                    genesis,
-                    device_id,
-                )
-                .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                use crate::economic::offline_boundary::{offline_body_kind, OfflineBodyKind};
+                let verified = match offline_body_kind(&body_bytes)
+                    .map_err(|e| invalid(format!("offline body at {position}: {e}")))?
+                {
+                    // A settlement of value received offline: funded by the
+                    // payer's spend the payer's online history exposed.
+                    OfflineBodyKind::Settlement => self
+                        .settlement(genesis, device_id, &body_bytes)
+                        .map_err(|e| at_position(position, e))?,
+                    OfflineBodyKind::Boundary => {
+                        let (verified, payments) =
+                            crate::economic::offline_boundary::OfflineBoundaryBody::verify(
+                                &body_bytes,
+                                genesis,
+                                device_id,
+                                &facts.proven_ak,
+                            )
+                            .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                        let previous = match self
+                            .offline_accounts
+                            .borrow()
+                            .iter()
+                            .rev()
+                            .find(|a| {
+                                a.genesis == *genesis
+                                    && a.device_id == *device_id
+                                    && a.bundle == verified.bundle()
+                            })
+                            .cloned()
+                        {
+                            Some(walked) => Some(walked),
+                            None => self.frontiers.offline_account_below(
+                                genesis,
+                                device_id,
+                                &verified.bundle(),
+                                position,
+                            )?,
+                        };
+                        let since = verified.since().ok_or_else(|| {
+                            invalid(format!(
+                                "offline boundary at {position}: it moves no account"
+                            ))
+                        })?;
+                        continues_the_account(since, previous.as_ref())
+                            .map_err(|e| at_position(position, e))?;
+                        exposed = payments;
+                        verified
+                    }
+                };
                 (
                     AcceptedSubstrate::from_verified_offline_boundary(verified, *evidence_addr),
                     PeerSubstrate::OfflineBoundary(verified),
@@ -1149,9 +1301,18 @@ impl Verifier<'_> {
         if let PeerSubstrate::OfflineBoundary(boundary) = &substrate {
             self.offline_accounts
                 .borrow_mut()
-                .push(PeerOfflineAccount::validated(
+                .extend(PeerOfflineAccount::validated(
                     *genesis, *device_id, position, boundary,
                 ));
+            self.offline_exposures
+                .borrow_mut()
+                .extend(exposed.iter().map(|payment| PeerOfflineExposure {
+                    genesis: *genesis,
+                    device_id: *device_id,
+                    economic_position: position,
+                    bundle: boundary.bundle(),
+                    payment: *payment,
+                }));
         }
         Ok(ValidatedPeerTransition::single_root_from_walk(
             *genesis,
@@ -1163,6 +1324,45 @@ impl Verifier<'_> {
             manifest_addr,
             advanced.claim,
         ))
+    }
+
+    /// A settlement of value received offline, verified: the payer's lineage
+    /// validated, from this verifier's frontier for it, through the boundary
+    /// that exposed the spend — which records what that boundary exposed in
+    /// this walk — and the settlement held to exactly that exposed payment, to
+    /// this device.
+    fn settlement(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        body_bytes: &[u8],
+    ) -> Result<crate::economic::offline_boundary::VerifiedOfflineBoundary, PeerLineageFailure>
+    {
+        use crate::economic::offline_boundary::OfflineSettlementBody;
+        let body = OfflineSettlementBody::decode(body_bytes)
+            .map_err(|e| invalid(format!("an offline settlement body: {e}")))?;
+        if body.exposed_at == 0 {
+            return Err(invalid(
+                "a settlement names the payer's activation root, where nothing is exposed",
+            ));
+        }
+        self.segment(&body.payer_genesis, &body.payer_device, body.exposed_at)?;
+        let exposure = self
+            .offline_exposures
+            .borrow()
+            .iter()
+            .find(|e| {
+                e.genesis == body.payer_genesis
+                    && e.device_id == body.payer_device
+                    && e.economic_position == body.exposed_at
+                    && e.payment.release_message == body.release_message
+            })
+            .copied()
+            .ok_or_else(|| {
+                invalid("the payer's step at the settlement's position exposes no such payment")
+            })?;
+        OfflineSettlementBody::verify(body_bytes, genesis, device_id, &exposure)
+            .map_err(|e| invalid(format!("an offline settlement: {e}")))
     }
 
     /// Spend one position of the walk's budget.
@@ -1755,6 +1955,76 @@ mod tests {
         ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
             Ok(Some(self.0.clone()))
         }
+
+        /// These tests walk no offline boundary: the receiver recorded none.
+        fn offline_account_below(
+            &self,
+            genesis: &[u8; 32],
+            device_id: &[u8; 32],
+            bundle: &[u8; 32],
+            position: u64,
+        ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure> {
+            Err(PeerLineageFailure::Incomplete(format!(
+                "no offline account recorded in this test: {genesis:?} {device_id:?} {bundle:?} \
+                 {position}"
+            )))
+        }
+    }
+
+    /// The owner's funding ancestry, as a walker holds a peer's offline
+    /// account to it: a first boundary only where this receiver recorded none
+    /// before; every later one from exactly the account the previous one left.
+    /// A later boundary without the record of the previous one is not
+    /// established; one from another account is invalid.
+    /// MUTATION CONTROL: taking a boundary from an account other than the one
+    /// recorded turns this red.
+    #[test]
+    fn an_offline_boundary_continues_the_account_its_previous_boundary_left() {
+        use crate::economic::offline_boundary::BoundarySince;
+        let previous = PeerOfflineAccount::rehydrate_recorded(
+            [0x01; 32], [0x02; 32], 3, [0x03; 32], [0x04; 32], [0x05; 32],
+        );
+        continues_the_account(
+            BoundarySince::Opened {
+                frontier: [0x06; 32],
+            },
+            None,
+        )
+        .expect("an account's first boundary, none recorded before it");
+        continues_the_account(
+            BoundarySince::Previous {
+                account_root: [0x04; 32],
+            },
+            Some(&previous),
+        )
+        .expect("a later boundary from the account the previous one left");
+        assert!(matches!(
+            continues_the_account(
+                BoundarySince::Previous {
+                    account_root: [0x07; 32]
+                },
+                Some(&previous)
+            ),
+            Err(PeerLineageFailure::Invalid(_))
+        ));
+        assert!(matches!(
+            continues_the_account(
+                BoundarySince::Opened {
+                    frontier: [0x06; 32]
+                },
+                Some(&previous)
+            ),
+            Err(PeerLineageFailure::Invalid(_))
+        ));
+        assert!(matches!(
+            continues_the_account(
+                BoundarySince::Previous {
+                    account_root: [0x04; 32]
+                },
+                None
+            ),
+            Err(PeerLineageFailure::Incomplete(_))
+        ));
     }
 
     /// A receiver that has recorded nothing of this peer.
@@ -1767,6 +2037,16 @@ mod tests {
             _device_id: &[u8; 32],
             _position: u64,
         ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
+            Ok(None)
+        }
+
+        fn offline_account_below(
+            &self,
+            _genesis: &[u8; 32],
+            _device_id: &[u8; 32],
+            _bundle: &[u8; 32],
+            _position: u64,
+        ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure> {
             Ok(None)
         }
     }

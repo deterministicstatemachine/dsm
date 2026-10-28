@@ -294,6 +294,7 @@ fn record_offline_account_in_tx(
 pub fn record_validated(
     frontiers: &[dsm::economic::peer_lineage::PeerFrontier],
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
+    offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
@@ -306,8 +307,175 @@ pub fn record_validated(
     for account in offline_accounts {
         record_offline_account_in_tx(&tx, account)?;
     }
+    for exposure in offline_exposures {
+        record_offline_exposure_in_tx(&tx, exposure)?;
+    }
     tx.commit()?;
     Ok(())
+}
+
+fn record_offline_exposure_in_tx(
+    tx: &Transaction<'_>,
+    exposure: &dsm::economic::peer_lineage::PeerOfflineExposure,
+) -> Result<()> {
+    let payment = exposure.payment();
+    tx.execute(
+        "INSERT OR IGNORE INTO peer_offline_exposure(
+             release_message, peer_genesis, peer_devid, economic_position, bundle, recipient,
+             asset, amount, before_root, before_counter, before_frontier, after_root,
+             after_counter, after_frontier)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            payment.release_message.as_slice(),
+            exposure.genesis().as_slice(),
+            exposure.device_id().as_slice(),
+            i64::try_from(exposure.economic_position())
+                .map_err(|e| anyhow!("position overflow: {e}"))?,
+            exposure.bundle().as_slice(),
+            payment.recipient.as_slice(),
+            payment.asset.as_slice(),
+            i64::try_from(payment.amount).map_err(|e| anyhow!("amount overflow: {e}"))?,
+            payment.before.root.as_slice(),
+            i64::try_from(payment.before.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
+            payment.before.frontier.as_slice(),
+            payment.after.root.as_slice(),
+            i64::try_from(payment.after.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
+            payment.after.frontier.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The payment a peer's offline boundary exposed under the release that
+/// signed it, as this receiver's walk of the peer recorded it; `None` while it
+/// has recorded no boundary exposing it.
+pub fn offline_exposure(
+    release_message: &[u8; 32],
+) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineExposure>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    type Row = (
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+    );
+    let row: Option<Row> = conn
+        .query_row(
+            "SELECT peer_genesis, peer_devid, economic_position, bundle, recipient, asset, amount,
+                    before_root, before_counter, before_frontier, after_root, after_counter,
+                    after_frontier
+             FROM peer_offline_exposure WHERE release_message = ?1",
+            params![release_message.as_slice()],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|r| {
+        let unsigned =
+            |v: i64, what: &str| u64::try_from(v).map_err(|e| anyhow!("an exposure's {what}: {e}"));
+        Ok(
+            dsm::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
+                digest32(r.0, "exposure genesis")?,
+                digest32(r.1, "exposure device")?,
+                unsigned(r.2, "position")?,
+                digest32(r.3, "exposure bundle")?,
+                dsm::types::offline_chain::ChainPayment {
+                    recipient: digest32(r.4, "exposure recipient")?,
+                    asset: digest32(r.5, "exposure asset")?,
+                    amount: unsigned(r.6, "amount")?,
+                    release_message: *release_message,
+                    before: dsm::types::offline_chain::AccountPoint {
+                        root: digest32(r.7, "exposure before root")?,
+                        counter: unsigned(r.8, "before counter")?,
+                        frontier: digest32(r.9, "exposure before frontier")?,
+                    },
+                    after: dsm::types::offline_chain::AccountPoint {
+                        root: digest32(r.10, "exposure after root")?,
+                        counter: unsigned(r.11, "after counter")?,
+                        frontier: digest32(r.12, "exposure after frontier")?,
+                    },
+                },
+            ),
+        )
+    })
+    .transpose()
+}
+
+/// The peer's offline account under `bundle` as the latest boundary this
+/// receiver recorded strictly below `position` left it.
+pub fn offline_account_below(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    bundle: &[u8; 32],
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let below = i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT economic_position, account_root, funding_chain FROM peer_offline_account
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND bundle = ?3
+               AND economic_position < ?4
+             ORDER BY economic_position DESC LIMIT 1",
+            params![
+                peer_genesis.as_slice(),
+                peer_devid.as_slice(),
+                bundle.as_slice(),
+                below
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(position, root, chain)| {
+        Ok(
+            dsm::economic::peer_lineage::PeerOfflineAccount::rehydrate_recorded(
+                *peer_genesis,
+                *peer_devid,
+                u64::try_from(position)
+                    .map_err(|e| anyhow!("offline account position {position}: {e}"))?,
+                *bundle,
+                digest32(root, "offline account root")?,
+                digest32(chain, "offline account funding chain")?,
+            ),
+        )
+    })
+    .transpose()
 }
 
 /// The peer's offline account under `bundle` as this receiver last

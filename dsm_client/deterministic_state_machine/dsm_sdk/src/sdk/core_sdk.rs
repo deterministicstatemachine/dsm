@@ -732,6 +732,15 @@ impl CoreSDK {
                     )
                 },
             )?;
+            // The boundary's body carries every spend since the last boundary: they are
+            // exposed with it, and the next chain starts from the account it leaves.
+            crate::storage::client_db::offline_spends::expose_own_offline_spends_in_tx(&tx, bundle)
+                .map_err(|e| {
+                    DsmError::storage(
+                        format!("offline boundary: expose the spends it carries: {e}"),
+                        None::<std::io::Error>,
+                    )
+                })?;
             tx.commit().map_err(|e| {
                 DsmError::storage(
                     format!("offline boundary: commit: {e}"),
@@ -743,6 +752,81 @@ impl CoreSDK {
         drop(sm);
         Self::reproject_committed_head(&new_head);
         Ok((outcome, pending))
+    }
+
+    /// Take a settlement of value received offline (SA-91) as Core takes it:
+    /// the head credited by the payment `receipt` records
+    /// (`RealizedHead::settle_offline_receipt`), with its prepared admission, and
+    /// that head, the pending row, the frozen evidence and the receipt's settled
+    /// mark commit in ONE transaction. A head already fenced by another admission
+    /// takes no settlement.
+    pub(crate) fn admitted_settlement(
+        &self,
+        receipt: &crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        prepare: impl FnOnce() -> Result<
+            (
+                dsm::economic::admission::PendingEconomicAdmission,
+                dsm::economic::admission::AcceptedAdmissionCoords,
+                Vec<(String, Vec<u8>, &'static str)>,
+            ),
+            DsmError,
+        >,
+        storage_set_id: &[u8; 32],
+    ) -> Result<dsm::economic::admission::PendingEconomicAdmission, DsmError> {
+        let mut sm = self.state_machine.lock();
+        let head = sm.device_head().ok_or_else(|| {
+            DsmError::state_machine("offline settlement: DeviceState not initialized")
+        })?;
+        if let Some(pending) = head.pending_economic_admission() {
+            return Err(DsmError::invalid_operation(format!(
+                "offline settlement: the admission at position {} is still pending — finish it \
+                 first",
+                pending.economic_position
+            )));
+        }
+        let settled = head.settle_offline_receipt(&receipt.asset, receipt.amount)?;
+        let (prepared, coords, artifacts) = prepare()?;
+        let pending = prepared
+            .into_locally_accepted(coords)
+            .map_err(DsmError::invalid_operation)?;
+        let new_head = settled.with_pending_economic_admission(Some(pending.clone()));
+        let devid = new_head.devid();
+        let bound_root = new_head.root();
+        {
+            let storage = |what: &str, e: &dyn std::fmt::Display| {
+                DsmError::storage(
+                    format!("offline settlement: {what}: {e}"),
+                    None::<std::io::Error>,
+                )
+            };
+            let binding = crate::storage::client_db::get_connection()
+                .map_err(|e| storage("the store", &e))?;
+            let mut conn = binding
+                .lock()
+                .map_err(|e| storage("the database lock is poisoned", &e))?;
+            let tx = conn.transaction().map_err(|e| storage("tx", &e))?;
+            Self::make_admission_durable_in_tx(
+                &tx,
+                &devid,
+                &pending,
+                &artifacts,
+                storage_set_id,
+                &bound_root,
+            )?;
+            crate::storage::client_db::update_bcr_device_head_with_conn(&tx, &new_head)
+                .map_err(|e| storage("persist device head", &e))?;
+            crate::storage::client_db::offline_receipts::settle_offline_receipt_in_tx(
+                &tx,
+                &receipt.release_message,
+                pending.economic_position,
+            )
+            .map_err(|e| storage("the receipt settled", &e))?;
+            tx.commit().map_err(|e| storage("commit", &e))?;
+        }
+        sm.set_device_head(new_head.clone());
+        drop(sm);
+        Self::reproject_committed_head(&new_head);
+        Ok(pending)
     }
 
     fn dual_write_advance_outcome_with_extra(
@@ -1817,6 +1901,15 @@ impl CoreSDK {
     /// is keyed by the appliance's bundle, which only the appliance states, so
     /// a device that has not attached one cannot say what it holds offline:
     /// that is unknown, not zero.
+    /// The pin of the anchor attached in this process, checked to be
+    /// provisioned for this device; `None` while none is attached.
+    pub(crate) fn attached_anchor_pin(&self) -> Option<crate::anchor::AnchorPin> {
+        self.anchor_appliance
+            .lock()
+            .as_ref()
+            .map(|attached| attached.pin.clone())
+    }
+
     pub fn offline_allocation_of(&self, asset: &[u8; 32]) -> Option<u64> {
         let bundle = self
             .anchor_appliance

@@ -1232,7 +1232,32 @@ struct AdmittedBoundary {
     witness: EconomicTransitionWitness,
 }
 
-const BUNDLE: [u8; 32] = [0xB0; 32];
+/// The anchor of the trader's offline account: pin material whose bundle
+/// recomputes for the trader's online key and device id.
+fn boundary_anchor() -> dsm::economic::offline_boundary::BoundaryAnchor {
+    dsm::economic::offline_boundary::BoundaryAnchor {
+        anchor_id: [0xB1; 32],
+        pk_chip: vec![0xB2; 32],
+        pk_host: vec![0xB3; 64],
+        enrolled_counter: 16,
+        birth_commitment: [0xB4; 32],
+    }
+}
+
+/// The bundle `B` of [`boundary_anchor`] provisioned for the trader.
+fn bundle() -> [u8; 32] {
+    let a = boundary_anchor();
+    anchor_core::enrollment::anchor_bundle(
+        &trader().0,
+        &a.anchor_id,
+        &a.pk_chip,
+        &a.pk_host,
+        16,
+        dev(),
+        &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+        &a.birth_commitment,
+    )
+}
 
 fn boundary(
     head: &dsm::types::device_state::RealizedHead,
@@ -1246,13 +1271,39 @@ fn boundary(
     use dsm::economic::offline_boundary::{offline_boundary_evidence_addr, OfflineBoundaryBody};
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let outcome = head
-        .cross_offline_boundary(&BUNDLE, kind, &era, amount)
+        .cross_offline_boundary(&bundle(), kind, &era, amount)
         .expect("the head takes the boundary");
-    let bytes = OfflineBoundaryBody::of(&outcome, kind, BUNDLE, era, amount)
-        .expect("body")
-        .encode()
-        .expect("encode");
-    let verified = OfflineBoundaryBody::verify(&bytes, &G, dev()).expect("the body verifies");
+    // No spends here: the boundary starts from the account as it stands,
+    // which is the account its previous boundary left, or the one opened.
+    let account = head
+        .offline_account(&bundle())
+        .expect("the account is open");
+    let since = match account.funding_chain() {
+        None => dsm::economic::offline_boundary::BoundarySince::Opened {
+            frontier: account.frontier(),
+        },
+        Some(_) => dsm::economic::offline_boundary::BoundarySince::Previous {
+            account_root: account.root(),
+        },
+    };
+    let bytes = OfflineBoundaryBody::of(
+        &outcome,
+        kind,
+        bundle(),
+        era,
+        amount,
+        dsm::economic::offline_boundary::BoundaryAncestry {
+            anchor: boundary_anchor(),
+            since,
+            chain: Vec::new(),
+        },
+    )
+    .expect("body")
+    .encode()
+    .expect("encode");
+    let (verified, exposed) =
+        OfflineBoundaryBody::verify(&bytes, &G, dev(), &trader().0).expect("the body verifies");
+    assert!(exposed.is_empty(), "no spends, no exposure");
     let built = dsm::economic::write_set::build_boundary_write_set(
         &dsm::economic::write_set::BoundaryEffect {
             kind,
@@ -1346,7 +1397,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     );
     assert_eq!(tree.root(), at_one.economic_root());
     let head = head_of(G, &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
-        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
 
     // ── position 2: load 300 ──
@@ -1366,7 +1417,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     assert_eq!(
         load.outcome
             .new_device_state
-            .offline_allocation(&BUNDLE, &era),
+            .offline_allocation(&bundle(), &era),
         Some(300)
     );
 
@@ -1495,7 +1546,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let fx = faucet_fixture(1);
     let online = std::collections::BTreeMap::from([(era, 500)]);
     let head = head_of(G, &fx, &[(era, 500)], &[], None)
-        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
     let mut tree = EconomicSmt::new();
     let held = bal(era, 500);

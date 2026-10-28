@@ -37,6 +37,7 @@ fn kind_code(kind: &PendingAdmissionKind) -> i64 {
         PendingAdmissionKind::OfflineLoad { .. } => 1,
         PendingAdmissionKind::OfflineUnload { .. } => 2,
         PendingAdmissionKind::SofiFulfillment { .. } => 3,
+        PendingAdmissionKind::OfflineSettle { .. } => 4,
     }
 }
 
@@ -223,6 +224,19 @@ pub fn load_pending_admission_with_conn(
                 "fulfillment_id",
             )?;
             PendingAdmissionKind::SofiFulfillment { fulfillment_id }
+        }
+        4 => {
+            // A settlement without its asset cannot be finished: its credit
+            // names it. Refuse rather than guess.
+            let asset = digest32(
+                fenced.ok_or_else(|| {
+                    anyhow!("an offline settlement admission has no asset — cannot resume")
+                })?,
+                "settled asset",
+            )?;
+            PendingAdmissionKind::OfflineSettle {
+                asset_policy_commit: asset,
+            }
         }
         other => return Err(anyhow!("unknown pending admission kind {other}")),
     };

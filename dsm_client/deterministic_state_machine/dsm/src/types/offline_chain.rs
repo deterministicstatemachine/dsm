@@ -141,6 +141,21 @@ impl SpendHop {
         }
     }
 
+    /// The hop a wire form's canonical bytes state.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DsmError> {
+        Self::from_proto(
+            crate::types::proto::OfflineSpendHop::decode(bytes)
+                .map_err(|e| DsmError::invalid_operation(format!("an offline spend: {e}")))?,
+        )
+    }
+
+    /// The account root the spend states it started from. Taken on trust by
+    /// nobody: [`verify_spend_chain`] holds it to the account the chain stands
+    /// at.
+    pub fn starts_from(&self) -> [u8; 32] {
+        self.witness.pre_account_root
+    }
+
     /// The root-advance message `M` the anchor signed for this spend: what
     /// names it.
     pub fn release_message(&self) -> [u8; 32] {
@@ -793,7 +808,7 @@ mod tests {
         let (first, _, _) = payer.spend(B, 10);
         let (second, _, _) = payer.spend(B, 5);
         refused(
-            verify_spend_chain(&start, &payer.pin, &[second.clone()]),
+            verify_spend_chain(&start, &payer.pin, std::slice::from_ref(&second)),
             "does not start from the account the chain stands at",
         );
         refused(
@@ -816,7 +831,7 @@ mod tests {
         let mut foreign_keys = payer.pin.clone();
         foreign_keys.pk_chip = other.pin.pk_chip.clone();
         refused(
-            verify_spend_chain(&start, &foreign_keys, &[hop.clone()]),
+            verify_spend_chain(&start, &foreign_keys, std::slice::from_ref(&hop)),
             "the anchor did not sign this advance",
         );
         let mut forged = hop.clone();

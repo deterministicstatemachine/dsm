@@ -183,6 +183,11 @@ pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
 /// its preimage holds no root the boundary produces.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-id/offline-boundary/v1");
+/// Economic operation id of an offline settlement: `H(tag ‖ 0x00 ‖ G ‖ DevID
+/// ‖ G_payer ‖ DevID_payer ‖ M)`, the receiver's one settlement of the payer's
+/// spend the anchor signed as `M`.
+pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_SETTLEMENT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/economic-operation-id/offline-settlement/v1");
 /// Digest of an offline boundary body for economic binding:
 /// `operation_digest = H(tag ‖ 0x00 ‖ exact body bytes)`.
 pub const TAG_DSM_ECONOMIC_OPERATION_DIGEST_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =

@@ -4318,10 +4318,13 @@ impl BilateralBleHandler {
             ));
         }
 
-        // Derive receiver-side credit deltas from the session operation: the
-        // bearer value received, installed in the receiver's local balance
-        // representation (the sender side moved allocation, never online
-        // balance).
+        // What the step credits: nothing online. A bearer transfer's value is
+        // pending until it is reconciled online (SA-91): it is recorded below, in
+        // the step's own transaction, and settled by an admitted transition of its
+        // own once the sender's online history exposes the spend.
+        let mut pending_receipt: Option<
+            crate::storage::client_db::offline_receipts::PendingOfflineReceipt,
+        > = None;
         let receiver_deltas: Vec<dsm::types::device_state::BalanceDelta> = match &session.operation
         {
             Operation::Transfer {
@@ -4357,11 +4360,39 @@ impl BilateralBleHandler {
                         String::from_utf8_lossy(&terms.token_id)
                     )));
                 }
-                vec![dsm::types::device_state::BalanceDelta {
-                    policy_commit,
-                    direction: dsm::types::device_state::BalanceDirection::Credit,
-                    amount: amount.value(),
-                }]
+                let anchor = sender_bearer
+                    .as_ref()
+                    .map(|(anchor, ..)| anchor)
+                    .ok_or_else(|| {
+                        DsmError::invalid_operation(
+                        "receiver confirm: a transfer on this transport is offline-bearer, and \
+                         its sender's anchor was not established",
+                    )
+                    })?;
+                let release_message = anchor_core::proto::pb::OfflineRelease::decode(
+                    confirm_request.offline_release.as_slice(),
+                )
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!("receiver confirm: the release: {e}"))
+                })?
+                .to_release()
+                .map_err(|e| {
+                    DsmError::invalid_operation(format!("receiver confirm: the release: {e:?}"))
+                })?
+                .cert
+                .root_advance_message;
+                pending_receipt = Some(
+                    crate::storage::client_db::offline_receipts::PendingOfflineReceipt {
+                        release_message,
+                        payer_genesis: sender_genesis,
+                        payer_device: session.counterparty_device_id,
+                        bundle: anchor.bundle,
+                        asset: policy_commit,
+                        amount: amount.value(),
+                        commitment_hash,
+                    },
+                );
+                Vec::new()
             }
             _ => Vec::new(),
         };
@@ -4489,6 +4520,12 @@ impl BilateralBleHandler {
                     adopted.next_anchor_counter,
                 )
                 .map_err(|e| storage("the adopted anchor frontier", e))?;
+            }
+            if let Some(receipt) = &pending_receipt {
+                crate::storage::client_db::offline_receipts::record_pending_offline_receipt_in_tx(
+                    tx, receipt,
+                )
+                .map_err(|e| storage("the payment received offline, pending", e))?;
             }
             crate::sdk::economic_admission_flow::record_ble_ek_steps_in_tx(
                 tx,

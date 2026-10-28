@@ -387,6 +387,21 @@ impl PeerFrontiers for StoredFrontiers {
                 PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
             })
     }
+
+    fn offline_account_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        bundle: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::offline_account_below(
+            genesis, device_id, bundle, position,
+        )
+        .map_err(|e| {
+            PeerLineageFailure::Incomplete(format!("the offline account store is unreadable: {e}"))
+        })
+    }
 }
 
 /// What one verification of a peer cost, logged where it ran (DSM Amendment
@@ -420,6 +435,7 @@ fn record_established<T>(
     crate::storage::client_db::economic_lineage::record_validated(
         checked.reached(),
         checked.offline_accounts(),
+        checked.offline_exposures(),
     )
     .map_err(|e| {
         PeerLineageFailure::Incomplete(format!("recording what this walk validated: {e}"))

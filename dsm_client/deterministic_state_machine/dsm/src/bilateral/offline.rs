@@ -1760,7 +1760,7 @@ mod receive_rule_tests {
         accepted: Option<([u8; 32], u64)>,
     ) -> BearerOrigin<'a> {
         BearerOrigin {
-            recorded: recorded.clone(),
+            recorded: *recorded,
             anchor: payer.pin.clone(),
             chain,
             accepted,
@@ -1782,7 +1782,7 @@ mod receive_rule_tests {
             &second_receipt,
             &second_leaves,
             &payer.genesis,
-            &origin(&recorded, &payer, &[first.clone()], None),
+            &origin(&recorded, &payer, std::slice::from_ref(&first), None),
         )
         .expect("the second spend is taken with the chain");
         assert_eq!((start.counter, start.frontier), (1, second_leaves.frontier));
@@ -1819,7 +1819,7 @@ mod receive_rule_tests {
                 &receipt,
                 &leaves,
                 &payer.genesis,
-                &origin(&recorded, &payer, &[first.clone()], None),
+                &origin(&recorded, &payer, std::slice::from_ref(&first), None),
             ),
             "carried forward by the sender's chain of spends",
         );
@@ -1858,7 +1858,7 @@ mod receive_rule_tests {
             &second_receipt,
             &second_leaves,
             &payer.genesis,
-            &origin(&recorded, &payer, &[first.clone()], after_first),
+            &origin(&recorded, &payer, std::slice::from_ref(&first), after_first),
         )
         .expect("the next spend passes through the one accepted");
         let after_second = Some((second_leaves.next_frontier, second_leaves.counter + 1));

@@ -384,7 +384,8 @@ fn pending_fulfillment(core: &CoreSDK) -> Result<(PendingEconomicAdmission, D32)
         PendingAdmissionKind::SofiFulfillment { fulfillment_id } => Ok((pending, fulfillment_id)),
         PendingAdmissionKind::DsmBacked
         | PendingAdmissionKind::OfflineLoad { .. }
-        | PendingAdmissionKind::OfflineUnload { .. } => Err(refuse(format!(
+        | PendingAdmissionKind::OfflineUnload { .. }
+        | PendingAdmissionKind::OfflineSettle { .. } => Err(refuse(format!(
             "the pending admission at position {} is not a SoFi fulfillment",
             pending.economic_position
         ))),

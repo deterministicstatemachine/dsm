@@ -41,6 +41,7 @@ mod manifold_seeds;
 pub mod money_received;
 pub mod native_reserve;
 mod nonces;
+pub mod offline_receipts;
 pub mod offline_spends;
 mod online_outbox;
 pub mod own_directory_entry;
@@ -934,6 +935,40 @@ fn create_schema(conn: &Connection) -> Result<()> {
             account_root        BLOB NOT NULL,      -- 32B
             funding_chain       BLOB NOT NULL,      -- 32B
             PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
+        );
+
+        -- A payment a peer's offline boundary exposed online, as this
+        -- receiver's own walk of the peer verified it: one spend of the chain
+        -- the boundary carried, named by the release that signed it.
+        CREATE TABLE IF NOT EXISTS peer_offline_exposure(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            bundle              BLOB NOT NULL,      -- 32B
+            recipient           BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            before_root         BLOB NOT NULL,
+            before_counter      INTEGER NOT NULL,
+            before_frontier     BLOB NOT NULL,
+            after_root          BLOB NOT NULL,
+            after_counter       INTEGER NOT NULL,
+            after_frontier      BLOB NOT NULL
+        );
+
+        -- Value this device received offline, pending until it is settled
+        -- online (SA-91): neither online balance nor offline allocation. A
+        -- settlement admitted online marks it settled, once.
+        CREATE TABLE IF NOT EXISTS pending_offline_receipt(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            payer_genesis       BLOB NOT NULL,      -- 32B
+            payer_devid         BLOB NOT NULL,      -- 32B
+            bundle              BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            commitment_hash     BLOB NOT NULL,      -- 32B
+            settled_position    INTEGER
         );
 
         -- This device's own offline-bearer spends no boundary of its online
