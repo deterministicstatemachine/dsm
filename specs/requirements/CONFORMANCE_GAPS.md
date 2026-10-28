@@ -5051,12 +5051,12 @@ Each item below turns on one of four clauses:
 
 1. A1, the index: (a), u online and hash adjacency on a relationship chain.
 2. A2, perpetuals: (a), out of beta, with the five design decisions recorded.
-3. A3, the grant's total: (a), each kind's cap; A11's sentence reworded by the owner.
+3. A3, the grant's total: (a), each kind's cap; A11's sentence reworded by the owner. *Test half done 2026-10-27 (§6.115): a payment past a scope's total is not carried out; what remains is the reading.*
 4. A4, pair restrictions: (a), the default only in beta.
-5. A5, checks outside the constructor: (a), SDK preflight for early rejection with Core as the authority, as in question 9's ruling; rule 5 amended to match.
-6. A6, the SDK adapter: (b), setup-body construction and the leaf cache's root move into Core.
-7. A7, publishing F: (a), F's content object put only after Valid, before stage 6.
-8. A8, the staged tree store: (a), §34, §31 and §41.1 amended to the current mechanism, and the deletion ruling written down.
+5. A5, checks outside the constructor: (a), SDK preflight for early rejection with Core as the authority, as in question 9's ruling; rule 5 amended to match. *Test half done 2026-10-27 (§6.115): Core refuses each bound alone, at its edge, with a mutation control per bound; what remains is the reading.*
+6. A6, the SDK adapter: (b), setup-body construction and the leaf cache's root move into Core. *Applied 2026-10-27 (§6.111 and its two follow-ups).*
+7. A7, publishing F: (a), F's content object put only after Valid, before stage 6. *Applied 2026-10-27 (§6.113).*
+8. A8, the staged tree store: (a), §34, §31 and §41.1 amended to the current mechanism, and the deletion ruling written down. *Test half done (§6.111 follow-up): the leaf cache's root check and row binding (`tree_of_rows`, behind `installed_leaves` and `admitted_tree`) and the owner's vault tree (`vault_tree_at`) each have a named test that a mutation turns red; what remains is the text.*
 9. A9, the transfer nonce: (a), §39 and §43.1 amended to record the 2026-10-02 ruling.
 10. A10, raising supply: (a), out of beta, due when DJTE is scheduled.
 11. B, G3: confirm B1, B2, B6 and B7 out; for B3 and B4, (b), the registered-program amendment; B5's `iteration_budget` slot, keep or remove; B8's key inventory and B9's refinement checks, in beta or not; B10, not G3, and it follows §6.101 A4.
