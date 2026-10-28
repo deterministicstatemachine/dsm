@@ -4726,6 +4726,30 @@ All 14 of adversarial_bilateral's decides, property_tests' 2 and implementation_
   - Core is unchanged at this change. Its full run above (1,869/0 in 23 binaries) is of the same sources.
   - `make lint` (fmt and clippy, all targets, `-D warnings`) and the safety checks pass, and so do the conformance evidence check and the real-code guard against `origin/main`.
 
+**After the merge (`db012590`, directed by the main session, 2026-10-28).**
+- *The bearer-leaf check, settled by a run: it overlaps the release predicate.* The check is Core's comparison, in `verify_receipt_state` under `decide_confirm`, of a bearer receipt's offline account with the leaves the receiver derives from the release.
+  - *The forgery the run builds.* `dsm_sdk::bluetooth::offline_step_tests::a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_under_a_certificate_over_its_roots` builds the receipt only this check could catch. In A's second payment, the account advances to a frontier its release did not sign. The writes are folded again to the child root they now produce. A's own chip certifies exactly those roots. The release carries the state proofs the advance produced, and the confirm goes through B's handler. The fold holds, and so does the certificate's root binding.
+  - *What refuses it.* On the tree, Core refuses it at this check ("is not the one its release advances"). With the check dropped (one `DSM_MUTANT` build; control green), B still refuses it, before anything commits: "offline transfer rejected (recover online): Predicate(NextStateUncommitted)". That is the release predicate's proof of the successor account (Π_{i+1}), which does not verify under the certified root.
+  - *Why no such receipt can pass, whatever proofs it carries.* Four bindings together imply the leaf match, given the SMT's binding:
+    - `accept_offline_release` requires the certificate's device roots to be the receipt's parent and child roots.
+    - The predicate verifies Π_i and Π_{i+1} under those roots (`offline_account::verify_offline_state`). They prove the account leaf at the pinned bundle's key, and under that account root the counter and frontier leaves at the release's values (`u_i`, `h_i`; `u_i + 1`, `h_{i+1}`).
+    - The receipt's fold proves the same account leaf under the same roots: the witness's pre-account root before, and the root its witness folds to after.
+    - `verify_step` proves the witness's counter and frontier under that pre-account root.
+    So the witness's counter and both frontiers can differ from the release's only by a second value under one key. A Π proving the forged frontier instead fails the predicate's comparison with the release's frontier.
+  - *Overlapping, and it should stay.*
+    - Core is the authoritative enforcement boundary (owner, question 9), and Π is verified in the SDK (`bluetooth::anchor_accept`).
+    - The predicate's own `verify_transition` relies on this check: it compares the release-derived leaves with the release's certificate, which is the receipt's spend only because `decide_confirm` bound the receipt to those leaves.
+    - It refuses first, with the precise reason.
+    Not removed.
+- *No TLC trace is replayed into the code.* OfflineFinality and NonInterference printed "direct=PASS" from `replay_structural_trace`, which runs no code: it only checks that the trace's states name the model's variables. Both are now `TraceReplay::Literal`, and the implementation-replay layer is deleted: `replay_trace_into_implementation`, `TlaImplementationReplayResult`, the runner's `LiteralAndImplementation`, and the report's Direct column and lines. `TraceReplay` is `None` or `Literal`. `Literal`'s doc says what it checks per model: the transition rules for Tripwire and DSM.tla, and only the state shape for OfflineFinality and NonInterference. Both keep their linked implementation traces (`bilateral_full_offline_finality`, `bilateral_pair_non_interference`), which run code. `tla-check` now prints `literal=…` alone.
+- *Stale counts.* `tools/vertical_validation/src/main.rs`'s header said "Property-Based Tests — 7 invariants" and "Adversarial Bilateral — 6 attack scenarios". It now says 5 invariants, and names the one attack left and where the rest run. No other doc or record carries the old property, trace or attack counts; §6.45's are dated evidence under its superseded note.
+- *Counts at these follow-ups,* on the merged tree, each run on its own in `--release`.
+  - Core, full (`cargo test --release -p dsm --no-fail-fast`): 1,888/0 in 23 binaries.
+  - SDK, on a private Postgres server: `bluetooth::offline_step_tests` 56/0 (the forgery test included; it also passed alone after formatting), `bluetooth::bilateral_ble_handler` 14/0 and `bluetooth::anchor_accept` 7/0.
+  - `bilateral_reject_tests` 1/0 and `ble_smoke` 3/0 (the one `#[ignore]` predates this work).
+  - The harness: `tla-check` passes all 95 specs, every replayed model at `literal=PASS` and nothing printed as direct. `property-tests --iterations 5 --seed 42` passes 5 of 5, `implementation-traces` 13 of 13 and `adversarial` 1 of 1. The binary's tests are 26/0, of which `tla_runner` is 14.
+  - `make lint`, the safety checks, the conformance evidence check and the real-code guard against `origin/main` pass.
+
 **Decided in the owner's absence (2026-10-27), for confirmation.**
 1. *The load is the chip's announcement.* No separate chip-setup step: the bundle a load names binds the online key, device id, policy, anchor keys and `S_birth`; a receiver pins a first disclosure only when it recomputes that bundle, and takes a spend only from an account it recorded under it.
 2. *A payer carries its chain.* A receiver takes a payment that does not start exactly at its record when the confirm carries the chip-signed chain of the payer's unexposed spends from that record (SA-116), verified hop by hop, forward only of the last spend it accepted. (The alternative, a payment only from exactly the recorded state, would refuse every second offline payment.)
@@ -5180,7 +5204,7 @@ Each item below turns on one of four clauses:
 - *Why only partly.* Only the guarded model (`DSMGuardedTripwire.lean`, `DSM_Guarded*.tla`) is clause (i)'s model. The ruling's words do not reach the relationship-scoped, storage-cell, SoFi and recognition models. Beta runs on what those models describe (clause (iii)).
 - *Code today.*
   - `tools/vertical_validation` replayed TLC Tripwire traces into `decide_prepare` and `decide_confirm`, and DSM.tla traces into the implementation, until 2026-10-28. Both replays into the code are removed (§6.103); the Tripwire and DSM.tla models keep their TLC check and their literal replay. The DSM.tla replay had run `NetDeliver`, an online transfer in the model, through the offline confirm.
-  - Its runner registers `TraceReplay::None` for OfflineAnchorSingleAppliance, ReceiptWriteSet, NativeReserveRelease, RouteChain, SofiSuccessorCells (three configurations), SofiFulfillment (two) and DSM_bilateral_liveness. Tripwire and DSM.tla are `Literal`. OfflineFinality and NonInterference are `LiteralAndImplementation`, but their replay into the code checks only that the trace names the model's variables.
+  - Its runner registers `TraceReplay::None` for OfflineAnchorSingleAppliance, ReceiptWriteSet, NativeReserveRelease, RouteChain, SofiSuccessorCells (three configurations), SofiFulfillment (two) and DSM_bilateral_liveness. Tripwire, DSM.tla, OfflineFinality and NonInterference are `Literal`: a TLC trace is replayed against the model in Rust (for OfflineFinality and NonInterference only as a check that every state names the model's variables), and none into the code.
   - Outside its own sources, nothing runs `DSM_Guarded*`.
 - *Remains for beta.* Code-level refinement checks for the route-chain and storage-cell, SoFi and recognition models: either trace replay into the implementation, or a Rust-to-model correspondence with mutation controls.
 
