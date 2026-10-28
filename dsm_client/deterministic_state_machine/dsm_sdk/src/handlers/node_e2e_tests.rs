@@ -3338,10 +3338,21 @@ async fn an_exercise_naming_a_vault_its_precommit_has_no_leg_for_does_not_freeze
 /// Pre-audit 12e, the owner's ruling (2026-10-01): a pair that is already
 /// registered is not written again. B's trade registers its pair, and its
 /// exercise reaches only the leader of the vault's first key, so the key is
-/// held and not yet final. A then closes the vault: its walk meets the held
-/// key, finds B's pair registered, and goes past it without writing the
-/// pair. Every member holds exactly the values it held at B's two cells
-/// before A's close. Mutation: a registered pair counts as withheld.
+/// held and not yet final; the key's other seats go on refusing it. A then
+/// closes the vault: its walk meets the held key, finds B's pair registered,
+/// and goes past it without writing the pair. Every member holds exactly the
+/// values it held at B's two cells before A's close.
+///
+/// The close drafted past the held key is not taken: its skip conforms only
+/// once the key before it is final (conformance item 5), the seats keep that
+/// key short of final, and a producer obtains Valid before it publishes F
+/// (SoFi L1738, §6.113). A's close answers the network's status, the earlier
+/// attempt not in hand, and nothing of A's moves. Carrying the key to final
+/// once the seats take writes is
+/// `a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk_goes_on`.
+///
+/// MUTATION CONTROL: a registered pair counted as withheld turns this red:
+/// the walk writes B's pair.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair() {
@@ -3408,7 +3419,9 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
         assert_ne!(held.fact(), CellFact::Open);
     }
 
-    // A closes: the walk goes past the held key and writes nothing at B's pair.
+    // A closes: the walk goes past the held key and writes nothing at B's
+    // pair, and the close drafted past it waits on that key.
+    let era_before = balance(&p.a, &m.era);
     let r = invoke(
         &p.a,
         "sofi.close",
@@ -3417,9 +3430,25 @@ async fn a_held_key_whose_pair_is_registered_is_passed_without_writing_the_pair(
         }),
     )
     .await;
-    assert!(r.success, "A's close is taken: {:?}", r.error_message);
-    assert_eq!(held_at(pair.fulfillment()).await, ful_before);
+    assert_eq!(
+        held_at(pair.fulfillment()).await,
+        ful_before,
+        "the walk wrote nothing at B's registered pair"
+    );
     assert_eq!(held_at(pair.root().routed()).await, root_before);
+    assert!(
+        !r.success,
+        "A's close is not taken while the key before its attempt is short of final"
+    );
+    let why = r
+        .error_message
+        .clone()
+        .expect("A's close answers why it is not taken");
+    assert!(
+        why.contains("PriorAttempt") && why.contains("stays withheld"),
+        "the close waits on the earlier attempt, as the network's status: {why}"
+    );
+    assert_eq!(balance(&p.a, &m.era), era_before, "nothing of A's moved");
 }
 
 /// SA-72. A key held short of final by an exercise whose pair is already
