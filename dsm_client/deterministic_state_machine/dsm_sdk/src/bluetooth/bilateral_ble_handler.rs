@@ -137,6 +137,57 @@ fn sync_contact_from_storage(
     mgr.add_verified_contact(contact)
 }
 
+/// Move this device's pin of `peer`'s head on their relationship, in `tx`, by
+/// the pair the peer's own receipt for the step `commitment_hash` signs: the
+/// peer's relationship leaf before and after the step. The receipt is the
+/// peer's as Core's `decide_confirm` (the sender's confirm) or
+/// `record_commit_ack` (the receiver's acknowledgment) verified it. The pin
+/// moves as an online apply and an online sender's finalization move it
+/// (`counterparty_canonical_heads`): from the head pinned, or made from the
+/// genesis seed on the relationship's first step. Chain tips are per-device
+/// values, so the peer's next step, online or offline, is signed under the leaf
+/// this pair ends at, and only the peer's verified receipt says what that leaf
+/// is. A pin anywhere else is not the peer's lineage, and the step commits
+/// nothing.
+fn move_peer_head_pin_in_tx(
+    tx: &rusqlite::Connection,
+    local_device_id: &[u8; 32],
+    peer: &[u8; 32],
+    peer_receipt: &dsm::types::receipt_types::StitchedReceiptV2,
+    commitment_hash: &[u8; 32],
+) -> Result<(), DsmError> {
+    use crate::storage::client_db::counterparty_canonical_heads::{
+        cas_advance_counterparty_canonical_head_with_conn, CasCanonicalHeadOutcome,
+    };
+    let moved = cas_advance_counterparty_canonical_head_with_conn(
+        tx,
+        &dsm::core::bilateral_transaction_manager::compute_smt_key(local_device_id, peer),
+        peer,
+        &peer_receipt.parent_tip,
+        &peer_receipt.child_tip,
+        commitment_hash,
+        &dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+            local_device_id,
+            peer,
+        ),
+    )
+    .map_err(|e| {
+        DsmError::storage(
+            format!("the peer's pinned head: {e}"),
+            None::<std::io::Error>,
+        )
+    })?;
+    match moved {
+        CasCanonicalHeadOutcome::Advanced
+        | CasCanonicalHeadOutcome::GenesisInit
+        | CasCanonicalHeadOutcome::AlreadyAtTarget => Ok(()),
+        CasCanonicalHeadOutcome::Conflict { .. } => Err(DsmError::invalid_operation(
+            "the peer's head this device pins is not the head the peer's receipt says the step \
+             began from",
+        )),
+    }
+}
+
 /// A stored relationship tip, or why it could not be read.
 fn stored_contact_tip(
     read: anyhow::Result<Option<[u8; 32]>>,
@@ -3458,6 +3509,13 @@ impl BilateralBleHandler {
                     )))
                 }
             }
+            move_peer_head_pin_in_tx(
+                tx,
+                &self.device_id,
+                &counterparty_device_id,
+                &counter_signed,
+                commitment_hash,
+            )?;
             crate::sdk::economic_admission_flow::record_ble_ek_steps_in_tx(
                 tx,
                 &ek_step_set,
@@ -4203,11 +4261,6 @@ impl BilateralBleHandler {
         // commit mirrors it so the next step chains from it.
         let verified_a_side_ek_pk: Vec<u8> = verified.receipt().ek_pk_a.clone();
 
-        // Offline-bearer receipt is disabled (SA-61; owner, 2026-10-18): Core's
-        // `decide_prepare` refuses a bearer transfer, so no session reaches
-        // this confirm with one. What follows is kept, unreached, for the
-        // complete proof of the allocation a bearer spend debits.
-        //
         // Offline-bearer acceptance (OFFLINE_BEARER_REQUIRED transfers only). Canonical predicate:
         // the v2 Software-Authority / Hardware-Identity `accept_offline` via `anchor_accept` —
         // three signatures (σ^DSM gated by the handler's rel-proof/§C1 checks above, σ^chip + σ^host
@@ -4511,6 +4564,13 @@ impl BilateralBleHandler {
                     &signed_key.at_rest_key,
                 )
                 .map_err(|e| storage("this device's cert-chain head", e))?,
+            )?;
+            move_peer_head_pin_in_tx(
+                tx,
+                &self.device_id,
+                &counterparty_device_id,
+                verified.receipt(),
+                &commitment_hash,
             )?;
             if let Some(adopted) = &adopted_anchor_state {
                 crate::storage::client_db::anchor_enrollments::store_accepted_anchor_root_with_conn(
@@ -5049,6 +5109,13 @@ impl BilateralBleHandler {
                     )))
                 }
             }
+            move_peer_head_pin_in_tx(
+                tx,
+                &local_device_id,
+                &counterparty_device_id,
+                &counter_signed,
+                commitment_hash,
+            )?;
             crate::sdk::economic_admission_flow::record_ble_ek_steps_in_tx(
                 tx,
                 &ek_step_set,

@@ -217,7 +217,10 @@ pub struct PrepareClaims<'a> {
 /// The proposal must come from the pinned sender (its keys, and its
 /// signature over the commitment); it is refused while another step is in
 /// flight; and its commitment must be its operation's commitment on the held
-/// tip — the receiver never signs a commitment it did not recompute.
+/// tip — the receiver never signs a commitment it did not recompute. A
+/// bearer transfer moves only a token its committed policy lets move; the
+/// allocation it spends is proven to be its sender's at the confirm, from the
+/// account this device recorded ([`spend_starts_at_the_record`]).
 pub fn decide_prepare(
     commitment_hash: [u8; 32],
     operation: &Operation,
@@ -234,20 +237,10 @@ pub fn decide_prepare(
     if claims.addressed_to != local_device_id.as_slice() || transfer_addressed_elsewhere {
         return Ok(PrepareDecision::NotAddressed);
     }
-    // Offline-bearer receipt is disabled. A receiver that takes a bearer
-    // transfer credits an allocation its sender asserts: nothing yet binds the
-    // sender's parent root to the allocation the spend debits (§52, §67), so a
-    // modified sender app mints or re-spends value offline (SA-61). Owner,
-    // 2026-10-18: "Disable the vulnerable acceptance path until the complete
-    // proof is implemented." The proposal is refused on its operation alone,
-    // before anything is verified or written; the confirm path behind it stays
-    // for the complete proof, unreached.
+    // Owner question 9: no economic write set checks a bearer transfer offline,
+    // so its token's committed policy is checked here, before anything else.
     if operation_requires_offline_bearer(operation) {
         bearer_token_moves(operation)?;
-        return Err(DsmError::invalid_operation(
-            "offline-bearer receipt is disabled until the allocation a bearer transfer spends \
-             is proven to be its sender's (SA-61): this device takes no offline-bearer transfer",
-        ));
     }
     verify_pinned_peer_keys(sender, claims.credentials)?;
     verify_step_signature(sender, &commitment_hash, claims.signature, "proposal")?;
@@ -1062,15 +1055,13 @@ mod tests {
         refused(decide(&step(0x04), &receiver, None), "carries no signature");
     }
 
-    /// Offline-bearer receipt is disabled (SA-61; owner, 2026-10-18): a
-    /// bearer transfer addressed to this device is refused on its operation
-    /// alone, however its sender signed it and whatever tip it claims, and
-    /// nothing else of it is consulted. One addressed to another device is
-    /// still not addressed here.
-    /// MUTATION CONTROL: dropping the refusal lets the sender's own signed
-    /// bearer transfer on the held tip be considered and turns this red.
+    /// SA-61, opened in phase 4: the allocation a bearer transfer spends is
+    /// proven at the confirm, from the account the receiver recorded
+    /// (`spend_starts_at_the_record`), so its prepare is decided as any step's
+    /// is — put to the user when its pinned sender signed it on the held tip,
+    /// refused unsigned, and answered as in flight while another step is.
     #[test]
-    fn a_bearer_transfer_addressed_here_is_refused_on_its_operation_alone() {
+    fn a_bearer_transfer_addressed_here_is_decided_as_any_step() {
         let sender = Peer::new(0x4D);
         let receiver = [0x4Eu8; 32];
         let held = [0x7Bu8; 32];
@@ -1093,14 +1084,21 @@ mod tests {
                 in_flight,
             )
         };
-        refused(
-            decide(&sender.sign_step(&commitment), None),
-            "offline-bearer receipt is disabled",
-        );
-        refused(
-            decide(&[], Some([0x7Cu8; 32])),
-            "offline-bearer receipt is disabled",
-        );
+        match decide(&sender.sign_step(&commitment), None)
+            .expect("a signed bearer transfer on the held tip is decided")
+        {
+            PrepareDecision::Consider { commitment_hash } => {
+                assert_eq!(commitment_hash, commitment, "the proposal put to the user")
+            }
+            other => panic!("expected Consider, got {other:?}"),
+        }
+        refused(decide(&[], None), "carries no signature");
+        match decide(&sender.sign_step(&commitment), Some([0x7Cu8; 32]))
+            .expect("a bearer transfer while another step is in flight is decided")
+        {
+            PrepareDecision::StepInFlight { in_flight } => assert_eq!(in_flight, [0x7Cu8; 32]),
+            other => panic!("expected StepInFlight, got {other:?}"),
+        }
     }
 
     /// Owner question 9, offline: the receiver's Core refuses, at the

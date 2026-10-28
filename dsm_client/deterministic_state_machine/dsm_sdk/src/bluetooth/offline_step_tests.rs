@@ -12,6 +12,10 @@ use serial_test::serial;
 use tokio::sync::RwLock;
 
 use crate::bluetooth::bilateral_ble_handler::{BilateralBleHandler, BilateralPhase};
+use crate::bluetooth::bilateral_transport_adapter::{
+    BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,
+};
+use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
 use crate::test_support::two_device::{Pair, TestDevice};
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -19,10 +23,13 @@ use dsm::types::operations::Operation;
 
 /// One device's offline handler, built as `init_dsm_sdk` builds it: its
 /// transaction manager signs with the device's AK and keeps tips in the
-/// device's SQLite store.
+/// device's SQLite store, and holds the device's persisted contacts, loaded
+/// before any frame arrives. Beside it, the device's BLE frame coordinator,
+/// which chunks the frames it writes and reassembles the frames it reads.
 struct OfflineDevice {
     device: TestDevice,
-    handler: BilateralBleHandler,
+    handler: Arc<BilateralBleHandler>,
+    ble: BleFrameCoordinator,
 }
 
 impl OfflineDevice {
@@ -32,13 +39,19 @@ impl OfflineDevice {
             .expect("the entered device's wallet is unlocked");
         let keypair = crate::init::derive_device_signing_keypair(&wallet_seed, &device.genesis)
             .expect("the device's AK");
-        let manager = BilateralTransactionManager::new(
+        let mut manager = BilateralTransactionManager::new(
             DsmContactManager::new(device.device_id),
             keypair,
             device.device_id,
             device.genesis,
             Arc::new(crate::sdk::chain_tip_store::SqliteChainTipStore::new()),
         );
+        for record in crate::storage::client_db::get_all_contacts().expect("the device's contacts")
+        {
+            manager
+                .add_verified_contact(record.to_verified_contact().expect("a persisted contact"))
+                .expect("the contact is loaded");
+        }
         let mut handler =
             BilateralBleHandler::new(Arc::new(RwLock::new(manager)), device.device_id);
         handler.set_settlement_delegate(Arc::new(
@@ -46,8 +59,15 @@ impl OfflineDevice {
         ));
         Self {
             device: device.clone(),
-            handler,
+            handler: Arc::new(handler),
+            ble: BleFrameCoordinator::new(device.device_id),
         }
+    }
+
+    /// The bilateral transport adapter the BLE bridge hands this device's
+    /// reassembled frames to.
+    fn adapter(&self) -> BilateralTransportAdapter {
+        BilateralTransportAdapter::new(Arc::clone(&self.handler))
     }
 
     /// This device after a restart: a new handler and manager over the same
@@ -727,8 +747,9 @@ fn with_sender_signature(confirm: &[u8], signature: Vec<u8>) -> Vec<u8> {
 
 /// A bearer pair: A funded and its offline allocation of 20 ERA loaded under
 /// its anchor — the real anchor-core appliance on a software chip, whose
-/// seed is the appliance's only typed-in value — and the transfer of 7 ERA
-/// from it to B.
+/// seed is the appliance's only typed-in value — B having validated A's online
+/// history through the load, so it holds the account the load opened, and the
+/// transfer of 7 base units of ERA from it to B.
 async fn bearer_pair() -> (
     Pair,
     OfflineDevice,
@@ -753,19 +774,14 @@ async fn bearer_pair() -> (
         )
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
-    let (bytes, terms) =
-        crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
-            &b.device.device_id,
-            7,
-            "ERA",
-            "",
-            &dsm::core::token::token_state_manager::era_policy_commit(),
-            dsm::core::token::era_policy::era_policy_bytes().to_vec(),
-        );
-    let operation = Proposal {
-        operation: Operation::from_bytes(&bytes).expect("the bearer transfer"),
-        terms: Some(terms),
+    let (genesis, devid) = {
+        let head = a.device.router().core_sdk.device_head().expect("A's head");
+        (head.genesis_digest(), head.devid())
     };
+    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
+    b.device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    let operation = bearer_transfer(&b, 7);
     (pair, a, b, appliance, operation)
 }
 
@@ -794,9 +810,7 @@ fn with_terms(prepare: &[u8], terms: Vec<u8>) -> Vec<u8> {
 /// Pre-audit item 4 (owner ruling 2026-10-02): a bearer transfer's terms ride
 /// beside its operation over BLE, and a prepare whose terms are missing, name
 /// a memo the sender never signed, or do not decode, is refused before any
-/// session exists. Offline-bearer receipt is disabled (SA-61; owner,
-/// 2026-10-18), so the honest prepare is refused too, for that, and no
-/// session exists either.
+/// session exists. The honest prepare is taken and waits for B's user.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
@@ -820,7 +834,6 @@ async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
         (Vec::new(), "carries no terms"),
         (tampered.to_bytes(), "do not open"),
         (vec![0x01, 0x02], "transfer terms"),
-        (terms.to_bytes(), "offline-bearer receipt is disabled"),
     ] {
         let refused = b
             .handler
@@ -835,16 +848,222 @@ async fn a_bearer_prepare_without_terms_that_open_it_is_refused() {
             "{why}: B holds no session"
         );
     }
+    let (answer, _) = b
+        .handler
+        .handle_prepare_request(&with_terms(&prepare, terms.to_bytes()), None)
+        .await
+        .expect("the terms that open the transfer are taken");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
+    assert!(
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("B's sessions")
+            .is_some(),
+        "B holds the proposal for its user"
+    );
 }
 
-/// A's bearer transfer to B, prepared by A and delivered to B, which refuses
-/// it: offline-bearer receipt is disabled (SA-61). B writes nothing for it.
-/// Returns the step's commitment.
-async fn refused_at_the_receiver(
+/// `payload`, a frame of `frame_type`, written from `from` to `to` over BLE:
+/// chunked by the sender's frame coordinator as the radio writes it, every
+/// chunk taken in by the receiver's on the link from the sender, and the frame
+/// reassembled whole. Returns the frame as the receiver's radio hands it on.
+async fn over_ble(
+    from: &OfflineDevice,
+    to: &OfflineDevice,
+    frame_type: BleFrameType,
+    payload: &[u8],
+) -> TransportInboundMessage {
+    use crate::bluetooth::ble_frame_coordinator::FrameIngressResult;
+    from.device.enter();
+    let chunks = from
+        .ble
+        .encode_message(frame_type, payload)
+        .expect("the frame is chunked");
+    to.device.enter();
+    let link = from.device.slot.to_string();
+    let mut reassembled = None;
+    for chunk in &chunks {
+        match to
+            .ble
+            .ingest_chunk(&link, chunk)
+            .await
+            .expect("the chunk is taken in")
+        {
+            FrameIngressResult::NeedMoreChunks => {}
+            FrameIngressResult::MessageComplete { message } => reassembled = Some(message),
+            FrameIngressResult::ProtocolControl(control) => {
+                panic!("a frame's chunk answered as transport control: {control:?}")
+            }
+        }
+    }
+    let message = reassembled.expect("the frame reassembles once its last chunk is in");
+    assert_eq!(
+        message.payload, payload,
+        "the frame reassembles to the bytes written"
+    );
+    TransportInboundMessage {
+        peer_address: link,
+        frame_type: message.frame_type,
+        payload: message.payload,
+    }
+}
+
+/// `payload` delivered from `from` to `to` over BLE and handed to `to`'s
+/// bilateral transport adapter, as the BLE bridge hands it a reassembled
+/// frame. Returns what the adapter sends back.
+async fn delivered_over_ble(
+    from: &OfflineDevice,
+    to: &OfflineDevice,
+    frame_type: BleFrameType,
+    payload: &[u8],
+) -> Vec<TransportOutbound> {
+    let message = over_ble(from, to, frame_type, payload).await;
+    to.adapter()
+        .on_transport_message(message)
+        .await
+        .expect("the receiver's transport takes the frame")
+}
+
+/// A's bearer `payment` to B, every frame carried over BLE: A's prepare, B's
+/// acceptance answered with A's confirm — its release on A's anchor — B's
+/// commit, and B's acknowledgment, on which A commits. The adapter hands a
+/// confirm to a task it spawns, which acknowledges over the radio; here that
+/// task's call runs in place, on B. Returns the step's commitment.
+async fn bearer_payment_over_ble(
     a: &OfflineDevice,
     b: &OfflineDevice,
-    operation: &Proposal,
+    payment: &Proposal,
 ) -> [u8; 32] {
+    a.device.enter();
+    let (prepare, commitment) = a
+        .adapter()
+        .create_transfer_prepare_with_commitment(
+            b.device.device_id,
+            payment.operation.clone(),
+            payment.terms.clone().expect("a transfer's terms"),
+        )
+        .await
+        .expect("A prepares the payment");
+    let answered = delivered_over_ble(a, b, BleFrameType::BilateralPrepare, &prepare).await;
+    assert!(answered.is_empty(), "the proposal waits for B's user");
+    b.device.enter();
+    let response = b
+        .adapter()
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    let confirm = match delivered_over_ble(b, a, BleFrameType::BilateralPrepareResponse, &response)
+        .await
+        .as_slice()
+    {
+        [outbound] if outbound.frame_type == BleFrameType::BilateralConfirm => {
+            outbound.payload.clone()
+        }
+        other => panic!("A answers the acceptance with its confirm, not {other:?}"),
+    };
+    let carried = over_ble(a, b, BleFrameType::BilateralConfirm, &confirm).await;
+    let envelope =
+        crate::envelope::from_canonical_bytes(&carried.payload).expect("the confirm's envelope");
+    assert_eq!(
+        crate::bluetooth::bilateral_transport_adapter::BilateralFrame::of(&envelope),
+        Some(crate::bluetooth::bilateral_transport_adapter::BilateralFrame::Confirm),
+        "the frame carried is the confirm"
+    );
+    let ack = b
+        .handler
+        .handle_confirm_request(&carried.payload)
+        .await
+        .expect("B commits the payment and acknowledges it");
+    let answered = delivered_over_ble(b, a, BleFrameType::BilateralCommitResponse, &ack).await;
+    assert!(answered.is_empty(), "the acknowledgment ends the step");
+    commitment
+}
+
+/// A bearer transfer of `amount` base units of ERA from A to `to`.
+fn bearer_transfer(to: &OfflineDevice, amount: u64) -> Proposal {
+    let (bytes, terms) =
+        crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+            &to.device.device_id,
+            amount,
+            "ERA",
+            "",
+            &dsm::core::token::token_state_manager::era_policy_commit(),
+            dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        );
+    Proposal {
+        operation: Operation::from_bytes(&bytes).expect("the bearer transfer"),
+        terms: Some(terms),
+    }
+}
+
+/// The value of ERA the entered device received offline and has not settled.
+fn pending_era() -> u64 {
+    crate::storage::client_db::offline_receipts::pending_offline_value(
+        &dsm::core::token::token_state_manager::era_policy_commit(),
+    )
+    .expect("the payments received offline")
+}
+
+/// The spends A's anchor released that no boundary of A's online history has
+/// exposed yet.
+fn unexposed_spends(
+    a: &OfflineDevice,
+    appliance: &crate::test_support::appliance::InstalledAppliance,
+) -> usize {
+    a.device.enter();
+    crate::storage::client_db::offline_spends::own_offline_spends(&appliance.pin().bundle)
+        .expect("A's spends")
+        .len()
+}
+
+/// Phases 2–4, SA-61 opened: A's bearer payment of 7 to B, every frame over
+/// BLE, commits on both devices. B credits nothing online — its ERA balance is
+/// what it was, and an online send of what it received is refused — and holds
+/// the payment pending until it is settled online (SA-91). A's anchor moved its
+/// counter once, B pinned A's anchor from the payment's disclosure, and A
+/// records the spend, unexposed, for its next boundary to carry (SA-116).
+/// MUTATION CONTROL: the receiver not recording the payment it commits
+/// (`receipt_unrecorded`) leaves nothing pending and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_payment_over_ble_is_held_pending_and_credits_nothing_online() {
+    let (pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    let commitment = bearer_payment_over_ble(&a, &b, &operation).await;
+    assert_committed_on_both(&a, &b, &commitment);
+
+    b.device.enter();
+    assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
+    b.device.enter();
+    assert_eq!(pending_era(), 7, "B holds the payment pending");
+    let refused = pair.b.send(&pair.a, 7).await;
+    assert!(
+        !refused.success,
+        "B spent online what it received offline before it was settled"
+    );
+    assert!(
+        crate::bridge::anchor_enrollment_store()
+            .expect("the enrollment store")
+            .get(&a.device.device_id)
+            .is_some(),
+        "B pinned A's anchor from the payment"
+    );
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        before.anchor_counter + 1,
+        "A's anchor moved its counter once"
+    );
+    assert_eq!(unexposed_spends(&a, &appliance), 1, "A records its spend");
+}
+
+/// SA-112, a response delivered twice: B's acceptance reaches A twice. A
+/// releases once — its anchor's counter moves once — and answers the second
+/// copy with the confirm it sent for the first, byte for byte. B commits the
+/// payment once, from either copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_bearer_response_delivered_twice_releases_once_and_is_answered_with_the_same_confirm() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
     a.device.enter();
     let (prepare, commitment) = a
         .handler
@@ -856,110 +1075,368 @@ async fn refused_at_the_receiver(
         .await
         .expect("A prepares");
     b.device.enter();
-    let refused = b
-        .handler
+    b.handler
         .handle_prepare_request(&prepare, None)
         .await
-        .expect_err("B refuses the bearer transfer");
-    assert!(
-        refused
-            .to_string()
-            .contains("offline-bearer receipt is disabled"),
-        "{refused}"
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    let (confirm, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A releases and confirms");
+    let (again, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the response delivered again is answered");
+    assert_eq!(again, confirm, "the confirm owed is the confirm sent");
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        before.anchor_counter + 1,
+        "A's anchor moved its counter once for the two copies"
     );
-    commitment
-}
 
-/// SA-61, offline-bearer receipt disabled (owner, 2026-10-18: "Disable the
-/// vulnerable acceptance path until the complete proof is implemented"). A
-/// loads an offline allocation under its anchor, the real anchor-core
-/// appliance on a software chip, and proposes a bearer transfer to B; B
-/// refuses it at the prepare. B holds no session for it, keeps no history
-/// row, and holds no ERA: nothing is credited on an allocation its sender
-/// asserts.
-/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
-/// hold the proposal for its user and turns this red.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn a_bearer_transfer_is_refused_at_its_receiver_and_credits_nothing() {
-    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
-    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
     b.device.enter();
-    assert!(
-        crate::storage::client_db::get_bilateral_session(&commitment)
-            .expect("B's sessions")
-            .is_none(),
-        "B holds no session for the refused step"
-    );
-    assert_eq!(history_rows(&commitment), 0, "B keeps no history of it");
-    assert_eq!(b.device.era_balance(), 0, "B is credited nothing");
+    let ack = b
+        .handler
+        .handle_confirm_request(&again)
+        .await
+        .expect("B commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+    b.device.enter();
+    assert_eq!(pending_era(), 7, "B holds the payment once");
 }
 
-/// SA-61. A bearer transfer delivered again is refused the same way: the
-/// refusal is decided on the operation each time, and nothing the first
-/// delivery left lets the second one in.
-/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
-/// hold the proposal and turns this red.
+/// The acknowledgment filed, and a crash boundary on the receiver: B commits
+/// A's payment and its ack is lost; B restarts. A still owes its confirm and
+/// delivers it again; the restarted B answers with the ack the step committed,
+/// from its history, and records nothing again. A files the ack and commits.
+/// Each device holds the step once, B holds the payment once, and A records
+/// its spend once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_bearer_transfer_delivered_again_is_refused_again() {
+async fn a_bearer_payment_whose_ack_is_lost_is_answered_again_after_the_receiver_restarts() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let (commitment, _lost_ack) = to_the_ack(&a, &b, operation).await;
+    let b = b.restarted().await;
+    a.device.enter();
+    let owed = a.handler.frames_owed_to(&b.device.device_id).await;
+    assert_eq!(owed.len(), 1, "A owes its confirm");
+    assert_eq!(
+        owed[0].kind,
+        crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm
+    );
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&owed[0].bytes)
+        .await
+        .expect("the restarted receiver answers its committed step again");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A files the ack and commits");
+    assert_committed_on_both(&a, &b, &commitment);
+    for device in [&a, &b] {
+        device.device.enter();
+        assert_eq!(
+            history_rows(&commitment),
+            1,
+            "{} holds the step twice",
+            device.device.slot
+        );
+    }
+    b.device.enter();
+    assert_eq!(pending_era(), 7, "B holds the payment once");
+    assert_eq!(
+        unexposed_spends(&a, &appliance),
+        1,
+        "A records its spend once"
+    );
+    a.device.enter();
+    assert!(a
+        .handler
+        .frames_owed_to(&b.device.device_id)
+        .await
+        .is_empty());
+}
+
+/// A crash boundary on the receiver before its commit: B accepts A's payment
+/// and restarts before the confirm arrives. The restarted B takes the step up
+/// again as it was — the acceptance and its challenge were durable before the
+/// response went out — and commits the confirm, holding the payment pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_restarted_after_accepting_a_bearer_payment_commits_its_confirm() {
     let (_pair, a, b, _appliance, operation) = bearer_pair().await;
     a.device.enter();
     let (prepare, commitment) = a
         .handler
-        .prepare_bilateral_step(b.device.device_id, operation.operation, operation.terms)
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
         .await
         .expect("A prepares");
     b.device.enter();
-    for delivery in 1..=2 {
-        let refused = b
-            .handler
-            .handle_prepare_request(&prepare, None)
-            .await
-            .expect_err("B refuses the bearer transfer");
-        assert!(
-            refused
-                .to_string()
-                .contains("offline-bearer receipt is disabled"),
-            "delivery {delivery}: {refused}"
-        );
-        assert!(
-            crate::storage::client_db::get_bilateral_session(&commitment)
-                .expect("B's sessions")
-                .is_none(),
-            "delivery {delivery}: B holds no session"
-        );
-    }
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    let b = b.restarted().await;
+    a.device.enter();
+    let (confirm, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A releases and confirms");
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("the restarted receiver commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+    b.device.enter();
+    assert_eq!(pending_era(), 7, "B holds the payment pending");
 }
 
-/// SA-61. A bearer transfer its receiver refuses spends no counter step on
-/// the sender's appliance: nothing irreversible runs before an acceptance,
-/// and none comes. A ends its proposal, and the relationship takes its next
-/// step.
-/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
-/// hold the proposal and turns this red.
+/// Restart recovery of a releasing step, through the handler: the power goes
+/// off as A's anchor writes its committed candidate, while A answers B's
+/// acceptance, so A sends nothing and the step stays releasing. A restarts
+/// with its appliance booted again: the appliance completed the commit from its
+/// record, and A's handler settles the step by the recovery table — the release
+/// prepared for this step, emitted again — and owes B the confirm. B commits
+/// it, A commits on the ack, and the counter moved once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_refused_bearer_transfer_spends_no_counter_step_and_frees_the_relationship() {
-    use crate::anchor::AnchorAppliance;
+async fn a_sender_restarted_mid_release_settles_it_and_the_payment_commits_once() {
+    use crate::test_support::appliance::Cut;
 
     let (_pair, a, b, appliance, operation) = bearer_pair().await;
-    let before = appliance.clone().status().expect("the chip's status");
-    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
-    let after = appliance.clone().status().expect("the chip's status");
+    let before = chip(&appliance);
+    let counter_before = appliance.chip_counter();
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    // Record writes from here: 1 prepared, 2 the committed candidate.
+    appliance.cut(Cut::AfterWrite(2));
+    a.handler
+        .handle_prepare_response(&response)
+        .await
+        .expect_err("the release cannot finish without power");
+    assert_eq!(stored_phase(&commitment), "releasing");
+    assert!(
+        a.handler
+            .frames_owed_to(&b.device.device_id)
+            .await
+            .is_empty(),
+        "A owes nothing it has not released"
+    );
+
+    appliance.reboot();
+    let a = a.restarted().await;
+    a.device.enter();
+    let owed = a.handler.frames_owed_to(&b.device.device_id).await;
+    assert_eq!(owed.len(), 1, "the restarted A owes its confirm");
+    assert_eq!(
+        owed[0].kind,
+        crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm
+    );
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&owed[0].bytes)
+        .await
+        .expect("B commits the release emitted again");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits on the ack");
+    assert_committed_on_both(&a, &b, &commitment);
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "the counter moved once"
+    );
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        before.anchor_counter + 1,
+        "one counter step for the payment"
+    );
+    b.device.enter();
+    assert_eq!(pending_era(), 7, "B holds the payment pending");
+}
+
+/// A bearer transfer B's user rejects spends no counter step on A's appliance:
+/// nothing irreversible runs before an acceptance, and none comes. A takes the
+/// rejection, and the relationship takes its next step.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_rejected_bearer_transfer_spends_no_counter_step_and_frees_the_relationship() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let rejection = b
+        .handler
+        .create_prepare_reject_envelope_with_cleanup(commitment, "not now".to_string())
+        .await
+        .expect("B's user rejects");
+    a.device.enter();
+    a.handler
+        .handle_prepare_reject(&rejection)
+        .await
+        .expect("the rejection ends A's side");
+    let after = chip(&appliance);
     assert_eq!(
         after.anchor_counter, before.anchor_counter,
         "no counter step was spent"
     );
     assert_eq!(after.root, before.root, "the frontier did not move");
-
-    a.device.enter();
-    a.handler
-        .cancel_proposal(commitment, "refused by its receiver".to_string())
-        .await
-        .expect("A ends its proposal");
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "B holds nothing pending");
     let next = offline_step(&a, &b, marked(0x61)).await;
     assert_committed_on_both(&a, &b, &next);
+}
+
+/// Phases 2–4 end to end (§5A "Offline, end to end"), every offline frame
+/// over BLE between the two devices on the node harness: A loads 20 ERA into
+/// its offline account; B validates A's online history through the load. A
+/// pays B 7, then 3 more before A goes online again — the second payment
+/// carries A's chain of spends from the account B recorded (SA-116). B holds
+/// 10 pending and spends none of it online. A unloads what is left; that
+/// boundary carries both spends and exposes them online. B's sync walks A's
+/// history and settles each payment by an admitted transition of its own,
+/// once (SA-91); a second sync settles nothing more. B then spends the result
+/// online, and A takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online() {
+    use crate::economic_fixtures::whole_era;
+
+    let (pair, a, b, appliance, _) = bearer_pair().await;
+    let first = bearer_payment_over_ble(&a, &b, &bearer_transfer(&b, whole_era(7))).await;
+    assert_committed_on_both(&a, &b, &first);
+    let second = bearer_payment_over_ble(&a, &b, &bearer_transfer(&b, whole_era(3))).await;
+    assert_committed_on_both(&a, &b, &second);
+    assert_eq!(unexposed_spends(&a, &appliance), 2, "A's two spends wait");
+
+    b.device.enter();
+    assert_eq!(
+        pending_era(),
+        whole_era(10),
+        "B holds both payments pending"
+    );
+    assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
+    let refused = pair.b.send(&pair.a, whole_era(1)).await;
+    assert!(
+        !refused.success,
+        "B spent online what it received offline before it was settled"
+    );
+
+    a.device.enter();
+    let unloaded = a
+        .device
+        .invoke(
+            "wallet.unloadOffline",
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: "10.00".to_string(),
+            },
+        )
+        .await;
+    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    assert_eq!(
+        unexposed_spends(&a, &appliance),
+        0,
+        "the unload carried A's spends online"
+    );
+    assert_eq!(
+        pair.a.era_balance(),
+        whole_era(90),
+        "A's online balance: 100 funded, 20 loaded, 10 unloaded"
+    );
+
+    pair.b.sync().await;
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "B settled both payments");
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(10),
+        "B's online balance holds what it was paid offline"
+    );
+    pair.b.sync().await;
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(10),
+        "a second sync settles nothing again"
+    );
+
+    let sent = pair.b.send(&pair.a, whole_era(10)).await;
+    assert!(sent.success, "B spends online: {:?}", sent.error_message);
+    assert_eq!(pair.b.era_balance(), 0, "B's online send debited");
+    let synced = pair.a.sync().await;
+    assert_eq!(
+        pair.a.era_balance(),
+        whole_era(100),
+        "A received B's online payment: {synced:?}"
+    );
 }
 
 /// The history rows the entered device holds for the step.
@@ -1356,6 +1833,46 @@ async fn a_receiver_that_rejected_answers_the_prepare_again_with_its_rejection()
         .frames_owed_to(&b.device.device_id)
         .await
         .is_empty());
+}
+
+/// Online after offline, on one relationship. Chain tips are per-device
+/// values: each device's next online step is signed under the relationship
+/// leaf its offline step ended at, and its peer pins that leaf from the step's
+/// verified receipts — the sender's confirm at the receiver's commit, the
+/// receiver's acknowledgment at the sender's. After an offline step from A to
+/// B, A's online send to B is taken by B, and B's back to A by A.
+/// MUTATION CONTROL: the receiver not moving its pin of the sender's head at
+/// its commit (`peer_pin_receiver`), or the sender not moving its pin of the
+/// receiver's head on the acknowledgment (`peer_pin_sender_ack`), leaves that
+/// device refusing its peer's online send and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn online_sends_after_an_offline_step_are_taken_in_both_directions() {
+    use crate::economic_fixtures::whole_era;
+
+    let pair = Pair::boot(100, 100).await;
+    let a = OfflineDevice::new(&pair.a);
+    let b = OfflineDevice::new(&pair.b);
+    let step = offline_step(&a, &b, marked(1)).await;
+    assert_committed_on_both(&a, &b, &step);
+
+    let sent = pair.a.send(&pair.b, whole_era(1)).await;
+    assert!(sent.success, "A sends online: {:?}", sent.error_message);
+    let synced = pair.b.sync().await;
+    assert_eq!(
+        pair.b.era_balance(),
+        whole_era(101),
+        "B took A's online send: {synced:?}"
+    );
+    pair.a.sync().await;
+    let sent = pair.b.send(&pair.a, whole_era(2)).await;
+    assert!(sent.success, "B sends online: {:?}", sent.error_message);
+    let synced = pair.a.sync().await;
+    assert_eq!(
+        pair.a.era_balance(),
+        whole_era(101),
+        "A took B's online send: {synced:?}"
+    );
 }
 
 /// SA-114. A proposal its receiver never saw, delivered after the
@@ -1835,17 +2352,15 @@ async fn an_offline_proposal_waits_for_an_online_send_in_progress() {
         .expect("A proposes once the online send is done");
 }
 
-/// SA-54. A device whose identity recovery is under way moves no value out:
-/// recovery under way before a proposal stops the proposal. The release gate
-/// after the receiver's acceptance is not reached while offline-bearer
-/// receipt is disabled (SA-61): the receiver refuses the proposal first, and
-/// the sender's appliance spends nothing.
+/// SA-54. A device whose identity recovery is under way moves no value out.
+/// Recovery under way before a proposal stops the proposal. Recovery that
+/// begins after the receiver accepted stops the release: A's anchor spends
+/// nothing, A sends no confirm, and B is paid nothing.
 /// MUTATION CONTROL: dropping the gate before the prepare lets A propose
 /// while recovering and turns the first refusal red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_recovering_device_neither_proposes_nor_releases_an_offline_spend() {
-    use crate::anchor::AnchorAppliance;
     use crate::storage::client_db::recovery::{set_recovery_state, RecoveryState};
 
     let (_pair, a, b, appliance, operation) = bearer_pair().await;
@@ -1867,13 +2382,53 @@ async fn a_recovering_device_neither_proposes_nor_releases_an_offline_spend() {
     );
     set_recovery_state(RecoveryState::None).expect("A's recovery is not under way");
 
-    let before = appliance.clone().status().expect("the chip's status");
-    refused_at_the_receiver(&a, &b, &operation).await;
-    let after = appliance.clone().status().expect("the chip's status");
+    let before = chip(&appliance);
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    set_recovery_state(RecoveryState::Polling).expect("A's recovery begins");
+    let refused = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect_err("no release while recovering");
+    assert!(
+        refused.to_string().contains("recovery in progress"),
+        "{refused}"
+    );
     assert_eq!(
-        after.anchor_counter, before.anchor_counter,
+        chip(&appliance).anchor_counter,
+        before.anchor_counter,
         "no counter step was spent"
     );
+    assert!(
+        a.handler
+            .frames_owed_to(&b.device.device_id)
+            .await
+            .iter()
+            .all(|owed| owed.kind
+                != crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm),
+        "A owes no confirm"
+    );
+    b.device.enter();
+    assert_eq!(pending_era(), 0, "B is paid nothing");
 }
 
 /// The phase stored for the step `commitment` on the entered device.
@@ -2017,45 +2572,15 @@ async fn a_confirm_does_not_overwrite_a_cancellation_made_meanwhile() {
     assert_eq!(stored_phase(&commitment), "rejected");
 }
 
-/// SA-61, offline-bearer receipt disabled (owner, 2026-10-18): the receiver
-/// never holds a step it could take a release in against. B refuses A's bearer
-/// transfer at the prepare, so it issues no challenge, keeps no session for
-/// the step, and never pins A's anchor, which only a confirm B verified could
-/// admit. Before, the release was accepted against the confirm Core verified;
-/// that path is kept, unreached, for the complete proof.
-/// MUTATION CONTROL: dropping the refusal from Core's `decide_prepare` lets B
-/// hold the proposal and turns this red.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[serial]
-async fn no_offline_release_is_taken_in_while_bearer_receipt_is_disabled() {
-    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
-    let commitment = refused_at_the_receiver(&a, &b, &operation).await;
-    b.device.enter();
-    assert!(
-        crate::storage::client_db::get_bilateral_session(&commitment)
-            .expect("B's sessions")
-            .is_none(),
-        "B holds no step to take a release in against"
-    );
-    assert!(
-        crate::bridge::anchor_enrollment_store()
-            .expect("the enrollment store")
-            .get(&a.device.device_id)
-            .is_none(),
-        "B pins no anchor of A's"
-    );
-}
-
-// --- Phase 2: the sender's release on its anchor, by the recovery table ---
+// --- The sender's release on its anchor, by the recovery table ---
 //
-// Offline-bearer receipt stays refused until Phase 4, so no receiver accepts a
-// bearer transfer and none is made to here. These drive the sender's half on
-// its own: the staging and the canonical advance simulation the confirm builder
-// runs (`stage_bearer_spend`, `simulate_advance_for_confirm`), the real
-// anchor-core appliance on a software chip, and the recovery rules the sender
-// settles a releasing step by. The receiver challenge is drawn the way a
-// receiver draws it. The whole payment, its acknowledgment and a response
-// delivered twice (SA-112) are exercised in Phase 4, through the receiver.
+// These drive the sender's half on its own: the staging and the canonical
+// advance simulation the confirm builder runs (`stage_bearer_spend`,
+// `simulate_advance_for_confirm`), the real anchor-core appliance on a
+// software chip, and the recovery rules the sender settles a releasing step
+// by. The receiver challenge is drawn the way a receiver draws it. The whole
+// payment through the receiver — its acknowledgment, a response delivered
+// twice (SA-112), restarts on either side — is exercised above.
 
 /// A's bearer transfer to B staged on A's anchor under a fresh receiver
 /// challenge, and the device roots its canonical advance simulation produces:

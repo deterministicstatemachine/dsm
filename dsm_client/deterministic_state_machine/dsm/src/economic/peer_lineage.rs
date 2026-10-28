@@ -1239,16 +1239,21 @@ impl Verifier<'_> {
                                 &facts.proven_ak,
                             )
                             .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                        // The account the latest boundary strictly below this one
+                        // left, as this walk validated it — a walk can pass the same
+                        // segment again, so never this boundary's own — else as
+                        // this receiver recorded it.
                         let previous = match self
                             .offline_accounts
                             .borrow()
                             .iter()
-                            .rev()
-                            .find(|a| {
+                            .filter(|a| {
                                 a.genesis == *genesis
                                     && a.device_id == *device_id
                                     && a.bundle == verified.bundle()
+                                    && a.economic_position < position
                             })
+                            .max_by_key(|a| a.economic_position)
                             .cloned()
                         {
                             Some(walked) => Some(walked),

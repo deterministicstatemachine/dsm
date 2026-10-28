@@ -161,20 +161,10 @@ pub fn store_bilateral_session_with_conn(
             ));
         }
     }
-    if ![
-        "preparing",
-        "prepared",
-        "pending_user_action",
-        "accepted",
-        "rejected",
-        "confirm_pending",
-        "committed",
-        "failed",
-    ]
-    .contains(&session.phase.as_str())
-    {
-        return Err(anyhow!("Invalid phase: '{}'", session.phase));
-    }
+    // The phases a row holds are exactly the session's: the tag parses as
+    // the session parses it on restore.
+    crate::bluetooth::bilateral_session::phase_from_str(&session.phase)
+        .map_err(|e| anyhow!("Invalid phase: '{}': {e}", session.phase))?;
     conn.execute(
         "INSERT INTO bilateral_sessions(
             commitment_hash, counterparty_device_id, operation_bytes, phase,
@@ -255,11 +245,12 @@ pub fn get_bilateral_session(commitment_hash: &[u8]) -> Result<Option<BilateralS
 
 /// The phase tags of a step in flight: the steps a relationship's one-step-
 /// at-a-time rule counts.
-pub const IN_FLIGHT_PHASE_TAGS: [&str; 5] = [
+pub const IN_FLIGHT_PHASE_TAGS: [&str; 6] = [
     "preparing",
     "prepared",
     "pending_user_action",
     "accepted",
+    "releasing",
     "confirm_pending",
 ];
 
@@ -465,6 +456,7 @@ mod tests {
             "pending_user_action",
             "accepted",
             "rejected",
+            "releasing",
             "confirm_pending",
             "committed",
             "failed",
