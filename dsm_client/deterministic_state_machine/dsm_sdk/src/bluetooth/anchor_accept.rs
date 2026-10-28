@@ -321,25 +321,24 @@ pub struct AdoptedAnchorState {
 /// a verified receipt, and the device roots and anchor leaves are the receipt's, never values the
 /// caller supplies.
 ///
-/// `accepted_frontier`: the frontier adopted from the holder's last accepted release. `None` =
-/// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
-/// authenticity rests on the offline-state proofs + the three signatures, the same trust
-/// root as the first-transfer pin admit.
+/// The frontier the release must start from is the one Core established for the spend
+/// ([`dsm::bilateral::offline::VerifiedConfirm::bearer_start`]): this device's record of the
+/// holder's account carried forward by the holder's verified chain of spends, forward of the last
+/// spend it accepted from the holder.
 pub fn accept_offline_release(
     verified: &dsm::bilateral::offline::VerifiedConfirm,
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_frontier: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
     let rel = decode_release(offline_release)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
-    let spend = verified
-        .bearer()
-        .filter(|leaves| leaves.bundle == pinned.bundle)
-        .ok_or(OfflineRecover::NotTheStepsSpend)?;
+    let spend = verified.bearer();
+    if spend.bundle != pinned.bundle {
+        return Err(OfflineRecover::NotTheStepsSpend);
+    }
 
     // Tie the cert's device roots to the roots the verified receipt proves (its write set folds the
     // one to the other). The predicate checks Π against the CERT roots; if the cert roots were not
@@ -353,11 +352,6 @@ pub fn accept_offline_release(
     }
 
     let t = rel.transition.as_transition();
-    // The receiver's adopted frontier for this holder, or (genesis) the release's own prev_root TOFU.
-    let effective_frontier: [u8; 32] = match accepted_frontier {
-        Some(r) => *r,
-        None => *t.prev_root,
-    };
     let adopted = AdoptedAnchorState {
         next_root: *t.next_root,
         next_anchor_counter: t.next_anchor_counter,
@@ -368,7 +362,7 @@ pub fn accept_offline_release(
         pinned_anchor_id: &pinned.anchor_id,
         pinned_pk_chip: &pinned.pk_chip,
         pinned_pk_host: &pinned.partition_pk,
-        accepted_frontier: &effective_frontier,
+        accepted_frontier: &verified.bearer_start().frontier,
         expected_receiver_challenge,
         expected_recipient: receiver_device_id,
         expected_policy_hash,

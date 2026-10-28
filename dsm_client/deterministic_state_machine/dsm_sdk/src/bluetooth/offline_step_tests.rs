@@ -3244,7 +3244,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
     let pin = appliance.pin();
     let origin = |recorded: dsm::economic::peer_lineage::PeerOfflineAccount| {
         dsm::bilateral::offline::BearerOrigin {
-            recorded,
+            recorded: Some(recorded),
             anchor: dsm::types::offline_chain::ChainAnchor {
                 bundle: pin.bundle,
                 anchor_id: pin.anchor_id,

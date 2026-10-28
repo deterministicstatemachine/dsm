@@ -378,7 +378,8 @@ mod tests {
     use dsm::verification::receipt_verification::ReceiptStateContext;
 
     /// A step that moves no value. Core refuses `Noop` (MR-DSM-0201); a
-    /// zero-effect `Generic` still advances until the dBTC round decides it.
+    /// zero-effect `Generic` still advances until the owner decides it (the
+    /// dBTC exit flow builds one).
     fn zero_effect() -> Operation {
         Operation::Generic {
             operation_type: b"zero-effect-step".to_vec(),

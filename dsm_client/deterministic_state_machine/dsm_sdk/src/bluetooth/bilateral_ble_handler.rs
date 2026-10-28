@@ -4103,12 +4103,12 @@ impl BilateralBleHandler {
                 None::<std::io::Error>,
             )
         })?;
-        let bearer_origin = recorded.map(|recorded| dsm::bilateral::offline::BearerOrigin {
+        let bearer_origin = dsm::bilateral::offline::BearerOrigin {
             recorded,
             anchor: sender_anchor.clone(),
             chain: &sender_chain,
             accepted,
-        });
+        };
         let verified = dsm::bilateral::offline::decide_confirm(
             dsm::bilateral::offline::ConfirmClaims {
                 signature: &confirm_request.sender_signature,
@@ -4126,8 +4126,8 @@ impl BilateralBleHandler {
                 receiver_device_id: self.device_id,
                 sender_device_tree_root: sender_device_tree,
                 sender_chain_head: sender_chain_head.as_deref(),
-                bearer: Some(sender_bearer_leaves),
-                bearer_origin: bearer_origin.as_ref(),
+                bearer: sender_bearer_leaves,
+                bearer_origin: &bearer_origin,
             },
             &dsm::bilateral::offline::PinnedPeer {
                 device_id: session.counterparty_device_id,
@@ -4197,21 +4197,13 @@ impl BilateralBleHandler {
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
-            // The frontier the release must start from: the one Core established for the
-            // spend — this device's record of the sender's account carried forward by the
-            // sender's verified chain, forward of the last spend it accepted from the sender.
-            let established = verified.bearer_start().ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "offline-bearer confirm: Core established no account the spend starts from",
-                )
-            })?;
             // The predicate runs against the confirm Core verified: the release's device roots
-            // and anchor leaves must be the ones its receipt proves.
+            // and anchor leaves must be the ones its receipt proves, and it starts from the
+            // frontier Core established for the spend.
             let adopted = crate::bluetooth::anchor_accept::accept_offline_release(
                 &verified,
                 &confirm_request.offline_release,
                 pinned.as_ref(),
-                Some(&established.frontier),
                 &self.device_id,
                 &expected_receiver_challenge,
                 &policy_hash,

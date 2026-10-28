@@ -407,14 +407,14 @@ pub struct AcceptedStep<'a> {
     /// The sender's EK chain head on this relationship, once a step has been
     /// received; before that, its pinned AK signs the first EK.
     pub sender_chain_head: Option<&'a [u8]>,
-    /// For an offline-bearer step, the sender's anchor-state leaves as this
-    /// device derived them from the step's release under the sender's pinned
-    /// bundle.
-    pub bearer: Option<BearerLeaves>,
-    /// For an offline-bearer step, where this device holds the sender's
-    /// offline account from ([`BearerOrigin`]); `None` when it has validated
-    /// none of it online.
-    pub bearer_origin: Option<&'a BearerOrigin<'a>>,
+    /// The sender's anchor-state leaves as this device derived them from the
+    /// step's release under the sender's pinned bundle. Every step the
+    /// offline door admits is an offline-bearer transfer ([`offline_door`]),
+    /// so a confirm carries them, always.
+    pub bearer: BearerLeaves,
+    /// Where this device holds the sender's offline account from
+    /// ([`BearerOrigin`]).
+    pub bearer_origin: &'a BearerOrigin<'a>,
 }
 
 /// What a receiver holds of a sender's offline account, independently of the
@@ -423,8 +423,10 @@ pub struct AcceptedStep<'a> {
 pub struct BearerOrigin<'a> {
     /// The sender's offline account under the release's bundle as this device
     /// last validated it from the sender's online history
-    /// (`economic_lineage::latest_offline_account`).
-    pub recorded: crate::economic::peer_lineage::PeerOfflineAccount,
+    /// (`economic_lineage::latest_offline_account`); `None` when this device
+    /// has validated none of it — a real state (it has not walked the
+    /// sender's load), and Core refuses the spend for it.
+    pub recorded: Option<crate::economic::peer_lineage::PeerOfflineAccount>,
     /// The sender's anchor: its bundle and the keys it commits, as this device
     /// pins it, or admits it from a disclosure whose bundle recomputes.
     pub anchor: crate::types::offline_chain::ChainAnchor,
@@ -443,8 +445,8 @@ pub struct BearerOrigin<'a> {
 pub struct VerifiedConfirm {
     receipt: StitchedReceiptV2,
     successor_tip: [u8; 32],
-    bearer: Option<BearerLeaves>,
-    bearer_start: Option<crate::types::offline_chain::AccountPoint>,
+    bearer: BearerLeaves,
+    bearer_start: crate::types::offline_chain::AccountPoint,
 }
 
 impl VerifiedConfirm {
@@ -459,18 +461,18 @@ impl VerifiedConfirm {
         self.successor_tip
     }
 
-    /// For an offline-bearer step, the sender's anchor-state leaves the
-    /// verified receipt proves its step moved, before and after.
-    pub fn bearer(&self) -> Option<&BearerLeaves> {
-        self.bearer.as_ref()
+    /// The sender's anchor-state leaves the verified receipt proves its step
+    /// moved, before and after.
+    pub fn bearer(&self) -> &BearerLeaves {
+        &self.bearer
     }
 
     /// For an offline-bearer step, the account its spend starts from as this
     /// device established it: its recorded account carried forward by the
     /// sender's verified chain of spends, at the counter and frontier the
     /// release starts from.
-    pub fn bearer_start(&self) -> Option<&crate::types::offline_chain::AccountPoint> {
-        self.bearer_start.as_ref()
+    pub fn bearer_start(&self) -> &crate::types::offline_chain::AccountPoint {
+        &self.bearer_start
     }
 }
 
@@ -502,7 +504,12 @@ pub fn spend_starts_at_the_record(
     origin: &BearerOrigin<'_>,
 ) -> Result<crate::types::offline_chain::AccountPoint, DsmError> {
     use crate::types::offline_chain::{chain_end, verify_spend_chain, AccountPoint};
-    let recorded = &origin.recorded;
+    let recorded = origin.recorded.as_ref().ok_or_else(|| {
+        DsmError::invalid_operation(
+            "offline-bearer confirm: this device has validated none of the sender's offline \
+             account online, so no offline payment from it is taken",
+        )
+    })?;
     if recorded.device_id() != &receipt.devid_a
         || recorded.genesis() != sender_genesis
         || recorded.bundle() != &leaves.bundle
@@ -601,7 +608,7 @@ pub fn decide_confirm(
             ),
             author_genesis: sender.genesis,
             operation: step.operation,
-            bearer: step.bearer,
+            bearer: Some(step.bearer),
         },
     )?;
     verify_per_step_ek_signing(
@@ -611,23 +618,8 @@ pub fn decide_confirm(
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
-    let bearer_start = match step.bearer.as_ref() {
-        Some(leaves) => {
-            let origin = step.bearer_origin.ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "offline-bearer confirm: this device has validated none of the sender's \
-                     offline account online, so no offline payment from it is taken",
-                )
-            })?;
-            Some(spend_starts_at_the_record(
-                &receipt,
-                leaves,
-                &sender.genesis,
-                origin,
-            )?)
-        }
-        None => None,
-    };
+    let bearer_start =
+        spend_starts_at_the_record(&receipt, &step.bearer, &sender.genesis, step.bearer_origin)?;
 
     let pre_entropy = <[u8; 32]>::try_from(claims.pre_entropy).map_err(|_| {
         DsmError::invalid_operation("pre_entropy must be present and 32 bytes in confirm")
@@ -1754,10 +1746,17 @@ mod tests {
     /// side by the sender's per-step EK certified by its AK over the
     /// session-bound target of the step's commitment on the tip the receiver
     /// holds, and the successor both derive from the sender's entropy.
+    /// A sender's offline-bearer payment to a receiver, at the confirm: the
+    /// sender's load and spend on its anchor, the spend's receipt answered by
+    /// the sender's per-step EK, and the receiver's record of the account the
+    /// load left.
     struct BuiltConfirm {
         sender: Peer,
         receiver: Peer,
-        transfer: Step,
+        operation: Operation,
+        bearer: BearerLeaves,
+        recorded: crate::economic::peer_lineage::PeerOfflineAccount,
+        anchor: crate::types::offline_chain::ChainAnchor,
         commitment_hash: [u8; 32],
         receipt: Vec<u8>,
         device_tree_root: [u8; 32],
@@ -1798,25 +1797,27 @@ mod tests {
         (held_tip, commitment)
     }
 
-    /// `author`'s receipt of `step` toward `toward`, answered on `side` by
+    /// `author`'s `receipt` toward `toward`, of the step precommitted as
+    /// `c_pre`, answered on `side` by
     /// the author's per-step EK certified by its AK over the session-bound
     /// target of `commitment_hash`. Returns the receipt's wire bytes and the
     /// author's Device Tree root.
     fn signed_receipt(
         author: &Peer,
         toward: &Peer,
-        step: &Step,
+        receipt: &StitchedReceiptV2,
+        c_pre: &[u8; 32],
         side: BilateralSide,
         commitment_hash: &[u8; 32],
     ) -> (Vec<u8>, [u8; 32]) {
         use crate::types::receipt_types::compute_receipt_challenge_response_target;
 
-        let mut receipt = step.receipt.clone();
+        let mut receipt = receipt.clone();
         let commitment = receipt.compute_commitment().expect("commitment");
         let answer = author.party.answer(
             &toward.party,
             &receipt.parent_tip,
-            &step.c_pre,
+            c_pre,
             &compute_receipt_challenge_response_target(&commitment, commitment_hash),
         );
         match side {
@@ -1839,21 +1840,50 @@ mod tests {
         )
     }
 
+    impl BuiltConfirm {
+        /// Where the receiver holds the sender's offline account from: its
+        /// record of the load, with no spend between.
+        fn origin(&self) -> BearerOrigin<'static> {
+            BearerOrigin {
+                recorded: Some(self.recorded),
+                anchor: self.anchor.clone(),
+                chain: &[],
+                accepted: None,
+            }
+        }
+    }
+
     fn built_confirm() -> BuiltConfirm {
+        use crate::types::offline_chain::fixture::{bearer_op, Payer};
+
         let sender = Peer::new(0x61);
         let receiver = Peer::new(0x62);
-        let (transfer, _) = steps(&sender, &receiver);
-        let (held_tip, commitment_hash) =
-            held_tip_and_commitment(&receiver, &sender, &transfer.operation);
+        let mut payer = Payer::loaded_on(
+            sender.party.head(),
+            sender.genesis,
+            0x61,
+            40,
+            crate::economic::token_policy::POLICY_FLAG_TRANSFERABLE,
+        );
+        let recorded = super::receive_rule_tests::record(&payer);
+        let operation = bearer_op(receiver.device_id, payer.token, &payer.token_policy, 7);
+        let (_, spent, bearer) = payer.spend(receiver.device_id, 7);
+        let (held_tip, commitment_hash) = held_tip_and_commitment(&receiver, &sender, &operation);
+        let pre_entropy = spent.transition_entropy;
+        let c_pre = compute_precommit(
+            &spent.parent_tip,
+            &operation.with_cleared_signature().to_bytes(),
+            &pre_entropy,
+        );
         let (receipt, device_tree_root) = signed_receipt(
             &sender,
             &receiver,
-            &transfer,
+            &spent,
+            &c_pre,
             BilateralSide::A,
             &commitment_hash,
         );
-        let pre_entropy = transfer.outcome.transition_entropy();
-        let op_bytes = transfer.operation.to_bytes();
+        let op_bytes = operation.to_bytes();
         let successor_tip = compute_successor_tip(
             &held_tip,
             &op_bytes,
@@ -1863,7 +1893,10 @@ mod tests {
         BuiltConfirm {
             sender,
             receiver,
-            transfer,
+            operation,
+            bearer,
+            recorded,
+            anchor: payer.pin,
             commitment_hash,
             receipt,
             device_tree_root,
@@ -1875,15 +1908,18 @@ mod tests {
 
     /// The receiver commits only a confirm its pinned sender signed, whose
     /// receipt is from that sender to this device and holds (state rules,
-    /// A-side EK chaining from the sender's head), and whose successor tip
-    /// the held tip, the operation and the sender's entropy reproduce.
+    /// A-side EK chaining from the sender's head), whose spend starts at the
+    /// sender's offline account as this device validated it online, and
+    /// whose successor tip the held tip, the operation and the sender's
+    /// entropy reproduce.
     /// MUTATION CONTROLS: dropping the σ_A check, the receipt's device
     /// binding, or the successor recompute lets a refused confirm through and
     /// turns this red.
     #[test]
     fn a_confirm_is_committed_only_as_its_sender_signed_and_derived_it() {
         let c = built_confirm();
-        let operation = c.transfer.operation.clone();
+        let operation = c.operation.clone();
+        let origin = c.origin();
         let other = Peer::new(0x65);
         let decide = |signature: &[u8],
                       receipt: &[u8],
@@ -1905,8 +1941,8 @@ mod tests {
                     receiver_device_id,
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head,
-                    bearer: None,
-                    bearer_origin: None,
+                    bearer: c.bearer,
+                    bearer_origin: &origin,
                 },
                 &c.sender.pinned(),
             )
@@ -1990,6 +2026,34 @@ mod tests {
             ),
             "128 KiB",
         );
+
+        // A device that has validated none of the sender's offline account
+        // online takes no offline payment from it.
+        refused(
+            decide_confirm(
+                ConfirmClaims {
+                    signature: &sigma_a,
+                    receipt: &c.receipt,
+                    pre_entropy: &c.pre_entropy,
+                    successor_tip: Some(c.successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id: c.receiver.device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer: c.bearer,
+                    bearer_origin: &BearerOrigin {
+                        recorded: None,
+                        ..c.origin()
+                    },
+                },
+                &c.sender.pinned(),
+            ),
+            "has validated none of the sender's offline account online",
+        );
     }
 
     /// SA-11. The confirm's entropy and successor tip ride unsigned beside
@@ -2003,7 +2067,8 @@ mod tests {
     #[test]
     fn a_confirm_whose_entropy_is_not_its_receipts_moves_nothing() {
         let c = built_confirm();
-        let operation = c.transfer.operation.clone();
+        let operation = c.operation.clone();
+        let origin = c.origin();
         let tampered_entropy = [0x6Bu8; 32];
         assert_ne!(tampered_entropy, c.pre_entropy);
         let op_bytes = operation.to_bytes();
@@ -2029,8 +2094,8 @@ mod tests {
                     receiver_device_id: c.receiver.device_id,
                     sender_device_tree_root: c.device_tree_root,
                     sender_chain_head: None,
-                    bearer: None,
-                    bearer_origin: None,
+                    bearer: c.bearer,
+                    bearer_origin: &origin,
                 },
                 &c.sender.pinned(),
             )
@@ -2046,6 +2111,81 @@ mod tests {
             decide(&tampered_entropy, tampered_successor),
             "is not the transition entropy its signed receipt commits",
         );
+    }
+
+    /// The receiver takes a bearer confirm only with the anchor-state leaves
+    /// its receipt's spend moved. The counter and both frontiers the
+    /// receipt's offline account starts from and advances to must be the ones
+    /// the release signed, and the account's leaf, under the release's bundle,
+    /// must fold with the relationship leaf from the receipt's parent root to
+    /// its child root.
+    /// MUTATION CONTROL: dropping the comparison of the receipt's offline
+    /// account with the release's leaves lets the counter and frontier cases
+    /// through and turns this red.
+    #[test]
+    fn a_confirm_whose_bearer_leaves_are_not_its_receipts_spend_is_refused() {
+        let c = built_confirm();
+        let operation = c.operation.clone();
+        let origin = c.origin();
+        let sigma_a = c.sender.sign_step(&c.commitment_hash);
+        let decide = |bearer: BearerLeaves| {
+            decide_confirm(
+                ConfirmClaims {
+                    signature: &sigma_a,
+                    receipt: &c.receipt,
+                    pre_entropy: &c.pre_entropy,
+                    successor_tip: Some(c.successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: &operation,
+                    held_tip: c.held_tip,
+                    receiver_device_id: c.receiver.device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer,
+                    bearer_origin: &origin,
+                },
+                &c.sender.pinned(),
+            )
+        };
+
+        decide(c.bearer).expect("the confirm with its own spend's leaves");
+        let other = [0x6Cu8; 32];
+        for (leaves, why) in [
+            (
+                BearerLeaves {
+                    counter: c.bearer.counter + 1,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    frontier: other,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    next_frontier: other,
+                    ..c.bearer
+                },
+                "is not the one its release advances",
+            ),
+            (
+                BearerLeaves {
+                    bundle: other,
+                    ..c.bearer
+                },
+                // The account's leaf under another bundle is another key: its
+                // write's path is not the tree's.
+                "the receipt's writes: ",
+            ),
+        ] {
+            refused(decide(leaves), why);
+        }
     }
 
     /// The sender takes as the step's acknowledgment only the receiver's
@@ -2100,7 +2240,8 @@ mod tests {
         let (ack, root) = signed_receipt(
             &receiver,
             &sender,
-            &credit,
+            &credit.receipt,
+            &credit.c_pre,
             BilateralSide::B,
             &commitment_hash,
         );
@@ -2144,7 +2285,8 @@ mod tests {
         let (a_side, _) = signed_receipt(
             &receiver,
             &sender,
-            &credit,
+            &credit.receipt,
+            &credit.c_pre,
             BilateralSide::A,
             &commitment_hash,
         );
@@ -2172,7 +2314,7 @@ mod receive_rule_tests {
         assert!(error.to_string().contains(reason), "{error}");
     }
 
-    fn record(payer: &Payer) -> PeerOfflineAccount {
+    pub(super) fn record(payer: &Payer) -> PeerOfflineAccount {
         let account = payer
             .head
             .offline_account(&payer.pin.bundle)
@@ -2194,7 +2336,7 @@ mod receive_rule_tests {
         accepted: Option<([u8; 32], u64)>,
     ) -> BearerOrigin<'a> {
         BearerOrigin {
-            recorded: *recorded,
+            recorded: Some(*recorded),
             anchor: payer.pin.clone(),
             chain,
             accepted,

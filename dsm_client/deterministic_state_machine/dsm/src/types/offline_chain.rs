@@ -481,15 +481,30 @@ pub(crate) mod fixture {
 
         /// [`Self::loaded`], the token's committed policy carrying `flags`.
         pub(crate) fn loaded_with(seed: u8, loaded: u64, flags: u8) -> Self {
+            Self::loaded_on(
+                crate::types::device_state::tests::fresh_device(seed),
+                derive(seed, "genesis"),
+                seed,
+                loaded,
+                flags,
+            )
+        }
+
+        /// [`Self::loaded_with`] on `device`, a head whose genesis is
+        /// `genesis`.
+        pub(crate) fn loaded_on(
+            device: DeviceState,
+            genesis: [u8; 32],
+            seed: u8,
+            loaded: u64,
+            flags: u8,
+        ) -> Self {
             let resident = SigningKey::from_bytes(&derive(seed, "resident key"));
             let chip_pk = resident.verifying_key().to_bytes().to_vec();
             let (token, token_policy) = crate::sofi::validation::fixtures::committed(
                 crate::sofi::validation::fixtures::token_policy_bytes_with(seed, flags),
             );
-            let genesis = derive(seed, "genesis");
-            let mut head = crate::types::device_state::tests::fresh_device(seed)
-                .created_token(token, 100)
-                .expect("token created");
+            let mut head = device.created_token(token, 100).expect("token created");
             let born = birth::<Partition>(&BirthInputs {
                 partition_trng: &derive(seed, "partition trng"),
                 chip_birth_witness: &derive(seed, "chip birth witness"),

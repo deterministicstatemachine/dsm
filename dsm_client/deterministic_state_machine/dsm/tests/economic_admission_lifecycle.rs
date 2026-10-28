@@ -99,16 +99,25 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
 
 // ── The fence predicate ────────────────────────────────────────────────────
 
+/// Activity that touches no economic leaf: a token adoption commits a policy
+/// leaf and moves no value.
+fn ordinary_activity() -> Operation {
+    Operation::AdoptToken {
+        policy_commit: ERA,
+        signature: Vec::new(),
+    }
+}
+
 #[test]
 fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
     let p = pending(
         PendingAdmissionKind::DsmBacked,
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
-    let op = Operation::Noop;
+    let op = ordinary_activity();
 
-    // A publication delay must not look like a device fault: relationship
-    // activity that touches no economic leaf continues throughout.
+    // A publication delay must not look like a device fault: activity that
+    // touches no economic leaf continues throughout.
     assert!(fence_allows(&p, EconomicEffect::None, &op).is_ok());
 
     assert!(matches!(
@@ -123,7 +132,7 @@ fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
 
 #[test]
 fn the_fence_engages_only_while_actually_pending() {
-    let op = Operation::Noop;
+    let op = ordinary_activity();
     // Before local acceptance nothing durable changed, and after admission the
     // protection has served its purpose. Fencing in either state would stall
     // the device for no benefit.
@@ -215,7 +224,11 @@ fn an_unidentifiable_bearer_operation_fails_closed_during_a_boundary_fence() {
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
     assert!(matches!(
-        fence_allows(&load, EconomicEffect::OfflineAccountOnly, &Operation::Noop),
+        fence_allows(
+            &load,
+            EconomicEffect::OfflineAccountOnly,
+            &ordinary_activity()
+        ),
         Err(FenceBlock::BearerUseOfPendingAllocation { .. })
     ));
 }
