@@ -5342,6 +5342,76 @@ Each item below turns on one of four clauses:
 
 **Rows.** Notes for MR-DSM-0020, 0082, 0095, 0101, 0102, 0215, 0245, 0250 and MR-SOFI-0078, 0092, 0126, 0284, with MR-DSM-0215's and MR-DSM-0250's Test cells extended. Eight matrix rows added.
 
+### 6.111 The setup body's root and the resolved leaf cache are derived in Core (§6.105 A6, option (b); `refactor/sofi-setup-root-and-leaf-cache-in-core`, 2026-10-27)
+
+**Why.** The audit session's assignment, 2026-10-27: implement §6.105 A6, option (b), for MR-SOFI-0037. SoFi §2.1 (L368) says the SDK adapter "Packages a result Core already accepted into Core's generic transition input. Never validates a second time, never computes a second root, never supplies its own entropy." §6.105 found two roots the SDK computed: the setup body's `R_T^setup`, and the root of the leaf cache it writes after a resolution. The assignment came from that session; the owner's own ruling text on A6 is not in the repository.
+
+**What changed.**
+- *The setup body is Core's.* `dsm::sofi::lineage::setup_body(previous, pre_tree, names)` builds the unsigned `SofiSetupBody`:
+  - it refuses a tree whose root is not the validated predecessor's (`PreTreeIsNotThePredecessor`);
+  - it refuses a vault this identity already holds a relationship with (`SetupAlreadyExists`);
+  - it inserts `h⁰` of the setup id at `p`, from absent, at the relationship key (the P15-6 insertion the write set makes);
+  - it names `p` and the root after that insertion.
+
+  `SetupNames` carries the identity, the vault, `ClaimRef_p` and the key, so no `#[allow]` was added. `dsm_sdk::sdk::sofi_sdk::build_setup` now calls it and states only what is signed (`m_setup`) and what is published. Its two refusals moved to Core as `BuildError::Setup`. Its `#[allow(clippy::too_many_arguments)]` line is gone, and that baseline entry is now surplus.
+- *The leaves behind a resolved root are Core's.*
+  - `advance_resolved` derives, beside the balances, the trader leaf states a realized route writes: `ResolvedAdvance::leaf_states`, from `trader_post_states` over the same facts. A Void writes none.
+  - `ResolvedAdvance::installed_leaves(current)` puts them into the device's cache. It binds every row to the state its bytes decode to, under this device's key derivation, and refuses unless the rows recompute the installed root. The result is an `InstalledLeaves`, which only Core builds.
+  - `CoreSDK::admit_resolved_sofi_position` takes that type. `sofi_advance::resolve_pending_position` no longer builds an `EconomicSmt`, and its `post_leaf_cache` is deleted.
+  - One check is new: before this, a row's bytes were written without being checked against its key and value.
+- *Kept:* `check_draft` still obtains Core's verdict before anything is published (L1738; §31 stage 3).
+- *No wire change.*
+
+**Tests.**
+- Core producer:
+  - `dsm::sofi::lineage::tests::a_setup_body_names_its_predecessor_and_the_root_the_insertion_gives`;
+  - `dsm::sofi::lineage::tests::a_setup_body_is_not_built_off_the_predecessor_or_over_a_relationship`;
+  - `dsm::economic_admission_lifecycle::a_setup_transition_binds_its_position_and_its_derived_root`, which now takes its passing body from `setup_body`. The verifier derives the same root from the transition, and a body naming another `p` or another root is refused.
+- Leaves:
+  - `dsm::sofi::lineage::tests::a_realized_position_installs_the_leaves_that_recompute_its_realize_root`;
+  - `dsm::sofi::lineage::tests::leaves_that_do_not_recompute_the_installed_root_are_refused`;
+  - `dsm::sofi::lineage::tests::a_row_whose_bytes_are_not_its_state_is_refused`.
+- Production paths, each in its own `--release` run on Postgres:
+  - `dsm_sdk::handlers::node_e2e_tests::a_sofi_trade_executes_end_to_end` (setup, trade, Realized);
+  - `dsm_sdk::handlers::node_e2e_tests::a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes` (Void, then Realized);
+  - `dsm_sdk::handlers::node_e2e_tests::a_vault_traded_through_closes_for_its_owner` (close);
+  - `dsm_sdk::handlers::node_e2e_tests::every_sofi_route_reaches_its_producer` (`sofi.setup` among the routes).
+- Also run, each binary or module on its own: the SDK's `source_rules` (10/0), Core's `sofi::lineage` (45/0, three runs) and `sofi::facts` (16/0).
+
+**Not written here: `a_producer_refuses_a_route_that_does_not_chain`.**
+- *History.* The §8 note recorded it under MR-SOFI-0037. It existed in `sofi_sdk.rs` at `5a8c638d` and was deleted in `8bb4d1b6` (#977).
+- *Why it is not part of this change.* It tests that a producer stops on a route Core refutes in hand: MR-SOFI-0260's rule and §6.105 A5's preflight. It is not about where a root is computed.
+- *Why its old form no longer applies.* Its two hops traded one pair. Under Amendment S19 that is a split, not a broken chain. `route_endpoints` takes a chain's ends without checking its links; `check_draft`'s `validate` is what refuses a chain whose links do not meet (`RouteDoesNotChain`).
+- *What a test on the production builders needs.* A market of two vaults on the nodes, and a hop pair that `draft_trade` would not plan, built by hand with the trader core and both vault cores against the walked heads. That is a node test of its own.
+- *Core's own test of the rule:* `dsm::sofi::validation::tests::what_the_operation_decides_alone_is_decided_before_any_read`.
+
+**What this leaves: the SDK still computes the producer tree's root.**
+- `dsm_sdk::sdk::economic_admission_flow::producer_tree_and_pre_state` rebuilds `R_econ` from the leaf cache and refuses unless its root is the validated root. It is the same kind of computation as the leaf-cache recompute moved here.
+- It serves every economic producer: transfers, the faucet, offline boundaries, the SoFi setup (whose `pre_tree` it builds) and the trade's standing. Since this change, `setup_body` checks the tree it is handed against the predecessor again, in Core.
+- The DSM admission producer (`build_dsm_admission`) also takes its witness's `pre_root` from that tree.
+- Moving it means a Core function that builds the tree from cache rows bound to a validated root. That reaches every economic producer, not only SoFi's, so it was not done under this assignment. MR-SOFI-0037 stays Partial on it.
+
+**Specification pointers.** In `specs/SoFi_Settlement_Specification.md`, three code pointers now name `setup_body` in CORE/sofi/lineage.rs, with `build_setup` packaging its body:
+- the Code box at L990;
+- step 1 of §29, at L2058;
+- rebuild step R8, at L2800.
+
+Only pointer text changed; the line count is unchanged. `MASTER_REQUIREMENTS.md` §1 re-pins the file with a dated sentence. No canonical row changes: no row derives from those lines (Code boxes and Part VIII's step table are not requirements).
+
+**Mutation controls.**
+- *Setup.* One `DSM_MUTANT` scratch worktree of this tree, outside the repository, with its own target directory. A mutant is a switch read at run time, in the scratch copy only. The unmutated control of every named test was green, before and after. Each mutant turned its named test red by doing the forbidden thing:
+  - **The verifier's setup-root check off** (`advance_validated`, `SetupRootIsNotTheDerivedRoot`): `a_setup_transition_binds_its_position_and_its_derived_root` is red; a body naming a root its transition does not produce is no longer refused by it.
+  - **The producer's insertion skipped** (`setup_body` names the predecessor's root): `a_setup_body_names_its_predecessor_and_the_root_the_insertion_gives` is red, and so is `a_setup_transition_binds_its_position_and_its_derived_root`, because the verifier refuses Core's own body with `SetupRootIsNotTheDerivedRoot`.
+  - **The producer's predecessor check off**: `a_setup_body_is_not_built_off_the_predecessor_or_over_a_relationship` is red; a body is built on another tree.
+  - **The producer's from-absent check off**: the same test is red; a second setup over an existing relationship is built.
+  - **`installed_leaves`' root check off**: `leaves_that_do_not_recompute_the_installed_root_are_refused` is red; a cache holding a leaf the predecessor's root does not hold is handed back to write.
+  - **`installed_leaves`' row binding off**: `a_row_whose_bytes_are_not_its_state_is_refused` is red; a row carrying another state's bytes under the right key and value is handed back.
+- *A test defect found by the control, and fixed.* The unmutated control of `leaves_that_do_not_recompute_the_installed_root_are_refused` failed one run in two at first. It compared the void's rows with the input's order, while the cache comes back in key order. The fixture's device id is derived from a per-process key, so the key order differs from run to run. The test now compares against the rows in key order, and its control then passed six runs out of six.
+
+**Verification.** Every test above passed in its own `--release` run, the node tests on a Postgres database of this session's own. `make lint` passed, with eslint through a temporary symlink to the main checkout's `node_modules`, removed afterwards. `ci/production_safety_checks.sh` passed on the pinned toolchain, and so did `python3 ci/conformance_evidence.py` and the real-code guard.
+
+**Rows.** MR-SOFI-0037 is rechecked and stays Partial, on the producer tree above. Its code and test cells now name Core's producer and the leaf binding. Two matrix rows were added. Totals are unchanged.
+
 ### 6.112 MR-DSM-0248: a field the length prefix cannot frame is refused, never hashed (`fix/length-prefix-refuses-oversize`, 2026-10-27)
 
 **Why.** §6.108 asked the owner question 3. `write_lp` wrote the prefix `u32::MAX` for every field over 4 GiB (`unwrap_or(u32::MAX)`), so two such fields of different lengths hashed with one prefix, and the prefix was a made-up value.
@@ -5827,7 +5897,7 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 | MR-SOFI-0034 | Met | `dsm_storage_node::api::cells`; `dsm_storage_node::api::objects::immutable` | `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | — |
 | MR-SOFI-0035 | Met | `dsm::sofi::storage::stored`; `dsm::sofi::storage::StoredFact`; `dsm::route_chain::evaluate` | `dsm::sofi::storage::tests::wrong_bytes_never_count`; `dsm::sofi::storage::tests::silence_never_counts`; `dsm::route_chain::tests::junk_first_at_the_leader_blocks_nothing` | arith.rs was deleted in #976; object facts come from re-hashed member bytes in sofi::storage and cell facts from raw reads in route_chain::evaluate, never from a node's verdict. |
 | MR-SOFI-0036 | Violated | `dsm::types::device_state::DeviceState::advance` | — | Rechecked 2026-10-26 on main ad831f53 (was Violated). core/state_machine/ itself no longer names SoFi (relationship.rs was deleted) [STALE-NOTE]. But its one transition path, DeviceState::advance, sends SoFi operations to sofi::signature and decodes sofi::wire VaultCreation. [NEEDS-OWNER] if types/device_state.rs counts as outside this layer. Out of beta: G8 rest (owner 2026-09-23). |
-| MR-SOFI-0037 | Partial | `dsm_sdk::sdk::sofi_sdk::build_setup` | — | Rechecked 2026-10-26 on main ad831f53 (was Partial). The SDK supplies no entropy; Core derives it in advance. But build_setup computes R_T^setup in the SDK, and sofi_advance recomputes the economic root from leaves as a check. The recorded test a_producer_refuses_a_route_that_does_not_chain no longer exists. [STALE-NOTE] [NEEDS-OWNER] Needs an owner ruling before work. |
+| MR-SOFI-0037 | Partial | `dsm::sofi::lineage::setup_body`; `dsm::sofi::lineage::ResolvedAdvance::installed_leaves`; `dsm_sdk::sdk::sofi_sdk::build_setup`; `dsm_sdk::sdk::sofi_advance::resolve_pending_position` | `dsm::sofi::lineage::tests::a_setup_body_names_its_predecessor_and_the_root_the_insertion_gives`; `dsm::economic_admission_lifecycle::a_setup_transition_binds_its_position_and_its_derived_root`; `dsm::sofi::lineage::tests::leaves_that_do_not_recompute_the_installed_root_are_refused`; `dsm::sofi::lineage::tests::a_row_whose_bytes_are_not_its_state_is_refused` | Rechecked 2026-10-27 (§6.111, was Partial). §6.105 A6, option (b), as assigned: Core's setup_body derives R_T^setup on the predecessor's tree and build_setup only packages the body; the leaves behind a resolved root are derived and bound to it in Core, and the SDK writes them without computing a root. The SDK supplies no entropy. check_draft still obtains Core's verdict before anything is published (L1738, §31 stage 3); option (b) keeps it and leaves §2.1's "never validates a second time" unamended. Still Partial: the shared producer tree, economic_admission_flow::producer_tree_and_pre_state, recomputes the admitted root from the leaf cache for every economic producer, the SoFi setup and the trade's standing among them (§6.111). The recorded a_producer_refuses_a_route_that_does_not_chain was deleted in 8bb4d1b6 and is not rewritten here (§6.111). |
 | MR-SOFI-0038 | Met | `dsm_storage_node::api::objects::immutable::put_immutable`; `dsm_storage_node::api::objects::immutable::get_immutable`; put_cell, put_cells, get_cell | `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::immutable_store_round_trip::bytes_put_into_the_immutable_store_come_back_byte_identical` | Rechecked 2026-10-26 on main ad831f53 (was Partial). The node keeps every value in arrival order, never decodes payloads and refuses only malformed requests. Its only checks are generic integrity: its own content address, size caps, the mirror's member id. The node has no SoFi code. Tests show a contested key is kept, not refused. |
 | MR-SOFI-0039 | Met | `dsm_storage_node::api::cells`; `dsm_storage_node::api::objects::immutable` | `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused`; `dsm_storage_node::api::objects::immutable::tests::proto_decodable_bytes_are_just_bytes` | The node holds bytes and refuses only malformed shapes; ci/storage_is_dumb.sh also fails any SoFi reference under dsm_storage_node/src. |
 | MR-SOFI-0040 | Met | `dsm::route_chain::ChainState`; `dsm::sofi::storage::StoredFact`; `dsm::sofi::registration::Registration`; `dsm::sofi::resolution::Resolution`; `dsm::sofi::resolution::consumed_route`; `dsm::economic::register::RegisteredEconomicRoot` | `dsm::sofi::registration::tests::registration_needs_both_cells_final_and_the_root_on_this_claim`; `dsm::sofi::resolution::tests::registration_is_not_conformance`; `dsm::sofi::resolution::tests::a_final_leg_of_an_invalid_route_is_not_consumed`; `dsm::economic_lineage_register::registering_an_arbitrary_root_yields_nothing_validated` | sofi/arith.rs is gone; storage finality (route_chain), registration, conformance, consumption and validation are separate types, and tests show none implies another. |
