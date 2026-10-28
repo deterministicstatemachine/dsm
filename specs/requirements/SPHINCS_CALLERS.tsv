@@ -335,8 +335,8 @@ dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3057	crate::
 dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3065	crate::crypto::sphincs::sphincs_sign(&wrong_secret_key, &invalidation_message)
 dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3253	crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
 dsm_client/deterministic_state_machine/dsm/src/vault/limbo_vault.rs	3281	crate::crypto::sphincs::generate_sphincs_keypair().expect("sphincs keypair");
-dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	270	use crate::crypto::sphincs::sphincs_verify;
-dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	299	let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
+dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	297	use crate::crypto::sphincs::sphincs_verify;
+dsm_client/deterministic_state_machine/dsm/src/verification/receipt_verification.rs	326	let sig_ok = sphincs_verify(ek_pk, signing_target, sig).map_err(|e| {
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	25	use dsm::crypto::sphincs::sphincs_sign;
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	55	grk_signature: sphincs_sign(&grk.secret_key, &msg).expect("fixture"),
 dsm_client/deterministic_state_machine/dsm/tests/authority_resolver_obligations.rs	63	delegate_signature: sphincs_sign(&key.secret_key, &msg).expect("fixture"),
@@ -367,7 +367,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/authored_routes.rs	1
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	27	use dsm::crypto::sphincs::sphincs_sign;
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	204	let intent_sig = sphincs_sign(&ak_sk, &cert_resync_signing_target(&joint, &ek_pk_a))?;
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	321	let assert_sig = sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	515	let other = dsm::crypto::sphincs::generate_sphincs_keypair()
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	528	let other = dsm::crypto::sphincs::generate_sphincs_keypair()
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	817	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	821	signature: dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/counterfeit_acceptance_tests.rs	437	let signature = dsm::crypto::sphincs::sphincs_sign(
@@ -392,7 +392,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_finaliz
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	721	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	854	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	1067	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/storage_routes.rs	754	cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/storage_routes.rs	755	cert.signature_a = dsm::crypto::sphincs::sphincs_sign(&ek_sk_a, &target)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	1815	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a signer key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2125	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a sender key");
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/wallet_routes.rs	2126	let signature = dsm::crypto::sphincs::sphincs_sign(&sender_sk, &unsigned.to_bytes())
@@ -433,18 +433,18 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/kyber_identity.rs	331	dsm
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/kyber_identity.rs	350	let (ak_pk, ak_sk) = sphincs::generate_sphincs_keypair().expect("ak keypair");
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/kyber_identity.rs	354	let binding_sig = sphincs::sphincs_sign(&ak_sk, &digest).expect("sign binding");
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/kyber_identity.rs	428	let (other_ak_pk, _) = sphincs::generate_sphincs_keypair().expect("other ak");
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	249	use dsm::crypto::sphincs::sphincs_sign;
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	300	let sig = sphincs_sign(&ek_sk, signing_target).map_err(|e| {
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	485	let sig = dsm::crypto::sphincs::sphincs_sign(&sk, msg).expect("sign");
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	486	assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	665	use dsm::crypto::sphincs::sphincs_verify;
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	695	let sig_ok = sphincs_verify(&out.ek_pk, &response_target, &out.sig).unwrap();
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	756	use dsm::crypto::sphincs::sphincs_verify;
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	775	assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	794	assert!(sphincs_verify(&out1.ek_pk, &target1, &out1.sig).unwrap());
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	835	use dsm::crypto::sphincs::sphincs_verify;
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	950	sphincs_verify(&chain_pubkeys[i], &response_target, &chain_sigs[i]).unwrap(),
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	958	!sphincs_verify(&chain_pubkeys[i - 1], &response_target, &chain_sigs[i])
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	250	use dsm::crypto::sphincs::sphincs_sign;
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	302	let sig = sphincs_sign(&ek_sk, signing_target).map_err(|e| {
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	487	let sig = dsm::crypto::sphincs::sphincs_sign(&sk, msg).expect("sign");
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	488	assert!(dsm::crypto::sphincs::sphincs_verify(&pk, msg, &sig).expect("verify"));
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	667	use dsm::crypto::sphincs::sphincs_verify;
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	697	let sig_ok = sphincs_verify(&out.ek_pk, &response_target, &out.sig).unwrap();
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	758	use dsm::crypto::sphincs::sphincs_verify;
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	777	assert!(sphincs_verify(&out0.ek_pk, &target0, &out0.sig).unwrap());
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	796	assert!(sphincs_verify(&out1.ek_pk, &target1, &out1.sig).unwrap());
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	837	use dsm::crypto::sphincs::sphincs_verify;
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	952	sphincs_verify(&chain_pubkeys[i], &response_target, &chain_sigs[i]).unwrap(),
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/receipts.rs	960	!sphincs_verify(&chain_pubkeys[i - 1], &response_target, &chain_sigs[i])
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	470	let keypair = dsm::crypto::sphincs::generate_keypair_from_seed(
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	471	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	2363	let authority = dsm::crypto::sphincs::generate_keypair_from_seed(

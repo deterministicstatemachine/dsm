@@ -214,8 +214,9 @@ pub struct PerStepSigningOutput {
 /// the cert chain back to the device's AK in the process (whitepaper §11.1).
 ///
 /// Flow:
-/// 1. Load prior chain head SK (encrypted, decrypted in-memory). If absent at
-///    relationship genesis, use `inputs.root_ak_keypair`.
+/// 1. Choose the prior SK by Core's predecessor rule: the chain head's
+///    (decrypted in memory), or at relationship genesis, where there is none,
+///    `inputs.root_ak_keypair`'s.
 /// 2. Run deterministic Kyber encapsulation against
 ///    `inputs.recipient_kyber_pk` to derive `k_step` per whitepaper §11
 ///    The recipient's Kyber pubkey is mandatory.
@@ -255,22 +256,23 @@ pub fn sign_receipt_with_per_step_ek_target(
     let s_master = crate::init::current_smaster()?;
     let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
 
-    // 1. Resolve prior signer's SK.
-    let (prior_sk, used_root_ak) =
-        match load_local_chain_head_sk(&inputs.relationship_key, &at_rest_key)
-            .map_err(|e| DsmError::invalid_operation(format!("chain-head SK load: {e}")))?
-        {
-            Some(sk) => (sk, false),
-            None => match inputs.root_ak_keypair {
-                Some((_pk, sk)) => (sk.to_vec(), true),
-                None => {
-                    return Err(DsmError::invalid_operation(
-                        "per-step signing requires chain-head SK or root AK keypair; \
-                     neither was available — call init_local_cert_chain_head_with_sk first",
-                    ))
-                }
-            },
-        };
+    // 1. The prior signer's SK: Core's predecessor rule decides whether the
+    //    chain head's or the root AK's is due. A caller that withholds the root
+    //    AK requires the chain head, so a due key this device does not hold is
+    //    refused here.
+    let head_sk = load_local_chain_head_sk(&inputs.relationship_key, &at_rest_key)
+        .map_err(|e| DsmError::invalid_operation(format!("chain-head SK load: {e}")))?;
+    let prior = dsm::verification::receipt_verification::per_step_ek_predecessor(
+        head_sk.as_deref().map(Some),
+        inputs.root_ak_keypair.map(|(_pk, sk)| sk),
+    );
+    let used_root_ak = prior.is_root_ak();
+    let Some(prior_sk) = prior.key() else {
+        return Err(DsmError::invalid_operation(
+            "per-step signing requires chain-head SK or root AK keypair; neither was \
+             available — call init_local_cert_chain_head_with_sk first",
+        ));
+    };
 
     // 2. Per-step Kyber encapsulation per §11. No stubs — the recipient's
     //    Kyber pubkey is mandatory and validated inside the helper.
@@ -292,7 +294,7 @@ pub fn sign_receipt_with_per_step_ek_target(
     let (ek_pk, ek_sk) = derive_per_step_ek(&ek_ctx, &s_master)?;
 
     // 4. Sign cert.
-    let cert = sign_ek_cert(&prior_sk, &ek_pk, &inputs.h_n)?;
+    let cert = sign_ek_cert(prior_sk, &ek_pk, &inputs.h_n)?;
 
     // 5. Answer the receipt challenge with the new EK_sk over the caller's
     //    response target (standard: session-bound commitment; online B side:

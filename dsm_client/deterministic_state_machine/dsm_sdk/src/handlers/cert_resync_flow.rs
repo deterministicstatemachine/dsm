@@ -364,6 +364,15 @@ impl super::app_router_impl::AppRouterImpl {
         let (state, epoch) = cert_resync_status(&rel_key).map_err(|e| {
             DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>)
         })?;
+        // An ack below the relationship's current epoch answers a request
+        // this device has since replaced. Epochs only rise, so it never will
+        // match: it is passed over by its content (§6.104), not read again.
+        if ack.epoch < epoch {
+            return not_recognized(&format!(
+                "cert resync ack: epoch {} is below this relationship's current {epoch}",
+                ack.epoch
+            ));
+        }
         if state != RESYNC_PENDING || epoch != ack.epoch {
             return Err(CertResyncRefusal::Failed(DsmError::invalid_operation(
                 format!(
@@ -467,9 +476,13 @@ mod tests {
     ///   read again, and B's head for A does not move;
     /// - under another AK, the cosignature does not verify: the request is
     ///   passed over, and B's head for A does not move;
-    /// - under A's own AK, A's next request is taken: B's head for A moves to
-    ///   the EK A asserted, B's own head is untouched, and B records A's epoch
-    ///   without blocking its own sending.
+    /// - under A's own AK, A's requests are taken. A asked twice, so B's ack
+    ///   for the first answers a request A replaced: A refuses it as below its
+    ///   epoch and finalizes on the second. Both sides end at that epoch with
+    ///   nothing pending: B's head for A is A's restarted head, A holds B's
+    ///   unchanged head, and B's own head is untouched.
+    /// - a further sync on each side is clean: no resync starts again and the
+    ///   replaced ack is not read again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_resync_request_is_taken_only_under_the_ak_the_responder_pins() {
@@ -530,22 +543,61 @@ mod tests {
             Some(lost.clone())
         );
 
+        // B pins A's AK again. A asks twice before B answers, so one of B's
+        // acks will answer a request A has since replaced.
         pin(&p.b, &p.a, &p.a.ak_pk);
         let own = head(&p.b, &rel, CertChainSide::Local).expect("B's own head");
         p.a.sync().await;
+        let replaced = resync_state(&p.a, &rel).1;
+        p.a.sync().await;
+        let (_, epoch) = resync_state(&p.a, &rel);
+        assert!(epoch > replaced, "A asked again under a later epoch");
         let answered = p.b.sync().await;
         assert!(answered.errors.is_empty(), "{:?}", answered.errors);
-        let taken = head(&p.b, &rel, CertChainSide::Counterparty).expect("B's head for A");
-        assert_ne!(taken, lost, "B's head for A is A's fresh EK");
+
+        // A finalizes on the ack for its current epoch; the one for the epoch
+        // it replaced is refused as below it.
+        let finished = p.a.sync().await;
+        assert_eq!(finished.errors.len(), 1, "{:?}", finished.errors);
+        assert!(
+            finished.errors[0].contains(&format!("epoch {replaced} is below")),
+            "{:?}",
+            finished.errors
+        );
+        assert_eq!(
+            resync_state(&p.a, &rel),
+            (cdb::RESYNC_CLEAR, epoch),
+            "A finalized at its current epoch and owes nothing"
+        );
+        assert_eq!(
+            resync_state(&p.b, &rel),
+            (cdb::RESYNC_CLEAR, epoch),
+            "B recorded the same epoch and is not blocked"
+        );
+        let fresh = head(&p.a, &rel, CertChainSide::Local).expect("A's restarted head");
+        assert_ne!(fresh, lost);
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Counterparty),
+            Some(fresh),
+            "B's head for A is A's restarted head"
+        );
+        assert_eq!(
+            head(&p.a, &rel, CertChainSide::Counterparty),
+            Some(own.clone()),
+            "A holds B's head"
+        );
         assert_eq!(
             head(&p.b, &rel, CertChainSide::Local),
             Some(own),
             "B's own head is untouched"
         );
-        assert_eq!(
-            resync_state(&p.b, &rel),
-            (cdb::RESYNC_CLEAR, resync_state(&p.a, &rel).1),
-            "B recorded A's latest epoch and is not blocked"
-        );
+
+        // A further sync on each side is clean: no resync starts again, and
+        // the replaced ack is not read again.
+        let again = p.a.sync().await;
+        assert!(again.errors.is_empty(), "{:?}", again.errors);
+        assert_eq!(resync_state(&p.a, &rel), (cdb::RESYNC_CLEAR, epoch));
+        let quiet = p.b.sync().await;
+        assert!(quiet.errors.is_empty(), "{:?}", quiet.errors);
     }
 }

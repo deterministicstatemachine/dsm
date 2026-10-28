@@ -221,14 +221,41 @@ pub enum BilateralSide {
     B,
 }
 
-/// The key a side's `ek_cert` must chain to (§11.1): the side's EK head on the
-/// relationship, or, at the relationship's first step, where the side has no
-/// EK head yet, its AK. A head the caller could not read is not "no head":
-/// it is the caller's to report, never to pass here as `None`.
-pub fn per_step_ek_predecessor<'k>(ek_head: Option<&'k [u8]>, ak: &'k [u8]) -> &'k [u8] {
-    match ek_head {
-        Some(head) => head,
-        None => ak,
+/// Which key a side's next `ek_cert` chains to (§11.1), as the key of that
+/// kind the caller holds: a public key to verify the certificate, a secret
+/// key to sign it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EkPredecessor<K> {
+    /// The side's EK head on the relationship.
+    ChainHead(K),
+    /// The side's AK, at the relationship's first step, before it has an EK
+    /// head.
+    RootAk(K),
+}
+
+impl<K> EkPredecessor<K> {
+    /// The key itself.
+    pub fn key(self) -> K {
+        match self {
+            Self::ChainHead(key) | Self::RootAk(key) => key,
+        }
+    }
+
+    /// Whether the chain starts at the AK, the relationship's first step.
+    pub fn is_root_ak(&self) -> bool {
+        matches!(self, Self::RootAk(_))
+    }
+}
+
+/// The predecessor rule of the per-step EK chain (§11.1), the one rule its
+/// signer and every verifier use: a side's EK head on the relationship, or, at
+/// the relationship's first step, where the side has no EK head yet, its AK.
+/// A head the caller could not read is not "no head": it is the caller's to
+/// report, never to pass here as `None`.
+pub fn per_step_ek_predecessor<K>(chain_head: Option<K>, root_ak: K) -> EkPredecessor<K> {
+    match chain_head {
+        Some(head) => EkPredecessor::ChainHead(head),
+        None => EkPredecessor::RootAk(root_ak),
     }
 }
 
@@ -572,12 +599,22 @@ mod tests {
     }
 
     /// The predecessor is the side's EK head once it has one, and its AK only
-    /// before.
+    /// before, for a public key as for a secret one.
     #[test]
     fn the_predecessor_is_the_head_and_the_ak_only_before_one_exists() {
         let (head, ak) = ([0xE1u8; 64], [0xA1u8; 64]);
-        assert_eq!(per_step_ek_predecessor(Some(&head), &ak), &head[..]);
-        assert_eq!(per_step_ek_predecessor(None, &ak), &ak[..]);
+        let chosen = per_step_ek_predecessor(Some(&head[..]), &ak[..]);
+        assert_eq!(chosen, EkPredecessor::ChainHead(&head[..]));
+        assert_eq!(chosen.key(), &head[..]);
+        let first = per_step_ek_predecessor(None, &ak[..]);
+        assert_eq!(first, EkPredecessor::RootAk(&ak[..]));
+        assert_eq!(first.key(), &ak[..]);
+        assert!(!chosen.is_root_ak());
+        assert!(first.is_root_ak());
+        assert_eq!(
+            per_step_ek_predecessor(Some(vec![0xE2u8; 128]), vec![0xA2u8; 128]),
+            EkPredecessor::ChainHead(vec![0xE2u8; 128])
+        );
     }
 
     /// Everything the sender's finality predicate is handed, as the sender of
@@ -655,6 +692,7 @@ mod tests {
                 canonical_pair: (receipt.parent_tip, receipt.child_tip),
                 commitment,
                 predecessor: per_step_ek_predecessor(None, w.receiver.signing_public_key())
+                    .key()
                     .to_vec(),
                 b_pair,
                 receipt,

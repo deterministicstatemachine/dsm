@@ -207,6 +207,25 @@ mod tests {
         }
     }
 
+    /// The key the counterparty's next `ek_cert` must chain to, as this device
+    /// reads it: the counterparty's AK while no head is stored for the
+    /// relationship, and the stored head once there is one, whatever AK is
+    /// offered.
+    #[test]
+    #[serial_test::serial]
+    fn the_counterparty_predecessor_is_its_stored_head_and_its_ak_only_before_one() {
+        with_a_store();
+        let (rel_key, ak, head) = ([0x5Cu8; 32], [0x55u8; 64], [0xE1u8; 64]);
+        let predecessor = || {
+            crate::handlers::storage_routes::counterparty_ek_predecessor(&rel_key, &ak)
+                .expect("a readable store answers")
+        };
+        assert_eq!(predecessor(), ak.to_vec(), "no head stored: the AK");
+        crate::storage::client_db::cas_advance_counterparty_cert_chain_head(&rel_key, None, &head)
+            .expect("the head is stored");
+        assert_eq!(predecessor(), head.to_vec(), "a head stored: the head");
+    }
+
     /// Storage spec §4: a counterparty cert-chain head that could not be READ
     /// is not "no head yet". Neither verifier judges the chain against the
     /// root AK: the sender's read of the predecessor it checks the

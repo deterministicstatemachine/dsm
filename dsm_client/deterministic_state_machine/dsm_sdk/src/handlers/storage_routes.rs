@@ -175,6 +175,7 @@ pub(crate) fn counterparty_ek_predecessor(
             head.as_deref(),
             counterparty_ak,
         )
+        .key()
         .to_vec(),
     )
 }
@@ -2471,8 +2472,6 @@ impl AppRouterImpl {
                         &mut report.errors,
                     );
                 }
-                self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
-                    .await;
 
                 let (polled, read_on) = match retrieved {
                     Ok(outcome) => {
@@ -2550,6 +2549,12 @@ impl AppRouterImpl {
                 }
             }
         }
+        // A resync this device owes starts, or starts again, once per sync and
+        // only after every route was read: an ack waiting on any route meets
+        // the epoch it answers, not one this sync raised while reading.
+        self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
+            .await;
+
         // At most `limit` per route, which the request bounds by
         // STORAGE_SYNC_MAX_LIMIT, over the few routes this device's contacts
         // give it: far below u32::MAX.

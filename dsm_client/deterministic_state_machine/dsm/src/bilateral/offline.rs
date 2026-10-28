@@ -615,7 +615,7 @@ pub fn decide_confirm(
     verify_per_step_ek_signing(
         &receipt,
         BilateralSide::A,
-        per_step_ek_predecessor(step.sender_chain_head, sender.signing_key),
+        per_step_ek_predecessor(step.sender_chain_head, sender.signing_key).key(),
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;
@@ -732,7 +732,7 @@ pub fn decide_commit_ack(
     verify_per_step_ek_signing(
         &receipt,
         BilateralSide::B,
-        per_step_ek_predecessor(step.receiver_chain_head, receiver.signing_key),
+        per_step_ek_predecessor(step.receiver_chain_head, receiver.signing_key).key(),
         &receipt.parent_tip,
         &step.commitment_hash,
     )?;

@@ -5962,25 +5962,42 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 
 ### 6.117 One rule, in Core: the bilateral predicates both counterparties compute (owner ruling, 2026-10-28; `refactor/bilateral-predicates-into-core`, 2026-10-28)
 
-**Why.** Owner ruling, 2026-10-28, in their words: "If they belong in Core, they need to be in Core… There has to be one… There should not be two." A rule a counterparty must compute identically lives once, in Core, beside the statement it checks. The SDK copy is deleted with no forwarding wrapper or re-export, and every caller calls Core. Core takes the values it checks as arguments and does no I/O, storage or policy. The assignment came from the coordinating session; the scope was the five items below.
+**Why.** Owner ruling, 2026-10-28, in their words: "If they belong in Core, they need to be in Core… There has to be one… There should not be two." A rule a counterparty must compute identically lives once, in Core, beside the statement it checks. The SDK copy is deleted with no forwarding wrapper or re-export, and every caller calls Core. Core takes the values it checks as arguments and does no I/O, storage or policy. The assignment came from the coordinating session; the scope was the five items below. Two follow-ups, in the coordinating session's words of the same day: the predecessor rule's six sites all go through one Core rule, "the signer included. No open site", and the cert-resync defect this change found is fixed here.
 
 **What moved.**
 - *The sender's online finality predicate.* `dsm::verification::receipt_verification::verify_acceptance_receipt` (with `ReceiptVerifyOutcome`), beside `verify_per_step_ek_signing_target`. It takes the sender, the counterparty, the receipt, the canonical pair, the commitment, the expected previous key and the recipient's pair, not the SDK's `SenderOnlineProposal`. It checks, in order: both device ids; the parent and child tips against the canonical pair; the commitment; `ek_pk_b` and `kyber_ct_b` present together; and `sig_b` under the chained EK over the B-canonical target. The SDK's `handlers::online_finalize::verify_acceptance_receipt` is deleted. `finalize_from_countersign_delta` reads the predecessor and calls Core. Unchanged: a head that could not be read is `Unverifiable` (the delta is read again), never a verdict.
-- *The predecessor rule.* "No EK head yet ⇒ the predecessor is the AK" is `dsm::verification::receipt_verification::per_step_ek_predecessor`, beside `verify_per_step_ek_signing`. It was written five times on the verifier side:
-  - `online_finalize.rs` and `storage_routes.rs::expected_counterparty_ek_root` (the two the assignment named);
+- *The predecessor rule.* "No EK head yet ⇒ the predecessor is the AK" is `dsm::verification::receipt_verification::per_step_ek_predecessor`, beside `verify_per_step_ek_signing`. It is generic over the key and answers `EkPredecessor::ChainHead(k)` or `EkPredecessor::RootAk(k)`: a public key where a certificate is verified, a secret key where one is signed. It was written six times, and all six call Core now:
+  - the sender's acceptance (`online_finalize.rs`) and the recipient's `sig_a` check (`storage_routes.rs::expected_counterparty_ek_root`), the two the assignment named;
   - Core's `bilateral/offline.rs` (`decide_confirm`, `decide_commit_ack`);
-  - `recipient_receipt.rs::generate_b_artifacts_from_inbound` (the B side's self-check before journaling).
+  - `recipient_receipt.rs::generate_b_artifacts_from_inbound` (the B side's self-check before journaling);
+  - the signer, `sdk/receipts.rs::sign_receipt_with_per_step_ek_target` (the Local head's secret, else the root AK's).
 
-  All call Core now. The SDK's one read of the counterparty head is `storage_routes::counterparty_ek_predecessor`, used by the recipient's `sig_a` check and the sender's countersign finalization; `expected_counterparty_ek_root` is deleted. The signer's own choice of prior key (`sdk/receipts.rs::sign_receipt_with_per_step_ek_target`: the Local head's secret, else the root AK's) is the same rule over secret keys and is not routed through Core here; see *Open*.
+  The SDK's one read of the counterparty head is `storage_routes::counterparty_ek_predecessor`, used by both online verifiers; `expected_counterparty_ek_root` is deleted. The signer's `used_root_ak` is the `RootAk` variant. A caller that withholds the root AK (`root_ak_keypair: None`) requires the chain head, so the signer applies the rule to keys it may not hold. The "neither key is available" refusal is the SDK's, raised when the key the rule chose is absent; it is not a second rule. The BLE handler and the online send read `used_root_ak`; they choose nothing.
 - *The finality certificate's binding.* `dsm::types::receipt_types::verify_relationship_finalized`, beside `relationship_finalized_signing_target`: the certificate names the journal's sender, this device, the journaled sender child tip and the applied recipient pair, and `signature_a` verifies under the journaled sender EK head. `relationship_finalized.rs::check_against_journal` is deleted; the SDK finds the journal and records the release.
 - *Cert resync.* `dsm::bilateral::cert_resync` (new): `compute_joint_auth_hash`, `cert_resync_signing_target`, `verify_cert_resync_cosignature` and `cert_resync_epoch_advances`. `DSM/cert-restart/v1` is now `TAG_DSM_CERT_RESTART` in Core's registry (414 tags). The SDK's two digest functions are deleted. `handle_cert_resync_request` and `handle_cert_resync_ack` call the cosignature check; `begin_cert_resync` and `finalize_cert_resync_responder_atomically` call the epoch rule with the epoch they read. The CAS head writes, the send gate, the pending-obligation guard and the audit row stay in the SDK.
 - *The crossing comment.* `relationship_status.rs::finality_barrier_block` said a turn rule for a simultaneous cross was "a protocol decision outside this barrier". It now says there is no turn rule: two steps from one tip are candidate forks (DSM §36), and Tripwire (§53, MR-DSM-0170) lets at most one be realized; the side whose proposal was not realized proposes again from the tip that was. No rule was added.
 
 **Defect fixed in passing: a malformed key and a bad signature were one refusal.** Both cert-resync handlers checked `!sphincs_verify(..).unwrap_or(false)`. `sphincs_verify` answers `Ok(false)` for a key or signature of the wrong length, so a malformed pinned AK, a malformed signature and a signature that does not verify all became "cosignature failed verification", and every one was passed over as the message's fault. `CosignatureRefusal` now names each: `MalformedKey`, `MalformedSignature`, `DoesNotVerify`, `VerifierError`. A signature that is not one, or does not verify, is the message's and is passed over. A pinned AK that is not a key is this device's own record, not a verdict on the message: it is read again.
 
+**Defect found and fixed: a cert resync never finalized when a device polls two routes** (predates this change; found by the new flow test).
+- *Evidence.* The test's first full run, release, Postgres: A asked at `(PENDING, 4)` and B took the request with no errors. A's next sync ended at `(PENDING, 6)` with "cert resync ack: no matching pending resync (state=2 epoch=5 ack=3)", and the same for `ack=4`.
+- *Cause.* `pull_and_process_inbox` called `initiate_required_cert_resyncs` inside its per-route loop. A polls its current- and previous-tip routes, so each sync re-initiated, raising the epoch, before it read the acks waiting on the later route. An ack below the current epoch was a `Failed` refusal, read again on every sync.
+- *Fix.*
+  - A resync starts, or starts again, once per sync, after every route has been read. Nothing else in the pass depended on initiation per route.
+  - In `handle_cert_resync_ack`, an ack whose epoch is below the relationship's current one is passed over by its content (§6.104), not read again; epochs only rise, so it never will match. An ack at the current epoch that does not match is still refused with its reason.
+- *Shown.* The flow test now runs to completion. A asks twice before B answers, B takes both requests, and A finalizes on the ack for its current epoch while refusing the other as below it. Both sides end at that epoch with nothing pending: B's head for A is A's restarted EK, A holds B's unchanged head, and B's own head is untouched. A further sync on each side reports nothing: no resync starts again, and the replaced ack is not read again.
+
 **Pinned before the move.** Two tests ran green against the SDK code before anything moved:
 - `the_joint_statement_and_its_signing_target_are_the_pinned_bytes`: the joint statement on fixed inputs equals the digest `b3sum` gives for `"DSM/cert-restart/v1" ‖ 0x00 ‖ relationship ‖ tip ‖ epoch (i64 LE) ‖ commitment`, and the signed bytes are that digest followed by the asserted key. Moved unchanged, it passes against Core: `dsm::bilateral::cert_resync::tests::the_joint_statement_and_its_signing_target_are_the_pinned_bytes`.
 - `an_honest_countersign_verifies_and_names_its_commitment`: the recipient's real per-step EK answer over the B-canonical target, chained to its AK, verifies and names the step's commitment. Its Core form, `dsm::verification::receipt_verification::tests::an_honest_countersign_verifies_and_names_its_commitment`, makes the same assertion on Core's own step fixture, where the SDK's fixture is not available.
+
+Each predecessor site's choice, with a head and without one, was pinned on the code before the rule became generic, and the same tests passed after:
+- Core, 3/3 before and after: `dsm::verification::receipt_verification::tests::the_predecessor_is_the_head_and_the_ak_only_before_one_exists`, `dsm::bilateral::offline::tests::a_confirm_is_committed_only_as_its_sender_signed_and_derived_it`, `dsm::bilateral::offline::tests::an_ack_is_only_the_receivers_counter_signed_receipt`.
+- SDK, 6/6 before and after:
+  - `dsm_sdk::handlers::online_finalize::tests::the_counterparty_predecessor_is_its_stored_head_and_its_ak_only_before_one`, written for this;
+  - `dsm_sdk::sdk::receipts::tests::per_step_signing_uses_ak_root_when_chain_head_absent`, `…::per_step_signing_chains_through_advancement` and `…::per_step_signing_errors_without_chain_head_or_root`;
+  - `dsm_sdk::handlers::bilateral_finality_tests::r1_role_reversal_applies_once_on_a_and_finalizes_on_b`, B's self-check without and with a head;
+  - `dsm_sdk::handlers::sender_admission_tests::a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders_register_is_read`, the signer with no root AK and a head.
 
 **Tests.**
 - *Moved to Core with the code:*
@@ -5995,7 +6012,9 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
   - `dsm::bilateral::cert_resync::tests::an_epoch_is_taken_only_past_the_last`.
 - *Not carried over:* `divergent_projection_does_not_reject_a_valid_canonical_pair` (AWYPCNK8). Core takes the canonical pair as an argument, so there is no projection for it to confuse; the regression now lives at the SDK call site, which the `sdk_pair` mutant below exercises.
 - *SDK, kept:* `dsm_sdk::handlers::online_finalize::tests::an_unreadable_counterparty_head_is_never_read_as_genesis`, rewritten against `counterparty_ek_predecessor` and the recipient's `sig_a` check. Its name and module are unchanged.
-- *SDK, new:* `dsm_sdk::handlers::cert_resync_flow::tests::a_resync_request_is_taken_only_under_the_ak_the_responder_pins`. Two devices, a finalized transfer, then A's heads lost. Under a malformed pinned AK, B's sync reads the request again; under another AK, it passes it over, and B's head for A does not move. Under A's own AK, B takes A's request: its head for A moves to A's fresh EK, its own head is untouched, and it records A's epoch. Before this, no test reached either resync handler.
+- *SDK, new:*
+  - `dsm_sdk::handlers::cert_resync_flow::tests::a_resync_request_is_taken_only_under_the_ak_the_responder_pins`. Two devices, a finalized transfer, then A's heads lost. Under a malformed pinned AK, B's sync reads the request again; under another AK, it passes it over, and B's head for A does not move. Under A's own AK, the resync runs to completion as the fix above describes. Before this, no test reached either resync handler.
+  - `dsm_sdk::handlers::online_finalize::tests::the_counterparty_predecessor_is_its_stored_head_and_its_ak_only_before_one`.
 
 **Mutation controls.** One `DSM_MUTANT` build of this tree, in a scratch worktree outside the repository with its own target. Every unmutated control was green: Core's four modules 37/0, and each SDK test in its own run.
 - **Core, 20 mutants, each red:**
@@ -6015,24 +6034,29 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
   - `apply_relationship_finalized` not calling Core → `a_verified_certificate_releases_the_recipient_once_and_forgeries_do_not`: the forged sender child is `Applied`.
   - The responder not checking the cosignature → the resync flow test: B takes the request under a pinned AK that is not a key.
   - A malformed pinned key passed over → the same test.
+- **A second build, after the rule became generic and the resync fix, controls green, each red:**
+  - The rule answering `RootAk` whatever the head, against both of its users:
+    - the verifier side: the Core predecessor test and both offline tests; `the_counterparty_predecessor_is_its_stored_head_and_its_ak_only_before_one` ("a head stored: the head");
+    - the signer side: `per_step_signing_chains_through_advancement` ("step 1 must use chain-head SK, not root AK").
+  - Initiation back inside the route loop → the flow test: A raises its epoch before reading B's acks, refuses both as below it, and never finalizes.
+  - A stale ack refused as `Failed`, read again → the flow test, at its further-sync assertion: the replaced ack comes back.
 
 **Open.**
-- *The signer's predecessor.* `sdk/receipts.rs::sign_receipt_with_per_step_ek_target` chooses the prior signing key by the same rule, over secret keys, with its own "neither available" refusal and its `used_root_ak` report. It is not routed through `per_step_ek_predecessor`; whether it must be is put to the coordinating session.
-- *Cert resync never finalizes when a device polls two routes (found by the new flow test; predates this change).*
-  - Evidence: in the test's run before it was narrowed, A asked at `(PENDING, 4)` and B took the request with no errors. A's next sync ended at `(PENDING, 6)` with "cert resync ack: no matching pending resync (state=2 epoch=5 ack=3)", and the same for `ack=4`.
-  - Cause: `storage_routes.rs` calls `initiate_required_cert_resyncs` inside the per-route loop. A polls its current- and previous-tip routes, so each sync re-initiates and bumps the epoch before it reads the acks on the later route. An ack below the current epoch is a `Failed` refusal, read again on every sync, never passed over.
-  - The fix (initiate once per sync after every route is read; pass over an ack below the current epoch) is put to the coordinating session.
-  - The flow test therefore ends at B taking A's request. The ack handler's cosignature call is reached by no test, because every ack stops at the epoch check first.
+- *A restarted relationship cannot carry its next transfer* (found by a run after the fix; predates this change).
+  - Evidence, release, Postgres: after the resync completed, A sent B 5. B pulled it and staged it `bound`; it was never applied. B's balance stayed at 10, and B's sync reported no error.
+  - Cause: `economic_admission_flow::prevalidate_incoming_transfer_admission` requires, per side, that the stored cert head equal the latest content-addressed `EkCertStepV1` it tracks (`economic_lineage::latest_ek_step`). After the restart, B's head for A is A's restarted EK, while B's tracked step for A is still A's lost head. A probe in the run showed "tracked step == head: false; tracked step == lost head: true". The restart is authorized by the two AKs' cosignatures, and no step object links the old EK to the restarted one, so the check answers "EK ancestry is not portable" (`Incomplete`).
+  - The specification names a certificate resync only in passing (DSM_High_Level_Explainer L843) and defines no restart object. How a restart is made portable is a protocol design question, put to the coordinating session; nothing was built. The flow test ends at the clean further sync.
+- *A held transfer reports nothing.* The completion pass logs a prevalidation refusal (`log::warn!` / `log::info!`) and holds the pair without adding anything to the sync's errors. That is why the defect above was invisible to every sync answer.
 - *The resync framing.* `CertResyncRequest` and `CertResyncAck` (`to_body` and `from_body`, the bytes one side writes and the other reads) are one copy, in the SDK. Whether the ruling places a wire framing both sides compute in Core is the owner's.
 
 **Records.**
-- The verification matrix gains four rows (acceptance, predecessor, certificate, cert resync). The MR-STOR-0021 / A1 row's code cell names `counterparty_ek_predecessor`.
+- The verification matrix gains five rows: acceptance, predecessor (all six sites), certificate, cert resync, and the resync's completion. The MR-STOR-0021 / A1 row's code cell names `counterparty_ek_predecessor`.
 - Two §6 cells that cited the SDK predicate by path now name its Core location.
 - `DSM/cert-restart/v1` is registered; the tag count is 414.
-- The SPHINCS source map and caller inventory are regenerated for the moved verify sites.
-- The real-code guard: this change removes 27 hits and adds none. Among them are the two `.unwrap_or(false)` checks, the predicate's `#[allow(clippy::too_many_arguments)]`, three head-or-AK `unwrap_or`s and twelve zero ids in the old SDK tests. Their baseline entries are now surplus; the baseline is unchanged.
+- The SPHINCS source map and caller inventory are regenerated for the moved verify sites and the signer's moved lines.
+- The real-code guard: this change removes 29 hits and adds none. Among them are the two `.unwrap_or(false)` checks, the predicate's `#[allow(clippy::too_many_arguments)]`, three head-or-AK `unwrap_or`s, the signer's two boolean literals for `used_root_ak`, and twelve zero ids in the old SDK tests. Their baseline entries are now surplus; the baseline is unchanged.
 - No requirement row changes status; the totals are unchanged.
-- **Owed to the CI code-map repin:** MR-STOR-0021's six intent pins name `an_unreadable_counterparty_head_is_never_read_as_genesis`, whose body changed, so they are stale. So is any pin whose closure reaches `verify_inbound_receipt_sig_a`, `finalize_from_countersign_delta`, `generate_b_artifacts_from_inbound` or `bilateral::offline`. No moved function is named by a pin, and no pin was edited by hand.
+- **Owed to the CI code-map repin:** MR-STOR-0021's six intent pins name `an_unreadable_counterparty_head_is_never_read_as_genesis`, whose body changed, so they are stale. So is any pin whose closure reaches `verify_inbound_receipt_sig_a`, `finalize_from_countersign_delta`, `generate_b_artifacts_from_inbound`, `sign_receipt_with_per_step_ek_target`, `pull_and_process_inbox` or `bilateral::offline`. No moved function is named by a pin, and no pin was edited by hand.
 
 ## 7 Totals
 

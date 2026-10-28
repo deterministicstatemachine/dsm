@@ -425,7 +425,7 @@ pub fn generate_b_artifacts_from_inbound(
     verify_per_step_ek_signing_target(
         &receipt,
         BilateralSide::B,
-        per_step_ek_predecessor(pre_step_b.as_deref(), recipient_ak_pk),
+        per_step_ek_predecessor(pre_step_b.as_deref(), recipient_ak_pk).key(),
         &receipt.parent_tip,
         &b_target,
     )
