@@ -24,7 +24,7 @@ use crate::lean_checker::LeanSuiteResult;
 use crate::proof_runner::{ProofResult, ProofSpec};
 use crate::property_tests::PropertyTestSuiteResult;
 use crate::tla_runner::{TlaSpec, TlcResult};
-use crate::tla_trace_replay::{TlaImplementationReplayResult, TlaTraceReplayResult};
+use crate::tla_trace_replay::TlaTraceReplayResult;
 
 fn display_report_path(path: &Path) -> String {
     if let Ok(cwd) = std::env::current_dir() {
@@ -117,10 +117,8 @@ pub struct TlaSpecReport {
     pub invariants_checked: Vec<String>,
     /// Temporal properties that were checked
     pub properties_checked: Vec<String>,
-    /// Result of replaying a literal TLC simulation trace through Rust
+    /// Result of replaying a TLC simulation trace against the model in Rust
     pub literal_trace_replay: Option<TlaTraceReplayResult>,
-    /// Result of replaying the same TLC trace through actual DSM code
-    pub implementation_trace_replay: Option<TlaImplementationReplayResult>,
     /// Linked direct-code traces for integrated validation
     pub linked_implementation_traces: Vec<String>,
     /// Results of linked direct-code traces
@@ -149,21 +147,16 @@ impl TlaSpecReport {
         spec: &TlaSpec,
         result: &TlcResult,
         literal_trace_replay: Option<TlaTraceReplayResult>,
-        implementation_trace_replay: Option<TlaImplementationReplayResult>,
         linked_trace_results: Vec<ImplementationTraceResult>,
     ) -> Self {
         let replay_passed = literal_trace_replay
             .as_ref()
             .map(|replay| replay.passed)
             .unwrap_or(true);
-        let implementation_replay_passed = implementation_trace_replay
-            .as_ref()
-            .map(|replay| replay.passed)
-            .unwrap_or(true);
         let linked_passed = linked_trace_results.iter().all(|trace| trace.passed);
         Self {
             label: spec.label.clone(),
-            passed: result.passed && replay_passed && implementation_replay_passed && linked_passed,
+            passed: result.passed && replay_passed && linked_passed,
             tlc_passed: result.passed,
             states_generated: result.states_generated,
             distinct_states: result.distinct_states,
@@ -171,7 +164,6 @@ impl TlaSpecReport {
             invariants_checked: spec.invariants.clone(),
             properties_checked: spec.properties.clone(),
             literal_trace_replay,
-            implementation_trace_replay,
             linked_implementation_traces: spec.linked_implementation_traces.clone(),
             linked_trace_results,
             errors: result.errors.clone(),
@@ -190,12 +182,6 @@ impl TlaSpecReport {
         } else {
             Some(self.linked_trace_results.iter().all(|trace| trace.passed))
         }
-    }
-
-    pub fn implementation_trace_replay_passed(&self) -> Option<bool> {
-        self.implementation_trace_replay
-            .as_ref()
-            .map(|result| result.passed)
     }
 }
 
@@ -235,10 +221,10 @@ impl VerticalValidationReport {
         if !self.tla_results.is_empty() {
             out.push_str("--- TLA+ MODEL CHECKING VERDICT ---\n\n");
             out.push_str(
-                "  Spec                     | States     | Distinct   | Depth | TLC  | Replay | Direct | Linked | Overall\n",
+                "  Spec                     | States     | Distinct   | Depth | TLC  | Replay | Linked | Overall\n",
             );
             out.push_str(
-                "  -------------------------+------------+------------+-------+------+--------+--------+--------+--------\n",
+                "  -------------------------+------------+------------+-------+------+--------+--------+--------\n",
             );
 
             let mut all_invariants = Vec::new();
@@ -250,11 +236,6 @@ impl VerticalValidationReport {
                     Some(false) => "FAIL",
                     None => "N/A ",
                 };
-                let direct_verdict = match r.implementation_trace_replay_passed() {
-                    Some(true) => "PASS",
-                    Some(false) => "FAIL",
-                    None => "N/A ",
-                };
                 let linked_verdict = match r.linked_trace_passed() {
                     Some(true) => "PASS",
                     Some(false) => "FAIL",
@@ -262,14 +243,13 @@ impl VerticalValidationReport {
                 };
                 let verdict = if r.passed { "PASS" } else { "FAIL" };
                 out.push_str(&format!(
-                    "  {:<25}| {:>10} | {:>10} | {:>5} | {:>4} | {:>6} | {:>6} | {:>6} | {:>6}\n",
+                    "  {:<25}| {:>10} | {:>10} | {:>5} | {:>4} | {:>6} | {:>6} | {:>6}\n",
                     r.label,
                     format_number(r.states_generated),
                     format_number(r.distinct_states),
                     r.depth_reached,
                     tlc_verdict,
                     replay_verdict,
-                    direct_verdict,
                     linked_verdict,
                     verdict,
                 ));
@@ -302,16 +282,6 @@ impl VerticalValidationReport {
                     ));
                     for failure in &replay.failures {
                         out.push_str(&format!("    REPLAY FAILURE: {failure}\n"));
-                    }
-                }
-                if let Some(replay) = &r.implementation_trace_replay {
-                    out.push_str(&format!(
-                        "    DIRECT TRACE: {} ({} steps)\n",
-                        display_report_path(&replay.trace_path),
-                        replay.steps
-                    ));
-                    for failure in &replay.failures {
-                        out.push_str(&format!("    DIRECT FAILURE: {failure}\n"));
                     }
                 }
                 if !r.linked_implementation_traces.is_empty() {

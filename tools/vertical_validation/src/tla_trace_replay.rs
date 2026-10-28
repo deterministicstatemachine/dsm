@@ -26,16 +26,6 @@ pub struct TlaTraceReplayResult {
     pub duration_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TlaImplementationReplayResult {
-    pub spec_label: String,
-    pub trace_path: PathBuf,
-    pub steps: u64,
-    pub passed: bool,
-    pub failures: Vec<String>,
-    pub duration_ms: f64,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct TlaSimulationProfile {
     pub seed: u64,
@@ -86,40 +76,6 @@ pub fn replay_trace_file(
     };
 
     Ok(TlaTraceReplayResult {
-        spec_label: spec.label.clone(),
-        trace_path: trace_path.to_path_buf(),
-        steps: (states.len() - 1) as u64,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    })
-}
-
-pub fn replay_trace_into_implementation(
-    spec: &TlaSpec,
-    trace_path: &Path,
-) -> anyhow::Result<TlaImplementationReplayResult> {
-    let start = instant::Instant::now();
-    let trace_text = std::fs::read_to_string(trace_path)
-        .with_context(|| format!("failed to read TLC trace file {}", trace_path.display()))?;
-    let states = parse_trace_states(&trace_text)
-        .with_context(|| format!("failed to parse TLC trace file {}", trace_path.display()))?;
-
-    if states.len() < 2 {
-        bail!("TLC trace for {} did not contain a transition", spec.label);
-    }
-
-    let failures = match spec.spec_file.as_str() {
-        "DSM_OfflineFinality.tla" => {
-            replay_structural_trace(&states, &["chain", "phase", "parent", "net", "link"])
-        }
-        "DSM_NonInterference.tla" => {
-            replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
-        }
-        other => bail!("{other} has no replay into the implementation"),
-    };
-
-    Ok(TlaImplementationReplayResult {
         spec_label: spec.label.clone(),
         trace_path: trace_path.to_path_buf(),
         steps: (states.len() - 1) as u64,

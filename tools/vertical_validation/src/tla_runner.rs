@@ -18,8 +18,7 @@ use regex::Regex;
 use serde::Serialize;
 
 use crate::tla_trace_replay::{
-    replay_trace_file, replay_trace_into_implementation, simulation_profile_for_spec,
-    TlaImplementationReplayResult, TlaTraceReplayResult,
+    replay_trace_file, simulation_profile_for_spec, TlaTraceReplayResult,
 };
 
 /// Configuration for a single TLA+ model check run.
@@ -42,16 +41,18 @@ use crate::tla_trace_replay::{
 /// of the code commits on its ack, and `OfflineFinality/commit-on-ack` is gone.
 pub const EXPECTED_STANDARD_SPECS: usize = 95;
 
-/// The TLC simulation traces a spec replays in Rust.
+/// The TLC simulation trace a spec replays in Rust. No trace is replayed into
+/// the code: a model's code-level checks are its linked implementation traces
+/// (§6.103).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum TraceReplay {
     /// TLC checks the model; no simulation trace is replayed.
     None,
-    /// A simulation trace is replayed through the model's own transition rules
-    /// in Rust (the literal replay).
+    /// A simulation trace is replayed in Rust against the model alone: through
+    /// the model's transition rules for Tripwire and DSM.tla, and for
+    /// OfflineFinality and NonInterference only as a check that every state
+    /// names the model's variables.
     Literal,
-    /// The literal replay, and a replay of the same trace against the code.
-    LiteralAndImplementation,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,21 +284,11 @@ impl TlaRunner {
         Ok(trace_file)
     }
 
-    /// Generate one deterministic TLC simulation trace and run the replays the
-    /// spec has over it ([`TraceReplay`]).
-    pub async fn run_integrated_trace_replays(
-        &self,
-        spec: &TlaSpec,
-    ) -> anyhow::Result<(TlaTraceReplayResult, Option<TlaImplementationReplayResult>)> {
+    /// Generate one deterministic TLC simulation trace and replay it in Rust
+    /// against the model ([`TraceReplay::Literal`]).
+    pub async fn run_trace_replay(&self, spec: &TlaSpec) -> anyhow::Result<TlaTraceReplayResult> {
         let trace_file = self.generate_trace_file(spec).await?;
-        let literal = replay_trace_file(spec, &trace_file)?;
-        let implementation = match spec.trace_replay {
-            TraceReplay::LiteralAndImplementation => {
-                Some(replay_trace_into_implementation(spec, &trace_file)?)
-            }
-            TraceReplay::Literal | TraceReplay::None => None,
-        };
-        Ok((literal, implementation))
+        replay_trace_file(spec, &trace_file)
     }
 
     /// Return the standard set of specs to run for vertical validation.
@@ -325,7 +316,7 @@ impl TlaRunner {
             ],
             properties: vec!["ChainsOnlyGrow".into(), "SessionTermination".into()],
             linked_implementation_traces: vec!["bilateral_full_offline_finality".into()],
-            trace_replay: TraceReplay::LiteralAndImplementation,
+            trace_replay: TraceReplay::Literal,
             expect_violation: None,
             exhaustive: true,
         };
@@ -510,7 +501,7 @@ impl TlaRunner {
                 ],
                 properties: vec![],
                 linked_implementation_traces: vec!["bilateral_pair_non_interference".into()],
-                trace_replay: TraceReplay::LiteralAndImplementation,
+                trace_replay: TraceReplay::Literal,
                 expect_violation: None,
                 exhaustive: false,
             },

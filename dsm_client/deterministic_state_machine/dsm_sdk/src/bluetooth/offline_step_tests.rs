@@ -4038,3 +4038,222 @@ async fn the_first_contact_step_extends_h_0_and_an_alternate_first_step_is_refus
         "the receiver does not hold the extension's successor"
     );
 }
+
+/// Whether Core's comparison of a bearer receipt's offline account with its
+/// release is the only check that catches a mismatch, settled by a run
+/// (§6.103). A, hostile, signs its second payment's receipt with the offline
+/// account advancing to a frontier its release did not sign, its writes folded
+/// again to the child root they now produce, and has its own chip certify
+/// exactly those roots, with the release's state proofs attached as the advance
+/// produced them. The fold holds, and so does the certificate's root binding.
+/// B refuses the confirm before anything commits, at that comparison.
+/// MUTATION CONTROL: dropping the comparison turns this red. The forgery is
+/// then refused one check later, by the release's proof of the successor
+/// account under the certified root (Π_{i+1}). Core's comparison overlaps
+/// that proof: it is not the only check that catches the mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_under_a_certificate_over_its_roots(
+) {
+    use dsm::merkle::batch_fold::{verify_batch, FoldEntry};
+    use dsm::merkle::sparse_merkle_tree::DeviceSmtHashes;
+    use dsm::types::receipt_types::ReceiptLeaf;
+    use prost::Message;
+
+    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+    // A's first payment: B pins A's anchor from its disclosure.
+    offline_step(&a, &b, payment.clone()).await;
+    let Operation::Transfer {
+        amount,
+        policy_commit,
+        ..
+    } = &payment.operation
+    else {
+        panic!("a bearer payment is a transfer");
+    };
+    let (amount, asset) = (amount.value(), *policy_commit);
+
+    a.device.enter();
+    let (prepare, commitment) = a.propose(&b, payment.clone()).await.expect("A proposes");
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for the user");
+    b.handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    let receiver_challenge: [u8; 32] =
+        crate::storage::client_db::get_bilateral_session(&commitment)
+            .expect("read B's session")
+            .expect("B holds the step")
+            .receiver_challenge
+            .expect("B issued its challenge")
+            .try_into()
+            .expect("a 32-byte challenge");
+    let (b_tip, b_pending) = (b.tip_with(&a), pending_era());
+
+    // A stages the spend under B's challenge and simulates the step's advance,
+    // as its confirm does.
+    a.device.enter();
+    let router = crate::bridge::app_router().expect("A's router");
+    let rel_key = a.device.rel_key_with(&b.device);
+    let spend = crate::bluetooth::bilateral_ble_handler::stage_bearer_spend(
+        router.as_ref(),
+        rel_key,
+        b.device.device_id,
+        &payment.operation,
+        payment.terms.as_ref().expect("a transfer's terms"),
+        receiver_challenge,
+    )
+    .expect("A stages the payment on its anchor");
+    let advance = router
+        .simulate_advance_for_confirm(
+            rel_key,
+            b.device.device_id,
+            payment.operation.clone(),
+            &[],
+            Some(spend.spend),
+        )
+        .expect("A simulates the step's advance");
+    let leaves = dsm::verification::receipt_verification::BearerLeaves {
+        bundle: spend.staged.pin.bundle,
+        counter: spend.staged.transition.anchor_counter,
+        frontier: spend.staged.appliance_prev_root,
+        next_frontier: spend.staged.appliance_next_root,
+    };
+    let device_tree = crate::sdk::app_state::AppState::get_device_tree_commitment()
+        .expect("A's Device Tree commitment");
+    let honest = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+        &crate::sdk::receipts::build_bilateral_receipt(
+            a.device.device_id,
+            b.device.device_id,
+            &advance,
+            Some(leaves),
+            &device_tree,
+        )
+        .expect("A builds the step's receipt"),
+    )
+    .expect("the receipt decodes");
+
+    // The forgery: the account advances to another frontier, and the writes
+    // fold again to the child root they now produce.
+    let mut forged = honest.clone();
+    let (parent_tip, child_tip) = (forged.parent_tip, forged.child_tip);
+    let relationship =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&forged.devid_a, &forged.devid_b);
+    let mut entries = Vec::new();
+    for write in forged.step_writes.iter_mut() {
+        let path = dsm::merkle::smt_path::decode::<DeviceSmtHashes>(
+            &write.path.explicit_heights,
+            &write.path.siblings,
+        )
+        .expect("a write's path");
+        match &mut write.leaf {
+            ReceiptLeaf::Relationship => entries.push(FoldEntry {
+                key: relationship,
+                pre: Some(parent_tip),
+                post: Some(child_tip),
+                path,
+            }),
+            ReceiptLeaf::OfflineAccount(witness) => {
+                witness.next_frontier[0] ^= 0x01;
+                entries.push(FoldEntry {
+                    key: dsm::types::offline_account::offline_account_leaf_key(&leaves.bundle),
+                    pre: Some(witness.pre_account_root),
+                    post: Some(
+                        witness
+                            .post_account_root(&asset, amount)
+                            .expect("the forged account folds"),
+                    ),
+                    path,
+                });
+            }
+        }
+    }
+    forged.child_root = verify_batch::<DeviceSmtHashes>(&forged.parent_root, &entries)
+        .expect("the forged writes fold");
+    assert_ne!(
+        forged.child_root, honest.child_root,
+        "the forgery moved no root"
+    );
+    let forged = resigned_by(&a, &b, &forged, &commitment);
+
+    // A's chip certifies the forged roots; the advance's state proofs ride
+    // outside every signature.
+    a.device.enter();
+    let artifacts = router
+        .release_offline_bearer(
+            &spend.staged,
+            receiver_challenge,
+            forged.parent_root,
+            forged.child_root,
+        )
+        .expect("A's chip certifies the roots it is given");
+    let proofs = advance
+        .offline_state_proofs
+        .as_ref()
+        .expect("the spend's state proofs");
+    let release = crate::sdk::core_sdk::attach_offline_state_proofs(
+        &artifacts.offline_release,
+        proofs.parent.clone(),
+        proofs.child.clone(),
+    )
+    .expect("the proofs attach");
+    let op_bytes = payment.operation.to_bytes();
+    let held = a.tip_with(&b);
+    let entropy = forged.transition_entropy;
+    let sigma =
+        dsm::core::bilateral_transaction_manager::compute_precommit(&held, &op_bytes, &entropy)
+            .expect("the step's precommit");
+    let chain = crate::storage::client_db::offline_spends::own_offline_spends(&leaves.bundle)
+        .expect("A's unexposed spends")
+        .iter()
+        .map(|hop| crate::generated::OfflineSpendHop::decode(hop.as_slice()).expect("a hop"))
+        .collect();
+    let confirm = crate::bluetooth::bilateral_ble_handler::confirm_envelope(
+        &a.device.device_id,
+        &a.device.genesis,
+        &crate::generated::BilateralConfirmRequest {
+            commitment_hash: Some(crate::generated::Hash32 {
+                v: commitment.to_vec(),
+            }),
+            sender_signature: prepare_request(&prepare).sender_signature,
+            stitched_receipt: forged.to_full_protobuf().expect("the receipt encodes"),
+            shared_chain_tip_new: Some(crate::generated::Hash32 {
+                v: dsm::core::bilateral_transaction_manager::compute_successor_tip(
+                    &held, &op_bytes, &entropy, &sigma,
+                )
+                .to_vec(),
+            }),
+            pre_entropy: entropy.to_vec(),
+            offline_release: release,
+            anchor_disclosure: None,
+            offline_spend_chain: Some(crate::generated::OfflineSpendChain { hops: chain }),
+        },
+    )
+    .expect("the confirm's envelope");
+
+    b.device.enter();
+    let refused = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect_err("a receipt whose account its release did not advance");
+    assert!(
+        refused
+            .to_string()
+            .contains("is not the one its release advances"),
+        "{refused}"
+    );
+    assert!(!history_row_exists(&commitment), "B kept the forged step");
+    assert_eq!(
+        pending_era(),
+        b_pending,
+        "B holds a payment from the forgery"
+    );
+    assert_eq!(b.tip_with(&a), b_tip, "the forgery moved B's tip");
+}

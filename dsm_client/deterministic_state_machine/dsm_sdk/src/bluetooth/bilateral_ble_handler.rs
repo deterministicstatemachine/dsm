@@ -438,7 +438,7 @@ enum UnfinishedRelease {
 }
 
 /// The envelope that carries `confirm`.
-fn confirm_envelope(
+pub(crate) fn confirm_envelope(
     device_id: &[u8; 32],
     genesis_hash: &[u8; 32],
     confirm: &generated::BilateralConfirmRequest,

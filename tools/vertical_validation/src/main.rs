@@ -11,9 +11,11 @@
 //! 2. **Scaling Benchmark** — parallel writers proving additive Θ(N) throughput
 //! 3. **Non-Interference Proof** — idle nodes unchanged during parallel operations
 //! 4. **Tripwire Fork-Exclusion** — double-spend attempts rejected in real-time
-//! 5. **Property-Based Tests** — 7 invariants on real StateMachine across random ops
+//! 5. **Property-Based Tests** — 5 invariants on real device heads across seeded ops
 //! 6. **Implementation Traces** — deterministic direct-code replay on fixed scenarios
-//! 7. **Adversarial Bilateral** — 6 attack scenarios with 100% rejection
+//! 7. **Adversarial Bilateral** — the attack that needs no confirm (a debit
+//!    above the balance); the attacks a receiver decides with `decide_confirm`
+//!    run on real bearer pairs in the SDK's offline step tests (§6.103)
 //! 8. **Crypto KATs** — 16 internal consistency tests across 4 primitives
 //! 9. **Bilateral Throughput** — honest protocol performance (with/without signing)
 //!
@@ -55,7 +57,7 @@ use local_nodes::LocalNodeManager;
 use proof_runner::ProofRunner;
 use report::{ProofModuleReport, TlaSpecReport, VerticalValidationReport};
 use tla_runner::TlaRunner;
-use tla_trace_replay::{TlaImplementationReplayResult, TlaTraceReplayResult};
+use tla_trace_replay::TlaTraceReplayResult;
 
 #[derive(Parser)]
 #[command(name = "vertical-validation")]
@@ -346,8 +348,8 @@ async fn run_tla_check(
     include_liveness: bool,
 ) -> anyhow::Result<Vec<(tla_runner::TlaSpec, tla_runner::TlcResult)>> {
     let results = collect_tla_results(root, include_liveness).await?;
-    let (trace_replays, implementation_replays) = collect_tla_trace_replays(root, &results).await?;
-    let tla_reports = build_tla_reports(&results, &trace_replays, &implementation_replays, None);
+    let trace_replays = collect_tla_trace_replays(root, &results).await?;
+    let tla_reports = build_tla_reports(&results, &trace_replays, None);
 
     let report = VerticalValidationReport {
         proof_results: Vec::new(),
@@ -363,7 +365,7 @@ async fn run_tla_check(
     print!("{}", report.render_ascii());
 
     // A violated invariant, a falsification config that failed to falsify, or
-    // a literal, direct or linked Rust trace that fails to replay must redden
+    // a literal replay or a linked Rust trace that fails must redden
     // CI. `run_all` has already NORMALISED every TLC verdict, including
     // inverting the expected-to-fail configs; each spec report's `passed`
     // combines that verdict with its replays and linked traces, and is the
@@ -580,8 +582,7 @@ async fn run_formal_report(
 
     // Phase 7: TLA+ model checking
     let tla_results = collect_tla_results(root, false).await?;
-    let (trace_replays, implementation_replays) =
-        collect_tla_trace_replays(root, &tla_results).await?;
+    let trace_replays = collect_tla_trace_replays(root, &tla_results).await?;
 
     // Phase 8: Scaling (cached or fresh)
     let scaling_cache_path = root.join("docs/reports/.scaling-cache.json");
@@ -639,7 +640,6 @@ async fn run_formal_report(
     let tla_reports = build_tla_reports(
         &tla_results,
         &trace_replays,
-        &implementation_replays,
         Some(&implementation_trace_results),
     );
 
@@ -721,8 +721,7 @@ async fn run_full(
 
     // Phase 6: TLA+ model checking (progress on stderr, no report)
     let tla_results = collect_tla_results(root, false).await?;
-    let (trace_replays, implementation_replays) =
-        collect_tla_trace_replays(root, &tla_results).await?;
+    let trace_replays = collect_tla_trace_replays(root, &tla_results).await?;
 
     // Phase 7: Scaling benchmark (progress on stderr, no report)
     let scaling_results = collect_benchmark_results(root, duration, no_start).await?;
@@ -731,7 +730,6 @@ async fn run_full(
     let tla_reports = build_tla_reports(
         &tla_results,
         &trace_replays,
-        &implementation_replays,
         Some(&implementation_trace_results),
     );
 
@@ -764,53 +762,35 @@ async fn run_full(
 async fn collect_tla_trace_replays(
     root: &std::path::Path,
     results: &[(tla_runner::TlaSpec, tla_runner::TlcResult)],
-) -> anyhow::Result<(
-    HashMap<String, TlaTraceReplayResult>,
-    HashMap<String, TlaImplementationReplayResult>,
-)> {
-    eprintln!("  Replaying literal TLC traces and direct DSM traces in Rust ...");
+) -> anyhow::Result<HashMap<String, TlaTraceReplayResult>> {
+    eprintln!("  Replaying TLC traces against their models in Rust ...");
     let runner = TlaRunner::new(root)?;
     let mut trace_replays = HashMap::with_capacity(results.len());
-    let mut implementation_replays = HashMap::with_capacity(results.len());
 
     for (spec, _) in results {
         if spec.trace_replay == tla_runner::TraceReplay::None {
             eprintln!("    {} -> trace replay skipped", spec.label);
             continue;
         }
-        let (literal_replay, implementation_replay) =
-            runner.run_integrated_trace_replays(spec).await?;
+        let literal_replay = runner.run_trace_replay(spec).await?;
         let literal_verdict = if literal_replay.passed {
             "PASS"
         } else {
             "FAIL"
         };
-        let implementation_verdict = match &implementation_replay {
-            Some(replay) if replay.passed => format!("PASS, {:.1}ms", replay.duration_ms),
-            Some(replay) => format!("FAIL, {:.1}ms", replay.duration_ms),
-            None => "none".to_string(),
-        };
         eprintln!(
-            "    {} -> literal={} ({} steps, {:.1}ms) direct={}",
-            spec.label,
-            literal_verdict,
-            literal_replay.steps,
-            literal_replay.duration_ms,
-            implementation_verdict,
+            "    {} -> literal={} ({} steps, {:.1}ms)",
+            spec.label, literal_verdict, literal_replay.steps, literal_replay.duration_ms,
         );
         trace_replays.insert(spec.label.clone(), literal_replay);
-        if let Some(replay) = implementation_replay {
-            implementation_replays.insert(spec.label.clone(), replay);
-        }
     }
 
-    Ok((trace_replays, implementation_replays))
+    Ok(trace_replays)
 }
 
 fn build_tla_reports(
     results: &[(tla_runner::TlaSpec, tla_runner::TlcResult)],
     trace_replays: &HashMap<String, TlaTraceReplayResult>,
-    implementation_replays: &HashMap<String, TlaImplementationReplayResult>,
     implementation_trace_results: Option<&implementation_traces::ImplementationTraceSuiteResult>,
 ) -> Vec<TlaSpecReport> {
     let linked_trace_cache: HashMap<String, implementation_traces::ImplementationTraceResult> =
@@ -851,7 +831,6 @@ fn build_tla_reports(
         .iter()
         .map(|(spec, result)| {
             let literal_trace_replay = trace_replays.get(&spec.label).cloned();
-            let implementation_trace_replay = implementation_replays.get(&spec.label).cloned();
             let linked_trace_results = spec
                 .linked_implementation_traces
                 .iter()
@@ -874,7 +853,6 @@ fn build_tla_reports(
                 spec,
                 result,
                 literal_trace_replay,
-                implementation_trace_replay,
                 linked_trace_results,
             )
         })
