@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The parsers production runs on objects it reads embedded in another one:
 //! a settlement preimage carries its cores, entries, settlement body, owner
 //! authority and closure index, an economic leaf carries a trader

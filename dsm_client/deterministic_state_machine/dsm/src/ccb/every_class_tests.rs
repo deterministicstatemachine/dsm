@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Every live object class has one canonical encoding (MR-DSM-0100).
 //!
 //! The classes are read from [`super::class`] itself, so a class added there
