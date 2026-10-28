@@ -997,6 +997,130 @@ mod tests {
         assert_eq!(p.b.era_balance(), 10);
     }
 
+    /// Storage §8, routing rule 1: a relationship's inbox address hashes its
+    /// current chain tip and changes every step, so an item on a previous-tip
+    /// route steps from a tip this device has already advanced past, and is
+    /// never taken in. A pays B 10 and B applies it: the route for the tip A
+    /// paid from is now B's previous-tip route for A. A then forks its own
+    /// chain from that tip, a transfer of 7 to B signed as its send signs
+    /// one, which B has never decided, and posts it on that route through its
+    /// own spool client. B syncs and reads the route: the copy is left where
+    /// it is. Nothing is staged, its id is not consumed, its content is not
+    /// passed over, and B holds the 10 it was paid.
+    ///
+    /// MUTATION CONTROL: `pull_and_process_inbox` reading a previous-tip
+    /// route as a current one turns this red: the fork is staged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_item_on_a_previous_tip_route_is_never_taken_in() {
+        use crate::handlers::app_router_impl::contact_relationship_tip;
+        use dsm::types::operations::{TransactionMode, TransferTerms};
+
+        let p = Pair::boot(100, 0).await;
+
+        // A's tip with B before it pays, and the position its pay advances.
+        p.a.enter();
+        let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+            .expect("A's contacts")
+            .expect("A holds B as a contact");
+        let paid_from = contact_relationship_tip(&b_contact).expect("A's relationship tip with B");
+        let fork_position =
+            crate::economic_fixtures::admitted_position().expect("A is activated") + 1;
+
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = the_one_transfer(&p.b, &p.fleet).await;
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "B applied the honest payment");
+
+        p.b.enter();
+        let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
+            .expect("B's contacts")
+            .expect("B holds A as a contact");
+        assert_ne!(
+            contact_relationship_tip(&a_contact).expect("B's relationship tip with A"),
+            paid_from,
+            "B has advanced past the tip A paid from"
+        );
+        assert_eq!(
+            a_contact.previous_chain_tip.as_deref(),
+            Some(paid_from.as_slice()),
+            "the tip A paid from is B's previous tip with A"
+        );
+        let previous_route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+            &p.b.genesis,
+            &p.b.device_id,
+            &paid_from,
+        )
+        .expect("B's route for that tip");
+        assert_eq!(
+            previous_route, one.route,
+            "the honest payment arrived on that route"
+        );
+
+        // The fork: a transfer A's chain never made, from the tip it paid from.
+        p.a.enter();
+        let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+        let a_secret =
+            crate::sdk::signing_authority::current_secret_key().expect("A's signing key");
+        let terms = TransferTerms::new(
+            b"ERA".to_vec(),
+            transfer_nonce(&paid_from, 7, "ERA", &p.b.device_id),
+            TransactionMode::Unilateral,
+            String::new(),
+        );
+        let canonical = Operation::Transfer {
+            to_device_id: p.b.device_id.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(7),
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+        .to_bytes();
+        let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
+        Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+        let fork = dsm::types::proto::OnlineTransferRequest {
+            signature,
+            canonical_operation_bytes: canonical,
+            sender_economic_position: fork_position,
+            sender_debit_mutation_index: 0,
+            transfer_terms: terms.to_bytes(),
+        }
+        .encode_to_vec();
+
+        p.b.enter();
+        assert_eq!(
+            classify_stale_transfer_copy(&fork, &one.header_sender).expect("classified"),
+            StaleCopy::Undecided,
+            "B recognizes the fork and has never decided it"
+        );
+        nothing_staged();
+
+        let fork_id = crate::util::text_id::encode_base32_crockford(&[0x5Eu8; 16]);
+        post_as_the_sender(&p, &previous_route, &one.message_id, &fork_id, fork.clone()).await;
+        let fork_copy = copy_key_at_b(
+            &p,
+            &sealed_as_the_sender(&p, &one.message_id, &fork_id, fork),
+        );
+
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "nothing of the fork reached B");
+        p.b.enter();
+        nothing_staged();
+        assert!(
+            !client_db::b0x_consumed::is_consumed(&previous_route, &fork_id).expect("consumed"),
+            "the fork's id is not consumed"
+        );
+        assert!(
+            !client_db::b0x_consumed::is_passed_over(&previous_route, &fork_copy)
+                .expect("passed over"),
+            "the fork is left where it is, not passed over"
+        );
+    }
+
     /// A sender named in a wrapper is not a sender. The copy's wrapper names a
     /// third device; the boundary stages the transfer under the contact whose
     /// key verified it, so while it waits it holds the send barrier toward A
