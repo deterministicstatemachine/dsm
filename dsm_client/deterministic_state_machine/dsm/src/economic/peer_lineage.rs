@@ -2084,6 +2084,98 @@ mod tests {
         }
     }
 
+    /// A resolver whose answer names the coordinates it holds.
+    #[derive(Clone, Copy)]
+    struct AnswersFor {
+        root_position: u64,
+        claim_position: u64,
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+    }
+
+    impl ConditionalPositionResolver for AnswersFor {
+        fn resolve(
+            &self,
+            _previous: &ValidatedEconomicRoot,
+            _parent: &ParentClaimRef,
+            held: &SofiResolutionClaim,
+        ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure> {
+            Ok((
+                authenticated_root(self.root_position, held.realize_root),
+                AcceptedClaim::from_validated_coordinate(
+                    self.genesis,
+                    self.device_id,
+                    self.claim_position,
+                    [0xC1; 32],
+                ),
+            ))
+        }
+    }
+
+    /// MR-DSM-0276: what a resolver answers for a conditional position is
+    /// held to that position of that peer. The answer for the coordinate
+    /// asked about is taken; one whose root stands at another position, or
+    /// whose accepted claim is another position's, another genesis's or
+    /// another device's, is `Invalid`, however it was derived.
+    ///
+    /// MUTATION CONTROL: dropping the coordinate comparison in
+    /// `resolve_conditional` (`cond_coordinate`) turns this red.
+    #[test]
+    fn a_resolution_answered_for_another_coordinate_is_invalid() {
+        let position = 4;
+        let fetcher = ConditionalCellFetcher {
+            position,
+            writes: vec![peer_c_q(conditional_claim(position))],
+            last: crate::route_chain::ROUTE_LEN - 1,
+        };
+        let ask = |resolver: &AnswersFor| {
+            peer_claim_at(
+                &fetcher,
+                NETWORK,
+                &PEER_G,
+                &peer_d(),
+                position,
+                &Recorded::below(position),
+                resolver,
+            )
+        };
+        let honest = AnswersFor {
+            root_position: position,
+            claim_position: position,
+            genesis: PEER_G,
+            device_id: peer_d(),
+        };
+        if let Err(e) = ask(&honest) {
+            panic!("the answer for the coordinate asked about is taken: {e:?}");
+        }
+        let elsewhere = [
+            AnswersFor {
+                root_position: position + 1,
+                ..honest
+            },
+            AnswersFor {
+                claim_position: position - 1,
+                ..honest
+            },
+            AnswersFor {
+                genesis: [0x99; 32],
+                ..honest
+            },
+            AnswersFor {
+                device_id: [0x98; 32],
+                ..honest
+            },
+        ];
+        for shifted in &elsewhere {
+            match ask(shifted) {
+                Err(PeerLineageFailure::Invalid(why)) => {
+                    assert!(why.contains("answered for another coordinate"), "{why}")
+                }
+                other => panic!("an answer for another coordinate is Invalid, not {other:?}"),
+            }
+        }
+    }
+
     /// A claim naming other coordinates never holds the root cell (storage
     /// spec §9 rule 3): only a claim whose own coordinates derive `K_root(q)`
     /// is recognized there, so a foreign claim written first blocks nothing,

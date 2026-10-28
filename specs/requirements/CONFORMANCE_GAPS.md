@@ -4999,6 +4999,60 @@ Each item below turns on one of four clauses:
 12. C1, the offline SoFi door: (a), an exhaustive Core allowlist; its membership; and whether it waits for the offline round.
 13. C2, the register incarnation: §6.101 decision 5.
 
+### 6.106 Mutation controls for the shared-lineage, vault-history, baseline and contacts gates that had none (verification step 9; `test/shared-lineage-mutation-controls`, 2026-10-27)
+
+**Why.** Eleven rows of `VERIFICATION_MATRIX.md` named a gate and its negative tests but showed no red mutation: their Mutation control cell read "—" or "Not run". The repository rule: "Mutation-test every security gate. Remove it, watch a named test go red by actually performing the forbidden action, restore it… a mutation that stays green is a finding about the test, not a pass."
+
+**Method.**
+- *Build.* One DSM_MUTANT build, in a scratch worktree at `d357160e` with its own target directory. Each gate was switched off on its own name through `dsm::mutant(name)`, which reads `DSM_MUTANT`. The switches lived only in the scratch tree and are not in this branch.
+- *Runs.* Each named test ran by exact name, `--release`, three times: unmutated, under its mutant, and unmutated again. Every unmutated run passed.
+- *Node tests.* These ran on Postgres in a database of their own (`dsm_node_test_lineage`), one test binary at a time.
+- *Rebuild.* The two tests added below were copied into the scratch tree, the Core test binary was rebuilt incrementally, and the tests were run the same way. Both then passed in this tree in a targeted `--release` run (3 passed, with the conditional-position test they sit beside).
+- *Gate [7].* The CI gate `ci/sofi_validated_root_constructors.sh` reads source, not a binary. It was mutated by adding a construction, running the gate and removing the construction.
+
+**Results.** Twenty-nine mutants were run: 18 in Core, 9 in the SDK and 2 on gate [7]. Twenty-eight went red on a named test, two of them only once a new test asked (below). One stayed green, and one row has no SDK gate to remove.
+
+| Row | Gate removed (mutant) | Named test → red, doing what it forbids |
+|---|---|---|
+| MR-SOFI-0397, MR-SOFI-0400 | Trailing bytes accepted by the shared-lineage decoders (`sl_finish`) | `every_object_round_trips_and_refuses_trailing_bytes`: a longer encoding decoded |
+| | `CheckpointV1::decode` without its digest recompute (`sl_cp_digest`), and without the one-epoch end (`sl_cp_end`) | `a_checkpoint_must_cover_exactly_one_epoch_and_its_digest_must_recompute`: each decoded |
+| | `eligible_at` without its start generation, start digest, start root (`sl_elig_start`, `sl_elig_digest`, `sl_elig_root`) | `a_checkpoint_is_eligible_only_at_the_head_the_reader_established`: each ineligible checkpoint taken |
+| | `eligible_at` without its lineage check (`sl_elig_lineage`) | The same test, but the forbidden action did not happen: the other vault's checkpoint was refused as `StartDigestMismatch` instead of `OtherLineage`, since `d_g` binds the lineage |
+| | `end_matches` without its digest comparison (`sl_end_digest`) | `a_checkpoint_end_matches_only_the_head_the_walk_reached`: another vault's head matched |
+| | The parent digest left out of each generation (`sl_parent`, in `EstablishedSharedHead::extended`) | `a_generation_digest_binds_its_history_lineage_and_kind`: generation 5 of two chains that differ at 4 came out equal |
+| MR-SOFI-0415, MR-SOFI-0416 | `prove` without its vault check, node-hash check, leaf check (`hist_vault`, `hist_node`, `hist_leaf`) | `nothing_outside_the_head_is_proven`, `a_node_not_in_hand_or_not_its_hash_proves_nothing`, `another_root_at_a_generation_is_contradicted`: another vault's root walked, another node's bytes walked, another root proven |
+| | Trailing bytes accepted by `VaultHistoryHeadV1::decode` (`hist_head_trailing`) | `the_history_root_moves_with_every_generation_and_decodes_strictly` |
+| | The history root left out of `frontier_commitment` (`frontier_history`); the quarantine dropped from `adopt_one` (`baseline_equivocation`) | `an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined`: the two frontiers taken as one and the wallet adopting, both times |
+| MR-SOFI-0404 | Trailing bytes accepted by `VaultFrontierV1`, `VaultFrontierWitnessV1`, `OwnerBaselineAuthV1` (`frontier_trailing`, `witness_trailing`, `auth_trailing`) | `the_baseline_objects_decode_strictly`: the longer encoding decoded; `auth_trailing` only once the test asked (below) |
+| MR-SOFI-0405 [7] | A second `VerifiedFrontier` construction in `sofi/frontier/mod.rs`, then one in `dsm_sdk` · sdk/vault_baseline.rs | The gate: "stated 3 times", "constructed outside its own module"; green again once removed |
+| MR-SOFI-0407 | `adopt_one` adopting nothing (`baseline_skip`) | `a_wallet_that_holds_nothing_starts_at_the_owners_baseline_and_trades`: B's record held no generation 3 |
+| MR-SOFI-0411 | `adopt_one` also reading the baseline locator of every earlier generation (`baseline_reads_grow`) | `a_fresh_reader_reads_the_same_at_any_vault_age`: 224 reads at generation 2, 239 at generation 4 |
+| MR-SOFI-0399 | `owe_missing_hints` owing nothing (`owe_hints_none`) | `a_reserve_walker_publishes_a_hint_for_each_generation_it_established`: generation 1 not hinted after the sweep |
+| MR-DSM-0276 | `resolve_conditional` without its activation-root refusal (`cond_activation`) | `a_conditional_position_right_after_the_activation_root_is_invalid`: the resolver was asked where nothing names a parent |
+| | `resolve_conditional` without its coordinate comparison (`cond_coordinate`) | `a_resolution_answered_for_another_coordinate_is_invalid` (new): an answer for another position, genesis or device taken |
+| | `PeerPositionResolver::resolve` answering `Unresolved` (`cond_resolver_unresolved`) | `a_trader_who_has_traded_can_pay`: the payee did not credit the payment (48,900 against 48,905) |
+| MR-DSM-0320, MR-DSM-0321 | `contacts_to_share` without its application check (`contacts_apps`) | `a_contacts_answer_shares_device_ids_only_and_never_an_application` and `the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself`: an application's id shared, the game's own account shared back |
+| | `contacts_to_share` without its cap (`contacts_cap`) | The unit test: 1,029 shared against a cap of 1,024 |
+
+**Two green mutants, two new tests.**
+- *`auth_trailing` (MR-SOFI-0404).* `the_baseline_objects_decode_strictly` appended a byte to the frontier and to both witnesses, but never to `OwnerBaselineAuthV1`. The test now does, and the mutant turns it red.
+- *`cond_coordinate` (MR-DSM-0276).* Both conditional-position tests use a resolver that answers nothing, so the coordinate comparison was never reached. `dsm::economic::peer_lineage::tests::a_resolution_answered_for_another_coordinate_is_invalid` has a resolver that does answer.
+  - The answer for the coordinate asked about is taken.
+  - An answer whose root stands at another position, or whose accepted claim is another position's, another genesis's or another device's, is `Invalid`.
+  - Under the mutant all four are taken.
+  - The test resolver builds its root through `authenticated_root`, because the constructor gate allows `from_verifier_memo` one call in the file.
+
+**Findings.**
+1. *The reserve walk's read-ahead filter is not shown load-bearing (MR-DSM-0310, MR-DSM-0312).* With the walk taking a read-ahead read that Core did not resolve final (`reserve_ahead_unresolved`), `lying_reserve_hints_change_nothing_a_walk_establishes` stays green, so the row records no mutation control.
+   - *Why it stays green.* A read-ahead keeps only the releases from the root it was asked about (`named_successor_keeps`), and the walk looks up only its own cell. So the read-ahead of the walk's own cell holds what the walk's own read holds.
+   - *What would tell them apart.* A read cut short by the 24 MiB read-ahead window (`READ_AHEAD_BYTES`), or a cell that turns final between the read-ahead and the walk reaching it. No test builds either: the first needs a cell flooded past the window, the second a race inside one walk.
+   - *What the mutant can do.* Even under it, the walk can only stop short. Every generation it establishes is still one Core read final.
+   - *Owed.* A test that makes a read-ahead read of the walk's own cell incomplete.
+2. *The vault read-ahead has no SDK gate to remove (MR-DSM-0310, MR-DSM-0312, vault row).* This is read from source and was not run. `vault_history::read_ahead` returns a report and nothing else. A cell is kept for the walk only when Core's completion proof holds (`LiveSofiReads::keep_completion`), and the walk is `Verifier::chain`. What protects the row is Core's walk, together with the constructor gate [7], whose mutation is recorded above.
+3. *Observation, not run (MR-SOFI-0399).* `owe_missing_hints` skips a generation that any hint names, whatever root that hint names. Whether a lying hint at a generation can stop a walker from owing the honest hint there was not tested.
+
+**Rows.** No status changes. The matrix rows gain their mutation cells, and two Negative test cells gain the tests these runs used: `a_resolution_answered_for_another_coordinate_is_invalid` and `a_checkpoint_end_matches_only_the_head_the_walk_reached`.
+
 ### 6.108 The beta inventory; stale records corrected; mutation controls for gates checked only by reading (`fix/beta-requirements-completion`, 2026-10-27)
 
 **Why.** The owner, 2026-10-27: "Give me an accurate inventory of everything remaining in beta scope, including software requirements that are not represented by the Partial count." The inventory was read at f3ff6a3d by a read-only agent. The tree was unchanged before and after, and every claim below was rechecked against the code here.
