@@ -32,16 +32,13 @@ use dsm::crypto::domain::TaggedHashDomain;
 use dsm::sofi::derive;
 use dsm::sofi::history::{history_locator, HistoryBuilder};
 use dsm::sofi::frontier::{
-    authenticate_frontier_owner, baseline_commitment, frontier_commitment, witness_from_tree,
-    VaultWitness, VerifiedFrontier,
+    authenticate_frontier_owner, baseline_commitment, frontier_commitment, vault_tree_at,
+    witness_from_tree, VaultTree, VaultTreeError, VaultWitness, VerifiedFrontier,
 };
 use dsm::sofi::lineage::AcceptedVaultGenesis;
 use dsm::sofi::resolve::{VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
-use dsm::sofi::wire::{
-    OwnerBaselineAuthV1, VaultFrontierV1, VaultFrontierWitnessV1, VaultRelationshipLeaf,
-    VaultStateLeaf,
-};
+use dsm::sofi::wire::{OwnerBaselineAuthV1, VaultFrontierV1, VaultFrontierWitnessV1};
 use dsm::types::error::DsmError;
 
 use crate::generated;
@@ -161,41 +158,25 @@ pub(crate) fn sign(
 }
 
 /// The owner's whole tree of `vault_id` at `generation`, its state, and its
-/// relationship leaves by key — rebuilt from this device's record and
-/// checked against the root it recorded there.
+/// relationship leaves by key: this device's record, which Core binds leaf by
+/// leaf and refuses unless it recomputes the root recorded there
+/// (`sofi::frontier::vault_tree_at`). `None` when the record does not
+/// recompute that root: this device did not see every leaf.
 pub(crate) fn tree_at(
     vault_id: &D32,
     generation: u64,
     root: &D32,
-) -> Result<
-    Option<(
-        dsm::economic::tree::EconomicSmt,
-        VaultStateLeaf,
-        BTreeMap<D32, VaultRelationshipLeaf>,
-    )>,
-    DsmError,
-> {
-    let rows =
-        sofi_vault_head::leaf_rows(vault_id, generation).map_err(|e| failure("leaves", e))?;
-    let mut tree = dsm::economic::tree::EconomicSmt::new();
-    let mut state = None;
-    let mut relationships = BTreeMap::new();
-    let state_key = derive::vault_state_key(vault_id);
-    for (key, value, _, preimage) in &rows {
-        tree.insert(*key, *value);
-        if *key == state_key {
-            state = Some(VaultStateLeaf::decode(preimage).map_err(|e| failure("state", e))?);
-        } else {
-            relationships.insert(
-                *key,
-                VaultRelationshipLeaf::decode(preimage).map_err(|e| failure("relationship", e))?,
-            );
-        }
+) -> Result<Option<VaultTree>, DsmError> {
+    let rows: Vec<(D32, D32, Vec<u8>)> = sofi_vault_head::leaf_rows(vault_id, generation)
+        .map_err(|e| failure("leaves", e))?
+        .into_iter()
+        .map(|(key, value, _, preimage)| (key, value, preimage))
+        .collect();
+    match vault_tree_at(vault_id, root, &rows) {
+        Ok(tree) => Ok(Some(tree)),
+        Err(VaultTreeError::DoesNotRecomputeTheRoot { .. }) => Ok(None),
+        Err(e) => Err(failure("tree", e)),
     }
-    if tree.root() != *root {
-        return Ok(None);
-    }
-    Ok(state.map(|state| (tree, state, relationships)))
 }
 
 /// What the owner hands a trader: each vault's witness, and why each vault
@@ -262,10 +243,10 @@ async fn offer_one(
     if head.generation == 0 {
         return Ok(None);
     }
-    let Some((tree, state, relationships)) = tree_at(vault_id, head.generation, &head.root)? else {
+    let Some(whole) = tree_at(vault_id, head.generation, &head.root)? else {
         return Ok(None);
     };
-    let market = crate::sdk::storage_io::read_stored_bytes_kept(set, &state.market_policy)
+    let market = crate::sdk::storage_io::read_stored_bytes_kept(set, &whole.state.market_policy)
         .await?
         .ok_or_else(|| failure("market", "the vault's market policy is not Stored"))?;
     let market =
@@ -279,10 +260,10 @@ async fn offer_one(
     ensure_baseline(set, own_g, vault_id, head.generation, &head.root).await?;
     let rel_key = derive::relationship_key(&trader.0, &trader.1, vault_id);
     let witness = witness_from_tree(
-        &tree,
+        &whole.tree,
         vault_id,
-        &state,
-        relationships.get(&rel_key).copied(),
+        &whole.state,
+        whole.relationships.get(&rel_key).copied(),
         &trader.0,
         &trader.1,
     );

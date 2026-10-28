@@ -181,27 +181,16 @@ pub(crate) fn admitted_root_and_tree(
     Ok(Some((validated, tree, pre)))
 }
 
-/// Rebuild the producer-side economic tree.
-///
-/// Strategy A (cache) with root-equality admission; the cache is NEVER an
-/// authority — on mismatch it is discarded and the flow falls back to the
-/// recovery truth (for position 0/1 in beta: the empty tree, since nothing
-/// beyond the first admissions exists to replay yet).
+/// The producer-side economic tree at `validated`: Core's
+/// ([`producer_tree_and_pre_state`]).
 pub(crate) fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<EconomicSmt, DsmError> {
     Ok(producer_tree_and_pre_state(validated)?.0)
 }
 
-/// The admitted pre-state a write set reads: every leaf class in `R_econ` that
-/// a mutation can start from, owned so it can outlive the decode.
-///
-/// It is NOT "the balances plus some extras". `build_write_set` reads exactly
-/// two classes — balances, and the vault reserves an owner apply or a close
-/// draws down — and a class the producer drops is not a smaller pre-state but
-/// an ABSENT LEAF: `DlvOwnerApply` and `DlvWithdraw` fail closed with "the
-/// vault holds no output reserve for that settlement" against a validated root
-/// that commits exactly that reserve. Receipt and consumed-source leaves are
-/// deliberately absent: they are write-once records a write set inserts, never
-/// a state it starts from.
+/// The admitted pre-state a write set reads: every balance `R_econ` holds,
+/// owned so it can outlive the decode, and the position the next transition
+/// lands at. Core decides which leaf classes a write set starts from
+/// (`ValidatedEconomicRoot::admitted_tree`).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AdmittedPreState {
     pub balances: BTreeMap<[u8; 32], u64>,
@@ -217,77 +206,49 @@ impl AdmittedPreState {
     }
 }
 
-/// The producer tree PLUS the admitted pre-state decoded from the same
-/// cache rows. Admission pre-states come from `R_econ` ITSELF — never the
-/// device head, whose balance map can carry credits no admission backs (a
-/// received transfer awaiting PR4 recipient admission). Building from the
-/// head would pair a mutation pre-state the validated pre-root cannot prove;
-/// building from the tree makes unadmitted value simply unspendable, which
-/// is the economic-root guarantee working.
+/// The producer tree PLUS the admitted pre-state, both Core's: this device's
+/// leaf cache handed to `ValidatedEconomicRoot::admitted_tree`, which binds
+/// every row to its state and refuses rows that do not recompute the
+/// validated root. This module computes no root (SoFi §2.1). Admission
+/// pre-states come from `R_econ` ITSELF — never the device head, whose
+/// balance map can carry credits no admission backs (a received transfer
+/// awaiting PR4 recipient admission). Building from the head would pair a
+/// mutation pre-state the validated pre-root cannot prove; building from the
+/// tree makes unadmitted value simply unspendable, which is the economic-root
+/// guarantee working.
 pub(crate) fn producer_tree_and_pre_state(
     validated: &ValidatedEconomicRoot,
 ) -> Result<(EconomicSmt, AdmittedPreState), DsmError> {
-    let mut tree = EconomicSmt::new();
-    let mut pre = AdmittedPreState {
-        // The NEXT position: a pre-state at `p` is the pre-state of `p + 1`.
-        // CHECKED: a counter with no successor is a refusal, never a clamp —
-        // a saturated position would silently claim to be its own successor.
-        economic_position: validated
-            .economic_position()
-            .checked_add(1)
-            .ok_or_else(|| {
-                DsmError::invalid_operation("economic position has no successor".to_string())
-            })?,
-        ..AdmittedPreState::default()
-    };
-    if validated.economic_position() == 0 {
-        return Ok((tree, pre));
-    }
-    let leaves =
+    // The NEXT position: a pre-state at `p` is the pre-state of `p + 1`.
+    // CHECKED: a counter with no successor is a refusal, never a clamp — a
+    // saturated position would silently claim to be its own successor.
+    let economic_position = validated
+        .economic_position()
+        .checked_add(1)
+        .ok_or_else(|| {
+            DsmError::invalid_operation("economic position has no successor".to_string())
+        })?;
+    let rows =
         economic_lineage::load_leaf_cache().map_err(|e| storage_err("load leaf cache", e))?;
-    for (key, value, ccb) in &leaves {
-        tree.insert(*key, *value);
-        let state = dsm::economic::decode::decode_leaf_state(ccb)
-            .map_err(|e| storage_err("decode cached leaf state", e))?;
-        // Every class the tree carries is decoded here, and the two a write
-        // set can START from are kept. Dropping one would not narrow the
-        // pre-state — it would assert the leaf is absent from a root that
-        // commits it, and the write set would fail closed on state the device
-        // provably holds.
-        match state {
-            dsm::economic::state::EconomicLeafState::Balance(b) => {
-                pre.balances.insert(b.policy_commit, b.amount);
-            }
-            // Write-once records, inserted by a write set and never a
-            // predecessor it reads. The bundle-acceptance leaf (2c-D) belongs
-            // here for the same reason and one more: its `pre` is required to
-            // be `None`, so a pre-state that carried it would contradict the
-            // shape its own write-set arm enforces.
-            dsm::economic::state::EconomicLeafState::ConsumedSource(..) => {}
-            // A SoFi relationship leaf IS a predecessor a write set reads —
-            // its whole content is the base `hʲ` the next operation advances
-            // from — but the reader is `sofi::validation`, which fetches it by
-            // key with the vault's own evidence. This pre-state map exists for
-            // the bilateral write sets and has no slot it belongs in; adding a
-            // half-slot here would be a second place for the base to live.
-            dsm::economic::state::EconomicLeafState::Relationship(..) => {}
-            // Creation records are write-once and insert-only: a write set
-            // that found one would be creating a vault or a token that
-            // already exists, which its own arm refuses by reading the tree.
-            // Nothing reads one as a predecessor.
-            dsm::economic::state::EconomicLeafState::VaultCreation(..)
-            | dsm::economic::state::EconomicLeafState::TokenCreation(..) => {}
-        }
-    }
-    if tree.root() != validated.economic_root() {
-        return Err(DsmError::storage(
-            "economic leaf cache does not recompute the admitted root — discarded; witness \
-             replay recovery is required and no replay source exists yet"
-                .to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    Ok((tree, pre))
+    let (tree, balances) = validated
+        .admitted_tree(&rows)
+        .map_err(|e| {
+            DsmError::storage(
+                format!(
+                    "economic leaf cache: {e} — discarded; witness replay recovery is required \
+                     and no replay source exists yet"
+                ),
+                None::<std::io::Error>,
+            )
+        })?
+        .into_parts();
+    Ok((
+        tree,
+        AdmittedPreState {
+            balances,
+            economic_position,
+        },
+    ))
 }
 
 /// The portable P0–P6 authority material for THIS device, built from the
@@ -349,7 +310,6 @@ pub(crate) fn build_dsm_admission(
     authority: &AuthorityMaterial,
     extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<DsmAdmissionParts, DsmError> {
-    let pre_root = tree.root();
     let c_dsm_plus = chain_state.compute_chain_tip();
     let op_bytes = operation.to_bytes();
     let op_digest = dsm::economic::admission::dsm_operation_digest(&op_bytes);
@@ -366,6 +326,8 @@ pub(crate) fn build_dsm_admission(
         facts,
     )
     .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+    // Both roots the witness names are the builder's, never this module's.
+    let pre_root = built.pre_root;
     // THE DEBIT LOCATOR IS A TRANSFER FACT, AND ONLY A TRANSFER FACT. Its one
     // consumer is the online-transfer wire, where the recipient uses it to
     // locate the sender's debit; a Transfer sender's write set has exactly one
@@ -606,7 +568,7 @@ pub(crate) async fn stage_admission(
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         target_position,
-        tree.root(),
+        validated.economic_root(),
         op_digest,
     );
     Ok(StagedAdmission {
@@ -790,7 +752,6 @@ pub(crate) async fn admitted_offline_boundary(
                 .map_err(|e| storage_err("boundary body", e))?;
             let digest = offline_boundary_operation_digest(&body);
             let evidence_addr = offline_boundary_evidence_addr(&body);
-            let pre_root = tree.root();
             let write_set = dsm::economic::write_set::build_boundary_write_set(
                 &dsm::economic::write_set::BoundaryEffect {
                     kind,
@@ -804,6 +765,8 @@ pub(crate) async fn admitted_offline_boundary(
                 &mut tree,
             )
             .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+            // Both roots are the builder's, never this module's.
+            let pre_root = write_set.pre_root;
             let witness = EconomicTransitionWitness::new(
                 pre_root,
                 write_set.post_root,
@@ -1861,7 +1824,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         validated.economic_position() + 1,
-        tree.root(),
+        validated.economic_root(),
         op_digest,
     );
 

@@ -26,7 +26,7 @@
 //! Void installing the previous root IS "SofiVoid has zero mutations": the
 //! position exists, it is terminal, and it moved nothing.
 
-use crate::economic::lineage::ValidatedEconomicRoot;
+use crate::economic::lineage::{tree_of_rows, LeafCacheError, LeafRow, ValidatedEconomicRoot};
 use crate::economic::state::EconomicLeafState;
 use crate::economic::tree::EconomicSmt;
 use crate::sofi::validation::{
@@ -232,12 +232,8 @@ impl ResolvedBalances {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedLeafStates(Vec<(D32, Option<EconomicLeafState>)>);
 
-/// One row of a device's economic leaf cache: the leaf key, the leaf value,
-/// and the canonical bytes of the state that value hashes.
-pub type LeafRow = (D32, D32, Vec<u8>);
-
 /// The whole leaf cache behind the root a resolved position installs: every
-/// row's bytes are the state its key and value name, and together the rows
+/// row's bytes are the state its value hashes, and together the rows
 /// recompute that root. Only [`ResolvedAdvance::installed_leaves`] builds
 /// one, so a device writes the cache it admits without recomputing a root
 /// of its own.
@@ -249,56 +245,6 @@ impl InstalledLeaves {
         &self.0
     }
 }
-
-/// Why the leaves behind an installed root cannot be produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstalledLeavesError {
-    /// A row's bytes are not a canonical leaf state.
-    RowDoesNotDecode {
-        key: D32,
-        why: crate::ccb::decode::DecodeError,
-    },
-    /// A state in the cache has no canonical bytes, so it has no leaf value.
-    StateHasNoBytes { key: D32, why: crate::ccb::CcbError },
-    /// The state a row's bytes decode to is not the one its key and value
-    /// name.
-    RowIsNotItsState { key: D32 },
-    /// The rows do not recompute the root the advance installed.
-    LeavesDoNotRecomputeTheRoot { installed: D32, recomputed: D32 },
-}
-
-impl core::fmt::Display for InstalledLeavesError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::RowDoesNotDecode { key, why } => write!(
-                f,
-                "the leaf cache row at {} is not a canonical leaf state: {why:?}",
-                crate::utils::text_id::encode_base32_crockford(key)
-            ),
-            Self::StateHasNoBytes { key, why } => write!(
-                f,
-                "the state at {} has no canonical bytes: {why:?}",
-                crate::utils::text_id::encode_base32_crockford(key)
-            ),
-            Self::RowIsNotItsState { key } => write!(
-                f,
-                "the leaf cache row at {} is not the state its key and value name",
-                crate::utils::text_id::encode_base32_crockford(key)
-            ),
-            Self::LeavesDoNotRecomputeTheRoot {
-                installed,
-                recomputed,
-            } => write!(
-                f,
-                "the leaves do not recompute the installed root {}: they give {}",
-                crate::utils::text_id::encode_base32_crockford(installed),
-                crate::utils::text_id::encode_base32_crockford(recomputed)
-            ),
-        }
-    }
-}
-
-impl std::error::Error for InstalledLeavesError {}
 
 /// What [`advance_resolved`] establishes at `q`: the resolution the ladder
 /// reached and its effect, the validated root, the claim `C_q` accepted
@@ -319,14 +265,14 @@ impl ResolvedAdvance {
     /// writes put in and the leaves it leaves absent taken out.
     ///
     /// THE ROOT IS CORE'S. Every row is bound to the state its bytes decode
-    /// to, under this device's key derivation, and the rows are refused
-    /// unless they recompute the root installed at `q`. A Void writes nothing,
-    /// so its rows are `current`, which must recompute the predecessor's root
-    /// it reinstalls.
+    /// to, and the rows are refused unless they recompute the root installed
+    /// at `q` (`economic::lineage::tree_of_rows`, the producer tree's rule
+    /// too). A Void writes nothing, so its rows are `current`, which must
+    /// recompute the predecessor's root it reinstalls.
     pub fn installed_leaves(
         &self,
         current: Vec<LeafRow>,
-    ) -> Result<InstalledLeaves, InstalledLeavesError> {
+    ) -> Result<InstalledLeaves, LeafCacheError> {
         let mut cache: std::collections::BTreeMap<D32, (D32, Vec<u8>)> = current
             .into_iter()
             .map(|(key, value, ccb)| (key, (value, ccb)))
@@ -334,7 +280,7 @@ impl ResolvedAdvance {
         for (key, state) in &self.leaf_states.0 {
             match state {
                 Some(state) => {
-                    let no_bytes = |why| InstalledLeavesError::StateHasNoBytes { key: *key, why };
+                    let no_bytes = |why| LeafCacheError::StateHasNoBytes { key: *key, why };
                     let value = state.leaf_value().map_err(no_bytes)?;
                     cache.insert(*key, (value, state.encode().map_err(no_bytes)?));
                 }
@@ -343,32 +289,12 @@ impl ResolvedAdvance {
                 }
             }
         }
-        let (genesis, device_id) = (self.claim.genesis(), self.claim.device_id());
-        let mut tree = EconomicSmt::new();
-        for (key, (value, ccb)) in &cache {
-            let state = crate::economic::decode::decode_leaf_state(ccb)
-                .map_err(|why| InstalledLeavesError::RowDoesNotDecode { key: *key, why })?;
-            let state_value = state
-                .leaf_value()
-                .map_err(|why| InstalledLeavesError::StateHasNoBytes { key: *key, why })?;
-            if state.leaf_key(&genesis, &device_id) != *key || state_value != *value {
-                return Err(InstalledLeavesError::RowIsNotItsState { key: *key });
-            }
-            tree.insert(*key, *value);
-        }
-        let (installed, recomputed) = (self.root.economic_root(), tree.root());
-        if recomputed != installed {
-            return Err(InstalledLeavesError::LeavesDoNotRecomputeTheRoot {
-                installed,
-                recomputed,
-            });
-        }
-        Ok(InstalledLeaves(
-            cache
-                .into_iter()
-                .map(|(key, (value, ccb))| (key, value, ccb))
-                .collect(),
-        ))
+        let rows: Vec<LeafRow> = cache
+            .into_iter()
+            .map(|(key, (value, ccb))| (key, value, ccb))
+            .collect();
+        tree_of_rows(&rows, &self.root.economic_root())?;
+        Ok(InstalledLeaves(rows))
     }
 }
 
@@ -1759,8 +1685,8 @@ mod tests {
         extra.push(row_of(&EconomicLeafState::Balance(balance(d(0x7C), 3))));
         assert!(matches!(
             realized.installed_leaves(extra),
-            Err(InstalledLeavesError::LeavesDoNotRecomputeTheRoot { installed, .. })
-                if installed == *p.realize_root()
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root, .. })
+                if root == *p.realize_root()
         ));
 
         let (rows, void) = void_over_rows();
@@ -1773,12 +1699,12 @@ mod tests {
         );
         assert!(matches!(
             void.installed_leaves(rows[..1].to_vec()),
-            Err(InstalledLeavesError::LeavesDoNotRecomputeTheRoot { installed, .. })
-                if installed == root_of(&rows)
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root, .. })
+                if root == root_of(&rows)
         ));
     }
 
-    /// EVERY ROW IS THE STATE ITS KEY AND VALUE NAME. A row whose key and
+    /// EVERY ROW'S BYTES ARE THE STATE ITS VALUE HASHES. A row whose key and
     /// value are right — so the root still recomputes — but whose bytes are
     /// another state's, or no state at all, is refused: the cache a device
     /// decodes its balances from is the one the root commits.
@@ -1799,13 +1725,13 @@ mod tests {
         );
         assert_eq!(
             void.installed_leaves(forged),
-            Err(InstalledLeavesError::RowIsNotItsState { key })
+            Err(LeafCacheError::RowIsNotItsState { key })
         );
         let mut junk = rows;
         junk[0].2 = vec![0x00, 0x01];
         assert!(matches!(
             void.installed_leaves(junk),
-            Err(InstalledLeavesError::RowDoesNotDecode { key: at, .. }) if at == key
+            Err(LeafCacheError::RowDoesNotDecode { key: at, .. }) if at == key
         ));
     }
 
