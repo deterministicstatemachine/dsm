@@ -11788,6 +11788,14 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
    */
   pkChip = new Uint8Array(0);
 
+  /**
+   * The public birth commitment S_birth B commits: with the keys above, the sender's pinned
+   * online key and its device id, the receiver recomputes B from what is disclosed.
+   *
+   * @generated from field: bytes birth_commitment = 10;
+   */
+  birthCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AnchorDisclosure>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11802,6 +11810,7 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
     { no: 4, name: "partition_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "pk_chip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "birth_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorDisclosure {
@@ -12604,6 +12613,15 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    */
   anchorDisclosure?: AnchorDisclosure;
 
+  /**
+   * The sender's offline spends since the boundary of its online history that left the account
+   * its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
+   * spend starts at that account.
+   *
+   * @generated from field: dsm.OfflineSpendChain offline_spend_chain = 16;
+   */
+  offlineSpendChain?: OfflineSpendChain;
+
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12619,6 +12637,7 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "anchor_disclosure", kind: "message", T: AnchorDisclosure },
+    { no: 16, name: "offline_spend_chain", kind: "message", T: OfflineSpendChain },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -13174,6 +13193,105 @@ export class OfflineStateProof extends Message<OfflineStateProof> {
 
   static equals(a: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined, b: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined): boolean {
     return proto3.util.equals(OfflineStateProof, a, b);
+  }
+}
+
+/**
+ * One offline-bearer spend of an offline account as its anchor released it: the release
+ * (dsm.anchor.OfflineRelease — Δ, Π_i, Π_{i+1} and the certificate carrying σ^chip and σ^host),
+ * the spend's account witness, and what it moved. Π_i and Π_{i+1} prove the release's device
+ * roots commit the account before and after; the witness folds the one into the other.
+ *
+ * @generated from message dsm.OfflineSpendHop
+ */
+export class OfflineSpendHop extends Message<OfflineSpendHop> {
+  /**
+   * @generated from field: bytes release = 1;
+   */
+  release = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.StepWriteOfflineAccount spend = 2;
+   */
+  spend?: StepWriteOfflineAccount;
+
+  /**
+   * @generated from field: bytes asset = 3;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<OfflineSpendHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "spend", kind: "message", T: StepWriteOfflineAccount },
+    { no: 3, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined, b: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendHop, a, b);
+  }
+}
+
+/**
+ * An offline account's spends, in order.
+ *
+ * @generated from message dsm.OfflineSpendChain
+ */
+export class OfflineSpendChain extends Message<OfflineSpendChain> {
+  /**
+   * @generated from field: repeated dsm.OfflineSpendHop hops = 1;
+   */
+  hops: OfflineSpendHop[] = [];
+
+  constructor(data?: PartialMessage<OfflineSpendChain>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendChain";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: OfflineSpendHop, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined, b: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendChain, a, b);
   }
 }
 
