@@ -1671,6 +1671,80 @@ async fn a_committed_payment_counts_against_the_grant_whatever_its_delivery() {
     );
 }
 
+/// DSM Amendment A11, MR-DSM-0292: a grant's spending is bounded by its
+/// scope's cap in total. The pay scope allows 10 WILD a time and 30 in all;
+/// three payments of 10 spend it. The fourth is not carried out under the
+/// grant: nothing more is paid, the grant's spend stays at its total, and the
+/// wallet's log does not record it carried out. Whether the grant then ends
+/// or the request waits for the player is the owner's reading of A11
+/// (§6.105 A3); this holds under every reading.
+///
+/// MUTATION CONTROL: `grant::within` admitting a request past the cap's total
+/// turns this red: the fourth payment runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_past_the_grants_total_is_not_carried_out_under_it() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let sent = p.a.send_token(&p.b, "WILD", 50).await;
+    assert!(sent.success, "{:?}", sent.error_message);
+    p.b.sync().await;
+    settle(&p).await;
+    let pay = || {
+        generated::connect_app_request_intent_v1::Kind::Pay(generated::ConnectPayV1 {
+            policy_commit: wild.to_vec(),
+            amount: 10,
+            memo: String::new(),
+        })
+    };
+
+    for paid in 1..=3u64 {
+        let seq = request(&p.a, &relay, &session, pay()).await;
+        sync_clean(&p, &relay).await;
+        carried_out(&p.b, &session, seq).await;
+        assert_eq!(balance(&p.b, &wild), 50 - 10 * paid);
+        settle(&p).await;
+    }
+    p.b.enter();
+    assert_eq!(
+        crate::storage::client_db::connect::spent_all(&session).expect("the grant's spend"),
+        vec![(wild, 30)],
+        "three payments spent the pay scope's total"
+    );
+
+    let past = request(&p.a, &relay, &session, pay()).await;
+    sync_and_deliver(&p, &relay).await;
+    assert_eq!(balance(&p.b, &wild), 20, "nothing past the total is paid");
+    p.b.enter();
+    assert_eq!(
+        crate::storage::client_db::connect::spent_all(&session).expect("the grant's spend"),
+        vec![(wild, 30)],
+        "the grant's spend stays at its total"
+    );
+    let logged = query(
+        &p.b,
+        "connect.log",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: session.to_vec(),
+        }),
+    )
+    .await;
+    let Reply::Log(log) = reply(&logged) else {
+        panic!("connect.log answered another reply");
+    };
+    for entry in log.entries.iter().filter(|e| e.seq == past) {
+        assert_ne!(
+            generated::ConnectOutcome::try_from(entry.outcome),
+            Ok(generated::ConnectOutcome::CarriedOut),
+            "the payment past the total was carried out: {}",
+            entry.detail
+        );
+    }
+}
+
 /// One signed request moves value once and counts once against its grant,
 /// whatever stops it from being recorded as processed (SA-60). Here the
 /// write that records it fails after the payment committed: a trigger the
