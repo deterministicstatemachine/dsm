@@ -7017,3 +7017,674 @@ async fn a_tombstone_is_taken_in_under_the_authority_the_device_anchored() {
         "the tombstone under K_A is taken in"
     );
 }
+
+// ── Rows no suite exercised yet (CONFORMANCE §6.107) ───────────────────────
+
+/// A pending trade as storage holds it: its F, the P that F names, and that
+/// P's P(E).
+type PendingObjects = (
+    dsm::sofi::publication::Signed<TraderFulfillmentBody>,
+    dsm::sofi::publication::Signed<TraderPrecommitBody>,
+    dsm::sofi::wire::SettlementPreimage,
+);
+
+/// `d`'s pending trade, each object read back from storage by its identity.
+async fn pending_objects_of(
+    d: &TestDevice,
+    set: &crate::sdk::storage_set::StorageSet,
+) -> PendingObjects {
+    d.enter();
+    let head = d
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("the device's head");
+    let fulfillment_id = match head
+        .pending_economic_admission()
+        .map(|pending| pending.kind)
+    {
+        Some(dsm::economic::admission::PendingAdmissionKind::SofiFulfillment {
+            fulfillment_id,
+        }) => fulfillment_id,
+        other => panic!("the pending admission is a fulfillment: {other:?}"),
+    };
+    let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(set, fulfillment.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+    let preimage = match fetch_preimage(set, precommit.body.external_commitment())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(preimage) => preimage,
+        other => panic!("P(E) is stored under its locator: {other:?}"),
+    };
+    (fulfillment, precommit, preimage)
+}
+
+/// B trades 10 ERA in the market with the leader of its next position pair
+/// refusing the pair: its objects are published and nothing is at the pair
+/// or the vault. The position and the root its cells are routed by.
+async fn trade_held_at_its_pair(
+    p: &Pair,
+    m: &Market,
+    set: &crate::sdk::storage_set::StorageSet,
+) -> (u64, [u8; 32]) {
+    let exhausted = generated::SofiPositionState::RetriesExhausted as i32;
+    let q = admitted_position(&p.b) + 1;
+    let (.., root) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let pair = position_cells(set, &p.b.genesis, &p.b.device_id, q, &root)
+        .expect("B's next position pair");
+    let pair_leader = member_name(pair.fulfillment().route().leader());
+    p.nodes
+        .refuse_cell_writes(
+            &pair_leader,
+            &[*pair.fulfillment().key(), *pair.root().routed().key()],
+        )
+        .await;
+    let r = invoke(&p.b, "sofi.trade", args(&trade_request(p, m, 10))).await;
+    assert_eq!(position_of(&r, "sofi.trade"), (q, exhausted));
+    p.nodes.accept_cell_writes(&pair_leader).await;
+    (q, root)
+}
+
+/// MR-SOFI-0142, SoFi Amendment S20 and storage spec §9: `K_root(q)` counts
+/// only a claim naming it, so a precommit there counts as nothing. B trades
+/// with its pair held, so its `P` is published and nothing is at the pair.
+/// B's own `P`, exactly as stored, is then put first in the log of
+/// `K_root(q)`'s leader. B's completion writes the pair behind it, and the
+/// position realizes: `P` is still first at the leader and took nothing.
+///
+/// MUTATION CONTROL: the leader rule reading the first value in the leader's
+/// log whether or not it is recognized (`dsm::route_chain::first_at_leader`)
+/// turns this test red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_precommit_first_at_its_root_cell_takes_nothing_from_the_position() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let realized = generated::SofiPositionState::Realized as i32;
+    let (q, root) = trade_held_at_its_pair(&p, &m, &set).await;
+    let pair = position_cells(&set, &p.b.genesis, &p.b.device_id, q, &root).expect("pair");
+    let root_cell = pair.root().routed();
+
+    let (.., precommit, _) = pending_objects_of(&p.b, &set).await;
+    let p_bytes = Publication::Precommit {
+        body: &precommit.body,
+        signature: &precommit.signature,
+    }
+    .object_bytes()
+    .expect("P's envelope");
+    assert!(
+        dsm::economic::register::root_claim_naming(&p_bytes, root_cell.key()).is_none(),
+        "P names no root cell"
+    );
+    let entry = RouteEntry::at_leader(
+        root_cell.namespace().to_vec(),
+        *root_cell.key(),
+        p_bytes,
+        root_cell.route(),
+    );
+    let clients = SetClient::new(&set).expect("the set's members");
+    let leader = clients
+        .members()
+        .iter()
+        .position(|member| member.member_id().as_bytes() == root_cell.route().leader())
+        .expect("the cell's leader");
+    clients.members()[leader]
+        .put_cells(&[(entry.namespace.clone(), entry.key, entry.encode())])
+        .await
+        .expect("the leader keeps it");
+    let first_at_leader = || async {
+        clients
+            .held_at(root_cell.namespace(), root_cell.key())
+            .await[leader]
+            .clone()
+            .expect("the leader answers")
+    };
+    assert_eq!(
+        first_at_leader().await,
+        vec![entry.encode()],
+        "P alone is at the leader"
+    );
+
+    assert!(
+        matches!(complete(&p).await, Completion::Written(..)),
+        "B's pair is written behind P"
+    );
+    assert_eq!(resolve(&p).await, (q, realized));
+    assert_eq!(admitted_position(&p.b), q);
+    let held = first_at_leader().await;
+    assert_eq!(held[0], entry.encode(), "P is still first at the leader");
+    assert!(held.len() > 1, "B's claim is behind it");
+}
+
+/// MR-SOFI-0145 and storage spec §9 rule 7: the bytes at `K_root(q)` are a
+/// trader's own closure object only once they are final there. B's second
+/// trade names its first, a conditional position, as its parent, so its
+/// `P(E)` carries that position's `ConditionalClaim`; the trade is held at its
+/// pair, so its objects are published and nothing more. With a restarted
+/// device's empty memory and the last three seats of the first position's
+/// `K_root` route down, the leader and one seat answer: B's claim is held
+/// there one link short of final, and it is not a closure object. With the
+/// seats back it is, and it is B's claim on the fulfillment B admitted there.
+///
+/// MUTATION CONTROL: `final_root_cell` taking a held claim at any chain
+/// state (`dsm_sdk::sdk::sofi_advance`) turns this test red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_conditional_parent_claim_is_an_own_closure_object_only_once_final() {
+    let mut p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (.., built_on) = {
+        p.b.enter();
+        economic_lineage::get_admitted_coordinate()
+            .expect("read admitted")
+            .expect("an admitted position")
+    };
+    let first = realized_trade(&p, &m, 10).await;
+    let admitted_first = {
+        p.b.enter();
+        match economic_lineage::get_admitted_at(first).expect("admitted history") {
+            Some(AdmittedEconomicPosition::ResolvedSofi { fulfillment_id, .. }) => fulfillment_id,
+            other => panic!("B's first trade is a resolved conditional position: {other:?}"),
+        }
+    };
+    trade_held_at_its_pair(&p, &m, &set).await;
+    let (.., precommit, preimage) = pending_objects_of(&p.b, &set).await;
+    let parent = precommit.body.parent_reference();
+    assert!(
+        matches!(
+            parent,
+            dsm::sofi::wire::ValidationRef::ConditionalClaim { position, .. } if position == first
+        ),
+        "the second trade's parent is the first: {parent:?}"
+    );
+
+    let first_cells = position_cells(&set, &p.b.genesis, &p.b.device_id, first, &built_on)
+        .expect("the first position's pair");
+    let down: Vec<String> = first_cells.root().routed().route().seats()[2..]
+        .iter()
+        .map(|seat| member_name(seat))
+        .collect();
+    crate::sdk::final_reads::forget_everything();
+    p.nodes.take_down(&down).await;
+    p.b.enter();
+    let short = crate::sdk::sofi_advance::own_closure_objects(&set, &precommit.body, &preimage)
+        .await
+        .expect("B's own closure objects");
+    p.nodes.bring_up(&down).await;
+    assert_eq!(
+        short.get(&parent),
+        None,
+        "a claim one link short of final is no closure object"
+    );
+
+    p.b.enter();
+    let full = crate::sdk::sofi_advance::own_closure_objects(&set, &precommit.body, &preimage)
+        .await
+        .expect("B's own closure objects");
+    let bytes = full
+        .get(&parent)
+        .expect("the claim final at the first K_root");
+    match dsm::economic::register::root_claim_naming(bytes, first_cells.root().routed().key()) {
+        Some(dsm::economic::claim_envelope::RegisteredEconomicClaim::ConditionalSofi(claim)) => {
+            assert_eq!(
+                (claim.position, claim.fulfillment_id),
+                (first, admitted_first),
+                "B's claim on the fulfillment it admitted"
+            );
+        }
+        other => panic!("the closure object is B's conditional claim: {other:?}"),
+    }
+}
+
+/// MR-SOFI-0217, SoFi §17.4 and Rule T5: the position pair is written only
+/// for an F that conforms. B trades with its pair held, so its P and P(E) are
+/// published and nothing is at the pair. From those exact objects B installs
+/// an F of its own, signed, whose position is not P's successor: the install
+/// is refused as not conforming, and nothing is put at either cell of that
+/// F's position.
+///
+/// MUTATION CONTROL: removing the install's refusal of an Invalid F
+/// (`install_fulfillment`) turns this test red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_fulfillment_that_does_not_conform_is_not_installed() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (q, ..) = trade_held_at_its_pair(&p, &m, &set).await;
+    let (fulfillment, precommit, preimage) = pending_objects_of(&p.b, &set).await;
+
+    p.b.enter();
+    let (public_key, secret_key) =
+        crate::sdk::signing_authority::current_keypair().expect("B's key");
+    let att_a = crate::sdk::signing_authority::current_att_a().expect("B's AttA");
+    let skipping = TraderFulfillmentBody::new(
+        *fulfillment.body.precommit_id(),
+        fulfillment.body.policy_fulfillment_set().to_vec(),
+        fulfillment.body.attempts().to_vec(),
+        q + 1,
+        fulfillment.body.signature_alg(),
+        &public_key,
+        att_a,
+    )
+    .expect("a well-formed F");
+    let signature = dsm::crypto::sphincs::sphincs_sign(
+        &secret_key,
+        &derive::fulfillment_signing_digest(&skipping),
+    )
+    .expect("B signs it");
+    let own_objects =
+        crate::sdk::sofi_advance::own_closure_objects(&set, &precommit.body, &preimage)
+            .await
+            .expect("B's own closure objects");
+    let request = crate::sdk::sofi_register::InstallRequest {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage: &preimage,
+        fulfillment: &skipping,
+        fulfillment_signature: &signature,
+        own_objects: &own_objects,
+    };
+    let cells = crate::sdk::sofi_register::cells_of(&set, &precommit.body, &skipping)
+        .expect("the cells of F's position");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let installed =
+        crate::sdk::sofi_register::install_fulfillment(&ctx.verifier(), &set, &request).await;
+    assert!(
+        matches!(
+            installed,
+            Err(crate::sdk::sofi_register::InstallError::NotConforming(
+                FulfillmentConformanceError::PositionNotSuccessor { expected, got }
+            )) if (expected, got) == (q, q + 1)
+        ),
+        "an F that is not P's successor: {installed:?}"
+    );
+    let client = SetClient::new(&set).expect("a client of the set");
+    for cell in [cells.fulfillment(), cells.root().routed()] {
+        let held = client.held_at(cell.namespace(), cell.key()).await;
+        assert!(
+            held.iter()
+                .all(|values| matches!(values, Some(values) if values.is_empty())),
+            "nothing of the pair is at any member: {held:?}"
+        );
+    }
+}
+
+/// Damage, in place, member `member_id`'s row of the object at `addr`: its
+/// payload becomes `bytes`, as a store outside the fault model holds it.
+async fn damage_object(p: &Pair, member_id: &str, addr: &[u8; 32], bytes: &[u8]) {
+    let node = p
+        .nodes
+        .nodes
+        .iter()
+        .find(|node| node.member_id == member_id)
+        .expect("a node of the set");
+    let client = node.pool().get().await.expect("the member's database");
+    let changed = client
+        .execute(
+            "UPDATE immutable_objects SET payload = $1 WHERE addr_b32 = $2",
+            &[&bytes, &crate::util::text_id::encode_base32_crockford(addr)],
+        )
+        .await
+        .expect("damage the row");
+    assert_eq!(changed, 1, "{member_id} held the object");
+}
+
+/// MR-SOFI-0054, storage spec §5 rule 5 and SoFi §10: an object is read only
+/// from bytes that re-hash to its address at three members. B's realized
+/// trade stored its P at every member. Damaged in place at the first two
+/// members a reader asks, P is still read, exactly, from the other three;
+/// damaged at a third it is not established. It is never read as the damaged
+/// bytes, though the members holding them answer first.
+///
+/// MUTATION CONTROL: with both the node's hash-on-read (`get_immutable`) and
+/// the reader's re-hash (`dsm::sofi::storage::counts`) dropped, the damaged
+/// bytes are read as P and this test is red; with either one in place it is
+/// green, since each refuses the damaged bytes alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_object_damaged_at_its_members_is_never_read_as_other_bytes() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let q = realized_trade(&p, &m, 10).await;
+    let fulfillment_id = {
+        p.b.enter();
+        match economic_lineage::get_admitted_at(q).expect("admitted history") {
+            Some(AdmittedEconomicPosition::ResolvedSofi { fulfillment_id, .. }) => fulfillment_id,
+            other => panic!("B's trade is a resolved conditional position: {other:?}"),
+        }
+    };
+    let fulfillment = match crate::sdk::sofi_publish::fetch_fulfillment(&set, &fulfillment_id)
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("F is stored under its id: {other:?}"),
+    };
+    let precommit = match fetch_precommit(&set, fulfillment.body.precommit_id())
+        .await
+        .expect("read")
+    {
+        Resolved::Kept(signed) => signed,
+        other => panic!("P is stored under its id: {other:?}"),
+    };
+    let stored = Publication::Precommit {
+        body: &precommit.body,
+        signature: &precommit.signature,
+    }
+    .object_bytes()
+    .expect("P's envelope");
+    let addr = dsm::storage_object::immutable_addr(TAG_DSM_SOFI_PRECOMMIT_OBJECT, &stored);
+    let mut damaged = stored.clone();
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0x01;
+    let asked: Vec<String> = SetClient::new(&set)
+        .expect("a client of the set")
+        .members()
+        .iter()
+        .map(|member| member.member_id().to_string())
+        .collect();
+
+    for member_id in &asked[..2] {
+        damage_object(&p, member_id, &addr, &damaged).await;
+    }
+    crate::sdk::final_reads::forget_everything();
+    assert_eq!(
+        crate::sdk::storage_io::read_stored_bytes(&set, &addr)
+            .await
+            .expect("read"),
+        Some(stored),
+        "P, from the three members that hold it"
+    );
+
+    damage_object(&p, &asked[2], &addr, &damaged).await;
+    crate::sdk::final_reads::forget_everything();
+    assert_eq!(
+        crate::sdk::storage_io::read_stored_bytes(&set, &addr)
+            .await
+            .expect("read"),
+        None,
+        "two members hold P: it is not established, and never read as the damaged bytes"
+    );
+}
+
+/// MR-SOFI-0202, SoFi Amendment S16 and storage spec §4: a vault's genesis is
+/// the one its owner's creation carried, wherever it stands under its
+/// locator. Before A creates its second vault, a genesis naming that vault,
+/// A's first vault's state under the second's creation position, is put at
+/// every member and listed first under the second vault's locator. A then
+/// creates the vault, and a fresh verifier accepts A's own genesis, the one
+/// holding the reserves A put in, not the one listed ahead of it.
+///
+/// MUTATION CONTROL: the SDK's scan returning only the first candidate under
+/// the locator (`LiveSofiReads::vault_genesis_candidates`) turns this test
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_genesis_listed_ahead_of_the_owners_is_passed_over() {
+    use dsm::common::domain_tags::{
+        TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+    };
+    use dsm::sofi::resolve::VaultGenesis;
+
+    let p = Pair::boot(500, 200).await;
+    let era = era();
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let one = create_vault(&p.a, (era, 100), (tkn, 1_000)).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let client = SetClient::new(&set).expect("a client of the set");
+    let genesis_of = |vault_id: &[u8; 32]| {
+        let ctx = VerifierContext::new(&set, None, None).expect("a verifier over the set");
+        let read = ctx.verifier().vault_genesis(vault_id).expect("read");
+        match read {
+            VaultGenesis::Accepted(accepted) => accepted.preimage().clone(),
+            other => panic!("the vault's genesis is accepted: {other:?}"),
+        }
+    };
+    let first = genesis_of(&one);
+
+    let create_position = admitted_position(&p.a) + 1;
+    let two = derive::vault_id(&p.a.genesis, &p.a.device_id, create_position);
+    let listed = dsm::sofi::wire::VaultGenesisPreimage {
+        create_position,
+        state: dsm::sofi::wire::VaultStateLeaf {
+            create_position,
+            ..first.state.clone()
+        },
+        ..first
+    }
+    .encode()
+    .expect("a genesis preimage");
+    assert_eq!(
+        client
+            .put_immutable(TAG_DSM_SOFI_VAULT_GENESIS_OBJECT, &listed)
+            .await,
+        5
+    );
+    assert_eq!(
+        client
+            .append_index(
+                TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR.source_bytes(),
+                &derive::vault_genesis_locator(&two),
+                &dsm::storage_object::immutable_addr(TAG_DSM_SOFI_VAULT_GENESIS_OBJECT, &listed),
+            )
+            .await,
+        5
+    );
+
+    let created = create_vault(&p.a, (era, 120), (tkn, 1_000)).await;
+    assert_eq!(created, two, "the vault its creation position derives");
+    crate::sdk::final_reads::forget_everything();
+    let accepted = genesis_of(&two);
+    assert_ne!(
+        accepted.encode().expect("the accepted genesis"),
+        listed,
+        "the genesis listed first is not accepted"
+    );
+    let reserves = if era < tkn {
+        (120, 1_000)
+    } else {
+        (1_000, 120)
+    };
+    assert_eq!(
+        (accepted.state.reserve_a, accepted.state.reserve_b),
+        reserves,
+        "the genesis of the reserves A put in"
+    );
+}
+
+/// The vault `vault_id` at its head, as `d` walks it now.
+async fn vault_head(
+    d: &TestDevice,
+    set: &crate::sdk::storage_set::StorageSet,
+    vault_id: &[u8; 32],
+) -> dsm::sofi::wire::VaultStateLeaf {
+    let (own, parents) = standing_of(d);
+    let ctx = VerifierContext::new(set, Some(own), parents.as_ref()).expect("a verifier");
+    let (head, ..) = crate::sdk::sofi_flow::vault_at_head(set, &ctx.verifier(), vault_id)
+        .await
+        .expect("the vault's head");
+    head.state
+}
+
+/// MR-SOFI-0069, SoFi §36 and storage spec §3: a vault's storage set is
+/// frozen at its creation. A's vault is created over the pinned set; B
+/// trades through it twice and A closes it. At every head the vault's state
+/// names the set its genesis named, the set every position was routed over.
+///
+/// MUTATION CONTROL: a swap's post-state naming another set
+/// (`dsm::sofi::validation::swap_vault_post`) turns this test red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_keeps_the_storage_set_of_its_creation_through_trades_and_its_close() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let genesis = {
+        let ctx = VerifierContext::new(&set, None, None).expect("a verifier over the set");
+        match ctx.verifier().vault_genesis(&m.vault_id).expect("read") {
+            dsm::sofi::resolve::VaultGenesis::Accepted(accepted) => accepted.preimage().clone(),
+            other => panic!("the vault's genesis is accepted: {other:?}"),
+        }
+    };
+    assert_eq!(
+        genesis.state.storage_set_id,
+        set.id(),
+        "created over the set"
+    );
+
+    let mut seen = Vec::new();
+    realized_trade(&p, &m, 10).await;
+    let head = vault_head(&p.a, &set, &m.vault_id).await;
+    seen.push((head.generation, head.storage_set_id));
+    realized_trade(&p, &m, 5).await;
+    let head = vault_head(&p.a, &set, &m.vault_id).await;
+    seen.push((head.generation, head.storage_set_id));
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    let head = vault_head(&p.a, &set, &m.vault_id).await;
+    assert_eq!(
+        head.status,
+        dsm::sofi::wire::VAULT_STATUS_RETIRED,
+        "the close retired the vault"
+    );
+    seen.push((head.generation, head.storage_set_id));
+    assert_eq!(
+        seen,
+        vec![(1, set.id()), (2, set.id()), (3, set.id())],
+        "every generation names the set of the vault's creation"
+    );
+}
+
+/// What `vault_id` holds of `token`, as its owner's `sofi.vaults` lists it.
+async fn vault_reserve(owner: &TestDevice, vault_id: &[u8; 32], token: &[u8; 32]) -> u64 {
+    let vaults = match payload(
+        &invoke(owner, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await,
+    ) {
+        Payload::SofiVaultsResponse(r) => r.vaults,
+        other => panic!("sofi.vaults answered {other:?}"),
+    };
+    let vault = vaults
+        .iter()
+        .find(|v| v.vault_id == vault_id)
+        .expect("the owner lists the vault");
+    if vault.token_a_policy_commit == token {
+        vault.reserve_a
+    } else {
+        assert_eq!(
+            vault.token_b_policy_commit, token,
+            "the vault holds the token"
+        );
+        vault.reserve_b
+    }
+}
+
+/// MR-SOFI-0307, SoFi §35 and DSM conservation: across trades and a close no
+/// unit is created or destroyed anywhere. With the market open, ERA and TKN
+/// are each counted over every holder, A, B and the vault's reserves, and
+/// both sums are the same after B's two trades and after A closes the vault.
+/// TKN's is its genesis supply.
+///
+/// MUTATION CONTROL: a swap that keeps one unit more in the vault than it was
+/// paid (`dsm::sofi::validation::swap_vault_post`) passes every
+/// per-operation check, which prices with that same function, and turns this
+/// test red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn no_unit_is_created_or_destroyed_across_trades_and_a_close() {
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    set_up(&p.a, &m.vault_id).await;
+    let total = |token: [u8; 32]| {
+        let p = &p;
+        let vault_id = m.vault_id;
+        async move {
+            balance(&p.a, &token)
+                + balance(&p.b, &token)
+                + vault_reserve(&p.a, &vault_id, &token).await
+        }
+    };
+    let opened = (total(m.era).await, total(m.tkn).await);
+    assert_eq!(opened.1, 10_000, "TKN's genesis supply, all of it held");
+
+    let mut seen = Vec::new();
+    realized_trade(&p, &m, 10).await;
+    seen.push((total(m.era).await, total(m.tkn).await));
+    realized_trade(&p, &m, 5).await;
+    seen.push((total(m.era).await, total(m.tkn).await));
+    realized_through(
+        &p.a,
+        "sofi.close",
+        args(&generated::SofiCloseRequest {
+            vault_id: m.vault_id.to_vec(),
+        }),
+    )
+    .await;
+    assert_eq!(vault_reserve(&p.a, &m.vault_id, &m.era).await, 0);
+    seen.push((total(m.era).await, total(m.tkn).await));
+    assert_eq!(
+        seen,
+        vec![opened; 3],
+        "ERA and TKN, summed over every holder, after each trade and the close"
+    );
+}
+
+/// MR-DSM-0194, SoFi §28: a vault pairs any two transferable tokens; no
+/// token's policy names the pairs it may trade in. B creates TKB and pays A
+/// in it; A pairs its own TKN with B's TKB, a pair neither policy mentions,
+/// and B trades TKB for TKN through the vault and receives what it priced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_vault_pairs_two_device_tokens_of_two_creators() {
+    let p = Pair::boot(500, 200).await;
+    let tkn = create_token(&p.a, "TKN", 10_000).await;
+    let tkb = create_token(&p.b, "TKB", 5_000).await;
+    adopt(&p.a, &tkb).await;
+    let sent = p.b.send_token(&p.a, "TKB", 2_000).await;
+    assert!(sent.success, "B pays A in TKB: {:?}", sent.error_message);
+    p.a.sync().await;
+    assert_eq!(balance(&p.a, &tkb), 2_000);
+
+    let vault_id = create_vault(&p.a, (tkn, 1_000), (tkb, 1_000)).await;
+    adopt(&p.b, &tkn).await;
+    set_up(&p.b, &vault_id).await;
+    let m = Market {
+        vault_id,
+        era: tkb,
+        tkn,
+    };
+    let out = dsm::dlv::route_commit::constant_product_output(10, 1_000, 1_000, 30)
+        .expect("the vault prices the trade");
+    realized_trade(&p, &m, 10).await;
+    assert_eq!(balance(&p.b, &tkn), out, "B holds what the vault priced");
+    assert_eq!(balance(&p.b, &tkb), 5_000 - 2_000 - 10);
+}
