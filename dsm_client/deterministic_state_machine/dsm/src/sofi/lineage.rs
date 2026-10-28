@@ -481,23 +481,27 @@ impl std::error::Error for FenceError {}
 /// descendant admitted on that basis would be built on a root the lineage had
 /// not chosen, and half of the time it is the wrong one.
 ///
-/// **Wired, and deliberately inert.** Both paths that create the next local
-/// economic position cross it — the advance that stages an admission plan and
-/// the transaction that makes local acceptance durable — and
+/// **Wired, and its refusals unreachable.** Both paths that create the next
+/// local economic position cross it — the advance that stages an admission
+/// plan and the transaction that makes local acceptance durable — and
 /// `ci/admitted_predecessor_readers_fenced.sh` fails the build if a third
 /// descendant-producing path appears without it.
 ///
-/// It nevertheless cannot fire today, and that is a property of the WRITER,
-/// not of this rule: `record_admitted_with_conn` records `claim_kind = 0`
-/// unconditionally because F ingress is dark, so `predecessor_claim()` can
-/// only ever answer `SingleRoot`. Deleting the calls therefore turns no test
-/// red, which is why the gate is static rather than a runtime mutation.
+/// What it can refuse is a property of the WRITERS and the builders, not of
+/// this rule. `record_admitted_with_conn` records the claim kind of the
+/// position it is given, and a resolved SoFi position is recorded as
+/// `ResolvedSofi` (`CoreSDK::admit_resolved_sofi_position`), so after a trade
+/// `predecessor_claim()` answers `ConditionalResolved` and the next descendant
+/// crosses the selected-root check. It passes: every builder builds on the
+/// root the resolution selected. No writer records `UnresolvedSofi`, so
+/// `ConditionalUnresolved` is never answered. A test of either refusal would
+/// have to stage a descendant no production builder makes, which is why the
+/// gate is static rather than a runtime mutation.
 ///
-/// E2/E3 owns production of conditional admitted rows and makes this live when
-/// that lifecycle lands. The invariant is installed ahead of its producer on
-/// purpose: a descendant path added before then would be bypassing a fence
-/// nothing could yet catch, and would become a live hole the day the writer
-/// arrives.
+/// The invariant is installed ahead of anything that could trip it on
+/// purpose: a descendant path added without the fence would bypass a check
+/// nothing could yet catch, and would become a live hole the day a writer of
+/// unresolved positions, or a builder on another root, arrives.
 pub fn descendant_fence(
     predecessor: PredecessorClaim,
     descendant_pre_root: &D32,
