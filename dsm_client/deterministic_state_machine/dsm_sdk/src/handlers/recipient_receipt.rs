@@ -350,7 +350,9 @@ pub fn generate_b_artifacts_from_inbound(
 ) -> Result<GeneratedBArtifacts> {
     use crate::sdk::receipts::{sign_receipt_with_per_step_ek_target, PerStepSigningInputs};
     use dsm::types::receipt_types::compute_receipt_b_canonical_target;
-    use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
+    use dsm::verification::receipt_verification::{
+        per_step_ek_predecessor, verify_per_step_ek_signing_target, BilateralSide,
+    };
     use crate::storage::client_db::cert_chain::{
         encrypt_chain_sk, load_cert_chain_head_pubkey, CertChainSide,
     };
@@ -420,13 +422,10 @@ pub fn generate_b_artifacts_from_inbound(
             "serialization drift: commitment mismatch after full serialize"
         ));
     }
-    let expected_prev_pk = pre_step_b
-        .clone()
-        .unwrap_or_else(|| recipient_ak_pk.to_vec());
     verify_per_step_ek_signing_target(
         &receipt,
         BilateralSide::B,
-        &expected_prev_pk,
+        per_step_ek_predecessor(pre_step_b.as_deref(), recipient_ak_pk).key(),
         &receipt.parent_tip,
         &b_target,
     )

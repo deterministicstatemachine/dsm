@@ -1,182 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Sender-side VERIFICATION of a recipient acceptance receipt for online
-//! transition finalization (§16.6).
+//! Sender-side online transition finalization (§16.6): the recipient's
+//! countersign, bound to the A side the sender retained.
 //!
 //! Protocol boundary: a DSM online transition finalizes on the sender only when
 //! the sender verifies a recipient-produced acceptance receipt that binds the
 //! exact transition and carries the recipient's per-step EK countersignature
 //! (`sig_b`), cert-chained to the recipient's stored counterparty cert head.
 //! Storage-node ACK / message deletion is transport housekeeping and is DEMOTED
-//! to best-effort garbage collection — it MUST NOT determine finalization.
+//! to garbage collection — it MUST NOT determine finalization.
 //!
-//! This module performs VERIFICATION ONLY. The atomic finalization commit
+//! That predicate is Core's,
+//! [`verify_acceptance_receipt`](dsm::verification::receipt_verification::verify_acceptance_receipt),
+//! judged against the predecessor this device reads with
+//! [`counterparty_ek_predecessor`](crate::handlers::storage_routes::counterparty_ek_predecessor).
+//! This module rebuilds the receipt it judges from the sender's own retained
+//! A side and the recipient's delta. The atomic finalization commit
 //! (relationship tip advance, pending-gate deletion, Local cert-head promotion,
 //! Counterparty cert-head advance to `ek_pk_b`, receipt persistence, and the
-//! finalized marker, as ONE recoverable state transition) is intentionally NOT
-//! done here — "clear the gate, then persist evidence" is the wrong crash
-//! ordering. The commit is a durable-journal-first operation implemented
-//! separately so a crash cannot leave a transfer "finalized" with its cert heads
-//! or evidence missing.
-//!
-//! `sig_b` is a PER-STEP EK SPHINCS+ signature (with `ek_pk_b` / `ek_cert_b` /
-//! `kyber_ct_b`), NOT a static contact-key signature. It is verified the way the
-//! recipient produces it — mirroring [`verify_inbound_receipt_sig_a`] but B-side:
-//! `ek_cert_b` chains `ek_pk_b` back to the sender's stored Counterparty (=
-//! recipient) cert head over `h_n`, then `sig_b` verifies under `ek_pk_b` over
-//! the receipt challenge-response target. `genesis` is a genesis hash, not a
-//! relationship id; the relationship is identified by `compute_smt_key(devid_a,
-//! devid_b)` and matched to the pending gate by counterparty device id.
+//! finalized marker, as ONE recoverable state transition) is a durable-journal-
+//! first operation implemented separately, so a crash cannot leave a transfer
+//! "finalized" with its cert heads or evidence missing.
 
-use dsm::types::receipt_types::compute_receipt_b_canonical_target;
-use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
 use crate::storage::client_db::sender_proposal::SenderOnlineProposal;
-use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 use anyhow::{anyhow, Result};
 use dsm::types::receipt_types::StitchedReceiptV2;
-
-/// Outcome of [`verify_acceptance_receipt`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReceiptVerifyOutcome {
-    /// The receipt binds THIS exact pending transition and its per-step EK
-    /// countersignature (`sig_b`) verifies. `commitment` is the receipt
-    /// commitment the atomic finalization commit records for idempotent replay.
-    Verified { commitment: [u8; 32] },
-    /// The receipt does not correspond to this pending gate (wrong
-    /// party/parent/child/root) or its countersignature is invalid. The gate
-    /// MUST be retained.
-    Rejected { reason: String },
-}
-
-/// Verify a recipient acceptance receipt against a pending online gate, COMPLETELY,
-/// before any finalization commit.
-///
-/// Checks, in order:
-///  1. `receipt.devid_a` is this sender and `receipt.devid_b` is the gate
-///     counterparty (recipient);
-///  2. `receipt.parent_tip == proposal.canonical_parent`, `receipt.child_tip ==
-///     proposal.canonical_child`, and the recomputed receipt commitment equals
-///     `proposal.commitment` — all in the ASYMMETRIC canonical space. The gate's
-///     SYMMETRIC projection pair is deliberately NOT used: cross-space comparison
-///     rejects valid countersignatures. The commitment covers the receipt's
-///     parent and child roots, so a receipt naming other roots fails here;
-///  4. B-side per-step EK: `ek_cert_b` chains `ek_pk_b` back to the sender's
-///     stored Counterparty (recipient) cert head over `h_n` (or `recipient_ak_pk`
-///     at relationship genesis), then `sig_b` verifies under `ek_pk_b` over the
-///     B-CANONICAL target — the session-bound commitment target extended with
-///     `b_pair`, the recipient's canonical relationship pair as carried in the
-///     delta. A pair the recipient did not sign fails here, so the pair the
-///     sender goes on to pin as the peer's head is authenticated;
-///  5. Kyber consistency: `ek_pk_b` present ⇒ `kyber_ct_b` present.
-///
-/// `proposal` is the sender's ONE persisted proposal for this canonical step —
-/// the single artifact carrying both the canonical and projection pairs.
-///
-/// `recipient_ak_pk` MUST be the recipient's already-authenticated contact
-/// signing key (AK, the cert-chain genesis root) from the sender's contact book —
-/// used only as the genesis predecessor when no Counterparty cert head exists yet.
-/// It is NEVER used to verify `sig_b` directly.
-///
-/// This function does NOT mutate any state. A validly-signed receipt naming a
-/// different transition is `Rejected`.
-#[allow(clippy::too_many_arguments)]
-pub fn verify_acceptance_receipt(
-    self_device_id: &[u8; 32],
-    counterparty_device_id: &[u8; 32],
-    receipt: &StitchedReceiptV2,
-    proposal: &SenderOnlineProposal,
-    recipient_ak_pk: &[u8],
-    b_pair: ([u8; 32], [u8; 32]),
-) -> Result<ReceiptVerifyOutcome> {
-    // ---- 1-2. Structural binding: the receipt must name THIS exact transition ----
-    //
-    // FORMULA SPACE MATTERS HERE. The receipt's parent/child are ASYMMETRIC
-    // canonical tips (DeviceState-embedded). The pending GATE stores the
-    // SYMMETRIC projection pair used for routing and b0x addressing. Comparing
-    // the receipt against the gate compares two different spaces and rejects a
-    // perfectly valid countersignature — the exact failure that stranded
-    // AWYPCNK8. The persisted proposal is the single artifact holding BOTH
-    // pairs, so the canonical comparison is made against it.
-    if &receipt.devid_a != self_device_id {
-        return Ok(reject("receipt devid_a is not this sender"));
-    }
-    if &receipt.devid_b != counterparty_device_id {
-        return Ok(reject("receipt devid_b is not the proposal counterparty"));
-    }
-    if receipt.parent_tip != proposal.canonical_parent {
-        return Ok(reject(
-            "receipt parent_tip != proposal canonical_parent (A-space)",
-        ));
-    }
-    if receipt.child_tip != proposal.canonical_child {
-        return Ok(reject(
-            "receipt child_tip != proposal canonical_child (A-space)",
-        ));
-    }
-    if receipt
-        .compute_commitment()
-        .map_err(|e| anyhow!("receipt commitment failed: {e}"))?
-        != proposal.commitment
-    {
-        return Ok(reject("receipt commitment != proposal commitment"));
-    }
-
-    // ---- 5. Kyber consistency (structural) ----
-    if !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
-        return Ok(reject(
-            "receipt ek_pk_b set but kyber_ct_b missing — per-step EK derivation \
-             requires both halves of the Kyber context",
-        ));
-    }
-
-    // ---- 4. B-side per-step EK countersignature ----
-    // From the SENDER's viewpoint the recipient (B) is the Counterparty. At
-    // relationship genesis (no Counterparty head yet) ek_cert_b chains back to
-    // the recipient's AK — its legitimate predecessor. A head that could not
-    // be READ is not "no head": the check cannot be made, and the delta is
-    // retried rather than judged against the root AK.
-    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
-    let expected_prev_pk_b =
-        match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty) {
-            Ok(Some(head)) => head,
-            Ok(None) => recipient_ak_pk.to_vec(),
-            Err(e) => {
-                return Err(anyhow!(
-                    "the counterparty's cert-chain head could not be read: {e}"
-                ))
-            }
-        };
-
-    let commitment = receipt
-        .compute_commitment()
-        .map_err(|e| anyhow!("receipt commitment failed: {e}"))?;
-
-    // Online session binding is the commitment; the B-canonical target extends
-    // it with the recipient's pair from the delta.
-    let b_target =
-        compute_receipt_b_canonical_target(&commitment, &commitment, &b_pair.0, &b_pair.1);
-    if let Err(e) = verify_per_step_ek_signing_target(
-        receipt,
-        BilateralSide::B,
-        &expected_prev_pk_b,
-        &receipt.parent_tip,
-        &b_target,
-    ) {
-        return Ok(reject(&format!(
-            "recipient per-step EK countersignature (sig_b) failed verification: {e}"
-        )));
-    }
-
-    Ok(ReceiptVerifyOutcome::Verified { commitment })
-}
-
-fn reject(reason: &str) -> ReceiptVerifyOutcome {
-    ReceiptVerifyOutcome::Rejected {
-        reason: reason.to_string(),
-    }
-}
 
 // ============================================================================
 // ADR 0003 return leg — reconstruct the countersigned receipt from what the
@@ -186,7 +33,7 @@ fn reject(reason: &str) -> ReceiptVerifyOutcome {
 // cap). It ships `ReceiptCountersignB`: the four B-side fields plus two
 // references. The sender overlays those onto the A-side receipt it authored
 // and froze at send time (`sender_outbox_artifacts`, role `evidence_a`) and
-// then runs the UNCHANGED verifier above. That reconstruction is the
+// then runs Core's acceptance verifier on it. That reconstruction is the
 // load-bearing binding: B material is only ever judged against the A side the
 // sender itself produced, so no delta can be accepted "for" foreign A bytes.
 // The delta's `receipt_evidence_digest_a` is advisory consistency evidence
@@ -324,215 +171,6 @@ pub fn bind_countersign_delta(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    /// A real step's receipt — the first transfer between two wallets —
-    /// naming the parties and tips under test. These tests judge a receipt's
-    /// binding to its proposal, never its state rules, so the step's roots,
-    /// writes and entropy are carried as the real step made them.
-    fn base_receipt(
-        a: [u8; 32],
-        b: [u8; 32],
-        parent: [u8; 32],
-        child: [u8; 32],
-    ) -> StitchedReceiptV2 {
-        use crate::test_support::receipts::{transfer_step, Party};
-        static RECEIPT: std::sync::OnceLock<StitchedReceiptV2> = std::sync::OnceLock::new();
-        let mut receipt = RECEIPT
-            .get_or_init(|| {
-                transfer_step(&Party::from_seed(0x31), &Party::from_seed(0x32), 7).receipt
-            })
-            .clone();
-        receipt.devid_a = a;
-        receipt.devid_b = b;
-        receipt.parent_tip = parent;
-        receipt.child_tip = child;
-        receipt
-    }
-
-    /// A proposal whose CANONICAL pair is the transition under test, and whose
-    /// PROJECTION pair is deliberately DIFFERENT. Any check that reads the
-    /// projection values where it should read canonical ones fails these tests —
-    /// which is exactly the cross-space bug that stranded AWYPCNK8 in production.
-    fn proposal(cp: [u8; 32], parent: [u8; 32], child: [u8; 32]) -> SenderOnlineProposal {
-        proposal_with_commitment(cp, parent, child, [0u8; 32])
-    }
-
-    fn proposal_with_commitment(
-        cp: [u8; 32],
-        parent: [u8; 32],
-        child: [u8; 32],
-        commitment: [u8; 32],
-    ) -> SenderOnlineProposal {
-        SenderOnlineProposal {
-            relationship_key: dsm::core::bilateral_transaction_manager::compute_smt_key(
-                &[0x11u8; 32],
-                &cp,
-            ),
-            canonical_parent: parent,
-            canonical_child: child,
-            // Divergent on purpose (symmetric routing space).
-            projection_parent: [0xAAu8; 32],
-            projection_target: [0xBBu8; 32],
-            commitment,
-            operation_digest: [0u8; 32],
-            nonce_hash: [0u8; 32],
-            message_id: Some("MSG-TEST".to_string()),
-            tx_id: "TX-TEST".to_string(),
-            counterparty_device_id: cp,
-            amount: 0,
-            token_id: "ERA".to_string(),
-            status: "submitted".to_string(),
-        }
-    }
-
-    #[test]
-    fn rejects_receipt_naming_a_different_sender() {
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt([0x99u8; 32], b, parent, child);
-        let g = proposal(b, parent, child);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
-                .unwrap();
-        assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
-    }
-
-    #[test]
-    fn rejects_receipt_with_different_parent_or_child() {
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let g = proposal(b, parent, child);
-        let r1 = base_receipt(a, b, [0xEEu8; 32], child);
-        assert!(matches!(
-            verify_acceptance_receipt(&a, &b, &r1, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
-            ReceiptVerifyOutcome::Rejected { .. }
-        ));
-        let r2 = base_receipt(a, b, parent, [0xEEu8; 32]);
-        assert!(matches!(
-            verify_acceptance_receipt(&a, &b, &r2, &g, &[0u8; 32], ([0u8; 32], [0u8; 32])).unwrap(),
-            ReceiptVerifyOutcome::Rejected { .. }
-        ));
-    }
-
-    #[test]
-    fn a_receipt_naming_other_roots_than_the_committed_ones_is_rejected() {
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let committed = base_receipt(a, b, parent, child);
-        let g = proposal_with_commitment(
-            b,
-            parent,
-            child,
-            committed.compute_commitment().expect("commitment"),
-        );
-        let mutations: [fn(&mut StitchedReceiptV2); 2] = [
-            |r| r.parent_root = [0x77u8; 32],
-            |r| r.child_root = [0x77u8; 32],
-        ];
-        for mutate in mutations {
-            let mut receipt = committed.clone();
-            mutate(&mut receipt);
-            let out =
-                verify_acceptance_receipt(&a, &b, &receipt, &g, &[0u8; 32], ([0u8; 32], [0u8; 32]))
-                    .unwrap();
-            assert!(
-                matches!(&out, ReceiptVerifyOutcome::Rejected { reason } if reason.contains("commitment")),
-                "{out:?}"
-            );
-        }
-    }
-
-    /// REPRODUCER (half 2 of 2) for the stranded-proposal defect: the live gate
-    /// rejects on a field that no signature covers. Paired with
-    /// `receipts::tests::stripping_kyber_ct_b_leaves_sig_b_valid_and_wire_decodable`,
-    /// which shows sig_b still verifies after the same deletion.
-    ///
-    /// The gate itself is CORRECT and stays. Its refusal records nothing
-    /// (MR-DSM-0018): the step stays `submitted`, and a valid artifact for the
-    /// same commitment finalizes it.
-    #[test]
-    fn a_stripped_kyber_ct_b_is_rejected_by_the_live_gate() {
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let mut receipt = base_receipt(a, b, parent, child);
-        receipt.set_ek_pk_b(vec![0xE1u8; 32]); // arms the gate
-        receipt.set_kyber_ct_b(Vec::new()); // the strip
-
-        // The commitment is computed over the CANONICAL form, which zeroes
-        // fields 12-20 -- so the strip does not move it and the earlier
-        // commitment-binding check still passes. That is precisely why the
-        // Kyber gate is reachable with a stripped receipt.
-        let commitment = receipt.compute_commitment().unwrap();
-        let g = proposal_with_commitment(b, parent, child, commitment);
-        match verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
-            .unwrap()
-        {
-            ReceiptVerifyOutcome::Rejected { reason } => {
-                assert!(
-                    reason.contains("kyber_ct_b missing"),
-                    "expected the Kyber consistency gate, got: {reason}"
-                );
-            }
-            other => panic!("expected Rejected, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_static_key_receipt_without_per_step_ek_artifacts() {
-        // The shape today's recipient produces: a raw sig_b with NO ek_pk_b /
-        // ek_cert_b. The B-side per-step EK verifier MUST reject it — a static
-        // contact-key signature is not acceptable finalization evidence.
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let mut receipt = base_receipt(a, b, parent, child);
-        receipt.sig_b = vec![0xADu8; 64]; // present but no ek_pk_b/ek_cert_b
-        let g = proposal(b, parent, child);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &g, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
-                .unwrap();
-        assert!(matches!(out, ReceiptVerifyOutcome::Rejected { .. }));
-    }
-
-    /// LIVE REGRESSION (AWYPCNK8, 2026-07-19).
-    ///
-    /// A structurally valid receipt whose CANONICAL pair matches the proposal
-    /// must never be rejected for a tip/space reason, even though the gate's
-    /// SYMMETRIC projection pair diverges wildly from it. The production bug
-    /// compared the receipt's A-space tips against the gate's projection tips
-    /// and fail-closed a transfer that was entirely correct.
-    ///
-    /// This receipt still fails later (it carries no per-step EK material), so
-    /// the assertion is specifically that the rejection is NOT about parent,
-    /// child, or commitment — i.e. it survived the structural binding stage.
-    #[test]
-    #[serial_test::serial]
-    fn divergent_projection_does_not_reject_a_valid_canonical_pair() {
-        // A readable, empty store: the relationship has no counterparty head
-        // yet, so the predecessor is the recipient's AK.
-        with_a_store();
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt(a, b, parent, child);
-        let commitment = receipt.compute_commitment().expect("commitment");
-        let p = proposal_with_commitment(b, parent, child, commitment);
-
-        // Sanity: the proposal's projection pair is deliberately NOT the
-        // canonical pair — the exact live condition.
-        assert_ne!(p.projection_parent, p.canonical_parent);
-        assert_ne!(p.projection_target, p.canonical_child);
-
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
-                .unwrap();
-        match out {
-            ReceiptVerifyOutcome::Rejected { reason } => {
-                assert!(
-                    !reason.contains("parent_tip")
-                        && !reason.contains("child_tip")
-                        && !reason.contains("commitment"),
-                    "valid canonical pair must clear structural binding; \
-                     rejected instead with: {reason}"
-                );
-            }
-            ReceiptVerifyOutcome::Verified { .. } => {}
-        }
-    }
-
     /// A readable, empty client store.
     fn with_a_store() {
         crate::economic_fixtures::use_test_storage_dir();
@@ -569,66 +207,69 @@ mod tests {
         }
     }
 
+    /// The key the counterparty's next `ek_cert` must chain to, as this device
+    /// reads it: the counterparty's AK while no head is stored for the
+    /// relationship, and the stored head once there is one, whatever AK is
+    /// offered.
+    #[test]
+    #[serial_test::serial]
+    fn the_counterparty_predecessor_is_its_stored_head_and_its_ak_only_before_one() {
+        with_a_store();
+        let (rel_key, ak, head) = ([0x5Cu8; 32], [0x55u8; 64], [0xE1u8; 64]);
+        let predecessor = || {
+            crate::handlers::storage_routes::counterparty_ek_predecessor(&rel_key, &ak)
+                .expect("a readable store answers")
+        };
+        assert_eq!(predecessor(), ak.to_vec(), "no head stored: the AK");
+        crate::storage::client_db::cas_advance_counterparty_cert_chain_head(&rel_key, None, &head)
+            .expect("the head is stored");
+        assert_eq!(predecessor(), head.to_vec(), "a head stored: the head");
+    }
+
     /// Storage spec §4: a counterparty cert-chain head that could not be READ
-    /// is not "no head yet". Both verifiers refuse to judge the chain rather
-    /// than take the root AK as the predecessor: the sender's check of the
-    /// recipient's countersignature returns an error (the delta is retried),
-    /// never a rejection; the recipient's check of the sender's signature
-    /// names the unreadable head. With the store readable again, the same
-    /// inputs reach the chain check itself.
+    /// is not "no head yet". Neither verifier judges the chain against the
+    /// root AK: the sender's read of the predecessor it checks the
+    /// recipient's countersignature against is an error (the delta is
+    /// retried), never the AK; the recipient's check of the sender's
+    /// signature names the unreadable head. With the store readable again and
+    /// no head stored, the predecessor is the AK, and the same inputs reach
+    /// the chain check itself.
     #[test]
     #[serial_test::serial]
     fn an_unreadable_counterparty_head_is_never_read_as_genesis() {
+        use crate::test_support::receipts::{transfer_step, Party};
         with_a_store();
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt(a, b, parent, child);
+        let receipt = transfer_step(&Party::from_seed(0x31), &Party::from_seed(0x32), 7).receipt;
         let commitment = receipt.compute_commitment().expect("commitment");
-        let p = proposal_with_commitment(b, parent, child, commitment);
-        let verify = || {
-            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
-        };
+        let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &receipt.devid_a,
+            &receipt.devid_b,
+        );
+        let ak = [0x55u8; 64];
+        let predecessor =
+            || crate::handlers::storage_routes::counterparty_ek_predecessor(&rel_key, &ak);
         let sig_a = || {
             crate::handlers::storage_routes::verify_inbound_receipt_sig_a(
                 &receipt,
                 &commitment,
-                &[0x55u8; 32],
+                &ak,
             )
         };
         {
             let _hidden = HeadsUnreadable::hide();
-            let err = verify().expect_err("an unreadable head is not a verdict");
-            assert!(err.to_string().contains("could not be read"), "{err}");
+            let err = predecessor().expect_err("an unreadable head is not a verdict");
+            assert!(err.contains("could not be read"), "{err}");
             let err = sig_a().expect_err("an unreadable head is not a verdict");
             assert!(err.contains("could not be read"), "{err}");
         }
-        assert!(
-            verify().is_ok(),
-            "readable again: the chain check itself answers"
+        assert_eq!(
+            predecessor().expect("readable again"),
+            ak.to_vec(),
+            "with no head stored, the predecessor is the AK"
         );
         let err = sig_a()
             .expect("readable again: the check can be made")
             .expect_err("no per-step EK material in this receipt");
         assert!(!err.contains("could not be read"), "{err}");
-    }
-
-    /// A forged canonical child must still fail closed — retargeting the check
-    /// onto the proposal tightened the comparison, it did not relax it.
-    #[test]
-    fn forged_canonical_child_is_rejected() {
-        let (a, b, parent, child) = ([0x11u8; 32], [0x22u8; 32], [0x33u8; 32], [0x44u8; 32]);
-        let receipt = base_receipt(a, b, parent, [0xEEu8; 32]);
-        let commitment = receipt.compute_commitment().expect("commitment");
-        let p = proposal_with_commitment(b, parent, child, commitment);
-        let out =
-            verify_acceptance_receipt(&a, &b, &receipt, &p, &[0x55u8; 32], ([0u8; 32], [0u8; 32]))
-                .unwrap();
-        match out {
-            ReceiptVerifyOutcome::Rejected { reason } => {
-                assert!(reason.contains("child_tip"), "unexpected reason: {reason}");
-            }
-            ReceiptVerifyOutcome::Verified { .. } => {
-                panic!("a forged canonical child must never verify")
-            }
-        }
     }
 }

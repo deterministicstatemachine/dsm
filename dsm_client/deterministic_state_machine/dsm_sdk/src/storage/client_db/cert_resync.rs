@@ -9,10 +9,11 @@
 //! lost EK state.
 //!
 //! The resync installs NEW Local + Counterparty EK heads through a jointly
-//! authorized forward step. This module is the local, non-bypassable core; the
-//! two-device wire handshake that DELIVERS the peer's fresh EK and the joint
-//! authorization is deferred until both devices are available to prove it
-//! end-to-end.
+//! authorized forward step. This module is the device's local, non-bypassable
+//! half: the head writes, the epoch record, the guards and the audit row. The
+//! joint statement both AKs sign, the bytes they sign, the cosignature check and
+//! the epoch rule are Core's (`dsm::bilateral::cert_resync`); the two-device
+//! handshake that delivers the peer's fresh EK is `handlers::cert_resync_flow`.
 //!
 //! # What an adversarial review forced into this design
 //!
@@ -160,11 +161,8 @@ pub fn begin_cert_resync(relationship_key: &[u8; 32], proposed_epoch: i64) -> Re
         return Err(anyhow!("cannot begin cert resync: {reason}"));
     }
     let (_state, current_epoch) = cert_resync_status(relationship_key)?;
-    if proposed_epoch <= current_epoch {
-        return Err(anyhow!(
-            "cert resync epoch {proposed_epoch} is not greater than current {current_epoch}"
-        ));
-    }
+    dsm::bilateral::cert_resync::cert_resync_epoch_advances(proposed_epoch, current_epoch)
+        .map_err(|e| anyhow!("cannot begin cert resync: {e}"))?;
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
     conn.execute(
@@ -396,33 +394,6 @@ pub fn finalize_cert_resync_atomically(
     Ok(())
 }
 
-/// The jointly-authorized restart statement both AKs sign. Binds the restart to
-/// the relationship, the agreed accepted tip, the monotonic epoch, and the
-/// preserved acceptance commitment — so a signature for one restart cannot be
-/// replayed for another.
-pub fn compute_joint_auth_hash(
-    relationship_key: &[u8; 32],
-    agreed_tip: &[u8; 32],
-    epoch: i64,
-    preserved_acceptance_commitment: &[u8; 32],
-) -> [u8; 32] {
-    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
-    h.update(relationship_key);
-    h.update(agreed_tip);
-    h.update(&epoch.to_le_bytes());
-    h.update(preserved_acceptance_commitment);
-    *h.finalize().as_bytes()
-}
-
-/// The message an AK actually signs: the joint statement bound to the signer's
-/// fresh EK public key, so a signature authorizes exactly this key.
-pub fn cert_resync_signing_target(joint_auth_hash: &[u8; 32], ek_pubkey: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(32 + ek_pubkey.len());
-    v.extend_from_slice(joint_auth_hash);
-    v.extend_from_slice(ek_pubkey);
-    v
-}
-
 /// Responder-side finalize (the HEALTHY peer, e.g. D3). ASYMMETRIC: it does NOT
 /// touch its own Local head — it only CAS-advances the STALE Counterparty head it
 /// holds for the initiator to the initiator's fresh EK, records the epoch, and
@@ -444,11 +415,8 @@ pub fn finalize_cert_resync_responder_atomically(
         return Err(anyhow!("responder cannot finalize cert resync: {reason}"));
     }
     let (_state, current_epoch) = cert_resync_status(relationship_key)?;
-    if epoch <= current_epoch {
-        return Err(anyhow!(
-            "responder cert resync epoch {epoch} not greater than current {current_epoch}"
-        ));
-    }
+    dsm::bilateral::cert_resync::cert_resync_epoch_advances(epoch, current_epoch)
+        .map_err(|e| anyhow!("responder cannot finalize cert resync: {e}"))?;
 
     let binding = get_connection()?;
     let mut conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -658,118 +626,6 @@ mod tests {
         );
     }
 
-    /// B3 OLD-ARTIFACT REJECTION / NEW-ARTIFACT ACCEPTANCE, two-party, no fallback.
-    ///
-    /// The joint restart statement is signed by BOTH AKs over
-    /// `cert_resync_signing_target`, which wraps the joint auth hash. So the test
-    /// uses two real keypairs, not one: a single-signer version would not
-    /// exercise the "joint" part at all.
-    ///
-    /// Old artifacts must FAIL and regenerated ones must PASS **for both
-    /// parties**. If a compatibility verifier is ever introduced, the rejection
-    /// assertions break — which is the point of asserting the negative.
-    #[test]
-    fn old_joint_statements_fail_and_regenerated_ones_verify_for_both_aks() {
-        use dsm::crypto::signatures::SignatureKeyPair;
-
-        let rel = [0x31u8; 32];
-        let tip = [0x32u8; 32];
-        let epoch = 9i64;
-        let preserved = [0x33u8; 32];
-        let ek = [0x34u8; 32];
-
-        let ak_local =
-            SignatureKeyPair::generate_from_entropy(b"DSM/test/b3-local").expect("local AK");
-        let ak_peer =
-            SignatureKeyPair::generate_from_entropy(b"DSM/test/b3-peer").expect("peer AK");
-
-        // Rebuild the PRE-CUT joint auth hash: the literal carried its own NUL
-        // and dsm_domain_hasher appended another.
-        let mut old = blake3::Hasher::new();
-        old.update(b"DSM/cert-restart/v1\0");
-        old.update(&[0u8]);
-        old.update(&rel);
-        old.update(&tip);
-        old.update(&epoch.to_le_bytes());
-        old.update(&preserved);
-        let old_joint: [u8; 32] = *old.finalize().as_bytes();
-
-        let stale_target = cert_resync_signing_target(&old_joint, &ek);
-        let stale_local = ak_local.sign(&stale_target).expect("sign stale local");
-        let stale_peer = ak_peer.sign(&stale_target).expect("sign stale peer");
-
-        // What the corrected code produces, and what a verifier now re-derives.
-        let current_joint = compute_joint_auth_hash(&rel, &tip, epoch, &preserved);
-        let current_target = cert_resync_signing_target(&current_joint, &ek);
-
-        assert_ne!(
-            old_joint, current_joint,
-            "the pre-cut and canonical joint statements must differ"
-        );
-
-        // BOTH parties' pre-cut signatures must be refused.
-        for (who, kp, sig) in [
-            ("local", &ak_local, &stale_local),
-            ("peer", &ak_peer, &stale_peer),
-        ] {
-            assert!(
-                !matches!(
-                    dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, sig),
-                    Ok(true)
-                ),
-                "the {who} AK's pre-cut joint signature still verifies — there is \
-                 a compatibility path that must not exist"
-            );
-        }
-
-        // ANTI-VACUITY: regenerated signatures from BOTH parties must verify, so
-        // the rejections above are not simply "this verifier refuses everything".
-        for (who, kp) in [("local", &ak_local), ("peer", &ak_peer)] {
-            let fresh = kp.sign(&current_target).expect("sign current");
-            assert!(
-                matches!(
-                    dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, &fresh),
-                    Ok(true)
-                ),
-                "the {who} AK's regenerated joint signature must verify"
-            );
-        }
-    }
-
-    /// RULE-1 LAYER PROOF for B3, captured BEFORE the signature flip.
-    ///
-    /// `compute_joint_auth_hash` is the joint cert-restart statement BOTH AKs
-    /// sign. Its domain literal carries its own NUL and is handed to
-    /// `dsm_domain_hasher`, which appends another — impact-table row B3. This
-    /// pins BOTH digests so the move is asserted in both directions.
-    #[test]
-    fn b3_joint_auth_hash_is_frozen_across_the_delimiter_cut() {
-        // The digest the doubled-NUL spelling produced. Every joint statement
-        // signed before the cut derives from this construction.
-        const B3_OLD_DOUBLE_NUL: [u8; 32] = [
-            2, 162, 118, 237, 87, 134, 5, 64, 174, 142, 255, 231, 182, 55, 197, 122, 60, 88, 137,
-            28, 18, 176, 28, 124, 173, 84, 137, 120, 1, 194, 66, 127,
-        ];
-        let h = compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 7, &[3u8; 32]);
-        assert_ne!(
-            h, B3_OLD_DOUBLE_NUL,
-            "B3 still produces the doubled-NUL digest — the cut did not take, and \
-             statements signed before it would still verify"
-        );
-
-        // And it must equal the canonical encoding of the same inputs.
-        let mut canonical =
-            dsm::crypto::blake3::tagged_hasher(dsm::tagged_domain!(b"DSM/cert-restart/v1"));
-        canonical.update(&[1u8; 32]);
-        canonical.update(&[2u8; 32]);
-        canonical.update(&7i64.to_le_bytes());
-        canonical.update(&[3u8; 32]);
-        assert_eq!(
-            h,
-            *canonical.finalize().as_bytes(),
-            "B3 did not land on the canonical digest"
-        );
-    }
     use crate::storage::client_db::cert_chain::{load_cert_chain_head_pubkey, CertChainSide};
 
     fn init() {
@@ -988,28 +844,6 @@ mod tests {
         let mut hostile = req.to_body();
         hostile[136..140].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(CertResyncRequest::from_body(&hostile), None);
-    }
-
-    /// The joint auth hash binds all four fields — changing any one changes it.
-    #[test]
-    fn joint_auth_hash_binds_every_field() {
-        let base = compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 3, &[4u8; 32]);
-        assert_ne!(
-            base,
-            compute_joint_auth_hash(&[9u8; 32], &[2u8; 32], 3, &[4u8; 32])
-        );
-        assert_ne!(
-            base,
-            compute_joint_auth_hash(&[1u8; 32], &[9u8; 32], 3, &[4u8; 32])
-        );
-        assert_ne!(
-            base,
-            compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 9, &[4u8; 32])
-        );
-        assert_ne!(
-            base,
-            compute_joint_auth_hash(&[1u8; 32], &[2u8; 32], 3, &[9u8; 32])
-        );
     }
 
     /// The RESPONDER leg (asymmetric): CAS-advances only the stale Counterparty

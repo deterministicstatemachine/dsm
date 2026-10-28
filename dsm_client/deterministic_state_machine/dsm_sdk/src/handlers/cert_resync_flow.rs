@@ -16,16 +16,22 @@
 //!
 //! Every mutation is gated by: both-device AK cosignatures, a strictly-monotonic
 //! per-relationship epoch, one pending resync per relationship, and the
-//! non-bypassable core (`storage::client_db::cert_resync`).
+//! non-bypassable local core (`storage::client_db::cert_resync`). The joint
+//! statement, the bytes each AK signs, the cosignature check and the epoch rule
+//! are Core's (`dsm::bilateral::cert_resync`), computed once for both sides.
 
-use dsm::crypto::sphincs::{sphincs_sign, sphincs_verify};
+use dsm::bilateral::cert_resync::{
+    cert_resync_signing_target, compute_joint_auth_hash, verify_cert_resync_cosignature,
+    CosignatureRefusal,
+};
+use dsm::crypto::sphincs::sphincs_sign;
 use dsm::types::error::DsmError;
 
 use crate::storage::client_db::{
-    self, cert_resync_signing_target, cert_resync_status, compute_joint_auth_hash,
-    finalize_cert_resync_atomically, finalize_cert_resync_responder_atomically, CertChainSide,
-    CertResyncAck, CertResyncRequest, LocalResyncKey, ResyncAudit, CERT_RESYNC_ACK_METHOD,
-    CERT_RESYNC_REQUEST_METHOD, RESYNC_PENDING,
+    self, cert_resync_status, finalize_cert_resync_atomically,
+    finalize_cert_resync_responder_atomically, CertChainSide, CertResyncAck, CertResyncRequest,
+    LocalResyncKey, ResyncAudit, CERT_RESYNC_ACK_METHOD, CERT_RESYNC_REQUEST_METHOD,
+    RESYNC_PENDING,
 };
 
 fn err<T>(msg: impl Into<String>) -> Result<T, DsmError> {
@@ -64,6 +70,22 @@ fn not_recognized<T>(msg: &str) -> Result<T, CertResyncRefusal> {
     Err(CertResyncRefusal::NotRecognized(
         DsmError::invalid_operation(msg),
     ))
+}
+
+/// A refused cosignature, each reason kept as itself. A signature that is not
+/// one, or that does not verify, is the message's own: it never will be taken.
+/// An AK this device pins for the peer that is not a key, or a verifier that
+/// refused its inputs, is no verdict on the message; it is read again.
+fn cosignature_refused<T>(what: &str, refusal: CosignatureRefusal) -> Result<T, CertResyncRefusal> {
+    let error = DsmError::invalid_operation(format!("{what}: {refusal}"));
+    match refusal {
+        CosignatureRefusal::MalformedSignature { .. } | CosignatureRefusal::DoesNotVerify => {
+            Err(CertResyncRefusal::NotRecognized(error))
+        }
+        CosignatureRefusal::MalformedKey { .. } | CosignatureRefusal::VerifierError(_) => {
+            Err(CertResyncRefusal::Failed(error))
+        }
+    }
 }
 
 /// The epoch this device's next resync of `rel_key` takes: one past the last.
@@ -249,10 +271,15 @@ impl super::app_router_impl::AppRouterImpl {
             req.epoch,
             &req.preserved_acceptance_commitment,
         );
-        let target = cert_resync_signing_target(&joint, &req.initiator_ek_pubkey);
-        if !sphincs_verify(&initiator_ak, &target, &req.intent_sig).unwrap_or(false) {
-            return not_recognized(
-                "cert resync request: initiator cosignature failed verification",
+        if let Err(refusal) = verify_cert_resync_cosignature(
+            &initiator_ak,
+            &joint,
+            &req.initiator_ek_pubkey,
+            &req.intent_sig,
+        ) {
+            return cosignature_refused(
+                "cert resync request: the initiator's cosignature",
+                refusal,
             );
         }
 
@@ -337,6 +364,15 @@ impl super::app_router_impl::AppRouterImpl {
         let (state, epoch) = cert_resync_status(&rel_key).map_err(|e| {
             DsmError::internal(format!("resync status: {e}"), None::<std::io::Error>)
         })?;
+        // An ack below the relationship's current epoch answers a request
+        // this device has since replaced. Epochs only rise, so it never will
+        // match: it is passed over by its content (§6.104), not read again.
+        if ack.epoch < epoch {
+            return not_recognized(&format!(
+                "cert resync ack: epoch {} is below this relationship's current {epoch}",
+                ack.epoch
+            ));
+        }
         if state != RESYNC_PENDING || epoch != ack.epoch {
             return Err(CertResyncRefusal::Failed(DsmError::invalid_operation(
                 format!(
@@ -355,9 +391,13 @@ impl super::app_router_impl::AppRouterImpl {
             ack.epoch,
             &ack.preserved_acceptance_commitment,
         );
-        let target = cert_resync_signing_target(&joint, &ack.responder_local_head);
-        if !sphincs_verify(&peer_ak, &target, &ack.assert_sig).unwrap_or(false) {
-            return not_recognized("cert resync ack: responder cosignature failed verification");
+        if let Err(refusal) = verify_cert_resync_cosignature(
+            &peer_ak,
+            &joint,
+            &ack.responder_local_head,
+            &ack.assert_sig,
+        ) {
+            return cosignature_refused("cert resync ack: the responder's cosignature", refusal);
         }
 
         // Re-derive OUR fresh EK (deterministic — same as the request advertised).
@@ -389,5 +429,200 @@ impl super::app_router_impl::AppRouterImpl {
             ack.epoch
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::storage::client_db::{self as cdb, CertChainSide};
+    use crate::test_support::two_device::{Pair, TestDevice};
+    use serial_test::serial;
+
+    /// One statement on `device`'s store.
+    fn execute(device: &TestDevice, sql: &str, params: impl rusqlite::Params) {
+        device.enter();
+        cdb::get_connection()
+            .expect("the store")
+            .lock()
+            .expect("the store's lock")
+            .execute(sql, params)
+            .expect(sql);
+    }
+
+    /// The AK `device` pins for `peer`, replaced with `ak`.
+    fn pin(device: &TestDevice, peer: &TestDevice, ak: &[u8]) {
+        execute(
+            device,
+            "UPDATE contacts SET public_key = ?1 WHERE device_id = ?2",
+            rusqlite::params![ak, peer.device_id.as_slice()],
+        );
+    }
+
+    fn head(device: &TestDevice, rel: &[u8; 32], side: CertChainSide) -> Option<Vec<u8>> {
+        device.enter();
+        cdb::load_cert_chain_head_pubkey(rel, side).expect("the head reads")
+    }
+
+    /// `(state, epoch)` of `device`'s resync of `rel`.
+    fn resync_state(device: &TestDevice, rel: &[u8; 32]) -> (i64, i64) {
+        device.enter();
+        cdb::cert_resync_status(rel).expect("the resync state reads")
+    }
+
+    /// A lost both of its cert-chain heads on its relationship with B after a
+    /// finalized transfer, and asks B to restart the chain. B takes the
+    /// request only under the AK B pins for A:
+    /// - under a pinned AK that is not a key, the request is not judged: it is
+    ///   read again, and B's head for A does not move;
+    /// - under another AK, the cosignature does not verify: the request is
+    ///   passed over, and B's head for A does not move;
+    /// - under A's own AK, A's requests are taken. A asked twice, so B's ack
+    ///   for the first answers a request A replaced: A refuses it as below its
+    ///   epoch and finalizes on the second. Both sides end at that epoch with
+    ///   nothing pending: B's head for A is A's restarted head, A holds B's
+    ///   unchanged head, and B's own head is untouched.
+    /// - a further sync on each side is clean: no resync starts again and the
+    ///   replaced ack is not read again.
+    /// - A's next transfer is held by B and reported as held, with its reason:
+    ///   the open defect §6.117 records.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_resync_request_is_taken_only_under_the_ak_the_responder_pins() {
+        let p = Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        let finalized = p.a.sync().await;
+        assert!(finalized.success, "{:?}", finalized.errors);
+
+        let rel = p.a.rel_key_with(&p.b);
+        let lost = head(&p.a, &rel, CertChainSide::Local).expect("A's head before the loss");
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Counterparty),
+            Some(lost.clone())
+        );
+        execute(
+            &p.a,
+            "DELETE FROM cert_chain_heads WHERE relationship_key = ?1",
+            rusqlite::params![rel.as_slice()],
+        );
+        p.a.enter();
+        cdb::mark_cert_resync_required(&rel).expect("the head loss is marked");
+        p.a.sync().await;
+        assert_eq!(resync_state(&p.a, &rel).0, cdb::RESYNC_PENDING);
+
+        pin(&p.b, &p.a, &p.a.ak_pk[1..]);
+        let unjudged = p.b.sync().await;
+        assert!(
+            unjudged
+                .errors
+                .iter()
+                .any(|e| e.contains("not an SPX256f public key") && !e.contains("passed over")),
+            "{:?}",
+            unjudged.errors
+        );
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Counterparty),
+            Some(lost.clone())
+        );
+
+        let other = dsm::crypto::sphincs::generate_sphincs_keypair()
+            .expect("another AK")
+            .0;
+        pin(&p.b, &p.a, &other);
+        let refused = p.b.sync().await;
+        assert!(
+            refused
+                .errors
+                .iter()
+                .any(|e| e.contains("does not verify") && e.contains("passed over")),
+            "{:?}",
+            refused.errors
+        );
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Counterparty),
+            Some(lost.clone())
+        );
+
+        // B pins A's AK again. A asks twice before B answers, so one of B's
+        // acks will answer a request A has since replaced.
+        pin(&p.b, &p.a, &p.a.ak_pk);
+        let own = head(&p.b, &rel, CertChainSide::Local).expect("B's own head");
+        p.a.sync().await;
+        let replaced = resync_state(&p.a, &rel).1;
+        p.a.sync().await;
+        let (_, epoch) = resync_state(&p.a, &rel);
+        assert!(epoch > replaced, "A asked again under a later epoch");
+        let answered = p.b.sync().await;
+        assert!(answered.errors.is_empty(), "{:?}", answered.errors);
+
+        // A finalizes on the ack for its current epoch; the one for the epoch
+        // it replaced is refused as below it.
+        let finished = p.a.sync().await;
+        assert_eq!(finished.errors.len(), 1, "{:?}", finished.errors);
+        assert!(
+            finished.errors[0].contains(&format!("epoch {replaced} is below")),
+            "{:?}",
+            finished.errors
+        );
+        assert_eq!(
+            resync_state(&p.a, &rel),
+            (cdb::RESYNC_CLEAR, epoch),
+            "A finalized at its current epoch and owes nothing"
+        );
+        assert_eq!(
+            resync_state(&p.b, &rel),
+            (cdb::RESYNC_CLEAR, epoch),
+            "B recorded the same epoch and is not blocked"
+        );
+        let fresh = head(&p.a, &rel, CertChainSide::Local).expect("A's restarted head");
+        assert_ne!(fresh, lost);
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Counterparty),
+            Some(fresh),
+            "B's head for A is A's restarted head"
+        );
+        assert_eq!(
+            head(&p.a, &rel, CertChainSide::Counterparty),
+            Some(own.clone()),
+            "A holds B's head"
+        );
+        assert_eq!(
+            head(&p.b, &rel, CertChainSide::Local),
+            Some(own),
+            "B's own head is untouched"
+        );
+
+        // A further sync on each side is clean: no resync starts again, and
+        // the replaced ack is not read again.
+        let again = p.a.sync().await;
+        assert!(again.errors.is_empty(), "{:?}", again.errors);
+        assert_eq!(resync_state(&p.a, &rel), (cdb::RESYNC_CLEAR, epoch));
+        let quiet = p.b.sync().await;
+        assert!(quiet.errors.is_empty(), "{:?}", quiet.errors);
+
+        // OPEN DEFECT (§6.117), asserted as it stands until the owner rules on
+        // how a restart is made portable; then this becomes "applied". A's
+        // next transfer reaches B and is held: B's tracked EK step for A is
+        // still the lost head, so the restarted EK has no portable ancestry.
+        // The hold is reported, never only logged, and nothing is credited.
+        let held = p.b.era_balance();
+        let next = p.a.send(&p.b, 5).await;
+        assert!(next.success, "{:?}", next.error_message);
+        let holding = p.b.sync().await;
+        assert!(
+            holding
+                .errors
+                .iter()
+                .any(|e| e.contains("held at locator") && e.contains("EK ancestry is not portable")),
+            "{:?}",
+            holding.errors
+        );
+        assert_eq!(
+            p.b.era_balance(),
+            held,
+            "nothing is credited while it is held"
+        );
     }
 }

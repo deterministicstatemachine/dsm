@@ -471,6 +471,64 @@ pub fn relationship_finalized_signing_target(
     )
 }
 
+/// The recipient's check of a `RelationshipFinalizedV1` against the
+/// transition it journaled (finality barrier): the certificate names
+/// `sender_device_id` as its sender and `recipient_device_id` as its
+/// recipient, the sender child tip the recipient accepted, and the pair the
+/// recipient applied; and `signature_a` verifies over
+/// [`relationship_finalized_signing_target`] under `sender_ek_head`, the
+/// sender's per-step EK for that transition as the recipient journaled it
+/// (never the live head, which moves on). The relationship key and the
+/// commitment are bound by the caller's lookup of the journal they name.
+pub fn verify_relationship_finalized(
+    cert: &crate::types::proto::RelationshipFinalizedV1,
+    sender_device_id: &[u8; 32],
+    recipient_device_id: &[u8; 32],
+    sender_child_tip_a: &[u8; 32],
+    recipient_pair: (&[u8; 32], &[u8; 32]),
+    sender_ek_head: &[u8],
+) -> Result<(), DsmError> {
+    if cert.sender_device_id.as_slice() != sender_device_id.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate sender is not the journal's counterparty",
+        ));
+    }
+    if cert.recipient_device_id.as_slice() != recipient_device_id.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate recipient is not this device",
+        ));
+    }
+    if cert.sender_child_tip_a.as_slice() != sender_child_tip_a.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate sender_child_tip_a != journaled signed child",
+        ));
+    }
+    if cert.recipient_parent_tip_b.as_slice() != recipient_pair.0.as_slice()
+        || cert.recipient_child_tip_b.as_slice() != recipient_pair.1.as_slice()
+    {
+        return Err(DsmError::invalid_operation(
+            "certificate recipient pair != the pair this device journaled",
+        ));
+    }
+    if sender_ek_head.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "journal carries no sender per-step EK head to verify under",
+        ));
+    }
+    let verified = crate::crypto::sphincs::sphincs_verify(
+        sender_ek_head,
+        &relationship_finalized_signing_target(cert),
+        &cert.signature_a,
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("certificate signature verify error: {e}")))?;
+    if !verified {
+        return Err(DsmError::invalid_operation(
+            "certificate signature_a does not verify under the journal's sender EK head",
+        ));
+    }
+    Ok(())
+}
+
 /// The B-side receipt fields the recipient adds at acceptance (ADR 0003
 /// return leg): exactly what the sender lacks after authoring the A side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1662,5 +1720,62 @@ mod tests {
             f[0] ^= 0x01;
             assert_ne!(relationship_finalized_signing_target(&c), t0, "field {i}");
         }
+    }
+
+    /// The sender's per-step EK for the transition signs the certificate; the
+    /// recipient journaled its sender, itself, the sender child tip and its
+    /// own applied pair. The certificate is taken; one signed by that very key
+    /// but naming another sender, recipient, sender child or recipient pair is
+    /// refused at that field; so is one under another key, or a journal with
+    /// no EK head to check against.
+    #[test]
+    fn a_certificate_verifies_only_for_the_transition_the_recipient_journaled() {
+        use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+        let head = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x5Eu8; 32])
+            .expect("the sender's EK for the transition");
+        let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x6Fu8; 32])
+            .expect("another key");
+        let signed = |mut cert: crate::types::proto::RelationshipFinalizedV1, sk: &[u8]| {
+            cert.signature_a =
+                sphincs_sign(sk, &relationship_finalized_signing_target(&cert)).expect("sign");
+            cert
+        };
+        let honest = signed(production_shaped_certificate(), &head.secret_key);
+        let check = |cert: &crate::types::proto::RelationshipFinalizedV1, ek_head: &[u8]| {
+            verify_relationship_finalized(
+                cert,
+                &[0x03; 32],
+                &[0x04; 32],
+                &[0x05; 32],
+                (&[0x06; 32], &[0x07; 32]),
+                ek_head,
+            )
+        };
+        check(&honest, &head.public_key).expect("the journaled transition's certificate");
+
+        let refused =
+            |cert: &crate::types::proto::RelationshipFinalizedV1, ek_head: &[u8], why: &str| {
+                let err = check(cert, ek_head).expect_err(why);
+                assert!(err.to_string().contains(why), "{why}: {err}");
+            };
+        type Field = fn(&mut crate::types::proto::RelationshipFinalizedV1) -> &mut Vec<u8>;
+        let fields: [(Field, &str); 5] = [
+            (|c| &mut c.sender_device_id, "sender is not"),
+            (|c| &mut c.recipient_device_id, "recipient is not"),
+            (|c| &mut c.sender_child_tip_a, "sender_child_tip_a"),
+            (|c| &mut c.recipient_parent_tip_b, "recipient pair"),
+            (|c| &mut c.recipient_child_tip_b, "recipient pair"),
+        ];
+        for (field, why) in fields {
+            let mut cert = honest.clone();
+            field(&mut cert)[0] ^= 0x01;
+            refused(&signed(cert, &head.secret_key), &head.public_key, why);
+        }
+        refused(
+            &signed(honest.clone(), &other.secret_key),
+            &head.public_key,
+            "does not verify",
+        );
+        refused(&honest, &[], "no sender per-step EK head");
     }
 }

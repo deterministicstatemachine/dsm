@@ -84,9 +84,12 @@ pub(crate) fn finality_barrier_block(
         )));
     }
     // An inbound transfer from this peer is staged but not yet applied:
-    // originating now would cross it. Narrows the crossing window; the
-    // deterministic turn rule for a true simultaneous cross is a protocol
-    // decision outside this barrier.
+    // originating now would cross it. This narrows the crossing window and
+    // decides nothing: DSM has no turn rule. Two steps proposed from one tip
+    // are candidate forks (DSM spec §36), and Tripwire (§53, MR-DSM-0170)
+    // lets at most one of them be realized: the tip takes one successor, and
+    // the side whose proposal was not realized proposes again from the tip
+    // that was.
     if client_db::recipient_staging::counterparty_has_unconverged_inbound(counterparty_device_id)
         .map_err(|e| format!("Failed to load inbound staging state: {e}"))?
     {
