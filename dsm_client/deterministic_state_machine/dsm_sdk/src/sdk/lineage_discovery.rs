@@ -60,8 +60,8 @@ pub(crate) struct Candidates {
     admitted: Vec<CheckpointV1>,
     /// The roots the hints name, by generation.
     hint_roots: BTreeMap<u64, BTreeSet<D32>>,
-    /// The generations some hint was found for.
-    hinted: BTreeSet<u64>,
+    /// The hints found, by the generation each names.
+    hints: BTreeMap<u64, Vec<GenerationHintV1>>,
     /// The epochs whose index could not be read in full.
     unavailable: BTreeSet<u64>,
 }
@@ -76,9 +76,11 @@ impl Candidates {
         &self.checkpoints
     }
 
-    /// Whether some hint names generation `g`.
-    pub(crate) fn hinted(&self, generation: u64) -> bool {
-        self.hinted.contains(&generation)
+    /// Whether `hint` itself was found: not another hint at its generation.
+    pub(crate) fn holds(&self, hint: &GenerationHintV1) -> bool {
+        self.hints
+            .get(&hint.generation())
+            .is_some_and(|found| found.contains(hint))
     }
 
     /// The roots a walk reads ahead from generation `from` on, generation by
@@ -143,13 +145,13 @@ impl Candidates {
     fn add(&mut self, object: LineageObject) {
         match object {
             LineageObject::Hint(hint) => {
-                self.hinted.insert(hint.generation());
                 for named in [&mut self.roots, &mut self.hint_roots] {
                     named
                         .entry(hint.generation())
                         .or_default()
                         .insert(*hint.claimed_root());
                 }
+                self.hints.entry(hint.generation()).or_default().push(hint);
             }
             LineageObject::Checkpoint(checkpoint) => self.checkpoints.push(checkpoint),
         }
@@ -334,11 +336,13 @@ pub(crate) async fn discover(
     candidates
 }
 
-/// Owe the epoch index a hint for every generation of `chain` in the epochs
-/// discovery read from `from` on that no hint was found for;
-/// `step_digests[g]` is generation `g`'s step digest. The sweep publishes
-/// what is owed (`artifact_republish::publish_lineage_debt`). Returns how
-/// many hints are newly owed.
+/// Owe the epoch index the hint of every generation of `chain` in the epochs
+/// discovery read from `from` on, unless that very hint was found. Another
+/// hint at the generation, which anyone may append naming any root, is not
+/// the generation's own. `step_digests[g]` is generation `g`'s step digest.
+/// The sweep publishes what is owed
+/// (`artifact_republish::publish_lineage_debt`). Returns how many hints are
+/// newly owed.
 pub(crate) fn owe_missing_hints(
     set_id: &D32,
     chain: &GenerationChain,
@@ -350,15 +354,14 @@ pub(crate) fn owe_missing_hints(
     let first_read = epoch_of(from) * EPOCH_GENERATIONS;
     let mut owed = 0usize;
     for (generation, step) in step_digests {
-        if *generation == 0
-            || *generation < first_read
-            || *generation > head.generation()
-            || found.hinted(*generation)
-        {
+        if *generation == 0 || *generation < first_read || *generation > head.generation() {
             continue;
         }
         let hint = GenerationHintV1::of_established(chain, *generation, *step)
             .map_err(|e| lineage_err("hint", e))?;
+        if found.holds(&hint) {
+            continue;
+        }
         owe(
             set_id,
             &hint.encode(),

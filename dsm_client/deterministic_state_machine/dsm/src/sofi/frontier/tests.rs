@@ -721,6 +721,9 @@ fn the_baseline_objects_decode_strictly() {
     let mut trailing = frontier.encode();
     trailing.push(0x01);
     VaultFrontierV1::decode(&trailing).expect_err("a trailing byte is refused");
+    let mut trailing = auth.encode();
+    trailing.push(0x01);
+    OwnerBaselineAuthV1::decode(&trailing).expect_err("a trailing byte is refused");
     VaultFrontierV1::decode(&auth.encode()).expect_err("another class is refused");
     OwnerBaselineAuthV1::decode(&frontier.encode()).expect_err("another class is refused");
 }

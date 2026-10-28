@@ -631,15 +631,37 @@ fn a_debit_with_an_extra_mutation_is_refused() {
     }
 }
 
+/// Same witness, different claimed operations: each is refused by the check
+/// for exactly what it changes. The near-miss on the asset names a burnable
+/// token and carries its own committed policy, so the policy check passes and
+/// only the asset binding can refuse it.
+///
+/// MUTATION CONTROL: delete the asset comparison in the pure-debit arm of
+/// `verify_operation_write_set` and the asset near-miss is accepted: red.
 #[test]
 fn a_debit_of_the_wrong_amount_or_asset_is_refused() {
+    use dsm::economic::token_policy::POLICY_FLAG_BURN;
     let (tree, balances) = funded_tree(era(), 100);
     let op = burn(40, era());
     let witness = round_trip(&op, tree, balances, &CreditSourceFacts::None);
-    // Same witness, different claimed operations.
-    assert!(verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE).is_err());
-    assert!(
-        verify_operation_write_set(&burn(40, [0xEE; 32]), &G, &DEV, &witness, P_CREATE).is_err()
+    assert_eq!(
+        verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit delta is not exactly the operation amount"
+        })
+    );
+    let (other, other_policy) = policy_token(74, POLICY_FLAG_BURN);
+    assert_eq!(
+        verify_operation_write_set(
+            &burn_carrying(40, other, &other_policy),
+            &G,
+            &DEV,
+            &witness,
+            P_CREATE
+        ),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit touches a different asset than the operation names"
+        })
     );
     // And the role near-miss: the same delta presented as a transfer TO us
     // (credit role) is refused.
@@ -705,6 +727,214 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         verify_operation_write_set(&op, &G, &DEV, &stripped, P_CREATE),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
+}
+
+// ── A consumed source is write-once (MR-DSM-0161) ──────────────────────────
+
+/// One planned leaf write: its key, its pre-state and its post-state.
+type Planned = (
+    [u8; 32],
+    Option<EconomicLeafState>,
+    Option<EconomicLeafState>,
+);
+
+/// The peer debit every credit below draws on.
+fn peer_debit() -> CreditSourceFacts {
+    CreditSourceFacts::PeerDebit {
+        peer_genesis: [0x55; 32],
+        peer_devid: PEER_DEV,
+        peer_economic_position: 3,
+        peer_debit_mutation_index: 0,
+        acceptance_evidence_addr: [0x66; 32],
+    }
+}
+
+/// Another operation on the same lineage than the one that consumed the
+/// source.
+fn second_op_id() -> [u8; 32] {
+    dsm_economic_operation_id(&G, &DEV, &[0xCE; 32])
+}
+
+/// A credit of 40 ERA from [`peer_debit`], built on an empty tree: the tree
+/// it leaves, holding the balance and the consumed-source leaf the builder
+/// wrote, and the write set itself.
+fn credited_tree() -> (EconomicSmt, dsm::economic::write_set::BuiltWriteSet) {
+    let mut tree = EconomicSmt::new();
+    let built = build_write_set(
+        &transfer(DEV, 40, era()),
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
+        &mut tree,
+        &peer_debit(),
+    )
+    .expect("the first credit consumes the source");
+    (tree, built)
+}
+
+/// The consumed-source record a write set wrote.
+fn consumed_by(
+    built: &dsm::economic::write_set::BuiltWriteSet,
+) -> dsm::economic::state::EconomicConsumedSourceState {
+    built
+        .mutations
+        .iter()
+        .find_map(|m| match &m.post_state {
+            Some(EconomicLeafState::ConsumedSource(c)) => Some(c.clone()),
+            _ => None,
+        })
+        .expect("a peer-funded credit writes its consumed source")
+}
+
+/// `planned`, applied to `tree` in the order given with progressive
+/// siblings, as the builder applies its own plan, formed into the witness of
+/// `operation`.
+fn witness_applying(
+    tree: &mut EconomicSmt,
+    planned: Vec<Planned>,
+    operation: &Operation,
+    economic_operation_id: [u8; 32],
+    sources: Vec<dsm::economic::credit::CreditSource>,
+) -> EconomicTransitionWitness {
+    let pre_root = tree.root();
+    let mut mutations = Vec::with_capacity(planned.len());
+    for (key, pre, post) in planned {
+        let siblings = tree.siblings(&key).to_vec();
+        match &post {
+            Some(state) => tree.insert(key, state.leaf_value().unwrap()),
+            None => tree.remove(&key),
+        }
+        mutations.push(EconomicLeafMutation::new(pre, post, siblings).unwrap());
+    }
+    EconomicTransitionWitness::new(
+        pre_root,
+        tree.root(),
+        economic_operation_id,
+        dsm::economic::admission::dsm_operation_digest(&operation.to_bytes()),
+        mutations,
+        sources,
+    )
+    .expect("the witness forms")
+}
+
+/// MR-DSM-0161: a peer debit funds one credit. Once its consumed-source leaf
+/// is in the tree, the builder refuses a second credit from that debit, under
+/// another operation, and the tree is left as it was.
+///
+/// MUTATION CONTROL: removing the builder's `SourceAlreadyConsumed` refusal
+/// from the peer-funded credit (`build_write_set`) turns this test red.
+#[test]
+fn a_consumed_peer_debit_funds_no_second_credit() {
+    let (mut tree, first) = credited_tree();
+    let consumed = EconomicLeafState::ConsumedSource(consumed_by(&first));
+    assert_eq!(
+        tree.get(&consumed.leaf_key(&G, &DEV)),
+        Some(&consumed.leaf_value().unwrap()),
+        "the first credit wrote the consumed-source leaf"
+    );
+    let held = tree.root();
+    let mut balances = BTreeMap::new();
+    balances.insert(era(), 40);
+    let again = build_write_set(
+        &transfer(DEV, 40, era()),
+        &G,
+        &DEV,
+        &second_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE + 1),
+        &mut tree,
+        &peer_debit(),
+    );
+    assert!(
+        matches!(again, Err(WriteSetError::SourceAlreadyConsumed)),
+        "a second credit from a consumed debit: {again:?}"
+    );
+    assert_eq!(tree.root(), held, "a refused build writes nothing");
+}
+
+/// MR-DSM-0161: a witness that rewrites a consumed-source leaf, re-pointing
+/// it at a second operation so that the same peer debit funds a second
+/// credit, is a consistent mutation sequence and is refused by the write-set
+/// rule.
+///
+/// MUTATION CONTROL: letting the verifier take a consumed-source write
+/// whatever its pre-state (`verify_operation_write_set`, the
+/// `(None, Some(ConsumedSource))` arm) turns this test red.
+#[test]
+fn a_witness_that_rewrites_a_consumed_source_is_refused() {
+    let (mut tree, first) = credited_tree();
+    let consumed = consumed_by(&first);
+    let rewritten = dsm::economic::state::EconomicConsumedSourceState {
+        source_id: consumed.source_id,
+        consumer_economic_operation_id: second_op_id(),
+    };
+    let balance_key = dsm::economic::keys::balance_key(&G, &DEV, &era());
+    let mut planned: Vec<Planned> = vec![
+        (
+            balance_key,
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 40).unwrap(),
+            )),
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 80).unwrap(),
+            )),
+        ),
+        (
+            EconomicLeafState::ConsumedSource(consumed.clone()).leaf_key(&G, &DEV),
+            Some(EconomicLeafState::ConsumedSource(consumed)),
+            Some(EconomicLeafState::ConsumedSource(rewritten)),
+        ),
+    ];
+    planned.sort_by_key(|(key, ..)| *key);
+    let credit_index = planned
+        .iter()
+        .position(|(key, ..)| *key == balance_key)
+        .unwrap();
+    let mut sources = first.credit_sources;
+    if let dsm::economic::credit::CreditSource::ValidatedPeerDebit(d) = &mut sources[0] {
+        d.credit_mutation_index = u32::try_from(credit_index).unwrap();
+    }
+    let op = transfer(DEV, 40, era());
+    let witness = witness_applying(&mut tree, planned, &op, second_op_id(), sources);
+    verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV)
+        .expect("the rewrite is a consistent sequence over the tree");
+    let verdict = verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE + 1);
+    assert!(
+        matches!(verdict, Err(WriteSetError::WrongWriteSet { .. })),
+        "a rewritten consumed source: {verdict:?}"
+    );
+}
+
+/// MR-DSM-0161: a debit whose witness also deletes the consumed-source leaf,
+/// reopening the peer debit for reuse, is a consistent mutation sequence and
+/// is refused by the write-set rule.
+///
+/// MUTATION CONTROL: letting the verifier pass over the removal of a
+/// consumed-source leaf (`verify_operation_write_set`) turns this test red.
+#[test]
+fn a_witness_that_removes_a_consumed_source_is_refused() {
+    let (mut tree, first) = credited_tree();
+    let consumed = EconomicLeafState::ConsumedSource(consumed_by(&first));
+    let mut planned: Vec<Planned> = vec![
+        (
+            dsm::economic::keys::balance_key(&G, &DEV, &era()),
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 40).unwrap(),
+            )),
+            None,
+        ),
+        (consumed.leaf_key(&G, &DEV), Some(consumed), None),
+    ];
+    planned.sort_by_key(|(key, ..)| *key);
+    let op = burn(40, era());
+    let witness = witness_applying(&mut tree, planned, &op, second_op_id(), Vec::new());
+    verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV)
+        .expect("the removal is a consistent sequence over the tree");
+    let verdict = verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE + 1);
+    assert!(
+        matches!(verdict, Err(WriteSetError::WrongWriteSet { .. })),
+        "a removed consumed source: {verdict:?}"
+    );
 }
 
 #[test]
