@@ -899,7 +899,8 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
         &tip,
         &canonical,
         &outcome.transition_entropy(),
-    );
+    )
+    .expect("the step's C_pre");
     let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
     receipt.set_ek_pk_a(answer.ek_pk);
     receipt.set_ek_cert_a(answer.ek_cert);
@@ -1121,7 +1122,8 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
         &receipt.parent_tip,
         &canonical,
         &outcome.transition_entropy(),
-    );
+    )
+    .expect("the step's C_pre");
     let answer = crate::sdk::receipts::sign_receipt_with_per_step_ek(
         &crate::sdk::receipts::PerStepSigningInputs {
             commitment: &commitment,

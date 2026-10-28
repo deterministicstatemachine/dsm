@@ -1247,7 +1247,8 @@ mod tests {
                 &r.parent_tip,
                 &op.with_cleared_signature().to_bytes(),
                 &r.transition_entropy,
-            );
+            )
+            .expect("the step's C_pre");
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
@@ -1693,7 +1694,8 @@ mod tests {
                 &r.parent_tip,
                 &op.with_cleared_signature().to_bytes(),
                 &r.transition_entropy,
-            );
+            )
+            .expect("the step's C_pre");
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);

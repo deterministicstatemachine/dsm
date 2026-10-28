@@ -243,7 +243,8 @@ fn step(
         &h_n,
         &operation.with_cleared_signature().to_bytes(),
         &outcome.transition_entropy(),
-    );
+    )
+    .expect("the step's C_pre");
     Step {
         operation,
         outcome,

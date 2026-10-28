@@ -350,7 +350,7 @@ impl LiveDevice {
             .shared_tip_with(to)
             .ok_or_else(|| DsmError::relationship("the counterparty is not a contact"))?;
         let commitment_hash =
-            BilateralPreCommitment::new(expected_tip, operation.clone()).bilateral_commitment_hash;
+            BilateralPreCommitment::new(expected_tip, operation.clone())?.bilateral_commitment_hash;
         let sender_signature = self
             .keypair
             .sign(&bilateral_sign_message(&commitment_hash))?;
@@ -384,7 +384,7 @@ impl LiveDevice {
 
         let pre_entropy = sender_outcome.transition_entropy();
         let op_bytes = operation.to_bytes();
-        let c_pre = compute_precommit(&expected_tip, &op_bytes, &pre_entropy);
+        let c_pre = compute_precommit(&expected_tip, &op_bytes, &pre_entropy)?;
         let successor_tip = compute_successor_tip(&expected_tip, &op_bytes, &pre_entropy, &c_pre);
         Ok(Step {
             operation,

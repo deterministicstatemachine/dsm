@@ -4011,15 +4011,18 @@ pub(crate) mod tests {
             relationship_chain_tip_v2(&rk, &parent, &cp, &op_bytes, &e_other, None)
         );
         // C_pre and the symmetric tip take the same value and nothing else.
-        let c_pre = compute_precommit(&parent, &op_bytes, &e);
+        let c_pre = compute_precommit(&parent, &op_bytes, &e).expect("C_pre");
         let sym = compute_successor_tip(&parent, &op_bytes, &e, &c_pre);
-        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+        let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other).expect("C_pre");
         assert_ne!(c_pre, c_pre_other);
         assert_ne!(
             sym,
             compute_successor_tip(&parent, &op_bytes, &e_other, &c_pre_other)
         );
-        assert_eq!(c_pre, compute_precommit(&parent, &op_bytes, &e));
+        assert_eq!(
+            c_pre,
+            compute_precommit(&parent, &op_bytes, &e).expect("C_pre")
+        );
         assert_eq!(sym, compute_successor_tip(&parent, &op_bytes, &e, &c_pre));
     }
 
@@ -4254,8 +4257,8 @@ pub(crate) mod tests {
             );
             let mut e_other = e;
             e_other[0] ^= 0x01;
-            let c_pre = compute_precommit(&parent, &op_bytes, &e);
-            let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other);
+            let c_pre = compute_precommit(&parent, &op_bytes, &e).expect("C_pre");
+            let c_pre_other = compute_precommit(&parent, &op_bytes, &e_other).expect("C_pre");
             assert_ne!(c_pre, c_pre_other, "{name}: C_pre contains the entropy");
             assert_ne!(
                 compute_successor_tip(&parent, &op_bytes, &e, &c_pre),

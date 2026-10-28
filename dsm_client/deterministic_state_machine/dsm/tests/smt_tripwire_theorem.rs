@@ -215,7 +215,9 @@ fn theorem2_two_successors_same_parent_rejected() {
             &kyber_pk,
         ))
         .unwrap();
-    let commitment = BilateralPreCommitment::new(h_0, op2.clone()).bilateral_commitment_hash;
+    let commitment = BilateralPreCommitment::new(h_0, op2.clone())
+        .expect("the second child's precommitment")
+        .bilateral_commitment_hash;
     let signature = alice
         .keypair
         .sign(&bilateral_sign_message(&commitment))

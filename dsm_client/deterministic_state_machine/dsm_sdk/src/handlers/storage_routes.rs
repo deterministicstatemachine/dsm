@@ -1546,7 +1546,8 @@ impl AppRouterImpl {
                         &signed_parent,
                         &v.canonical_operation_bytes,
                         &transition_entropy,
-                    );
+                    )
+                    .map_err(|e| format!("the signed step's C_pre: {e}"))?;
                     let projection_parent: [u8; 32] =
                         crate::storage::client_db::get_contact_chain_tip(&sender_device)
                             .map_err(|e| {
@@ -1554,11 +1555,13 @@ impl AppRouterImpl {
                             })?
                             .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
-                        let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
-                            &projection_parent,
-                            &v.canonical_operation_bytes,
-                            &transition_entropy,
-                        );
+                        let sigma_sym =
+                            dsm::core::bilateral_transaction_manager::compute_precommit(
+                                &projection_parent,
+                                &v.canonical_operation_bytes,
+                                &transition_entropy,
+                            )
+                            .map_err(|e| format!("the projected step's C_pre: {e}"))?;
                         dsm::core::bilateral_transaction_manager::compute_successor_tip(
                             &projection_parent,
                             &v.canonical_operation_bytes,

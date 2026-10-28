@@ -2813,7 +2813,7 @@ impl BilateralBleHandler {
             &h_n,
             &op_bytes,
             &pre_entropy,
-        );
+        )?;
         let h_n_plus_1 = dsm::core::bilateral_transaction_manager::compute_successor_tip(
             &h_n,
             &op_bytes,
@@ -3193,7 +3193,7 @@ impl BilateralBleHandler {
                     )
                 })?;
                 let entropy = o.transition_entropy();
-                let sigma = compute_precommit(&parent_tip, &op_bytes, &entropy);
+                let sigma = compute_precommit(&parent_tip, &op_bytes, &entropy)?;
                 let child = compute_successor_tip(&parent_tip, &op_bytes, &entropy, &sigma);
                 settlement.write_in_tx(tx, o, child, None)?;
                 let storage = |what: &str, e: anyhow::Error| {
@@ -4828,7 +4828,7 @@ impl BilateralBleHandler {
                 )));
             }
             let entropy = o.transition_entropy();
-            let sigma = compute_precommit(&parent_tip, settlement.operation_bytes(), &entropy);
+            let sigma = compute_precommit(&parent_tip, settlement.operation_bytes(), &entropy)?;
             let child =
                 compute_successor_tip(&parent_tip, settlement.operation_bytes(), &entropy, &sigma);
             settlement.write_in_tx(tx, o, child, Some(&counter_signed_receipt))?;
@@ -4926,7 +4926,8 @@ impl BilateralBleHandler {
         // advance, whose root the commit held to the root the receiver
         // verified — so it is the value the receiver accepted in the confirm.
         let transition_entropy = outcome.transition_entropy();
-        let receipt_sigma = compute_precommit(&prepared.parent_tip, &op_bytes, &transition_entropy);
+        let receipt_sigma =
+            compute_precommit(&prepared.parent_tip, &op_bytes, &transition_entropy)?;
         let h_next_symmetric = compute_successor_tip(
             &prepared.parent_tip,
             &op_bytes,
@@ -5931,6 +5932,7 @@ mod tests {
                 held_tip,
                 transfer.operation.clone(),
             )
+            .expect("the transfer's precommitment")
             .bilateral_commitment_hash;
         handler
             .test_insert_session(BilateralBleSession {

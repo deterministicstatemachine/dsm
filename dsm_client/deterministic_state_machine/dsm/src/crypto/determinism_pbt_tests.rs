@@ -99,8 +99,8 @@ mod tests {
             prop_assume!(!domain.contains(&0));
             let domain = [&b"DSM/"[..], &domain[..]].concat();
             let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
-            let h1 = hash_lp1(d, &a);
-            let h2 = hash_lp1(d, &a);
+            let h1 = hash_lp1(d, &a)?;
+            let h2 = hash_lp1(d, &a)?;
             prop_assert_eq!(h1, h2);
         }
 
@@ -113,8 +113,8 @@ mod tests {
             prop_assume!(!domain.contains(&0));
             let domain = [&b"DSM/"[..], &domain[..]].concat();
             let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
-            let h1 = hash_lp2(d, &a, &b);
-            let h2 = hash_lp2(d, &a, &b);
+            let h1 = hash_lp2(d, &a, &b)?;
+            let h2 = hash_lp2(d, &a, &b)?;
             prop_assert_eq!(h1, h2);
         }
 
@@ -128,8 +128,8 @@ mod tests {
             prop_assume!(!domain.contains(&0));
             let domain = [&b"DSM/"[..], &domain[..]].concat();
             let d = TaggedHashDomain::try_new(&domain).expect("non-NUL DSM/ domain");
-            let h1 = hash_lp3(d, &a, &b, &c);
-            let h2 = hash_lp3(d, &a, &b, &c);
+            let h1 = hash_lp3(d, &a, &b, &c)?;
+            let h2 = hash_lp3(d, &a, &b, &c)?;
             prop_assert_eq!(h1, h2);
         }
 
