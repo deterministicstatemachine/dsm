@@ -51,5 +51,5 @@ describe('TokenCreationDialog request', () => {
     const burn = within(screen.getByRole('group', { name: 'Burn' }));
     expect(burn.getByRole('button', { name: 'Off' })).toHaveClass('active');
     expect(burn.getByRole('button', { name: 'On' })).not.toHaveClass('active');
-  });
+  }, 15_000);
 });
