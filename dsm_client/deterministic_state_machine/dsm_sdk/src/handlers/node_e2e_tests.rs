@@ -1011,7 +1011,7 @@ async fn a_sofi_trade_executes_end_to_end() {
 /// the members taking writes again, B's next trade completes the one it
 /// prepared.
 ///
-/// MUTATION CONTROL: dropping `require_stored` from `publish_prepared` turns
+/// MUTATION CONTROL: dropping `require_stored` from `publish_gated` turns
 /// this red: the trade goes on to its transition over objects no reader can
 /// fetch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

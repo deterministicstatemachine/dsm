@@ -5501,9 +5501,11 @@ The other 13 `canonical_lp` tests stayed green under both mutants, so before thi
 - The SA-71 resume test, a full SoFi trade, the held-pair trade and the install-refusal test pass, each in its own run.
 
 **Mutation controls** (one `DSM_MUTANT` build, unmutated control green):
-- F published before its conformance is decided → the end-to-end test red: F is at the members.
+- F published before its conformance is decided → the end-to-end test red: F is at the members. The source rule below is red on the same mutant source.
 - A fulfillment frozen owed to its set instead of withheld → red: the sweep puts it.
 - The sweep listing withheld rows → red: the sweep puts it.
+
+**The source rules.** `dsm_sdk::source_rules::a_producer_signs_freezes_and_publishes_only_a_draft_core_found_valid` and `a_producer_exercises_only_what_it_has_read_back_stored` named `publish_prepared`, which this change replaced. They were not run before the commit and were red on the branch. Rerunning the merged tree's tests found them. Both now name `publish_gated`, and the second also requires, in `publish_gated`'s calls, `fulfillment_conformance` before `release_withheld` before `publish`. Its unmutated control passes (10/0). On the source carrying the first mutant it is red: "publish_gated puts F before its conformance is decided". MR-SOFI-0261's matrix row now names `publish_gated`.
 
 **Also fixed here.** `dsm_sdk::handlers::frontier_verification_tests::a_faucet_claim_reads_the_cell_it_won_once` was red on the branch (16 reads against a bound of 15), found by the shared-lineage session. The bound predated owner ruling 4 (MR-STOR-0134): the route writer reads the leader's log before its put and again after it. The bound now counts both, the same correction made earlier to `a_trade_reads_its_vaults_open_head_once_per_walk`.
 
