@@ -85,6 +85,8 @@ enum Op {
   OP_CANCEL      = 7;  // discard a prepared (uncommitted) record
   OP_SPI_PASSTHROUGH = 8; // raw-SPI relay bridge: clock spi_payload to TROPIC01, return the MISO
                           // bytes. NOT an appliance op — the bytes are not interpreted.
+  OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
+                       // answered with the STATUS pin material of the anchor it made
 }
 
 // A request from the (non-secure) host transport into the secure core. The device roots
@@ -97,6 +99,7 @@ message ApplianceRequest {
   bytes sender_device_root_before   = 4;  // OP_PREPARE (32, R_i)
   bytes sender_device_root_after    = 5;  // OP_PREPARE (32, R_{i+1})
   bytes spi_payload                 = 6;  // OP_SPI_PASSTHROUGH: raw MOSI bytes to clock to the chip
+  Provisioning provision            = 7;  // OP_PROVISION: the device the anchor is bound to
 }
 
 // The secure core's response.
@@ -117,4 +120,49 @@ message ApplianceResponse {
   uint64 pin_enrolled_counter  = 11; // OP_STATUS: H0 (the live provisioned enrollment counter)
   bytes  pin_partition_pk      = 12; // OP_STATUS: partition public key pk_host
   bytes  pin_chip_pk           = 13; // OP_STATUS: resident chip public key pk_chip
+  // OP_STATUS: the public birth commitment S_birth B commits. With fields 6 and 10–13 and the
+  // owner's online key and device id, B recomputes from what the chip discloses.
+  bytes  pin_birth_commitment  = 14;
+}
+
+// The appliance's durable record (§26): everything it holds across a power cut except the
+// chip's own monotonic counter. Written whole at each durable point of the flow; a store holds
+// the last record written in full. The status is the record's kind: none is Ready.
+message DurablePrepared {
+  TransitionPackage transition     = 1;
+  RootAdvanceCertificate cert      = 2;
+}
+
+message DurableCommitted {
+  bytes prev_frontier              = 1;  // 32  h_i
+  bytes next_frontier              = 2;  // 32  h_{i+1}
+  uint64 anchor_counter            = 3;  //     u_i
+  uint64 next_anchor_counter       = 4;  //     u_i+1
+  OfflineRelease release           = 5;
+  bool counter_committed           = 6;  // the counter has moved for this release
+}
+
+message DurableActive {
+  bytes root                       = 1;  // 32  h_i, the active frontier
+  uint64 anchor_counter            = 2;  //     u_i
+  oneof record {
+    DurablePrepared prepared       = 3;
+    DurableCommitted committed     = 4;
+  }
+}
+
+// What the host supplies when it provisions an anchor for its device, once: the identity the
+// anchor's bundle B binds. The chip contributes its own identity and entropy.
+message Provisioning {
+  bytes device_id                  = 1;  // 32  the owner's DSM device id
+  bytes online_id_pk               = 2;  //     the owner's online key pk_on (B binds H(pk_on))
+  bytes policy_hash                = 3;  // 32  the policy the anchor is enrolled under
+  bytes genesis_root               = 4;  // 32  the genesis that seeds the offline frontier h_0
+}
+
+// Everything the anchor keeps across a power cut besides its counter: what it was provisioned
+// for, and its active state. One record, replaced whole.
+message DurableAnchor {
+  Provisioning provisioning        = 1;
+  DurableActive active             = 2;
 }

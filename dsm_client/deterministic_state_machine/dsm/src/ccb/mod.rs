@@ -141,6 +141,11 @@ pub mod class {
     pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
     /// `0x002B` — an offline unload boundary body.
     pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
+    /// `0x002C` — an offline settlement body: a receiver's admission of value
+    /// it received offline, funded by the payer's spend its online history
+    /// exposed (SA-91). Promoted from reserved (`OFFLINE_SPEND_STEP_EVIDENCE`)
+    /// with its field table.
+    pub const OFFLINE_SETTLEMENT_BODY: u16 = 0x002C;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -342,7 +347,6 @@ pub mod class {
 /// it. Reaching into `reserved` from a `CcbObject` impl is caught by
 /// `reserved_classes_have_no_encoder`.
 pub mod reserved {
-    pub const OFFLINE_SPEND_STEP_EVIDENCE: u16 = 0x002C;
     pub const OFFLINE_BRANCH_EVIDENCE: u16 = 0x002D;
     pub const PORTABLE_ANCHOR_ENROLLMENT_BODY: u16 = 0x002E;
     pub const PORTABLE_HARDWARE_ENROLLMENT_BODY: u16 = 0x002F;
@@ -350,7 +354,6 @@ pub mod reserved {
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
     pub const ALL: &[u16] = &[
-        OFFLINE_SPEND_STEP_EVIDENCE,
         OFFLINE_BRANCH_EVIDENCE,
         PORTABLE_ANCHOR_ENROLLMENT_BODY,
         PORTABLE_HARDWARE_ENROLLMENT_BODY,
@@ -533,6 +536,12 @@ pub mod schema {
     /// silent divergence §2.8 exists to prevent, and it is why a bump
     /// propagates upward through every enclosing object.
     pub const BURNED: &[(u16, u16)] = &[
+        // Schema 1 of the offline boundary bodies carried no ancestry: nothing
+        // tied the account a boundary started from to the one the boundary
+        // before it left, nor named the anchor its bundle commits. Schema 2
+        // carries both, and the spends since the last boundary.
+        (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 1),
+        (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 1),
         // Schema 1 had no arm for an offline unload's credit, so an unload
         // could not be witnessed at all. Schema 2 adds `0x0075`; the source
         // sequence of schema 1 bytes is not that of schema 2.
@@ -687,6 +696,9 @@ pub enum CcbError {
     /// One transition introduces more direct external provenance references
     /// than `MAX_PROVENANCE_FANOUT` (SoFi §18.4). A known bound violation.
     ProvenanceFanoutExceeded { count: usize, max: usize },
+    /// An offline boundary body of a kind that is no boundary of the
+    /// device's own offline account: a settlement has a body of its own.
+    NotAnOfflineAccountBoundary,
 }
 
 impl core::fmt::Display for CcbError {
@@ -806,6 +818,10 @@ impl core::fmt::Display for CcbError {
                 f,
                 "economic admission: the transition introduces {count} direct external \
                  provenance references, more than the bound of {max}"
+            ),
+            CcbError::NotAnOfflineAccountBoundary => write!(
+                f,
+                "an offline boundary body is a load or an unload of the device's own account"
             ),
         }
     }

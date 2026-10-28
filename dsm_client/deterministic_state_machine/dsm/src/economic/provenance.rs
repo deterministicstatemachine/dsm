@@ -1055,7 +1055,17 @@ pub fn verify_credit_source(
         // device's own offline account. The source is the boundary's own
         // identity, consumed below from ZERO.
         CreditSource::OfflineBoundaryDebit(_) => match ctx.offline_boundary {
-            Some(b) if b.kind() == crate::types::device_state::OfflineBoundaryKind::Unload => {
+            // An unload, funded by its own account debit; or a settlement of
+            // value received offline, funded by the payer's spend the payer's
+            // online history exposed, verified against it before the boundary
+            // was built (SA-91). Either consumes its own identity's source.
+            Some(b)
+                if matches!(
+                    b.kind(),
+                    crate::types::device_state::OfflineBoundaryKind::Unload
+                        | crate::types::device_state::OfflineBoundaryKind::Settle
+                ) =>
+            {
                 FundedCredit {
                     source_id: crate::economic::offline_boundary::offline_boundary_debit_source_id(
                         ctx.genesis,

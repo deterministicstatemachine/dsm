@@ -692,6 +692,56 @@ const OFFLINE_BOUNDARY_BODY_PURPOSE: &str = "economic-offline-boundary-body";
 /// took, make the boundary and its admission durable together, then publish,
 /// register, validate and admit — the one finish every admission runs. The
 /// boundary registers BEFORE the route reports success.
+/// This device's offline account's ancestry, for the boundary `boundary` Core
+/// took: the anchor its bundle commits, where the account stood since its last
+/// boundary, and every spend this device's anchor released since, which the
+/// boundary exposes. Read under the state-machine lock the boundary is taken
+/// under, so no spend lands between the chain and the boundary.
+fn own_boundary_ancestry(
+    pin: &crate::anchor::AnchorPin,
+    bundle: &[u8; 32],
+    boundary: &dsm::types::device_state::OfflineBoundaryOutcome,
+) -> Result<dsm::economic::offline_boundary::BoundaryAncestry, DsmError> {
+    use dsm::economic::offline_boundary::{BoundaryAncestry, BoundaryAnchor, BoundarySince};
+    if pin.bundle != *bundle {
+        return Err(DsmError::invalid_operation(
+            "offline boundary: the attached anchor is not the account's",
+        ));
+    }
+    let chain = client_db::offline_spends::own_offline_spends(bundle)
+        .map_err(|e| storage_err("this device's unexposed offline spends", e))?;
+    let funded = match &boundary.account_move.before {
+        dsm::types::offline_account::StepBefore::Boundary { funding_chain, .. } => *funding_chain,
+        dsm::types::offline_account::StepBefore::Spend { .. } => {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: Core took a spend where a boundary was asked",
+            ))
+        }
+    };
+    let since = match (funded, chain.first()) {
+        (None, _) => BoundarySince::Opened {
+            frontier: boundary.account_move.account.frontier(),
+        },
+        (Some(_), Some(first)) => BoundarySince::Previous {
+            account_root: dsm::types::offline_chain::SpendHop::from_bytes(first)?.starts_from(),
+        },
+        (Some(_), None) => BoundarySince::Previous {
+            account_root: boundary.pre_account_root,
+        },
+    };
+    Ok(BoundaryAncestry {
+        anchor: BoundaryAnchor {
+            anchor_id: pin.anchor_id,
+            pk_chip: pin.pk_chip.clone(),
+            pk_host: pin.partition_pk.clone(),
+            enrolled_counter: pin.enrolled_counter,
+            birth_commitment: pin.birth_commitment,
+        },
+        since,
+        chain,
+    })
+}
+
 pub(crate) async fn admitted_offline_boundary(
     core: &CoreSDK,
     bundle: [u8; 32],
@@ -735,21 +785,43 @@ pub(crate) async fn admitted_offline_boundary(
                 asset_policy_commit: asset,
             }
         }
+        // A settlement moves nothing across the account: it credits a payment
+        // received offline, and is admitted by `admitted_offline_settlement`.
+        dsm::types::device_state::OfflineBoundaryKind::Settle => {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: a settlement is no account boundary — it is admitted as the \
+                 settlement of the payment it names",
+            ))
+        }
     };
     let mut built: Option<(
         EconomicTransitionWitness,
         EconomicAdmissionManifest,
         Vec<u8>,
     )> = None;
+    // The anchor the account belongs to, read before the boundary is taken: its
+    // lock is never taken under the state-machine lock the boundary holds.
+    let pin = core.attached_anchor_pin().ok_or_else(|| {
+        DsmError::invalid_operation(
+            "offline boundary: no anchor is attached, so the account's anchor cannot be named",
+        )
+    })?;
     let (outcome, pending) = core.admitted_boundary(
         &bundle,
         kind,
         &asset,
         amount,
         |boundary| {
-            let body = OfflineBoundaryBody::of(boundary, kind, bundle, asset, amount)?
-                .encode()
-                .map_err(|e| storage_err("boundary body", e))?;
+            let body = OfflineBoundaryBody::of(
+                boundary,
+                kind,
+                bundle,
+                asset,
+                amount,
+                own_boundary_ancestry(&pin, &bundle, boundary)?,
+            )?
+            .encode()
+            .map_err(|e| storage_err("boundary body", e))?;
             let digest = offline_boundary_operation_digest(&body);
             let evidence_addr = offline_boundary_evidence_addr(&body);
             let write_set = dsm::economic::write_set::build_boundary_write_set(
@@ -868,6 +940,237 @@ pub(crate) async fn admitted_offline_boundary(
     )
     .await?;
     Ok((outcome, admitted))
+}
+
+/// Settle a payment this device received offline (SA-91): once the payer's
+/// online history exposed the spend — a walk of the payer this device ran
+/// itself recorded the exposure — the payment is credited to the online balance
+/// by an admitted economic transition of its own, funded by that spend and
+/// consumed once. The settlement, its admission and the pending receipt's
+/// settled mark are durable together; then the one finish runs.
+pub(crate) async fn admitted_offline_settlement(
+    core: &CoreSDK,
+    release_message: [u8; 32],
+) -> Result<AdmittedOutcome, DsmError> {
+    use dsm::economic::offline_boundary::{
+        offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineSettlementBody,
+    };
+    let (receipt, settled) = client_db::offline_receipts::offline_receipt(&release_message)
+        .map_err(|e| storage_err("the payment received offline", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline settlement: no payment received under this release",
+            )
+        })?;
+    if let Some(position) = settled {
+        return Err(DsmError::invalid_operation(format!(
+            "offline settlement: the payment was settled at position {position}"
+        )));
+    }
+    let exposure = client_db::economic_lineage::offline_exposure(&release_message)
+        .map_err(|e| storage_err("the exposure of the payment", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline settlement: the payer's online history has not exposed this spend yet — \
+                 the payment stays pending",
+            )
+        })?;
+    if *exposure.genesis() != receipt.payer_genesis
+        || *exposure.device_id() != receipt.payer_device
+        || *exposure.bundle() != receipt.bundle
+        || exposure.payment().asset != receipt.asset
+        || exposure.payment().amount != receipt.amount
+    {
+        return Err(DsmError::invalid_operation(
+            "offline settlement: the exposed payment is not the one this device received",
+        ));
+    }
+    let network_id = committed_network_id()?;
+    if let Some(pending) = core
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+    {
+        resume_pending_admission(core, &network_id, pending).await?;
+    }
+    let head = core
+        .device_head()
+        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
+    let genesis = head.genesis_digest();
+    let devid = head.devid();
+    let set = canonical_set(&network_id)?;
+    let validated = validated_root_or_activate(core)?;
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
+    let authority = authority_material(&network_id, &genesis)?;
+    let body = OfflineSettlementBody::of(&exposure).encode();
+    let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &exposure)?;
+    let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
+    let pending = core.admitted_settlement(
+        &receipt,
+        || {
+            let digest = offline_boundary_operation_digest(&body);
+            let evidence_addr = offline_boundary_evidence_addr(&body);
+            let pre_root = tree.root();
+            let write_set = dsm::economic::write_set::build_boundary_write_set(
+                &dsm::economic::write_set::BoundaryEffect {
+                    kind: dsm::types::device_state::OfflineBoundaryKind::Settle,
+                    asset: verified.asset(),
+                    amount: verified.amount(),
+                    boundary_id: verified.operation_id(),
+                },
+                &genesis,
+                &devid,
+                &pre_state.as_write_set_pre_state(),
+                &mut tree,
+            )
+            .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+            let witness = EconomicTransitionWitness::new(
+                pre_root,
+                write_set.post_root,
+                verified.operation_id(),
+                digest,
+                write_set.mutations,
+                write_set.credit_sources,
+            )
+            .map_err(|e| storage_err("witness", e))?;
+            let witness_bytes = witness
+                .encode()
+                .map_err(|e| storage_err("witness encode", e))?;
+            let manifest = EconomicAdmissionManifest::new(
+                authority.position,
+                immutable_inner(
+                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                    &witness_bytes,
+                ),
+                authority.addr,
+                AdmissionSubstrate::OfflineBoundary { evidence_addr },
+                witness.derived_provenance_index(),
+            )
+            .map_err(|e| storage_err("manifest", e))?;
+            let manifest_bytes = manifest
+                .encode()
+                .map_err(|e| storage_err("manifest encode", e))?;
+            let coords = AcceptedAdmissionCoords {
+                post_economic_root: write_set.post_root,
+                accepted_substrate_addr: evidence_addr,
+                admission_manifest_addr: manifest
+                    .addr()
+                    .map_err(|e| storage_err("manifest addr", e))?,
+                substrate: dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary,
+            };
+            let key = |tag, bytes: &[u8]| {
+                crate::sdk::economic_registers::immutable_object_key(tag, bytes)
+            };
+            let artifacts = vec![
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                        &witness_bytes,
+                    ),
+                    witness_bytes,
+                    "economic-transition-witness",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+                        &manifest_bytes,
+                    ),
+                    manifest_bytes,
+                    "economic-admission-manifest",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE,
+                        &body,
+                    ),
+                    body.clone(),
+                    OFFLINE_BOUNDARY_BODY_PURPOSE,
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+                        &authority.bytes,
+                    ),
+                    authority.bytes.clone(),
+                    "economic-authority-evidence",
+                ),
+            ];
+            let prepared = PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::OfflineSettle {
+                    asset_policy_commit: verified.asset(),
+                },
+                validated.economic_position() + 1,
+                pre_root,
+                digest,
+            );
+            built = Some((witness, manifest));
+            Ok((prepared, coords, artifacts))
+        },
+        &set.id(),
+    )?;
+    let (witness, manifest) = built.ok_or_else(|| {
+        DsmError::storage(
+            "settlement committed without building its admission".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    finish_admission(
+        core,
+        &network_id,
+        &set,
+        &validated,
+        witness,
+        manifest,
+        AdmittedSubstrate::OfflineBoundary(body),
+        pending,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Settle every payment this device received offline that its payer's online
+/// history now exposes (SA-91). Each payer is walked from this device's
+/// frontier for it toward the head its register holds — the walk records the
+/// spends the payer's boundaries exposed — and each exposed payment is settled
+/// by its own admitted transition. A payment its payer has not exposed yet
+/// stays pending; it is no failure. Returns how many were settled, and what
+/// could not be done.
+pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>) {
+    let mut failures = Vec::new();
+    let receipts = match client_db::offline_receipts::pending_offline_receipts() {
+        Ok(receipts) => receipts,
+        Err(e) => {
+            failures.push(format!("the payments received offline are unreadable: {e}"));
+            return (0, failures);
+        }
+    };
+    let mut walked: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    for receipt in &receipts {
+        if walked.insert(receipt.payer_device) {
+            if let Err(e) = crate::sdk::economic_registers::prevalidate_contact(
+                receipt.payer_genesis,
+                receipt.payer_device,
+            )
+            .await
+            {
+                failures.push(format!(
+                    "the payer {} of a payment received offline could not be walked: {e}",
+                    crate::util::text_id::encode_base32_crockford(&receipt.payer_device)
+                ));
+            }
+        }
+    }
+    let mut settled = 0u32;
+    for receipt in receipts {
+        match client_db::economic_lineage::offline_exposure(&receipt.release_message) {
+            Ok(Some(_)) => match admitted_offline_settlement(core, receipt.release_message).await {
+                Ok(_) => settled += 1,
+                Err(e) => failures.push(format!("a payment received offline: {e}")),
+            },
+            Ok(None) => {}
+            Err(e) => failures.push(format!("the exposure of a payment received offline: {e}")),
+        }
+    }
+    (settled, failures)
 }
 
 /// ONE admission finish at a time on this device. The sync's crash recovery and
@@ -1191,9 +1494,39 @@ async fn finish_locked(
                     "the boundary body is not the one the admission names",
                 ));
             }
-            let verified = dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
-                &body, &genesis, &devid,
-            )?;
+            let verified = match dsm::economic::offline_boundary::offline_body_kind(&body)? {
+                dsm::economic::offline_boundary::OfflineBodyKind::Boundary => {
+                    dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
+                        &body,
+                        &genesis,
+                        &devid,
+                        head.public_key(),
+                    )
+                    .map(|(verified, ..)| verified)?
+                }
+                // A settlement is held to the exposure this device's own walk of
+                // the payer recorded.
+                dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
+                    let named =
+                        dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
+                            .map_err(|e| {
+                                DsmError::invalid_operation(format!(
+                                    "an offline settlement body: {e}"
+                                ))
+                            })?;
+                    let exposure =
+                        client_db::economic_lineage::offline_exposure(&named.release_message)
+                            .map_err(|e| storage_err("the exposure the settlement names", e))?
+                            .ok_or_else(|| {
+                                DsmError::invalid_operation(
+                                    "the settlement names an exposure this device never recorded",
+                                )
+                            })?;
+                    dsm::economic::offline_boundary::OfflineSettlementBody::verify(
+                        &body, &genesis, &devid, &exposure,
+                    )?
+                }
+            };
             AcceptedSubstrate::from_verified_offline_boundary(
                 verified,
                 coords.accepted_substrate_addr,

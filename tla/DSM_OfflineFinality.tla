@@ -72,11 +72,11 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
                                   takes the peer's proposal. Two proposals
                                   that cross each commit on its receiver: two
                                   successors of one tip -> NoFork
-    SenderCommitsAtRelease        TRUE for an offline-bearer step (the code's
-                                  value-moving steps): the proposer commits as
-                                  it confirms. FALSE: it commits on the ack
-                                  (DSM_OfflineFinality_CommitOnAck.cfg, the
-                                  code's steps that move no value).
+    SenderCommitsAtRelease        TRUE: the code's order. Every offline step
+                                  is an offline-bearer transfer (the offline
+                                  door, MR-DSM-0219), and its proposer commits
+                                  as it confirms. FALSE: it commits on the
+                                  ack, an order no step of the code takes.
     ConfirmOwedWithCommit         FALSE: the proposer's commit and its owed
                                   confirm are not one write; it commits and
                                   restarts still Prepared, then cancels. Its

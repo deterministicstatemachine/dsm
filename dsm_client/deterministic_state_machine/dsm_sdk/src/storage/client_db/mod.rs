@@ -41,6 +41,8 @@ mod manifold_seeds;
 pub mod money_received;
 pub mod native_reserve;
 mod nonces;
+pub mod offline_receipts;
+pub mod offline_spends;
 mod online_outbox;
 pub mod own_directory_entry;
 mod projection_repair;
@@ -151,6 +153,22 @@ pub(crate) fn switch_test_database_slot(slot: &'static str) {
     }
     // else: leave DB_CONNECTION empty so the next get_connection() opens the
     // slot's URI and initializes its schema.
+}
+
+/// The active slot's database as it stands now, copied to `slot`'s file: the
+/// same device restored later from a backup taken at this point. `slot` is
+/// one no test has opened yet.
+#[cfg(test)]
+pub(crate) fn copy_test_database_to_slot(slot: &'static str) -> Result<()> {
+    // The file `get_database_path` names for `slot` in this generation.
+    let base = crate::storage_utils::get_storage_base_dir()
+        .ok_or_else(|| anyhow!("Storage base directory not set"))?;
+    let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let target = base.join(format!("{gen}_{slot}_{DB_FILE_NAME}"));
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
+    Ok(())
 }
 
 pub fn init_database() -> Result<()> {
@@ -519,7 +537,8 @@ fn get_database_path() -> Result<PathBuf> {
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
 /// the same shape and encoding. `peer_offline_account` is created on open
 /// the same way: a peer's offline account as a boundary the receiver
-/// validated left it (the owner's receive rule, 2026-10-22).
+/// validated left it (the owner's receive rule, 2026-10-22); and
+/// `own_offline_spend`, this device's spends no boundary exposed yet (SA-116).
 ///
 /// v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
 /// whole route — namespace, key, seed and committed set — and the value, and
@@ -937,6 +956,51 @@ fn create_schema(conn: &Connection) -> Result<()> {
             account_root        BLOB NOT NULL,      -- 32B
             funding_chain       BLOB NOT NULL,      -- 32B
             PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
+        );
+
+        -- A payment a peer's offline boundary exposed online, as this
+        -- receiver's own walk of the peer verified it: one spend of the chain
+        -- the boundary carried, named by the release that signed it.
+        CREATE TABLE IF NOT EXISTS peer_offline_exposure(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            bundle              BLOB NOT NULL,      -- 32B
+            recipient           BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            before_root         BLOB NOT NULL,
+            before_counter      INTEGER NOT NULL,
+            before_frontier     BLOB NOT NULL,
+            after_root          BLOB NOT NULL,
+            after_counter       INTEGER NOT NULL,
+            after_frontier      BLOB NOT NULL
+        );
+
+        -- Value this device received offline, pending until it is settled
+        -- online (SA-91): neither online balance nor offline allocation. A
+        -- settlement admitted online marks it settled, once.
+        CREATE TABLE IF NOT EXISTS pending_offline_receipt(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            payer_genesis       BLOB NOT NULL,      -- 32B
+            payer_devid         BLOB NOT NULL,      -- 32B
+            bundle              BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            commitment_hash     BLOB NOT NULL,      -- 32B
+            settled_position    INTEGER
+        );
+
+        -- This device's own offline-bearer spends no boundary of its online
+        -- history has exposed yet: the chain each confirm carries from the
+        -- account its receivers recorded (SA-116). Written with the step that
+        -- spent, taken out by the boundary that carries them online.
+        CREATE TABLE IF NOT EXISTS own_offline_spend(
+            bundle              BLOB NOT NULL,      -- 32B
+            anchor_counter      INTEGER NOT NULL,   -- u_i the spend started from
+            hop                 BLOB NOT NULL,      -- OfflineSpendHop
+            PRIMARY KEY(bundle, anchor_counter)
         );
         DROP TABLE IF EXISTS economic_admitted;
 

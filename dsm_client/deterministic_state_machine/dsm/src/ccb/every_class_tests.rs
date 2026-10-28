@@ -382,6 +382,19 @@ fn boundary(kind: OfflineBoundaryKind) -> OfflineBoundaryBody {
         pre_funding_chain: Some(b(0xB4)),
         account_paths: vec![encoded(0xB5), encoded(0xB6)],
         device_path: encoded(0xB7),
+        ancestry: crate::economic::offline_boundary::BoundaryAncestry {
+            anchor: crate::economic::offline_boundary::BoundaryAnchor {
+                anchor_id: b(0xB8),
+                pk_chip: vec![0xB9; 32],
+                pk_host: vec![0xBA; 64],
+                enrolled_counter: 16,
+                birth_commitment: b(0xBB),
+            },
+            since: crate::economic::offline_boundary::BoundarySince::Previous {
+                account_root: b(0xBC),
+            },
+            chain: vec![vec![0xBD; 8]],
+        },
     }
 }
 
@@ -683,11 +696,32 @@ fn every_class() -> Vec<Shown> {
     ] {
         all.push(shown(
             boundary_class,
-            1,
+            2,
             ok(boundary(kind).encode(), "offline boundary"),
             Read::Parsed(|b| re(OfflineBoundaryBody::decode(b).map_err(text)?.encode())),
         ));
     }
+    let offline_settlement = crate::economic::offline_boundary::OfflineSettlementBody {
+        payer_genesis: b(0xC1),
+        payer_device: b(0xC2),
+        exposed_at: 7,
+        release_message: b(0xC3),
+        bundle: b(0xC4),
+        asset: b(0x0A),
+        amount: 12,
+    };
+    all.push(shown(
+        class::OFFLINE_SETTLEMENT_BODY,
+        SCHEMA_V1,
+        offline_settlement.encode(),
+        Read::Parsed(|b| {
+            Ok(
+                crate::economic::offline_boundary::OfflineSettlementBody::decode(b)
+                    .map_err(text)?
+                    .encode(),
+            )
+        }),
+    ));
 
     // ── SoFi family ─────────────────────────────────────────────────────
     let setup = ok(

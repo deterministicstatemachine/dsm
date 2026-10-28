@@ -377,6 +377,18 @@ mod tests {
     use dsm::types::operations::Operation;
     use dsm::verification::receipt_verification::ReceiptStateContext;
 
+    /// A step that moves no value. Core refuses `Noop` (MR-DSM-0201); a
+    /// zero-effect `Generic` still advances until the owner decides it (the
+    /// dBTC exit flow builds one).
+    fn zero_effect() -> Operation {
+        Operation::Generic {
+            operation_type: b"zero-effect-step".to_vec(),
+            data: vec![0x01],
+            message: String::new(),
+            signature: Vec::new(),
+        }
+    }
+
     const TEST_SESSION_BINDING: [u8; 32] = [0x5A; 32];
 
     /// The first four steps of a real relationship: the wallet
@@ -2110,14 +2122,14 @@ mod tests {
             .expect("genesis installed the head");
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
         assert!(
-            head.advance(rel_key, devid_b, Operation::Noop, &[], None)
+            head.advance(rel_key, devid_b, zero_effect(), &[], None)
                 .is_err(),
             "a step on a relationship the device never established is refused"
         );
 
         let established = head.establish_relationship(devid_b).expect("establish");
         let outcome = established
-            .advance(rel_key, devid_b, Operation::Noop, &[], None)
+            .advance(rel_key, devid_b, zero_effect(), &[], None)
             .expect("the first step");
         assert_eq!(outcome.parent_r_a, established.root());
         assert_eq!(

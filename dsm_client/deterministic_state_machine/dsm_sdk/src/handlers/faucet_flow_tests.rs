@@ -1388,7 +1388,12 @@ async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
     let refused = d.core().execute_offline_step(
         [0x71; 32],
         [0x72; 32],
-        dsm::types::operations::Operation::Noop,
+        dsm::types::operations::Operation::Generic {
+            operation_type: b"zero-effect-step".to_vec(),
+            data: vec![0x01],
+            message: String::new(),
+            signature: Vec::new(),
+        },
         &[BalanceDelta {
             policy_commit: era(),
             direction: BalanceDirection::Debit,

@@ -716,7 +716,7 @@ fn semantic_write_set(
 /// commit before anything is read out of them, so the check is a function of
 /// the operation alone: the producer and every verifier read the same bytes,
 /// and bytes that are not the token's make the operation itself invalid.
-fn moved_token_policy(
+pub(crate) fn moved_token_policy(
     policy_commit: &[u8; 32],
     carried: &[u8],
 ) -> Result<crate::economic::token_policy::TokenPolicy, WriteSetError> {
@@ -1778,7 +1778,10 @@ pub fn build_boundary_write_set(
                 balance_state(*asset, rest)?,
             ));
         }
-        OfflineBoundaryKind::Unload => {
+        // An unload credits what its own account debit funds; a settlement
+        // credits what the payer's exposed spend funds (SA-91). Each consumes
+        // the source its own identity derives, once.
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
             let next = match have {
                 Some(held) => held
                     .checked_add(amount)
@@ -1814,8 +1817,10 @@ pub fn build_boundary_write_set(
     let mut credit_sources = Vec::new();
     for (index, (key, pre, post)) in planned.into_iter().enumerate() {
         let siblings = tree.siblings(&key).to_vec();
-        let funded = kind == OfflineBoundaryKind::Unload
-            && matches!(&post, Some(EconomicLeafState::Balance(_)));
+        let funded = matches!(
+            kind,
+            OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle
+        ) && matches!(&post, Some(EconomicLeafState::Balance(_)));
         let mutation = EconomicLeafMutation::new(pre, post.clone(), siblings)
             .map_err(|e| WriteSetError::Ccb(e.to_string()))?;
         match &post {
@@ -1891,7 +1896,7 @@ pub fn verify_boundary_write_set(
             }
             Ok(())
         }
-        OfflineBoundaryKind::Unload => {
+        OfflineBoundaryKind::Unload | OfflineBoundaryKind::Settle => {
             let expected_source =
                 crate::economic::offline_boundary::offline_boundary_debit_source_id(
                     genesis,

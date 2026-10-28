@@ -898,6 +898,7 @@ dependencies = [
  "constant_time_eq 0.5.0",
  "crc32fast",
  "derive_more",
+ "dsm-anchor-core",
  "dsm-sphincs",
  "ed25519-dalek",
  "env_logger",
