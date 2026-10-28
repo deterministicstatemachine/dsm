@@ -224,7 +224,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
-            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+            if let Some(c) = dsm::core::token::builtin_policy_commit_for_token("dBTC") {
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
@@ -2095,7 +2095,7 @@ mod history_tests {
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
         let peer_id = [0x76u8; 32];
         let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
-        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
         // The nonce the sender's send derives (§4.1), over the relationship.
         let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &peer_id,

@@ -35,7 +35,7 @@ use serial_test::serial;
 const STEP: Duration = Duration::from_secs(240);
 
 fn era() -> [u8; 32] {
-    let Some(commit) = dsm_sdk::policy::builtin_policy_commit("ERA") else {
+    let Some(commit) = dsm::core::token::builtin_policy_commit_for_token("ERA") else {
         panic!("ERA's policy is not built in");
     };
     commit

@@ -1244,7 +1244,7 @@ mod tests {
         assert_eq!(recognized.terms.memo, "the memo A signed");
         assert_eq!(
             recognized.terms.policy_commit,
-            crate::policy::builtin_policy_commit("ERA").expect("ERA's policy")
+            dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy")
         );
     }
 
@@ -1649,7 +1649,7 @@ mod tests {
         let op = Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
-            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA"),
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),

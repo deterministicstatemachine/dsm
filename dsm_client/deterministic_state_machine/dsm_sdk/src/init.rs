@@ -264,7 +264,7 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                     .and_then(|v| v.as_slice().try_into().ok());
                 if let Some(device_id) = self_device {
                     match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
-                        crate::policy::builtin_policy_commit(token)
+                        dsm::core::token::builtin_policy_commit_for_token(token)
                     }) {
                         Ok((0, 0)) => {}
                         Ok((repaired, remaining)) => log::info!(

@@ -4,9 +4,10 @@
 //!
 //! `get_bcr_chain_states` fails on a row it cannot decode or whose state does
 //! not recompute its stored tip (`bcr::tests::a_corrupt_archived_row_fails_the_load`),
-//! so a history with a row missing never yields a total. `derive_circulating_supply`
-//! reports that as ABSENCE, never as `0` — which would be maximum headroom
-//! exactly when the chain was least trustworthy — and the enforcer refuses a
+//! so a history with a row missing never yields a total. Core's
+//! `policy_enforcement::circulating_supply` reports that as ABSENCE, never as
+//! `0` — which would be maximum headroom exactly when the chain was least
+//! trustworthy — and the enforcer refuses a
 //! capped operation whose circulating supply it cannot establish (see
 //! `supply_cap_fails_closed_without_circulating_supply` in
 //! supply_cap_enforcement.rs).

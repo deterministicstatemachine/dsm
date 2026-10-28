@@ -1263,68 +1263,35 @@ impl CoreSDK {
         }
     }
 
-    /// Circulating supply of an asset, DERIVED from this device's canonical
-    /// chain history — never a cached counter, which a restored snapshot could
-    /// misreport. A token's whole supply is released at creation (SoFi §51),
-    /// so:
-    ///
-    ///   circulating = Σ CreateToken.initial_supply − Σ Burn
-    ///                 (for operations naming this policy_commit)
-    ///
-    /// Returns `None` when the history could not be read in full. That is not
-    /// the same as zero: a figure from partial history is a figure about
-    /// another chain.
-    ///
-    /// `None` propagates as an ABSENT witness, and the enforcer already fails
-    /// closed on an absent circulating supply rather than guessing.
-    fn derive_circulating_supply(&self, policy_commit: &[u8; 32]) -> Option<u64> {
-        use dsm::types::operations::Operation as O;
-        let device_id = self.device_info.device_id;
-        let Ok(states) = crate::storage::client_db::get_bcr_chain_states(&device_id, false) else {
-            log::warn!("[supply] chain history unreadable — refusing to derive a supply figure");
-            return None;
-        };
-        let mut circulating: u128 = 0;
-        for state in states {
-            match &state.operation {
-                O::CreateToken {
-                    initial_supply,
-                    policy_commit: pc,
-                    ..
-                } if pc == policy_commit => {
-                    circulating = circulating.saturating_add(initial_supply.value() as u128);
-                }
-                O::Burn {
-                    amount,
-                    policy_commit: pc,
-                    ..
-                } if pc == policy_commit => {
-                    circulating = circulating.saturating_sub(amount.value() as u128);
-                }
-                _ => {}
-            }
-        }
-        Some(u64::try_from(circulating).unwrap_or(u64::MAX))
-    }
-
     /// Whether the policy committed at the commitment `operation` names
     /// permits it. A creation's supply cap is evaluated against the
-    /// circulating supply derived HERE, where the chain is reachable, never
-    /// in the pure context builder.
+    /// circulating supply Core folds over the chain history loaded HERE,
+    /// where the chain is reachable, never in the pure context builder.
     pub(crate) fn enforce_policy_for_operation(
         &self,
         operation: &dsm::types::operations::Operation,
     ) -> Result<(), DsmError> {
-        use dsm::core::token::policy::policy_enforcement::witness_keys;
+        use dsm::core::token::policy::policy_enforcement::{circulating_supply, witness_keys};
         let Some((policy_commit, op_type, mut context)) =
             Self::build_token_policy_context(operation)?
         else {
             return Ok(());
         };
         if context.contains_key(witness_keys::AMOUNT) {
-            // Absent, not zero, when the history is incomplete — the
+            // Core folds the supply over this device's canonical chain
+            // history. Absent, not zero, when the history is incomplete — the
             // enforcer refuses a capped creation it cannot evaluate.
-            if let Some(circulating) = self.derive_circulating_supply(&policy_commit) {
+            let states =
+                crate::storage::client_db::get_bcr_chain_states(&self.device_info.device_id);
+            if let Err(e) = &states {
+                log::warn!("[supply] chain history unreadable, so no supply figure: {e}");
+            }
+            if let Some(circulating) = circulating_supply(
+                &policy_commit,
+                states
+                    .as_ref()
+                    .map(|states| states.iter().map(|state| &state.operation)),
+            ) {
                 context.insert(
                     witness_keys::CIRCULATING.to_string(),
                     circulating.to_le_bytes().to_vec(),
@@ -2574,7 +2541,7 @@ impl CoreSDK {
         let token_id = std::str::from_utf8(token_id)
             .map_err(|_| DsmError::invalid_operation("token_id must be valid UTF-8"))?;
 
-        if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
+        if let Some(commit) = dsm::core::token::builtin_policy_commit_for_token(token_id) {
             return Ok(commit);
         }
 
@@ -2617,12 +2584,11 @@ impl CoreSDK {
         // metadata for `token_id`. Chains are keyed by chain tip and ordered
         // by insertion time — no counter, no derived sparse index.
         let device_id = self.device_info.device_id;
-        let states =
-            crate::storage::client_db::get_bcr_chain_states(&device_id, false).map_err(|e| {
-                DsmError::state(format!(
-                    "Failed to load BCR chain states for policy commit lookup: {e}"
-                ))
-            })?;
+        let states = crate::storage::client_db::get_bcr_chain_states(&device_id).map_err(|e| {
+            DsmError::state(format!(
+                "Failed to load BCR chain states for policy commit lookup: {e}"
+            ))
+        })?;
         for state in states.into_iter().rev() {
             if let Some(token_metadata) =
                 self.token_metadata_for_operation(&state.operation, token_id)

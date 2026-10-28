@@ -3634,7 +3634,7 @@ impl BilateralBleHandler {
         {
             {
                 let existing = store.get(&sender_device_id);
-                match crate::bluetooth::anchor_accept::pin_admit_decision(
+                match dsm::crypto::anchor_enrollment::pin_admit_decision(
                     sender_device_id,
                     sender_online_key,
                     policy,
@@ -3642,7 +3642,7 @@ impl BilateralBleHandler {
                     &disclosed,
                     existing.as_ref(),
                 ) {
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Admit(e) => {
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => {
                         let anchor_id = e.pin.anchor_id;
                         match store.admit(e) {
                             Ok(()) => {
@@ -3675,8 +3675,8 @@ impl BilateralBleHandler {
                             ),
                         }
                     }
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::NoChange => {}
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Reject(reason) => {
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => {}
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
                         // A pinned anchor's identity changed on a later transfer — a security event,
                         // not a routine failure. The transfer is ALREADY rejected fail-closed by the
                         // acceptance predicate (it verifies against the PINNED anchor) and the pinned

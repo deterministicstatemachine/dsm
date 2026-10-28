@@ -599,7 +599,7 @@ async fn a_holdings_status_reads_from_the_frontier_and_the_next_cell_every_time(
     let (proven, root) = client_db::economic_lineage::get_admitted_coordinate()
         .expect("read")
         .expect("A admitted its debit");
-    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy");
     let proof = holdings::prove(&p.a.router().core_sdk, &[era]).expect("A's proof");
     assert_eq!(proof.position, proven);
     let next_cell = cell_read(&p.a.genesis, &p.a.device_id, proven + 1, &root);

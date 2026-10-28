@@ -436,7 +436,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	471	dsm::
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	2363	let authority = dsm::crypto::sphincs::generate_keypair_from_seed(
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/recovery_sdk.rs	2364	dsm::crypto::sphincs::SphincsVariant::SPX256f,
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	230	dsm::crypto::sphincs::sphincs_sign(&secret_key, message)
-dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/token_sdk.rs	533	dsm::crypto::sphincs::sphincs_sign(&signing_key, &payload).map_err(|e| {
+dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/token_sdk.rs	532	dsm::crypto::sphincs::sphincs_sign(&signing_key, &payload).map_err(|e| {
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/wallet_sdk.rs	592	dsm::crypto::sphincs::sphincs_sign(&private_key, payload).map_err(|e| {
 dsm_client/deterministic_state_machine/dsm_sdk/src/storage/client_db/cert_resync.rs	717	dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, sig),
 dsm_client/deterministic_state_machine/dsm_sdk/src/storage/client_db/cert_resync.rs	731	dsm::crypto::sphincs::sphincs_verify(kp.public_key(), &current_target, &fresh),

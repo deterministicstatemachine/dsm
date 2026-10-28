@@ -394,7 +394,7 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
         "250.00"
     );
 
-    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
     let (_, era_decimals) = token_of_commit(&era).expect("ERA's decimals are known");
     assert_eq!(
         format_directed_base_units_for_display(100, Debit, era_decimals),

@@ -8,14 +8,6 @@ pub mod builtins;
 
 use dsm::types::{error::DsmError, policy_types::PolicyAnchor};
 
-pub fn builtin_policy_commit(token_id: &str) -> Option<[u8; 32]> {
-    match token_id {
-        "ERA" => Some(dsm::core::token::token_state_manager::era_policy_commit()),
-        "dBTC" => Some(*builtins::DBTC_POLICY_COMMIT),
-        _ => None,
-    }
-}
-
 pub fn parse_policy_anchor_uri(policy_anchor_uri: &str) -> Result<[u8; 32], DsmError> {
     let anchor_b32 = policy_anchor_uri
         .strip_prefix("dsm:policy:")
@@ -28,7 +20,7 @@ pub fn strict_policy_commit_for_token(
     token_id: &str,
     policy_anchor_uri: Option<&str>,
 ) -> Result<[u8; 32], DsmError> {
-    if let Some(commit) = builtin_policy_commit(token_id) {
+    if let Some(commit) = dsm::core::token::builtin_policy_commit_for_token(token_id) {
         return Ok(commit);
     }
 

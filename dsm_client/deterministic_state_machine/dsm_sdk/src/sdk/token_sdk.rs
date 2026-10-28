@@ -45,7 +45,7 @@ fn classify_token(token_id: &str) -> TokenLane {
 }
 
 fn builtin_policy_anchor_uri(token_id: &str) -> Option<String> {
-    crate::policy::builtin_policy_commit(token_id).map(|commit| {
+    dsm::core::token::builtin_policy_commit_for_token(token_id).map(|commit| {
         format!(
             "dsm:policy:{}",
             crate::util::text_id::encode_base32_crockford(&commit)
@@ -280,13 +280,12 @@ impl TokenSDK {
     /// token; a read or decode failure is an error, never "not found".
     fn find_token_metadata_operation(&self, token_id: &str) -> Result<Option<Operation>, DsmError> {
         let device_id = self.core_sdk.get_current_state()?.device_info.device_id;
-        let states =
-            crate::storage::client_db::get_bcr_chain_states(&device_id, false).map_err(|e| {
-                DsmError::storage(
-                    format!("Failed to load BCR chain states for token metadata lookup: {e}"),
-                    None::<std::io::Error>,
-                )
-            })?;
+        let states = crate::storage::client_db::get_bcr_chain_states(&device_id).map_err(|e| {
+            DsmError::storage(
+                format!("Failed to load BCR chain states for token metadata lookup: {e}"),
+                None::<std::io::Error>,
+            )
+        })?;
         Ok(states
             .into_iter()
             .rev()
@@ -331,7 +330,7 @@ impl TokenSDK {
         &self,
         token_id: &str,
     ) -> Result<[u8; 32], DsmError> {
-        if let Some(commit) = crate::policy::builtin_policy_commit(token_id) {
+        if let Some(commit) = dsm::core::token::builtin_policy_commit_for_token(token_id) {
             return Ok(commit);
         }
 
@@ -1251,7 +1250,7 @@ mod tests {
     #[serial_test::serial]
     async fn a_transfer_whose_terms_name_another_ticker_than_its_policy_is_refused() {
         let wallet = crate::sdk::wallet_sdk::WalletSDK::test_wallet().expect("wallet");
-        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
         let sender = wallet
             .token_sdk
             .core_sdk

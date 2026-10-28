@@ -798,7 +798,7 @@ impl AppRouterImpl {
                 if key.is_empty() {
                     return err("token.adoptionQr: params must name a ticker or token id".into());
                 }
-                if crate::policy::builtin_policy_commit(&key).is_some() {
+                if dsm::core::token::builtin_policy_commit_for_token(&key).is_some() {
                     return err(format!(
                         "token.adoptionQr: {key} is a protocol asset — every device already has it"
                     ));

@@ -79,7 +79,7 @@ pub(super) fn balance(d: &TestDevice, policy_commit: &[u8; 32]) -> u64 {
 }
 
 pub(super) fn era() -> [u8; 32] {
-    crate::policy::builtin_policy_commit("ERA").expect("ERA policy")
+    dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy")
 }
 
 /// Create a token on `d` and return its policy commit.
@@ -1874,7 +1874,7 @@ async fn a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing
     let position = admitted_position(&p.b);
     let before = p.b.era_balance();
     p.b.enter();
-    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy");
     let rows = economic_lineage::load_leaf_cache().expect("the leaf cache");
     let (key, held) = rows
         .iter()
