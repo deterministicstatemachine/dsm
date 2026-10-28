@@ -263,7 +263,7 @@ impl TestDevice {
     /// The device's spendable ERA as the canonical state machine holds it.
     pub fn era_balance(&self) -> u64 {
         self.enter();
-        let pc = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+        let pc = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy");
         self.router()
             .core_sdk
             .device_head()

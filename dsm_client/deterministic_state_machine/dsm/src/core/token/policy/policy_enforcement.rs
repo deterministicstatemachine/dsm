@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use crate::types::{
     error::DsmError,
+    operations::Operation,
     policy_types::{PolicyCondition, PolicyFile, TokenPolicy},
 };
 
@@ -158,8 +159,56 @@ pub struct PolicyEnforcer;
 /// Context keys carrying what the supply cap is evaluated against.
 pub mod witness_keys {
     pub const AMOUNT: &str = "amount_le";
-    /// Circulating supply DERIVED from canonical state (never a cached count).
+    /// Circulating supply DERIVED from canonical state (never a cached count):
+    /// [`super::circulating_supply`].
     pub const CIRCULATING: &str = "circulating_le";
+}
+
+/// The circulating supply of the asset under `policy_commit`, folded over a
+/// device's chain history — never a cached counter, which a restored snapshot
+/// could misreport. A token's whole supply is released at creation (SoFi §51),
+/// so:
+///
+///   circulating = Σ CreateToken.initial_supply − Σ Burn
+///                 (for operations naming this policy_commit)
+///
+/// A burn past what the history created (units received from another device)
+/// floors at zero.
+///
+/// `None` when the history could not be read in full (`history` is the read's
+/// failure). That is not the same as zero: a figure from partial history is a
+/// figure about another chain. `None` also when the creations pass what a
+/// balance carries, which no history whose every creation the cap admitted
+/// reaches. Absent is what [`witness_keys::CIRCULATING`] then carries, and the
+/// cap refuses a creation it cannot evaluate.
+pub fn circulating_supply<'a, E>(
+    policy_commit: &[u8; 32],
+    history: Result<impl IntoIterator<Item = &'a Operation>, E>,
+) -> Option<u64> {
+    let Ok(operations) = history else {
+        return None;
+    };
+    let mut circulating: u64 = 0;
+    for operation in operations {
+        match operation {
+            Operation::CreateToken {
+                initial_supply,
+                policy_commit: pc,
+                ..
+            } if pc == policy_commit => {
+                circulating = circulating.checked_add(initial_supply.value())?;
+            }
+            Operation::Burn {
+                amount,
+                policy_commit: pc,
+                ..
+            } if pc == policy_commit => {
+                circulating = circulating.saturating_sub(amount.value());
+            }
+            _ => {}
+        }
+    }
+    Some(circulating)
 }
 
 impl PolicyEnforcer {
@@ -262,6 +311,74 @@ mod tests {
     use super::*;
     use crate::economic::token_policy::{Release, TokenPolicy as ParsedTokenPolicy};
     use crate::types::policy_types::{PolicyAnchor, PolicyCondition, PolicyFile, TokenPolicy};
+
+    /// What the circulating supply folds to on fixed histories: creations add,
+    /// burns subtract and never below zero, operations naming another policy
+    /// do not count, and a history that could not be read has no figure.
+    /// MUTATION CONTROL: a fold that ignores burns turns this red.
+    #[test]
+    fn the_circulating_supply_folds_creations_less_burns_for_its_policy_alone() {
+        use crate::types::token_types::Balance;
+        let create = |policy_commit: [u8; 32], supply: u64| Operation::CreateToken {
+            token_id: b"PINNED".to_vec(),
+            initial_supply: Balance::amount(supply),
+            policy_commit,
+            fee_amount: 10,
+            name: "Pinned".into(),
+            symbol: "PIN".into(),
+            decimals: 2,
+            metadata_uri: None,
+            signature: Vec::new(),
+        };
+        let burn = |policy_commit: [u8; 32], amount: u64| Operation::Burn {
+            amount: Balance::amount(amount),
+            token_id: b"PINNED".to_vec(),
+            policy_commit,
+            token_policy: Vec::new(),
+            message: "burn".into(),
+        };
+        let fold = |policy_commit: &[u8; 32], history: &[Operation]| {
+            circulating_supply(
+                policy_commit,
+                Ok::<_, std::convert::Infallible>(history.iter()),
+            )
+        };
+        let (p, q) = ([0x51u8; 32], [0x52u8; 32]);
+        let history = [
+            create(p, 1_000),
+            burn(p, 300),
+            create(q, 50),
+            burn(q, 10),
+            Operation::Noop,
+        ];
+        assert_eq!(fold(&p, &history), Some(700));
+        assert_eq!(fold(&q, &history), Some(40));
+        assert_eq!(fold(&[0x53; 32], &history), Some(0));
+        assert_eq!(fold(&p, &[]), Some(0));
+        assert_eq!(
+            fold(&p, &[create(p, 100), burn(p, 250), create(p, 40)]),
+            Some(40),
+            "a burn past what this chain created floors at zero",
+        );
+        assert_eq!(
+            circulating_supply(
+                &p,
+                Err::<std::iter::Empty<&Operation>, _>("a row does not decode"),
+            ),
+            None,
+            "a history read short has no figure, not a figure of zero",
+        );
+        assert_eq!(
+            fold(&p, &[create(p, u64::MAX), create(p, 1)]),
+            None,
+            "creations past what a balance carries have no figure",
+        );
+        assert_eq!(
+            fold(&p, &[create(p, u64::MAX), create(p, 1), burn(p, 1)]),
+            None,
+            "creations past what a balance carries have no figure",
+        );
+    }
 
     fn fungible_fixture() -> ParsedTokenPolicy {
         ParsedTokenPolicy {

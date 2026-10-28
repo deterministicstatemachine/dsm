@@ -513,11 +513,8 @@ pub(crate) fn store_bcr_chain_state_with_conn(
 }
 
 /// Load all archived [`RelationshipChainState`]s for a device, in insertion
-/// order. Optionally filter to published-only.
-pub fn get_bcr_chain_states(
-    device_id: &[u8],
-    published_only: bool,
-) -> Result<Vec<RelationshipChainState>> {
+/// order.
+pub fn get_bcr_chain_states(device_id: &[u8]) -> Result<Vec<RelationshipChainState>> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length: {}", device_id.len()));
     }
@@ -528,19 +525,11 @@ pub fn get_bcr_chain_states(
         poisoned.into_inner()
     });
 
-    let mut stmt = if published_only {
-        conn.prepare(
-            "SELECT state_bytes, chain_tip FROM bcr_chain_states
-             WHERE device_id = ?1 AND published = 1
-             ORDER BY rowid ASC",
-        )?
-    } else {
-        conn.prepare(
-            "SELECT state_bytes, chain_tip FROM bcr_chain_states
-             WHERE device_id = ?1
-             ORDER BY rowid ASC",
-        )?
-    };
+    let mut stmt = conn.prepare(
+        "SELECT state_bytes, chain_tip FROM bcr_chain_states
+         WHERE device_id = ?1
+         ORDER BY rowid ASC",
+    )?;
 
     let iter = stmt.query_map(params![device_id], |row| {
         let bytes: Vec<u8> = row.get(0)?;
@@ -986,14 +975,12 @@ mod tests {
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
             .expect("store unpublished rel state");
 
-        let published = get_bcr_chain_states(&device_id, true).expect("load published rel states");
-        let all = get_bcr_chain_states(&device_id, false).expect("load all rel states");
+        let all = get_bcr_chain_states(&device_id).expect("load all rel states");
         let per_rel = get_bcr_chain_states_for_rel(&device_id, &rel_key).expect("load rel");
 
-        assert_eq!(published.len(), 1);
         assert_eq!(all.len(), 2);
         assert_eq!(per_rel.len(), 2);
-        assert_eq!(published[0].compute_chain_tip(), rel0.compute_chain_tip());
+        assert_eq!(all[0].compute_chain_tip(), rel0.compute_chain_tip());
         assert_eq!(
             all[1].compute_chain_tip(),
             outcome1.new_chain_state.compute_chain_tip()
@@ -1025,14 +1012,7 @@ mod tests {
                 .expect("corrupt the row");
                 assert_eq!(changed, 1);
             }
-            assert!(
-                get_bcr_chain_states(&device_id, false).is_err(),
-                "{corrupt}: device load"
-            );
-            assert!(
-                get_bcr_chain_states(&device_id, true).is_err(),
-                "{corrupt}: published load"
-            );
+            get_bcr_chain_states(&device_id).expect_err("a corrupt row fails the device load");
             assert!(
                 get_bcr_chain_states_for_rel(&device_id, &rel_key).is_err(),
                 "{corrupt}: relationship load"

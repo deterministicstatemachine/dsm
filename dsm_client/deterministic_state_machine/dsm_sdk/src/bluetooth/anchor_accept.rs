@@ -176,8 +176,8 @@ impl DsmVerifier for DsmStateVerifier<'_> {
 
     fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
         // Dormant in Stage 3: acceptance sets is_genesis=false, so the predicate never reaches this.
-        // First-transfer admission stays TOFU (`pin_admit_decision`); the real dual-identity upgrade
-        // cert is Stage 5.
+        // First-transfer admission stays TOFU (Core's `pin_admit_decision`); the real
+        // dual-identity upgrade cert is Stage 5.
         //
         // FAILS CLOSED rather than returning true. Because the hook is unreachable today the two
         // answers are behaviourally identical NOW, which is exactly why the choice matters: whoever
@@ -186,85 +186,6 @@ impl DsmVerifier for DsmStateVerifier<'_> {
         // is a visible failure that names this function instead of a silent admission.
         false
     }
-}
-
-/// Receiver-admit fold: the decision for a sender's anchor disclosure against the receiver's pin
-/// state. PURE — no store, no I/O; the confirm handler applies it inside the offline branch, bound
-/// to that transfer, under the surrounding gates (offline op, verified contact, disclosure present).
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PinAdmitDecision {
-    /// No existing pin: admit the disclosed pin (first-transfer TOFU under the verified contact).
-    Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment),
-    /// Already pinned and the disclosure matches: keep the pin untouched.
-    NoChange,
-    /// The disclosure CONFLICTS with the pinned anchor (differing anchor_id / bundle / policy / H0 /
-    /// pk_host / pk_chip). A changed anchor after pinning is a silent-substitution attack: keep the
-    /// pinned anchor, never overwrite from a transfer.
-    Reject(&'static str),
-}
-
-/// Decide admit/no-change/reject for a disclosed pin. A first pin is admitted
-/// only when its bundle recomputes for the sender — from the disclosed keys,
-/// enrolled counter and `birth_commitment`, the sender's pinned online key
-/// `sender_online_key`, its device id and the disclosed policy: the bundle is
-/// then the one the sender's online load named. `disclosed.uncompromised` is
-/// ignored: admission marks the pin uncompromised, and only an event out of
-/// band invalidates it.
-pub(crate) fn pin_admit_decision(
-    device_id: [u8; 32],
-    sender_online_key: &[u8],
-    disclosed_policy: [u8; 32],
-    birth_commitment: &[u8; 32],
-    disclosed: &dsm::crypto::anchor_enrollment::FusedAnchorPin,
-    existing: Option<&dsm::crypto::anchor_enrollment::AnchorEnrollment>,
-) -> PinAdmitDecision {
-    let Some(cur) = existing else {
-        let recomputes = dsm::crypto::anchor_enrollment::require_bundle_of(
-            dsm::crypto::anchor_enrollment::PinKeys {
-                bundle: &disclosed.bundle,
-                anchor_id: &disclosed.anchor_id,
-                pk_chip: &disclosed.pk_chip,
-                partition_pk: &disclosed.partition_pk,
-                enrolled_counter: disclosed.enrolled_counter,
-            },
-            dsm::crypto::anchor_enrollment::BundleOwner {
-                online_key: sender_online_key,
-                device_id: &device_id,
-                policy: &disclosed_policy,
-                birth_commitment,
-            },
-        );
-        if let Err(e) = recomputes {
-            log::warn!("[anchor-accept] a disclosed anchor whose bundle does not recompute: {e}");
-            return PinAdmitDecision::Reject(
-                "the disclosed bundle does not recompute for the sender",
-            );
-        }
-        return PinAdmitDecision::Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment {
-            device_id,
-            policy_hash: disclosed_policy,
-            pin: dsm::crypto::anchor_enrollment::FusedAnchorPin {
-                uncompromised: true,
-                ..disclosed.clone()
-            },
-        });
-    };
-    if cur.pin.anchor_id != disclosed.anchor_id || cur.pin.bundle != disclosed.bundle {
-        return PinAdmitDecision::Reject("disclosed anchor identity differs from the pinned one");
-    }
-    if cur.policy_hash != disclosed_policy {
-        return PinAdmitDecision::Reject("disclosed policy differs from the admitted one");
-    }
-    if cur.pin.enrolled_counter != disclosed.enrolled_counter {
-        return PinAdmitDecision::Reject("disclosed H0 differs from the enrolled counter");
-    }
-    if cur.pin.partition_pk != disclosed.partition_pk {
-        return PinAdmitDecision::Reject("disclosed pk_host differs from the pinned one");
-    }
-    if cur.pin.pk_chip != disclosed.pk_chip {
-        return PinAdmitDecision::Reject("disclosed pk_chip differs from the pinned one");
-    }
-    PinAdmitDecision::NoChange
 }
 
 /// The offline-account spend a sender's offline-bearer step makes, DERIVED — never read — from
@@ -367,7 +288,7 @@ pub fn accept_offline_release(
         expected_recipient: receiver_device_id,
         expected_policy_hash,
         anchor_uncompromised: pinned.uncompromised,
-        // Stage 3: genesis handling stays TOFU (pin_admit_decision); the upgrade cert is Stage 5.
+        // Stage 3: genesis handling stays TOFU (Core's pin_admit_decision); the upgrade cert is Stage 5.
         is_genesis: false,
     };
     let dsm = DsmStateVerifier {
@@ -510,132 +431,6 @@ mod tests {
         assert!(matches!(
             decode_release(&bytes),
             Err(OfflineRecover::Malformed)
-        ));
-    }
-
-    // --- receiver-admit fold: pin_admit_decision matrix ---
-
-    /// The sender's pinned online key, and the birth its anchor's bundle commits.
-    const ONLINE_KEY: [u8; 64] = [0x0E; 64];
-    const BIRTH: [u8; 32] = [0xB7; 32];
-
-    /// A pin whose bundle is the one an anchor born for device `0x11` under
-    /// policy `0x9A` has.
-    fn fused_pin() -> dsm::crypto::anchor_enrollment::FusedAnchorPin {
-        dsm::crypto::anchor_enrollment::FusedAnchorPin {
-            bundle: anchor_core::enrollment::anchor_bundle(
-                &ONLINE_KEY,
-                &[0xA1; 32],
-                &[0x0C; 32],
-                &[0x07; 64],
-                1_000_000,
-                &[0x11; 32],
-                &[0x9A; 32],
-                &BIRTH,
-            ),
-            anchor_id: [0xA1; 32],
-            enrolled_counter: 1_000_000,
-            partition_pk: vec![0x07; 64],
-            pk_chip: vec![0x0C; 32],
-            uncompromised: true,
-        }
-    }
-
-    fn pinned() -> dsm::crypto::anchor_enrollment::AnchorEnrollment {
-        dsm::crypto::anchor_enrollment::AnchorEnrollment {
-            device_id: [0x11; 32],
-            policy_hash: [0x9A; 32],
-            pin: fused_pin(),
-        }
-    }
-
-    #[test]
-    fn pin_admit_decision_first_transfer_admits_under_disclosed_policy() {
-        let d = fused_pin();
-        match pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, &d, None) {
-            PinAdmitDecision::Admit(e) => {
-                assert_eq!(e.device_id, [0x11; 32]);
-                assert_eq!(e.policy_hash, [0x9A; 32]);
-                assert_eq!(e.pin.anchor_id, [0xA1; 32]);
-                assert_eq!(e.pin.pk_chip, vec![0x0C; 32]);
-                assert!(e.pin.uncompromised, "admission sets uncompromised=true");
-            }
-            other => panic!("expected Admit, got {other:?}"),
-        }
-    }
-
-    /// A first disclosure is admitted only when its bundle recomputes for the
-    /// sender: under another online key, another device, another policy or
-    /// another birth commitment, the same bundle is not this sender's anchor.
-    /// MUTATION CONTROL: admitting without the recomputation turns this red.
-    #[test]
-    fn a_first_disclosure_whose_bundle_does_not_recompute_is_not_admitted() {
-        let d = fused_pin();
-        for (device, key, policy, birth) in [
-            ([0x12; 32], ONLINE_KEY.to_vec(), [0x9A; 32], BIRTH),
-            ([0x11; 32], vec![0x0F; 64], [0x9A; 32], BIRTH),
-            ([0x11; 32], ONLINE_KEY.to_vec(), [0x9B; 32], BIRTH),
-            ([0x11; 32], ONLINE_KEY.to_vec(), [0x9A; 32], [0xB8; 32]),
-        ] {
-            assert_eq!(
-                pin_admit_decision(device, &key, policy, &birth, &d, None),
-                PinAdmitDecision::Reject("the disclosed bundle does not recompute for the sender"),
-            );
-        }
-    }
-
-    #[test]
-    fn pin_admit_decision_no_change_when_disclosure_matches() {
-        let cur = pinned();
-        assert_eq!(
-            pin_admit_decision(
-                [0x11; 32],
-                &ONLINE_KEY,
-                [0x9A; 32],
-                &BIRTH,
-                &fused_pin(),
-                Some(&cur)
-            ),
-            PinAdmitDecision::NoChange
-        );
-    }
-
-    #[test]
-    fn pin_admit_decision_rejects_every_conflicting_disclosure() {
-        let cur = pinned();
-        let base = fused_pin();
-
-        let mut anchor = base.clone();
-        anchor.anchor_id = [0xEE; 32];
-        let mut bundle = base.clone();
-        bundle.bundle = [0xEE; 32];
-        let mut h0 = base.clone();
-        h0.enrolled_counter = 999_999;
-        let mut host = base.clone();
-        host.partition_pk = vec![0x08; 64];
-        let mut chip = base.clone();
-        chip.pk_chip = vec![0x0D; 32];
-
-        for d in [&anchor, &bundle, &h0, &host, &chip] {
-            assert!(
-                matches!(
-                    pin_admit_decision([0x11; 32], &ONLINE_KEY, [0x9A; 32], &BIRTH, d, Some(&cur)),
-                    PinAdmitDecision::Reject(_)
-                ),
-                "conflicting disclosure must be rejected: {d:?}"
-            );
-        }
-        // Differing policy rejects too.
-        assert!(matches!(
-            pin_admit_decision(
-                [0x11; 32],
-                &ONLINE_KEY,
-                [0x9B; 32],
-                &BIRTH,
-                &base,
-                Some(&cur)
-            ),
-            PinAdmitDecision::Reject(_)
         ));
     }
 }

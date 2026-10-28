@@ -103,4 +103,4 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/escrow.rs	181	verdict_author
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_flow.rs	1	module boundary	unproved	6344bcb9ceebf6f759010c47af73a3764aa4cf35
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	1	module boundary	unproved	9723773f5c61435e072df51b49a2d206b3714034
 crates/dsm-anchor-pico/src/main.rs	1	module boundary	unproved	fb0687d62f305afa7651ddf9cae981350853d91b
-dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	c57c6a389cf75a9bd7339a8d3fea13660ef81b00
+dsm_client/deterministic_state_machine/dsm_sdk/src/bluetooth/anchor_accept.rs	1	module boundary	unproved	468bbcf8cffc5f738d879e27525a5a697cf5d4f8

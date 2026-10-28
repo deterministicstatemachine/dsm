@@ -224,7 +224,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
-            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+            if let Some(c) = dsm::core::token::builtin_policy_commit_for_token("dBTC") {
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
@@ -890,17 +890,15 @@ impl AppRouterImpl {
                         Ok(amount) => amount,
                         Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
                     };
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => {
-                        return err(format!(
-                            "wallet.sendOffline: policy_commit resolve failed: {e}"
-                        ))
-                    }
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
                 let token_policy =
                     match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
                         Ok(bytes) => bytes,
@@ -1146,13 +1144,11 @@ impl AppRouterImpl {
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                    };
                 let token_decimals = match token_of_commit(&policy_commit) {
                     Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),
@@ -2095,7 +2091,7 @@ mod history_tests {
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
         let peer_id = [0x76u8; 32];
         let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
-        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
         // The nonce the sender's send derives (§4.1), over the relationship.
         let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &peer_id,

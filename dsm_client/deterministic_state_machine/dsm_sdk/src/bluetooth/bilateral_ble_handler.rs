@@ -344,14 +344,12 @@ pub(crate) fn stage_bearer_spend(
     // §9.5: independently resolve the sender's installed policy_commit for the token the step's
     // terms name; it must be the asset the operation signs. Unresolved is a REFUSAL — empty deltas
     // without a spend would only die later in the conservation guard; fail at the seam instead.
-    let asset = router
-        .resolve_policy_commit_strict(&terms.token_id)
-        .map_err(|e| {
-            DsmError::invalid_operation(format!(
-                "bearer transfer refused: policy_commit unresolved for token {} — {e}",
-                String::from_utf8_lossy(&terms.token_id)
-            ))
-        })?;
+    let asset = crate::policy::resolve_policy_commit_strict(&terms.token_id).map_err(|e| {
+        DsmError::invalid_operation(format!(
+            "bearer transfer refused: policy_commit unresolved for token {} — {e}",
+            String::from_utf8_lossy(&terms.token_id)
+        ))
+    })?;
     if asset != *policy_commit {
         return Err(DsmError::invalid_operation(format!(
             "bearer transfer refused: token {} is not the asset the operation signs",
@@ -3634,7 +3632,7 @@ impl BilateralBleHandler {
         {
             {
                 let existing = store.get(&sender_device_id);
-                match crate::bluetooth::anchor_accept::pin_admit_decision(
+                match dsm::crypto::anchor_enrollment::pin_admit_decision(
                     sender_device_id,
                     sender_online_key,
                     policy,
@@ -3642,7 +3640,7 @@ impl BilateralBleHandler {
                     &disclosed,
                     existing.as_ref(),
                 ) {
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Admit(e) => {
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => {
                         let anchor_id = e.pin.anchor_id;
                         match store.admit(e) {
                             Ok(()) => {
@@ -3675,8 +3673,8 @@ impl BilateralBleHandler {
                             ),
                         }
                     }
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::NoChange => {}
-                    crate::bluetooth::anchor_accept::PinAdmitDecision::Reject(reason) => {
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => {}
+                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
                         // A pinned anchor's identity changed on a later transfer — a security event,
                         // not a routine failure. The transfer is ALREADY rejected fail-closed by the
                         // acceptance predicate (it verifies against the PINNED anchor) and the pinned
@@ -4239,15 +4237,8 @@ impl BilateralBleHandler {
         let terms = session.terms.as_ref().ok_or_else(|| {
             DsmError::invalid_operation("receiver confirm: the session holds no transfer terms")
         })?;
-        let policy_commit = crate::bridge::app_router()
-            .ok_or_else(|| {
-                DsmError::state_machine(
-                    "receiver confirm: app_router not installed; cannot resolve the \
-                     credited asset",
-                )
-            })?
-            .resolve_policy_commit_strict(&terms.token_id)
-            .map_err(|e| {
+        let policy_commit =
+            crate::policy::resolve_policy_commit_strict(&terms.token_id).map_err(|e| {
                 DsmError::invalid_operation(format!(
                     "receiver confirm: policy_commit unresolved for token {}: {e}",
                     String::from_utf8_lossy(&terms.token_id)
