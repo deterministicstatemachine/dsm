@@ -1834,13 +1834,11 @@ mod tests {
                 receipt.set_ek_cert_a(answer.ek_cert);
                 receipt.set_ek_pk_a(answer.ek_pk);
                 receipt.add_sig_a(answer.sig);
-                receipt.set_kyber_ct_a(answer.kyber_ct);
             }
             BilateralSide::B => {
                 receipt.set_ek_cert_b(answer.ek_cert);
                 receipt.set_ek_pk_b(answer.ek_pk);
                 receipt.add_sig_b(answer.sig);
-                receipt.set_kyber_ct_b(answer.kyber_ct);
             }
         }
         (
@@ -2085,10 +2083,9 @@ mod tests {
     /// - `recognized_implies_valid` and `replayed_signature_pins_the_fields`:
     ///   one bit flipped at each of 96 positions spread over the receipt — its
     ///   fields, paths, proofs, signatures and certificates — is never
-    ///   recognized. The one exception is the sender's Kyber ciphertext
-    ///   (field 18), which no signature covers and nothing reads: an owner
-    ///   question recorded in CONFORMANCE §6.121, located here by its value
-    ///   and left out of the sample, never pinned as expected behaviour.
+    ///   recognized. The receipt carries nothing outside its signatures: the
+    ///   Kyber ciphertext no signature covered is gone from it (CONFORMANCE
+    ///   §6.121).
     ///
     /// MUTATION CONTROL: dropping the σ_A check, or the recompute of the
     /// successor tip from the fields, turns this red.
@@ -2210,30 +2207,10 @@ mod tests {
         }
         assert_eq!(refusals.len(), 7, "every witness was refused: {refusals:?}");
 
-        // The sender's ML-KEM ciphertext (receipt field 18) rides in the
-        // envelope only: no signature covers it and nothing reads it, so a
-        // flip there is taken (CONFORMANCE §6.121, an owner question). Every
-        // other byte of the receipt is bound.
-        let kyber_ct_a = {
-            use prost::Message;
-            crate::types::proto::ReceiptCommit::decode(c.receipt.as_slice())
-                .expect("the receipt decodes")
-                .kyber_ct_a
-        };
-        let Some(ct_at) = c
-            .receipt
-            .windows(kyber_ct_a.len())
-            .position(|w| w == kyber_ct_a.as_slice())
-        else {
-            panic!("the ciphertext is in the receipt's bytes");
-        };
-        let unbound = ct_at..ct_at + kyber_ct_a.len();
+        // Every byte of the receipt is bound.
         let stride = c.receipt.len() / 97 + 1;
         let mut flips = Vec::new();
-        for at in (0..c.receipt.len())
-            .step_by(stride)
-            .filter(|at| !unbound.contains(at))
-        {
+        for at in (0..c.receipt.len()).step_by(stride) {
             let mut bytes = c.receipt.clone();
             bytes[at] ^= 0x01;
             match decide(Case {

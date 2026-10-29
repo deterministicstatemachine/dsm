@@ -27,13 +27,11 @@ pub(crate) struct Party {
 }
 
 /// One per-step EK answer: the EK the step derived, the prior key's
-/// certificate over it, the EK's signature over the response target, and the
-/// ML-KEM ciphertext the EK's derivation consumed.
+/// certificate over it, and the EK's signature over the response target.
 pub(crate) struct StepAnswer {
     pub ek_pk: Vec<u8>,
     pub ek_cert: Vec<u8>,
     pub sig: Vec<u8>,
-    pub kyber_ct: Vec<u8>,
 }
 
 impl Party {
@@ -163,7 +161,7 @@ impl Party {
             c_pre,
             &self.device_id(),
         );
-        let (shared_secret, kyber_ct) = crate::crypto::kyber::kyber_encapsulate_deterministic(
+        let (shared_secret, _ciphertext) = crate::crypto::kyber::kyber_encapsulate_deterministic(
             toward.kyber_public_key(),
             &coins,
         )
@@ -186,7 +184,6 @@ impl Party {
             ek_pk,
             ek_cert,
             sig,
-            kyber_ct,
         }
     }
 }

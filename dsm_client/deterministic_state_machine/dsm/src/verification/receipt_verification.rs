@@ -367,8 +367,7 @@ fn rejected(reason: &str) -> ReceiptVerifyOutcome {
 ///     space, and comparing across the two rejects valid countersignatures);
 ///  3. its commitment is `commitment`. The commitment covers the receipt's
 ///     parent and child roots, so a receipt naming other roots fails here;
-///  4. `ek_pk_b` and `kyber_ct_b` are present together;
-///  5. `ek_cert_b` chains `ek_pk_b` to `expected_prev_pk_b` over the parent tip
+///  4. `ek_cert_b` chains `ek_pk_b` to `expected_prev_pk_b` over the parent tip
 ///     ([`per_step_ek_predecessor`] of the recipient's head and AK), and
 ///     `sig_b` verifies under `ek_pk_b` over the B-canonical target: the
 ///     session-bound target of the commitment extended with `b_pair`, the
@@ -405,12 +404,6 @@ pub fn verify_acceptance_receipt(
     let receipt_commitment = receipt.compute_commitment()?;
     if &receipt_commitment != commitment {
         return Ok(rejected("receipt commitment != proposal commitment"));
-    }
-    if !receipt.ek_pk_b.is_empty() && receipt.kyber_ct_b.is_empty() {
-        return Ok(rejected(
-            "receipt ek_pk_b set but kyber_ct_b missing — per-step EK derivation \
-             requires both halves of the Kyber context",
-        ));
     }
     let b_target = crate::types::receipt_types::compute_receipt_b_canonical_target(
         &receipt_commitment,
@@ -684,7 +677,6 @@ mod tests {
             );
             receipt.set_ek_pk_b(answer.ek_pk);
             receipt.set_ek_cert_b(answer.ek_cert);
-            receipt.set_kyber_ct_b(answer.kyber_ct);
             receipt.add_sig_b(answer.sig);
             Judged {
                 sender: w.sender.device_id(),
@@ -782,25 +774,6 @@ mod tests {
         .rejected_for("commitment");
     }
 
-    /// `kyber_ct_b` is outside every signature: stripped, `sig_b` still
-    /// verifies, so the consistency gate is what refuses it. Its refusal
-    /// records nothing (MR-DSM-0018), and a valid artifact for the same
-    /// commitment still finalizes the step.
-    #[test]
-    fn a_stripped_kyber_ct_b_is_rejected_by_the_live_gate() {
-        let mut stripped = countersigned().clone();
-        stripped.receipt.set_kyber_ct_b(Vec::new());
-        assert_eq!(
-            stripped
-                .receipt
-                .compute_commitment()
-                .expect("the commitment"),
-            stripped.commitment,
-            "the canonical form leaves the B-side fields out of the commitment"
-        );
-        stripped.rejected_for("kyber_ct_b missing");
-    }
-
     /// A raw `sig_b` with no per-step EK and no certificate is a static-key
     /// signature, not finalization evidence.
     #[test]
@@ -808,7 +781,6 @@ mod tests {
         let mut bare = countersigned().clone();
         bare.receipt.set_ek_pk_b(Vec::new());
         bare.receipt.set_ek_cert_b(Vec::new());
-        bare.receipt.set_kyber_ct_b(Vec::new());
         bare.rejected_for("per-step EK");
     }
 

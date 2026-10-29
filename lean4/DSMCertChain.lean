@@ -58,17 +58,13 @@
                           || DevID_sender)
       (ct, ss) = KyberEncDet(recipient_kyber_pk, coins)
       k_step = BLAKE3-256("DSM/kyber-ss\0" || ss)
-    The recipient decapsulates `ct` with their Kyber sk to recover the
-    same `ss` and `k_step`. The Kyber ciphertext travels in the receipt's
-    `kyber_ct_a/b` envelope fields (proto 18/19). Code helpers:
-    `derive_kyber_k_step_for_send` / `_for_verify` in sdk/receipts.rs.
-    The cert chain proofs in this module are agnostic to where `k_step`
-    came from — they reason about cert verification given EK_pk values,
-    regardless of the derivation pathway. Real Kyber per-step BINDS the
-    EK derivation to a specific recipient (a receipt encapsulated to one
-    recipient cannot be replayed against another — Kyber binds to
-    recipient_kyber_pk), strengthening the security model the cert chain
-    proofs rest on.
+    `ct` goes nowhere: no receipt carries it and no recipient opens it, so
+    `k_step` is an input to the sender's own EK seed only (code helper:
+    `derive_kyber_k_step_for_send` in sdk/receipts.rs). The cert chain
+    proofs in this module are agnostic to where `k_step` came from — they
+    reason about cert verification given EK_pk values, regardless of the
+    derivation pathway. The EK is authenticated by its certificate chain,
+    never by the exchange.
 -/
 
 -- ============================================================

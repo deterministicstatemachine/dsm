@@ -1383,7 +1383,6 @@ mod tests {
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
-            r.set_kyber_ct_a(answer.kyber_ct);
             r.add_sig_a(answer.sig);
             r.to_full_protobuf().expect("re-encode")
         };
@@ -1830,7 +1829,6 @@ mod tests {
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
-            r.set_kyber_ct_a(answer.kyber_ct);
             r.add_sig_a(answer.sig);
             r.to_full_protobuf().expect("re-encode")
         };

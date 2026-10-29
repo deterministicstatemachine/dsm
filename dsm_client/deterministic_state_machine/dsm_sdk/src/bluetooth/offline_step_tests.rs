@@ -2033,6 +2033,107 @@ async fn a_proposer_cancels_an_unanswered_proposal_and_the_receiver_ends_it_on_i
     assert!(again.to_string().contains("already proposed"), "{again}");
 }
 
+/// A receiver told of a cancellation keeps the proposer's signed cancellation
+/// as the step's terminal record, in place of the acceptance it owed, and
+/// answers the proposal delivered again — any number of times, before and
+/// after a restart — with those same bytes, never reopening or moving the
+/// step (owner ruling, 2026-09-26). (Found by the offline-finality
+/// correspondence: the stale acceptance was kept and sent again.)
+/// MUTATION CONTROL: keeping the frame owed before the cancellation as the
+/// step's answer turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_told_of_a_cancellation_answers_the_proposal_again_with_that_cancellation() {
+    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+
+    let (commitment, prepare, _lost_response) = to_a_lost_response(&a, &b, payment).await;
+    a.device.enter();
+    let cancellation = a
+        .handler
+        .cancel_proposal(commitment, "no answer".to_string())
+        .await
+        .expect("the proposer cancels");
+    b.device.enter();
+    let tip = b.tip_with(&a);
+    b.handler
+        .handle_prepare_reject(&cancellation)
+        .await
+        .expect("the cancellation ends the receiver's side");
+    let restarted = b.restarted().await;
+    for device in [&b, &b, &restarted, &restarted] {
+        device.device.enter();
+        let (answer, _) = device
+            .handler
+            .handle_prepare_request(&prepare, None)
+            .await
+            .expect("the proposal delivered again is answered");
+        assert_eq!(
+            answer, cancellation,
+            "answered with the cancellation that ended it"
+        );
+        assert_eq!(stored_phase(&commitment), "rejected");
+        assert!(
+            device
+                .handler
+                .frames_owed_to(&a.device.device_id)
+                .await
+                .is_empty(),
+            "an ended step owes nothing"
+        );
+        assert!(
+            !history_row_exists(&commitment),
+            "the cancelled step committed"
+        );
+        assert_eq!(device.tip_with(&a), tip, "the cancelled step moved the tip");
+    }
+}
+
+/// A receiver restarted while a proposal awaits its user takes it up again
+/// with its relationship: its user accepts, and the step commits on both
+/// devices. (Found by the offline-finality correspondence: the restored
+/// proposal could not be accepted, "No chain tip for relationship".)
+/// MUTATION CONTROL: not holding a restored receiver step's relationship
+/// again turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_receiver_restarted_while_its_user_decides_accepts_and_the_step_commits() {
+    let (_pair, a, b, _appliance, payment) = bearer_pair().await;
+
+    a.device.enter();
+    let (prepare, commitment) = a.propose(&b, payment).await.expect("A proposes");
+    b.device.enter();
+    let (answer, _) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
+    let b = b.restarted().await;
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts the restored proposal");
+    a.device.enter();
+    let (confirm, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A confirms");
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A files the ack");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
 /// A cancellation its proposer did not sign ends nothing: the receiver keeps
 /// its acceptance and still owes its response.
 /// MUTATION CONTROL: ending the step without the rejector's signature
@@ -3545,7 +3646,6 @@ fn resigned_by(
     .expect("the sender's per-step EK signs");
     resigned.set_ek_pk_a(signed.ek_pk);
     resigned.set_ek_cert_a(signed.ek_cert);
-    resigned.set_kyber_ct_a(signed.kyber_ct);
     resigned.sig_a.clear();
     resigned.add_sig_a(signed.sig);
     resigned
@@ -4362,3 +4462,6 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     );
     assert_eq!(b.tip_with(&a), b_tip, "the forgery moved B's tip");
 }
+
+/// The bilateral models, refined by this protocol run between real devices.
+mod model_correspondence;

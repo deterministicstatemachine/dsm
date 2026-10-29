@@ -48,7 +48,7 @@ pub struct RecipientAcceptanceJournal {
     /// op + entropy), NOT a digest of the whole accepted transition.
     pub precommit_digest: [u8; 32],
     /// `BLAKE3("DSM/acceptance-artifact/v1" || exact_persisted_full_receipt_bytes)`.
-    /// Binds the EXACT signed EK artifact (sig_b / ek_pk_b / ek_cert_b / kyber_ct_b
+    /// Binds the EXACT signed EK artifact (sig_b / ek_pk_b / ek_cert_b
     /// and any non-commitment envelope fields), separate from the semantic
     /// `commitment`. Computed over `receipt_bytes` verbatim — never reserialized.
     pub prepared_receipt_artifact_hash: [u8; 32],
@@ -550,7 +550,7 @@ pub fn promote_prepared_to_applied(
 
     // Recompute the exact-artifact hash from the journal's PRECISE stored bytes
     // (verbatim — never deserialized/reserialized). This binds the exact signed EK
-    // artifact (sig_b/ek_pk_b/ek_cert_b/kyber_ct_b/envelope), which the semantic
+    // artifact (sig_b/ek_pk_b/ek_cert_b/envelope), which the semantic
     // commitment does not cover. Require both self-consistency (stored hash matches
     // stored bytes) and marker agreement.
     let recomputed_artifact = acceptance_artifact_hash(&rec.receipt_bytes);

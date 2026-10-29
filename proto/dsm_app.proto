@@ -1891,7 +1891,7 @@ message BilateralCommitResponse {
   Hash32 commitment_hash  = 5;
   // §11.1 receiver counter-sign: receiver's locally-built copy of the
   // stitched receipt with B-side per-step EK signing artifacts
-  // (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+  // (ek_pk_b / ek_cert_b / sig_b) stamped on top of the
   // sender's A-side fields. Sender verifies this on receipt and persists
   // a fully co-signed copy to its own archive. This field is required for
   // offline receipt authorization.
@@ -1976,19 +1976,12 @@ message ReceiptCommit {
   // is the Boot Fenced Fused Anchor (a seed copy holds Smaster).
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
-  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
-  // deterministic Kyber coins from
-  //   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
-  //                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
-  // encapsulates against the recipient's Kyber public key, and the
-  // resulting ciphertext travels here. The recipient decapsulates with
-  // their local Kyber secret key to recover the same shared secret `ss`,
-  // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
-  // arrive at identical k_step, which is then mixed into the per-step
-  // EK derivation alongside Smaster. Wire-only — not part of canonical
-  // commit form (§4.2.1).
-  bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
-  bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
+  // 18 and 19 were the two sides' per-step ML-KEM ciphertexts. No signature
+  // covered them and nothing read them: the step's shared secret feeds only
+  // its sender's own EK seed, and the EK is authenticated by its certificate
+  // chain, never by the exchange (CONFORMANCE §6.121).
+  reserved 18, 19;
+  reserved "kyber_ct_a", "kyber_ct_b";
   // 20 was a fork-aware finalization witness: no producer made one, and the
   // receiver checked the sender's candidate set only against itself.
   reserved 20;
@@ -3717,7 +3710,9 @@ message ReceiptCountersignB {
   bytes sig_b                     = 3 [(dsm_max_len)=65535];
   bytes ek_cert_b                 = 4 [(dsm_max_len)=65535];
   bytes ek_pk_b                   = 5 [(dsm_max_len)=65535];
-  bytes kyber_ct_b                = 6 [(dsm_max_len)=2048];
+  // 6 was the B side's per-step ML-KEM ciphertext, covered by no signature.
+  reserved 6;
+  reserved "kyber_ct_b";
   // The recipient's own canonical relationship pair for the applied step: its
   // local lineage head before this apply (parent) and after it (child) — the
   // exact parent the recipient will sign under when IT next originates.

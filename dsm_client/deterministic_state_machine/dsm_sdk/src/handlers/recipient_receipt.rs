@@ -394,15 +394,10 @@ pub fn generate_b_artifacts_from_inbound(
     let mut receipt = inbound_receipt.clone();
     receipt.set_ek_pk_b(out.ek_pk.clone());
     receipt.set_ek_cert_b(out.ek_cert.clone());
-    receipt.set_kyber_ct_b(out.kyber_ct.clone());
     receipt.add_sig_b(out.sig.clone());
 
     // Verify before journaling.
-    if receipt.sig_b.is_empty()
-        || receipt.ek_pk_b.is_empty()
-        || receipt.ek_cert_b.is_empty()
-        || receipt.kyber_ct_b.is_empty()
-    {
+    if receipt.sig_b.is_empty() || receipt.ek_pk_b.is_empty() || receipt.ek_cert_b.is_empty() {
         return Err(anyhow!(
             "constructed B-side receipt has an empty EK artifact"
         ));

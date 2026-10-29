@@ -1421,7 +1421,6 @@ impl AppRouterImpl {
                                     // Stamp per-step artifacts on the receipt.
                                     receipt.set_ek_pk_a(out.ek_pk.clone());
                                     receipt.set_ek_cert_a(out.ek_cert);
-                                    receipt.set_kyber_ct_a(out.kyber_ct);
                                     receipt.add_sig_a(out.sig);
 
                                     // §11.1 lockstep: do NOT advance the committed Local

@@ -606,9 +606,9 @@ impl BilateralBleHandler {
     ///
     /// `side` selects which side of the bilateral receipt to stamp:
     ///   * `BilateralSide::A` — local device is the sender (stamps
-    ///     `ek_pk_a`/`ek_cert_a`/`kyber_ct_a`/`sig_a`).
+    ///     `ek_pk_a`/`ek_cert_a`/`sig_a`).
     ///   * `BilateralSide::B` — local device is the receiver counter-signing
-    ///     (stamps `ek_pk_b`/`ek_cert_b`/`kyber_ct_b`/`sig_b`).
+    ///     (stamps `ek_pk_b`/`ek_cert_b`/`sig_b`).
     ///
     /// Writes nothing: the EK it signed with is returned, and the caller
     /// installs it as the local cert-chain head where the step's durability
@@ -688,13 +688,11 @@ impl BilateralBleHandler {
             BilateralSide::A => {
                 receipt.set_ek_pk_a(signing_out.ek_pk.clone());
                 receipt.set_ek_cert_a(signing_out.ek_cert);
-                receipt.set_kyber_ct_a(signing_out.kyber_ct);
                 receipt.add_sig_a(signing_out.sig);
             }
             BilateralSide::B => {
                 receipt.set_ek_pk_b(signing_out.ek_pk.clone());
                 receipt.set_ek_cert_b(signing_out.ek_cert);
-                receipt.set_kyber_ct_b(signing_out.kyber_ct);
                 receipt.add_sig_b(signing_out.sig);
             }
         }
@@ -1013,6 +1011,21 @@ impl BilateralBleHandler {
                     self.fail_session(&session.commitment_hash, None).await?;
                     continue;
                 }
+            } else if matches!(
+                session.phase,
+                BilateralPhase::PendingUserAction | BilateralPhase::Accepted
+            ) {
+                // A proposal this device took: its user may still accept it,
+                // and its acceptance still be confirmed. Both read the
+                // relationship's anchor, which a restart does not keep. One
+                // that cannot be held again stays in flight: its proposer may
+                // have committed.
+                if let Err(e) = self.hold_receiver_step_again(&session).await {
+                    warn!(
+                        "[BLE_HANDLER] receiver step {} is not held again: {e}",
+                        bytes_to_base32(&session.commitment_hash[..8])
+                    );
+                }
             }
             if session.phase == BilateralPhase::ConfirmPending {
                 if let Some(ack) = &session.counter_signed_receipt {
@@ -1096,6 +1109,23 @@ impl BilateralBleHandler {
             session.operation.clone(),
             &session.commitment_hash,
         )
+    }
+
+    /// A restored step this device received: its relationship held again, at
+    /// the tip its store holds.
+    async fn hold_receiver_step_again(
+        &self,
+        session: &BilateralBleSession,
+    ) -> Result<(), DsmError> {
+        let counterparty = session.counterparty_device_id;
+        let mut mgr = self.bilateral_tx_manager.write().await;
+        if !mgr.has_verified_contact(&counterparty) {
+            sync_contact_from_storage(&mut mgr, &counterparty)?;
+        }
+        if mgr.get_relationship(&counterparty).is_none() {
+            mgr.establish_relationship(&counterparty).await?;
+        }
+        Ok(())
     }
 
     /// Phase 1: Prepare bilateral transaction (sender initiates). One step at
@@ -2525,6 +2555,12 @@ impl BilateralBleHandler {
             }
             let mut rejected = session.clone();
             rejected.phase = BilateralPhase::Rejected;
+            // The counterparty's signed rejection or cancellation ended the
+            // step: it is the step's terminal record and the answer to any of
+            // its frames delivered again, in place of the frame owed before —
+            // a prepare or an acceptance is no answer now (owner ruling,
+            // 2026-09-26). It is the counterparty's evidence, kept here.
+            rejected.owed_frame = Some(envelope_bytes.to_vec());
             rejected
         };
         self.bilateral_tx_manager.read().await.verify_rejection(
@@ -2546,6 +2582,7 @@ impl BilateralBleHandler {
             .get_mut(&commitment_hash)
         {
             session.phase = BilateralPhase::Rejected;
+            session.owed_frame = Some(envelope_bytes.to_vec());
         }
         // The step is abandoned: the relationship tip stays where it was.
         let pending_key = rejected_session

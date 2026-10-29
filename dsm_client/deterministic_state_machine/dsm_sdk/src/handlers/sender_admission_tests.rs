@@ -904,7 +904,6 @@ async fn a_transfer_its_policy_refuses_is_refused_before_the_senders_register_is
     let answer = a.answer(&b, &receipt.parent_tip, &c_pre, &target);
     receipt.set_ek_pk_a(answer.ek_pk);
     receipt.set_ek_cert_a(answer.ek_cert);
-    receipt.set_kyber_ct_a(answer.kyber_ct);
     receipt.add_sig_a(answer.sig);
     let receipt_bytes = receipt.to_full_protobuf().expect("the signed receipt");
     let transfer_bytes = dsm::types::proto::OnlineTransferRequest {
@@ -1142,7 +1141,6 @@ async fn a_transfer_on_a_fork_of_the_senders_chain_is_refused_before_the_senders
     );
     receipt.set_ek_pk_a(answer.ek_pk);
     receipt.set_ek_cert_a(answer.ek_cert);
-    receipt.set_kyber_ct_a(answer.kyber_ct);
     receipt.add_sig_a(answer.sig);
     let receipt_bytes = receipt.to_full_protobuf().expect("the signed receipt");
     let transfer_bytes = dsm::types::proto::OnlineTransferRequest {

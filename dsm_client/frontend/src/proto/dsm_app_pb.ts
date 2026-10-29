@@ -12592,7 +12592,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   /**
    * §11.1 receiver counter-sign: receiver's locally-built copy of the
    * stitched receipt with B-side per-step EK signing artifacts
-   * (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+   * (ek_pk_b / ek_cert_b / sig_b) stamped on top of the
    * sender's A-side fields. Sender verifies this on receipt and persists
    * a fully co-signed copy to its own archive. This field is required for
    * offline receipt authorization.
@@ -12860,28 +12860,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
-   * deterministic Kyber coins from
-   *   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
-   *                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
-   * encapsulates against the recipient's Kyber public key, and the
-   * resulting ciphertext travels here. The recipient decapsulates with
-   * their local Kyber secret key to recover the same shared secret `ss`,
-   * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
-   * arrive at identical k_step, which is then mixed into the per-step
-   * EK derivation alongside Smaster. Wire-only — not part of canonical
-   * commit form (§4.2.1).
-   *
-   * @generated from field: bytes kyber_ct_a = 18;
-   */
-  kyberCtA = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes kyber_ct_b = 19;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
    * value Core derived inside DeviceState::advance for this step. CANONICAL —
    * part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -12924,8 +12902,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 15, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 16, name: "ek_pk_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 22, name: "step_writes", kind: "message", T: StepWriteSet },
   ]);
@@ -23425,11 +23401,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes kyber_ct_b = 6;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The recipient's own canonical relationship pair for the applied step: its
    * local lineage head before this apply (parent) and after it (child) — the
    * exact parent the recipient will sign under when IT next originates.
@@ -23475,7 +23446,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
     { no: 3, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "b_parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "b_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "recipient_economic_release_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },

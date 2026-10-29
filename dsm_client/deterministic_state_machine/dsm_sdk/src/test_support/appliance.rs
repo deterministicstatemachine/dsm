@@ -365,6 +365,42 @@ impl HostAppliance {
     }
 }
 
+/// One appliance for each of several devices, installed together through the
+/// production seam: a device's `CoreSDK` attaches on first use, while that
+/// device is entered, and the factory hands it the appliance born for it.
+/// Dropping the handle uninstalls them.
+pub struct InstalledAppliances;
+
+impl HostAppliance {
+    /// Install `appliances`, each the appliance of the device whose id it is
+    /// paired with.
+    #[must_use = "the appliances stay installed only while the handle lives"]
+    pub fn install_each(by_device: Vec<([u8; 32], HostAppliance)>) -> InstalledAppliances {
+        crate::bridge::install_anchor_appliance_factory(Arc::new(move || {
+            let entered = crate::sdk::app_state::AppState::get_device_id()
+                .ok_or_else(|| DsmError::invalid_operation("no device is entered"))?;
+            match by_device
+                .iter()
+                .find(|(device, _)| device.as_slice() == entered.as_slice())
+            {
+                Some((_, appliance)) => {
+                    Ok(Box::new(appliance.clone()) as Box<dyn AnchorAppliance + Send>)
+                }
+                None => Err(DsmError::invalid_operation(
+                    "no appliance was born for the entered device",
+                )),
+            }
+        }));
+        InstalledAppliances
+    }
+}
+
+impl Drop for InstalledAppliances {
+    fn drop(&mut self) {
+        crate::bridge::uninstall_anchor_appliance_factory();
+    }
+}
+
 /// An appliance installed as the process's anchor appliance; dropping it
 /// uninstalls it. An installation that outlived its test leaked into every
 /// later test in the process: the offline-cash gate tests, which assert what a

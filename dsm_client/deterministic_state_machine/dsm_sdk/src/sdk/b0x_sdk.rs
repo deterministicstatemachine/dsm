@@ -1144,7 +1144,6 @@ impl B0xSDK {
             sig_b: b.sig_b,
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
-            kyber_ct_b: b.kyber_ct_b,
             b_parent_tip: b_pair.0.to_vec(),
             b_child_tip: b_pair.1.to_vec(),
             // 3.5b PR4: the post-admission RELEASE's content address — the
@@ -3017,7 +3016,6 @@ mod tests {
     /// Field sizes decoded from a REAL stuck envelope pulled off the bench rig
     /// (submission RX6BA3TY6KRDEBVXGXNCTHWVT0, 168,400 bytes). Using measured
     /// production values, not guesses, is the whole point of this budget.
-    const KYBER_CT_LEN: usize = 1_088;
     const EK_PK_LEN: usize = 64;
     const CANONICAL_OP_LEN: usize = 303;
 
@@ -3051,11 +3049,9 @@ mod tests {
             );
             assert_eq!(a.sig.len(), sphincs_sig_len());
             assert_eq!(a.ek_pk.len(), EK_PK_LEN);
-            assert_eq!(a.kyber_ct.len(), KYBER_CT_LEN);
             receipt.add_sig_a(a.sig);
             receipt.set_ek_cert_a(a.ek_cert);
             receipt.set_ek_pk_a(a.ek_pk);
-            receipt.set_kyber_ct_a(a.kyber_ct);
             let (b_parent, b_child) = TEST_B_PAIR;
             let b = receiver.answer(
                 &sender,
@@ -3074,7 +3070,6 @@ mod tests {
                     sig_b: b.sig,
                     ek_cert_b: b.ek_cert,
                     ek_pk_b: b.ek_pk,
-                    kyber_ct_b: b.kyber_ct,
                 },
             }
         })
@@ -3505,15 +3500,10 @@ mod tests {
         let a = dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(&a_bytes)
             .expect("A side decodes");
         let b = budget_step().countersign_b.clone();
-        let b_fields: usize = [
-            (13, &b.sig_b),
-            (15, &b.ek_cert_b),
-            (17, &b.ek_pk_b),
-            (19, &b.kyber_ct_b),
-        ]
-        .into_iter()
-        .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
-        .sum();
+        let b_fields: usize = [(13, &b.sig_b), (15, &b.ek_cert_b), (17, &b.ek_pk_b)]
+            .into_iter()
+            .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
+            .sum();
         let bytes = a
             .with_countersign_b(b)
             .expect("overlay")
@@ -3585,7 +3575,6 @@ mod tests {
         assert_eq!(delta.sig_b, b.sig_b);
         assert_eq!(delta.ek_cert_b, b.ek_cert_b);
         assert_eq!(delta.ek_pk_b, b.ek_pk_b);
-        assert_eq!(delta.kyber_ct_b, b.kyber_ct_b);
         assert!(
             body.len() < 2 * sig + 8 * 1024,
             "B delta grew beyond two signatures plus reference material: {} bytes",
@@ -3714,7 +3703,6 @@ mod tests {
                 sig_b: vec![0xBB; 65_535],
                 ek_cert_b: vec![0xCB; 65_535],
                 ek_pk_b: vec![0xEB; EK_PK_LEN],
-                kyber_ct_b: vec![0x1B; KYBER_CT_LEN],
             })
             .expect("overlay")
             .to_full_protobuf()

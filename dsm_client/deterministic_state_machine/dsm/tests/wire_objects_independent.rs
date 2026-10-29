@@ -222,8 +222,6 @@ fn a_receipts_canonical_bytes_are_the_same_from_an_independent_encoder() {
         ek_cert_b: vec![0x15; 8],
         ek_pk_a: vec![0x16; 8],
         ek_pk_b: vec![0x17; 8],
-        kyber_ct_a: vec![0x18; 8],
-        kyber_ct_b: vec![0x19; 8],
     };
 
     let mut write = Vec::new();

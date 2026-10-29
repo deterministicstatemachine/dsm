@@ -2228,7 +2228,6 @@ pub(crate) fn build_recipient_admission(
         sig_b: b.sig_b.clone(),
         ek_cert_b: b.ek_cert_b.clone(),
         ek_pk_b: b.ek_pk_b.clone(),
-        kyber_ct_b: b.kyber_ct_b.clone(),
         b_parent_tip: b_artifacts.applied_parent_tip_b.to_vec(),
         b_child_tip: b_artifacts.applied_child_tip_b.to_vec(),
         // The bundle is acceptance PROVENANCE — it never carries the
