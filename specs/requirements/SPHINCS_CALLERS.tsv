@@ -302,11 +302,11 @@ dsm_client/deterministic_state_machine/dsm/src/sofi/validation.rs	5892	signature
 dsm_client/deterministic_state_machine/dsm/src/types/crypto_error.rs	17	/// Name of the cryptographic operation that failed (e.g., "blake3_hash", "sphincs_sign").
 dsm_client/deterministic_state_machine/dsm/src/types/crypto_error.rs	56	operation: "sphincs_sign".into(),
 dsm_client/deterministic_state_machine/dsm/src/types/crypto_error.rs	62	"CryptoError [sphincs_sign]: sign failed (source: invalid key material)"
-dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4156	use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
-dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4192	let over_the_operation = sphincs_sign(
-dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4213	let signed = sphincs_sign(&sk, &derive::setup_signing_digest(&body)).unwrap();
-dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4361	use crate::crypto::sphincs::sphincs_sign;
-dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4377	let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
+dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4342	use crate::crypto::sphincs::{generate_sphincs_keypair, sphincs_sign};
+dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4378	let over_the_operation = sphincs_sign(
+dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4399	let signed = sphincs_sign(&sk, &derive::setup_signing_digest(&body)).unwrap();
+dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4547	use crate::crypto::sphincs::sphincs_sign;
+dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4563	let sign = |message: &[u8]| sphincs_sign(&keys.secret_key, message).expect("signs");
 dsm_client/deterministic_state_machine/dsm/src/types/error.rs	1980	let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	66	crate::crypto::sphincs::verify(
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	67	crate::crypto::sphincs::SphincsVariant::SPX128f,

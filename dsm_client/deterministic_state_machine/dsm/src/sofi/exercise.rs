@@ -1377,4 +1377,334 @@ mod tests {
         );
         assert!(recognize_exercise(&bytes).is_none());
     }
+
+    // ── model-to-code correspondence: tla/DSM_SofiSuccessorCells.tla ───────
+
+    use crate::route_chain::{ChainSlot, RouteEntry};
+    use crate::storage_cell::ArrivalRecord;
+
+    /// The model's raw values at the attempt keys: the trader's exercise
+    /// (naming attempt 0 of leg 0's parent, `AttemptT = 0`), a rival
+    /// exercise naming the same key, and bytes no recognition rebuilds.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum CellValue {
+        Xt,
+        Xu,
+        G,
+    }
+
+    const CELL_VALUES: [CellValue; 3] = [CellValue::Xt, CellValue::Xu, CellValue::G];
+
+    /// The two attempt keys of leg 0's parent.
+    const ATTEMPTS: [u64; 2] = [0, 1];
+
+    /// The exercises, made once (SPHINCS+ is slow): the trader's from a
+    /// two-hop swap and the rival's from a one-hop swap over the same first
+    /// vault and parent, so both name attempt 0 of that parent.
+    struct CellObjects {
+        xt: Vec<u8>,
+        xu: Vec<u8>,
+        e_xt: D32,
+        e_xu: D32,
+        vault: D32,
+        parent: D32,
+    }
+
+    fn cell_objects() -> &'static CellObjects {
+        static OBJECTS: std::sync::OnceLock<CellObjects> = std::sync::OnceLock::new();
+        OBJECTS.get_or_init(|| {
+            // Every leg of the trader's swap names attempt 0, so whichever of
+            // its legs trades the rival's vault names the key the rival names.
+            let trader = exercise(&swap_fixture_n(2), &[0, 0]);
+            let rival = exercise(&swap_fixture_n(1), &[0]);
+            let shared = rival.precommit.legs()[0];
+            let Some(leg) = trader
+                .precommit
+                .legs()
+                .iter()
+                .find(|l| (l.vault_id, l.parent_root) == (shared.vault_id, shared.parent_root))
+                .cloned()
+            else {
+                panic!("the rival trades a vault of the trader's swap from the same parent");
+            };
+            CellObjects {
+                xt: trader.exercise.encode(),
+                xu: rival.exercise.encode(),
+                e_xt: *trader.precommit.external_commitment(),
+                e_xu: *rival.precommit.external_commitment(),
+                vault: leg.vault_id,
+                parent: leg.parent_root,
+            }
+        })
+    }
+
+    fn value_bytes(v: CellValue) -> Vec<u8> {
+        match v {
+            CellValue::Xt => cell_objects().xt.clone(),
+            CellValue::Xu => cell_objects().xu.clone(),
+            CellValue::G => b"bytes no recognition rebuilds".to_vec(),
+        }
+    }
+
+    /// The model's `TrueNamesKey`: the object whose own fields name the key.
+    fn names_key(attempt: u64, v: CellValue) -> bool {
+        matches!(v, CellValue::Xt | CellValue::Xu) && attempt == 0
+    }
+
+    impl CellValue {
+        fn index(self) -> usize {
+            match self {
+                CellValue::Xt => 0,
+                CellValue::Xu => 1,
+                CellValue::G => 2,
+            }
+        }
+    }
+
+    /// The model's state at the two attempt keys (every fault off): the
+    /// leader's raw arrivals, the copies carrying a value's leader record,
+    /// the copies of XT at K0 written before it held the leader, garbage
+    /// copies, and whether T has signed F.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CellsModel {
+        leader: [Vec<CellValue>; 2],
+        linked: [[u8; 3]; 2],
+        early: u8,
+        garbage: [u8; 2],
+        signed_f: Option<()>,
+    }
+
+    impl CellsModel {
+        fn occupant(&self, k: usize) -> Option<CellValue> {
+            self.leader[k]
+                .iter()
+                .copied()
+                .find(|v| names_key(ATTEMPTS[k], *v))
+        }
+        fn links(&self, k: usize, v: CellValue) -> u8 {
+            self.linked[k][v.index()]
+        }
+        fn producible(&self, v: CellValue) -> bool {
+            v != CellValue::Xt || self.signed_f.is_some()
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum CellAction {
+        PutRaw(usize, CellValue),
+        PutCopy(usize, CellValue),
+        EarlyCopy,
+        PutGarbageCopy(usize),
+        SignF,
+    }
+
+    fn cell_actions(m: &CellsModel) -> Vec<CellAction> {
+        let mut out = Vec::new();
+        for k in 0..2 {
+            for v in CELL_VALUES {
+                // RawAt: K1 receives XT and G (the rival's exercise names only K0).
+                let raw_here = k == 0 || v != CellValue::Xu;
+                if raw_here && m.producible(v) && !m.leader[k].contains(&v) {
+                    out.push(CellAction::PutRaw(k, v));
+                }
+                if m.occupant(k) == Some(v) && m.producible(v) && m.links(k, v) < 2 {
+                    out.push(CellAction::PutCopy(k, v));
+                }
+            }
+            if m.garbage[k] < 2 {
+                out.push(CellAction::PutGarbageCopy(k));
+            }
+        }
+        if m.signed_f.is_some() && m.occupant(0) != Some(CellValue::Xt) && m.early < 2 {
+            out.push(CellAction::EarlyCopy);
+        }
+        if m.signed_f.is_none() {
+            out.push(CellAction::SignF);
+        }
+        out
+    }
+
+    /// The writes at the two attempt cells: the leader at route position 0;
+    /// linked copies extend the occupant's one chain in route order from
+    /// position 1; unlinked copies (early copies of XT, garbage) carry no
+    /// leader record and sit at positions 3 and 4.
+    struct CellWrites {
+        cells: [AttemptCell; 2],
+        seats: [Cell; 2],
+        chain: [Vec<ChainSlot>; 2],
+    }
+
+    impl CellWrites {
+        fn new() -> Self {
+            let o = cell_objects();
+            let cell = |attempt: u64| {
+                AttemptCell::new(
+                    &o.vault,
+                    &o.parent,
+                    attempt,
+                    &committed_set(),
+                    &committed_set_id(),
+                )
+                .expect("the committed set")
+            };
+            let cells = [cell(0), cell(1)];
+            let seats = [Cell::at(cells[0].routed()), Cell::at(cells[1].routed())];
+            Self {
+                cells,
+                seats,
+                chain: [Vec::new(), Vec::new()],
+            }
+        }
+
+        fn copy(
+            &self,
+            k: usize,
+            v: CellValue,
+            position: usize,
+            chain: Vec<ChainSlot>,
+        ) -> RouteEntry {
+            RouteEntry {
+                namespace: self.seats[k].namespace.clone(),
+                key: self.seats[k].key,
+                value: value_bytes(v),
+                seat: self.seats[k].route.seats()[position].clone(),
+                position,
+                chain,
+            }
+        }
+
+        fn leader_record(&self, k: usize, v: CellValue) -> ArrivalRecord {
+            let index = self.seats[k].logs[0]
+                .iter()
+                .position(|b| RouteEntry::decode(b).is_some_and(|e| e.value == value_bytes(v)))
+                .expect("the value reached the leader");
+            self.seats[k].record_at(0, index + 1)
+        }
+
+        fn apply(&mut self, action: CellAction) {
+            match action {
+                CellAction::PutRaw(k, v) => {
+                    let entry = self.copy(k, v, 0, Vec::new());
+                    self.seats[k].put(0, entry.encode());
+                }
+                CellAction::PutCopy(k, v) => {
+                    if self.chain[k].is_empty() {
+                        self.chain[k].push(ChainSlot::Link(self.leader_record(k, v)));
+                    }
+                    let position = self.chain[k].len();
+                    let entry = self.copy(k, v, position, self.chain[k].clone());
+                    let record = self.seats[k].put(position, entry.encode());
+                    self.chain[k].push(ChainSlot::Link(record));
+                }
+                CellAction::EarlyCopy => {
+                    let entry = self.copy(0, CellValue::Xt, 3, vec![ChainSlot::NoResponse; 3]);
+                    self.seats[0].put(3, entry.encode());
+                }
+                CellAction::PutGarbageCopy(k) => {
+                    let entry = self.copy(k, CellValue::G, 4, vec![ChainSlot::NoResponse; 4]);
+                    self.seats[k].put(4, entry.encode());
+                }
+                CellAction::SignF => {}
+            }
+        }
+
+        /// Core's reading of each attempt key: the value holding it and its
+        /// chain state.
+        fn read(&self, k: usize) -> Option<(CellValue, ChainState)> {
+            let read = attempt_resolution(&self.cells[k], &self.seats[k].evidence())
+                .expect("every seat is read and committed");
+            match read.fact() {
+                CellFact::Open => None,
+                CellFact::Held { id, state } => {
+                    let o = cell_objects();
+                    let v = if id == o.e_xt {
+                        CellValue::Xt
+                    } else if id == o.e_xu {
+                        CellValue::Xu
+                    } else {
+                        panic!("the key is held by an object the model never wrote")
+                    };
+                    Some((v, state))
+                }
+            }
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's attempt cells
+    /// refine the attempt-key half of `tla/DSM_SofiSuccessorCells.tla` along
+    /// 120 seeded traces of its `Next` (every fault off, `AttemptT = 0`), each
+    /// step made as real writes at the two attempt cells of one parent with
+    /// real signed exercises: the trader's, a rival's over the same parent,
+    /// and garbage. At every step the value Core reads as holding each key is
+    /// the model's occupant, the first recognized object at the leader whose
+    /// own fields name the key (`UnrecognizedBytesNeverOccupy`,
+    /// `RecognizedAttemptNamesItsKey`: garbage never, an exercise only at the
+    /// attempt it names), and Core reads it final exactly where the model does
+    /// (`FinalRequiresChainLinks`; early copies and garbage count for
+    /// nothing), never takes a final back (`FinalityIsPermanent`) and holds at
+    /// most one final per key (`AtMostOneFinalPerCoordinate`). The model's
+    /// consumption predicates are the fulfillment model's, checked there.
+    /// MUTATION CONTROL: recognizing an exercise at an attempt it does not
+    /// name turns this red. The chain reading under each cell is the route
+    /// chain's `evaluate`, whose controls run in its own correspondence.
+    #[test]
+    fn the_attempt_cells_refine_the_successor_cell_model() {
+        let mut finals = 0usize;
+        for trace in 0..120u64 {
+            let mut seed = trace.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut model = CellsModel {
+                leader: [Vec::new(), Vec::new()],
+                linked: [[0; 3]; 2],
+                early: 0,
+                garbage: [0, 0],
+                signed_f: None,
+            };
+            let mut writes = CellWrites::new();
+            let mut ever_final: [Option<CellValue>; 2] = [None, None];
+            for _ in 0..14 {
+                for (k, ever) in ever_final.iter_mut().enumerate() {
+                    let core = writes.read(k);
+                    let expected = model.occupant(k).map(|v| {
+                        let links = 1 + usize::from(model.links(k, v));
+                        (v, ChainState::of_links(links).expect("a leader link"))
+                    });
+                    assert_eq!(core, expected, "trace {trace}, key {k}: {model:?}");
+                    if let Some((v, ChainState::Final)) = core {
+                        finals += 1;
+                        assert!(
+                            ever.is_none() || *ever == Some(v),
+                            "trace {trace}: two finals at one key"
+                        );
+                        *ever = Some(v);
+                    }
+                    if let Some(v) = *ever {
+                        assert_eq!(
+                            core.map(|(held, _)| held),
+                            Some(v),
+                            "trace {trace}: a final was taken back"
+                        );
+                    }
+                }
+                let actions = cell_actions(&model);
+                if actions.is_empty() {
+                    // Only the model's `Idle` remains: the trace has reached a
+                    // state it can only stutter in.
+                    break;
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let action = actions[(seed % actions.len() as u64) as usize];
+                writes.apply(action);
+                match action {
+                    CellAction::PutRaw(k, v) => model.leader[k].push(v),
+                    CellAction::PutCopy(k, v) => model.linked[k][v.index()] += 1,
+                    CellAction::EarlyCopy => model.early += 1,
+                    CellAction::PutGarbageCopy(k) => model.garbage[k] += 1,
+                    CellAction::SignF => model.signed_f = Some(()),
+                }
+            }
+        }
+        assert!(finals > 0, "no trace reached a final");
+    }
 }

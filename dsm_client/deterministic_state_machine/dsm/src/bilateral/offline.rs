@@ -2066,6 +2066,191 @@ mod tests {
         );
     }
 
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): the receiver's offline
+    /// confirm is a production instance of `lean4/DSMRecognition.lean`'s
+    /// recognition boundary — raw bytes from the sender, recognized only
+    /// against the state the receiver holds. Each of the model's theorems
+    /// is run on it:
+    /// - `constructible_implies_recognized`: the confirm the sender's Core
+    ///   built is recognized;
+    /// - one witness per construction constraint, each not recognized: a
+    ///   forged signature (`forged_signature_is_not_recognized`), another
+    ///   parent (`wrong_parent_is_not_recognized`), another coordinate — a
+    ///   successor tip its fields do not derive, or another lineage's device
+    ///   (`wrong_coordinate_is_not_recognized`), bytes that are not the
+    ///   canonical encoding (`non_canonical_encoding_is_not_recognized`), a
+    ///   source this device already took a spend from
+    ///   (`consumed_source_is_not_recognized`), and more than the sender's
+    ///   allocation holds (`overdraft_is_not_recognized`);
+    /// - `recognized_implies_valid` and `replayed_signature_pins_the_fields`:
+    ///   one bit flipped at each of 96 positions spread over the receipt — its
+    ///   fields, paths, proofs, signatures and certificates — is never
+    ///   recognized. The one exception is the sender's Kyber ciphertext
+    ///   (field 18), which no signature covers and nothing reads: an owner
+    ///   question recorded in CONFORMANCE §6.121, located here by its value
+    ///   and left out of the sample, never pinned as expected behaviour.
+    ///
+    /// MUTATION CONTROL: dropping the σ_A check, or the recompute of the
+    /// successor tip from the fields, turns this red.
+    #[test]
+    fn the_confirm_refines_the_recognition_boundary() {
+        let c = built_confirm();
+        let origin = c.origin();
+        let other = Peer::new(0x66);
+        let sigma_a = c.sender.sign_step(&c.commitment_hash);
+        struct Case<'a> {
+            signature: &'a [u8],
+            receipt: &'a [u8],
+            successor_tip: [u8; 32],
+            held_tip: [u8; 32],
+            receiver_device_id: [u8; 32],
+            operation: &'a Operation,
+            origin: &'a BearerOrigin<'a>,
+        }
+        let decide = |case: Case<'_>| {
+            decide_confirm(
+                ConfirmClaims {
+                    signature: case.signature,
+                    receipt: case.receipt,
+                    pre_entropy: &c.pre_entropy,
+                    successor_tip: Some(case.successor_tip),
+                },
+                AcceptedStep {
+                    commitment_hash: c.commitment_hash,
+                    operation: case.operation,
+                    held_tip: case.held_tip,
+                    receiver_device_id: case.receiver_device_id,
+                    sender_device_tree_root: c.device_tree_root,
+                    sender_chain_head: None,
+                    bearer: c.bearer,
+                    bearer_origin: case.origin,
+                },
+                &c.sender.pinned(),
+            )
+        };
+        let honest = || Case {
+            signature: &sigma_a,
+            receipt: &c.receipt,
+            successor_tip: c.successor_tip,
+            held_tip: c.held_tip,
+            receiver_device_id: c.receiver.device_id,
+            operation: &c.operation,
+            origin: &origin,
+        };
+        decide(honest()).expect("constructible_implies_recognized: the sender's own confirm");
+
+        let forged = other.sign_step(&c.commitment_hash);
+        let mut non_canonical = c.receipt.clone();
+        non_canonical.push(0x00);
+        let consumed = BearerOrigin {
+            accepted: Some((c.bearer.next_frontier, c.bearer.counter + 1)),
+            ..c.origin()
+        };
+        let mut overdraft = c.operation.clone();
+        if let Operation::Transfer { amount, .. } = &mut overdraft {
+            *amount = crate::types::token_types::Balance::amount(41);
+        }
+        let witnesses: [(&str, Case<'_>); 7] = [
+            (
+                "a forged signature",
+                Case {
+                    signature: &forged,
+                    ..honest()
+                },
+            ),
+            (
+                "another parent",
+                Case {
+                    held_tip: [0x7A; 32],
+                    ..honest()
+                },
+            ),
+            (
+                "a successor tip its fields do not derive",
+                Case {
+                    successor_tip: c.held_tip,
+                    ..honest()
+                },
+            ),
+            (
+                "another lineage's device",
+                Case {
+                    receiver_device_id: other.device_id,
+                    ..honest()
+                },
+            ),
+            (
+                "bytes that are not the canonical encoding",
+                Case {
+                    receipt: &non_canonical,
+                    ..honest()
+                },
+            ),
+            (
+                "a source this device already took a spend from",
+                Case {
+                    origin: &consumed,
+                    ..honest()
+                },
+            ),
+            (
+                "more than the allocation holds",
+                Case {
+                    operation: &overdraft,
+                    ..honest()
+                },
+            ),
+        ];
+        let mut refusals = Vec::new();
+        for (what, case) in witnesses {
+            match decide(case) {
+                Err(e) => refusals.push(format!("{what}: {e}")),
+                Ok(_) => panic!("{what} was recognized"),
+            }
+        }
+        assert_eq!(refusals.len(), 7, "every witness was refused: {refusals:?}");
+
+        // The sender's ML-KEM ciphertext (receipt field 18) rides in the
+        // envelope only: no signature covers it and nothing reads it, so a
+        // flip there is taken (CONFORMANCE §6.121, an owner question). Every
+        // other byte of the receipt is bound.
+        let kyber_ct_a = {
+            use prost::Message;
+            crate::types::proto::ReceiptCommit::decode(c.receipt.as_slice())
+                .expect("the receipt decodes")
+                .kyber_ct_a
+        };
+        let Some(ct_at) = c
+            .receipt
+            .windows(kyber_ct_a.len())
+            .position(|w| w == kyber_ct_a.as_slice())
+        else {
+            panic!("the ciphertext is in the receipt's bytes");
+        };
+        let unbound = ct_at..ct_at + kyber_ct_a.len();
+        let stride = c.receipt.len() / 97 + 1;
+        let mut flips = Vec::new();
+        for at in (0..c.receipt.len())
+            .step_by(stride)
+            .filter(|at| !unbound.contains(at))
+        {
+            let mut bytes = c.receipt.clone();
+            bytes[at] ^= 0x01;
+            match decide(Case {
+                receipt: &bytes,
+                ..honest()
+            }) {
+                Err(e) => flips.push((at, e.to_string())),
+                Ok(_) => panic!("a receipt with byte {at} flipped was recognized"),
+            }
+        }
+        assert!(
+            flips.len() >= 96,
+            "the flips covered the receipt: {}",
+            flips.len()
+        );
+    }
+
     /// SA-11. The confirm's entropy and successor tip ride unsigned beside
     /// the signed receipt. A frame whose entropy is another value — with the
     /// successor tip recomputed from it, so the two agree with each other —

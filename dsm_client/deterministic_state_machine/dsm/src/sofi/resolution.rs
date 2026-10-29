@@ -2854,4 +2854,245 @@ mod tests {
             assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
         }
     }
+
+    // ── model-to-code correspondence: tla/DSM_SofiFulfillment.tla ──────────
+
+    /// The model's resolution of trader T's position (`Resolve(T)`), over the
+    /// facts Core is handed. States whose facts are not complete (validation
+    /// evidence unavailable, conformance unavailable, the trader parent's
+    /// branch undecided) are never handed to Core: the SDK keeps reading
+    /// (Amendment S7), so they are not enumerated.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ModelResolution {
+        Pending,
+        Invalid,
+        Realized,
+        Void,
+    }
+
+    /// The trader parent states the model names, as the facts Core holds:
+    /// single and taken leave `PRE`; other and none, and a lineage Invalid,
+    /// leave no root `P` can build on.
+    fn model_parents() -> [(ParentPosition, &'static str); 5] {
+        [
+            (HELD, "single"),
+            (
+                ParentPosition::ConditionalSelected { selected_root: PRE },
+                "taken",
+            ),
+            (
+                ParentPosition::ConditionalSelected {
+                    selected_root: OTHER_ROOT,
+                },
+                "other",
+            ),
+            (ParentPosition::ConditionalNoRoot, "none"),
+            (NOT_HELD, "other claim held"),
+        ]
+    }
+
+    /// Whether a fact holds, as the model enumerates both cases.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Holds {
+        Yes,
+        No,
+    }
+
+    /// Every leg the model's facts give: the key empty, final on `E1`, or
+    /// final on another operation's commitment; the parent canonical,
+    /// orphaned or not yet established; the attempt live or not; the parent
+    /// consumed by another operation or not.
+    fn model_legs() -> Vec<LegFacts> {
+        let mut legs = Vec::new();
+        for cell in [
+            CellFact::Open,
+            CellFact::Held {
+                id: E,
+                state: ChainState::Final,
+            },
+            CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+        ] {
+            for parent in [
+                ParentStatus::Canonical,
+                ParentStatus::Orphaned,
+                ParentStatus::Unavailable,
+            ] {
+                for live in [Holds::Yes, Holds::No] {
+                    for consumed in [Holds::Yes, Holds::No] {
+                        legs.push(LegFacts {
+                            cell,
+                            parent,
+                            attempt_live: live == Holds::Yes,
+                            parent_consumed_elsewhere: consumed == Holds::Yes,
+                        });
+                    }
+                }
+            }
+        }
+        legs
+    }
+
+    /// `ConsumedRoute`: registered, conforming, valid, the parent compatible,
+    /// and every leg final on `E1` from a canonical, live parent.
+    fn model_consumed(facts: &RouteFacts<'_>, compatible: bool) -> bool {
+        facts.pair == PairStanding::Registered
+            && facts.conformance == Valid
+            && facts.validation == Valid
+            && compatible
+            && facts
+                .legs
+                .iter()
+                .all(|l| l.parent == ParentStatus::Canonical && l.attempt_live && l.final_on(&E))
+    }
+
+    /// `Resolve(T)`, transcribed from the model.
+    fn model_resolve(facts: &RouteFacts<'_>, compatible: bool) -> ModelResolution {
+        if facts.pair != PairStanding::Registered {
+            return ModelResolution::Pending;
+        }
+        if !compatible {
+            return ModelResolution::Invalid;
+        }
+        if facts.conformance == Invalid {
+            return ModelResolution::Invalid;
+        }
+        if facts.validation == Invalid {
+            return ModelResolution::Invalid;
+        }
+        if model_consumed(facts, compatible) {
+            return ModelResolution::Realized;
+        }
+        let void_evidence = facts.legs.iter().any(|l| {
+            l.final_on_other(&E)
+                || l.parent == ParentStatus::Orphaned
+                || l.parent_consumed_elsewhere
+        });
+        if facts.storage_resolved && void_evidence {
+            return ModelResolution::Void;
+        }
+        ModelResolution::Pending
+    }
+
+    /// `Skipped(k)` and `ConsumesAt(E1, k)` for the key of leg `at`, final on
+    /// `E1`: the route rejected by validation or conformance (arm i), another
+    /// leg's parent orphaned (ii) or consumed elsewhere (iii), the trader
+    /// parent impossible (iv), or the position lost; consumed when the route
+    /// consumed.
+    fn model_classify(facts: &RouteFacts<'_>, at: usize, compatible: bool) -> AttemptClass {
+        let others = || {
+            facts
+                .legs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, l)| l)
+        };
+        let rejected = facts.validation == Invalid
+            || facts.conformance == Invalid
+            || others().any(|l| l.parent == ParentStatus::Orphaned)
+            || others().any(|l| l.parent_consumed_elsewhere)
+            || !compatible;
+        if rejected || facts.pair == PairStanding::Lost {
+            AttemptClass::Skipped
+        } else if model_consumed(facts, compatible) {
+            AttemptClass::Consumed
+        } else {
+            AttemptClass::Unresolved
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's resolution layer
+    /// refines `tla/DSM_SofiFulfillment.tla` for trader T's two-leg route
+    /// (its checked configuration: `CreationValidB`, every fault off). Every
+    /// combination of the facts the model's states give Core — the pair
+    /// registered, pending or lost; five trader-parent states; conformance and
+    /// validation each Valid or Invalid; each of two legs empty, final on
+    /// `E1` or final on another commitment, its parent canonical, orphaned or
+    /// unestablished, its attempt live or not, its parent consumed elsewhere
+    /// or not; storage-resolved as the model derives it — is resolved by
+    /// `resolve_position` exactly as the model's `Resolve(T)` resolves it
+    /// (Realized, Void, Invalid, or not yet), and each leg final on `E1` is
+    /// classified by `classify_attempt` exactly as the model's `Skipped` and
+    /// `ConsumesAt` classify its key. The model skips a key for the other
+    /// legs' lost parents and Core for any leg's, so a leg whose own parent
+    /// is already lost (its key then reaches no consumption either way) is
+    /// compared only for not being consumed.
+    /// MUTATION CONTROL: resolving on past a conformance failure, or past a
+    /// validation failure, turns this red.
+    #[test]
+    fn the_resolution_layer_refines_the_fulfillment_model() {
+        let legs = model_legs();
+        let mut compared = 0usize;
+        for pair in [
+            PairStanding::Registered,
+            PairStanding::Pending,
+            PairStanding::Lost,
+        ] {
+            for (parent, name) in model_parents() {
+                let compatible = trader_parent_compatible(&parent, &PRE);
+                assert_eq!(
+                    compatible,
+                    name == "single" || name == "taken",
+                    "{name}: the model's ParentCompatible"
+                );
+                for conformance in [Valid, Invalid] {
+                    for validation in [Valid, Invalid] {
+                        for a in &legs {
+                            for b in &legs {
+                                let route = [*a, *b];
+                                let storage_resolved =
+                                    route.iter().all(|l| l.final_on(&E) || l.final_on_other(&E));
+                                let facts = RouteFacts {
+                                    external_commitment: E,
+                                    pair,
+                                    conformance,
+                                    parent,
+                                    parent_pre_root: PRE,
+                                    validation,
+                                    storage_resolved,
+                                    verdict: VerdictFact::NotARelease,
+                                    legs: &route,
+                                };
+                                let core = match resolve_position(&facts) {
+                                    Ok(Resolution::Realized) => ModelResolution::Realized,
+                                    Ok(Resolution::Void) => ModelResolution::Void,
+                                    Ok(Resolution::Invalid) => ModelResolution::Invalid,
+                                    Err(
+                                        Incomplete::NotRegistered | Incomplete::StorageNotFinal,
+                                    ) => ModelResolution::Pending,
+                                };
+                                assert_eq!(
+                                    core,
+                                    model_resolve(&facts, compatible),
+                                    "{name}: {facts:?}"
+                                );
+                                for (at, leg) in route.iter().enumerate() {
+                                    if !leg.final_on(&E) {
+                                        continue;
+                                    }
+                                    let (class, _) = classify_attempt(&facts, leg);
+                                    let own_lost = leg.parent == ParentStatus::Orphaned
+                                        || leg.parent_consumed_elsewhere;
+                                    if own_lost {
+                                        assert_ne!(class, AttemptClass::Consumed, "{facts:?}");
+                                    } else {
+                                        assert_eq!(
+                                            class,
+                                            model_classify(&facts, at, compatible),
+                                            "{name}: leg {at}: {facts:?}"
+                                        );
+                                    }
+                                }
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 5 * 2 * 2 * legs.len() * legs.len());
+    }
 }

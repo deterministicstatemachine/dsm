@@ -57,7 +57,7 @@ CI publishes the storage-node binary, the frontend bundle, and the SBOM; the APK
 | Token surface: create, mint, burn, adopt, policy; faucet | proven on hardware | same run; capped issuance stays fenced in beta |
 | Storage fleet: 5 nodes, quorum 3 of 5, write-once registers | proven on hardware | the live fleet every run above wrote to; `BETA_ROOT_REGISTER_MEMBERS` pins the 5 members |
 | Offline protocol: appliance core, verifier, SPHINCS+, RP2350 firmware, TrustZone monitor, TROPIC01 | proven on hardware | the three-signature release produced on the RP2350 + TROPIC01 appliance and accepted on the phone; silicon proof log in [docs/bench-proofs/](docs/bench-proofs/) |
-| dBTC: origin admission, burn-gated withdrawal, successor vaults | fenced | proven on hardware on signet earlier; fenced in this release while it is upgraded to align with Sovereign Finance (DSM-NATIVE dBTC V1), a small upgrade and the next thing being done; ships in v5 shortly after v4 |
+| dBTC: origin admission, burn-gated withdrawal, successor vaults | being replaced; not functional | the code stays in the tree as material for its replacement, and nothing in this release runs it; see [dBTC](#dbtc) |
 | Token emissions (DJTE) | core-only | schedule and ticket selection in `dsm/src/emissions`; the faucet consumes tickets |
 | Formal models: TLA+, Lean 4, vertical validation | checked in CI | `formal-validation` and `lean` CI jobs; see [Formal verification](#formal-verification) |
 
@@ -126,6 +126,8 @@ Code: the vault, routing, settlement, and receipt objects live in [dsm/src/dlv/]
 
 ## dBTC
 
+**Being replaced, and not functional in this release.** The design below is kept for reference, and its code stays in the tree unused; [Status in this release](#status-in-this-release-being-replaced-not-functional) says what does not work.
+
 dBTC is Bitcoin-backed economic state native to DSM. A real Bitcoin output is funded under a vault profile and verified at the required depth; exactly that quantity is admitted as dBTC into DSM state. From then on dBTC moves the way every other DSM asset moves: as ordinary bilateral transitions, online or offline, with no Bitcoin transaction, no confirmation, no depositor, no custodian, and no ledger.
 
 **The one rule everything follows from:** holding Bitcoin-related bytes is not holding dBTC. A party may hold the vault identifier, the lineage, every public receipt, the encrypted execution capsule, the fulfillment hash, and a copy of every storage replica, and still have no withdrawal authority. Release requires, conjunctively: live dBTC state, valid authority over it, a valid consumption of it, and DLV fulfillment derived from that consumption.
@@ -161,7 +163,16 @@ dBTC is Bitcoin-backed economic state native to DSM. A real Bitcoin output is fu
 
 **Not introduced:** a Bitcoin threshold-signing federation, a vault custodian committee, a dBTC validator set, a global dBTC ledger, a mint that approves withdrawals, storage-node economic voting, a second double-spend database, a depositor liveness requirement, wall-clock settlement validity, a dBTC-only ownership model, a dBTC-only hardware appliance, or any rule that knowing a preimage constitutes ownership. **Not claimed:** that DSM prevents a Bitcoin reorganization deeper than the chosen confirmation depth; that dBTC survives compromise of the DSM authority needed to produce a valid burn; that storage unavailability cannot delay retrieval; that testnet or signet shortcuts imply mainnet security.
 
-**Status in this release.** dBTC has been exercised on hardware on signet: origin admission, transfer, and withdrawal against real signet outputs. It is fenced in v4, not because it is unfinished, but because it is being upgraded to align with Sovereign Finance under the V1 design above; the SDK refuses new BTC→dBTC tap creation and partial withdrawal through `DBTC_PUBLIC_WITNESS_FENCE` in `dsm_sdk/src/handlers/bitcoin_invoke_routes.rs` until that lands, with no override and no environment escape. v4 does not wait for it because Sovereign Finance does not need it. The upgrade is small and is the next thing being done; it ships in v5, shortly after v4. The TLA+ models under `tla/DSM_dBTC_*.tla` track the V1 design. All Bitcoin work is on signet; nothing here claims mainnet readiness. Code: origin verification in [dsm/src/bitcoin/](dsm_client/deterministic_state_machine/dsm/src/bitcoin/) (header chain, SPV, script, trust profile), the vault and fulfillment derivation in [dsm/src/vault/](dsm_client/deterministic_state_machine/dsm/src/vault/), and the routes in [bitcoin_invoke_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/bitcoin_invoke_routes.rs) and [bitcoin_query_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/bitcoin_query_routes.rs); Rust correspondence: [tla/DBTC_RUST_CORRESPONDENCE.md](tla/DBTC_RUST_CORRESPONDENCE.md).
+### Status in this release: being replaced, not functional
+
+dBTC as described above is being replaced. Its code stays in the tree because parts of it may be built on, but nothing in this release uses it, and its presence is not a capability:
+
+- every dBTC storage call in `bitcoin_tap_sdk.rs` returns `NotImplemented` and stores, reads, lists or deletes nothing;
+- the token operations that served it (lock, unlock, create, receive) wrap their operation in a zero-effect step, which Core refuses;
+- new BTC→dBTC taps and partial withdrawal are refused by `DBTC_PUBLIC_WITNESS_FENCE` in `dsm_sdk/src/handlers/bitcoin_invoke_routes.rs`;
+- the dBTC requirements are deferred ([CONFORMANCE_GAPS.md](specs/requirements/CONFORMANCE_GAPS.md) §5).
+
+An earlier build exercised origin admission, transfer and withdrawal against real signet outputs; that run says nothing about this release. The TLA+ models under `tla/DSM_dBTC_*.tla` model the design being replaced. Code, kept unused: origin verification in [dsm/src/bitcoin/](dsm_client/deterministic_state_machine/dsm/src/bitcoin/) (header chain, SPV, script, trust profile), the vault and fulfillment derivation in [dsm/src/vault/](dsm_client/deterministic_state_machine/dsm/src/vault/), and the routes in [bitcoin_invoke_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/bitcoin_invoke_routes.rs) and [bitcoin_query_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/bitcoin_query_routes.rs); Rust correspondence: [tla/DBTC_RUST_CORRESPONDENCE.md](tla/DBTC_RUST_CORRESPONDENCE.md).
 
 ## Offline protocol
 
