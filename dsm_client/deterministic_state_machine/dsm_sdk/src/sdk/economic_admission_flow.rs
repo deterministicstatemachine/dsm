@@ -2241,9 +2241,60 @@ pub(crate) fn build_recipient_admission(
     let a_prior = client_db::economic_lineage::latest_ek_step(rel_key, &prereqs.peer_devid)
         .map_err(|e| storage_err("ek step chain (A)", e))?
         .map(|(_, addr, _)| addr);
-    let b_prior = client_db::economic_lineage::latest_ek_step(rel_key, devid)
+    let b_chain_head = client_db::economic_lineage::latest_ek_step(rel_key, devid)
         .map_err(|e| storage_err("ek step chain (B)", e))?
         .map(|(_, addr, _)| addr);
+    // This device's countersignature chains, by Core's lineage rule, from its
+    // own send still in flight when this apply follows it in its canonical
+    // lineage — a transfer that crossed that send (owner ruling, 2026-10-29:
+    // "both settle"). Its predecessor step is then that send's own step
+    // object, built from the send's frozen A-side evidence on the chain as it
+    // stood before the send, and recorded and published ahead of it.
+    let own_send_step: Option<Vec<u8>> =
+        match client_db::sender_proposal::get_unfinalized_proposal_for_relationship(rel_key)
+            .map_err(|e| storage_err("this device's send in flight", e))?
+        {
+            Some(send)
+                if matches!(
+                    dsm::verification::receipt_verification::per_step_ek_predecessor_in_lineage(
+                        &b_artifacts.applied_parent_tip_b,
+                        Some((&send.canonical_child, ())),
+                        None,
+                        (),
+                    ),
+                    dsm::verification::receipt_verification::EkPredecessor::OwnStepInFlight(())
+                ) =>
+            {
+                let evidence = crate::handlers::online_finalize::load_retained_evidence_a(&send)
+                    .map_err(|e| storage_err("the send in flight's evidence", e))?
+                    .ok_or_else(|| {
+                        storage_err(
+                            "the send in flight's evidence",
+                            "the send retains no A-side evidence",
+                        )
+                    })?;
+                let send_receipt =
+                    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                        &evidence.full_receipt_bytes,
+                    )?;
+                Some(
+                    dsm::types::proto::EkCertStepV1 {
+                        ek_pk: send_receipt.ek_pk_a.clone(),
+                        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                            send_receipt.ek_cert_a.clone(),
+                        )),
+                        h_n: send_receipt.parent_tip.to_vec(),
+                        prior_step_addr: b_chain_head.map(|a| a.to_vec()),
+                    }
+                    .encode_to_vec(),
+                )
+            }
+            _ => None,
+        };
+    let b_prior = match &own_send_step {
+        Some(step) => Some(dsm::economic::peer_acceptance::ek_cert_step_addr(step)),
+        None => b_chain_head,
+    };
     let a_step_bytes = dsm::types::proto::EkCertStepV1 {
         ek_pk: receipt.ek_pk_a.clone(),
         authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
@@ -2295,7 +2346,7 @@ pub(crate) fn build_recipient_admission(
         peer_debit_mutation_index: prereqs.sender_debit_mutation_index,
         acceptance_evidence_addr,
     };
-    let extra_artifacts = vec![
+    let mut extra_artifacts = vec![
         (
             crate::sdk::economic_registers::immutable_object_key(
                 dsm::common::domain_tags::TAG_DSM_PEER_TRANSFER_ACCEPTANCE,
@@ -2321,6 +2372,25 @@ pub(crate) fn build_recipient_admission(
             "ek-cert-step",
         ),
     ];
+    let own_send_row = match own_send_step {
+        Some(step) => {
+            let addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&step);
+            let ek_pk = match dsm::types::proto::EkCertStepV1::decode(step.as_slice()) {
+                Ok(decoded) => decoded.ek_pk,
+                Err(e) => return Err(storage_err("the send in flight's step object", e)),
+            };
+            extra_artifacts.push((
+                crate::sdk::economic_registers::immutable_object_key(
+                    dsm::common::domain_tags::TAG_DSM_EK_CERT_STEP,
+                    &step,
+                ),
+                step,
+                "ek-cert-step",
+            ));
+            Some((*devid, addr, ek_pk))
+        }
+        None => None,
+    };
     let parts = build_dsm_admission(
         genesis,
         devid,
@@ -2352,10 +2422,11 @@ pub(crate) fn build_recipient_admission(
     )
     .map_err(|e| DsmError::invalid_operation(format!("release sign: {e}")))?;
 
-    let ek_step_rows = vec![
-        (prereqs.peer_devid, a_step_addr, receipt.ek_pk_a.clone()),
-        (*devid, b_step_addr, b.ek_pk_b.clone()),
-    ];
+    // In chain order: the send in flight's own step before the
+    // countersignature it precedes.
+    let mut ek_step_rows = vec![(prereqs.peer_devid, a_step_addr, receipt.ek_pk_a.clone())];
+    ek_step_rows.extend(own_send_row);
+    ek_step_rows.push((*devid, b_step_addr, b.ek_pk_b.clone()));
     Ok(RecipientAdmissionBuild {
         parts,
         release_bytes,

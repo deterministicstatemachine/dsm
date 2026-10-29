@@ -208,7 +208,9 @@ mod tests {
     // moving into Core (§6.119; the SDK declared them inline).
     // +2 with the restart request and done statements of a certificate
     // restart (DSM Amendment A20).
-    const EXPECTED_TAG_COUNT: usize = 424;
+    // +1 with the join of two online transfers that cross (owner ruling,
+    // 2026-10-29: "both settle"): `DSM/relationship-join/v1`.
+    const EXPECTED_TAG_COUNT: usize = 425;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

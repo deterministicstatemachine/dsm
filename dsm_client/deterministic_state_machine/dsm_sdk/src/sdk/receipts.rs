@@ -207,26 +207,39 @@ pub fn sign_receipt_with_per_step_ek_target(
     signing_target: &[u8; 32],
 ) -> Result<PerStepSigningOutput, DsmError> {
     use crate::storage::client_db::load_local_chain_head_sk;
-    use dsm::crypto::ephemeral_key::sign_ek_cert;
-    use dsm::crypto::sphincs::sphincs_sign;
 
-    // 0. Re-derive the session secrets from the unlocked wallet (never persisted).
-    //    `Smaster` roots the per-step EK seed + ML-KEM coins; the chain-head
-    //    at-rest key (s0-rooted, domain-separated) unlocks the prior signer SK. Both fail
-    //    closed when the wallet is locked.
-    let s_master = crate::init::current_smaster()?;
+    // The chain-head at-rest key (s0-rooted, domain-separated) unlocks the
+    // prior signer SK; it fails closed when the wallet is locked.
     let at_rest_key = crate::init::current_chain_head_at_rest_key()?;
 
-    // 1. The prior signer's SK: Core's predecessor rule decides whether the
-    //    chain head's or the root AK's is due. A caller that withholds the root
-    //    AK requires the chain head, so a due key this device does not hold is
-    //    refused here.
+    // The prior signer's SK: Core's predecessor rule decides whether the
+    // chain head's or the root AK's is due. A caller that withholds the root
+    // AK requires the chain head, so a due key this device does not hold is
+    // refused below.
     let head_sk = load_local_chain_head_sk(&inputs.relationship_key, &at_rest_key)
         .map_err(|e| DsmError::invalid_operation(format!("chain-head SK load: {e}")))?;
     let prior = dsm::verification::receipt_verification::per_step_ek_predecessor(
         head_sk.as_deref().map(Some),
         inputs.root_ak_keypair.map(|(_pk, sk)| sk),
     );
+    sign_receipt_with_per_step_ek_after(inputs, signing_target, prior)
+}
+
+/// [`sign_receipt_with_per_step_ek_target`] with the prior signer the caller
+/// has already chosen by Core's predecessor rule: the countersignature of a
+/// transfer that crossed this device's own send chains from that send's key
+/// (`per_step_ek_predecessor_in_lineage`).
+pub fn sign_receipt_with_per_step_ek_after(
+    inputs: &PerStepSigningInputs,
+    signing_target: &[u8; 32],
+    prior: dsm::verification::receipt_verification::EkPredecessor<Option<&[u8]>>,
+) -> Result<PerStepSigningOutput, DsmError> {
+    use dsm::crypto::ephemeral_key::sign_ek_cert;
+    use dsm::crypto::sphincs::sphincs_sign;
+
+    // `Smaster` roots the per-step EK seed + ML-KEM coins; re-derived from
+    // the unlocked wallet (never persisted), it fails closed when locked.
+    let s_master = crate::init::current_smaster()?;
     let used_root_ak = prior.is_root_ak();
     let Some(prior_sk) = prior.key() else {
         return Err(DsmError::invalid_operation(

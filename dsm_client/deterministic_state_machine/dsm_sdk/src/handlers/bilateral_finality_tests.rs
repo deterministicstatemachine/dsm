@@ -1005,3 +1005,693 @@ async fn r9_the_barrier_is_relationship_local() {
     p.b.enter();
     assert!(send_status(&p.a).send_ready);
 }
+
+/// Two online sends that cross both settle (owner ruling, 2026-10-29: "both
+/// settle"). A sends to B and B sends to A, each before either device sees
+/// the other's transfer: every spool has failed, so neither preflight pulls
+/// anything and each send's delivery is left to the re-drive. Each transfer
+/// consumes its own sender's parent. Once the spools serve again, both
+/// transfers apply, both senders finalize on the countersignatures made
+/// after their counterparties' own sends, both certificates are verified and
+/// both gates release; each balance moved by both amounts, both devices hold
+/// one relationship tip, and the relationship takes the next transfer in
+/// each direction. (The defect this pins: both transfers applied and every
+/// finalization was refused on every sync, so neither gate released and the
+/// relationship took no further step, online or offline.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_online_sends_that_cross_both_settle_and_the_relationship_moves_on() {
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let members = crate::economic_fixtures::canonical_member_ids();
+    let (a0, b0) = (p.a.era_balance(), p.b.era_balance());
+
+    p.nodes.fail_spools(&members).await;
+    for (from, to, amount) in [(&p.a, &p.b, 10), (&p.b, &p.a, 7)] {
+        let sent = from.send(to, amount).await;
+        assert!(
+            sent.error_message
+                .as_deref()
+                .is_some_and(|e| e.contains("delivery outcome unknown")),
+            "{}: debited, its delivery left to the re-drive: {:?}",
+            from.slot,
+            sent.error_message
+        );
+    }
+    p.nodes.restore_spools(&members).await;
+
+    let mut rounds = 0;
+    loop {
+        let a_sync = p.a.sync().await;
+        let b_sync = p.b.sync().await;
+        let settled = [(&p.a, &p.b), (&p.b, &p.a)].iter().all(|(me, peer)| {
+            me.enter();
+            !gate_present(peer) && !cdb::relationship_awaits_peer_finalization(&rel).expect("await")
+        });
+        if settled {
+            break;
+        }
+        rounds += 1;
+        assert!(
+            rounds < 6,
+            "the crossing did not settle: A {:?}; B {:?}",
+            a_sync.errors,
+            b_sync.errors
+        );
+    }
+
+    assert_eq!(p.a.era_balance(), a0 - 10 + 7, "A paid 10 and was paid 7");
+    assert_eq!(p.b.era_balance(), b0 + 10 - 7, "B was paid 10 and paid 7");
+    let mut tips = Vec::new();
+    for (me, peer) in [(&p.a, &p.b), (&p.b, &p.a)] {
+        me.enter();
+        assert_eq!(
+            proposal_statuses(&rel),
+            vec![cdb::PROPOSAL_FINALIZED.to_string()],
+            "{}'s send finalized",
+            me.slot
+        );
+        assert_eq!(
+            rows_for_relationship("canonical_apply_identity", &rel),
+            1,
+            "{} applied the crossing transfer once",
+            me.slot
+        );
+        assert!(send_status(peer).send_ready, "{} is send-ready", me.slot);
+        tips.push(
+            cdb::get_contact_chain_tip(&peer.device_id)
+                .expect("read the tip")
+                .expect("the peer is a contact"),
+        );
+    }
+    assert_eq!(tips[0], tips[1], "both devices hold one relationship tip");
+
+    generation(&p.a, &p.b, 5).await;
+    generation(&p.b, &p.a, 3).await;
+}
+
+// =====================================================================
+// CROSSING SENDS (owner ruling, 2026-10-29: "both settle") — adversarial.
+// Each test crosses two online sends as the permanent crossing test does,
+// then disturbs the settlement one way, and requires both to settle exactly
+// once.
+// =====================================================================
+
+/// A sends `a_amount` to B and B sends `b_amount` to A while every spool has
+/// failed, so neither preflight sees the other's transfer; the spools serve
+/// again on return.
+async fn crossed(p: &Pair, a_amount: u64, b_amount: u64) {
+    let members = crate::economic_fixtures::canonical_member_ids();
+    p.nodes.fail_spools(&members).await;
+    for (from, to, amount) in [(&p.a, &p.b, a_amount), (&p.b, &p.a, b_amount)] {
+        let sent = from.send(to, amount).await;
+        assert!(
+            sent.error_message
+                .as_deref()
+                .is_some_and(|e| e.contains("delivery outcome unknown")),
+            "{}: debited, its delivery left to the re-drive: {:?}",
+            from.slot,
+            sent.error_message
+        );
+    }
+    p.nodes.restore_spools(&members).await;
+}
+
+/// Whether both of the crossing's gates are released and both barriers
+/// resolved.
+fn crossing_settled(p: &Pair, rel: &[u8; 32]) -> bool {
+    [(&p.a, &p.b), (&p.b, &p.a)].iter().all(|(me, peer)| {
+        me.enter();
+        !gate_present(peer) && !cdb::relationship_awaits_peer_finalization(rel).expect("await")
+    })
+}
+
+/// Syncs `first` then `second`, round after round, until the crossing settles.
+async fn settle(p: &Pair, rel: &[u8; 32], first: &TestDevice, second: &TestDevice) {
+    for round in 0..8 {
+        let one = first.sync().await;
+        let two = second.sync().await;
+        if crossing_settled(p, rel) {
+            return;
+        }
+        assert!(
+            round < 7,
+            "the crossing did not settle: {} {:?}; {} {:?}",
+            first.slot,
+            one.errors,
+            second.slot,
+            two.errors
+        );
+    }
+}
+
+/// Both sends settled exactly once: each balance moved by both amounts, each
+/// device holds one finalized send and one applied transfer, both hold one
+/// relationship tip, and both are send-ready.
+fn assert_crossing_settled(p: &Pair, rel: &[u8; 32], before: (u64, u64), amounts: (u64, u64)) {
+    assert_eq!(
+        p.a.era_balance(),
+        before.0 - amounts.0 + amounts.1,
+        "A's balance"
+    );
+    assert_eq!(
+        p.b.era_balance(),
+        before.1 + amounts.0 - amounts.1,
+        "B's balance"
+    );
+    let mut tips = Vec::new();
+    for (me, peer) in [(&p.a, &p.b), (&p.b, &p.a)] {
+        me.enter();
+        assert_eq!(
+            proposal_statuses(rel),
+            vec![cdb::PROPOSAL_FINALIZED.to_string()],
+            "{}'s send finalized once",
+            me.slot
+        );
+        assert_eq!(
+            rows_for_relationship("canonical_apply_identity", rel),
+            1,
+            "{} applied the crossing transfer once",
+            me.slot
+        );
+        assert!(send_status(peer).send_ready, "{} is send-ready", me.slot);
+        tips.push(
+            cdb::get_contact_chain_tip(&peer.device_id)
+                .expect("read the tip")
+                .expect("the peer is a contact"),
+        );
+    }
+    assert_eq!(tips[0], tips[1], "both devices hold one relationship tip");
+}
+
+/// Every copy of a transfer half, an evidence half and a certificate one
+/// device's polls have read, each kept once by the id the spool holds it by.
+#[derive(Default)]
+struct Copies {
+    transfers: Vec<crate::sdk::b0x_sdk::B0xEntry>,
+    evidence: Vec<(crate::sdk::b0x_sdk::EvidenceArtifact, String)>,
+    certificates: Vec<crate::sdk::b0x_sdk::RelationshipFinalizedMessage>,
+}
+
+impl Copies {
+    /// Keep what `me`'s poll would read now.
+    async fn read(&mut self, me: &TestDevice, p: &Pair) {
+        let arrived = crate::test_support::arrivals::arrivals_for(me, &p.fleet).await;
+        for transfer in arrived.transfers {
+            if self
+                .transfers
+                .iter()
+                .all(|kept| kept.transaction_id != transfer.transaction_id)
+            {
+                self.transfers.push(transfer);
+            }
+        }
+        for (artifact, route) in arrived.evidence {
+            if self
+                .evidence
+                .iter()
+                .all(|(kept, _)| kept.message_id != artifact.message_id)
+            {
+                self.evidence.push((artifact, route));
+            }
+        }
+        for certificate in arrived.certificates {
+            if self
+                .certificates
+                .iter()
+                .all(|kept| kept.message_id != certificate.message_id)
+            {
+                self.certificates.push(certificate);
+            }
+        }
+    }
+
+    /// Deliver every kept copy to `me` again through its own boundary — each
+    /// half into its ingestion, each certificate into its handler — as a
+    /// network that repeats itself does.
+    async fn deliver_again(&self, me: &TestDevice) {
+        use crate::handlers::recipient_dispatch::{ingest_evidence_half, ingest_transfer_half};
+        use crate::handlers::relationship_finalized::{
+            apply_relationship_finalized, RelationshipFinalizedOutcome,
+        };
+        me.enter();
+        for transfer in &self.transfers {
+            if let Err(e) = ingest_transfer_half(
+                &transfer.transfer_wire_bytes,
+                &transfer.sender_device_id,
+                &transfer.inbox_key,
+                &transfer.transaction_id,
+            ) {
+                panic!("{}: a transfer copy failed the device: {e}", me.slot);
+            }
+        }
+        for (artifact, route) in &self.evidence {
+            if let Err(e) = ingest_evidence_half(
+                &artifact.evidence.full_receipt_bytes,
+                route,
+                &artifact.message_id,
+            ) {
+                panic!("{}: an evidence copy failed the device: {e}", me.slot);
+            }
+        }
+        for certificate in &self.certificates {
+            let outcome = apply_relationship_finalized(&certificate.body).await;
+            assert!(
+                matches!(
+                    outcome,
+                    RelationshipFinalizedOutcome::Applied
+                        | RelationshipFinalizedOutcome::AlreadyFinalized
+                ),
+                "{}: a certificate copy: {outcome:?}",
+                me.slot
+            );
+        }
+    }
+}
+
+/// Reversed delivery order and copies: B, not A, syncs first in every round,
+/// so each device meets the other's transfer, acknowledgment and certificate
+/// in the other order. Before each sync the device's arrivals are kept, and
+/// after it every copy kept so far is delivered to it again — mid-settlement,
+/// while its reconciliation is under way — and once more after the crossing
+/// settles, followed by two more rounds of syncs. Nothing moves twice: each
+/// balance moves by both amounts once, each device applies one transfer and
+/// finalizes one send.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn crossing_sends_settle_in_the_reversed_order_and_their_copies_change_nothing() {
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    crossed(&p, 10, 7).await;
+    let mut copies = [Copies::default(), Copies::default()];
+    for round in 0..8 {
+        let mut errors = Vec::new();
+        for (kept, me) in copies.iter_mut().zip([&p.b, &p.a]) {
+            kept.read(me, &p).await;
+            let synced = me.sync().await;
+            errors.push((me.slot, synced.errors));
+            kept.deliver_again(me).await;
+        }
+        if crossing_settled(&p, &rel) {
+            break;
+        }
+        assert!(round < 7, "the crossing did not settle: {errors:?}");
+    }
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+    for (kept, me) in copies.iter().zip([&p.b, &p.a]) {
+        assert!(
+            !kept.transfers.is_empty() && !kept.evidence.is_empty(),
+            "{}: the peer's transfer halves were read and kept",
+            me.slot
+        );
+        assert!(
+            !kept.certificates.is_empty(),
+            "{}: the peer's certificate was read and kept",
+            me.slot
+        );
+        kept.deliver_again(me).await;
+    }
+    for _ in 0..2 {
+        let b_sync = p.b.sync().await;
+        let a_sync = p.a.sync().await;
+        assert!(
+            a_sync.success && b_sync.success,
+            "{:?} {:?}",
+            a_sync.errors,
+            b_sync.errors
+        );
+    }
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+}
+
+/// Lost acknowledgments: while B applies A's transfer, enough members' spools
+/// fail that B's acknowledgment reaches no quorum; while A applies B's, the
+/// same. Each acknowledgment is sent again once the members serve, and both
+/// sends settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn crossing_sends_settle_when_their_acknowledgments_are_lost_and_sent_again() {
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    crossed(&p, 10, 7).await;
+    // Each device's re-drive delivers its own transfer.
+    for device in [&p.a, &p.b] {
+        let sync = device.sync().await;
+        assert!(sync.success, "{}: {:?}", device.slot, sync.errors);
+    }
+    let breaking = crate::economic_fixtures::members_to_break_quorum();
+    for device in [&p.b, &p.a] {
+        p.nodes.fail_spools(&breaking).await;
+        // The transfer is read from the members still serving; the
+        // acknowledgment reaches no quorum.
+        let sync = device.sync().await;
+        assert_incomplete(&sync);
+        p.nodes.restore_spools(&breaking).await;
+        device.enter();
+        assert_eq!(
+            rows_for_relationship("canonical_apply_identity", &rel),
+            1,
+            "{} applied the crossing transfer",
+            device.slot
+        );
+    }
+    settle(&p, &rel, &p.a, &p.b).await;
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+}
+
+/// A restart during reconciliation: after B has applied A's transfer and
+/// before either send has finalized, B restarts — a new router over its own
+/// database — and the settlement goes on from what it holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn crossing_sends_settle_across_a_restart_mid_reconciliation() {
+    let mut p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    crossed(&p, 10, 7).await;
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    let b_sync = p.b.sync().await;
+    assert!(b_sync.success, "{:?}", b_sync.errors);
+    p.b.enter();
+    assert_eq!(rows_for_relationship("canonical_apply_identity", &rel), 1);
+    assert_eq!(
+        proposal_statuses(&rel),
+        vec![cdb::PROPOSAL_SUBMITTED.to_string()]
+    );
+
+    p.b.boot(&p.fleet).await;
+    settle(&p, &rel, &p.a, &p.b).await;
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+    generation(&p.a, &p.b, 5).await;
+}
+
+/// A tampered certificate of a crossing step releases nothing: once A has
+/// finalized its send, its certificate is read off the members before B's
+/// poll, and each field altered, then applied by hand on B — every one is
+/// refused and B still awaits A's finality. The certificate as A signed it
+/// then releases B, and both sends settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_tampered_certificate_of_a_crossing_step_releases_nothing() {
+    use prost::Message as _;
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    crossed(&p, 10, 7).await;
+    let mut certificate = None;
+    for _ in 0..6 {
+        let a_sync = p.a.sync().await;
+        assert!(a_sync.success, "{:?}", a_sync.errors);
+        p.a.enter();
+        if proposal_statuses(&rel) == vec![cdb::PROPOSAL_FINALIZED.to_string()] {
+            certificate = crate::test_support::arrivals::arrivals_for(&p.b, &p.fleet)
+                .await
+                .certificates
+                .pop();
+            break;
+        }
+        let b_sync = p.b.sync().await;
+        assert!(b_sync.success, "{:?}", b_sync.errors);
+    }
+    let Some(certificate) = certificate else {
+        panic!("A never finalized its crossing send");
+    };
+    let good = dsm::types::proto::RelationshipFinalizedV1::decode(certificate.body.as_slice())
+        .expect("the certificate");
+    p.b.enter();
+    for field in 0..4 {
+        let mut forged = good.clone();
+        match field {
+            0 => forged.sender_child_tip_a[0] ^= 1,
+            1 => forged.recipient_parent_tip_b[0] ^= 1,
+            2 => forged.recipient_child_tip_b[0] ^= 1,
+            _ => forged.signature_a[0] ^= 1,
+        }
+        let out = crate::handlers::relationship_finalized::apply_relationship_finalized(
+            &forged.encode_to_vec(),
+        )
+        .await;
+        assert!(
+            matches!(
+                out,
+                crate::handlers::relationship_finalized::RelationshipFinalizedOutcome::Rejected(_)
+                    | crate::handlers::relationship_finalized::RelationshipFinalizedOutcome::NoJournal
+            ),
+            "field {field}: {out:?}"
+        );
+        assert!(
+            cdb::relationship_awaits_peer_finalization(&rel).expect("await"),
+            "field {field}: B still awaits A's finality"
+        );
+    }
+    settle(&p, &rel, &p.a, &p.b).await;
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+}
+
+/// A send `device` froze for `rel` and could not deliver: its transfer
+/// request and evidence half as the recipient would read them, with the ids
+/// and route they were frozen under, and the parent it consumed.
+struct FrozenSend {
+    transfer: Vec<u8>,
+    route: String,
+    message_id: String,
+    receipt: Vec<u8>,
+    evidence_id: String,
+    parent: [u8; 32],
+}
+
+/// The latest send `device` froze for `rel`, opened with `recipient`'s key
+/// where the frozen bytes are sealed to it.
+fn frozen_send(device: &TestDevice, recipient: &TestDevice, rel: &[u8; 32]) -> FrozenSend {
+    device.enter();
+    let (envelope, route, message_id, parent, evidence_envelope, evidence_id) = {
+        let binding = cdb::get_connection().expect("conn");
+        let conn = binding.lock().expect("the store lock");
+        let (envelope, route, message_id, parent, nonce): (
+            Vec<u8>,
+            String,
+            String,
+            Vec<u8>,
+            Vec<u8>,
+        ) = conn
+            .query_row(
+                "SELECT envelope_bytes, routing_address, submission_id, canonical_parent, \
+                 proposal_nonce FROM sender_outbox WHERE relationship_key = ?1 \
+                 ORDER BY rowid DESC LIMIT 1",
+                rusqlite::params![rel.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("the frozen send");
+        let (evidence_envelope, evidence_id): (Vec<u8>, String) = conn
+            .query_row(
+                "SELECT envelope_bytes, submission_id FROM sender_outbox_artifacts \
+                 WHERE relationship_key = ?1 AND canonical_parent = ?2 AND proposal_nonce = ?3 \
+                 AND role = 'evidence_a'",
+                rusqlite::params![rel.as_slice(), parent, nonce],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("its frozen evidence half");
+        (
+            envelope,
+            route,
+            message_id,
+            parent,
+            evidence_envelope,
+            evidence_id,
+        )
+    };
+    recipient.enter();
+    let body = |bytes: &[u8]| -> Vec<u8> {
+        let outer = dsm::envelope::from_canonical_bytes(bytes).expect("a frozen envelope");
+        let inner = match outer.payload {
+            Some(generated::envelope::Payload::Sealed(_)) => crate::sdk::b0x_sdk::open_sealed(
+                &crate::sdk::b0x_sdk::local_kyber_secret().expect("the recipient's key"),
+                &outer,
+            )
+            .expect("the recipient opens it"),
+            _ => outer,
+        };
+        let Some(generated::envelope::Payload::UniversalTx(tx)) = inner.payload else {
+            panic!("a frozen send carries a UniversalTx");
+        };
+        tx.ops
+            .into_iter()
+            .find_map(|op| match op.kind {
+                Some(generated::universal_op::Kind::Invoke(invoke)) => {
+                    invoke.args.map(|args| args.body)
+                }
+                _ => None,
+            })
+            .expect("an invoke with its request")
+    };
+    let receipt = generated::ReceiptEvidenceA::decode(body(&evidence_envelope).as_slice())
+        .expect("the evidence half")
+        .full_receipt_bytes;
+    FrozenSend {
+        transfer: body(&envelope),
+        route,
+        message_id,
+        receipt,
+        evidence_id,
+        parent: <[u8; 32]>::try_from(parent.as_slice()).expect("a 32-byte parent"),
+    }
+}
+
+/// Conflicting transfers from one parent: A's device is copied before it
+/// sends, and while A's transfer crosses B's, the copy sends B another
+/// transfer from the same parent. The copy's own wallet cannot deliver it —
+/// its economic admission finds the position A's send holds — so the copy's
+/// frozen transfer and evidence are handed to B's ingestion directly, as a
+/// copy running other software can post them. B applies exactly one transfer
+/// from that parent — A's — and never the copy's; A's and B's crossing sends
+/// settle, and B is credited A's amount once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_second_transfer_from_the_same_parent_never_applies_beside_a_crossing() {
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    let mut copy = p.a.backed_up_into("A_COPY");
+    crossed(&p, 10, 7).await;
+    // A's transfer reaches the members first.
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    // The copy sends from the parent A sent from, before it can see B's
+    // transfer: its spools have failed, as A's had.
+    copy.boot(&p.fleet).await;
+    let members = crate::economic_fixtures::canonical_member_ids();
+    p.nodes.fail_spools(&members).await;
+    let forked = copy.send(&p.b, 4).await;
+    p.nodes.restore_spools(&members).await;
+    assert!(
+        forked
+            .error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("held by another root claim")),
+        "the copy's admission finds A's position held: {:?}",
+        forked.error_message
+    );
+    let fork = frozen_send(&copy, &p.b, &rel);
+    let a_b32 = crate::util::text_id::encode_base32_crockford(&p.a.device_id);
+    p.b.enter();
+    let transfer = crate::handlers::recipient_dispatch::ingest_transfer_half(
+        &fork.transfer,
+        &a_b32,
+        &fork.route,
+        &fork.message_id,
+    )
+    .expect("B reads the copy's transfer");
+    let evidence = crate::handlers::recipient_dispatch::ingest_evidence_half(
+        &fork.receipt,
+        &fork.route,
+        &fork.evidence_id,
+    )
+    .expect("B reads the copy's evidence");
+    // Both halves verify under A's key and are staged; staging executes nothing.
+    for (half, outcome) in [("transfer", &transfer), ("evidence", &evidence)] {
+        assert!(
+            matches!(
+                outcome.ingested,
+                crate::handlers::recipient_dispatch::Ingested::Staged
+            ),
+            "the copy's {half} half is staged: {outcome:?}"
+        );
+    }
+
+    settle(&p, &rel, &p.a, &p.b).await;
+    p.b.enter();
+    assert_eq!(
+        applied_signed_parents(&rel).first(),
+        Some(&fork.parent),
+        "the copy's transfer consumes the parent A's applied transfer consumed"
+    );
+    assert_eq!(
+        p.a.era_balance(),
+        before.0 - 10 + 7,
+        "A paid 10 and was paid 7"
+    );
+    assert_eq!(
+        p.b.era_balance(),
+        before.1 + 10 - 7,
+        "B credited A's amount once, never the copy's"
+    );
+    p.b.enter();
+    assert_eq!(
+        applied_signed_parents(&rel).len(),
+        1,
+        "B applied one transfer from A's parent"
+    );
+    for me in [&p.a, &p.b] {
+        me.enter();
+        assert_eq!(
+            proposal_statuses(&rel),
+            vec![cdb::PROPOSAL_FINALIZED.to_string()],
+            "{}'s crossing send finalized",
+            me.slot
+        );
+    }
+    // The copy's staged transfer holds nothing: B is send-ready toward A and
+    // the relationship carries the next transfer each way.
+    p.b.enter();
+    assert!(send_status(&p.a).send_ready, "B is send-ready toward A");
+    generation(&p.b, &p.a, 3).await;
+    generation(&p.a, &p.b, 2).await;
+}
+
+/// A lone transfer half from a copy: as above, but the copy posts only its
+/// transfer, never the evidence that would bind it to a step. Staged and
+/// unbound, it waits on a receipt that will not come; once the crossing has
+/// moved B's tip past the one its nonce derives from it can never execute,
+/// and it holds nothing: B is send-ready toward A and the relationship
+/// carries the next transfer each way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lone_transfer_half_from_a_copy_holds_nothing_once_it_cannot_execute() {
+    let p = Pair::boot(1_000, 1_000).await;
+    let rel = p.a.rel_key_with(&p.b);
+    let before = (p.a.era_balance(), p.b.era_balance());
+    let mut copy = p.a.backed_up_into("A_COPY");
+    crossed(&p, 10, 7).await;
+    let a_sync = p.a.sync().await;
+    assert!(a_sync.success, "{:?}", a_sync.errors);
+    copy.boot(&p.fleet).await;
+    let members = crate::economic_fixtures::canonical_member_ids();
+    p.nodes.fail_spools(&members).await;
+    let forked = copy.send(&p.b, 4).await;
+    p.nodes.restore_spools(&members).await;
+    assert!(
+        forked
+            .error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("held by another root claim")),
+        "the copy's admission finds A's position held: {:?}",
+        forked.error_message
+    );
+    let fork = frozen_send(&copy, &p.b, &rel);
+    let a_b32 = crate::util::text_id::encode_base32_crockford(&p.a.device_id);
+    p.b.enter();
+    let transfer = crate::handlers::recipient_dispatch::ingest_transfer_half(
+        &fork.transfer,
+        &a_b32,
+        &fork.route,
+        &fork.message_id,
+    )
+    .expect("B reads the copy's transfer");
+    assert!(
+        matches!(
+            transfer.ingested,
+            crate::handlers::recipient_dispatch::Ingested::Staged
+        ),
+        "the copy's transfer half is staged: {transfer:?}"
+    );
+
+    settle(&p, &rel, &p.a, &p.b).await;
+    assert_crossing_settled(&p, &rel, before, (10, 7));
+    generation(&p.b, &p.a, 3).await;
+    generation(&p.a, &p.b, 2).await;
+}
+
+mod model_correspondence;

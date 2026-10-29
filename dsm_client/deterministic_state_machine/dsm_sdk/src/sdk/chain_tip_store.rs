@@ -40,12 +40,22 @@ impl ChainTipStore for SqliteChainTipStore {
             counterparty_device_id: *device_id,
             expected_parent_tip,
             target_tip: new_tip,
+            crossing: client_db::bilateral_tip_sync::CrossingSteps::Refuse,
         };
         match client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request) {
             Ok(outcome) => match outcome {
                 client_db::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => Ok(true),
+                // This store's syncs refuse crossings: one step at a time.
+                client_db::bilateral_tip_sync::TipSyncOutcome::Joined { new_tip: tip }
+                | client_db::bilateral_tip_sync::TipSyncOutcome::AlreadyJoined { tip } => {
+                    Err(DsmError::InvalidState(format!(
+                        "SqliteChainTipStore: a one-step-at-a-time sync joined concurrent steps \
+                         at {}",
+                        crate::util::text_id::encode_base32_crockford(&tip[..4])
+                    )))
+                }
                 client_db::bilateral_tip_sync::TipSyncOutcome::ParentMismatch { .. }
                 | client_db::bilateral_tip_sync::TipSyncOutcome::CanonicalMovedToDifferentTip {
                     ..

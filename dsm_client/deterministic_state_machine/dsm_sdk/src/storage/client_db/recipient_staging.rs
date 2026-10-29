@@ -621,24 +621,36 @@ pub fn step_decided(relationship_key: &[u8; 32], parent_tip: &[u8; 32]) -> Resul
         .is_some())
 }
 
-/// Whether an INBOUND transfer from `counterparty_device_id` is recognized
-/// here and can still execute. The finality barrier treats this as
-/// PendingCatchup for originating toward that peer: an inbound step is in
-/// flight on the relationship and originating under it would cross it.
+/// The staged transfers from `counterparty_device_id` whose nonce is unspent.
+/// Whether each can still execute — its nonce derived from the tip this device
+/// holds — is the recognition boundary's judgement
+/// (`recipient_dispatch::counterparty_has_unconverged_inbound`).
 ///
 /// The counterparty is the contact whose key verified the object — never a
-/// field the object carries. An object the apply has decided (its nonce spent,
-/// its step taken) no longer holds the barrier.
-pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool> {
+/// field the object carries.
+pub fn unspent_staged_transfers_from(counterparty_device_id: &[u8]) -> Result<Vec<StagedTransfer>> {
+    let binding = get_connection()?;
+    let conn = lock(&binding)?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {TRANSFER_COLS} FROM recipient_staged_transfer t
+         WHERE t.sender_device_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM spent_nonces s WHERE s.nonce_hash = t.nonce_hash)
+         ORDER BY t.op_id"
+    ))?;
+    let rows = stmt
+        .query_map(params![counterparty_device_id], row_to_transfer)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Whether a staged receipt from `counterparty_device_id` names a step the
+/// apply has not taken: it can still execute once its transfer is here.
+pub fn has_undecided_staged_receipt_from(counterparty_device_id: &[u8]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = lock(&binding)?;
     Ok(conn
         .query_row(
-            "SELECT 1 FROM recipient_staged_transfer t
-             WHERE t.sender_device_id = ?1
-               AND NOT EXISTS (SELECT 1 FROM spent_nonces s WHERE s.nonce_hash = t.nonce_hash)
-             UNION ALL
-             SELECT 1 FROM recipient_staged_receipt r
+            "SELECT 1 FROM recipient_staged_receipt r
              WHERE r.sender_device_id = ?1
                AND NOT EXISTS (SELECT 1 FROM canonical_apply_identity c
                                WHERE c.relationship_key = r.relationship_key

@@ -189,6 +189,32 @@ pub fn get_sender_proposal(
         .optional()?)
 }
 
+/// This device's own send on `relationship_key` still awaiting its finality:
+/// proposed or submitted, not yet finalized. The relationship's gate admits
+/// one at a time, so there is at most one.
+pub fn get_unfinalized_proposal_for_relationship(
+    relationship_key: &[u8; 32],
+) -> Result<Option<SenderOnlineProposal>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database connection is poisoned: {e}"))?;
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT {COLS} FROM sender_online_proposal \
+                 WHERE relationship_key = ?1 AND status IN (?2, ?3)"
+            ),
+            params![
+                relationship_key.as_slice(),
+                PROPOSAL_PROPOSED,
+                PROPOSAL_SUBMITTED
+            ],
+            row_to_proposal,
+        )
+        .optional()?)
+}
+
 /// Look up the proposal a returned acceptance receipt answers.
 ///
 /// The commitment is the ONLY identifier shared by both sides of the reply

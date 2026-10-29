@@ -856,13 +856,37 @@ pub fn complete_applied_acceptance(
         }
     };
     if !ek_sk_b.is_empty() {
-        match cas_advance_local_cert_chain_head_with_sk(
+        let advanced = match cas_advance_local_cert_chain_head_with_sk(
             &rec.relationship_key,
             rec.expected_local_b_head.as_deref(),
             &rec.new_local_b_head,
             &ek_sk_b,
             chain_head_wrap_key,
         )? {
+            // The countersignature chained from this device's own send still
+            // in flight (owner ruling, 2026-10-29: "both settle"): the head is
+            // still the one that send's key was certified by, and moves past
+            // it to this step's key.
+            CasHeadOutcome::Conflict { .. } => match rec.expected_local_b_head.as_deref() {
+                Some(pending) => {
+                    super::cert_chain::cas_advance_local_cert_chain_head_past_pending_with_sk(
+                        &rec.relationship_key,
+                        pending,
+                        &rec.new_local_b_head,
+                        &ek_sk_b,
+                        chain_head_wrap_key,
+                    )?
+                }
+                None => CasHeadOutcome::Conflict {
+                    current: super::cert_chain::load_cert_chain_head_pubkey(
+                        &rec.relationship_key,
+                        CertChainSide::Local,
+                    )?,
+                },
+            },
+            other => other,
+        };
+        match advanced {
             CasHeadOutcome::Advanced { .. }
             | CasHeadOutcome::GenesisInit
             | CasHeadOutcome::AlreadyAtTarget => {}

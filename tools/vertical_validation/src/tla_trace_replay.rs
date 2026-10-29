@@ -314,8 +314,13 @@ fn dsm_replay_candidates() -> &'static [(&'static str, ReplayFn)] {
     &[
         ("add_device", apply_add_device),
         ("create_relationship", apply_create_relationship),
-        ("net_send", apply_net_send),
-        ("net_deliver", apply_net_deliver),
+        ("send", apply_send),
+        ("recv_transfer", apply_recv_transfer),
+        ("recv_delta", apply_recv_delta),
+        ("cert_post", apply_cert_post),
+        ("gate_release", apply_gate_release),
+        ("recv_cert", apply_recv_cert),
+        ("injected_copy", apply_injected_copy),
         ("net_drop", apply_net_drop),
         ("net_duplicate", apply_net_duplicate),
         ("add_storage_node", apply_add_storage_node),
@@ -379,205 +384,653 @@ fn apply_add_device(current: &TlaState, next: &TlaState) -> anyhow::Result<bool>
     Ok(expected == *next)
 }
 
-fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_relationships = map_var(current, "relationships")?;
-    let next_relationships = map_var(next, "relationships")?;
+// ---------------------------------------------------------------------------
+// DSM.tla's online protocol, restated over TLC's values. Each `apply_*`
+// rebuilds the next state from the current one for every choice the action
+// allows and reports whether one is the state TLC printed.
+// ---------------------------------------------------------------------------
 
-    for pair_key in current_relationships.keys() {
+fn pair_of(d: &TlaValue, p: &TlaValue) -> TlaValue {
+    TlaValue::Seq(vec![d.clone(), p.clone()])
+}
+
+fn int_value(n: i64) -> TlaValue {
+    TlaValue::Int(n)
+}
+
+fn record_of(fields: &[(&str, TlaValue)]) -> TlaValue {
+    TlaValue::Record(
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+fn online_of(
+    state: &TlaState,
+    d: &TlaValue,
+    p: &TlaValue,
+) -> anyhow::Result<BTreeMap<String, TlaValue>> {
+    let online = map_var(state, "online")?;
+    Ok(record_fields(
+        online
+            .get(&pair_of(d, p))
+            .ok_or_else(|| anyhow!("missing online[{}]", pair_of(d, p).display()))?,
+    )?
+    .clone())
+}
+
+fn set_online(
+    state: &mut TlaState,
+    d: &TlaValue,
+    p: &TlaValue,
+    rec: BTreeMap<String, TlaValue>,
+) -> anyhow::Result<()> {
+    set_map_entry(state, "online", pair_of(d, p), TlaValue::Record(rec))
+}
+
+fn with_field(
+    mut rec: BTreeMap<String, TlaValue>,
+    field: &str,
+    value: i64,
+) -> BTreeMap<String, TlaValue> {
+    rec.insert(field.to_string(), int_value(value));
+    rec
+}
+
+/// d's projection tip moves to `tip`: its relationship view, its SMT leaf and
+/// its root revision.
+fn move_tip(state: &mut TlaState, d: &TlaValue, p: &TlaValue, tip: i64) -> anyhow::Result<()> {
+    set_map_entry(
+        state,
+        "relationships",
+        pair_of(d, p),
+        relationship_record(tip, "active"),
+    )?;
+    set_nested_map_entry(
+        state,
+        "smtState",
+        d.clone(),
+        rel_key_value(d, p),
+        int_value(tip),
+    )?;
+    increment_map_entry(state, "deviceRoots", d.clone(), 1)
+}
+
+fn ledger_entry(rel: TlaValue, signer: &TlaValue, old_tip: i64, new_tip: i64) -> TlaValue {
+    record_of(&[
+        ("rel", rel),
+        ("signer", signer.clone()),
+        ("oldTip", int_value(old_tip)),
+        ("newTip", int_value(new_tip)),
+    ])
+}
+
+fn unfinalized(rec: &BTreeMap<String, TlaValue>) -> anyhow::Result<bool> {
+    Ok(!record_bool(rec, "fin")?)
+}
+
+/// The join oracle's tip for (parent, a, b), if it holds one.
+fn join_known(state: &TlaState, parent: i64, a: i64, b: i64) -> anyhow::Result<Option<i64>> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    for j in set_var(state, "joins")? {
+        let j = record_fields(j)?;
+        if record_int(j, "parent")? == parent
+            && record_int(j, "lo")? == lo
+            && record_int(j, "hi")? == hi
+        {
+            return Ok(Some(record_int(j, "tip")?));
+        }
+    }
+    Ok(None)
+}
+
+/// `TipSync(v, parent, target, fresh)`; `Some((chain, prev, local, joined))`
+/// where the sync commits, `joined` naming a join the oracle had to take.
+fn tip_sync_values(
+    state: &TlaState,
+    chain: i64,
+    prev: i64,
+    local: i64,
+    parent: i64,
+    target: i64,
+    fresh: i64,
+) -> anyhow::Result<Option<(i64, i64, i64, Option<(i64, i64, i64)>)>> {
+    if chain == target {
+        return Ok(Some((target, prev, target, None)));
+    }
+    if chain == parent {
+        return Ok(Some((target, parent, target, None)));
+    }
+    if prev == parent && local == chain {
+        return Ok(Some(match join_known(state, parent, chain, target)? {
+            Some(tip) => (tip, chain, tip, None),
+            None => (fresh, chain, fresh, Some((parent, chain, target))),
+        }));
+    }
+    if prev != 0 && prev != parent && prev != target && local == chain {
+        if join_known(state, parent, prev, target)? == Some(chain) {
+            return Ok(Some((chain, prev, local, None)));
+        }
+    }
+    Ok(None)
+}
+
+fn add_join(state: &mut TlaState, join: Option<(i64, i64, i64)>, tip: i64) -> anyhow::Result<()> {
+    match join {
+        Some((parent, a, b)) => insert_set_var(
+            state,
+            "joins",
+            record_of(&[
+                ("parent", int_value(parent)),
+                ("lo", int_value(a.min(b))),
+                ("hi", int_value(a.max(b))),
+                ("tip", int_value(tip)),
+            ]),
+        ),
+        None => Ok(()),
+    }
+}
+
+fn create_relationship_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let g = int_var(current, "nextMsgId")?;
+    let relationships = map_var(current, "relationships")?;
+    for pair_key in relationships.keys() {
         let pair = seq_items(pair_key)?;
         if pair.len() != 2 || pair[0] == pair[1] {
             continue;
         }
-
-        let reverse = TlaValue::Seq(vec![pair[1].clone(), pair[0].clone()]);
-        let current_pair = record_fields(
-            current_relationships
-                .get(pair_key)
-                .ok_or_else(|| anyhow!("missing current relationship"))?,
-        )?;
-        let next_pair = record_fields(
-            next_relationships
-                .get(pair_key)
-                .ok_or_else(|| anyhow!("missing next relationship"))?,
-        )?;
-        let current_reverse = record_fields(
-            current_relationships
-                .get(&reverse)
-                .ok_or_else(|| anyhow!("missing reverse relationship"))?,
-        )?;
-        let next_reverse = record_fields(
-            next_relationships
-                .get(&reverse)
-                .ok_or_else(|| anyhow!("missing next reverse relationship"))?,
-        )?;
-
-        if record_int(current_pair, "tip")? != 0
-            || record_int(current_reverse, "tip")? != 0
-            || record_str(current_pair, "state")? != "inactive"
-            || record_str(current_reverse, "state")? != "inactive"
-            || record_int(next_pair, "tip")? != 1
-            || record_int(next_reverse, "tip")? != 1
-            || record_str(next_pair, "state")? != "active"
-            || record_str(next_reverse, "state")? != "active"
-        {
-            continue;
-        }
-
+        let (d1, d2) = (&pair[0], &pair[1]);
+        let start = BTreeMap::from([
+            ("prev".to_string(), int_value(0)),
+            ("local".to_string(), int_value(g)),
+            ("lin".to_string(), int_value(g)),
+            ("pin".to_string(), int_value(g)),
+            ("gate".to_string(), int_value(0)),
+            ("awaits".to_string(), int_value(0)),
+        ]);
         let mut expected = current.clone();
         set_map_entry(
             &mut expected,
             "relationships",
-            pair_key.clone(),
-            relationship_record(1, "active"),
+            pair_of(d1, d2),
+            relationship_record(g, "active"),
         )?;
         set_map_entry(
             &mut expected,
             "relationships",
-            reverse,
-            relationship_record(1, "active"),
+            pair_of(d2, d1),
+            relationship_record(g, "active"),
         )?;
+        update_relationship_smt_leaf(&mut expected, d1, d2, g)?;
+        set_online(&mut expected, d1, d2, start.clone())?;
+        set_online(&mut expected, d2, d1, start)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(g + 1))?;
+        bump_step(&mut expected)?;
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(create_relationship_candidates(current)?.contains(next))
+}
+
+fn transfer_msg(
+    r: &BTreeMap<String, TlaValue>,
+    copy: i64,
+    dup_left: TlaValue,
+) -> anyhow::Result<TlaValue> {
+    let field = |f: &str| {
+        r.get(f)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing outbox field {f}"))
+    };
+    Ok(record_of(&[
+        ("id", field("id")?),
+        ("copy", int_value(copy)),
+        ("kind", TlaValue::Str("transfer".into())),
+        ("from", field("from")?),
+        ("to", field("to")?),
+        ("payload", field("payload")?),
+        ("sp", field("sp")?),
+        ("sc", field("sc")?),
+        ("pp", field("pp")?),
+        ("pc", field("pc")?),
+        ("dupLeft", dup_left),
+    ]))
+}
+
+fn delta_msg(
+    j: &BTreeMap<String, TlaValue>,
+    copy: i64,
+    dup_left: TlaValue,
+) -> anyhow::Result<TlaValue> {
+    let field = |f: &str| {
+        j.get(f)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing journal field {f}"))
+    };
+    Ok(record_of(&[
+        ("id", field("id")?),
+        ("copy", int_value(copy)),
+        ("kind", TlaValue::Str("delta".into())),
+        ("from", field("from")?),
+        ("to", field("to")?),
+        ("payload", int_value(0)),
+        ("sp", field("sp")?),
+        ("sc", field("sc")?),
+        ("pp", field("pp")?),
+        ("pc", field("pc")?),
+        ("dupLeft", dup_left),
+    ]))
+}
+
+/// The duplicate budget a fresh copy carries: whatever the copies already in
+/// the bag were given, read from the transfer the step under check added.
+fn dup_budget(msg: &BTreeMap<String, TlaValue>) -> anyhow::Result<TlaValue> {
+    msg.get("dupLeft")
+        .cloned()
+        .ok_or_else(|| anyhow!("missing dupLeft"))
+}
+
+fn send_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let added = set_difference(set_var(next, "outbox")?, set_var(current, "outbox")?);
+    let [r] = added.as_slice() else {
+        return Ok(out);
+    };
+    let rec = record_fields(r)?;
+    let id = int_var(current, "nextMsgId")?;
+    let (d, p) = (
+        rec.get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?,
+        rec.get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?,
+    );
+    let o = online_of(current, &d, &p)?;
+    let amt = record_int(rec, "payload")?;
+    if record_int(rec, "id")? != id
+        || record_int(rec, "sc")? != id
+        || record_int(rec, "pc")? != id
+        || record_int(rec, "sp")? != record_int(&o, "lin")?
+        || record_int(rec, "pp")? != relationship_tip(current, &pair_of(&d, &p))?
+        || !unfinalized(rec)?
+    {
+        return Ok(out);
+    }
+    let sent = set_difference(set_var(next, "net")?, set_var(current, "net")?);
+    let [msg] = sent.as_slice() else {
+        return Ok(out);
+    };
+    let mut expected = current.clone();
+    insert_set_var(&mut expected, "outbox", r.clone())?;
+    insert_set_var(
+        &mut expected,
+        "net",
+        transfer_msg(rec, id, dup_budget(record_fields(msg)?)?)?,
+    )?;
+    let o = with_field(
+        with_field(with_field(o, "lin", id), "local", id),
+        "gate",
+        id,
+    );
+    set_online(&mut expected, &d, &p, o)?;
+    increment_map_entry(&mut expected, "deviceBalance", d, -amt)?;
+    set_var_value(&mut expected, "nextMsgId", int_value(id + 1))?;
+    bump_step(&mut expected)?;
+    out.push(expected);
+    Ok(out)
+}
+
+fn apply_send(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(send_candidates(current, next)?.contains(next))
+}
+
+fn recv_transfer_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let base = int_var(current, "nextMsgId")?;
+    for m in set_var(current, "net")? {
+        let msg = record_fields(m)?;
+        if record_str(msg, "kind")? != "transfer" {
+            continue;
+        }
+        let d = msg
+            .get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?;
+        let p = msg
+            .get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?;
+        let o = online_of(current, &d, &p)?;
+        let chain = relationship_tip(current, &pair_of(&d, &p))?;
+        let (sp, sc, pp, pc) = (
+            record_int(msg, "sp")?,
+            record_int(msg, "sc")?,
+            record_int(msg, "pp")?,
+            record_int(msg, "pc")?,
+        );
+        let Some((new_chain, new_prev, new_local, join)) = tip_sync_values(
+            current,
+            chain,
+            record_int(&o, "prev")?,
+            record_int(&o, "local")?,
+            pp,
+            pc,
+            base + 1,
+        )?
+        else {
+            continue;
+        };
+        let bc = base;
+        let rel = rel_key_value(&d, &p);
+        let journal = record_of(&[
+            (
+                "id",
+                msg.get("id")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing id"))?,
+            ),
+            ("from", d.clone()),
+            ("to", p.clone()),
+            (
+                "sp",
+                o.get("lin")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing lin"))?,
+            ),
+            ("sc", int_value(bc)),
+            ("pp", int_value(pp)),
+            ("pc", int_value(pc)),
+        ]);
+        let mut expected = current.clone();
+        move_tip(&mut expected, &d, &p, new_chain)?;
+        let mut rec = o.clone();
+        rec.insert("prev".into(), int_value(new_prev));
+        rec.insert("local".into(), int_value(new_local));
+        rec.insert("lin".into(), int_value(bc));
+        rec.insert("pin".into(), int_value(sc));
+        rec.insert(
+            "awaits".into(),
+            msg.get("id")
+                .cloned()
+                .ok_or_else(|| anyhow!("missing id"))?,
+        );
+        set_online(&mut expected, &d, &p, rec)?;
+        increment_map_entry(
+            &mut expected,
+            "deviceBalance",
+            d.clone(),
+            record_int(msg, "payload")?,
+        )?;
+        insert_set_var(&mut expected, "ledger", ledger_entry(rel, &p, sp, sc))?;
+        add_join(&mut expected, join, new_chain)?;
+        remove_set_var(&mut expected, "net", m)?;
+        let delta = delta_msg(record_fields(&journal)?, bc, dup_budget(msg)?)?;
+        insert_set_var(&mut expected, "journal", journal)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(base + 2))?;
+        bump_step(&mut expected)?;
+        // The delta's duplicate budget is the configuration's; take it from
+        // the delta TLC printed, if the rest of the state is this step's.
+        let printed = set_difference(set_var(next, "net")?, set_var(&expected, "net")?);
+        if let [printed] = printed.as_slice() {
+            let mut printed_fields = record_fields(printed)?.clone();
+            let mut ours = record_fields(&delta)?.clone();
+            printed_fields.remove("dupLeft");
+            ours.remove("dupLeft");
+            if printed_fields == ours {
+                insert_set_var(&mut expected, "net", printed.clone())?;
+            }
+        }
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_transfer_candidates(current, next)?.contains(next))
+}
+
+fn recv_delta_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let fresh = int_var(current, "nextMsgId")?;
+    for m in set_var(current, "net")? {
+        let msg = record_fields(m)?;
+        if record_str(msg, "kind")? != "delta" {
+            continue;
+        }
+        let d = msg
+            .get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?;
+        let p = msg
+            .get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?;
+        let id = record_int(msg, "id")?;
+        let mut found = None;
+        for r in set_var(current, "outbox")? {
+            if record_int(record_fields(r)?, "id")? == id {
+                found = Some(r);
+            }
+        }
+        let Some(r) = found else {
+            continue;
+        };
+        let rec = record_fields(r)?;
+        let o = online_of(current, &d, &p)?;
+        let chain = relationship_tip(current, &pair_of(&d, &p))?;
+        let Some((new_chain, new_prev, new_local, join)) = tip_sync_values(
+            current,
+            chain,
+            record_int(&o, "prev")?,
+            record_int(&o, "local")?,
+            record_int(rec, "pp")?,
+            record_int(rec, "pc")?,
+            fresh,
+        )?
+        else {
+            continue;
+        };
+        let mut expected = current.clone();
+        move_tip(&mut expected, &d, &p, new_chain)?;
+        let mut on = o.clone();
+        on.insert("prev".into(), int_value(new_prev));
+        on.insert("local".into(), int_value(new_local));
+        on.insert("pin".into(), int_value(record_int(msg, "sc")?));
+        set_online(&mut expected, &d, &p, on)?;
+        remove_set_var(&mut expected, "outbox", r)?;
+        let mut finalized = rec.clone();
+        finalized.insert("fin".into(), TlaValue::Bool(unfinalized(rec)?));
+        insert_set_var(&mut expected, "outbox", TlaValue::Record(finalized))?;
         insert_set_var(
             &mut expected,
             "ledger",
-            ledger_record(pair[0].clone(), pair[1].clone(), 0, 1),
+            ledger_entry(
+                rel_key_value(&d, &p),
+                &p,
+                record_int(msg, "sp")?,
+                record_int(msg, "sc")?,
+            ),
         )?;
-        update_relationship_smt_leaf(&mut expected, &pair[0], &pair[1], 1)?;
+        add_join(&mut expected, join, new_chain)?;
+        remove_set_var(&mut expected, "net", m)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(fresh + 1))?;
         bump_step(&mut expected)?;
-        if expected == *next {
-            return Ok(true);
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_delta(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_delta_candidates(current)?.contains(next))
+}
+
+fn cert_post_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let gate = record_int(record_fields(rec)?, "gate")?;
+        if pair.len() != 2 || gate == 0 {
+            continue;
         }
+        let mut expected = current.clone();
+        insert_set_var(&mut expected, "certs", int_value(gate))?;
+        bump_step(&mut expected)?;
+        out.push(expected);
     }
-
-    Ok(false)
+    Ok(out)
 }
 
-fn apply_net_send(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_net = set_var(current, "net")?;
-    let next_net = set_var(next, "net")?;
-    let added = set_difference(next_net, current_net);
-    if added.len() != 1 || next_net.len() != current_net.len() + 1 {
-        return Ok(false);
+fn apply_cert_post(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(cert_post_candidates(current)?.contains(next))
+}
+
+fn gate_release_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let rec = record_fields(rec)?;
+        let gate = record_int(rec, "gate")?;
+        if pair.len() != 2 || gate == 0 {
+            continue;
+        }
+        let mut expected = current.clone();
+        let mut outbox = BTreeSet::new();
+        for r in set_var(current, "outbox")? {
+            if record_int(record_fields(r)?, "id")? != gate {
+                outbox.insert(r.clone());
+            }
+        }
+        set_var_value(&mut expected, "outbox", TlaValue::Set(outbox))?;
+        set_online(
+            &mut expected,
+            &pair[0],
+            &pair[1],
+            with_field(rec.clone(), "gate", 0),
+        )?;
+        bump_step(&mut expected)?;
+        out.push(expected);
     }
+    Ok(out)
+}
 
-    let msg = record_fields(&added[0])?;
-    let from = msg
-        .get("from")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing from"))?;
-    let to = msg
-        .get("to")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing to"))?;
+fn apply_gate_release(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(gate_release_candidates(current)?.contains(next))
+}
 
+fn recv_cert_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let rec = record_fields(rec)?;
+        let awaits = record_int(rec, "awaits")?;
+        if pair.len() != 2 || awaits == 0 {
+            continue;
+        }
+        let mut expected = current.clone();
+        let mut journal = BTreeSet::new();
+        for j in set_var(current, "journal")? {
+            if record_int(record_fields(j)?, "id")? != awaits {
+                journal.insert(j.clone());
+            }
+        }
+        set_var_value(&mut expected, "journal", TlaValue::Set(journal))?;
+        set_online(
+            &mut expected,
+            &pair[0],
+            &pair[1],
+            with_field(rec.clone(), "awaits", 0),
+        )?;
+        bump_step(&mut expected)?;
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_cert(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_cert_candidates(current)?.contains(next))
+}
+
+/// A copy put into the bag: a re-drive (from the outbox or a journal) or a
+/// copy's post. Each takes a fresh copy id.
+fn injected_copy_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let added = set_difference(set_var(next, "net")?, set_var(current, "net")?);
+    let [msg] = added.as_slice() else {
+        return Ok(out);
+    };
+    let fields = record_fields(msg)?;
+    let copy = int_var(current, "nextMsgId")?;
+    if record_int(fields, "copy")? != copy {
+        return Ok(out);
+    }
+    let budget = dup_budget(fields)?;
+    let redriven = set_var(current, "outbox")?
+        .iter()
+        .chain(set_var(current, "journal")?.iter())
+        .map(|src| {
+            let src = record_fields(src)?;
+            if src.contains_key("fin") {
+                transfer_msg(src, copy, budget.clone())
+            } else {
+                delta_msg(src, copy, budget.clone())
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let posted_by_a_copy = record_str(fields, "kind")? == "transfer"
+        && record_int(fields, "id")? == copy
+        && record_int(fields, "sc")? == copy
+        && record_int(fields, "pc")? == copy;
+    if !redriven.contains(msg) && !posted_by_a_copy {
+        return Ok(out);
+    }
     let mut expected = current.clone();
-    insert_set_var(&mut expected, "net", added[0].clone())?;
-    let current_next_msg_id = int_var(current, "nextMsgId")?;
-    if receipt_int(msg, "id")? != current_next_msg_id {
-        return Ok(false);
-    }
-    set_var_value(
-        &mut expected,
-        "nextMsgId",
-        TlaValue::Int(current_next_msg_id + 1),
-    )?;
-    increment_map_entry(
-        &mut expected,
-        "deviceBalance",
-        from.clone(),
-        -receipt_int(msg, "payload")?,
-    )?;
-    let pair = TlaValue::Seq(vec![from.clone(), to.clone()]);
-    let reverse = TlaValue::Seq(vec![to, from]);
-    let tip = relationship_tip(current, &pair)?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair,
-        relationship_record(tip, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(tip, "active"),
-    )?;
+    insert_set_var(&mut expected, "net", msg.clone())?;
+    set_var_value(&mut expected, "nextMsgId", int_value(copy + 1))?;
     bump_step(&mut expected)?;
-    Ok(expected == *next)
+    out.push(expected);
+    Ok(out)
 }
 
-fn apply_net_deliver(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+fn apply_injected_copy(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(injected_copy_candidates(current, next)?.contains(next))
+}
+
+fn net_drop_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
     let current_net = set_var(current, "net")?;
     let next_net = set_var(next, "net")?;
     let removed = set_difference(current_net, next_net);
     if removed.len() != 1 || next_net.len() + 1 != current_net.len() {
-        return Ok(false);
+        return Ok(out);
     }
-
-    let msg = record_fields(&removed[0])?;
-    let from = msg
-        .get("from")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing from"))?;
-    let to = msg
-        .get("to")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing to"))?;
-    let parent_tip = receipt_int(msg, "parentTip")?;
-    let pair = TlaValue::Seq(vec![from.clone(), to.clone()]);
-    let reverse = TlaValue::Seq(vec![to.clone(), from.clone()]);
 
     let mut expected = current.clone();
     remove_set_var(&mut expected, "net", &removed[0])?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair.clone(),
-        relationship_record(parent_tip + 1, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(parent_tip + 1, "active"),
-    )?;
-    update_relationship_smt_leaf(&mut expected, &from, &to, parent_tip + 1)?;
-    increment_map_entry(
-        &mut expected,
-        "deviceBalance",
-        to.clone(),
-        receipt_int(msg, "payload")?,
-    )?;
-    insert_set_var(
-        &mut expected,
-        "ledger",
-        ledger_record(from, to, parent_tip, parent_tip + 1),
-    )?;
     bump_step(&mut expected)?;
-    Ok(expected == *next)
+    out.push(expected);
+    Ok(out)
 }
 
 fn apply_net_drop(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_net = set_var(current, "net")?;
-    let next_net = set_var(next, "net")?;
-    let removed = set_difference(current_net, next_net);
-    if removed.len() != 1 || next_net.len() + 1 != current_net.len() {
-        return Ok(false);
-    }
-
-    let mut expected = current.clone();
-    remove_set_var(&mut expected, "net", &removed[0])?;
-    bump_step(&mut expected)?;
-    Ok(expected == *next)
+    Ok(net_drop_candidates(current, next)?.contains(next))
 }
 
-fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+fn net_duplicate_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
     let current_net = set_var(current, "net")?;
     let next_net = set_var(next, "net")?;
     if next_net.len() != current_net.len() + 1 {
-        return Ok(false);
+        return Ok(out);
     }
 
-    let current_next_msg_id = int_var(current, "nextMsgId")?;
+    let copy = int_var(current, "nextMsgId")?;
     for original in current_net {
         let msg = record_fields(original)?;
         let dup_left = receipt_int(msg, "dupLeft")?;
@@ -587,26 +1040,109 @@ fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bo
 
         let mut reduced = msg.clone();
         reduced.insert("dupLeft".into(), TlaValue::Int(dup_left - 1));
-        let mut clone = msg.clone();
-        clone.insert("id".into(), TlaValue::Int(current_next_msg_id));
-        clone.insert("dupLeft".into(), TlaValue::Int(dup_left - 1));
+        let mut clone = reduced.clone();
+        clone.insert("copy".into(), TlaValue::Int(copy));
 
         let mut expected = current.clone();
         remove_set_var(&mut expected, "net", original)?;
         insert_set_var(&mut expected, "net", TlaValue::Record(reduced))?;
         insert_set_var(&mut expected, "net", TlaValue::Record(clone))?;
-        set_var_value(
-            &mut expected,
-            "nextMsgId",
-            TlaValue::Int(current_next_msg_id + 1),
-        )?;
+        set_var_value(&mut expected, "nextMsgId", TlaValue::Int(copy + 1))?;
         bump_step(&mut expected)?;
-        if expected == *next {
-            return Ok(true);
-        }
+        out.push(expected);
     }
 
-    Ok(false)
+    Ok(out)
+}
+
+fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(net_duplicate_candidates(current, next)?.contains(next))
+}
+
+fn offline_transfer_candidates(
+    current: &TlaState,
+    next: &TlaState,
+) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let current_sessions = set_var(current, "offlineSessions")?;
+    let next_sessions = set_var(next, "offlineSessions")?;
+    if current_sessions.len() < 2 || next_sessions.len() + 2 != current_sessions.len() {
+        return Ok(out);
+    }
+    let removed = set_difference(current_sessions, next_sessions);
+    let [first, second] = removed.as_slice() else {
+        return Ok(out);
+    };
+    let base = int_var(current, "nextMsgId")?;
+    for session in [first, second] {
+        let ends = seq_items(session)?;
+        let (d1, d2) = (&ends[0], &ends[1]);
+        let tip = relationship_tip(current, &pair_of(d1, d2))?;
+        let (o1, o2) = (online_of(current, d1, d2)?, online_of(current, d2, d1)?);
+        let (c1, c2) = (base, base + 1);
+        let old_balance = map_var(current, "deviceBalance")?
+            .get(d1)
+            .map(int_from_value)
+            .transpose()?
+            .ok_or_else(|| anyhow!("missing balance"))?;
+        let new_balance = map_var(next, "deviceBalance")?
+            .get(d1)
+            .map(int_from_value)
+            .transpose()?
+            .ok_or_else(|| anyhow!("missing balance"))?;
+        let amount = old_balance - new_balance;
+        let mut expected = current.clone();
+        remove_set_var(&mut expected, "offlineSessions", first)?;
+        remove_set_var(&mut expected, "offlineSessions", second)?;
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d1, d2),
+            relationship_record(c1, "active"),
+        )?;
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d2, d1),
+            relationship_record(c1, "active"),
+        )?;
+        update_relationship_smt_leaf(&mut expected, d1, d2, c1)?;
+        let mut n1 = o1.clone();
+        n1.insert("prev".into(), int_value(tip));
+        n1.insert("local".into(), int_value(c1));
+        n1.insert("lin".into(), int_value(c1));
+        n1.insert("pin".into(), int_value(c2));
+        let mut n2 = o2.clone();
+        n2.insert("prev".into(), int_value(tip));
+        n2.insert("local".into(), int_value(c1));
+        n2.insert("lin".into(), int_value(c2));
+        n2.insert("pin".into(), int_value(c1));
+        set_online(&mut expected, d1, d2, n1)?;
+        set_online(&mut expected, d2, d1, n2)?;
+        increment_map_entry(&mut expected, "deviceBalance", d1.clone(), -amount)?;
+        increment_map_entry(&mut expected, "deviceBalance", d2.clone(), amount)?;
+        let rel = rel_key_value(d1, d2);
+        insert_set_var(
+            &mut expected,
+            "ledger",
+            ledger_entry(rel.clone(), d1, record_int(&o1, "lin")?, c1),
+        )?;
+        insert_set_var(
+            &mut expected,
+            "ledger",
+            ledger_entry(rel, d2, record_int(&o2, "lin")?, c2),
+        )?;
+        set_var_value(&mut expected, "nextMsgId", int_value(base + 2))?;
+        bump_step(&mut expected)?;
+        if amount > 0 {
+            out.push(expected);
+        }
+    }
+    Ok(out)
+}
+
+fn apply_offline_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(offline_transfer_candidates(current, next)?.contains(next))
 }
 
 fn apply_add_storage_node(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
@@ -683,52 +1219,6 @@ fn apply_start_offline_session(current: &TlaState, next: &TlaState) -> anyhow::R
     let mut expected = current.clone();
     insert_set_var(&mut expected, "offlineSessions", added[0].clone())?;
     insert_set_var(&mut expected, "offlineSessions", added[1].clone())?;
-    bump_step(&mut expected)?;
-    Ok(expected == *next)
-}
-
-fn apply_offline_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_sessions = set_var(current, "offlineSessions")?;
-    let next_sessions = set_var(next, "offlineSessions")?;
-    if current_sessions.len() < 2 || next_sessions.len() + 2 != current_sessions.len() {
-        return Ok(false);
-    }
-
-    let removed = set_difference(current_sessions, next_sessions);
-    if removed.len() != 2 {
-        return Ok(false);
-    }
-    let a = seq_items(&removed[0])?;
-    let b = seq_items(&removed[1])?;
-    if a.len() != 2 || b.len() != 2 || a[0] != b[1] || a[1] != b[0] {
-        return Ok(false);
-    }
-
-    let pair = TlaValue::Seq(vec![a[0].clone(), a[1].clone()]);
-    let reverse = TlaValue::Seq(vec![a[1].clone(), a[0].clone()]);
-    let old_tip = relationship_tip(current, &pair)?;
-
-    let mut expected = current.clone();
-    remove_set_var(&mut expected, "offlineSessions", &removed[0])?;
-    remove_set_var(&mut expected, "offlineSessions", &removed[1])?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair,
-        relationship_record(old_tip + 1, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(old_tip + 1, "active"),
-    )?;
-    update_relationship_smt_leaf(&mut expected, &a[0], &a[1], old_tip + 1)?;
-    insert_set_var(
-        &mut expected,
-        "ledger",
-        ledger_record(a[0].clone(), a[1].clone(), old_tip, old_tip + 1),
-    )?;
     bump_step(&mut expected)?;
     Ok(expected == *next)
 }
@@ -988,17 +1478,6 @@ fn key_record(sphincs: i64, kyber: i64) -> TlaValue {
     TlaValue::Record(BTreeMap::from([
         ("sphincs".into(), TlaValue::Int(sphincs)),
         ("kyber".into(), TlaValue::Int(kyber)),
-    ]))
-}
-
-fn ledger_record(d1: TlaValue, d2: TlaValue, old_tip: i64, new_tip: i64) -> TlaValue {
-    let mut rel = BTreeSet::new();
-    rel.insert(d1);
-    rel.insert(d2);
-    TlaValue::Record(BTreeMap::from([
-        ("rel".into(), TlaValue::Set(rel)),
-        ("oldTip".into(), TlaValue::Int(old_tip)),
-        ("newTip".into(), TlaValue::Int(new_tip)),
     ]))
 }
 
@@ -1591,6 +2070,76 @@ mod tests {
         let value = parser.parse_value().expect("parse nested value");
         parser.expect_end().expect("consume all input");
         assert!(matches!(value, TlaValue::Map(_)));
+    }
+
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 42): a
+    /// relationship, two sends that cross, a dropped copy and its re-drive,
+    /// and both transfers applied. Every step is one the online rules explain.
+    #[test]
+    fn replays_a_dsm_simulation_where_two_sends_cross() {
+        let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_42_simulation.trace"))
+            .expect("parse the simulation");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 7): a send
+    /// applied, finalized on its delta, copies of its delta, and its
+    /// certificate reaching storage.
+    #[test]
+    fn replays_a_dsm_simulation_through_finalization_and_the_certificate() {
+        let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_7_simulation.trace"))
+            .expect("parse the simulation");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// TLC's counterexample to `NoCrossingSettles` (`DSM_CrossingSettles.cfg`):
+    /// two sends cross, both apply, both finalize on the joined tip, both
+    /// certificates reach storage, both gates release and both recipients
+    /// read them.
+    #[test]
+    fn replays_the_crossing_witness_through_both_certificates() {
+        let states = parse_trace_states(include_str!(
+            "../fixtures/dsm_crossing_settles_witness.trace"
+        ))
+        .expect("parse the witness");
+        assert_eq!(states.len(), 14, "the witness's thirteen steps");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// The same simulation with the recipient credited one more than the
+    /// transfer carried: no rule explains the step.
+    #[test]
+    fn rejects_a_dsm_simulation_whose_apply_mints() {
+        let text = include_str!("../fixtures/dsm_tiny_7_simulation.trace");
+        let mut states = parse_trace_states(text).expect("parse the simulation");
+        let apply = states
+            .windows(2)
+            .position(|w| w[0].get("journal") != w[1].get("journal"))
+            .expect("the simulation applies a transfer")
+            + 1;
+        let mut minted = 0;
+        if let Some(TlaValue::Map(balances)) = states[apply].get_mut("deviceBalance") {
+            for value in balances.values_mut() {
+                if let TlaValue::Int(n) = value {
+                    *n += 1;
+                    minted += 1;
+                }
+            }
+        }
+        assert!(
+            minted > 0,
+            "the simulation's balances are a function of ints"
+        );
+        let failures = replay_dsm_trace(&states);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.starts_with(&format!("step {apply}:"))),
+            "the minted credit at step {apply} was explained: {failures:?}"
+        );
     }
 
     #[test]

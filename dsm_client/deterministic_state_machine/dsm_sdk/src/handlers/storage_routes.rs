@@ -645,10 +645,26 @@ async fn finalize_from_countersign_delta(
             prior_step_addr: b_prior.map(|a| a.to_vec()),
         }
         .encode_to_vec();
+        // This send's own step object, when this device already recorded it:
+        // it countersigned a transfer that crossed this send, and recorded the
+        // send's step then, on the chain as it stood before the send (owner
+        // ruling, 2026-10-29: "both settle"). Taken as built, never rebuilt
+        // on the chain as it stands now.
+        let a_step_addr = match crate::storage::client_db::economic_lineage::recorded_ek_step_addr(
+            &proposal.relationship_key,
+            &self_device_id,
+            &receipt.ek_pk_a,
+        ) {
+            Ok(Some(addr)) => addr,
+            Ok(None) => dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes),
+            Err(e) => {
+                return CountersignOutcome::FinalizeFailed(format!("ek step chain (A): {e}"));
+            }
+        };
         vec![
             (
                 self_device_id,
-                dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes),
+                a_step_addr,
                 receipt.ek_pk_a.clone(),
                 a_step_bytes,
             ),
@@ -1578,12 +1594,22 @@ impl AppRouterImpl {
                         &transition_entropy,
                     )
                     .map_err(|e| format!("the signed step's C_pre: {e}"))?;
+                    // The relationship tip the sender made this transfer on:
+                    // the one its signed nonce derives from, which is the tip
+                    // this device holds — a transfer crossing this device's own
+                    // send included (owner ruling, 2026-10-29: "both settle").
+                    // The successor is taken from there, as the sender took it.
                     let projection_parent: [u8; 32] =
-                        crate::storage::client_db::get_contact_chain_tip(&sender_device)
-                            .map_err(|e| {
-                                format!("the sender's relationship tip is unreadable: {e}")
-                            })?
-                            .ok_or_else(|| "the sender is not a contact".to_string())?;
+                        crate::handlers::recipient_dispatch::tip_the_nonce_derives_from(
+                            &sender_device,
+                            &v.signed_op,
+                            &v.terms,
+                        )?
+                        .ok_or_else(|| {
+                            "the transfer's nonce derives from another tip than the one this \
+                             device holds for the relationship"
+                                .to_string()
+                        })?;
                     let projection_target: [u8; 32] = {
                         let sigma_sym =
                             dsm::core::bilateral_transaction_manager::compute_precommit(

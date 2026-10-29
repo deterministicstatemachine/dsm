@@ -226,6 +226,9 @@ pub enum BilateralSide {
 /// key to sign it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EkPredecessor<K> {
+    /// The EK of the side's own step still awaiting its finality, when the
+    /// step being signed follows it in the side's canonical lineage.
+    OwnStepInFlight(K),
     /// The side's EK head on the relationship.
     ChainHead(K),
     /// The side's AK, at the relationship's first step, before it has an EK
@@ -237,7 +240,7 @@ impl<K> EkPredecessor<K> {
     /// The key itself.
     pub fn key(self) -> K {
         match self {
-            Self::ChainHead(key) | Self::RootAk(key) => key,
+            Self::OwnStepInFlight(key) | Self::ChainHead(key) | Self::RootAk(key) => key,
         }
     }
 
@@ -256,6 +259,26 @@ pub fn per_step_ek_predecessor<K>(chain_head: Option<K>, root_ak: K) -> EkPredec
     match chain_head {
         Some(head) => EkPredecessor::ChainHead(head),
         None => EkPredecessor::RootAk(root_ak),
+    }
+}
+
+/// The predecessor rule along a side's canonical lineage (owner ruling,
+/// 2026-10-29: "both settle"). A side's steps on a relationship are one chain
+/// in the order of its canonical lineage, whether or not each has reached its
+/// finality: a step whose canonical parent is the canonical child of the
+/// side's own step still in flight — its send, awaiting the counterparty's
+/// countersignature — chains to that step's EK, never past it to the head the
+/// side held before it. Otherwise the rule is [`per_step_ek_predecessor`]'s.
+/// `own_step_in_flight` is that step's canonical child and its key.
+pub fn per_step_ek_predecessor_in_lineage<K>(
+    step_parent: &[u8; 32],
+    own_step_in_flight: Option<(&[u8; 32], K)>,
+    chain_head: Option<K>,
+    root_ak: K,
+) -> EkPredecessor<K> {
+    match own_step_in_flight {
+        Some((child, key)) if child == step_parent => EkPredecessor::OwnStepInFlight(key),
+        _ => per_step_ek_predecessor(chain_head, root_ak),
     }
 }
 
@@ -473,6 +496,43 @@ mod tests {
     /// each turns one named assertion here red. The write-count check is not
     /// load-bearing for a one-write step (a repeated leaf and an empty set are
     /// refused without it); it carries the three-write bearer step.
+    /// A side's steps are one chain in its canonical lineage (owner ruling,
+    /// 2026-10-29: "both settle"): a step that follows the side's own step
+    /// still in flight chains to that step's key; any other step chains to
+    /// the head, or at the first step to the AK.
+    /// MUTATION CONTROL: ignoring the step in flight (the head the side held
+    /// before it) turns this red, and the crossing test with it.
+    #[test]
+    fn a_step_after_the_sides_own_step_in_flight_chains_to_that_step() {
+        let parent = [0x51u8; 32];
+        let elsewhere = [0x52u8; 32];
+        assert_eq!(
+            per_step_ek_predecessor_in_lineage(
+                &parent,
+                Some((&parent, "send")),
+                Some("head"),
+                "ak"
+            ),
+            EkPredecessor::OwnStepInFlight("send"),
+            "it follows the send in flight"
+        );
+        assert_eq!(
+            per_step_ek_predecessor_in_lineage(
+                &parent,
+                Some((&elsewhere, "send")),
+                Some("head"),
+                "ak"
+            ),
+            EkPredecessor::ChainHead("head"),
+            "a send in flight it does not follow is not its predecessor"
+        );
+        assert_eq!(
+            per_step_ek_predecessor_in_lineage(&parent, None::<(&[u8; 32], &str)>, None, "ak"),
+            EkPredecessor::RootAk("ak"),
+            "the relationship's first step chains to the AK"
+        );
+    }
+
     #[test]
     fn the_state_rules_hold_only_for_the_move_the_writes_prove() {
         let w = world();

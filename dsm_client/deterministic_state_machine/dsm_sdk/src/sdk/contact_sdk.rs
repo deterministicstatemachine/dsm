@@ -123,6 +123,7 @@ impl ContactManager {
             counterparty_device_id: device_id,
             expected_parent_tip: initial_chain_tip,
             target_tip: initial_chain_tip,
+            crossing: crate::storage::client_db::bilateral_tip_sync::CrossingSteps::Refuse,
         };
         crate::storage::client_db::bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .map_err(|e| {

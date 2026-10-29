@@ -596,11 +596,14 @@ pub fn finalize_on_acceptance_atomically(f: &AcceptanceFinalization<'_>) -> Resu
         counterparty_device_id: *counterparty_device_id,
         expected_parent_tip: *projection_parent,
         target_tip: *projection_target,
+        crossing: super::bilateral_tip_sync::CrossingSteps::Join,
     };
     match super::bilateral_tip_sync::sync_tip_projections_in_tx(&tx, &request, None)? {
         super::bilateral_tip_sync::TipSyncOutcome::Advanced { .. }
         | super::bilateral_tip_sync::TipSyncOutcome::RepairedAtTarget { .. }
-        | super::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. } => {}
+        | super::bilateral_tip_sync::TipSyncOutcome::AlreadyAtTarget { .. }
+        | super::bilateral_tip_sync::TipSyncOutcome::Joined { .. }
+        | super::bilateral_tip_sync::TipSyncOutcome::AlreadyJoined { .. } => {}
         other => {
             return Err(anyhow!(
                 "acceptance finalization: projection tip refused to converge ({other:?}) — \
@@ -1409,6 +1412,56 @@ mod tests {
             OUTBOX_FINALIZATION_CHECKPOINT_PENDING,
             "status write rolled back with the failed release"
         );
+    }
+
+    /// The finalization's pin: the recipient's countersigned pair must begin
+    /// at the head of the recipient this device pins. A delta whose parent is
+    /// any other head — here, before any step, anything but the genesis seed —
+    /// finalizes nothing: the proposal stays submitted, the tip and the pin
+    /// stay where they were, the gate stays. (In a crossing the sync applies
+    /// the peer's transfer, which moves the pin, before it reads the delta, so
+    /// no crossing test reaches this refusal.)
+    #[test]
+    #[serial]
+    fn a_delta_whose_parent_is_not_the_pinned_head_finalizes_nothing() {
+        init_test_db();
+        let r = rec(3);
+        seed_pre_finalization(&r);
+        let err = finalize_on_acceptance_atomically(&AcceptanceFinalization {
+            relationship_key: &r.relationship_key,
+            canonical_parent: &r.canonical_parent,
+            proposal_nonce: &r.proposal_nonce,
+            commitment: &r.commitment,
+            counterparty_device_id: &CP,
+            projection_parent: &T0,
+            projection_target: &T1,
+            expected_counterparty_head: None,
+            new_counterparty_head: &EK_B,
+            peer_pair: ([0xEEu8; 32], [0xB1u8; 32]),
+            genesis_seed: SEED,
+            countersign_b: &countersign_b_for(&r),
+            finalized: &finalized_for(&r),
+            ek_steps: &[],
+        })
+        .expect_err("a delta that does not begin at the pinned head finalizes nothing");
+        assert!(
+            err.to_string().contains("peer canonical head conflict"),
+            "{err}"
+        );
+        assert_eq!(
+            crate::storage::client_db::load_counterparty_canonical_head(&r.relationship_key)
+                .expect("head"),
+            None,
+            "the pin did not move"
+        );
+        let (chain_tip, _local_tip) = tips();
+        assert_eq!(chain_tip, T0.to_vec(), "the tip did not move");
+        assert_eq!(
+            statuses(&r).0,
+            crate::storage::client_db::PROPOSAL_SUBMITTED,
+            "the proposal is not finalized"
+        );
+        assert_eq!(gate_rows(), 1, "the gate stays");
     }
 
     /// THE ATOMICITY PROOF. The counterparty-head CAS is the third of six

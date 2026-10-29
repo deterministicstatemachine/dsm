@@ -2138,9 +2138,7 @@ impl LimboVault {
     /// Invalidate a vault (only creator can do so).
     ///
     /// Precondition: vault must be in Limbo or Active state (not yet claimed).
-    /// Matches TLA+ DSM_BilateralLiveness.tla VaultInvalidate guard:
-    ///   `vaults[vid].state \in {"Limbo", "Unlocked"}`
-    /// and DSM_dBTC_Concrete.tla ExpireVault guard:
+    /// Matches DSM_dBTC_Concrete.tla ExpireVault guard:
     ///   `vault[vid].status = "Live" /\ vault[vid].boundTo = NULL`
     pub fn invalidate(
         &mut self,

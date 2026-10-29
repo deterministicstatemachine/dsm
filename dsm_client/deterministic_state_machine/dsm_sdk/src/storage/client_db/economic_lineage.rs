@@ -804,9 +804,68 @@ pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Opt
         .optional()?)
 }
 
+/// The ordinal of the recorded step object `step_addr` in `signer_devid`'s
+/// chain on `rel_key`, if recorded.
+fn recorded_ek_step_ordinal_with_conn(
+    conn: &rusqlite::Connection,
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+    step_addr: &[u8; 32],
+) -> Result<Option<u64>> {
+    let ordinal: Option<i64> = conn
+        .query_row(
+            "SELECT step_ordinal FROM ek_cert_step_chain
+             WHERE rel_key = ?1 AND signer_devid = ?2 AND step_addr = ?3",
+            params![
+                rel_key.as_slice(),
+                signer_devid.as_slice(),
+                step_addr.as_slice()
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match ordinal {
+        Some(ordinal) => Ok(Some(
+            u64::try_from(ordinal).map_err(|e| anyhow!("negative step ordinal: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The address of the step object recorded for the per-step EK `ek_pk` in
+/// `signer_devid`'s chain on `rel_key`, if one is recorded: a step's object is
+/// built once, from the chain as it stood before it, and taken as built
+/// afterwards.
+pub fn recorded_ek_step_addr(
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+    ek_pk: &[u8],
+) -> Result<Option<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database connection is poisoned: {e}"))?;
+    let addr: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT step_addr FROM ek_cert_step_chain
+             WHERE rel_key = ?1 AND signer_devid = ?2 AND ek_pk = ?3",
+            params![rel_key.as_slice(), signer_devid.as_slice(), ek_pk],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match addr {
+        Some(addr) => Ok(Some(
+            <[u8; 32]>::try_from(addr.as_slice())
+                .map_err(|e| anyhow!("step addr is not 32 bytes: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
 /// Append one signer-chain step inside the caller's transaction. Idempotent
-/// on exact re-append of the same head (crash replay); a DIFFERENT addr at
-/// the same next ordinal is refused by the primary key.
+/// on any step already recorded (crash replay, or a step recorded ahead of the
+/// one after it); a DIFFERENT addr at the same next ordinal is refused by the
+/// primary key.
 pub fn append_ek_step_with_conn(
     conn: &rusqlite::Connection,
     rel_key: &[u8; 32],
@@ -814,12 +873,17 @@ pub fn append_ek_step_with_conn(
     step_addr: &[u8; 32],
     ek_pk: &[u8],
 ) -> Result<u64> {
-    let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
-    if let Some((ord, addr, ..)) = &latest {
-        if addr == step_addr {
-            return Ok(*ord);
-        }
+    // A step object is content-addressed: one already recorded is recorded,
+    // wherever it sits. A device that countersigned a transfer crossing its
+    // own send recorded that send's step before the countersignature's
+    // (owner ruling, 2026-10-29: "both settle"), and its finalization meets
+    // the send's step again below the head.
+    if let Some(ordinal) =
+        recorded_ek_step_ordinal_with_conn(conn, rel_key, signer_devid, step_addr)?
+    {
+        return Ok(ordinal);
     }
+    let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
     let next = latest.map(|(ordinal, ..)| ordinal + 1).unwrap_or(0);
     conn.execute(
         "INSERT INTO ek_cert_step_chain(rel_key, signer_devid, step_ordinal, step_addr, ek_pk)

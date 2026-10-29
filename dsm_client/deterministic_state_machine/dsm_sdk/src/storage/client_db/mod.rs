@@ -568,7 +568,7 @@ fn get_database_path() -> Result<PathBuf> {
 /// proves it final again on load (`ReserveLineage::establish_final`). A
 /// database made at 35 holds releases without their reads, and is refused
 /// at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 36;
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 37;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1981,6 +1981,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             ek_pubkey               BLOB NOT NULL,
             ek_sk_encrypted         BLOB NOT NULL,
             is_init                 INTEGER NOT NULL CHECK(is_init IN (0, 1)),
+            -- The Local head this key was certified by when it was stashed
+            -- (NULL at the relationship's first step): promotion advances
+            -- from it, and a later step of this device chained from the
+            -- pending key may move the head past it first.
+            prev_pubkey             BLOB,
             PRIMARY KEY (relationship_key, commitment_hash)
         );
 
@@ -2351,6 +2356,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&request).expect("sync should succeed");
 
@@ -2609,6 +2615,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: new_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2646,6 +2653,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2681,6 +2689,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip,
             target_tip: tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2710,6 +2719,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: wrong_parent,
             target_tip: new_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should not error");
@@ -2752,6 +2762,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: next_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -3265,6 +3276,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_a,
             target_tip: tip_b,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req1).expect("advance A→B");
         assert_eq!(
@@ -3281,6 +3293,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_b,
             target_tip: tip_c,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req2).expect("advance B→C");
         assert_eq!(
