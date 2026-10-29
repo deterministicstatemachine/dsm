@@ -2021,4 +2021,378 @@ mod tests {
             ))
         );
     }
+
+    // ── model-to-code correspondence: tla/DSM_NativeReserveRelease.tla ─────
+
+    use crate::route_chain::{ChainSlot, RouteEntry};
+    use crate::storage_cell::ArrivalRecord;
+
+    /// The model's values: two claimants' releases of the payout (RA, RC), a
+    /// release of more than the payout (RB, which nothing recognizes), and
+    /// bytes that are no release (G).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ModelValue {
+        Ra,
+        Rc,
+        Rb,
+        G,
+    }
+
+    const MODEL_VALUES: [ModelValue; 4] = [
+        ModelValue::Ra,
+        ModelValue::Rc,
+        ModelValue::Rb,
+        ModelValue::G,
+    ];
+
+    impl ModelValue {
+        fn recognized(self) -> bool {
+            matches!(self, ModelValue::Ra | ModelValue::Rc)
+        }
+        /// The index into the model's per-value counts (RA, RC, RB).
+        fn countable(self) -> Option<usize> {
+            match self {
+                ModelValue::Ra => Some(0),
+                ModelValue::Rc => Some(1),
+                ModelValue::Rb => Some(2),
+                ModelValue::G => None,
+            }
+        }
+    }
+
+    /// A member is up or down.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Up {
+        Up,
+        Down,
+    }
+
+    /// The state of `tla/DSM_NativeReserveRelease.tla` with every fault off.
+    #[derive(Debug, Clone)]
+    struct ReserveModel {
+        leader: Vec<ModelValue>,
+        alt: Vec<ModelValue>,
+        counts: [u8; 3],
+        alt_linked: std::collections::BTreeSet<ModelValue>,
+        link_counts: [u8; 3],
+        up_l: Up,
+        up_a: Up,
+        /// The value whose release advanced the reserve, once one did.
+        released: Option<ModelValue>,
+        remaining: u64,
+    }
+
+    impl ReserveModel {
+        fn init() -> Self {
+            Self {
+                leader: Vec::new(),
+                alt: Vec::new(),
+                counts: [0; 3],
+                alt_linked: Default::default(),
+                link_counts: [0; 3],
+                up_l: Up::Up,
+                up_a: Up::Up,
+                released: None,
+                remaining: 1,
+            }
+        }
+        fn winner(&self) -> Option<ModelValue> {
+            self.leader.iter().copied().find(|v| v.recognized())
+        }
+        fn links(&self, v: ModelValue) -> u8 {
+            u8::from(self.alt_linked.contains(&v))
+                + v.countable().map_or(0, |i| self.link_counts[i])
+        }
+        fn is_final(&self, v: ModelValue) -> bool {
+            self.winner() == Some(v) && self.links(v) >= 2
+        }
+        fn amount(v: ModelValue) -> u64 {
+            match v {
+                ModelValue::Rb => 2,
+                _ => 1,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ReserveAction {
+        WriteLeader(ModelValue),
+        WriteAlt(ModelValue),
+        LinkAlt(ModelValue),
+        WriteOther(ModelValue),
+        LinkOther(ModelValue),
+        Advance(ModelValue),
+        CrashL,
+        RecoverL,
+        CrashA,
+        RecoverA,
+    }
+
+    fn reserve_enabled(m: &ReserveModel) -> Vec<ReserveAction> {
+        let mut out = Vec::new();
+        for v in MODEL_VALUES {
+            if m.up_l == Up::Up && !m.leader.contains(&v) {
+                out.push(ReserveAction::WriteLeader(v));
+            }
+            if m.up_a == Up::Up && !m.alt.contains(&v) {
+                out.push(ReserveAction::WriteAlt(v));
+            }
+            if m.up_a == Up::Up && m.winner() == Some(v) && !m.alt_linked.contains(&v) {
+                out.push(ReserveAction::LinkAlt(v));
+            }
+            if let Some(i) = v.countable() {
+                if m.counts[i] < 3 {
+                    out.push(ReserveAction::WriteOther(v));
+                }
+                if m.winner() == Some(v) && m.link_counts[i] < 3 {
+                    out.push(ReserveAction::LinkOther(v));
+                }
+            }
+            if m.released.is_none() && m.is_final(v) && ReserveModel::amount(v) <= m.remaining {
+                out.push(ReserveAction::Advance(v));
+            }
+        }
+        match m.up_l {
+            Up::Up => out.push(ReserveAction::CrashL),
+            Up::Down => out.push(ReserveAction::RecoverL),
+        }
+        match m.up_a {
+            Up::Up => out.push(ReserveAction::CrashA),
+            Up::Down => out.push(ReserveAction::RecoverA),
+        }
+        out
+    }
+
+    /// The three releases and the garbage, made once: SPHINCS+ is slow.
+    struct ReserveValues {
+        r0: NativeReserveState,
+        releases: [VerifiedRelease; 3],
+    }
+
+    fn reserve_values() -> &'static ReserveValues {
+        static VALUES: std::sync::OnceLock<ReserveValues> = std::sync::OnceLock::new();
+        VALUES.get_or_init(|| {
+            let r0 = genesis();
+            let releases = [
+                signed(&r0, ERA_FAUCET_PAYOUT),
+                signed(&r0, ERA_FAUCET_PAYOUT),
+                signed(&r0, ERA_FAUCET_PAYOUT + 1),
+            ];
+            ReserveValues { r0, releases }
+        })
+    }
+
+    fn bytes_of(v: ModelValue) -> Vec<u8> {
+        match v.countable() {
+            Some(i) => reserve_values().releases[i].envelope_bytes.clone(),
+            None => b"garbage at the successor cell".to_vec(),
+        }
+    }
+
+    /// The writes the model's actions stand for, at R_0's successor cell:
+    /// the leader at route position 0, member A at 1, the three others at
+    /// 2..5, a copy carrying its leader record (and the links written before
+    /// it, so the chain is as long as the writes allow) or carrying none.
+    struct ReserveWrites {
+        at: SuccessorCell,
+        seats: Cell,
+        /// Each value's leader arrival index (1-based) and the record of its
+        /// linked copy at each position.
+        linked: std::collections::BTreeMap<(ModelValue, usize), ArrivalRecord>,
+    }
+
+    impl ReserveWrites {
+        fn new() -> Self {
+            let (at, seats) = successor_cell(&reserve_values().r0);
+            Self {
+                at,
+                seats,
+                linked: Default::default(),
+            }
+        }
+
+        fn copy_at(&self, v: ModelValue, position: usize, chain: Vec<ChainSlot>) -> RouteEntry {
+            RouteEntry {
+                namespace: self.seats.namespace.clone(),
+                key: self.seats.key,
+                value: bytes_of(v),
+                seat: self.seats.route.seats()[position].clone(),
+                position,
+                chain,
+            }
+        }
+
+        fn leader_record(&self, v: ModelValue) -> ArrivalRecord {
+            let index = self.seats.logs[0]
+                .iter()
+                .position(|b| RouteEntry::decode(b).is_some_and(|e| e.value == bytes_of(v)))
+                .expect("the value reached the leader");
+            self.seats.record_at(0, index + 1)
+        }
+
+        fn apply(&mut self, m: &ReserveModel, action: ReserveAction) {
+            match action {
+                ReserveAction::WriteLeader(v) => {
+                    let copy = self.copy_at(v, 0, Vec::new());
+                    self.seats.put(0, copy.encode());
+                }
+                ReserveAction::WriteAlt(v) => {
+                    let copy = self.copy_at(v, 1, vec![ChainSlot::NoResponse]);
+                    self.seats.put(1, copy.encode());
+                }
+                ReserveAction::WriteOther(v) => {
+                    let i = v.countable().expect("a countable value");
+                    let position = 2 + usize::from(m.counts[i]);
+                    let copy = self.copy_at(v, position, vec![ChainSlot::NoResponse; position]);
+                    self.seats.put(position, copy.encode());
+                }
+                ReserveAction::LinkAlt(v) => self.link(v, 1),
+                ReserveAction::LinkOther(v) => {
+                    let i = v.countable().expect("a countable value");
+                    self.link(v, 2 + usize::from(m.link_counts[i]));
+                }
+                ReserveAction::Advance(_)
+                | ReserveAction::CrashL
+                | ReserveAction::RecoverL
+                | ReserveAction::CrashA
+                | ReserveAction::RecoverA => {}
+            }
+        }
+
+        /// A copy of `v` at `position` carrying its leader record, and the
+        /// record of each linked copy of `v` already written before it.
+        fn link(&mut self, v: ModelValue, position: usize) {
+            let mut chain = vec![ChainSlot::Link(self.leader_record(v))];
+            for earlier in 1..position {
+                chain.push(match self.linked.get(&(v, earlier)) {
+                    Some(record) => ChainSlot::Link(record.clone()),
+                    None => ChainSlot::NoResponse,
+                });
+            }
+            let copy = self.copy_at(v, position, chain);
+            let record = self.seats.put(position, copy.encode());
+            self.linked.insert((v, position), record);
+        }
+
+        fn read(&self) -> SuccessorRead {
+            resolve_successor(&self.at, &self.seats.evidence())
+        }
+    }
+
+    fn release_value(release: &VerifiedRelease) -> ModelValue {
+        let values = &reserve_values().releases;
+        let i = values
+            .iter()
+            .position(|r| r.envelope_bytes == release.envelope_bytes)
+            .expect("the release holding the cell is one the model wrote");
+        [ModelValue::Ra, ModelValue::Rc, ModelValue::Rb][i]
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's reserve cell
+    /// refines `tla/DSM_NativeReserveRelease.tla` along 200 seeded traces of
+    /// its `Next`, each step made as real writes at R_0's successor cell.
+    /// At every step: the value Core reads as holding the cell is the model's
+    /// leader-first winner (unrecognized bytes never hold it, however early
+    /// or widely written); Core reads a release final only where the model
+    /// does (the model counts further links across members; Core counts one
+    /// chain, which `route_chain_evaluation_refines_the_route_chain_model`
+    /// checks exactly); and the advance the model takes is the one Core
+    /// constructs: the child holds the parent's remaining supply less the
+    /// payout, credits the claimant that signed, at the next generation.
+    /// MUTATION CONTROL: recognizing a release of an amount other than the
+    /// payout, or reading a release final on its leader link alone, turns
+    /// this red.
+    #[test]
+    fn the_reserve_cell_refines_the_native_reserve_model() {
+        let mut steps = 0usize;
+        let mut finals = 0usize;
+        for trace in 0..200u64 {
+            let mut seed = trace.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut model = ReserveModel::init();
+            let mut writes = ReserveWrites::new();
+            for _ in 0..16 {
+                let read = writes.read();
+                let (held, final_core) = match &read {
+                    SuccessorRead::Open => (None, None),
+                    SuccessorRead::LeaderHeld { release, .. } => {
+                        (Some(release_value(release)), None)
+                    }
+                    SuccessorRead::Final { release, child } => {
+                        let v = release_value(release);
+                        (Some(v), Some((v, *child)))
+                    }
+                    SuccessorRead::Unavailable(missing) => {
+                        panic!("every seat is read and committed: {missing:?}")
+                    }
+                };
+                assert_eq!(held, model.winner(), "trace {trace}: {model:?}");
+                if let Some((v, child)) = &final_core {
+                    finals += 1;
+                    assert!(
+                        model.is_final(*v),
+                        "trace {trace}: Core final where the model is not: {model:?}"
+                    );
+                    let r0 = &reserve_values().r0;
+                    let release = &reserve_values().releases[v.countable().expect("a release")];
+                    assert_eq!(
+                        child.remaining_supply,
+                        r0.remaining_supply - ERA_FAUCET_PAYOUT
+                    );
+                    assert_eq!(child.generation, r0.generation + 1);
+                    assert_eq!(release.body.amount, ERA_FAUCET_PAYOUT);
+                    let ReleaseSource::FaucetClaimant {
+                        claimant_public_key,
+                        claimant_att_a,
+                    } = &release.body.source;
+                    assert_eq!(
+                        release.body.recipient_devid,
+                        crate::core::identity::genesis_v2::derive_devid(
+                            claimant_public_key,
+                            claimant_att_a
+                        ),
+                        "the release credits the claimant that signed it"
+                    );
+                }
+                let enabled = reserve_enabled(&model);
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let action = enabled[(seed % enabled.len() as u64) as usize];
+                writes.apply(&model, action);
+                match action {
+                    ReserveAction::WriteLeader(v) => model.leader.push(v),
+                    ReserveAction::WriteAlt(v) => model.alt.push(v),
+                    ReserveAction::LinkAlt(v) => {
+                        model.alt_linked.insert(v);
+                        if !model.alt.contains(&v) {
+                            model.alt.push(v);
+                        }
+                    }
+                    ReserveAction::WriteOther(v) => {
+                        let i = v.countable().expect("a countable value");
+                        model.counts[i] += 1;
+                    }
+                    ReserveAction::LinkOther(v) => {
+                        let i = v.countable().expect("a countable value");
+                        if model.counts[i] <= model.link_counts[i] {
+                            model.counts[i] += 1;
+                        }
+                        model.link_counts[i] += 1;
+                    }
+                    ReserveAction::Advance(v) => {
+                        assert_eq!(held, Some(v), "trace {trace}: the model advances by the release Core reads as holding the cell");
+                        model.released = Some(v);
+                        model.remaining -= ReserveModel::amount(v);
+                    }
+                    ReserveAction::CrashL => model.up_l = Up::Down,
+                    ReserveAction::RecoverL => model.up_l = Up::Up,
+                    ReserveAction::CrashA => model.up_a = Up::Down,
+                    ReserveAction::RecoverA => model.up_a = Up::Up,
+                }
+                steps += 1;
+            }
+        }
+        assert_eq!(steps, 200 * 16);
+        assert!(finals > 0, "no trace reached a release Core reads final");
+    }
 }
