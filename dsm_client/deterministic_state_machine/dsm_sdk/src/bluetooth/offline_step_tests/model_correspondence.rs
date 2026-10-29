@@ -1490,6 +1490,7 @@ async fn the_offline_steps_refine_the_non_interference_model() {
     .await;
     let mut next_amount = 1u64;
     let mut refusals = 0usize;
+    let mut commits = 0usize;
     for trace in 0..16u64 {
         let mut rng = Rng(0x2545_F491_4F6C_DD1D ^ (trace + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
         let mut model = NonInterference::init();
@@ -1572,11 +1573,20 @@ async fn the_offline_steps_refine_the_non_interference_model() {
                 }
             }
 
-            let acts = model.enabled();
+            let mut acts = model.enabled();
             if acts.is_empty() {
                 break;
             }
+            // A failure is offered one step in three, so sessions reach
+            // their commits as often as their failures.
+            let fails = |a: &NiAct| matches!(a, NiAct::Fail(_));
+            if rng.below(3) != 0 && acts.iter().any(|a| !fails(a)) {
+                acts.retain(|a| !fails(a));
+            }
             let act = acts[rng.below(acts.len())];
+            if matches!(act, NiAct::Commit(_)) {
+                commits += 1;
+            }
             match act {
                 NiAct::Prepare {
                     sender,
@@ -1735,4 +1745,5 @@ async fn the_offline_steps_refine_the_non_interference_model() {
         refusals > 0,
         "the traces reached a step the code refuses and the model allows"
     );
+    assert!(commits >= 8, "the traces committed {commits} sessions");
 }
