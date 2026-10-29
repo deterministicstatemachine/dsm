@@ -45,6 +45,86 @@ fn a_faucet_claim_asks_whether_the_reserve_is_exhausted_before_it_signs_or_freez
     }
 }
 
+// ── MR-DSM-0181: the vault state's iteration budget authorizes nothing ─────
+
+/// G3 ruling B5 (owner, 2026-10-28): "No time-lock mechanism in beta. Keep the
+/// currently encoded `iteration_budget` field inert; it must not authorize any
+/// behaviour." The vault state's encoder writes the field and its decoder
+/// reads it back; no other production function of Core or the SDK names it,
+/// so no verifier, producer or route acts on it.
+///
+/// MUTATION CONTROL: a production function anywhere else in Core or the SDK
+/// that reads, sets or matches `iteration_budget` turns this red.
+#[test]
+fn the_vault_states_iteration_budget_is_named_by_its_codec_alone() {
+    struct Names(usize);
+    impl<'ast> syn::visit::Visit<'ast> for Names {
+        fn visit_ident(&mut self, ident: &'ast syn::Ident) {
+            if ident == "iteration_budget" {
+                self.0 += 1;
+            }
+        }
+    }
+    // The files of modules declared under a `cfg` (`#[cfg(test)] mod x;`):
+    // `x.rs` or `x/mod.rs` beside a `lib.rs` or `mod.rs`, else under the
+    // declaring file's own directory. They are not production code.
+    let gated_files = |files: &[std::path::PathBuf]| -> Vec<std::path::PathBuf> {
+        let mut gated = Vec::new();
+        for path in files {
+            let dir = match path.parent() {
+                Some(dir) => dir.to_path_buf(),
+                None => panic!("{} has a directory", path.display()),
+            };
+            let base = match path.file_stem().and_then(|s| s.to_str()) {
+                Some("lib" | "main" | "mod") => dir,
+                Some(own) => dir.join(own),
+                None => panic!("{} has a name", path.display()),
+            };
+            for item in parse(path).items {
+                if let Item::Mod(m) = item {
+                    if m.content.is_none() && cfg_gated(&m.attrs) {
+                        let name = m.ident.to_string();
+                        gated.push(base.join(format!("{name}.rs")));
+                        gated.push(base.join(&name).join("mod.rs"));
+                    }
+                }
+            }
+        }
+        gated
+    };
+    let sdk_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut naming = Vec::new();
+    for (root, krate) in [(core_src(), "dsm"), (sdk_src, "dsm_sdk")] {
+        let files = rust_files(&root);
+        let gated = gated_files(&files);
+        for path in files.iter().filter(|path| {
+            !gated
+                .iter()
+                .any(|g| *path == g || path.starts_with(g.with_extension("")))
+        }) {
+            let rel = match path.strip_prefix(&root) {
+                Ok(rel) => rel.display().to_string(),
+                Err(e) => panic!("{} is under {}: {e}", path.display(), root.display()),
+            };
+            for (name, block) in production_fns(&parse(path)) {
+                let mut names = Names(0);
+                syn::visit::Visit::visit_block(&mut names, &block);
+                if names.0 > 0 {
+                    naming.push(format!("{krate} {rel} {name}"));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        naming,
+        [
+            "dsm ccb/decode.rs vault_state_at",
+            "dsm ccb/state.rs encode"
+        ],
+        "production functions that name the vault state's iteration budget"
+    );
+}
+
 // ── MR-SOFI-0281: one function prepares every SoFi transition ──────────────
 
 /// Every file that produces a SoFi, escrow, computed or outcome transition.

@@ -388,13 +388,16 @@ mod tests {
             .expect("establish the relationship");
         let before = core.device_head().expect("head").root();
 
-        // A step that moves no value: Core refuses `Noop` (MR-DSM-0201), and a
-        // zero-effect `Generic` still advances until the owner decides it.
-        let step = Operation::Generic {
-            operation_type: b"zero-effect-step".to_vec(),
-            data: vec![0x01],
-            message: String::new(),
+        // A step that moves no value and changes state: a vault's creation.
+        // Core refuses a step that changes nothing (MR-DSM-0201).
+        let step = Operation::DlvCreate {
+            vault_id: b"settled-step".to_vec(),
+            creator_public_key: Vec::new(),
+            parameters_hash: Vec::new(),
+            fulfillment_condition: Vec::new(),
+            intended_recipient: None,
             signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Bilateral,
         };
         let settlement = super::StepSettlement::resolve(
             identity.device_id,

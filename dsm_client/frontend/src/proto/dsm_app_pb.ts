@@ -18495,6 +18495,14 @@ export class Envelope extends Message<Envelope> {
     case: "moneyWaitingResponse";
   } | {
     /**
+     * Reply to `wallet.pendingOffline`.
+     *
+     * @generated from field: dsm.PendingOfflineValueResponse pending_offline_value_response = 140;
+     */
+    value: PendingOfflineValueResponse;
+    case: "pendingOfflineValueResponse";
+  } | {
+    /**
      * Reply to `token.adoptionQr`.
      *
      * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
@@ -18620,6 +18628,7 @@ export class Envelope extends Message<Envelope> {
     { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
     { no: 139, name: "money_waiting_response", kind: "message", T: MoneyWaitingResponse, oneof: "payload" },
+    { no: 140, name: "pending_offline_value_response", kind: "message", T: PendingOfflineValueResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
@@ -24110,6 +24119,132 @@ export class OfflineAllocationView extends Message<OfflineAllocationView> {
 
   static equals(a: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined, b: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined): boolean {
     return proto3.util.equals(OfflineAllocationView, a, b);
+  }
+}
+
+/**
+ * One payment this device received offline and holds pending: its value
+ * settles online only once the payer's return online exposes its signed spend
+ * chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+ * the offline allocation, and nothing spends it until it settles.
+ *
+ * @generated from message dsm.PendingOfflineReceiptView
+ */
+export class PendingOfflineReceiptView extends Message<PendingOfflineReceiptView> {
+  /**
+   * The token's policy commit, and its ticker and decimals as Rust read them.
+   *
+   * @generated from field: bytes asset = 1;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ticker = 2;
+   */
+  ticker = "";
+
+  /**
+   * @generated from field: uint32 decimals = 3;
+   */
+  decimals = 0;
+
+  /**
+   * @generated from field: uint64 base_units = 4;
+   */
+  baseUnits = protoInt64.zero;
+
+  /**
+   * Display form of `base_units`, rendered by Rust.
+   *
+   * @generated from field: string display_amount = 5;
+   */
+  displayAmount = "";
+
+  /**
+   * The paying contact's alias, or its device id in Base32 when it has none.
+   *
+   * @generated from field: string payer = 6;
+   */
+  payer = "";
+
+  /**
+   * `M`, the release message the payer's anchor signed: the receipt's id.
+   *
+   * @generated from field: bytes release_message = 7;
+   */
+  releaseMessage = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PendingOfflineReceiptView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineReceiptView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "payer", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "release_message", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined, b: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineReceiptView, a, b);
+  }
+}
+
+/**
+ * wallet.pendingOffline: every payment received offline and not yet settled,
+ * oldest first.
+ *
+ * @generated from message dsm.PendingOfflineValueResponse
+ */
+export class PendingOfflineValueResponse extends Message<PendingOfflineValueResponse> {
+  /**
+   * @generated from field: repeated dsm.PendingOfflineReceiptView receipts = 1;
+   */
+  receipts: PendingOfflineReceiptView[] = [];
+
+  constructor(data?: PartialMessage<PendingOfflineValueResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineValueResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipts", kind: "message", T: PendingOfflineReceiptView, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined, b: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineValueResponse, a, b);
   }
 }
 

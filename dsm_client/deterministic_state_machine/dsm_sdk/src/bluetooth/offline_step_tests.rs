@@ -1210,6 +1210,69 @@ fn pending_era() -> u64 {
     .expect("the payments received offline")
 }
 
+/// What `device`'s wallet shows held pending: its answer to
+/// `wallet.pendingOffline`.
+async fn pending_offline_shown(
+    device: &OfflineDevice,
+) -> Vec<dsm::types::proto::PendingOfflineReceiptView> {
+    device.device.enter();
+    let res = crate::bridge::AppRouter::query(
+        device.device.router(),
+        crate::bridge::AppQuery {
+            path: "wallet.pendingOffline".to_string(),
+            params: Vec::new(),
+        },
+    )
+    .await;
+    assert!(
+        res.success,
+        "wallet.pendingOffline: {:?}",
+        res.error_message
+    );
+    match crate::handlers::response_helpers::decode_local_envelope(&res.data)
+        .expect("wallet.pendingOffline answers locally")
+        .payload
+    {
+        Some(dsm::types::proto::envelope::Payload::PendingOfflineValueResponse(r)) => r.receipts,
+        other => panic!("expected PendingOfflineValueResponse, got {other:?}"),
+    }
+}
+
+/// `device`'s ERA row as `balance.list` answers it.
+async fn era_row_shown(device: &OfflineDevice) -> dsm::types::proto::BalanceGetResponse {
+    device.device.enter();
+    let res = crate::bridge::AppRouter::query(
+        device.device.router(),
+        crate::bridge::AppQuery {
+            path: "balance.list".to_string(),
+            params: Vec::new(),
+        },
+    )
+    .await;
+    assert!(res.success, "balance.list: {:?}", res.error_message);
+    let rows = match crate::handlers::response_helpers::decode_local_envelope(&res.data)
+        .expect("balance.list answers locally")
+        .payload
+    {
+        Some(dsm::types::proto::envelope::Payload::BalancesListResponse(b)) => b.balances,
+        other => panic!("expected BalancesListResponse, got {other:?}"),
+    };
+    rows.into_iter()
+        .find(|r| r.token_id.eq_ignore_ascii_case("ERA"))
+        .expect("ERA is listed")
+}
+
+/// The alias the entered device's contacts hold for `peer`.
+fn alias_of(device: &OfflineDevice, peer: &OfflineDevice) -> String {
+    device.device.enter();
+    crate::storage::client_db::get_all_contacts()
+        .expect("the contacts")
+        .into_iter()
+        .find(|c| c.device_id == peer.device.device_id)
+        .expect("the peer is a contact")
+        .alias
+}
+
 /// The spends A's anchor released that no boundary of A's online history has
 /// exposed yet.
 fn unexposed_spends(
@@ -1571,13 +1634,20 @@ async fn a_rejected_bearer_transfer_spends_no_counter_step_and_frees_the_relatio
 /// boundary carries both spends and exposes them online. B's sync walks A's
 /// history and settles each payment by an admitted transition of its own,
 /// once (SA-91); a second sync settles nothing more. B then spends the result
-/// online, and A takes it.
+/// online, and A takes it. While B holds them, B's wallet shows each payment
+/// held pending, with its asset, amount and payer, and its ERA row and offline
+/// allocation are what they were before it was paid (owner ruling,
+/// 2026-10-28); once settled, nothing is shown pending.
+/// MUTATION CONTROL: `wallet.pendingOffline` answering from the settled rows
+/// too, or `balance.list` adding the value held pending to `available`, turns
+/// this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online() {
     use crate::economic_fixtures::whole_era;
 
     let (pair, a, b, appliance, _) = bearer_pair().await;
+    let era_before = era_row_shown(&b).await;
     let first = bearer_payment_over_ble(&a, &b, &bearer_transfer(&b, whole_era(7))).await;
     assert_committed_on_both(&a, &b, &first);
     let second = bearer_payment_over_ble(&a, &b, &bearer_transfer(&b, whole_era(3))).await;
@@ -1589,6 +1659,36 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
         pending_era(),
         whole_era(10),
         "B holds both payments pending"
+    );
+    let payer = alias_of(&b, &a);
+    let shown = pending_offline_shown(&b).await;
+    assert_eq!(
+        shown
+            .iter()
+            .map(|r| (
+                r.ticker.as_str(),
+                r.base_units,
+                r.display_amount.as_str(),
+                r.payer.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("ERA", whole_era(7), "7.00", payer.as_str()),
+            ("ERA", whole_era(3), "3.00", payer.as_str()),
+        ],
+        "B's wallet shows each payment held pending"
+    );
+    assert!(
+        shown
+            .iter()
+            .all(|r| r.asset == dsm::core::token::token_state_manager::era_policy_commit()),
+        "each names ERA's policy commit"
+    );
+    let era_held = era_row_shown(&b).await;
+    assert_eq!(
+        (era_held.available, era_held.offline_allocation),
+        (era_before.available, era_before.offline_allocation),
+        "the value held pending is in neither the balance nor the offline allocation"
     );
     assert_eq!(pair.b.era_balance(), 0, "B is credited nothing online");
     let refused = pair.b.send(&pair.a, whole_era(1)).await;
@@ -1623,6 +1723,11 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
     pair.b.sync().await;
     b.device.enter();
     assert_eq!(pending_era(), 0, "B settled both payments");
+    assert_eq!(
+        pending_offline_shown(&b).await,
+        Vec::new(),
+        "a settled payment is shown pending no more"
+    );
     assert_eq!(
         pair.b.era_balance(),
         whole_era(10),

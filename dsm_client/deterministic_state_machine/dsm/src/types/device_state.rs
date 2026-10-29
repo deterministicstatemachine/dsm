@@ -1270,6 +1270,69 @@ impl DeviceState {
         Ok(next)
     }
 
+    /// MR-DSM-0201: a zero-effect transition is not a transition (the
+    /// explainer's spam-resistance aside: "send nothing a million times" is not
+    /// representable). Refuses an operation that this advance gives no effect
+    /// and that no verifier reads as one.
+    ///
+    /// An operation is not zero-effect merely because it moves no value: an
+    /// adoption writes its policy leaf, a setup its relationship leaf, a vault
+    /// operation the vault lifecycle the vault manager records, and each of
+    /// those is admitted. A second adoption of a policy rewrites the leaf the
+    /// first wrote, so it changes nothing and is refused (owner ruling,
+    /// 2026-10-28). The match has no wildcard arm, so a variant added to
+    /// `Operation` does not compile until it is classified here.
+    fn refuse_zero_effect(&self, operation: &Operation) -> Result<(), DsmError> {
+        match operation {
+            // Nothing at all.
+            Operation::Noop
+            // An application payload: this advance applies none of it, and no
+            // verifier reads it.
+            | Operation::Generic { .. }
+            // An identity's genesis is not a step on a relationship.
+            | Operation::Genesis
+            // Legacy operations with no producer: this advance applies nothing
+            // for them, and no verifier reads them.
+            | Operation::Create { .. }
+            | Operation::Update { .. }
+            | Operation::Delete { .. }
+            | Operation::AddRelationship { .. }
+            | Operation::RemoveRelationship { .. }
+            | Operation::Link { .. }
+            | Operation::Unlink { .. }
+            | Operation::Invalidate { .. }
+            // Value operations this advance moves nothing for: conservation
+            // admits each only with no balance delta, nothing here writes a
+            // credit or an encumbrance, and the economic classifier gives each
+            // no write set (`economic::classifier`, UnsupportedValueTransition).
+            | Operation::Receive { .. }
+            | Operation::Lock { .. }
+            | Operation::Unlock { .. }
+            | Operation::LockToken { .. }
+            | Operation::UnlockToken { .. } => Err(DsmError::ZeroEffectTransition),
+            Operation::AdoptToken { policy_commit, .. } if self.has_adopted(policy_commit) => {
+                Err(DsmError::ZeroEffectTransition)
+            }
+            Operation::AdoptToken { .. }
+            | Operation::CreateToken { .. }
+            | Operation::Transfer { .. }
+            | Operation::Burn { .. }
+            | Operation::FaucetClaim { .. }
+            | Operation::SofiSetup { .. }
+            | Operation::SofiVaultCreate { .. }
+            | Operation::SofiFulfill { .. }
+            | Operation::EscrowVaultCreate { .. }
+            | Operation::DlvCreate { .. }
+            | Operation::DlvUnlock { .. }
+            | Operation::DlvClaim { .. }
+            | Operation::DlvInvalidate { .. }
+            // Recovery's own operations; recovery's verifiers read them
+            // (`recovery::chain_segment`, `recovery::succession_binding`).
+            | Operation::CreateRelationship { .. }
+            | Operation::Recovery { .. } => Ok(()),
+        }
+    }
+
     /// Attempt to build an advance by one transition on `rel_key`.
     ///
     /// Takes the current state by reference and returns an
@@ -1308,13 +1371,9 @@ impl DeviceState {
         deltas: &[BalanceDelta],
         offline_spend: Option<OfflineSpend>,
     ) -> Result<AdvanceOutcome, DsmError> {
-        // A zero-effect transition is not a transition (MR-DSM-0201; the
-        // explainer's spam-resistance aside: "send nothing a million times" is
-        // not representable). An operation that is nothing at all advances no
-        // relationship, online or offline.
-        if let Operation::Noop = operation {
-            return Err(DsmError::ZeroEffectTransition);
-        }
+        // A zero-effect transition is not a transition (MR-DSM-0201), online or
+        // offline, refused before anything else is computed.
+        self.refuse_zero_effect(&operation)?;
         // The leaf a step moves is the one its two device ids name (§18.1),
         // whatever key the caller passed beside them.
         if rel_key
@@ -2419,12 +2478,21 @@ pub(crate) mod tests {
         DeviceState::new([0u8; 32], devid(b), pubkey())
     }
 
+    /// A step that moves no value but changes state: it records a vault's
+    /// creation, which the vault manager reads (MR-DSM-0201 admits it).
     fn op() -> Operation {
-        Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![],
-            message: "t".to_string(),
+        vault_record(b"test")
+    }
+
+    fn vault_record(vault_id: &[u8]) -> Operation {
+        Operation::DlvCreate {
+            vault_id: vault_id.to_vec(),
+            creator_public_key: vec![],
+            parameters_hash: vec![],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
             signature: vec![],
+            mode: TransactionMode::Bilateral,
         }
     }
 
@@ -2869,12 +2937,14 @@ pub(crate) mod tests {
                 .copied(),
             Some(50)
         );
-        // Re-adopting is idempotent: same leaf, same value, no refusal.
+        // A second adoption changes nothing, so it is no transition
+        // (MR-DSM-0201), and the first adoption stands.
         let again = outcome
             .new_device_state
             .adopt_token(custom_token)
-            .expect("adopt");
-        assert!(again.has_adopted(&custom_token));
+            .expect_err("a second adoption is refused");
+        assert!(matches!(again, DsmError::ZeroEffectTransition), "{again}");
+        assert!(outcome.new_device_state.has_adopted(&custom_token));
     }
 
     #[test]
@@ -3786,11 +3856,10 @@ pub(crate) mod tests {
     // A relationship is established before its first step (§26)
     // ─────────────────────────────────────────────────────────────
 
-    /// MR-DSM-0201, its `Noop` half: a zero-effect transition is not a
-    /// transition (the explainer's spam-resistance aside), so Core's advance —
-    /// the one chokepoint of a step, online and offline — refuses `Noop` on an
+    /// MR-DSM-0201: a zero-effect transition is not a transition (the
+    /// explainer's spam-resistance aside), so Core's advance — the one
+    /// chokepoint of a step, online and offline — refuses `Noop` on an
     /// established relationship with the typed [`DsmError::ZeroEffectTransition`].
-    /// The `Generic` half waits on the owner.
     /// MUTATION CONTROL: dropping the refusal lets the `Noop` advance and turns
     /// this red.
     #[test]
@@ -3809,6 +3878,112 @@ pub(crate) mod tests {
         established
             .advance(rk, cp, op(), &[], None)
             .expect("the relationship still steps by an operation");
+    }
+
+    /// MR-DSM-0201 (owner ruling, 2026-10-28: "Refuse genuine no-effect
+    /// operations in Core"): an application payload Core applies nowhere, a
+    /// receipt or a lock that moves nothing, and a second adoption of a policy
+    /// already adopted are each refused with the typed error, and the device's
+    /// head does not move.
+    /// MUTATION CONTROL: dropping the `Generic`, the `Receive`/lock or the
+    /// re-adoption arm of `refuse_zero_effect` lets that step advance and
+    /// turns this red.
+    #[test]
+    fn a_step_that_changes_nothing_is_no_transition() {
+        let dev = fresh_device(0x75);
+        let cp = devid(0x76);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let policy = [0x5Au8; 32];
+        let adopted = established.adopt_token(policy).expect("first adoption");
+        let head = *adopted.smt.root();
+        let nothing = [
+            (
+                "an application payload",
+                Operation::Generic {
+                    operation_type: b"lock".to_vec(),
+                    data: b"amount".to_vec(),
+                    message: "Lock".to_string(),
+                    signature: vec![],
+                },
+            ),
+            (
+                "a bare receipt",
+                Operation::Receive {
+                    token_id: b"ERA".to_vec(),
+                    from_device_id: cp.to_vec(),
+                    amount: bal(1),
+                    recipient: dev.devid.to_vec(),
+                    message: String::new(),
+                    mode: TransactionMode::Bilateral,
+                    nonce: vec![1],
+                    sender_state_hash: None,
+                },
+            ),
+            (
+                "a lock",
+                Operation::LockToken {
+                    token_id: b"ERA".to_vec(),
+                    amount: 1,
+                    purpose: b"exit".to_vec(),
+                    signature: vec![],
+                    mode: TransactionMode::Bilateral,
+                },
+            ),
+            (
+                "a second adoption",
+                Operation::AdoptToken {
+                    policy_commit: policy,
+                    signature: vec![],
+                },
+            ),
+        ];
+        for (what, operation) in nothing {
+            let refused = adopted
+                .advance(rk, cp, operation, &[], None)
+                .expect_err(what);
+            assert!(
+                matches!(refused, DsmError::ZeroEffectTransition),
+                "{what}: {refused}"
+            );
+            assert_eq!(*adopted.smt.root(), head, "{what} moved the head");
+        }
+    }
+
+    /// MR-DSM-0201's other half (owner ruling, 2026-10-28: "A meaningful state
+    /// mutation isn't a no-op merely because its monetary delta is zero"): an
+    /// adoption of a policy not yet adopted and a vault's creation move no value
+    /// and are transitions, each writing what it carries.
+    #[test]
+    fn a_step_that_moves_no_value_but_writes_state_is_a_transition() {
+        let dev = fresh_device(0x77);
+        let cp = devid(0x78);
+        let rk = crate::core::bilateral_transaction_manager::compute_smt_key(&dev.devid, &cp);
+        let established = dev.establish_relationship(cp).expect("establish");
+        let policy = [0x5Bu8; 32];
+        assert!(!established.has_adopted(&policy));
+        let adopted = established
+            .advance(
+                rk,
+                cp,
+                Operation::AdoptToken {
+                    policy_commit: policy,
+                    signature: vec![],
+                },
+                &[],
+                None,
+            )
+            .expect("an adoption moves no value and writes its leaf")
+            .new_device_state;
+        assert!(adopted.has_adopted(&policy));
+        assert_eq!(adopted.balances, established.balances);
+        let recorded = adopted
+            .advance(rk, cp, vault_record(b"vault"), &[], None)
+            .expect("a vault's creation moves no value and is recorded");
+        assert_ne!(
+            recorded.new_device_state.chain_tip(&rk),
+            adopted.chain_tip(&rk)
+        );
     }
 
     /// Establishing a relationship is a root advance that writes `h_0` into
@@ -4103,12 +4278,7 @@ pub(crate) mod tests {
     fn changing_a_carried_byte_changes_the_derived_value_and_the_tip() {
         let (dev, cp, rk) = seam_fixture();
         let base = dev.advance(rk, cp, op(), &[], None).expect("advance");
-        let flipped = Operation::Generic {
-            operation_type: b"test".to_vec(),
-            data: vec![1],
-            message: "t".to_string(),
-            signature: vec![],
-        };
+        let flipped = vault_record(b"tesu");
         let other = dev
             .advance(rk, cp, flipped, &[], None)
             .expect("advance with one more carried byte");

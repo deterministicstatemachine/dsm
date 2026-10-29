@@ -379,15 +379,17 @@ mod tests {
     use dsm::types::operations::Operation;
     use dsm::verification::receipt_verification::ReceiptStateContext;
 
-    /// A step that moves no value. Core refuses `Noop` (MR-DSM-0201); a
-    /// zero-effect `Generic` still advances until the owner decides it (the
-    /// dBTC exit flow builds one).
-    fn zero_effect() -> Operation {
-        Operation::Generic {
-            operation_type: b"zero-effect-step".to_vec(),
-            data: vec![0x01],
-            message: String::new(),
+    /// A step that moves no value and changes state: it records a vault's
+    /// creation. Core refuses a step that changes nothing (MR-DSM-0201).
+    fn state_step() -> Operation {
+        Operation::DlvCreate {
+            vault_id: b"receipt-step".to_vec(),
+            creator_public_key: Vec::new(),
+            parameters_hash: Vec::new(),
+            fulfillment_condition: Vec::new(),
+            intended_recipient: None,
             signature: Vec::new(),
+            mode: dsm::types::operations::TransactionMode::Bilateral,
         }
     }
 
@@ -2124,14 +2126,14 @@ mod tests {
             .expect("genesis installed the head");
         let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(&devid_a, &devid_b);
         assert!(
-            head.advance(rel_key, devid_b, zero_effect(), &[], None)
+            head.advance(rel_key, devid_b, state_step(), &[], None)
                 .is_err(),
             "a step on a relationship the device never established is refused"
         );
 
         let established = head.establish_relationship(devid_b).expect("establish");
         let outcome = established
-            .advance(rel_key, devid_b, zero_effect(), &[], None)
+            .advance(rel_key, devid_b, state_step(), &[], None)
             .expect("the first step");
         assert_eq!(outcome.parent_r_a, established.root());
         assert_eq!(

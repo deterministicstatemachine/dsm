@@ -821,7 +821,7 @@ mod tests {
             .expect("value advance")
             .new_device_state;
 
-        // A non-value relationship (Generic → No).
+        // A non-value relationship (a vault's creation → No).
         let c_no = [0xC2; 32];
         let rk_no = compute_smt_key(&owner, &c_no);
         let dev = dev
@@ -830,11 +830,14 @@ mod tests {
             .advance(
                 rk_no,
                 c_no,
-                Operation::Generic {
-                    operation_type: b"t".to_vec(),
-                    data: vec![],
-                    message: "t".into(),
+                Operation::DlvCreate {
+                    vault_id: b"t".to_vec(),
+                    creator_public_key: vec![],
+                    parameters_hash: vec![],
+                    fulfillment_condition: vec![],
+                    intended_recipient: None,
                     signature: vec![],
+                    mode: crate::types::operations::TransactionMode::Bilateral,
                 },
                 &[],
                 None,

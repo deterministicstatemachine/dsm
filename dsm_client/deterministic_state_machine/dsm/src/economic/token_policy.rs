@@ -476,6 +476,39 @@ mod tests {
         }
     }
 
+    /// MR-DSM-0194 (owner ruling, 2026-10-28: "Transferable tokens may trade
+    /// freely by default. Test the default."): a policy enumerates no pairs.
+    /// Two device-created tokens of different creators, tickers and decimals
+    /// are each a permitted market leg, so any pair of them may be traded;
+    /// the one fact the leg check reads is `transferable`, and a token whose
+    /// policy is not transferable is refused as a leg.
+    /// MUTATION CONTROL: dropping the `transferable` check from
+    /// `check_market_leg_permitted` admits the non-transferable leg and turns
+    /// this red.
+    #[test]
+    fn any_two_transferable_tokens_are_permitted_legs_and_only_transferable_decides() {
+        use crate::economic::issuance::{check_market_leg_permitted, MarketLegRefusal};
+        let one = parse_token_policy_blob(&created_blob(
+            1,
+            &[b"key".to_vec()],
+            &tail_with("AAA", "A", 2, 1_000),
+        ))
+        .expect("one token");
+        let mut other_blob = created_blob(1, &[b"other".to_vec()], &tail_with("BBB", "B", 0, 7));
+        other_blob[5] ^= 0xFF;
+        let other = parse_token_policy_blob(&other_blob).expect("another creator's token");
+        for (what, policy) in [("one token", &one), ("another creator's token", &other)] {
+            assert_eq!(check_market_leg_permitted(policy), Ok(()), "{what}");
+        }
+        let mut fixed_blob = created_blob(1, &[b"key".to_vec()], &tail_with("CCC", "C", 2, 9));
+        fixed_blob[3] = POLICY_FLAG_BURN;
+        let fixed = parse_token_policy_blob(&fixed_blob).expect("a non-transferable token");
+        assert_eq!(
+            check_market_leg_permitted(&fixed),
+            Err(MarketLegRefusal::NotTransferable)
+        );
+    }
+
     #[test]
     fn a_well_formed_blob_parses_to_its_fields() {
         let p = parse_token_policy_blob(&blob()).expect("parses");

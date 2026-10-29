@@ -242,6 +242,20 @@ mod state_machine_tests {
         crate::types::device_state::DeviceState::genesis_head(genesis, device_id, pk)
     }
 
+    /// A step that moves no value and is a transition: a vault's creation
+    /// (a zero-effect step is refused, MR-DSM-0201).
+    fn vault_record(vault_id: &[u8]) -> Operation {
+        Operation::DlvCreate {
+            vault_id: vault_id.to_vec(),
+            creator_public_key: vec![],
+            parameters_hash: vec![],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
+            signature: vec![],
+            mode: crate::types::operations::TransactionMode::Bilateral,
+        }
+    }
+
     #[test]
     fn test_first_post_genesis_transition_is_allowed() -> Result<(), DsmError> {
         let head = test_head();
@@ -249,12 +263,7 @@ mod state_machine_tests {
         // SMT-advance mechanics test: a non-balance op carries no deltas. The
         // conservation guard requires balance-bearing deltas to match the op;
         // balance-bearing advances are covered by the device_state guard tests.
-        let op = Operation::Generic {
-            operation_type: b"test.post-genesis".to_vec(),
-            data: vec![],
-            message: "first post-genesis transition".to_string(),
-            signature: vec![],
-        };
+        let op = vault_record(b"test.post-genesis");
 
         let mut state_machine = StateMachine::new();
         state_machine.set_device_head(head);
@@ -275,12 +284,7 @@ mod state_machine_tests {
         machine.set_device_head(head);
 
         // SMT-advance mechanics test: non-balance op, no deltas (see conservation guard).
-        let op = Operation::Generic {
-            operation_type: b"test.advance".to_vec(),
-            data: vec![],
-            message: "Test transfer".to_string(),
-            signature: vec![],
-        };
+        let op = vault_record(b"test.advance");
 
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
         let outcome = machine.advance_relationship(rel_key, dev_id, op, &[])?;

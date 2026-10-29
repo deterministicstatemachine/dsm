@@ -2827,6 +2827,8 @@ message Envelope {
     ReceiptEmailResultV1              receipt_email_result             = 138;
     // Reply to `inbox.moneyWaiting` and `inbox.moneySeen`.
     MoneyWaitingResponse              money_waiting_response           = 139;
+    // Reply to `wallet.pendingOffline`.
+    PendingOfflineValueResponse       pending_offline_value_response   = 140;
 
 
     // Reply to `token.adoptionQr`.
@@ -3887,6 +3889,30 @@ message OfflineAllocationView {
   // Display form of `base_units`, rendered by Rust.
   string display_amount = 2;
 }
+// One payment this device received offline and holds pending: its value
+// settles online only once the payer's return online exposes its signed spend
+// chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+// the offline allocation, and nothing spends it until it settles.
+message PendingOfflineReceiptView {
+  // The token's policy commit, and its ticker and decimals as Rust read them.
+  bytes  asset          = 1;
+  string ticker         = 2;
+  uint32 decimals       = 3;
+  uint64 base_units     = 4;
+  // Display form of `base_units`, rendered by Rust.
+  string display_amount = 5;
+  // The paying contact's alias, or its device id in Base32 when it has none.
+  string payer          = 6;
+  // `M`, the release message the payer's anchor signed: the receipt's id.
+  bytes  release_message = 7;
+}
+
+// wallet.pendingOffline: every payment received offline and not yet settled,
+// oldest first.
+message PendingOfflineValueResponse {
+  repeated PendingOfflineReceiptView receipts = 1;
+}
+
 // The permission flags of a committed token policy, as Core's one parser read
 // them (SoFi §47).
 message TokenPolicyPermissions {

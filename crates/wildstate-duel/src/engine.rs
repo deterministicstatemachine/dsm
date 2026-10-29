@@ -594,7 +594,9 @@ impl SideState {
             kind: EventKind::Faint,
             team_index: self.active,
         });
-        let (next, _) = (0u8..).zip(self.team.iter()).find(|(_, f)| f.hp() > 0)?;
+        let (next, _) = (0u8..=u8::MAX)
+            .zip(self.team.iter())
+            .find(|(_, f)| f.hp() > 0)?;
         self.active = next;
         events.push(Event {
             side,

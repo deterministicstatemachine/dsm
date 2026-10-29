@@ -818,6 +818,14 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- wallet.pendingOffline --------
+            "wallet.pendingOffline" => match pending_offline_value() {
+                Ok(reply) => pack_envelope_ok(
+                    generated::envelope::Payload::PendingOfflineValueResponse(reply),
+                ),
+                Err(e) => err(format!("wallet.pendingOffline: {e}")),
+            },
+
             _ => err(format!("unknown wallet query path: {}", q.path)),
         }
     }
@@ -1173,6 +1181,42 @@ impl AppRouterImpl {
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
         }
     }
+}
+
+/// Every payment received offline and not yet settled, oldest first, each
+/// with its token's ticker and decimals and its payer as this device names it
+/// (owner ruling, 2026-10-28: "Show it separately from spendable balance,
+/// including asset, amount and pending-settlement status. It must not
+/// contribute to either spendable online funds or offline allocation.").
+///
+/// The value is read from the receipts held pending (§6.103), the rows
+/// `balance.list` never reads: it settles online once the payer's return
+/// online exposes its signed spend chain, and only then is it a balance.
+pub(crate) fn pending_offline_value() -> Result<generated::PendingOfflineValueResponse, String> {
+    let pending = crate::storage::client_db::offline_receipts::pending_offline_receipts()
+        .map_err(|e| format!("the receipts held pending are unreadable: {e}"))?;
+    let aliases = contact_aliases()?;
+    let receipts = pending
+        .into_iter()
+        .map(|receipt| {
+            let (ticker, decimals) = token_of_commit(&receipt.asset)?;
+            let payer_b32 = crate::util::text_id::encode_base32_crockford(&receipt.payer_device);
+            let payer = match aliases.get(&payer_b32) {
+                Some(alias) if !alias.is_empty() => alias.clone(),
+                _ => payer_b32,
+            };
+            Ok(generated::PendingOfflineReceiptView {
+                asset: receipt.asset.to_vec(),
+                ticker,
+                decimals,
+                base_units: receipt.amount,
+                display_amount: format_base_units_for_display(receipt.amount, decimals),
+                payer,
+                release_message: receipt.release_message.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::PendingOfflineValueResponse { receipts })
 }
 
 /// This device's contacts' aliases by device id (Base32), for naming a

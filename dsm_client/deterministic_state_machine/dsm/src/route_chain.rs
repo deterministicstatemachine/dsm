@@ -1520,6 +1520,7 @@ pub(crate) mod fixtures {
     }
 
     /// One cell across its five seats.
+    #[derive(Clone)]
     pub(crate) struct Cell {
         pub(crate) namespace: Vec<u8>,
         pub(crate) key: [u8; 32],
@@ -2652,5 +2653,235 @@ mod tests {
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
         );
+    }
+
+    // ── model-to-code correspondence: tla/DSM_RouteChain.tla ───────────────
+
+    /// The state of `tla/DSM_RouteChain.tla` (`Mutation = "none"`), with
+    /// seats as route positions (the model's seats are symmetric) and values
+    /// as indexes into [`MODEL_VALUES`].
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct RouteChainModel {
+        /// The leader's arrivals, in order.
+        arrivals: Vec<usize>,
+        /// `copies[p]`: the values the seat at route position `p` holds a
+        /// copy of (positions 1..5; position 0 is the leader's arrivals).
+        copies: [std::collections::BTreeSet<usize>; ROUTE_LEN],
+        /// `last[x]`: the route position x's chain has reached, as the model
+        /// counts it (0: not written, 1: the leader, 5: the last seat).
+        last: [usize; 2],
+        /// Lost seats, by route position (at most two).
+        lost: std::collections::BTreeSet<usize>,
+    }
+
+    /// The model's `Values = {v1, v2}`, as recognized bytes.
+    const MODEL_VALUES: [&[u8]; 2] = [b"ok-v1", b"ok-v2"];
+
+    impl RouteChainModel {
+        fn init() -> Self {
+            Self {
+                arrivals: Vec::new(),
+                copies: Default::default(),
+                last: [0; 2],
+                lost: Default::default(),
+            }
+        }
+
+        fn leader_link(&self, x: usize) -> bool {
+            self.arrivals.first() == Some(&x)
+        }
+
+        /// `ValidLinks(x)`.
+        fn valid_links(&self, x: usize) -> usize {
+            if self.leader_link(x) {
+                1 + self
+                    .copies
+                    .iter()
+                    .skip(1)
+                    .filter(|held| held.contains(&x))
+                    .count()
+            } else {
+                0
+            }
+        }
+    }
+
+    /// One action of the model's `Next`.
+    #[derive(Debug, Clone, Copy)]
+    enum RouteChainAction {
+        WriteLeader(usize),
+        /// `Extend(x, i)`, with `i` as a route position 1..5 (the model's 2..5).
+        Extend(usize, usize),
+        Lose(usize),
+    }
+
+    fn enabled(m: &RouteChainModel) -> Vec<RouteChainAction> {
+        let mut out = Vec::new();
+        for x in 0..MODEL_VALUES.len() {
+            if !m.lost.contains(&0) && m.last[x] == 0 {
+                out.push(RouteChainAction::WriteLeader(x));
+            }
+            for p in 1..ROUTE_LEN {
+                if m.last[x] >= 1 && p + 1 > m.last[x] && !m.lost.contains(&p) && m.leader_link(x) {
+                    out.push(RouteChainAction::Extend(x, p));
+                }
+            }
+        }
+        if m.lost.len() < 2 {
+            for p in (0..ROUTE_LEN).filter(|p| !m.lost.contains(p)) {
+                out.push(RouteChainAction::Lose(p));
+            }
+        }
+        out
+    }
+
+    /// The writes the model's actions stand for, made the way a writer makes
+    /// them: real arrival logs at each seat, each copy carrying the chain
+    /// built so far, a seat passed over recorded as no response.
+    #[derive(Clone)]
+    struct Writes {
+        cell: fixtures::Cell,
+        /// Each value's entry for the next route position it would extend
+        /// to, once it has reached the leader.
+        next: [Option<RouteEntry>; 2],
+    }
+
+    impl Writes {
+        fn new() -> Self {
+            Self {
+                cell: fixtures::Cell::new(b"model", [0x52; 32], [0x43; 32]),
+                next: [None, None],
+            }
+        }
+
+        fn apply(&mut self, action: RouteChainAction) {
+            match action {
+                RouteChainAction::WriteLeader(x) => {
+                    let copy = RouteEntry::at_leader(
+                        self.cell.namespace.clone(),
+                        self.cell.key,
+                        MODEL_VALUES[x].to_vec(),
+                        &self.cell.route,
+                    );
+                    let record = self.cell.put(0, copy.encode());
+                    self.next[x] = copy.next(ChainSlot::Link(record), &self.cell.route);
+                }
+                RouteChainAction::Extend(x, p) => {
+                    let mut entry = self.next[x]
+                        .clone()
+                        .expect("a value extends after its leader write");
+                    while entry.position < p {
+                        entry = entry
+                            .next(ChainSlot::NoResponse, &self.cell.route)
+                            .expect("a passed-over position before the last");
+                    }
+                    let record = self.cell.put(p, entry.encode());
+                    self.next[x] = entry.next(ChainSlot::Link(record), &self.cell.route);
+                }
+                RouteChainAction::Lose(_) => {}
+            }
+        }
+
+        /// Core's reading of the cell over every seat's reads, and each
+        /// value's chain state there.
+        fn states(&self) -> [Option<ChainState>; 2] {
+            let held = evaluate(
+                &self.cell.routed(),
+                &self.cell.evidence(),
+                fixtures::recognize_ok,
+            )
+            .expect("every seat is read and committed");
+            let mut states = [None, None];
+            if let CellReading::Held { value, state, .. } = held {
+                let x = MODEL_VALUES
+                    .iter()
+                    .position(|v| *v == value.as_slice())
+                    .expect("the value holding the cell is one the model wrote");
+                states[x] = Some(state);
+            }
+            states
+        }
+
+        /// The route positions of `x`'s valid links, the leader's included.
+        fn link_positions(&self, x: usize) -> Vec<usize> {
+            let cell = self.cell.routed();
+            let ev = self.cell.evidence();
+            let Ok(Some(leader)) = leader_link(&cell, &ev, fixtures::recognize_ok) else {
+                return Vec::new();
+            };
+            if leader.value != MODEL_VALUES[x] {
+                return Vec::new();
+            }
+            let mut positions = vec![0];
+            positions.extend(valid_links(&cell, &ev, &leader).iter().map(|l| l.position));
+            positions
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28: "Model-to-code
+    /// correspondence remains in scope for active beta mechanisms. Use genuine
+    /// executable tests and mutation controls"): every state of
+    /// `tla/DSM_RouteChain.tla` (its checked configuration: two values, five
+    /// seats, up to two lost) is reached by breadth-first search, each action
+    /// applied to the model and made as real writes; in every state Core's
+    /// `evaluate` gives each value exactly the model's `LeaderHeld` /
+    /// `Preserved` / `Final`, and the model's invariants hold of Core's
+    /// answers: one value holds the cell, a final value survives two losses,
+    /// and no step takes a value's state back.
+    /// MUTATION CONTROL: taking any arrival at the leader as its link, or
+    /// counting a copy whose chain does not begin with the leader link, turns
+    /// this red.
+    #[test]
+    fn route_chain_evaluation_refines_the_route_chain_model() {
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![(RouteChainModel::init(), Writes::new())];
+        let mut states = 0usize;
+        while let Some((model, writes)) = frontier.pop() {
+            if !seen.insert((model.clone(), writes.cell.logs.clone())) {
+                continue;
+            }
+            states += 1;
+            let core = writes.states();
+            for (x, state) in core.iter().enumerate() {
+                let expected = ChainState::of_links(model.valid_links(x));
+                assert_eq!(*state, expected, "value {x} in {model:?}");
+                if *state == Some(ChainState::Final) {
+                    assert!(
+                        writes
+                            .link_positions(x)
+                            .iter()
+                            .any(|p| !model.lost.contains(p)),
+                        "a final value lost every holder of its chain: {model:?}"
+                    );
+                }
+            }
+            for action in enabled(&model) {
+                let mut next_model = model.clone();
+                let mut next_writes = writes.clone();
+                match action {
+                    RouteChainAction::WriteLeader(x) => {
+                        next_model.arrivals.push(x);
+                        next_model.last[x] = 1;
+                    }
+                    RouteChainAction::Extend(x, p) => {
+                        next_model.copies[p].insert(x);
+                        next_model.last[x] = p + 1;
+                    }
+                    RouteChainAction::Lose(p) => {
+                        next_model.lost.insert(p);
+                    }
+                }
+                next_writes.apply(action);
+                let after = next_writes.states();
+                for (x, (before, now)) in core.iter().zip(after.iter()).enumerate() {
+                    assert!(
+                        before.is_none() || now >= before,
+                        "{action:?} took value {x} back from {before:?} to {now:?}"
+                    );
+                }
+                frontier.push((next_model, next_writes));
+            }
+        }
+        assert!(states > 100, "the model's states were reached: {states}");
     }
 }
