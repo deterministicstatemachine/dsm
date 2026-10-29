@@ -3377,6 +3377,192 @@ pub(crate) mod tests {
         );
     }
 
+    /// The writes a model receipt names (`tla/DSM_ReceiptWriteSet.tla`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct ModelWrites {
+        rel: Presence,
+        anchor: Presence,
+        alloc: Presence,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Presence {
+        Named,
+        Absent,
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's receipt state
+    /// rules refine `tla/DSM_ReceiptWriteSet.tla` (its checked configuration:
+    /// two peers, an allocation of 3, amounts 1 and 2, three accepted steps).
+    /// Every reachable state of the model is reproduced on a real device with
+    /// a real offline account, and in each, every receipt the model's
+    /// unconstrained author can form — each subset of the three leaves, each
+    /// amount, the counter moved or not, the allocation debited by 0, 1 or 2
+    /// — is judged by `verify_receipt_state` exactly as the model's verifier
+    /// `Holds` judges it. Core proves the counter and the allocation as one
+    /// offline-account leaf, so a receipt naming one of them and not the
+    /// other is a receipt without that leaf. An accepted receipt moves the
+    /// device's account exactly as the model's `Accept`: the counter by one
+    /// (`CounterMovesWithRoot`), the allocation by the amount, which the
+    /// receiver is credited (`AllocationConserved`); and the honest spend is
+    /// accepted whenever the allocation can pay it (`HonestSpendAcceptable`).
+    /// MUTATION CONTROL: checking the relationship write alone (the model's
+    /// `RelationshipOnlyCheck`), or not deriving the account's post-root from
+    /// the spend, turns this red.
+    #[test]
+    fn the_receipt_state_rules_refine_the_receipt_write_set_model() {
+        use crate::core::bilateral_transaction_manager::compute_smt_key;
+        use crate::types::receipt_types::{
+            DeviceTreeAcceptanceCommitment, ReceiptLeaf, StitchedReceiptV2,
+        };
+        use crate::verification::receipt_verification::{
+            verify_receipt_state, BearerLeaves, ReceiptStateContext,
+        };
+        const INIT_ALLOC: u64 = 3;
+        const MAX_STEPS: u64 = 3;
+        let (token, bundle, genesis) = (moving_token().0, [0xB6; 32], [0x6F; 32]);
+        let mut loaded = with_offline_account(0xD8, token, bundle)
+            .cross_offline_boundary(&bundle, OfflineBoundaryKind::Load, &token, INIT_ALLOC)
+            .expect("load")
+            .new_device_state
+            .into_head();
+        loaded.genesis = genesis;
+        let peers = [devid(0xC8), devid(0xC9)];
+        let mut start = loaded;
+        for p in peers {
+            start = start.establish_relationship(p).expect("establish");
+        }
+        let commitment = DeviceTreeAcceptanceCommitment::from_root(
+            crate::common::device_tree::DeviceTree::single(start.devid).root(),
+        );
+        let all_writes = [Presence::Named, Presence::Absent];
+        // (device, steps taken, value spent)
+        let mut pending = vec![(start, 0u64, 0u64)];
+        let mut states = 0usize;
+        while let Some((dev, steps, spent)) = pending.pop() {
+            states += 1;
+            let account = dev.offline_account(&bundle).expect("the account is open");
+            let counter = account.counter();
+            let alloc = INIT_ALLOC - spent;
+            assert_eq!(counter, steps, "CounterMovesWithRoot");
+            assert_eq!(
+                account.allocation(&token),
+                Some(alloc),
+                "AllocationConserved: the account holds the load less what receivers were credited"
+            );
+            if steps == MAX_STEPS {
+                continue;
+            }
+            let frontier = account.frontier();
+            let next_frontier = [0x10 + steps as u8; 32];
+            for p in peers {
+                let rk = compute_smt_key(&dev.devid, &p);
+                for amount in [1u64, 2] {
+                    let advanced = dev.advance(
+                        rk,
+                        p,
+                        bearer_op(p, token, amount),
+                        &[],
+                        Some(OfflineSpend {
+                            anchor_bundle_b: bundle,
+                            asset: token,
+                            amount,
+                            next_frontier,
+                        }),
+                    );
+                    let Ok(out) = advanced else {
+                        // Core cannot make a step the allocation cannot pay:
+                        // no receipt of it exists, honest or not, and the
+                        // model's verifier holds none (`Derived`).
+                        assert!(amount > alloc, "an affordable spend refused: {advanced:?}");
+                        continue;
+                    };
+                    let leaves = BearerLeaves {
+                        bundle,
+                        counter,
+                        frontier,
+                        next_frontier,
+                    };
+                    let honest = StitchedReceiptV2::of_step(
+                        genesis,
+                        dev.devid,
+                        p,
+                        &out,
+                        Some(leaves),
+                        &commitment,
+                    )
+                    .expect("HonestSpendAcceptable: the honest receipt holds");
+                    let check = |r: &StitchedReceiptV2| {
+                        verify_receipt_state(
+                            r,
+                            &ReceiptStateContext {
+                                device_tree_commitment: &commitment,
+                                author_genesis: genesis,
+                                operation: &out.new_chain_state.operation,
+                                bearer: Some(leaves),
+                            },
+                        )
+                    };
+                    for rel in all_writes {
+                        for anchor_w in all_writes {
+                            for alloc_w in all_writes {
+                                let writes = ModelWrites {
+                                    rel,
+                                    anchor: anchor_w,
+                                    alloc: alloc_w,
+                                };
+                                for ctr_post in [counter, counter + 1] {
+                                    for alloc_post in
+                                        [alloc, alloc.wrapping_sub(1), alloc.wrapping_sub(2)]
+                                            .into_iter()
+                                            .filter(|a| *a <= alloc)
+                                    {
+                                        let every = writes
+                                            == ModelWrites {
+                                                rel: Presence::Named,
+                                                anchor: Presence::Named,
+                                                alloc: Presence::Named,
+                                            };
+                                        let derived =
+                                            ctr_post == counter + 1 && alloc_post + amount == alloc;
+                                        let holds = every && derived;
+                                        let mut r = honest.clone();
+                                        if !derived {
+                                            // Any post-state but the derived one folds to another
+                                            // child root than the step's.
+                                            r.child_root = r.parent_root;
+                                        }
+                                        r.step_writes.retain(|w| match &w.leaf {
+                                            ReceiptLeaf::Relationship => rel == Presence::Named,
+                                            ReceiptLeaf::OfflineAccount(_) => {
+                                                anchor_w == Presence::Named
+                                                    && alloc_w == Presence::Named
+                                            }
+                                        });
+                                        match check(&r) {
+                                            Ok(()) => assert!(
+                                                holds,
+                                                "Core accepts what the model refuses: {writes:?}, counter {ctr_post}, allocation {alloc_post}"
+                                            ),
+                                            Err(e) => assert!(
+                                                !holds,
+                                                "Core refuses what the model accepts: {writes:?}: {e}"
+                                            ),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let mut next = out.new_device_state.into_head();
+                    next.genesis = genesis;
+                    pending.push((next, steps + 1, spent + amount));
+                }
+            }
+        }
+        assert!(states > 10, "the model's states were reached: {states}");
+    }
+
     #[test]
     fn an_ordinary_advance_leaves_the_offline_account_where_it_was() {
         use crate::core::bilateral_transaction_manager::compute_smt_key;

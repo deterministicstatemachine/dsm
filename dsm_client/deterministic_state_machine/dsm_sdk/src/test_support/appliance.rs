@@ -477,3 +477,363 @@ impl AnchorAppliance for HostAppliance {
         self.with(|d| Ok(d.recover()))
     }
 }
+
+/// Model-to-code correspondence for `tla/DSM_OfflineAnchorSingleAppliance.tla`
+/// (G3 ruling B9, owner 2026-10-28).
+#[cfg(test)]
+mod model_correspondence {
+    use super::*;
+    use anchor_core::appliance::Status;
+    use anchor_core::root_advance::{anchor_root_advance, transition_digest, OwnedTransition};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    /// The model's `H0`.
+    const H0: u32 = 3;
+    /// The contents whose step's receipt holds (`ReceiptHolds`): with
+    /// `VerifyBeforePrepare`, the only ones the host ever prepares. Content 3
+    /// is refused by the host before the appliance sees it
+    /// (`a_bearer_confirm_whose_receipt_does_not_hold_is_refused_before_anything_commits`).
+    const CONTENTS: [u8; 2] = [1, 2];
+    const CHALLENGE: [u8; 32] = [0x55; 32];
+
+    /// An origin `(h, u)`: the contents of the transfers finalized before it
+    /// (which fix its frontier) and its counter.
+    type Origin = (Vec<u8>, u64);
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    enum ModelStatus {
+        Ready,
+        Prepared,
+        Committed,
+    }
+
+    /// The model's state, with every record named by its origin and content.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    struct ApplianceModel {
+        finalized: Vec<u8>,
+        counter: u64,
+        phys: u32,
+        status: ModelStatus,
+        prepared: Option<(Origin, u8)>,
+        committed: Option<(Origin, u8)>,
+        ledger: BTreeSet<(Origin, u8)>,
+        consumed: BTreeSet<Origin>,
+        emitted: BTreeSet<(Origin, u8)>,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Step {
+        Prepare(u8),
+        Commit,
+        Emit,
+        Finalize,
+        Recover,
+        PowerLossBeforeCommit,
+    }
+
+    impl ApplianceModel {
+        fn init() -> Self {
+            Self {
+                finalized: Vec::new(),
+                counter: 0,
+                phys: H0,
+                status: ModelStatus::Ready,
+                prepared: None,
+                committed: None,
+                ledger: BTreeSet::new(),
+                consumed: BTreeSet::new(),
+                emitted: BTreeSet::new(),
+            }
+        }
+
+        fn origin(&self) -> Origin {
+            (self.finalized.clone(), self.counter)
+        }
+
+        fn enabled(&self) -> Vec<Step> {
+            let mut out = Vec::new();
+            match self.status {
+                // At the exhausted counter the model can prepare a record
+                // that no commit can ever take; the appliance refuses that
+                // prepare at once (`CounterExhausted`), which the test
+                // asserts in place of exploring the abandoned record.
+                ModelStatus::Ready => {
+                    if self.counter == u64::from(H0 - self.phys)
+                        && !self.consumed.contains(&self.origin())
+                        && self.phys > 0
+                    {
+                        out.extend(CONTENTS.map(Step::Prepare));
+                    }
+                }
+                ModelStatus::Prepared => {
+                    if self.phys > 0 {
+                        out.push(Step::Commit);
+                    }
+                    out.push(Step::PowerLossBeforeCommit);
+                }
+                ModelStatus::Committed => {
+                    out.extend([Step::Emit, Step::Finalize, Step::Recover]);
+                }
+            }
+            out
+        }
+
+        fn after(&self, step: Step) -> Self {
+            let mut m = self.clone();
+            match step {
+                Step::Prepare(c) => {
+                    m.prepared = Some((m.origin(), c));
+                    m.status = ModelStatus::Prepared;
+                }
+                Step::Commit => {
+                    let rec = m.prepared.clone().expect("a prepared record");
+                    m.phys -= 1;
+                    m.consumed.insert(rec.0.clone());
+                    m.ledger.insert(rec.clone());
+                    m.committed = Some(rec);
+                    m.status = ModelStatus::Committed;
+                }
+                Step::Emit | Step::Recover => {
+                    m.emitted
+                        .insert(m.committed.clone().expect("a committed record"));
+                }
+                Step::Finalize => {
+                    let (_, c) = m.committed.clone().expect("a committed record");
+                    m.finalized.push(c);
+                    m.counter += 1;
+                    m.status = ModelStatus::Ready;
+                    m.prepared = None;
+                    m.committed = None;
+                }
+                Step::PowerLossBeforeCommit => {
+                    m.status = ModelStatus::Ready;
+                    m.prepared = None;
+                }
+            }
+            m
+        }
+    }
+
+    /// The transition of content `c` from the origin `(frontier, u)`.
+    fn transition(frontier: [u8; 32], u: u64, c: u8) -> OwnedTransition {
+        let mut t = OwnedTransition {
+            relationship_id: [1; 32],
+            object_id: [2; 32],
+            sender_device_id: [3; 32],
+            recipient_device_id: [4; 32],
+            prev_root: frontier,
+            next_root: [5; 32],
+            anchor_counter: u,
+            next_anchor_counter: u + 1,
+            action_type: 0,
+            action_fields: vec![c],
+            payload_hash: [6; 32],
+            old_leaf_proof: vec![7; 40],
+            new_leaf_proof: vec![8; 40],
+            authority_policy_hash: dsm::types::operations::canonical_offline_bearer_policy()
+                .policy_id,
+        };
+        let d = transition_digest(&t.as_transition(), &CHALLENGE);
+        t.next_root = anchor_root_advance(&frontier, &d);
+        t
+    }
+
+    /// A board born and provisioned the same way for every replay.
+    fn board() -> HostAppliance {
+        let mut board = HostAppliance::unprovisioned([0x3C; 32], H0);
+        if let Err(e) = board.provision(&Provisioning {
+            device_id: [0x77; 32],
+            online_id_pk: vec![0x66; 32],
+            policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+            genesis_root: [0x11; 32],
+        }) {
+            panic!("the board provisions: {e}");
+        }
+        board
+    }
+
+    fn status_of(board: &HostAppliance) -> Status {
+        match board.with(|d| Ok(d.appliance().active.status)) {
+            Ok(status) => status,
+            Err(e) => panic!("the board serves: {e}"),
+        }
+    }
+
+    /// The frontier the board reached after `finalized`, recomputed as the
+    /// board advances it: the forward-only successor of each content.
+    fn frontier_after(start: [u8; 32], finalized: &[u8]) -> [u8; 32] {
+        finalized
+            .iter()
+            .enumerate()
+            .fold(start, |h, (u, c)| transition(h, u as u64, *c).next_root)
+    }
+
+    /// Make `path` on a fresh board, checking every refusal the model
+    /// implies, and return the board and the bytes each origin emitted.
+    fn replay(path: &[Step]) -> (HostAppliance, ApplianceModel, BTreeMap<Origin, Vec<u8>>) {
+        let mut board = board();
+        let start = match board.status() {
+            Ok(s) => s.root,
+            Err(e) => panic!("the board reports its frontier: {e}"),
+        };
+        let mut model = ApplianceModel::init();
+        let mut emitted: BTreeMap<Origin, Vec<u8>> = BTreeMap::new();
+        for step in path {
+            let frontier = frontier_after(start, &model.finalized);
+            match step {
+                Step::Prepare(c) => {
+                    let t = transition(frontier, model.counter, *c);
+                    let before = [0x51u8.wrapping_add(model.counter as u8); 32];
+                    let after = [0x61u8.wrapping_add(model.counter as u8); 32];
+                    if let Err(e) = board.prepare(&t.as_transition(), &CHALLENGE, &before, &after) {
+                        panic!("{path:?}: prepare refused: {e}");
+                    }
+                }
+                Step::Commit => {
+                    if let Err(e) = board.commit() {
+                        panic!("{path:?}: commit refused: {e}");
+                    }
+                }
+                Step::Emit | Step::Recover => {
+                    if matches!(step, Step::Recover) {
+                        match board.recover() {
+                            Ok(RecoverOutcome::ReemitCommitted(_)) => {}
+                            other => panic!("{path:?}: a committed board re-emits: {other:?}"),
+                        }
+                    }
+                    let bytes = match board.emit() {
+                        Ok(bytes) => bytes,
+                        Err(e) => panic!("{path:?}: emit refused: {e}"),
+                    };
+                    let origin = model.origin();
+                    match emitted.get(&origin) {
+                        Some(first) => assert_eq!(
+                            first, &bytes,
+                            "{path:?}: a second package emitted for one counter step"
+                        ),
+                        None => {
+                            emitted.insert(origin, bytes);
+                        }
+                    }
+                }
+                Step::Finalize => {
+                    if let Err(e) = board.finalize() {
+                        panic!("{path:?}: finalize refused: {e}");
+                    }
+                }
+                Step::PowerLossBeforeCommit => {
+                    board.cut(Cut::AtWrite(1));
+                    match board.commit() {
+                        Err(e) => assert!(
+                            e.to_string().contains("commit"),
+                            "{path:?}: the commit fails as a commit: {e}"
+                        ),
+                        Ok(()) => {
+                            panic!("{path:?}: a commit whose first write loses power completes")
+                        }
+                    }
+                    board.reboot();
+                }
+            }
+            model = model.after(*step);
+        }
+        (board, model, emitted)
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): the anchor-core
+    /// appliance, on the software board with its real chip counter and
+    /// R-memory, refines `tla/DSM_OfflineAnchorSingleAppliance.tla`. Every
+    /// state of the model's checked configuration (H0 = 3, contents {1, 2, 3},
+    /// receipts holding for 1 and 2) is reached by depth-first search, each by
+    /// replaying its path into a freshly born board; power loss before commit
+    /// is a real cut at the commit's first record write and a reboot. In every
+    /// state the board's status, frontier, counter floor and chip counter are
+    /// the model's (`CounterSync`); every package emitted or re-emitted for one
+    /// counter step is byte-identical (`NoTwoEmittedSameOrigin`,
+    /// `RecoveryIdempotence`); and a prepare from every consumed origin, with
+    /// every content, is refused and moves nothing (`SecondSameOriginFails`).
+    /// At the exhausted counter the appliance refuses a prepare the model
+    /// would let it make and only abandon; the test asserts that refusal.
+    /// MUTATION CONTROL: the appliance's prepare taking any origin (its four
+    /// overlapping checks of frontier, index, counter and successor dropped
+    /// together), or its commit not moving the chip counter, turns this red.
+    #[test]
+    fn the_appliance_refines_the_single_appliance_model() {
+        let start = match board().status() {
+            Ok(s) => s.root,
+            Err(e) => panic!("the board reports its frontier: {e}"),
+        };
+        let mut seen: BTreeSet<ApplianceModel> = BTreeSet::new();
+        let mut pending: Vec<Vec<Step>> = vec![Vec::new()];
+        while let Some(path) = pending.pop() {
+            let (mut board, model, _) = replay(&path);
+            if !seen.insert(model.clone()) {
+                continue;
+            }
+            let status = status_of(&board);
+            let expected = match model.status {
+                ModelStatus::Ready => Status::Ready,
+                ModelStatus::Prepared => Status::Prepared,
+                ModelStatus::Committed => Status::Committed,
+            };
+            assert_eq!(status, expected, "{path:?}");
+            let reported = match board.status() {
+                Ok(s) => s,
+                Err(e) => panic!("{path:?}: the board reports: {e}"),
+            };
+            assert_eq!(board.chip_counter(), model.phys, "{path:?}");
+            assert_eq!(
+                reported.anchor_counter,
+                u64::from(H0 - model.phys),
+                "{path:?}: the board's counter floor is the chip's, moved at commit"
+            );
+            if model.status == ModelStatus::Ready {
+                assert_eq!(
+                    reported.anchor_counter, model.counter,
+                    "{path:?}: ready, the SMT counter is synchronized to the floor (CounterSync)"
+                );
+                if model.phys == 0 {
+                    let t = transition(frontier_after(start, &model.finalized), model.counter, 1);
+                    match board.prepare(&t.as_transition(), &CHALLENGE, &[0x73; 32], &[0x74; 32]) {
+                        Err(e) => assert!(
+                            e.to_string().contains("CounterExhausted"),
+                            "{path:?}: an exhausted counter refuses a prepare as exhausted: {e}"
+                        ),
+                        Ok(()) => panic!("{path:?}: a prepare at the exhausted counter was taken"),
+                    }
+                    assert_eq!(status_of(&board), Status::Ready, "{path:?}");
+                }
+                for (finalized, u) in &model.consumed {
+                    let origin_frontier = frontier_after(start, finalized);
+                    for c in CONTENTS {
+                        let t = transition(origin_frontier, *u, c);
+                        match board.prepare(
+                            &t.as_transition(),
+                            &CHALLENGE,
+                            &[0x71; 32],
+                            &[0x72; 32],
+                        ) {
+                            Err(e) => assert!(
+                                e.to_string().contains("prepare"),
+                                "{path:?}: refused as a prepare: {e}"
+                            ),
+                            Ok(()) => {
+                                panic!("{path:?}: a prepare from the consumed origin {u} was taken")
+                            }
+                        }
+                        assert_eq!(status_of(&board), Status::Ready, "{path:?}");
+                    }
+                }
+            }
+            for step in model.enabled() {
+                let mut next = path.clone();
+                next.push(step);
+                pending.push(next);
+            }
+        }
+        assert!(
+            seen.iter().any(|m| m.counter == u64::from(H0)),
+            "the search reached the exhausted counter"
+        );
+    }
+}
