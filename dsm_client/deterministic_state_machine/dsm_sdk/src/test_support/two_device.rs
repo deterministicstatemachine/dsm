@@ -366,6 +366,24 @@ pub fn assert_incomplete(sync: &generated::StorageSyncResponse) {
     );
 }
 
+/// The message of a committed send's answer, an `OnlineTransferResponse`,
+/// delivered or not. Panics on any other answer, a refusal included: a send
+/// whose debit is committed is never answered as one.
+pub fn committed_send_message(answer: &crate::bridge::AppResult) -> String {
+    assert!(
+        answer.success,
+        "a committed send answers success: {:?}",
+        answer.error_message
+    );
+    match crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+        .expect("the send answers an envelope")
+        .payload
+    {
+        Some(generated::envelope::Payload::OnlineTransferResponse(response)) => response.message,
+        other => panic!("a committed send answers an OnlineTransferResponse, not {other:?}"),
+    }
+}
+
 /// A booted A/B pair on the network's pinned set of storage nodes, each device
 /// published, mutually added as contacts and funded. The starting point of
 /// every protocol test.

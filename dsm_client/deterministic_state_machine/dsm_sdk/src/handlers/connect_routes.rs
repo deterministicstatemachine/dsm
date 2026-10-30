@@ -1155,11 +1155,10 @@ impl AppRouterImpl {
                     // A committed debit is paid, delivered or not: it stands
                     // and the sweep carries it forward (§16.6), so it counts
                     // against the grant (SA-19).
-                    OnlineSent::Debited(answer) => match (answer.success, answer.error_message) {
-                        (ok, _) if ok => Executed::carried_out(None),
-                        (_, Some(why)) => Executed::paid_undelivered(why),
-                        (_, None) => Executed::paid_undelivered("the send said nothing more"),
-                    },
+                    OnlineSent::Delivered(_) => Executed::carried_out(None),
+                    OnlineSent::Undelivered { why, .. } | OnlineSent::Stranded { why, .. } => {
+                        Executed::paid_undelivered(why)
+                    }
                     OnlineSent::NotDebited(answer) => match answer.error_message {
                         Some(why) => Executed::failed(why),
                         None => {

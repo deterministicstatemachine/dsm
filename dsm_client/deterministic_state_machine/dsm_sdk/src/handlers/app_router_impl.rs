@@ -71,18 +71,30 @@ pub(crate) struct OnlineSendIntent {
 
 /// What an online send did with the sender's balance, and its answer.
 pub(crate) enum OnlineSent {
-    /// Nothing was committed: no debit, nothing to deliver.
+    /// Nothing was committed: no debit, nothing to deliver. Answered as a
+    /// refusal.
     NotDebited(AppResult),
-    /// The debit is committed. It stands whatever the answer says: success,
-    /// or why its admission is held or its delivery is unknown, both of which
-    /// the reconciliation sweep carries forward (§16.6).
-    Debited(AppResult),
+    /// The debit is committed and the transfer delivered.
+    Delivered(AppResult),
+    /// The debit is committed and the transfer not delivered yet, for `why`:
+    /// its admission is held, its outbox row was not marked, or its delivery
+    /// is unknown. It stands and completes on its own: the sync finishes a
+    /// held admission and the reconciliation sweep drives the outbox row
+    /// (§16.6). Answered as the committed send it is, never as a refusal.
+    Undelivered { answer: AppResult, why: String },
+    /// The debit is committed on this device and can never complete, for
+    /// `why`: its admission cannot land (its position is held by another
+    /// claim, a copy of this wallet having sent from it first), or the advance
+    /// left no admission to finish. Answered as an error that says so: the
+    /// payment will not happen.
+    Stranded { answer: AppResult, why: String },
 }
 
 impl OnlineSent {
     pub(crate) fn answer(self) -> AppResult {
         match self {
-            Self::NotDebited(answer) | Self::Debited(answer) => answer,
+            Self::NotDebited(answer) | Self::Delivered(answer) => answer,
+            Self::Undelivered { answer, .. } | Self::Stranded { answer, .. } => answer,
         }
     }
 }
@@ -1872,16 +1884,13 @@ impl AppRouterImpl {
         let pending_admission = match accepted_admission {
             Some(p) => p,
             None => {
-                return OnlineSent::Debited(err(
-                    "wallet.send: advance committed without an accepted admission".to_string(),
-                ))
+                return self
+                    .stranded("the advance committed without an accepted admission".to_string())
             }
         };
         let econ_parts_final = match admission_parts.into_inner() {
             Some(p) => p,
-            None => {
-                return OnlineSent::Debited(err("wallet.send: admission parts missing".to_string()))
-            }
+            None => return self.stranded("the admission parts are missing".to_string()),
         };
         if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
             &self.core_sdk,
@@ -1896,10 +1905,21 @@ impl AppRouterImpl {
         )
         .await
         {
-            return OnlineSent::Debited(err(format!(
-                "wallet.send: debit committed; economic admission is HELD for resume and \
-                 nothing was delivered: {e}"
-            )));
+            // An invalid admission cannot land: its inputs are frozen, so a
+            // resume fails the same way. Anything else holds it for resume.
+            return match e {
+                dsm::types::error::DsmError::InvalidOperation(_) => {
+                    self.stranded(format!("its economic admission cannot land: {e}"))
+                }
+                _ => self.undelivered(
+                    &token_id,
+                    &new_state.hash,
+                    format!(
+                        "its economic admission is held for resume and nothing is delivered yet; \
+                         it completes once storage is reachable: {e}"
+                    ),
+                ),
+            };
         }
 
         let mut b0x_succeeded = false;
@@ -1925,11 +1945,14 @@ impl AppRouterImpl {
             &outbox_record.proposal_nonce,
             crate::storage::client_db::OUTBOX_SUBMITTING,
         ) {
-            return OnlineSent::Debited(err(format!(
-                "wallet.send: debit committed; the outbox row could not be marked \
-                 submitting, so nothing was sent and the transfer is retained for the \
-                 reconciliation sweep: {e}"
-            )));
+            return self.undelivered(
+                &token_id,
+                &new_state.hash,
+                format!(
+                    "the outbox row could not be marked submitting, so nothing is sent yet and \
+                     the reconciliation sweep sends it: {e}"
+                ),
+            );
         }
 
         // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
@@ -2048,11 +2071,13 @@ impl AppRouterImpl {
                 "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
                  outbox; reconciling forward (a timeout is not proof of non-delivery)"
             );
-            return OnlineSent::Debited(err(
-                "wallet.send: delivery outcome unknown — the transfer is retained and will be \
-                 retried automatically. Funds are not lost; do not resend."
+            return self.undelivered(
+                &token_id,
+                &new_state.hash,
+                "its delivery outcome is unknown; the transfer is retained and retried \
+                 automatically"
                     .to_string(),
-            ));
+            );
         }
         if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
             &outbox_record.relationship_key,
@@ -2128,8 +2153,20 @@ impl AppRouterImpl {
             // with the sender's actual finalized relationship tip.
         }
 
-        // Get new balance for response
-        let new_balance = match self.wallet.get_balance(&token_id) {
+        OnlineSent::Delivered(self.committed_send(
+            &token_id,
+            &new_state.hash,
+            "Transfer successful".to_string(),
+        ))
+    }
+
+    /// The answer to a send whose debit is committed: an
+    /// `OnlineTransferResponse` naming the committed state, delivered or not.
+    /// A committed debit is never answered as a refusal; only a send that
+    /// moved nothing is. Where the transfer stands is the contact's send
+    /// status and the history row, both durable.
+    fn committed_send(&self, token_id: &str, state_hash: &[u8], message: String) -> AppResult {
+        let new_balance = match self.wallet.get_balance(token_id) {
             Ok(bal) => Some(bal.value()),
             Err(e) => {
                 log::error!(
@@ -2139,19 +2176,41 @@ impl AppRouterImpl {
                 None
             }
         };
-
-        let response = generated::OnlineTransferResponse {
-            success: true,
-            transaction_hash: Some(generated::Hash32 {
-                v: new_state.hash.to_vec(),
-            }),
-            message: "Transfer successful".to_string(),
-            new_balance,
-        };
-        // NEW: Return as Envelope.onlineTransferResponse (field 40)
-        OnlineSent::Debited(pack_envelope_ok(
-            generated::envelope::Payload::OnlineTransferResponse(response),
+        pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
+            generated::OnlineTransferResponse {
+                success: true,
+                transaction_hash: Some(generated::Hash32 {
+                    v: state_hash.to_vec(),
+                }),
+                message,
+                new_balance,
+            },
         ))
+    }
+
+    /// A committed send that can never complete, for `why`.
+    fn stranded(&self, why: String) -> OnlineSent {
+        log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
+        OnlineSent::Stranded {
+            answer: err(format!(
+                "wallet.send: the debit is committed on this device and this payment cannot \
+                 complete: {why}"
+            )),
+            why,
+        }
+    }
+
+    /// A committed send not delivered yet, for `why`.
+    fn undelivered(&self, token_id: &str, state_hash: &[u8], why: String) -> OnlineSent {
+        log::warn!("[wallet.send] the debit is committed and not delivered yet: {why}");
+        OnlineSent::Undelivered {
+            answer: self.committed_send(
+                token_id,
+                state_hash,
+                format!("Sent: {why}. The debit stands; do not resend."),
+            ),
+            why,
+        }
     }
 }
 

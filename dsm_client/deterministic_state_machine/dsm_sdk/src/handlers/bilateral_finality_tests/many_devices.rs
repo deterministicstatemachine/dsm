@@ -6,11 +6,9 @@
 //! Every step is checked, and every phase ends at rest and is checked there.
 //!
 //! After every step:
-//! - a send that answers done armed the sender's gate toward the recipient.
-//!   A send counts as sent when it armed that gate, whatever its answer says:
-//!   a debit whose admission is held or whose delivery is unknown answers
-//!   with an error, and the answer does not say structurally that the debit
-//!   stands (§6.121);
+//! - a send answers as committed exactly when it armed the sender's gate
+//!   toward the recipient, i.e. debited it, delivered or not; any other
+//!   answer is a refusal and armed nothing;
 //! - no device holds less than it started with less what it sent, nor more
 //!   than that plus what was sent to it, and the devices together never hold
 //!   more than they started with: no value is created.
@@ -178,13 +176,12 @@ impl Mesh {
         };
         self.steps
             .push(format!("{}->{} {amount}: {said}", SLOTS[from], SLOTS[to]));
-        if answer.success {
-            assert!(
-                armed,
-                "{}: the wallet answered done and armed no gate",
-                self.trail()
-            );
-        }
+        assert_eq!(
+            answer.success,
+            armed,
+            "{}: the wallet answers a send as committed exactly when it debited it",
+            self.trail()
+        );
         if armed {
             self.sent[from] += amount;
             self.received[to] += amount;

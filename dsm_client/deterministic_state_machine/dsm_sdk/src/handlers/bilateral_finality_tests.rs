@@ -1029,13 +1029,11 @@ async fn two_online_sends_that_cross_both_settle_and_the_relationship_moves_on()
     p.nodes.fail_spools(&members).await;
     for (from, to, amount) in [(&p.a, &p.b, 10), (&p.b, &p.a, 7)] {
         let sent = from.send(to, amount).await;
+        let said = crate::test_support::two_device::committed_send_message(&sent);
         assert!(
-            sent.error_message
-                .as_deref()
-                .is_some_and(|e| e.contains("delivery outcome unknown")),
-            "{}: debited, its delivery left to the re-drive: {:?}",
-            from.slot,
-            sent.error_message
+            said.contains("delivery outcome is unknown"),
+            "{}: debited, its delivery left to the re-drive: {said}",
+            from.slot
         );
     }
     p.nodes.restore_spools(&members).await;
@@ -1105,13 +1103,11 @@ async fn crossed(p: &Pair, a_amount: u64, b_amount: u64) {
     p.nodes.fail_spools(&members).await;
     for (from, to, amount) in [(&p.a, &p.b, a_amount), (&p.b, &p.a, b_amount)] {
         let sent = from.send(to, amount).await;
+        let said = crate::test_support::two_device::committed_send_message(&sent);
         assert!(
-            sent.error_message
-                .as_deref()
-                .is_some_and(|e| e.contains("delivery outcome unknown")),
-            "{}: debited, its delivery left to the re-drive: {:?}",
-            from.slot,
-            sent.error_message
+            said.contains("delivery outcome is unknown"),
+            "{}: debited, its delivery left to the re-drive: {said}",
+            from.slot
         );
     }
     p.nodes.restore_spools(&members).await;
