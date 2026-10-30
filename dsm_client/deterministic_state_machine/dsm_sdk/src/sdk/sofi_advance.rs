@@ -177,6 +177,9 @@ pub async fn fulfill(
     set: &StorageSet,
     request: &FulfillRequest<'_>,
 ) -> Result<Fulfilled, DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     let precommit = request.precommit;
     let head = core
         .device_head()

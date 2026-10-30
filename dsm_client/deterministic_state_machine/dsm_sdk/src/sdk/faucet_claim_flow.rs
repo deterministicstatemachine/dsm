@@ -85,6 +85,9 @@ const MAX_ATTEMPTS: u64 = 8;
 /// Run one complete claim. Idempotent under crash + retry via the frozen
 /// artifacts; a pending admission from a previous run is finished first.
 pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<ClaimOutcome, DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     let head = core
         .device_head()
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;

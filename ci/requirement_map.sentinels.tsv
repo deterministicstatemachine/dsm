@@ -14,7 +14,7 @@ android	dsm::economic::peer_lineage::SourceAncestry::ProvenanceResolver::anchore
 android	dsm::sofi::smt::fold::EconomicHashes::SmtHashes::leaf	reached	REACHED_VIA_DISPATCH	an associated trait function dispatched on as a type argument
 android	dsm::economic::write_set::build_write_set	reached	REACHED_VIA_DISPATCH	a cross-module call reached through the router
 android	dsm_sdk::bridge::install_anchor_appliance_factory	indeterminate	IND_UNINDEXED_ARTIFACT	only the anchor crate calls it, which the map cannot index here
-android	dsm_sdk::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing	not-in-artifact	NOT_IN_ARTIFACT	test-utils code the shipped build does not compile
+android	dsm_sdk::storage::client_db::reset_database_for_tests	not-in-artifact	NOT_IN_ARTIFACT	test-utils code the shipped build does not compile
 android	dsm::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore::AnchorEnrollmentStore::admit	indeterminate	IND_DISPATCH_SELF_TYPE	the store trait's methods are reached, and the shipped build never makes the in-memory store
 android	dsm::core::token::policy::policy_enforcement::EnforcementError::Display::fmt	indeterminate	IND_NOT_CONSTRUCTED	reached code names EnforcementError and makes none of its values
 android	dsm::sofi::resolve::VerifierFailure::From::from	indeterminate	IND_NOT_DISPATCHED	a From impl that `?` or `into()` would call, which the index does not show

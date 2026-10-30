@@ -65,17 +65,42 @@ struct AttachedAnchor {
     pin: crate::anchor::AnchorPin,
 }
 
-/// The pending economic admission each device's head carried when THIS PROCESS
-/// built its first `CoreSDK` for that device, as `(economic_position,
-/// operation_digest)`, or `None` if there was no head or nothing pending.
-/// Recorded once per device per process and never replaced. The SDK can be initialized more than once in a process (a bridge
-/// re-init, an Android activity recreated while the process lives); a router
-/// built then must not adopt an admission a live handler of this process
-/// created. Ownership ruled 2026-09-15: recovery owns only what predates
-/// process startup.
-static PROCESS_STARTUP_ADMISSIONS: once_cell::sync::Lazy<
-    std::sync::Mutex<std::collections::HashMap<[u8; 32], Option<(u64, [u8; 32])>>>,
+/// How many handlers that create an economic admission are running in this
+/// process, per device. A pending admission no running handler holds is the
+/// sync's to finish: its handler has returned, and the admission is held for
+/// resume (owner ruling, 2026-10-30, amending the 2026-09-15 ruling that left
+/// one created by the running process to its handler alone). An admission a
+/// restored head carries has no running handler either.
+static RUNNING_ADMISSION_HANDLERS: once_cell::sync::Lazy<
+    std::sync::Mutex<std::collections::HashMap<[u8; 32], usize>>,
 > = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn running_admission_handlers(
+) -> std::sync::MutexGuard<'static, std::collections::HashMap<[u8; 32], usize>> {
+    match RUNNING_ADMISSION_HANDLERS.lock() {
+        Ok(running) => running,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// A running handler that creates an economic admission for one device, held
+/// from before it creates the admission until it returns
+/// ([`CoreSDK::admission_handler`]).
+pub(crate) struct AdmissionHandler {
+    device_id: [u8; 32],
+}
+
+impl Drop for AdmissionHandler {
+    fn drop(&mut self) {
+        let mut running = running_admission_handlers();
+        if let Some(count) = running.get_mut(&self.device_id) {
+            *count -= 1;
+            if *count == 0 {
+                running.remove(&self.device_id);
+            }
+        }
+    }
+}
 
 /* ------------------------------- Helpers -------------------------------- */
 
@@ -980,7 +1005,6 @@ impl CoreSDK {
         let state_machine = Mutex::new(StateMachine::new());
 
         Self::restore_latest_archived_state(&state_machine, &device_info.device_id)?;
-        Self::record_process_startup_admission(&state_machine, &device_info.device_id);
 
         Ok(Self {
             state_machine,
@@ -990,48 +1014,23 @@ impl CoreSDK {
         })
     }
 
-    /// Record, at the FIRST `CoreSDK` built for this device in this process, the
-    /// pending admission its restored head carries (`None` when there is no head
-    /// or nothing is pending). Never replaced: a later construction in the same
-    /// process (a bridge re-init, an activity recreated while the process lives)
-    /// records nothing, so no head created or loaded later in this process can
-    /// have its admission adopted.
-    fn record_process_startup_admission(state_machine: &Mutex<StateMachine>, device_id: &[u8; 32]) {
-        let coords = state_machine.lock().device_head().and_then(|h| {
-            h.pending_economic_admission()
-                .map(|p| (p.economic_position, p.operation_digest))
-        });
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entry(*device_id)
-            .or_insert(coords);
+    /// Hold this device's admission handler: a handler that creates an
+    /// economic admission holds it from before it creates the admission until
+    /// it returns, and the sync leaves the device's pending admission to it
+    /// meanwhile.
+    pub(crate) fn admission_handler(&self) -> AdmissionHandler {
+        *running_admission_handlers()
+            .entry(self.device_info.device_id)
+            .or_insert(0) += 1;
+        AdmissionHandler {
+            device_id: self.device_info.device_id,
+        }
     }
 
-    /// Whether `pending` is the admission this device's head already carried when
-    /// THIS PROCESS built its first `CoreSDK` for the device: an admission the
-    /// running process did not create.
-    pub(crate) fn admission_predates_startup(
-        &self,
-        pending: &dsm::economic::admission::PendingEconomicAdmission,
-    ) -> bool {
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&self.device_info.device_id)
-            .copied()
-            .flatten()
-            == Some((pending.economic_position, pending.operation_digest))
-    }
-
-    /// Forget every process-startup record. TEST ONLY: it models a process
-    /// restart for tests that build a fresh router over the same database.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn forget_process_startup_admissions_for_testing() {
-        PROCESS_STARTUP_ADMISSIONS
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
+    /// Whether a handler that creates an economic admission is running for
+    /// this device: while one is, the device's pending admission is its own.
+    pub(crate) fn admission_handler_running(&self) -> bool {
+        running_admission_handlers().contains_key(&self.device_info.device_id)
     }
 
     pub fn get_device_identity(&self) -> DeviceInfo {

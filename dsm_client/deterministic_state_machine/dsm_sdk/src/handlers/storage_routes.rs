@@ -1316,6 +1316,22 @@ impl AppRouterImpl {
         };
         let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
 
+        // Another handler is creating or finishing this device's admission:
+        // it is that handler's until it returns, and every apply would be
+        // fenced behind it, so the whole pass is held (pairs stay bound,
+        // retried next poll). Otherwise every admission this pass creates,
+        // and the one Step 0 resumes, is this pass's until it returns (owner
+        // ruling, 2026-10-30).
+        if self.core_sdk.admission_handler_running() {
+            failures.push(
+                "an economic admission's handler is running; every pair is held for the next \
+                 pass"
+                    .to_string(),
+            );
+            return (consumed, release, failures);
+        }
+        let _admission_handler = self.core_sdk.admission_handler();
+
         // ── Step 0 (3.5b PR4): a pending economic admission is DEVICE-global
         // — resume it before any pair. Still pending afterwards means our own
         // quorum is unreachable; every apply would be fenced, so hold the
@@ -1832,15 +1848,14 @@ impl AppRouterImpl {
                     )
                     .await
                     {
+                        // Nothing diverged: the projection has converged above.
+                        // The pending admission holds this device's applies and
+                        // sends until Step 0 finishes it on a later pass, which
+                        // delivers the release.
                         failures.push(format!(
                             "split transfer {name}: accepted; economic admission held for \
                              resume ({e}); release undelivered"
                         ));
-                        if let Err(e) =
-                            mark_contact_needs_online_reconcile_and_refresh(&sender_device)
-                        {
-                            failures.push(e);
-                        }
                         continue;
                     }
                 }
@@ -2819,7 +2834,7 @@ impl AppRouterImpl {
 
     /// The liveness sweeps: resubmit uncertain sends, replay frozen
     /// certificates and publication artifacts, and finish an economic
-    /// admission a crash stranded.
+    /// admission held for resume that no running handler holds.
     async fn push_owed(
         &self,
         report: &mut StorageSyncReport,
@@ -2868,14 +2883,15 @@ impl AppRouterImpl {
                 .errors
                 .push(format!("owner baselines: no committed set: {e}")),
         }
-        // An admission the head already carried when this process restored
-        // it; one created after startup belongs to the handler that created it.
-        let stranded = self
+        // A pending admission no running handler holds: its handler returned
+        // with it held for resume, or a restart restored it (owner ruling,
+        // 2026-10-30). While its handler runs, it is the handler's.
+        let held = self
             .core_sdk
             .device_head()
             .and_then(|head| head.pending_economic_admission().cloned())
-            .filter(|pending| self.core_sdk.admission_predates_startup(pending));
-        if let Some(pending) = stranded {
+            .filter(|_| !self.core_sdk.admission_handler_running());
+        if let Some(pending) = held {
             let position = pending.economic_position;
             let resumed = match crate::sdk::economic_admission_flow::committed_network_id() {
                 Ok(network) => {
@@ -2891,7 +2907,7 @@ impl AppRouterImpl {
             match resumed {
                 Ok(..) => report.pushed += 1,
                 Err(e) => report.errors.push(format!(
-                    "stranded admission at position {position} not finished: {e}"
+                    "held admission at position {position} not finished: {e}"
                 )),
             }
         }

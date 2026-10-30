@@ -123,12 +123,20 @@ impl TestDevice {
         }
     }
 
-    /// Bring the device up on `fleet`: build its `AppRouterImpl` (which loads
-    /// its head, and installs its wallet's Kyber key), install the durable
-    /// policy resolver and the pinned-anchor store production bring-up
-    /// installs beside it, and publish its directory entry. The store reads the
-    /// entered device's database, as each device's process reads its own.
+    /// Bring the device up on `fleet` for the first time: [`start`](Self::start)
+    /// it, and publish its directory entry.
     pub async fn boot(&mut self, fleet: &FleetGuard) {
+        self.start(fleet);
+        economic_fixtures::publish_identity(&self.device_id, &self.genesis).await;
+    }
+
+    /// Start the device's process on `fleet`, as a restart does: build its
+    /// `AppRouterImpl` (which loads its head, and installs its wallet's Kyber
+    /// key) and install the durable policy resolver and the pinned-anchor
+    /// store production bring-up installs beside it. The store reads the
+    /// entered device's database, as each device's process reads its own. A
+    /// device already published needs no member to start.
+    pub fn start(&mut self, fleet: &FleetGuard) {
         self.enter();
         let router = AppRouterImpl::new(crate::init::SdkConfig {
             node_id: self.slot.to_string(),
@@ -145,7 +153,6 @@ impl TestDevice {
             .get_kyber_public_key()
             .expect("wallet Kyber key");
         self.router = Some(Arc::new(router));
-        economic_fixtures::publish_identity(&self.device_id, &self.genesis).await;
     }
 
     /// A backup of this device taken now, to be restored later: its database

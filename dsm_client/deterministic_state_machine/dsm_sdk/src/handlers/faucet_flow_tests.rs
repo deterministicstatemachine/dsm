@@ -1284,7 +1284,7 @@ async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
         other => panic!("storage.sync answered {other:?}"),
     };
     assert!(
-        !sync.errors.iter().any(|e| e.contains("stranded admission")),
+        !sync.errors.iter().any(|e| e.contains("held admission")),
         "{:?}",
         sync.errors
     );

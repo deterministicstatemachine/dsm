@@ -1700,4 +1700,6 @@ async fn a_lone_transfer_half_from_a_copy_holds_nothing() {
     generation(&p.a, &p.b, 2).await;
 }
 
+mod held_admissions;
+mod many_devices;
 mod model_correspondence;

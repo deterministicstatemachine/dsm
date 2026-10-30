@@ -1115,7 +1115,10 @@ impl AppRouterImpl {
         // (the authoritative serialization is inside the advance seam; this
         // early pass keeps the deep-fence refusal from being the first line
         // of defense). Then the prerequisites for THIS send's admission are
-        // assembled: the debit registers before anything is deliverable.
+        // assembled: the debit registers before anything is deliverable. The
+        // admission is this handler's until it returns; the sync leaves it
+        // alone meanwhile, and finishes it after if it is held for resume.
+        let _admission_handler = self.core_sdk.admission_handler();
         let econ_network = match crate::sdk::economic_admission_flow::committed_network_id() {
             Ok(n) => n,
             Err(e) => {

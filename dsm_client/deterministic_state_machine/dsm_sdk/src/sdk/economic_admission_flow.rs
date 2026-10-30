@@ -617,6 +617,9 @@ pub(crate) async fn admitted_self_loop_operation(
     >,
     built_on: Option<BuiltOn>,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     let StagedAdmission {
         network_id,
         genesis,
@@ -755,6 +758,9 @@ pub(crate) async fn admitted_offline_boundary(
     ),
     DsmError,
 > {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     use dsm::economic::offline_boundary::{
         offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineBoundaryBody,
     };
@@ -952,6 +958,9 @@ pub(crate) async fn admitted_offline_settlement(
     core: &CoreSDK,
     release_message: [u8; 32],
 ) -> Result<AdmittedOutcome, DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     use dsm::economic::offline_boundary::{
         offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineSettlementBody,
     };
