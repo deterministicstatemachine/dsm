@@ -82,9 +82,9 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
   Code traceability:
     - Send: handlers/app_router_impl.rs (wallet.send), online_outbox.rs
       (`pending_online_outbox`, `local_bilateral_chain_tip`)
-    - RecvTransfer: handlers/storage_routes.rs (the recipient apply; the
-      projection parent from the signed nonce), recipient_receipt.rs (the
-      fold's tip sync), counterparty_canonical_heads.rs (the pin)
+    - RecvTransfer: handlers/storage_routes.rs (the recipient apply, decided
+      by the signed pair), recipient_receipt.rs (the fold's tip sync),
+      counterparty_canonical_heads.rs (the pin)
     - RecvDelta: sender_outbox.rs (acceptance finalization: projection sync,
       pin CAS, proposal finalized; the gate stays)
     - CertPost, GateRelease: the certificate's delivery and the checkpoint
@@ -288,7 +288,6 @@ RecvTransfer(m, posted) ==
     /\ \E r \in outbox : r.id = m.id /\ r.from = p /\ r.to = d /\ r.sp = m.sp /\ r.sc = m.sc
     /\ o.awaits = 0
     /\ m.sp = o.pin
-    /\ m.pp = v.chain
     /\ s.ok
     /\ tip' = [tip EXCEPT ![<<d, p>>] = s.chain]
     /\ online' = [online EXCEPT ![<<d, p>>] =

@@ -190,7 +190,6 @@ impl Model {
             || self.ledger.contains(&(p, t.sp, t.sc))
             || self.side[d].awaits.is_some()
             || t.sp != self.side[d].pin
-            || t.pp != self.side[d].chain
         {
             return None;
         }

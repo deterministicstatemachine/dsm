@@ -1594,22 +1594,16 @@ impl AppRouterImpl {
                         &transition_entropy,
                     )
                     .map_err(|e| format!("the signed step's C_pre: {e}"))?;
-                    // The relationship tip the sender made this transfer on:
-                    // the one its signed nonce derives from, which is the tip
-                    // this device holds — a transfer crossing this device's own
+                    // The projection moves on from the tip this device holds,
+                    // whatever it holds: the signed pair alone decides the
+                    // apply (AWYPCNK8), a transfer crossing this device's own
                     // send included (owner ruling, 2026-10-29: "both settle").
-                    // The successor is taken from there, as the sender took it.
                     let projection_parent: [u8; 32] =
-                        crate::handlers::recipient_dispatch::tip_the_nonce_derives_from(
-                            &sender_device,
-                            &v.signed_op,
-                            &v.terms,
-                        )?
-                        .ok_or_else(|| {
-                            "the transfer's nonce derives from another tip than the one this \
-                             device holds for the relationship"
-                                .to_string()
-                        })?;
+                        crate::storage::client_db::get_contact_chain_tip(&sender_device)
+                            .map_err(|e| {
+                                format!("the sender's relationship tip is unreadable: {e}")
+                            })?
+                            .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
                         let sigma_sym =
                             dsm::core::bilateral_transaction_manager::compute_precommit(

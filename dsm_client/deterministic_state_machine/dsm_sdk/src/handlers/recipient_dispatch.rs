@@ -489,18 +489,17 @@ pub fn signed_operation_of(t: &StagedTransfer) -> Result<Operation, String> {
     )
 }
 
-/// The relationship tip a transfer's signed nonce derives from, when it is the
-/// tip this device holds toward `sender` (§4.1: the nonce is taken over the tip
-/// the sender made the transfer on). A transfer crossing this device's own send
-/// was made on the tip this device still holds when it applies it: its own
-/// finalization waits on its pin of the sender's head, which only that apply
-/// moves. `None`: the nonce derives from another tip, and the relationship's
-/// tips only move on, so the transfer can never execute here.
-pub(crate) fn tip_the_nonce_derives_from(
+/// Whether a transfer's signed nonce derives from the relationship tip this
+/// device holds toward `sender` (§4.1: the nonce is taken over the tip the
+/// sender made the transfer on). A transfer crossing this device's own send
+/// was made on the tip this device still holds: its own finalization waits on
+/// its pin of the sender's head, which only applying that transfer moves.
+/// This reads the projection, so it never decides an apply (AWYPCNK8).
+fn made_on_the_tip_held(
     sender: &[u8; 32],
     op: &Operation,
     terms: &dsm::types::operations::TransferTerms,
-) -> Result<Option<[u8; 32]>, String> {
+) -> Result<bool, String> {
     let Operation::Transfer {
         amount,
         to_device_id,
@@ -518,41 +517,43 @@ pub(crate) fn tip_the_nonce_derives_from(
     let current = crate::storage::client_db::get_contact_chain_tip(sender)
         .map_err(|e| format!("the sender's relationship tip is unreadable: {e}"))?
         .ok_or_else(|| "the sender is not a contact".to_string())?;
-    let made_on_current = crate::handlers::app_router_impl::transfer_nonce(
+    Ok(crate::handlers::app_router_impl::transfer_nonce(
         &current,
         amount.value(),
         token,
         &recipient,
-    ) == terms.nonce;
-    Ok(made_on_current.then_some(current))
+    ) == terms.nonce)
 }
 
-/// Whether an INBOUND transfer from `counterparty_device_id` is staged here and
-/// can still execute. The finality barrier treats this as PendingCatchup for
-/// originating toward that peer: an inbound step is in flight on the
-/// relationship and originating under it would cross it.
+/// Whether an INBOUND step from `counterparty_device_id` waits here: a staged
+/// transfer made on the tip this device holds with its nonce unspent, or a
+/// receipt whose step is not taken. The finality barrier treats this as
+/// PendingCatchup for originating toward that peer: an inbound step is in
+/// flight on the relationship and originating under it would cross it.
 ///
-/// An object that can no longer execute holds nothing: a transfer whose nonce
-/// is spent or derives from another tip than the one this device holds, and a
-/// receipt whose step is taken. Otherwise a copy of the sender could hold this
-/// device's sends toward it for good with a transfer that will never execute.
-/// A transfer bound to a receipt whose step is taken needs no rule of its own:
-/// taking that step moved this device's tip off the one the transfer's nonce
-/// derives from.
+/// A transfer whose nonce is spent, or derives from another tip than the one
+/// this device holds, holds nothing. Otherwise a copy of the sender could hold
+/// this device's sends toward it for good with a transfer made on a tip the
+/// relationship has moved past, whose step the pin of the sender's head
+/// refuses. A transfer bound to a receipt whose step is taken needs no rule of
+/// its own: taking that step moved this device's tip off the one the
+/// transfer's nonce derives from. Where this device's projection has diverged
+/// from the sender's (AWYPCNK8), a transfer made on the sender's tip still
+/// applies, and this barrier does not hold for it.
 pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool, String> {
     let store = |e: anyhow::Error| format!("the inbound staging state: {e}");
     let receipt_waits =
         recipient_staging::has_undecided_staged_receipt_from(counterparty_device_id)
             .map_err(store)?;
-    let mut executable_on = Vec::new();
+    let mut made_on_the_tip = Vec::new();
     for staged in
         recipient_staging::unspent_staged_transfers_from(counterparty_device_id).map_err(store)?
     {
         let op = signed_operation_of(&staged)?;
         let terms = open_terms(&staged.terms, &op)?;
-        executable_on.push(tip_the_nonce_derives_from(&staged.sender, &op, &terms)?);
+        made_on_the_tip.push(made_on_the_tip_held(&staged.sender, &op, &terms)?);
     }
-    Ok(receipt_waits || executable_on.iter().any(Option::is_some))
+    Ok(receipt_waits || made_on_the_tip.iter().any(|made| *made))
 }
 
 /// What a staged receipt is to the transfer of `op`.

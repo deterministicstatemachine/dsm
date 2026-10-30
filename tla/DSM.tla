@@ -436,8 +436,8 @@ CreateRelationship(d1, d2) ==
 \*               armed (`pending_online_outbox`), `local` takes the projected
 \*               child, the transfer is frozen in the outbox.
 \*   RecvTransfer T2+T3: the recipient applies a transfer whose debit was
-\*               admitted, whose signed parent is its pin, whose projection
-\*               parent (the nonce's tip) is its current tip; its
+\*               admitted and whose signed parent is its pin; its
+\*               projection moves on from the tip it holds, its
 \*               lineage moves, its pin takes the sender's child, it is
 \*               credited, its journal holds the countersign delta, and it
 \*               awaits the sender's certificate.
@@ -576,8 +576,6 @@ RecvTransfer(m) ==
     /\ o.awaits = 0
     \* the pin: the signed parent is the sender's head this device pinned
     /\ RecipientChecksPin => m.sp = o.pin
-    \* the nonce's tip is this device's current tip
-    /\ m.pp = v.chain
     /\ s.ok
     /\ relationships' = [relationships EXCEPT ![<<d, p>>].tip = s.chain]
     /\ smtState' = [smtState EXCEPT ![d][RelKey(d, p)] = s.chain]
