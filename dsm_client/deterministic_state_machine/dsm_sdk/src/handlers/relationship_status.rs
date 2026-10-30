@@ -83,16 +83,15 @@ pub(crate) fn finality_barrier_block(
             "Waiting for the peer to finalize a transfer you received",
         )));
     }
-    // An inbound transfer from this peer is staged and can still execute:
-    // originating now would cross it. This narrows the crossing window and
-    // decides nothing: DSM has no turn rule, and two sends that cross both
-    // settle (owner ruling 2026-10-29, "both settle": each consumes its own
-    // sender's parent, and both devices join the two steps' tips). A staged
-    // object that can no longer execute holds nothing.
-    if crate::handlers::recipient_dispatch::counterparty_has_unconverged_inbound(
-        counterparty_device_id,
-    )
-    .map_err(|e| format!("Failed to load inbound staging state: {e}"))?
+    // A receipt from this peer is staged and names a step not taken: an
+    // inbound step is in flight, and originating now would cross it. This
+    // narrows the crossing window and decides nothing: DSM has no turn rule,
+    // and two sends that cross both settle (owner ruling 2026-10-29, "both
+    // settle": each consumes its own sender's parent, and both devices join
+    // the two steps' tips). Only signed material decides it, never the
+    // projection.
+    if client_db::recipient_staging::has_undecided_staged_receipt_from(counterparty_device_id)
+        .map_err(|e| format!("Failed to load inbound staging state: {e}"))?
     {
         return Ok(Some(blocked_status(
             generated::RelationshipSendBlockReason::PendingCatchup,

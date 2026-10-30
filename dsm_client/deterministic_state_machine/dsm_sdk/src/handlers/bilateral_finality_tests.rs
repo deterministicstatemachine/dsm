@@ -1643,13 +1643,14 @@ async fn a_second_transfer_from_the_same_parent_never_applies_beside_a_crossing(
 
 /// A lone transfer half from a copy: as above, but the copy posts only its
 /// transfer, never the evidence that would bind it to a step. Staged and
-/// unbound, it waits on a receipt that will not come; once the crossing has
-/// moved B's tip past the one its nonce derives from it can never execute,
-/// and it holds nothing: B is send-ready toward A and the relationship
-/// carries the next transfer each way.
+/// unbound, it waits on a receipt that will not come, and it holds nothing
+/// from the moment it is staged: without a receipt no signed parent says
+/// which step it is. It was made on the tip B still holds, so a barrier
+/// reading the projection would hold it. B is send-ready toward A after the
+/// crossing, and the relationship carries the next transfer each way.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_lone_transfer_half_from_a_copy_holds_nothing_once_it_cannot_execute() {
+async fn a_lone_transfer_half_from_a_copy_holds_nothing() {
     let p = Pair::boot(1_000, 1_000).await;
     let rel = p.a.rel_key_with(&p.b);
     let before = (p.a.era_balance(), p.b.era_balance());
@@ -1686,6 +1687,11 @@ async fn a_lone_transfer_half_from_a_copy_holds_nothing_once_it_cannot_execute()
             crate::handlers::recipient_dispatch::Ingested::Staged
         ),
         "the copy's transfer half is staged: {transfer:?}"
+    );
+    assert!(
+        !cdb::recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id)
+            .expect("barrier"),
+        "the copy's lone transfer half holds nothing"
     );
 
     settle(&p, &rel, &p.a, &p.b).await;

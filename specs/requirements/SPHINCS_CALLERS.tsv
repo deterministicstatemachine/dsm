@@ -419,8 +419,8 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	40
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4794	dsm::crypto::sphincs::sphincs_sign(&secret_key, &checked.precommit_signing_digest())
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	4823	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	8129	let signature = dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1143	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1716	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1076	let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/recipient_dispatch.rs	1664	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_finalized.rs	193	let foreign_sk = dsm::crypto::sphincs::generate_sphincs_keypair()
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/relationship_finalized.rs	197	foreign.signature_a = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/sender_admission_tests.rs	721	let signature = dsm::crypto::sphincs::sphincs_sign(

@@ -489,73 +489,6 @@ pub fn signed_operation_of(t: &StagedTransfer) -> Result<Operation, String> {
     )
 }
 
-/// Whether a transfer's signed nonce derives from the relationship tip this
-/// device holds toward `sender` (§4.1: the nonce is taken over the tip the
-/// sender made the transfer on). A transfer crossing this device's own send
-/// was made on the tip this device still holds: its own finalization waits on
-/// its pin of the sender's head, which only applying that transfer moves.
-/// This reads the projection, so it never decides an apply (AWYPCNK8).
-fn made_on_the_tip_held(
-    sender: &[u8; 32],
-    op: &Operation,
-    terms: &dsm::types::operations::TransferTerms,
-) -> Result<bool, String> {
-    let Operation::Transfer {
-        amount,
-        to_device_id,
-        ..
-    } = op
-    else {
-        return Err("the verified transfer is not a transfer".to_string());
-    };
-    let recipient: [u8; 32] = to_device_id
-        .as_slice()
-        .try_into()
-        .map_err(|e| format!("the transfer's recipient is not a device id: {e}"))?;
-    let token = std::str::from_utf8(&terms.token_id)
-        .map_err(|e| format!("the transfer's token is not text: {e}"))?;
-    let current = crate::storage::client_db::get_contact_chain_tip(sender)
-        .map_err(|e| format!("the sender's relationship tip is unreadable: {e}"))?
-        .ok_or_else(|| "the sender is not a contact".to_string())?;
-    Ok(crate::handlers::app_router_impl::transfer_nonce(
-        &current,
-        amount.value(),
-        token,
-        &recipient,
-    ) == terms.nonce)
-}
-
-/// Whether an INBOUND step from `counterparty_device_id` waits here: a staged
-/// transfer made on the tip this device holds with its nonce unspent, or a
-/// receipt whose step is not taken. The finality barrier treats this as
-/// PendingCatchup for originating toward that peer: an inbound step is in
-/// flight on the relationship and originating under it would cross it.
-///
-/// A transfer whose nonce is spent, or derives from another tip than the one
-/// this device holds, holds nothing. Otherwise a copy of the sender could hold
-/// this device's sends toward it for good with a transfer made on a tip the
-/// relationship has moved past, whose step the pin of the sender's head
-/// refuses. A transfer bound to a receipt whose step is taken needs no rule of
-/// its own: taking that step moved this device's tip off the one the
-/// transfer's nonce derives from. Where this device's projection has diverged
-/// from the sender's (AWYPCNK8), a transfer made on the sender's tip still
-/// applies, and this barrier does not hold for it.
-pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool, String> {
-    let store = |e: anyhow::Error| format!("the inbound staging state: {e}");
-    let receipt_waits =
-        recipient_staging::has_undecided_staged_receipt_from(counterparty_device_id)
-            .map_err(store)?;
-    let mut made_on_the_tip = Vec::new();
-    for staged in
-        recipient_staging::unspent_staged_transfers_from(counterparty_device_id).map_err(store)?
-    {
-        let op = signed_operation_of(&staged)?;
-        let terms = open_terms(&staged.terms, &op)?;
-        made_on_the_tip.push(made_on_the_tip_held(&staged.sender, &op, &terms)?);
-    }
-    Ok(receipt_waits || made_on_the_tip.iter().any(|made| *made))
-}
-
 /// What a staged receipt is to the transfer of `op`.
 enum Binding {
     /// The transfer's receipt.
@@ -1184,8 +1117,8 @@ mod tests {
 
     /// A sender named in a wrapper is not a sender. The copy's wrapper names a
     /// third device; the boundary stages the transfer under the contact whose
-    /// key verified it, so while it waits it holds the send barrier toward A
-    /// only.
+    /// key verified it. With its receipt here too, the step in flight holds the
+    /// send barrier toward A only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_sender_named_in_a_wrapper_blocks_nothing() {
@@ -1197,12 +1130,27 @@ mod tests {
             &one.route,
             &one.message_id,
         ));
+        assert_eq!(
+            recipient_staging::unbound_transfer_count(&p.a.device_id).expect("staging"),
+            1,
+            "the transfer is staged under its real sender"
+        );
+        assert_eq!(
+            recipient_staging::unbound_transfer_count(&named).expect("staging"),
+            0,
+            "and under nobody the wrapper names"
+        );
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
+        ));
         assert!(
-            counterparty_has_unconverged_inbound(&p.a.device_id).expect("barrier"),
-            "the transfer in flight holds the barrier toward its real sender"
+            recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "the step in flight holds the barrier toward its real sender"
         );
         assert!(
-            !counterparty_has_unconverged_inbound(&named).expect("barrier"),
+            !recipient_staging::has_undecided_staged_receipt_from(&named).expect("barrier"),
             "and toward nobody the wrapper names"
         );
     }
@@ -1783,9 +1731,9 @@ mod tests {
     /// it reaches B before B polls. The two are different signed objects, so
     /// both are staged: nothing in staging decides between them. Only the one
     /// A's receipt signs can bind, and the canonical apply takes the nonce with
-    /// it. B is credited that transfer once. The rival's nonce derives from no
-    /// tip B holds for its own amount, so it can never execute: it holds no
-    /// barrier even while its nonce is unspent, and it is collected.
+    /// it. B is credited that transfer once. No receipt signs the rival, so it
+    /// holds no barrier, while its nonce is unspent or after, and it is
+    /// collected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_rival_on_the_same_nonce_is_staged_and_never_executes() {
@@ -1803,8 +1751,8 @@ mod tests {
             "RIVAL",
         ));
         assert!(
-            !counterparty_has_unconverged_inbound(&p.a.device_id).expect("barrier"),
-            "the rival can never execute, so it holds nothing while its nonce is unspent"
+            !recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "no receipt signs the rival, so it holds nothing while its nonce is unspent"
         );
 
         clean(&p.b.sync().await);
@@ -1816,7 +1764,7 @@ mod tests {
         p.b.enter();
         nothing_staged();
         assert!(
-            !counterparty_has_unconverged_inbound(&p.a.device_id).expect("barrier"),
+            !recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
             "the rival holds nothing once its nonce is spent"
         );
     }

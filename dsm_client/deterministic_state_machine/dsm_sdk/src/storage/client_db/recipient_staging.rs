@@ -621,30 +621,21 @@ pub fn step_decided(relationship_key: &[u8; 32], parent_tip: &[u8; 32]) -> Resul
         .is_some())
 }
 
-/// The staged transfers from `counterparty_device_id` whose nonce is unspent.
-/// Whether each can still execute — its nonce derived from the tip this device
-/// holds — is the recognition boundary's judgement
-/// (`recipient_dispatch::counterparty_has_unconverged_inbound`).
+/// Whether a staged receipt from `counterparty_device_id` names a step the
+/// apply has not taken: it can still execute once its transfer is here. This
+/// is the send barrier toward that peer (`relationship_status`): an inbound
+/// step is in flight on the relationship.
+///
+/// It reads only signed material and this device's own decisions: the parent
+/// the receipt signs, against the parents the canonical apply took, never the
+/// projection (AWYPCNK8). A receipt from a parent already taken — a copy of
+/// the sender forking from a position the sender's step consumed — holds
+/// nothing. A transfer half holds nothing on its own: until its receipt is here
+/// no signed parent says which step it is, and a send that crosses it settles
+/// with it (owner ruling, 2026-10-29: "both settle").
 ///
 /// The counterparty is the contact whose key verified the object — never a
 /// field the object carries.
-pub fn unspent_staged_transfers_from(counterparty_device_id: &[u8]) -> Result<Vec<StagedTransfer>> {
-    let binding = get_connection()?;
-    let conn = lock(&binding)?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {TRANSFER_COLS} FROM recipient_staged_transfer t
-         WHERE t.sender_device_id = ?1
-           AND NOT EXISTS (SELECT 1 FROM spent_nonces s WHERE s.nonce_hash = t.nonce_hash)
-         ORDER BY t.op_id"
-    ))?;
-    let rows = stmt
-        .query_map(params![counterparty_device_id], row_to_transfer)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
-/// Whether a staged receipt from `counterparty_device_id` names a step the
-/// apply has not taken: it can still execute once its transfer is here.
 pub fn has_undecided_staged_receipt_from(counterparty_device_id: &[u8]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = lock(&binding)?;

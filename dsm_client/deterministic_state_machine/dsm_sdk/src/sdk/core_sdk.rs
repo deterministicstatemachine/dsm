@@ -3075,14 +3075,9 @@ mod tests {
         );
     }
 
-    /// AWYPCNK8: the apply consults only the SIGNED canonical pair. The
-    /// symmetric projection (`contacts.chain_tip`) is a different formula
-    /// space. B's poll stages A's next transfer; B's projection of the
-    /// relationship then diverges from its canonical lineage — as the live
-    /// rig's did — and B's next sync still applies the staged pair.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[serial]
-    async fn an_apply_consults_the_signed_pair_never_the_projection() {
+    /// A settled first transfer A→B, then A's next transfer of 5 and its
+    /// receipt staged at B by B's poll, not yet applied.
+    async fn a_pair_staged_at_b() -> Pair {
         use crate::handlers::recipient_dispatch::{
             ingest_evidence_half, ingest_transfer_half, IngestOutcome, Ingested,
         };
@@ -3124,18 +3119,34 @@ mod tests {
             .expect("ingest the evidence"),
             staged
         );
+        p
+    }
 
-        {
-            let binding = client_db::get_connection().expect("conn");
-            let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
-            let changed = conn
-                .execute(
-                    "UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?2",
-                    rusqlite::params![p.b.genesis.as_slice(), p.a.device_id.as_slice()],
-                )
-                .expect("diverge the projection");
-            assert_eq!(changed, 1, "B holds A as a contact");
-        }
+    /// B's projection of the relationship diverges from its canonical lineage,
+    /// as the live rig's did: its tip toward A becomes B's genesis.
+    fn diverge_b_projection(p: &Pair) {
+        p.b.enter();
+        let binding = client_db::get_connection().expect("conn");
+        let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+        let changed = conn
+            .execute(
+                "UPDATE contacts SET chain_tip = ?1 WHERE device_id = ?2",
+                rusqlite::params![p.b.genesis.as_slice(), p.a.device_id.as_slice()],
+            )
+            .expect("diverge the projection");
+        assert_eq!(changed, 1, "B holds A as a contact");
+    }
+
+    /// AWYPCNK8: the apply consults only the SIGNED canonical pair. The
+    /// symmetric projection (`contacts.chain_tip`) is a different formula
+    /// space. B's poll stages A's next transfer; B's projection of the
+    /// relationship then diverges from its canonical lineage — as the live
+    /// rig's did — and B's next sync still applies the staged pair.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_apply_consults_the_signed_pair_never_the_projection() {
+        let p = a_pair_staged_at_b().await;
+        diverge_b_projection(&p);
 
         let applied = p.b.sync().await;
         assert!(applied.success, "{:?}", applied.errors);
@@ -3143,6 +3154,45 @@ mod tests {
             p.b.era_balance(),
             15,
             "a valid signed pair applies whatever the projection holds"
+        );
+    }
+
+    /// The send barrier consults only the signed pair, as the apply does. A's
+    /// staged receipt names a step B has not taken, so B holds its sends toward
+    /// A. With B's projection diverged (AWYPCNK8) it still holds them, and B
+    /// says why; B's next sync applies the pair, and the step it took holds
+    /// nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn the_send_barrier_consults_the_signed_pair_never_the_projection() {
+        use crate::handlers::relationship_status::derive_local_send_status_for_device_id;
+        use client_db::recipient_staging::has_undecided_staged_receipt_from;
+        let p = a_pair_staged_at_b().await;
+        p.b.enter();
+        assert!(
+            has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "A's staged step holds B's sends toward A"
+        );
+
+        diverge_b_projection(&p);
+        assert!(
+            has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "and still holds them with B's projection diverged"
+        );
+        let status = derive_local_send_status_for_device_id(&p.a.device_id);
+        assert!(!status.send_ready, "B is not send-ready toward A");
+        assert_eq!(
+            status.send_block_message, "Waiting for a transfer from this peer to finish applying",
+            "B says its send waits on A's transfer"
+        );
+
+        let applied = p.b.sync().await;
+        assert!(applied.success, "{:?}", applied.errors);
+        assert_eq!(p.b.era_balance(), 15, "the staged pair applied");
+        p.b.enter();
+        assert!(
+            !has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "the step B took holds nothing"
         );
     }
 
