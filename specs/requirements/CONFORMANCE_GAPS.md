@@ -6448,6 +6448,43 @@ Definition 57, which A14 quotes, blocks a candidate only on "a local pending loc
     - `DSMNonInterference` cites a `core/state_machine/relationship.rs` that does not exist;
     - `dsm/src/types/device_state.rs` cites Lean `commitTransfer` / `commit_conservation`, which no Lean file defines;
     - `tools/verify-proofs.sh` still lists the removed `create_zero_allocation_still_burns`.
+- *The many-device fault test (owner direction, 2026-10-29: Jepsen deferred; the narrower fault-injection extension of the real-node harness first).* `dsm_sdk::handlers::bilateral_finality_tests::many_devices::many_devices_conserve_value_and_settle_under_outages_crashes_and_restarts` runs four devices on the five real nodes (Postgres). A seeded schedule runs in four phases, each opened by another outage, and mixes:
+  - online sends on every relationship, and syncs;
+  - failed spools and crashed nodes, one member or enough to break the quorum, a crashed node restarting on its own database (`NodeSet::take_down` / `bring_up`);
+  - device restarts (`TestDevice::start`, a restart with no directory publication).
+  The checks:
+  - after every step, each device holds no less than it started with less what it sent, and no more than that plus what was sent to it;
+  - at the end of each phase, with every member serving and syncs repeated until nothing moves, each device holds exactly that, and every relationship is on one tip and send-ready both ways;
+  - the run ends with a transfer each way on every relationship.
+  A send counts as sent when it armed the sender's gate. A run takes about 150 seconds: 31 sends (13 done, 6 debited with the admission held or the delivery unknown, 12 refused), 19 outages and 5 restarts. Its first runs found two liveness defects, both reproduced on a fixed seed and fixed by owner ruling (2026-10-30):
+  - *A recipient's held admission marked the relationship diverged for good.* When an outage held a recipient's economic admission after its projection had converged, the apply marked the sender's contact `needs_online_reconcile`. Nothing cleared the mark once Step 0 finished the admission: the tip sync's already-aligned case clears nothing. The relationship stayed "diverged and needs repair" with nothing diverged. The mark is removed. The pending admission holds the device's applies and sends until it is finished. Test: `a_recipients_held_admission_marks_nothing_diverged`.
+  - *A send's held admission was never finished by the sync.* Under the 2026-09-15 ruling (#895), recovery owned only admissions that predate process startup. A send held during an outage was therefore finished only by another send or an app restart, and until then its transfer was undelivered and the relationship blocked. Owner ruling (2026-10-30, amending 2026-09-15): the sync finishes a pending admission once the handler that created it has returned. The rule in code:
+    - each flow that creates an admission holds `CoreSDK::admission_handler` while it runs: `wallet.send`, the recipient pass, the self-loop, offline-boundary and offline-settlement admissions, the faucet claim, and SoFi `fulfill`;
+    - the sync's resume skips the admission while a handler runs;
+    - a sync pass holds its pairs while another admission handler runs.
+    The process-startup record and its test-utils reset are removed, and the requirement map's not-in-artifact sentinel moves to `reset_database_for_tests`. Tests: `a_senders_held_admission_is_finished_by_its_own_sync`, `the_sync_leaves_a_held_admission_to_its_running_handler`, `a_sync_holds_its_pairs_while_another_admission_handler_runs`.
+  - *A committed send answered as a failure, fixed without a wire change.* The wallet answered a send whose debit was committed but not yet delivered (admission held, outbox row unmarked, delivery unknown) with an error, and only its text said the debit stood. The client showed a definitive failure for money that had moved. The answer is now structural:
+    - nothing moved: an error, as before;
+    - debited and completing on its own: an `OnlineTransferResponse` naming the committed state, delivered or not. Where it stands is the contact's send status and the history row, both durable, and both already rendered;
+    - debited and unable to complete: an error that says the debit is committed and the payment will not happen. This covers an admission that cannot land (an `InvalidOperation` from `finish_admission`, whose inputs are frozen, such as a position held by another claim) and an advance that left no admission. Every other admission failure is held for resume.
+    `OnlineSent` splits `Debited` into `Delivered`, `Undelivered` and `Stranded`; DSM Connect still counts every committed debit against its grant (SA-19). The fault test requires a send to answer as committed exactly when it debited. The first run of the fork and lone-half tests found the third class: a copy's send whose position A's send held had been answered "Sent", which was false.
+  - *Covered:* `a_sync_racing_a_send_admits_and_delivers_each_send_once` races a sync against a send on one device for six rounds, every other round holding the send's admission while the sync runs. Each send answers by what it did, and is admitted, delivered and credited once.
+  An eighth build (2026-10-30, scratch worktree with its own target, removed after). The control was green on the four regression tests. Each mutant ran on its named test:
+  - the recipient marking its held admission diverged → `a_recipients_held_admission_marks_nothing_diverged` red ("no rest");
+  - the sync skipping held admissions → `a_senders_held_admission_is_finished_by_its_own_sync` red ("no rest"), and the fault test red;
+  - the sync ignoring a running handler → `the_sync_leaves_a_held_admission_to_its_running_handler` red;
+  - a pass applying its pairs while another handler runs → `a_sync_holds_its_pairs_while_another_admission_handler_runs` red.
+  The fault test stays green under the first mutant: its schedule held no recipient admission in that run, so the targeted test is that rule's control.
+  A ninth build (2026-10-30, scratch worktree with its own target, removed after), on the answer and the race. The control was green on its four named tests:
+  - an undelivered send answered as a refusal → the held-send, failed-finish and fault tests red ("a committed send answers success");
+  - a send whose admission cannot land answered as committed → the fork test red;
+  - the sync ignoring a running handler, and a pass applying its pairs while another handler runs → the race test green, as expected. The race checks that each send lands once, which `finish_admission`'s serialized compare-first keeps. The guard's own rule has its controls in the held-guard tests.
+  Verified on the final tree, each touched test in its own targeted run (release, Postgres), 18/0:
+  - the five held-admission tests, the race test included;
+  - the two sender-admission tests and the DSM Connect committed-payment test;
+  - the permanent crossing test, the four adversarial crossings, and the fork and lone-half tests;
+  - the fault test and both online correspondences.
+  `a_held_first_claim_is_finished_by_the_sync_after_a_restart` passed before the answer change, which it does not touch. The real-code guard and the production safety checks are clean, and so are `cargo fmt --check` and clippy with `-D warnings`.
 - *A branch removed as unreachable.* The first build also took a transfer whose nonce derived from the recipient's previous tip. With that alternative removed, TLC on `DSM_BilateralLiveness` reaches an identical state space: 23,456 distinct states at one step per device and 703,392 at two, offline steps and partitions included. The pin makes a device apply the crossing transfer before its own finalization moves its tip. The branch and the previous-tip reader added for it are removed; the apply, the barrier and both models take the current tip only.
 - *The models, corrected.* The owner: "Correct DSM.tla and BilateralLiveness to represent the real online protocol."
   - `tla/DSM.tla`:
