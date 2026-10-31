@@ -21,6 +21,7 @@ import {
   buildRouterQueryIngressRequest,
   ingressBoundaryOk,
 } from "../NativeBoundaryBridge";
+import { practiceAnswerFor } from "../../bridge/practiceGate";
 
 export function mustBridge(): AndroidBridgeV3 {
   const b = getBridgeInstance();
@@ -154,14 +155,22 @@ export async function routerInvokeBin(method: string, args?: Uint8Array): Promis
   if (typeof method !== "string" || method.length === 0) {
     throw new Error("routerInvokeBin: method required");
   }
-  return bridgeGate.enqueue(() => ingressBoundaryOk(buildRouterInvokeIngressRequest(method, args)));
+  const request = buildRouterInvokeIngressRequest(method, args);
+  const practiced = await practiceAnswerFor(request);
+  if (practiced !== undefined) return practiced;
+  return bridgeGate.enqueue(() => ingressBoundaryOk(request));
 }
 
 export async function routerQueryBin(path: string, params?: Uint8Array): Promise<Uint8Array> {
   if (typeof path !== "string" || path.length === 0) {
     throw new Error("routerQueryBin: path required");
   }
-  return bridgeGate.enqueue(() => ingressBoundaryOk(buildRouterQueryIngressRequest(path, params)));
+  const request = buildRouterQueryIngressRequest(path, params);
+  // The guided tour's practice wallet answers the routes it walks through
+  // (bridge/practiceGate.ts) before anything is queued for the bridge.
+  const practiced = await practiceAnswerFor(request);
+  if (practiced !== undefined) return practiced;
+  return bridgeGate.enqueue(() => ingressBoundaryOk(request));
 }
 
 export async function queryTransportHeadersV3(): Promise<Uint8Array> {

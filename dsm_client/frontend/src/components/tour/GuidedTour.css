@@ -195,6 +195,22 @@
   color: var(--text-dark);
 }
 
+/* A hands-on step's guide, tucked above the screen so every control on it can be reached. */
+.gt-dialog--tucked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.gt-dialog--tucked .gt-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gt-todo {
   font-size: 8px;
   font-weight: 700;

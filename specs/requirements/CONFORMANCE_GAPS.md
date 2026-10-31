@@ -6532,6 +6532,31 @@ Definition 57, which A14 quotes, blocks a candidate only on "a local pending loc
 - *The sender is not stopped.* A sender can send a token the recipient has not added: the sender is debited, the transfer is held until the recipient adds the token, and the recipient's inbox lists it. The designed fix (not built): the recipient's signed adoption, posted to storage, verified by the sender before any debit, carried in the transfer and required by Core.
 - *Spool writes cost nothing.* Routing only through a pre-established contact is built, so a stranger has no inbox address (storage spec §8). The spend-gate and credits (§16, §17) are outside beta (owner, 2026-09-23). A contact can therefore write without limit to its relationship's append-only spool, and any party can write well-formed values to the nodes. None of it reaches a credit, but the inbox lists a copy that fails verification as "Unverified".
 
+**Proven on real Android devices (2026-10-30 and 2026-10-31), on the frozen code cead4b2b.** Three Samsung A16s and an A54 on the beta storage fleet; the app host was built from the same tree.
+- *Wallet.* Onboarding, faucet claims, a 12-contact mesh, a send ring and two crossing sends that both settled, with value conserved.
+- *Tokens.* An open token and a restricted one were created. The restricted token refused an allowlist that leaves out its creator. A token moved freely to a holder off its allowlist, which governs issuance only.
+- *SoFi.* Three liquidity vaults, a split swap across two vaults, a two-hop chained swap, a market buy, and escrow lock → sign → decide → release. Every quote matched the constant product at 30 bps per vault, and the vault reserves the wallet lists matched to the cent. A vault close returned both reserves.
+- *DSM Connect, test app* (dsm-app-host driven through its ingress). Pairing by link: the wallet names the app that opened it. A payment inside the grant was carried out, and the app counted it only once its own account accepted the transfer. A holdings proof equal to the balance. A payment over the cap waited, was approved on the phone and was paid. A decline, then a disconnect, after which the app is refused.
+- *DSM Connect, Wildstate* (the game's debug build against a server on the LAN). Connect, the starting coin, a market swap of 2 ERA for 98 WILD at a realized position, a capsule bought in WILD, and a creature caught and delivered to the wallet as an object.
+- *Findings.* The game needed three fixes for this build of the host (game repository, branch `fix/app-host-ingress-secret`): the ingress secret (#1139), `storage.sync` as an invoke, and the production server's startup check. A receiver took 9 minutes to accept a transfer from the game account, because its sync re-verified the same lineage and vaults on every pass, and the game's next send waited for that. The two-player arena was not run.
+- *Not run.* Offline Bluetooth sending (the hardware stage).
+
+**The guided tour shows every mechanism, offline included (owner, 2026-10-31).** "You shouldn't need to actually do any of the transfers for it to show you how to do them all. By the way, that includes how to do offline transactions. It should show the mechanisms." This supersedes the offline half of the 2026-10-01 ruling ("Offline sending and Bitcoin stay out of the tour"); Bitcoin stays out.
+- *What practice carries out.* Practice mode now carries out what the tour walks through, on the practice wallet:
+  - creating a token;
+  - a quoted swap against a practice market;
+  - a liquidity vault opened and closed;
+  - an escrow stake locked, decided and released;
+  - connecting a practice app, deciding a request the grant does not cover, and disconnecting.
+  `components/tour/practiceRoutes.ts` answers those router routes, framed as Rust frames them, before a call is queued for the bridge (`bridge/practiceGate.ts` `practiceAnswerFor`). Every amount is parsed and rendered by Rust (`wallet.amount`).
+- *What still reaches Rust.* Nothing practice answers reaches Rust. Any other route still meets the gate, which lets reads through and refuses the rest. A real application's connect code is refused in practice, and once the tour ends practice answers nothing (`practiceRoutes.test.ts`).
+- *Offline.* Offline sending is not open in this build, so the offline steps teach the mechanism at the send form and send nothing (`tour.test.tsx`).
+- *On a phone (A16, 2026-10-31).* The tour was driven through every new chapter to step 65. Each hands-on step advanced on its practice event, and the real wallet's balances were unchanged afterwards. The run found four defects, all fixed:
+  - the guide covered a hands-on step's own controls: a hands-on step now offers Hide and Show;
+  - three steps' targets left out a control they asked for, and the shade blocks touches outside the target;
+  - the token step moved on before the user closed the result;
+  - a space typed into a field selected the highlighted menu item: the keyboard bindings now leave a key typed into a field to the field (`useKeyboardBindings.test.tsx`).
+
 **Checked, nothing to build.**
 - *Appliance identity.* Read-only research: an anchor is provisioned with the DSM device id, the AK public key, the canonical offline-bearer policy and the genesis root (`CoreSDK::anchor_for_this_device`; `dsm-anchor-core` `Provisioning`), all derived from the mnemonic; the bundle `B` binds them with the chip's own keys, and attach refuses a bundle that does not recompute from this device's AK and id. No handset value (Android id, serial, keystore attestation) reaches the device id or the binding; the keystore key only seals the seed at rest. The binding respects the ruling. *Boundary:* the production recovery path mints a new device id on a replacement handset (recovery is out of scope), so an appliance provisioned for the old id cannot follow it; that is recorded for the recovery round.
 - *A6, A7, C1, MR-DSM-0248, MR-DSM-0332*: built and tested before (§6.111, §6.113, §6.103/§6.105 C1, §6.112, §6.104).

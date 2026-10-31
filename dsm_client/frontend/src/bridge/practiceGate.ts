@@ -72,6 +72,8 @@ const READ_ROUTES = new Set([
   'inbox.moneyWaiting',
   'storage.status',
   'tokens.getFeeSchedule',
+  // A create request's fields checked as token.create checks them; it creates nothing.
+  'token.check',
   'token.adoptionQr',
   'bilateral.pending_list',
   'recovery.status',
@@ -92,6 +94,37 @@ const HOST_READS = new Set<NativeHostRequestKind>([
 ]);
 
 let sandbox: 'real' | 'practice' = 'real';
+
+/**
+ * The practice wallet's answer to a router call: the framed envelope it
+ * answers with, or undefined for a call it leaves to the gate.
+ */
+export type PracticeAnswer = (method: string, args: Uint8Array) => Promise<Uint8Array | undefined>;
+
+let practiceAnswer: PracticeAnswer | undefined;
+
+/**
+ * While the tour runs, its practice wallet answers the router routes it walks
+ * through (components/tour/practiceRoutes.ts) before a call reaches the
+ * bridge: an answered call never leaves the WebView. Undefined puts the gate back to
+ * reads and refusals only.
+ */
+export function answerInPractice(answer: PracticeAnswer | undefined): void {
+  practiceAnswer = answer;
+}
+
+/**
+ * The practice wallet's answer to a router call, before it is queued for the
+ * bridge: the framed envelope, or undefined when practice leaves the call to
+ * the bridge (and so to this gate). It runs outside the bridge's queue because
+ * a practice answer asks Rust (`wallet.amount`) for every figure it renders.
+ */
+export async function practiceAnswerFor(request: IngressRequest): Promise<Uint8Array | undefined> {
+  if (sandbox !== 'practice' || practiceAnswer === undefined) return undefined;
+  const operation = request.operation;
+  if (operation.case !== 'routerQuery' && operation.case !== 'routerInvoke') return undefined;
+  return practiceAnswer(operation.value.method, operation.value.args);
+}
 
 /** The tour's practice wallet is standing in: only reads reach native code. */
 export function enterPracticeSandbox(): void {

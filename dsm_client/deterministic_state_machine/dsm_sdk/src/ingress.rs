@@ -918,6 +918,33 @@ mod tests {
             // Finer than ERA counts, and nothing at all.
             (Unit::Decimals(2), Amount::Entered("1.234".to_string())),
             (Unit::Decimals(2), Amount::Entered("0".to_string())),
+            // The routes the tour walks through (practiceRoutes.test.ts): the
+            // practice market's reserves, a 10 PLAY swap and its 4.45 ERA, a
+            // vault of 20 PLAY against 10 ERA and its close, a 5 PLAY escrow
+            // stake, the practice app's 5 PLAY grant and its 8 PLAY request,
+            // and a token of 1000 created for a 10 ERA fee.
+            (Unit::Decimals(0), Amount::Entered("1000".to_string())),
+            (Unit::Decimals(2), Amount::Entered("500".to_string())),
+            (Unit::Decimals(0), Amount::Entered("10".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(445)),
+            (Unit::Decimals(2), Amount::Entered("4.45".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(40)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_445)),
+            (Unit::Decimals(2), Amount::Entered("5".to_string())),
+            (Unit::Decimals(0), Amount::Entered("20".to_string())),
+            (Unit::Decimals(2), Amount::Entered("10".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(30)),
+            (Unit::Decimals(2), Amount::BaseUnits(99_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(20)),
+            (Unit::Decimals(2), Amount::BaseUnits(1_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(50)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(0)),
+            (Unit::Decimals(2), Amount::BaseUnits(0)),
+            (Unit::Decimals(0), Amount::BaseUnits(15)),
+            (Unit::Decimals(0), Amount::Entered("8".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(42)),
+            (Unit::Decimals(0), Amount::BaseUnits(8)),
         ];
         let mut record = Vec::new();
         let mut answers = Vec::new();

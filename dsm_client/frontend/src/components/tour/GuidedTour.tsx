@@ -101,6 +101,9 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
   const [target, setTarget] = useState<Box | null>(null);
   const [screen, setScreen] = useState<Box | null>(null);
   const [shown, setShown] = useState(0);
+  // A hands-on step's guide can be tucked out of the way, so every control on
+  // the screen can be reached; it is tucked for that step only.
+  const [tucked, setTucked] = useState<string | null>(null);
   const [celebrating, setCelebrating] = useState(false);
   // What became of copying the step's text: which step, and whether the clipboard took it.
   const [clip, setClip] = useState<{ step: string; outcome: 'copied' | 'refused' } | null>(null);
@@ -332,6 +335,26 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
     arrowStyle = arrowDown ? { left, top: target.top - 22 } : { left, top: target.top + target.height + 6 };
   }
 
+  if (handsOn && tucked === step.id) {
+    return createPortal(
+      <div className="gt-root" data-testid="guided-tour">
+        <div
+          className="gt-dialog gt-dialog--tucked"
+          style={{ left: frame.left + 8, width: Math.max(frame.width - 16, 200), top: Math.max(frame.top - 48, 4) }}
+          role="dialog"
+          aria-labelledby="gt-title"
+        >
+          <div id="gt-title" className="gt-title">{step.title}</div>
+          <span className="gt-todo" role="status">{step.prompt ?? 'Your turn'}</span>
+          <button type="button" className="gt-btn" onClick={() => setTucked(null)}>
+            Show
+          </button>
+        </div>
+      </div>,
+      document.body,
+    );
+  }
+
   return createPortal(
     <div className="gt-root" data-testid="guided-tour">
       {target ? (
@@ -416,7 +439,19 @@ export default function GuidedTour({ appState }: Props): React.JSX.Element | nul
             Back
           </button>
           {handsOn ? (
-            <span className="gt-todo" role="status">{step.prompt ?? 'Your turn'}</span>
+            <>
+              <button
+                type="button"
+                className="gt-btn"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setTucked(step.id);
+                }}
+              >
+                Hide
+              </button>
+              <span className="gt-todo" role="status">{step.prompt ?? 'Your turn'}</span>
+            </>
           ) : (
             <button
               type="button"
