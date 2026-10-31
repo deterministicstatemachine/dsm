@@ -15,10 +15,10 @@ Requires: `picotool` v2.2+ (`picotool version`), `openssl`, the built firmware E
 BOOTSEL. The firmware must be built with the production profile:
 
 ```
-cd crates/dsm-anchor-pico
-PATH="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH" \
-RUSTC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc" \
-  cargo build --release --features secure-boot
+cd crates/dsm-anchor-secure-monitor
+PATH="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin:$PATH" \
+RUSTC="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc" \
+  cargo build --release --features production
 ```
 
 ## Step 0 — inspect the factory OTP map (READ-ONLY)
@@ -27,7 +27,7 @@ RUSTC="$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc" \
 picotool otp list                 # human map of pages/rows
 picotool otp dump  > otp-before.json
 ```
-Confirm the DSM host-secret page (`HOST_SECRET_ROW` = **page 48**, see `src/secure_boot.rs`) is
+Confirm the DSM host-secret page (`HOST_SECRET_ROW` = **page 48**, see `src/sealed.rs`) is
 **blank and free** — not claimed by the bootrom, white-label, or any factory field. If page 48 is
 taken on your silicon, change `HOST_SECRET_ROW` in `src/secure_boot.rs` to a confirmed-free page and
 rebuild. Never overwrite a populated system page.

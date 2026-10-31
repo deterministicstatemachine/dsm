@@ -33,7 +33,7 @@ object LocalPicoUsb {
     private const val TAG = "LocalPicoUsb"
     private const val USB_PERMISSION_ACTION = "com.dsm.wallet.USB_PERMISSION"
 
-    // The DSM Anchor firmware sets its own CDC-ACM USB descriptor (crates/dsm-anchor-pico
+    // The DSM Anchor firmware sets its own CDC-ACM USB descriptor (crates/dsm-anchor-nonsecure-app
     // `UsbVidPid(0x1209, 0xd5a1)`): vendor id 0x1209 (pid.codes community VID), product id 0xD5A1,
     // product string "DSM Anchor" — NOT the bare RP2350 VID 0x2E8A. Both ids must match: any other
     // CDC device on the OTG port (a serial adapter, another board) is never opened.

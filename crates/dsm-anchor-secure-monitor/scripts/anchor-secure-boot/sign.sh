@@ -4,7 +4,7 @@
 # See RUNBOOK.md. The signing private key must live OFFLINE/HSM — never on the appliance or in git.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ELF="${ELF:-$HERE/../../target/thumbv8m.main-none-eabihf/release/dsm-anchor-pico}"
+ELF="${ELF:-$HERE/../../target/thumbv8m.main-none-eabihf/release/dsm-anchor-secure-monitor}"
 KEY="${KEY:-$HERE/bootkey.pem}"
 SIGNED="$HERE/signed.elf"
 OTP_JSON="$HERE/bootkey-otp.json"

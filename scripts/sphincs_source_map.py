@@ -60,7 +60,6 @@ sdk+'sdk/connect/signed.rs':{'sign_own':'AK sphincs_sign on dsm::connect::statem
 core+'sofi/escrow.rs':{'statement':'WrapperInjective.lean: escrow_statement_injective / signing_domain_separation','sign_statement':'sphincs_sign on statement digest; unproved','verdict_authority':'signer set + verify per signature; tested, unproved'},
 sdk+'sdk/sofi_flow.rs':{},
 'crates/dsm-anchor-secure-monitor/src/anchor_glue.rs':{},
-'crates/dsm-anchor-pico/src/main.rs':{},
 sdk+'bluetooth/anchor_accept.rs':{},
 }
 rows = ['rust_file\trust_line\trust_symbol\tlean_definition_or_obligation\tgit_blob']

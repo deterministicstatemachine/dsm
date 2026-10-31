@@ -159,7 +159,7 @@ jobs:
           # misreading that line is what sent the first attempt wrong.
           #
           # Residual, tracked separately: 18 macro failures remain, all in the
-          # no_std embedded crates (hal::binary_info::* in dsm-anchor-pico),
+          # no_std embedded crates (hal::binary_info::* in dsm-anchor-secure-monitor),
           # which need their thumb target to resolve. Separately, ~31 files
           # under dsm_sdk/src/jni/ and platform/{android,ios} are cfg-gated to
           # non-host targets and get no semantic analysis at all, so the JNI

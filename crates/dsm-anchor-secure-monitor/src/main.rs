@@ -19,7 +19,7 @@
 //!    before any authority op (§2), and dispatches through the REAL `anchor_core` appliance
 //!    ([`anchor_glue::service_request`] → `anchor_core::service::dispatch`) — `σ^chip` on the
 //!    TROPIC01 die, `σ^host` via `dsm-sphincs`. The protocol state machine is NOT reimplemented here;
-//!    it is `anchor_core`, the same crate the `dsm-anchor-pico` binary drives.
+//!    it is `anchor_core`.
 //!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
 //!    outcome the appliance may not serve from, the appliance stays uninitialized and every
 //!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.

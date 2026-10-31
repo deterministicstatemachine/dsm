@@ -737,7 +737,7 @@ jobs:
   # checkout. No untrusted GitHub event inputs are used.
   #
   # WHAT THIS DOES NOT COVER, and why. Four anchor crates —
-  # dsm-anchor-pico, dsm-anchor-hw-verifier, dsm-android-anchor and
+  # dsm-anchor-hw-verifier, dsm-android-anchor and
   # dsm-anchor-secure-monitor — all reach `tropic01 = { path =
   # "../../../../libtropic-rs/tropic01" }`. That resolves ABOVE
   # $GITHUB_WORKSPACE, which actions/checkout cannot write to, and no commit is

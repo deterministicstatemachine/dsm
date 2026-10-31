@@ -75,7 +75,6 @@ dsm/
 │   ├── dsm-anchor-core/          hardware-free appliance core: root-advance message, three-signature release, prepare/commit/emit/finalize   (member)
 │   ├── dsm-anchor-verifier/      receiver-side relay primitives and the exact counter check, tropic01-free   (member)
 │   ├── dsm-sphincs/              no_std BLAKE3-keyed SPHINCS+, byte-compatible with the core, shared with firmware   (member)
-│   ├── dsm-anchor-pico/          RP2350 Pico 2 W firmware over libtropic-rs   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-secure-monitor/ TrustZone-M Secure world: TROPIC01, partition key, counter, seal, the single NSC gateway   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-nonsecure-app/ TrustZone-M Non-secure world: USB-CDC, protobuf, transport   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-hw-verifier/   the real libtropic session driver   (excluded: needs the sibling libtropic-rs checkout)
@@ -176,7 +175,7 @@ An earlier build exercised origin admission, transfer and withdrawal against rea
 
 ## Offline protocol
 
-Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-pico/](crates/dsm-anchor-pico/), [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the receiver side is [crates/dsm-anchor-verifier/](crates/dsm-anchor-verifier/) and [crates/dsm-anchor-hw-verifier/](crates/dsm-anchor-hw-verifier/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
+Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the receiver side is [crates/dsm-anchor-verifier/](crates/dsm-anchor-verifier/) and [crates/dsm-anchor-hw-verifier/](crates/dsm-anchor-hw-verifier/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
 
 **Two identity domains on one phone.** The online domain is the BIP39 seed alone: no hardware, all online DSM operation. The offline domain is a fusion of three factors, and every offline release must be witnessed by all three over the same root-advance message:
 
@@ -241,7 +240,7 @@ On Windows use `.\scripts\dev.ps1` for the Rust workspace and frontend, and WSL2
 | Frontend | yes | yes | yes (Node.js 20+) |
 | Local storage node | yes | yes | yes (PostgreSQL) |
 | Android APK build / install | yes | yes | WSL2 |
-| Anchor firmware (`crates/dsm-anchor-pico`, TrustZone images) | yes | yes | WSL2 |
+| Anchor firmware (`crates/dsm-anchor-secure-monitor` + `crates/dsm-anchor-nonsecure-app`, TrustZone images) | yes | yes | WSL2 |
 
 **The board.** The exact CI test command, run from `dsm_client/deterministic_state_machine/`:
 

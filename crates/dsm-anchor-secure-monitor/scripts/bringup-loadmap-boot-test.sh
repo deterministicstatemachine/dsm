@@ -25,7 +25,7 @@
 # Usage: hold BOOTSEL, plug the board in, release, then:   ./bringup-loadmap-boot-test.sh test
 #
 # NOTE: flashing overwrites whatever firmware the board carried (e.g. the Pico anchor fw).
-# Restore afterwards by rebuilding dsm-anchor-pico --release and flashing it back.
+# Restore afterwards by rebuilding dsm-anchor-secure-monitor --release and flashing it back.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CRATE="$HERE/.."

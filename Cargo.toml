@@ -24,7 +24,6 @@ members = [
 # bridge; it transitively pulls tropic01, so it too is excluded (built only in the Android cargo-ndk
 # pipeline). The default workspace stays tropic01-free (verify: `cargo tree --workspace -i tropic01`).
 exclude = [
-    "crates/dsm-anchor-pico",
     "crates/dsm-anchor-hw-verifier",
     "crates/dsm-android-anchor",
     # Host used-chip bench harness (native serialport dep); built directly, not in CI.

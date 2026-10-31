@@ -61,7 +61,6 @@ HARDWARE = [
 ]
 
 FIRMWARE = [
-    ("fw-anchor-pico", "crates/dsm-anchor-pico", "Single-image appliance firmware: TROPIC01 through libtropic-rs, the partition signature, the boot fence, and the appliance over USB-CDC."),
     ("fw-secure-monitor", "crates/dsm-anchor-secure-monitor", "TrustZone-M Secure world: TROPIC01, the partition key, the physical counter, prepare/commit/recovery state, the measurement seal, and the one Secure Gateway."),
     ("fw-nonsecure-app", "crates/dsm-anchor-nonsecure-app", "TrustZone-M Non-secure world: USB-CDC, protobuf and transport; reaches the Secure world only through the Secure Gateway."),
 ]

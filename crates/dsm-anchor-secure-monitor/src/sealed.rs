@@ -2,7 +2,7 @@
 //! The secret only this board holds, and the boot context the appliance requires before it reads it.
 //!
 //! The sealed secret is 256 bits in an RP2350 OTP page provisioned with secure-read permission
-//! (`crates/dsm-anchor-pico/scripts/anchor-secure-boot`, the same page the Pico image reads). Every
+//! (`scripts/anchor-secure-boot`, provisioned once per board). Every
 //! secret the appliance's identity needs derives from it: the pairing key the TROPIC01 is opened
 //! with, the σ^host partition key seed and the birth entropy. None derives from data the chip
 //! reports to anyone who asks.

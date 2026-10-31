@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! σ^chip — TROPIC01 resident Ed25519 signing, driven from the Secure monitor over a Secure-only
 //! SPI0 (GP18 SCK / GP19 MOSI / GP16 MISO / GP17 CS). The TROPIC + its SPI are inaccessible to
-//! Non-secure (proven BLOCKED). Ported from the proven `dsm-anchor-pico` integration; `eddsa_sign`
+//! Non-secure (proven BLOCKED). `eddsa_sign`
 //! returns `&[u8;64]` so NO heap is required.
 
 use embedded_hal_bus::spi::ExclusiveDevice;
