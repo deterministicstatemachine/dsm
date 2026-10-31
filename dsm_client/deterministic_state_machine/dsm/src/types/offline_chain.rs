@@ -370,6 +370,7 @@ pub(crate) mod fixture {
 
     pub(crate) struct Chip {
         counter: Rc<Cell<u32>>,
+        closed_births: u32,
         resident: SigningKey,
     }
 
@@ -385,6 +386,10 @@ pub(crate) mod fixture {
         }
         fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
             Ok(self.resident.sign(message).to_bytes().to_vec())
+        }
+        fn close_birth(&mut self) -> Result<(), TropicError> {
+            self.closed_births += 1;
+            Ok(())
         }
     }
 
@@ -531,6 +536,7 @@ pub(crate) mod fixture {
             let app = Appliance::new(
                 Chip {
                     counter: Rc::new(Cell::new(H0)),
+                    closed_births: 0,
                     resident,
                 },
                 H0,

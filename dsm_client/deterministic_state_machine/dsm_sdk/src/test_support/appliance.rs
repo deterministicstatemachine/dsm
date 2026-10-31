@@ -106,6 +106,7 @@ impl Board {
 pub struct SoftwareTropic {
     board: Board,
     counter: Arc<Mutex<u32>>,
+    closed_births: Arc<Mutex<u32>>,
     resident: SigningKey,
 }
 
@@ -125,6 +126,12 @@ impl Tropic for SoftwareTropic {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         self.board.powered()?;
         Ok(self.resident.sign(message).to_bytes().to_vec())
+    }
+
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        self.board.powered()?;
+        *held(&self.closed_births) += 1;
+        Ok(())
     }
 }
 
@@ -191,6 +198,7 @@ enum Served {
 struct Anchor {
     board: Board,
     counter: Arc<Mutex<u32>>,
+    closed_births: Arc<Mutex<u32>>,
     rmemory: SoftwareRMemory,
     chip_seed: [u8; 32],
     enrolled_counter: u32,
@@ -213,6 +221,7 @@ impl Anchor {
         SoftwareTropic {
             board: self.board.clone(),
             counter: self.counter.clone(),
+            closed_births: self.closed_births.clone(),
             resident: self.resident(),
         }
     }
@@ -282,6 +291,7 @@ impl HostAppliance {
                 },
                 board,
                 counter: Arc::new(Mutex::new(enrolled_counter)),
+                closed_births: Arc::new(Mutex::new(0)),
                 chip_seed,
                 enrolled_counter,
                 served: Served::Unprovisioned,
@@ -502,7 +512,7 @@ impl AnchorAppliance for HostAppliance {
                 anchor.rmemory.clone(),
                 provisioning.clone(),
             )
-            .map_err(|e| appliance_error("provision", e))?;
+            .map_err(|refused| appliance_error("provision", refused.error))?;
             anchor.served = Served::Serving(Box::new(d));
         }
         self.provisioned_pin()?

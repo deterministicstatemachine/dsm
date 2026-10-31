@@ -41,10 +41,15 @@ type App = Appliance<MockTropic, MockPart>;
 struct MockTropic {
     h: u32,
     csk: [u8; 32],
+    closed_births: u32,
 }
 impl MockTropic {
     fn with_h(h: u32) -> Self {
-        Self { h, csk: [0xC0; 32] }
+        Self {
+            h,
+            csk: [0xC0; 32],
+            closed_births: 0,
+        }
     }
     fn pk(&self) -> Vec<u8> {
         hash("mock/chip-pk", &[&self.csk]).to_vec()
@@ -64,6 +69,10 @@ impl Tropic for MockTropic {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         let pk = self.pk();
         Ok(hash("mock/chip-sig", &[&pk, message]).to_vec())
+    }
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        self.closed_births += 1;
+        Ok(())
     }
 }
 

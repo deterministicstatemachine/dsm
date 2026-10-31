@@ -35,6 +35,10 @@ use crate::tropic::{PartitionSig, Tropic};
 pub enum StoreError {
     /// The store did not take the write or answer the read: no power, or the bus failed.
     Unavailable,
+    /// The store holds written slots that form no complete record.
+    Corrupt,
+    /// The record is larger than the store was laid out to hold.
+    TooLarge,
 }
 
 /// Where the appliance's durable record lives: one record, replaced whole.
@@ -78,6 +82,20 @@ pub enum DurableError {
 impl From<ApplianceError> for DurableError {
     fn from(e: ApplianceError) -> Self {
         Self::Appliance(e)
+    }
+}
+
+/// A provisioning the anchor refused, with the chip and the store it was given: the anchor is
+/// still unprovisioned and can be provisioned again.
+pub struct ProvisionRefused<T, S> {
+    pub error: DurableError,
+    pub tropic: T,
+    pub store: S,
+}
+
+impl<T, S> core::fmt::Debug for ProvisionRefused<T, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "provisioning refused: {:?}", self.error)
     }
 }
 
@@ -181,16 +199,24 @@ pub fn encode_anchor(provisioning: &Provisioning, active: &Active) -> Vec<u8> {
     .encode_to_vec()
 }
 
-/// What an anchor's durable record holds: what it was provisioned for, and its active state.
-pub fn decode_anchor(bytes: &[u8]) -> Result<(Provisioning, Active), RecordError> {
-    let d = pb::DurableAnchor::decode(bytes).map_err(RecordError::Undecodable)?;
-    let p = d.provisioning.ok_or(ProtoError::MissingField)?;
-    let provisioning = Provisioning {
+/// The identity a provisioning names: the owner's device id, its online key, the policy and the
+/// genesis, each as the anchor binds it.
+pub fn provisioning_from_pb(p: pb::Provisioning) -> Result<Provisioning, ProtoError> {
+    if p.online_id_pk.is_empty() {
+        return Err(ProtoError::MissingField);
+    }
+    Ok(Provisioning {
         device_id: arr32(&p.device_id)?,
         online_id_pk: p.online_id_pk,
         policy_hash: arr32(&p.policy_hash)?,
         genesis_root: arr32(&p.genesis_root)?,
-    };
+    })
+}
+
+/// What an anchor's durable record holds: what it was provisioned for, and its active state.
+pub fn decode_anchor(bytes: &[u8]) -> Result<(Provisioning, Active), RecordError> {
+    let d = pb::DurableAnchor::decode(bytes).map_err(RecordError::Undecodable)?;
+    let provisioning = provisioning_from_pb(d.provisioning.ok_or(ProtoError::MissingField)?)?;
     let active = active_from_pb(d.active.ok_or(ProtoError::MissingField)?)?;
     Ok((provisioning, active))
 }
@@ -215,20 +241,40 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
         tropic: T,
         mut store: S,
         provisioning: Provisioning,
-    ) -> Result<Self, DurableError> {
-        if store.read().map_err(DurableError::Store)?.is_some() {
-            return Err(DurableError::AlreadyProvisioned);
+    ) -> Result<Self, ProvisionRefused<T, S>> {
+        let refused = |error, tropic, store| ProvisionRefused {
+            error,
+            tropic,
+            store,
+        };
+        match store.read() {
+            Ok(None) => {}
+            Ok(Some(_)) => return Err(refused(DurableError::AlreadyProvisioned, tropic, store)),
+            Err(e) => return Err(refused(DurableError::Store(e), tropic, store)),
+        }
+        let birth = match chip.birth::<P>(&provisioning) {
+            Ok(birth) => birth,
+            Err(e) => {
+                return Err(refused(
+                    DurableError::Appliance(ApplianceError::Partition(e)),
+                    tropic,
+                    store,
+                ))
+            }
+        };
+        // The first record is written before the appliance exists, so a write the store does not
+        // take leaves the chip and the store with the caller, the anchor unprovisioned.
+        let written = encode_anchor(&provisioning, &Active::genesis(birth.genesis_frontier));
+        if let Err(e) = store.write(&written) {
+            return Err(refused(DurableError::Store(e), tropic, store));
         }
         let app = Appliance::new(
             tropic,
             chip.enrolled_counter,
             chip.anchor_id,
             chip.partition_device_id,
-            chip.birth::<P>(&provisioning)
-                .map_err(ApplianceError::Partition)?,
+            birth,
         );
-        let written = encode_anchor(&provisioning, &app.active);
-        store.write(&written).map_err(DurableError::Store)?;
         Ok(Self {
             app,
             provisioning,
@@ -388,6 +434,11 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
                 other,
             ))),
         }
+    }
+
+    /// Close the chip to a second birth ([`Appliance::close_birth`]).
+    pub fn close_birth(&mut self) -> Result<(), ApplianceError> {
+        self.app.close_birth()
     }
 
     /// The live counter `u = H₀ − H` from the chip.

@@ -32,3 +32,8 @@ pub const TRANSITION_DIGEST_V2: &str = "DSM/transition-digest/v2";
 pub const ANCHOR_ROOT_ADVANCE_V2: &str = "DSM/anchor-root-advance/v2";
 /// Root-advance message `M_{i+1}` — the single message all three signatures cover.
 pub const ROOT_ADVANCE_MESSAGE_V2: &str = "DSM/root-advance/v2";
+
+/// The digest of the appliance's record as R-memory holds it.
+pub const RMEM_RECORD_V1: &str = "DSM/anchor/rmem-record/v1";
+/// The seal of an R-memory header naming a record.
+pub const RMEM_HEADER_V1: &str = "DSM/anchor/rmem-header/v1";

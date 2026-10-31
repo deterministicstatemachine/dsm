@@ -90,6 +90,18 @@ pub struct Active {
     pub record: Record,
 }
 
+impl Active {
+    /// The state an anchor is born into: the genesis frontier `h_0`, counter 0, nothing pending.
+    pub fn genesis(root: [u8; 32]) -> Self {
+        Self {
+            root,
+            anchor_counter: 0,
+            status: Status::Ready,
+            record: Record::Empty,
+        }
+    }
+}
+
 /// Recovery outcomes (§26).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RecoverOutcome {
@@ -156,18 +168,18 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             partition_pk: birth.partition_pk,
             chip_pk: birth.chip_pk,
             birth_commitment: birth.birth_commitment,
-            active: Active {
-                root: birth.genesis_frontier,
-                anchor_counter: 0,
-                status: Status::Ready,
-                record: Record::Empty,
-            },
+            active: Active::genesis(birth.genesis_frontier),
             firmware_boundary_invalid: false,
             rmemory_map_invalid: false,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
         }
+    }
+
+    /// Close the chip to a second birth ([`Tropic::close_birth`]).
+    pub fn close_birth(&mut self) -> Result<(), ApplianceError> {
+        self.tropic.close_birth().map_err(ApplianceError::Tropic)
     }
 
     /// Live anchor counter `u = H₀ − H` from the chip. The counter only counts down, so

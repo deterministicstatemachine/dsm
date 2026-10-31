@@ -40,6 +40,12 @@ pub trait Tropic {
     /// The public half `pk_chip` is read once at enrollment (bound into the anchor bundle `B`)
     /// via the chip's own key-read primitive, not through this trait.
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
+
+    /// Close the chip to a second birth: the pairing slot the appliance runs on may no longer
+    /// re-initialize the counter, write or invalidate pairing keys, or write the chip's access
+    /// configuration, and the closed configuration is in force when this returns. A chip already
+    /// closed is closed. Irreversible on silicon.
+    fn close_birth(&mut self) -> Result<(), TropicError>;
 }
 
 /// Forward `Tropic` through a `Box`, so a firmware holding the appliance in a `'static` slot can
@@ -56,6 +62,9 @@ impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
     }
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         (**self).chip_sign(message)
+    }
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        (**self).close_birth()
     }
 }
 

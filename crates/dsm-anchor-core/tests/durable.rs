@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::fmt::Debug;
 use std::rc::Rc;
 
+use anchor_core::anchor::Anchor as Firmware;
 use anchor_core::appliance::{Appliance, RecoverOutcome, Status};
 use anchor_core::durable::{
     decode_anchor, encode_active, ActiveStore, DurableAppliance, DurableBootRefusal, DurableError,
@@ -128,10 +129,20 @@ impl Board {
     }
 }
 
-/// The chip: its counter lives on the die across reboots; its resident key never leaves it.
+/// Whether the chip is still open to a birth, or closed to a second one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Cage {
+    Open,
+    Closed,
+}
+
+/// The chip: its counter and its cage live on the die across reboots; its resident key never
+/// leaves it.
 struct Chip {
     board: Board,
     counter: Rc<Cell<u32>>,
+    cage: Rc<Cell<Cage>>,
+    closes: Rc<Cell<u32>>,
     resident: SigningKey,
 }
 
@@ -152,6 +163,15 @@ impl Tropic for Chip {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         self.board.powered()?;
         Ok(self.resident.sign(message).to_bytes().to_vec())
+    }
+
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        self.board.powered()?;
+        if self.cage.get() == Cage::Open {
+            self.cage.set(Cage::Closed);
+            self.closes.set(self.closes.get() + 1);
+        }
+        Ok(())
     }
 }
 
@@ -219,6 +239,8 @@ type Durable = DurableAppliance<Chip, Partition, RMemory>;
 struct Anchor {
     board: Board,
     counter: Rc<Cell<u32>>,
+    cage: Rc<Cell<Cage>>,
+    closes: Rc<Cell<u32>>,
     rmemory: RMemory,
     seed: [u8; 32],
 }
@@ -237,6 +259,8 @@ impl Anchor {
             },
             board,
             counter: Rc::new(Cell::new(H0)),
+            cage: Rc::new(Cell::new(Cage::Open)),
+            closes: Rc::new(Cell::new(0)),
             seed: [seed; 32],
         }
     }
@@ -273,6 +297,8 @@ impl Anchor {
         Chip {
             board: self.board.clone(),
             counter: self.counter.clone(),
+            cage: self.cage.clone(),
+            closes: self.closes.clone(),
             resident: self.resident(),
         }
     }
@@ -648,7 +674,8 @@ fn an_anchor_is_provisioned_once() {
         anchor.rmemory.clone(),
         stranger,
     )
-    .map(|d| d.appliance().bundle);
+    .map(|d| d.appliance().bundle)
+    .map_err(|refused| refused.error);
     assert_eq!(again, Err(DurableError::AlreadyProvisioned));
     assert_eq!(
         some(anchor.rmemory.slot.borrow().clone(), "a record"),
@@ -787,4 +814,118 @@ fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
     assert_eq!(a.active.root, root);
     assert_eq!(a.active.anchor_counter, 0);
     assert_eq!(anchor.chip_counter(), H0);
+}
+
+type Booted = Firmware<Chip, Partition, RMemory>;
+
+fn provisioning_pb(p: &Provisioning) -> pb::Provisioning {
+    pb::Provisioning {
+        device_id: p.device_id.to_vec(),
+        online_id_pk: p.online_id_pk.clone(),
+        policy_hash: p.policy_hash.to_vec(),
+        genesis_root: p.genesis_root.to_vec(),
+    }
+}
+
+fn frame(op: pb::Op, provision: Option<pb::Provisioning>) -> Vec<u8> {
+    encode_request(&pb::ApplianceRequest {
+        op: op as i32,
+        provision,
+        ..Default::default()
+    })
+}
+
+fn served(anchor: Booted, request: &[u8]) -> (Booted, pb::ApplianceResponse) {
+    let (anchor, answer) = anchor.serve(request);
+    (anchor, ok(decode_response(&answer), "a response"))
+}
+
+impl Anchor {
+    fn boot(&self) -> Booted {
+        ok(
+            Booted::boot(self.chip_birth(), self.chip(), self.rmemory.clone()),
+            "booted",
+        )
+    }
+}
+
+/// An unprovisioned anchor answers nothing but a provisioning. The provisioning binds the bundle
+/// to the device it names (its id, online key, policy and genesis), closes the chip to a second
+/// birth once, and is not repeated.
+#[test]
+fn an_unprovisioned_anchor_answers_only_a_provisioning_and_is_bound_to_its_owner() {
+    let anchor = Anchor::new(0x30);
+    let booted = anchor.boot();
+    let (booted, status) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(status.error, anchor_core::service::err::NOT_PROVISIONED);
+    let (booted, prepare) = served(booted, &frame(pb::Op::Prepare, None));
+    assert_eq!(prepare.error, anchor_core::service::err::NOT_PROVISIONED);
+    assert_eq!(anchor.cage.get(), Cage::Open);
+
+    let owner = anchor.owner();
+    let (booted, provisioned) = served(
+        booted,
+        &frame(pb::Op::Provision, Some(provisioning_pb(&owner))),
+    );
+    assert_eq!(provisioned.error, anchor_core::service::err::NONE);
+    assert_eq!(
+        provisioned.anchor_bundle,
+        anchor.appliance().bundle.to_vec()
+    );
+    assert_eq!((anchor.cage.get(), anchor.closes.get()), (Cage::Closed, 1));
+
+    let mut stranger = owner;
+    stranger.device_id = derive(&[0x31; 32], "device id");
+    let (booted, again) = served(
+        booted,
+        &frame(pb::Op::Provision, Some(provisioning_pb(&stranger))),
+    );
+    assert_eq!(again.error, anchor_core::service::err::ALREADY_PROVISIONED);
+    let (_, status) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(status.anchor_bundle, anchor.appliance().bundle.to_vec());
+    assert_eq!(anchor.closes.get(), 1);
+}
+
+/// A provisioning whose first record the store does not take leaves the anchor unprovisioned,
+/// holding its chip and store, and it can be provisioned again.
+#[test]
+fn a_provisioning_the_store_does_not_take_leaves_the_anchor_provisionable() {
+    let anchor = Anchor::new(0x32);
+    let booted = anchor.boot();
+    anchor.board.cut(Cut::AtWrite(1));
+    let request = frame(pb::Op::Provision, Some(provisioning_pb(&anchor.owner())));
+    let (booted, cut) = served(booted, &request);
+    assert_eq!(cut.error, anchor_core::service::err::STORE);
+    assert_eq!(*anchor.rmemory.slot.borrow(), None);
+    assert_eq!(anchor.cage.get(), Cage::Open);
+    anchor.board.power_up();
+    let (_, provisioned) = served(booted, &request);
+    assert_eq!(provisioned.error, anchor_core::service::err::NONE);
+    assert_eq!(anchor.cage.get(), Cage::Closed);
+}
+
+/// A provisioning that names no online key binds nothing: it is refused and nothing is born.
+#[test]
+fn a_provisioning_naming_no_online_key_is_refused_and_nothing_is_born() {
+    let anchor = Anchor::new(0x33);
+    let mut nameless = provisioning_pb(&anchor.owner());
+    nameless.online_id_pk.clear();
+    let (_, refused) = served(anchor.boot(), &frame(pb::Op::Provision, Some(nameless)));
+    assert_eq!(refused.error, anchor_core::service::err::MISSING_FIELD);
+    assert_eq!(*anchor.rmemory.slot.borrow(), None);
+}
+
+/// A power cut between the first record and the closing of the chip leaves a provisioned anchor
+/// on an open chip. After the reboot it closes the chip before it answers anything.
+#[test]
+fn a_restored_anchor_on_an_open_chip_closes_it_before_it_serves() {
+    let anchor = Anchor::new(0x34);
+    drop(anchor.born());
+    assert_eq!(anchor.cage.get(), Cage::Open);
+    let booted = anchor.boot();
+    assert_eq!(anchor.cage.get(), Cage::Open);
+    let (_, status) = served(booted, &frame(pb::Op::Status, None));
+    assert_eq!(status.error, anchor_core::service::err::NONE);
+    assert_eq!(status.anchor_bundle, anchor.appliance().bundle.to_vec());
+    assert_eq!((anchor.cage.get(), anchor.closes.get()), (Cage::Closed, 1));
 }
