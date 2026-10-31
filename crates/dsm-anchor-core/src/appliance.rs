@@ -142,9 +142,6 @@ pub struct Appliance<T: Tropic, P: PartitionSig> {
     /// pin keys, the owner's online key and its device id, `B` recomputes from what is disclosed.
     pub birth_commitment: [u8; 32],
     pub active: Active,
-    /// Set when recovery sees a firmware-boundary / R-memory-map event (downgrades to online).
-    pub firmware_boundary_invalid: bool,
-    pub rmemory_map_invalid: bool,
     /// SECRET partition signing key (non-exportable on device).
     partition_sk: Vec<u8>,
     tropic: T,
@@ -169,8 +166,6 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
             chip_pk: birth.chip_pk,
             birth_commitment: birth.birth_commitment,
             active: Active::genesis(birth.genesis_frontier),
-            firmware_boundary_invalid: false,
-            rmemory_map_invalid: false,
             partition_sk: birth.partition_sk,
             tropic,
             _p: PhantomData,
@@ -415,9 +410,6 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
     /// §26 power-loss recovery. Never signs a new successor — a committed record is re-emitted
     /// and finalized as the *same* successor.
     pub fn recover(&mut self) -> RecoverOutcome {
-        if self.firmware_boundary_invalid || self.rmemory_map_invalid {
-            return RecoverOutcome::DowngradeOnline;
-        }
         let live_u = match self.live_index() {
             Ok(u) => u,
             Err(_) => return RecoverOutcome::DowngradeOnline,
@@ -470,22 +462,51 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
                     return RecoverOutcome::DowngradeOnline;
                 }
                 // Both on-device witnesses (σ^chip, σ^host) are formed atomically in prepare and
-                // no counter has moved, so a Prepared record is always safe to complete when its
-                // frontier + signatures are intact.
-                let (root_ok, sigs_present) = match &self.active.record {
-                    Record::Prepared(p) => (
-                        ct_eq_32(&p.cert.prev_frontier, &self.active.root),
-                        !p.cert.sigma_chip.is_empty() && !p.cert.sigma_host.is_empty(),
-                    ),
+                // no counter has moved, so a Prepared record is safe to complete when it is the
+                // record this appliance signed: its message recomputes from its own fields and
+                // transition, σ^host verifies under the pinned partition key, and σ^chip is what
+                // the chip signs over that message now (Ed25519 is deterministic).
+                let (root_ok, holds, m, sigma_chip, sigma_host) = match &self.active.record {
+                    Record::Prepared(p) => {
+                        let c = &p.cert;
+                        let d = transition_digest(&p.txn.as_transition(), &c.receiver_challenge);
+                        let next = anchor_root_advance(&c.prev_frontier, &d);
+                        let m = root_advance_message(
+                            &self.bundle,
+                            &c.sender_device_root_before,
+                            &c.sender_device_root_after,
+                            &c.prev_frontier,
+                            &next,
+                            c.anchor_counter,
+                            c.next_anchor_counter,
+                            &d,
+                            &c.recipient,
+                            &c.receiver_challenge,
+                        );
+                        let holds = ct_eq_32(&c.anchor_bundle, &self.bundle)
+                            && ct_eq_32(&d, &c.transition_digest)
+                            && ct_eq_32(&next, &c.next_frontier)
+                            && ct_eq_32(&m, &c.root_advance_message);
+                        (
+                            ct_eq_32(&c.prev_frontier, &self.active.root),
+                            holds,
+                            m,
+                            c.sigma_chip.clone(),
+                            c.sigma_host.clone(),
+                        )
+                    }
                     _ => return RecoverOutcome::DowngradeOnline,
                 };
                 if !root_ok {
                     return RecoverOutcome::DowngradeOnline;
                 }
-                if sigs_present {
-                    RecoverOutcome::AcceptPreparedCanComplete
-                } else {
-                    RecoverOutcome::OnlineCancelOrResolve
+                if !holds || !P::part_verify(&self.partition_pk, &m, &sigma_host) {
+                    return RecoverOutcome::OnlineCancelOrResolve;
+                }
+                match self.tropic.chip_sign(&m) {
+                    Ok(signed) if signed == sigma_chip => RecoverOutcome::AcceptPreparedCanComplete,
+                    Ok(_other) => RecoverOutcome::OnlineCancelOrResolve,
+                    Err(_unreachable_chip) => RecoverOutcome::DowngradeOnline,
                 }
             }
             Status::Ready => {

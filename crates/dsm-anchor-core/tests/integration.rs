@@ -357,13 +357,6 @@ fn recover_ready_accepts() {
 }
 
 #[test]
-fn recover_downgrades_on_firmware_boundary() {
-    let mut f = fixture(H0);
-    f.a.firmware_boundary_invalid = true;
-    assert_eq!(f.a.recover(), RecoverOutcome::DowngradeOnline);
-}
-
-#[test]
 fn recover_committed_reemits() {
     let mut f = fixture(H0);
     let t = make_transition(f.frontier0, 0);

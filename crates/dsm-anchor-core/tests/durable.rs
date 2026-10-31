@@ -929,3 +929,40 @@ fn a_restored_anchor_on_an_open_chip_closes_it_before_it_serves() {
     assert_eq!(status.anchor_bundle, anchor.appliance().bundle.to_vec());
     assert_eq!((anchor.cage.get(), anchor.closes.get()), (Cage::Closed, 1));
 }
+
+/// A prepared record completes at recovery only if it is the record the appliance signed: a σ^host
+/// that does not verify, or a σ^chip the chip did not make, is cancelled online instead.
+#[test]
+fn recovery_completes_only_a_prepared_record_whose_signatures_verify() {
+    use anchor_core::appliance::Record;
+    let anchor = Anchor::new(0x35);
+    let prepared = |anchor: &Anchor| {
+        let mut a = anchor.appliance();
+        let t = transition(a.active.root, a.active.anchor_counter);
+        ok(
+            a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+            "prepared",
+        );
+        a
+    };
+    let mut intact = prepared(&anchor);
+    assert_eq!(intact.recover(), RecoverOutcome::AcceptPreparedCanComplete);
+
+    let mut forged_host = prepared(&anchor);
+    if let Record::Prepared(p) = &mut forged_host.active.record {
+        p.cert.sigma_host[100] ^= 0x01;
+    }
+    assert_eq!(forged_host.recover(), RecoverOutcome::OnlineCancelOrResolve);
+
+    let mut forged_chip = prepared(&anchor);
+    if let Record::Prepared(p) = &mut forged_chip.active.record {
+        p.cert.sigma_chip[7] ^= 0x01;
+    }
+    assert_eq!(forged_chip.recover(), RecoverOutcome::OnlineCancelOrResolve);
+
+    let mut moved = prepared(&anchor);
+    if let Record::Prepared(p) = &mut moved.active.record {
+        p.cert.recipient[0] ^= 0x01;
+    }
+    assert_eq!(moved.recover(), RecoverOutcome::OnlineCancelOrResolve);
+}
