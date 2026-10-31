@@ -125,7 +125,9 @@ def audit_rows():
         c = cells(line)
         status = text_of(c[-1])
         head = status.split("(")[0].strip().lower()
-        if head.startswith("fixed in part") or head.startswith("partial"):
+        if head.startswith("duplicate of"):
+            state = "duplicate"
+        elif head.startswith("fixed in part") or head.startswith("partial"):
             state = "partial"
         elif head.startswith("fixed") or head.startswith("closed"):
             state = "closed"
@@ -473,6 +475,9 @@ def main():
 
     # ── Internal security audit ──────────────────────────────────────────────
     audit = audit_rows()
+    # A finding recorded twice is one finding: the duplicate names the original and is not counted.
+    duplicates = [row for row in audit if row["state"] == "duplicate"]
+    audit = [row for row in audit if row["state"] != "duplicate"]
     for row in audit:
         ref = bom.add_evidence(f"ev-{row['id'].lower()}", f"{row['id']}: {row['finding'][:200]}", "recorded", "recorded", audit_status=row["status"], location=row["where"], source="specs/requirements/CONFORMANCE_GAPS.md")
         bom.add_requirement(f"req-{row['id'].lower()}", row["id"], row["finding"], "dsm-software", [ref], {"closed": 1, "partial": 0.5}.get(row["state"], 0), f"internal audit status: {row['status']}")
@@ -579,7 +584,8 @@ def main():
         "",
         "## Internal security audit",
         "",
-        f"- Findings: {len(audit)} ({count([r['state'] for r in audit])}).",
+        f"- Findings: {len(audit)} ({count([r['state'] for r in audit])})"
+        + (f"; {len(duplicates)} more rows repeat an earlier finding ({', '.join(r['id'] + ' = ' + r['status'].split('of', 1)[1].strip() for r in duplicates)})." if duplicates else "."),
         "",
         "| Finding | Status |",
         "|---|---|",
