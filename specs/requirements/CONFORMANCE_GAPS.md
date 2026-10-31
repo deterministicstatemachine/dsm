@@ -6544,6 +6544,25 @@ Definition 57, which A14 quotes, blocks a candidate only on "a local pending loc
 - *Findings.* The game needed three fixes for this build of the host (game repository, branch `fix/app-host-ingress-secret`): the ingress secret (#1139), `storage.sync` as an invoke, and the production server's startup check. A receiver took 9 minutes to accept a transfer from the game account, because its sync re-verified the same lineage and vaults on every pass, and the game's next send waited for that. The two-player arena was not run.
 - *Not run.* Offline Bluetooth sending (the hardware stage).
 
+**The release bundle carries a security-assurance record (owner direction, 2026-10-31).** The owner forwarded an assessment asking for one unified package:
+- the SBOM;
+- an HBOM of the offline appliance with its firmware inventory;
+- formal-verification results and hardware test attestations;
+- each result naming the commit tested, the command, the outcome and the log;
+- passed, failed, skipped and incomplete kept distinct, and anything untested named.
+
+The archived April report records its TLA check as skipped; the SBOM bundle until now held that one check.
+
+What is built:
+- *The record.* `scripts/generate-assurance.py` writes `assurance.cdx.json` (CycloneDX 1.7, schema-valid) and `assurance-report.md` into the bundle. It holds:
+  - the hardware (Pico 2 W, RP2350, TROPIC01) and the three firmware images, each named by its source's git tree hash;
+  - a requirement for every VERIFICATION_MATRIX row, every internal audit finding (SA-*) and six hardware properties;
+  - claims, and evidence carrying a status, whether this run executed it, the commit, the command, the exit code, the log and the log's SHA-256.
+- *Statuses.* pass, fail, skipped, incomplete, not-run and recorded (an earlier observation the run did not repeat). Every hardware property is not-run until a bench run records it.
+- *Board logs.* A board log decides a named test only if it names the commit under assessment; one from another commit is refused (`ci/test_generate_assurance.py`, with a mutation control).
+- *Where it runs.* CI's SBOM job writes the record with every check skipped. The release job installs Lean and executes the checks.
+- *Linking.* The consolidated SBOM now carries a serial number, which the record links.
+
 **The guided tour shows every mechanism, offline included (owner, 2026-10-31).** "You shouldn't need to actually do any of the transfers for it to show you how to do them all. By the way, that includes how to do offline transactions. It should show the mechanisms." This supersedes the offline half of the 2026-10-01 ruling ("Offline sending and Bitcoin stay out of the tour"); Bitcoin stays out.
 - *What practice carries out.* Practice mode now carries out what the tour walks through, on the practice wallet:
   - creating a token;

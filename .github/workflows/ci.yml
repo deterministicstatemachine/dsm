@@ -924,9 +924,11 @@ jobs:
   #
   # `--skip-validation` is set: the `formal-validation` job runs
   # `dsm_vertical_validation tla-check` end-to-end on a manual run, and the
-  # SBOM does not repeat it. Tag-release SBOM (with validation
-  # evidence + GitHub Release attachment) is handled separately by the
-  # release workflow.
+  # SBOM does not repeat it. The bundle's security-assurance record
+  # (scripts/generate-assurance.py) is written here too, every check it would
+  # execute recorded as skipped. Tag-release SBOM (with validation evidence,
+  # the assurance record's executed checks, and GitHub Release attachment) is
+  # handled separately by the release workflow.
   #
   # No untrusted GitHub event inputs are used by any `run:` step below.
   # --------------------------------------------------------------------------

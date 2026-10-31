@@ -9,13 +9,17 @@ REPORT_ROOT="${PROJECT_ROOT}/reports"
 
 usage() {
     cat <<'EOF'
-Usage: scripts/generate-sbom.sh [--run-id <id>] [--skip-validation]
+Usage: scripts/generate-sbom.sh [--run-id <id>] [--skip-validation] [--board-log <cargo board log>]
 
 Generates a usable DSM SBOM bundle:
 - Rust SBOMs from cargo-cyclonedx
 - lockfile-resolved Node inventories where package-lock.json exists
 - manifest snapshot inventories for the root npm workspace and Android Gradle files
 - validation evidence from `cargo run -p dsm_vertical_validation -- tla-check`
+- the security-assurance record (`scripts/generate-assurance.py`): a CycloneDX 1.7
+  document with the offline appliance's hardware and firmware, every gated
+  requirement, every internal audit finding, and the evidence and status of each;
+  `--board-log` decides each named test from the cargo board of this commit
 EOF
 }
 
@@ -44,6 +48,7 @@ relative_path() {
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 SKIP_VALIDATION=0
+BOARD_LOG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -58,6 +63,14 @@ while [[ $# -gt 0 ]]; do
         --skip-validation)
             SKIP_VALIDATION=1
             shift
+            ;;
+        --board-log)
+            [[ $# -ge 2 ]] || {
+                usage >&2
+                exit 2
+            }
+            BOARD_LOG="$2"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -114,6 +127,8 @@ ANDROID_DEPENDENCIES_TSV="${TMP_DIR}/android-dependencies.tsv"
 CONSOLIDATED_SBOM_PATH="${RUN_DIR}/dsm-consolidated.cdx.json"
 VALIDATION_LOG_PATH="${LOG_DIR}/tla-check.log"
 VALIDATION_EVIDENCE_PATH="${RUN_DIR}/validation-evidence.json"
+ASSURANCE_DOCUMENT_PATH="${RUN_DIR}/assurance.cdx.json"
+ASSURANCE_REPORT_PATH="${RUN_DIR}/assurance-report.md"
 METADATA_PATH="${RUN_DIR}/metadata.json"
 
 generate_rust_sboms() {
@@ -511,7 +526,11 @@ generate_android_manifest_sbom() {
 
 generate_consolidated_sbom() {
     log "Writing consolidated SBOM"
+    local serial
+    # One serial per run of one commit, so the assurance record links this SBOM by it.
+    serial="$(python3 -c 'import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, "dsm-sbom:" + sys.argv[1] + ":" + sys.argv[2]))' "${GIT_COMMIT}" "${RUN_ID}")"
     jq -s \
+        --arg serial "urn:uuid:${serial}" \
         --arg timestamp "${GENERATED_AT}" \
         --arg commit "${GIT_COMMIT}" \
         --arg branch "${GIT_BRANCH}" \
@@ -522,6 +541,7 @@ generate_consolidated_sbom() {
             {
                 bomFormat: "CycloneDX",
                 specVersion: "1.5",
+                serialNumber: $serial,
                 version: 1,
                 metadata: {
                     timestamp: $timestamp,
@@ -600,6 +620,27 @@ generate_validation_evidence() {
     return "${validation_exit_code}"
 }
 
+# The security-assurance record beside the SBOM: it reads the TLA result the
+# validation step wrote, executes the other checks unless validation is skipped,
+# and links the consolidated SBOM by its serial number.
+generate_assurance() {
+    local assurance_args
+    assurance_args=(
+        --run-dir "${RUN_DIR}"
+        --generated-at "${GENERATED_AT}"
+        --sbom "${CONSOLIDATED_SBOM_PATH}"
+        --tla-evidence "${VALIDATION_EVIDENCE_PATH}"
+    )
+    if [[ "${SKIP_VALIDATION}" -eq 1 ]]; then
+        assurance_args+=(--skip-execution)
+    fi
+    if [[ -n "${BOARD_LOG}" ]]; then
+        assurance_args+=(--board-log "${BOARD_LOG}")
+    fi
+    log "Recording security assurance"
+    python3 "${SCRIPT_DIR}/generate-assurance.py" "${assurance_args[@]}"
+}
+
 generate_metadata() {
     local rust_workspace_members rust_components frontend_components mcp_components workspace_manifest_components android_components total_components mcp_lockfile_rel
     rust_workspace_members="$(jq '.workspace_members | length' "${RUST_METADATA_PATH}")"
@@ -628,6 +669,8 @@ generate_metadata() {
         --arg android_dir "$(relative_path "${ANDROID_DIR}")" \
         --arg validation_evidence "$(relative_path "${VALIDATION_EVIDENCE_PATH}")" \
         --arg validation_log "$(relative_path "${VALIDATION_LOG_PATH}")" \
+        --arg assurance_document "$(relative_path "${ASSURANCE_DOCUMENT_PATH}")" \
+        --arg assurance_report "$(relative_path "${ASSURANCE_REPORT_PATH}")" \
         --arg rust_metadata "$(relative_path "${RUST_METADATA_PATH}")" \
         --arg frontend_lockfile "$(relative_path "${FRONTEND_LOCKFILE}")" \
         --arg mcp_lockfile "${mcp_lockfile_rel}" \
@@ -657,7 +700,9 @@ generate_metadata() {
                 node_dir: $node_dir,
                 android_dir: $android_dir,
                 validation_evidence: $validation_evidence,
-                validation_log: $validation_log
+                validation_log: $validation_log,
+                assurance_document: $assurance_document,
+                assurance_report: $assurance_report
             },
             inputs: {
                 rust_workspace_members: $rust_workspace_members,
@@ -705,6 +750,7 @@ main() {
     else
         validation_exit_code=$?
     fi
+    generate_assurance
     generate_metadata
 
     ln -sfn "${RUN_ID}" "${SBOM_ROOT}/latest"
@@ -714,6 +760,7 @@ main() {
     log "SBOM bundle ready at $(relative_path "${RUN_DIR}")"
     log "Consolidated SBOM: $(relative_path "${CONSOLIDATED_SBOM_PATH}")"
     log "Validation evidence: $(relative_path "${VALIDATION_EVIDENCE_PATH}")"
+    log "Security assurance: $(relative_path "${ASSURANCE_DOCUMENT_PATH}"), $(relative_path "${ASSURANCE_REPORT_PATH}")"
 
     return "${validation_exit_code}"
 }

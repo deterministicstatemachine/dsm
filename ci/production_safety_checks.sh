@@ -80,6 +80,10 @@ python3 ci/conformance_evidence.py
 # The gate's Jest index is read from the files' structure, and a frontend test
 # name that does not resolve, or that a log does not show passing, fails it.
 python3 ci/test_conformance_evidence.py
+# The security-assurance record states only what was executed for the commit
+# it names: a board log of another commit is refused, and nothing it did not
+# execute is reported passed.
+python3 ci/test_generate_assurance.py
 
 # Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
 bash ci/sofi_no_default_evidence.sh
