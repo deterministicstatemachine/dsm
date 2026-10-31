@@ -6682,7 +6682,12 @@ The owner moved the work to the hardware stage on 2026-10-31 ("move on back to t
   - The phone does not yet read `NOT_PROVISIONED` as unprovisioned.
   - The passthrough path is not yet removed.
 
-*Found while generating a local SBOM (2026-10-31).* The assurance record's own TLA+ check ran all 101 configurations and failed one: `DSM/crossing-settles-reachable` (`tla/DSM_CrossingSettles.cfg`) must find `NoCrossingSettles` violated, and TLC explored 1,691,629 states to depth 13 without finding it. The invariant is vacuous in that configuration. `be8d7c5e3` (2026-10-29) removed `RecvTransfer`'s `m.pp = v.chain`, after which a crossing transfer applied over the tip a device holds settles without passing through a join, so no settled tip lies in `joins`. CI's Formal Validation job has been skipped or cancelled on every PR run since 2026-10-29, so no run caught it. The matrix row for the both-settle ruling names this configuration as formal evidence (VERIFICATION_MATRIX), which it does not provide until the model or its witness is corrected. Open.
+*Found while generating a local SBOM (2026-10-31), fixed.*
+- *What failed.* The assurance record's own TLA+ check ran all 101 configurations and failed one: `DSM/crossing-settles-reachable` (`tla/DSM_CrossingSettles.cfg`), which must find `NoCrossingSettles` violated, reported no violation.
+- *The cause was the runner, not the model.* `tools/vertical_validation` runs bounded configurations with TLC's `-dfid` search to a depth equal to `MaxStep`. TLC counts that depth in states, the initial state included, while `MaxStep` bounds actions. So for every step-bounded configuration the search stopped one action short, and the states the bound's last action reaches were never checked.
+- *The model was right.* Run directly, breadth-first, TLC finds the crossing witness at the original bound: thirteen actions, two crossing sends settled on one joined tip. An earlier version of this note blamed `be8d7c5e3`'s model change; that was wrong.
+- *The fix.* The runner now searches to `MaxStep + 1` (`dfid_depth_for_config`, test `a_step_bound_is_searched_through_its_last_action`), so every step-bounded configuration is checked through its last action.
+- *Why no run caught it.* CI's Formal Validation job had been skipped or cancelled on every PR run since 2026-10-29.
 
 A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to SA-179, recorded open and not yet confirmed one by one. The silicon properties HW-01 to HW-06 stay not-run in the assurance record until a bench run records them.
 

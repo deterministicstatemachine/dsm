@@ -1602,6 +1602,9 @@ mod registry_tests {
     }
 }
 
+/// The depth TLC's `-dfid` search runs to. TLC counts that depth in states, the initial state
+/// included, and `MaxStep` bounds actions: a search to `MaxStep` would stop one action short and
+/// never check the states the bound's last action reaches.
 fn dfid_depth_for_config(config_text: &str) -> u64 {
     let Some(re) = Regex::new(r"(?m)^\s*(MaxStep|MaxChain)\s*=\s*(\d+)\b").ok() else {
         return 10;
@@ -1615,7 +1618,11 @@ fn dfid_depth_for_config(config_text: &str) -> u64 {
         let Some(value) = caps.get(2).and_then(|m| m.as_str().parse::<u64>().ok()) else {
             continue;
         };
-        let candidate = if name == "MaxChain" { value * 4 } else { value };
+        let candidate = if name == "MaxChain" {
+            value * 4
+        } else {
+            value + 1
+        };
         depth = depth.max(candidate);
     }
     depth
@@ -1788,6 +1795,18 @@ fn parse_number_with_commas(s: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_step_bound_is_searched_through_its_last_action() -> std::io::Result<()> {
+        // DSM_CrossingSettles.cfg's witness takes all thirteen actions it allows: fourteen states.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tla/DSM_CrossingSettles.cfg");
+        let crossing = std::fs::read_to_string(&path)?;
+        assert!(crossing.contains("MaxStep = 13"));
+        assert_eq!(super::dfid_depth_for_config(&crossing), 14);
+        assert_eq!(super::dfid_depth_for_config("MaxStep = 3"), 10);
+        Ok(())
+    }
+
     use super::*;
 
     #[test]
