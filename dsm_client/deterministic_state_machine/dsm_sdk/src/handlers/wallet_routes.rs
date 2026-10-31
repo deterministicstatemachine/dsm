@@ -29,7 +29,9 @@ pub fn token_decimals(token_id: &str) -> Result<u32, String> {
         "ERA" => dsm::core::token::era_policy::era_policy()
             .map(|era| era.decimals)
             .map_err(|e| e.to_string()),
-        "DBTC" | "BTC" => Ok(8),
+        // dBTC is built in: one unit is one satoshi. A token a device creates may carry no
+        // built-in ticker, and "BTC" is not one, so it is read from the registry like any other.
+        "DBTC" => Ok(8),
         _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
             .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
             .map(|row| row.decimals)
@@ -1946,6 +1948,28 @@ mod tests {
     /// A created token's facts are its committed policy's, read from bytes
     /// verified against the anchor: the supply in display units, what holders
     /// may do, the icon.
+    /// A token a device created under the ticker BTC is scaled by its own registered decimals,
+    /// never by the built-in dBTC's.
+    #[test]
+    #[serial_test::serial]
+    fn a_created_token_named_btc_takes_its_own_decimals() {
+        fresh_db();
+        crate::storage::client_db::token_registry::insert_token(
+            &crate::storage::client_db::token_registry::TokenRegistryRow {
+                token_id: "token-BTC".to_string(),
+                policy_commit: [0x42; 32],
+                ticker: "BTC".to_string(),
+                alias: "BTC token".to_string(),
+                decimals: 2,
+                genesis_supply: 1_000,
+                creator_device_id: [0x22; 32],
+            },
+        )
+        .expect("the token is registered");
+        assert_eq!(token_decimals("BTC"), Ok(2));
+        assert_eq!(token_decimals("dBTC"), Ok(8));
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_registered_token_reports_its_policy_supply_and_permissions() {
