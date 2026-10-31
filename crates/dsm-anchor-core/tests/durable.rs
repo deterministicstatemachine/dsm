@@ -20,7 +20,7 @@ use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OwnedTransition, Transition,
 };
-use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
 const H0: u32 = 64;
@@ -182,23 +182,34 @@ impl ActiveStore for RMemory {
 struct Partition;
 
 impl PartitionSig for Partition {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        let kp = ok(
-            dsm_sphincs::generate_keypair_from_seed(PARTITION, seed),
-            "the partition keypair",
-        );
-        (kp.secret_key.clone(), kp.public_key.clone())
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(PARTITION, seed).map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
     }
 
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-        ok(
-            dsm_sphincs::sign(PARTITION, sk, digest),
-            "the partition signs",
-        )
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
     }
 
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
+    }
+}
+
+/// The SPHINCS+ failure, as the partition reports it.
+fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+    match e {
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+            PartitionError::SecretKey
+        }
+        dsm_sphincs::Error::Crypto(
+            dsm_sphincs::CryptoFailure::EmptySigningMessage
+            | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+        ) => PartitionError::Message,
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
+            PartitionError::SelfCheck
+        }
     }
 }
 
@@ -273,7 +284,10 @@ impl Anchor {
             H0,
             derive(&self.seed, "anchor id"),
             derive(&self.seed, "partition device id"),
-            self.chip_birth().birth::<Partition>(&self.owner()),
+            ok(
+                self.chip_birth().birth::<Partition>(&self.owner()),
+                "the anchor is born",
+            ),
         )
     }
 
@@ -711,4 +725,66 @@ fn a_provisioned_anchor_refuses_to_be_provisioned_again_over_the_wire() {
         Vec::<u8>::new(),
         "and discloses nothing"
     );
+}
+
+/// A partition whose keypair is born but which never signs.
+struct UnsigningPartition;
+
+impl PartitionSig for UnsigningPartition {
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        Partition::part_keygen(seed)
+    }
+
+    fn part_sign(_sk: &[u8], _digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        Err(PartitionError::SelfCheck)
+    }
+
+    fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        Partition::part_verify(pk, digest, sig)
+    }
+}
+
+/// No `σ^host` is put in place of one the partition could not make: the prepare is refused
+/// with the partition's own reason, over the wire with its own code, and nothing moves.
+#[test]
+fn a_partition_that_cannot_sign_prepares_nothing_and_says_so() {
+    let anchor = Anchor::new(0x2E);
+    let mut a = Appliance::<Chip, UnsigningPartition>::new(
+        anchor.chip(),
+        H0,
+        derive(&anchor.seed, "anchor id"),
+        derive(&anchor.seed, "partition device id"),
+        ok(
+            anchor
+                .chip_birth()
+                .birth::<UnsigningPartition>(&anchor.owner()),
+            "the anchor is born",
+        ),
+    );
+    let root = a.active.root;
+    let t = transition(root, a.active.anchor_counter);
+    assert_eq!(
+        a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER)
+            .err(),
+        Some(anchor_core::appliance::ApplianceError::Partition(
+            PartitionError::SelfCheck
+        ))
+    );
+    let frame = anchor_core::service::handle(
+        &mut a,
+        &encode_request(&pb::ApplianceRequest {
+            op: pb::Op::Prepare as i32,
+            transition: Some(t.to_pb()),
+            receiver_challenge: CHALLENGE.to_vec(),
+            sender_device_root_before: ROOT_BEFORE.to_vec(),
+            sender_device_root_after: ROOT_AFTER.to_vec(),
+            ..Default::default()
+        }),
+    );
+    let answer = ok(decode_response(&frame), "a response");
+    assert_eq!(answer.error, anchor_core::service::err::PARTITION);
+    assert_eq!(a.active.status, Status::Ready);
+    assert_eq!(a.active.root, root);
+    assert_eq!(a.active.anchor_counter, 0);
+    assert_eq!(anchor.chip_counter(), H0);
 }

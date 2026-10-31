@@ -294,7 +294,7 @@ mod tests {
     use super::*;
     use crate::hash::h;
     use crate::root_advance::OwnedTransition;
-    use crate::tropic::PartitionSig;
+    use crate::tropic::{PartitionError, PartitionSig};
     use alloc::vec::Vec;
 
     // --- deterministic mock signature schemes (host-only; no chip touched) ---
@@ -314,13 +314,13 @@ mod tests {
     /// sign/verify use `H("mock/host" ‖ pk ‖ M)`.
     struct MockHost;
     impl PartitionSig for MockHost {
-        fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+        fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
             let pk = h("mock/hostpk", &[seed]).to_vec();
-            (seed.to_vec(), pk)
+            Ok((seed.to_vec(), pk))
         }
-        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
+        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
             let pk = h("mock/hostpk", &[sk]).to_vec();
-            h("mock/host", &[&pk, digest]).to_vec()
+            Ok(host_sign(&pk, digest))
         }
         fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
             sig == h("mock/host", &[pk, digest])

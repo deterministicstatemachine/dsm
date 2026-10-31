@@ -357,7 +357,7 @@ pub(crate) mod fixture {
     use anchor_core::appliance::Appliance;
     use anchor_core::enrollment::{birth, BirthInputs};
     use anchor_core::root_advance::{anchor_root_advance, OwnedTransition, Transition};
-    use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
+    use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::{transition_digest, ChainAnchor, SpendHop};
@@ -391,21 +391,21 @@ pub(crate) mod fixture {
     pub(crate) struct Partition;
 
     impl PartitionSig for Partition {
-        fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+        fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
             let kp = crate::crypto::sphincs::generate_keypair_from_seed(
                 crate::crypto::sphincs::SphincsVariant::SPX128f,
                 seed,
             )
             .expect("the partition keypair");
-            (kp.secret_key.clone(), kp.public_key.clone())
+            Ok((kp.secret_key.clone(), kp.public_key.clone()))
         }
-        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-            crate::crypto::sphincs::sign(
+        fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+            Ok(crate::crypto::sphincs::sign(
                 crate::crypto::sphincs::SphincsVariant::SPX128f,
                 sk,
                 digest,
             )
-            .expect("the partition signs")
+            .expect("the partition signs"))
         }
         fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
             matches!(
@@ -518,7 +518,8 @@ pub(crate) mod fixture {
                 partition_key_seed: &derive(seed, "partition key seed"),
                 enrolled_counter: H0,
                 genesis_root: &genesis,
-            });
+            })
+            .expect("the anchor is born");
             let pin = ChainAnchor {
                 bundle: born.bundle,
                 anchor_id: derive(seed, "anchor id"),

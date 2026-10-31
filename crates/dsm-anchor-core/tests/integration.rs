@@ -15,7 +15,7 @@ use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OfflineRelease, OwnedTransition,
 };
 use anchor_core::service::{err, handle};
-use anchor_core::tropic::{ChipSig, PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{ChipSig, PartitionError, PartitionSig, Tropic, TropicError};
 
 const H0: u32 = 100;
 const ANCHOR: [u8; 32] = [0xAA; 32];
@@ -78,16 +78,16 @@ impl ChipSig for MockChip {
 /// Deterministic mock partition (`σ^host`) scheme: `sk = pk = seed`; signature = keyed hash.
 struct MockPart;
 impl PartitionSig for MockPart {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        (seed.to_vec(), seed.to_vec())
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        Ok((seed.to_vec(), seed.to_vec()))
     }
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         let mut k = [0u8; 32];
         k.copy_from_slice(&sk[..32]);
-        anchor_core::hash::kdf(&k, "test/partsign", &[digest]).to_vec()
+        Ok(anchor_core::hash::kdf(&k, "test/partsign", &[digest]).to_vec())
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-        Self::part_sign(pk, digest) == sig
+        Self::part_sign(pk, digest) == Ok(sig.to_vec())
     }
 }
 
@@ -160,7 +160,8 @@ fn fixture(h: u32) -> Fixture {
         partition_key_seed: &[0x04; 32],
         enrolled_counter: H0,
         genesis_root: &GENESIS_ROOT,
-    });
+    })
+    .expect("the anchor is born");
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;

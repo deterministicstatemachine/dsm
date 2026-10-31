@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use crate::domain;
 use crate::hash::h;
-use crate::tropic::PartitionSig;
+use crate::tropic::{PartitionError, PartitionSig};
 use crate::util::{u32_le, zeroize};
 
 /// Fixed-width public commitment `commit(x) = H("DSM/anchor/commit/v2" ‖ x)` to a
@@ -97,13 +97,13 @@ pub fn anchor_bundle(
 
 /// Run the birth ceremony (§7). Generates the partition keypair, forms the bundle and the
 /// genesis frontier, and **destroys the birth fuse preimage**.
-pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Birth {
+pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Result<Birth, PartitionError> {
     // Partition keypair (pre-bundle, so its pubkey can be bound into B).
     let part_seed = h(
         domain::PARTITION_KEY_SEED_V1,
         &[inp.partition_key_seed, inp.partition_device_id],
     );
-    let (partition_sk, partition_pk) = P::part_keygen(&part_seed);
+    let (partition_sk, partition_pk) = P::part_keygen(&part_seed)?;
 
     // One-way birth fuse and its public commitment (binds fresh device entropy into B).
     let mut s_birth = h(
@@ -134,14 +134,14 @@ pub fn birth<P: PartitionSig>(inp: &BirthInputs) -> Birth {
         &[&bundle, inp.genesis_root],
     );
 
-    Birth {
+    Ok(Birth {
         bundle,
         genesis_frontier,
         birth_commitment,
         partition_pk,
         partition_sk,
         chip_pk: inp.chip_pk.to_vec(),
-    }
+    })
 }
 
 /// What the host supplies when it provisions an anchor for its device: the identity the anchor's
@@ -177,7 +177,10 @@ pub struct ChipBirth {
 
 impl ChipBirth {
     /// The birth ceremony for the device `provisioning` names.
-    pub fn birth<P: PartitionSig>(&self, provisioning: &Provisioning) -> Birth {
+    pub fn birth<P: PartitionSig>(
+        &self,
+        provisioning: &Provisioning,
+    ) -> Result<Birth, PartitionError> {
         birth::<P>(&BirthInputs {
             partition_trng: &self.partition_trng,
             chip_birth_witness: &self.chip_birth_witness,

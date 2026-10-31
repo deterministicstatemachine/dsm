@@ -58,7 +58,7 @@ use alloc::vec::Vec;
 use anchor_core::appliance::{Appliance, RecoverOutcome};
 use anchor_core::enrollment::{birth, Birth, BirthInputs};
 use anchor_core::service;
-use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use dsm_sphincs::SphincsVariant;
 
 use usb_device::class_prelude::UsbBusAllocator;
@@ -199,17 +199,41 @@ fn write_all(serial: &mut Serial, usb_dev: &mut UsbDev, data: &[u8]) {
 /// BLAKE3-SPHINCS+ SPX128f as the partition (`σ^host`) signature scheme (PartitionSig).
 struct SphincsPart;
 impl PartitionSig for SphincsPart {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed) {
-            Ok(kp) => (kp.secret_key.clone(), kp.public_key.clone()),
-            Err(_) => (Vec::new(), Vec::new()),
-        }
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
     }
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-        dsm_sphincs::sign(PART_VARIANT, sk, digest).unwrap_or_default()
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(PART_VARIANT, sk, digest).map_err(partition_error)
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+    }
+}
+
+/// The partition's failure, as the bring-up log reports it.
+fn partition_reason(e: PartitionError) -> &'static str {
+    match e {
+        PartitionError::SecretKey => "the partition refused its secret key",
+        PartitionError::Message => "the partition refused the message",
+        PartitionError::SelfCheck => "the partition's signature failed its own check",
+    }
+}
+
+/// The SPHINCS+ failure, as the partition reports it.
+fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+    match e {
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+            PartitionError::SecretKey
+        }
+        dsm_sphincs::Error::Crypto(
+            dsm_sphincs::CryptoFailure::EmptySigningMessage
+            | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+        ) => PartitionError::Message,
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
+            PartitionError::SelfCheck
+        }
     }
 }
 
@@ -346,7 +370,8 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
         partition_key_seed: &ident.partition_key_seed,
         enrolled_counter: enroll_h0,
         genesis_root: &GENESIS,
-    });
+    })
+    .map_err(partition_reason)?;
     // The appliance derives u = H0 − live. Production: H0 = ENROLL_H0 (virgin chip → u = 0).
     // bench-adopt: H0 = live (used chip → u = 0). Real FROM/TO reads apply from here.
     Ok((enroll_h0, b))

@@ -20,11 +20,11 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use anchor_core::appliance::{Appliance, BootRecoveryRefusal};
-use anchor_core::enrollment::{birth, Birth, BirthInputs};
+use anchor_core::enrollment::{birth, BirthInputs};
 use anchor_core::hash::h;
 use anchor_core::proto::{decode_request, encode_response, pb};
 use anchor_core::service::dispatch;
-use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use dsm_sphincs::SphincsVariant;
 
 use embedded_hal::digital::OutputPin;
@@ -62,17 +62,32 @@ static mut MONITOR_APP: Option<Appliance<Box<dyn Tropic>, SphincsPart>> = None;
 /// as the pico anchor, so an anchor born here verifies on the same receiver.
 pub struct SphincsPart;
 impl PartitionSig for SphincsPart {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed) {
-            Ok(kp) => (kp.secret_key.clone(), kp.public_key.clone()),
-            Err(_) => (Vec::new(), Vec::new()),
-        }
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
     }
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-        dsm_sphincs::sign(PART_VARIANT, sk, digest).unwrap_or_default()
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(PART_VARIANT, sk, digest).map_err(partition_error)
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
         dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+    }
+}
+
+/// The SPHINCS+ failure, as the partition reports it.
+fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+    match e {
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+            PartitionError::SecretKey
+        }
+        dsm_sphincs::Error::Crypto(
+            dsm_sphincs::CryptoFailure::EmptySigningMessage
+            | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+        ) => PartitionError::Message,
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
+            PartitionError::SelfCheck
+        }
     }
 }
 
@@ -145,9 +160,9 @@ fn ensure_chip_key<SPI: SpiDevice, CS: OutputPin>(
     Ok(res.pub_key().to_vec())
 }
 
-/// Enroll: read (and, on a VIRGIN chip only, initialize) the live counter, ensure the resident chip
-/// key, run the one-way birth fuse to the bundle `B` + genesis frontier `h_0`. Fresh-birth profile:
-/// `H0 = ENROLL_H0`, `u = H0 − live`.
+/// Enroll: read (and, on a VIRGIN chip only, initialize) the live counter and ensure the resident
+/// chip key, returning `H0` and `pk_chip` for the birth fuse. Fresh-birth profile: `H0 = ENROLL_H0`,
+/// `u = H0 − live`.
 ///
 /// Counter handling — get, and ONLY on the specific `CounterInvalid` status (0x14 = never
 /// initialized; SWD-confirmed on the fresh chip) `mcounter_init(Index0, ENROLL_H0)` then re-get. The
@@ -157,9 +172,7 @@ fn ensure_chip_key<SPI: SpiDevice, CS: OutputPin>(
 /// at `u = 0` and identity is deterministic over `H0`.
 fn enroll<SPI: SpiDevice, CS: OutputPin>(
     sess: &mut Tropic01<SPI, CS, ActiveSession>,
-    ident: &ChipIdentity,
-    policy_hash: &[u8; 32],
-) -> Result<(u32, Birth), ()> {
+) -> Result<(u32, Vec<u8>), ()> {
     let live = match sess.mcounter_get(COUNTER) {
         Ok(v) => v,
         // Virgin chip: Index0 was never initialized. Initialize ONCE to MCOUNTER_VALUE_MAX, then
@@ -174,21 +187,7 @@ fn enroll<SPI: SpiDevice, CS: OutputPin>(
         return Err(()); // counter above enrollment H0 (unprovisioned/mis-provisioned chip)
     }
     let chip_pk = ensure_chip_key(sess)?;
-    let b = birth::<SphincsPart>(&BirthInputs {
-        partition_trng: &ident.birth_entropy,
-        chip_birth_witness: &ident.birth_witness,
-        host_nonce: &ident.birth_host_nonce,
-        device_id: &ident.device_id,
-        policy_hash,
-        partition_device_id: &ident.partition_device_id,
-        anchor_id: &ident.anchor_id,
-        chip_pk: &chip_pk,
-        online_id_pk: &ident.online_id_label,
-        partition_key_seed: &ident.partition_key_seed,
-        enrolled_counter: ENROLL_H0,
-        genesis_root: &GENESIS,
-    });
-    Ok((ENROLL_H0, b))
+    Ok((ENROLL_H0, chip_pk))
 }
 
 /// The TROPIC01 driver error on the monitor's bus: rp235x SPI and GPIO are infallible, and the
@@ -211,6 +210,7 @@ pub enum InitStage {
     Session = 6,
     Enroll = 7,
     Recovery = 8,
+    Partition = 9,
 }
 
 /// Why [`init`] refused to install the appliance: the failing stage and the cause it reported.
@@ -225,6 +225,8 @@ pub enum InitFailure {
     Enroll(()),
     /// §26 boot recovery refused ([`Appliance::recover_at_boot`]).
     Recovery(BootRecoveryRefusal),
+    /// The partition could not generate its keypair at birth.
+    Partition(PartitionError),
 }
 
 impl InitFailure {
@@ -237,6 +239,7 @@ impl InitFailure {
             Self::Session(_) => InitStage::Session,
             Self::Enroll(_) => InitStage::Enroll,
             Self::Recovery(_) => InitStage::Recovery,
+            Self::Partition(_) => InitStage::Partition,
         }
     }
 }
@@ -252,6 +255,7 @@ impl core::fmt::Debug for InitFailure {
             Self::CertStoreKey(cause) => write!(f, "{stage:?}: {cause:?}"),
             Self::Enroll(cause) => write!(f, "{stage:?}: {cause:?}"),
             Self::Recovery(cause) => write!(f, "{stage:?}: {cause:?}"),
+            Self::Partition(cause) => write!(f, "{stage:?}: {cause:?}"),
         }
     }
 }
@@ -348,9 +352,25 @@ pub unsafe fn init() -> Result<(), InitFailure> {
         Err((_, cause)) => return Err(InitFailure::Session(cause)),
     };
 
-    // Phase 4: enroll (resident chip key + birth fuse -> bundle B, frontier h_0).
+    // Phase 4: enroll (live counter + resident chip key), then the birth fuse -> bundle B,
+    // frontier h_0.
     let policy_hash = h(POLICY_ID_DOMAIN, &[&[0u8][..]]);
-    let (h0, b) = enroll(&mut sess, &ident, &policy_hash).map_err(InitFailure::Enroll)?;
+    let (h0, chip_pk) = enroll(&mut sess).map_err(InitFailure::Enroll)?;
+    let b = birth::<SphincsPart>(&BirthInputs {
+        partition_trng: &ident.birth_entropy,
+        chip_birth_witness: &ident.birth_witness,
+        host_nonce: &ident.birth_host_nonce,
+        device_id: &ident.device_id,
+        policy_hash: &policy_hash,
+        partition_device_id: &ident.partition_device_id,
+        anchor_id: &ident.anchor_id,
+        chip_pk: &chip_pk,
+        online_id_pk: &ident.online_id_label,
+        partition_key_seed: &ident.partition_key_seed,
+        enrolled_counter: h0,
+        genesis_root: &GENESIS,
+    })
+    .map_err(InitFailure::Partition)?;
 
     // Erase the concrete session behind `Box<dyn Tropic>` and construct the appliance.
     let chip: Box<dyn Tropic> = Box::new(RealChip { sess });

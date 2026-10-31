@@ -224,7 +224,8 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.enrolled_counter,
             chip.anchor_id,
             chip.partition_device_id,
-            chip.birth::<P>(&provisioning),
+            chip.birth::<P>(&provisioning)
+                .map_err(ApplianceError::Partition)?,
         );
         let written = encode_anchor(&provisioning, &app.active);
         store.write(&written).map_err(DurableError::Store)?;
@@ -250,7 +251,8 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> DurableAppliance<T, P, S> {
             chip.enrolled_counter,
             chip.anchor_id,
             chip.partition_device_id,
-            chip.birth::<P>(&provisioning),
+            chip.birth::<P>(&provisioning)
+                .map_err(ApplianceError::Partition)?,
         );
         app.active = active;
         Ok(Self {

@@ -22,6 +22,7 @@ pub mod err {
     pub const COUNTER_EXHAUSTED: u32 = 6;
     pub const NOT_COMMITTED: u32 = 7;
     pub const TROPIC: u32 = 8;
+    pub const PARTITION: u32 = 9;
     pub const BAD_PROTO: u32 = 100;
     pub const MISSING_FIELD: u32 = 101;
     pub const BAD_OP: u32 = 102;
@@ -45,6 +46,7 @@ fn appliance_code(e: ApplianceError) -> u32 {
         ApplianceError::CounterExhausted => err::COUNTER_EXHAUSTED,
         ApplianceError::NotCommitted => err::NOT_COMMITTED,
         ApplianceError::Tropic(_) => err::TROPIC,
+        ApplianceError::Partition(_) => err::PARTITION,
     }
 }
 

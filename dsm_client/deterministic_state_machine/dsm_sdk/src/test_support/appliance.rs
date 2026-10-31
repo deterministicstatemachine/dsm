@@ -27,7 +27,7 @@ use anchor_core::appliance::RecoverOutcome;
 use anchor_core::durable::{ActiveStore, DurableAppliance, DurableBootRefusal, StoreError};
 use anchor_core::enrollment::{ChipBirth, Provisioning};
 use anchor_core::root_advance::Transition;
-use anchor_core::tropic::{PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use ed25519_dalek::{Signer, SigningKey};
 
 use crate::anchor::{AnchorAppliance, AnchorPin, ApplianceStatus};
@@ -156,16 +156,16 @@ impl ActiveStore for SoftwareRMemory {
 pub struct SphincsPartition;
 
 impl PartitionSig for SphincsPartition {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
         match dsm::crypto::sphincs::generate_keypair_from_seed(PARTITION_VARIANT, seed) {
-            Ok(kp) => (kp.secret_key.clone(), kp.public_key.clone()),
+            Ok(kp) => Ok((kp.secret_key.clone(), kp.public_key.clone())),
             Err(e) => panic!("the partition keypair from its seed: {e}"),
         }
     }
 
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
         match dsm::crypto::sphincs::sign(PARTITION_VARIANT, sk, digest) {
-            Ok(sig) => sig,
+            Ok(sig) => Ok(sig),
             Err(e) => panic!("the partition signs: {e}"),
         }
     }

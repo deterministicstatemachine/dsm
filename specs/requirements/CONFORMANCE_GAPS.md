@@ -2697,7 +2697,7 @@ Mutation control (item 16): the gate run on the previous manifest fails, "activi
 - the ChaCha20 seed expansion;
 - whether to retain the instantiation or migrate to standard SLH-DSA before mainnet.
 
-Outside this round: the anchor firmware's signing call sites turn an error into an empty signature (`unwrap_or_default`). Separately, `crates/dsm-anchor-hw-verifier/Cargo.lock` was already stale against `dsm_sdk` before this change. Only this change's own lines were added to it.
+Outside this round: the anchor firmware's signing call sites turn an error into an empty signature (`unwrap_or_default`); fixed 2026-10-31 as SA-161 (§6.122). Separately, `crates/dsm-anchor-hw-verifier/Cargo.lock` was already stale against `dsm_sdk` before this change. Only this change's own lines were added to it.
 
 ### 6.71 A transfer's memo, ticker and nonce are in no public object (`security/minimum-disclosure`, pre-audit item 4, 2026-10-02)
 
@@ -3489,6 +3489,11 @@ Found while fixing §6.87.
 | SA-158 | `dsm_client/frontend/src/components/screens/sofi/EscrowTab.tsx` · `EscrowTab`, `onLock` | Escrow lock form picks payee and deciders by alias alone, with no fingerprint, namesake warning or review. | confirmed (2 of 2) | Fixed (`fbf9e49c`) |
 | SA-159 | `dsm_client/frontend/src/domain/displayName.ts` · `visibleText`, `nameKey` | SA-56 name defense bypassable: visibleText/nameKey ignore invisible Lo/default-ignorable fillers and cross-script confusables, and some name surfaces skip visibleText. | confirmed (2 of 2) | Fixed (`029652cc`) |
 | SA-160 | `dsm_sdk/build.rs` · `main` | dsm_sdk build.rs release guard checks CARGO_FEATURE_test, which Cargo never sets, so it never fires. | confirmed (1 of 1) | Fixed (`558af6d3`) |
+| SA-161 | `crates/dsm-anchor-secure-monitor/src/anchor_glue.rs`, `crates/dsm-anchor-pico/src/main.rs` · `SphincsPart::part_sign`, `part_keygen` | The anchor firmware turned a SPHINCS+ failure into an empty σ^host (`unwrap_or_default()`) and an empty partition keypair, and prepared a certificate carrying them. | confirmed in source (2026-10-31) | Fixed (§6.122) |
+| SA-162 | `crates/dsm-anchor-secure-monitor/src/anchor_glue.rs` · `init`, `ChipIdentity::online_id_label` | The serving firmware's bundle `B` binds a label derived from the chip in place of the owner's online key `pk_on`, so no anchor it births is bound to its owner's identity. | confirmed in source (2026-10-31) | Open |
+| SA-163 | `crates/dsm-anchor-secure-monitor/src/anchor_glue.rs` · `init` | The serving firmware re-enrolls from `h_0` on every boot and never reads a durable `Active`; anchor-core's `DurableAppliance` (R-memory record, §26 recovery from it) is not wired into it. | confirmed in source (2026-10-31) | Open |
+| SA-164 | `crates/dsm-anchor-core/src/service.rs` · `dispatch`; `crates/dsm-anchor-hw-verifier/src/provisioner.rs` | The phone's provisioner (counter birth, the irreversible slot-0 and UAP steps) speaks only `OP_SPI_PASSTHROUGH`, which the serving firmware refuses as an unknown op, so provisioning cannot run against it. | confirmed in source (2026-10-31) | Open |
+| SA-165 | `crates/dsm-anchor-secure-monitor/src/anchor_glue.rs` · `init` | The serving firmware enrolls under `policy_hash = H(POLICY_ID_DOMAIN ‖ 0x00)`, a constant, in place of the offline-bearer policy the SDK pins (`canonical_offline_bearer_policy`). | confirmed in source (2026-10-31) | Open |
 
 **The changes.** Every fix below has a test that performs the attack and goes red with the fix removed; each mutation was applied in place on a committed tree, its named test run on the release build, and the file restored byte for byte (`git diff` empty afterwards).
 
@@ -6636,6 +6641,24 @@ What is built:
 
 **Verified (2026-10-29, second pass).** The whole `bluetooth` module of the SDK 163/0 on Postgres (release), after the two handler fixes; the three offline correspondences and the two regression tests 5/0, then each in its own targeted run; the touched receipt, receipt-verification and offline modules of Core and the SDK modules whose receipts changed (receipts, b0x, admission, recipient receipt, recipient dispatch, sender admission) 56/0 and 168/0, with Core's two wire tests corrected and 28/0 again; Core's `wire_objects_independent` 4/0 and `economic_peer_evidence` 8/0; TLC on the updated `DSM_OfflineFinality` with no error; lint and the real-code guard clean. **Verified (first pass).** The four new correspondences 4/0 in the mutation build's control (release), and each alone in its own targeted run (the attempt-cell one three times in a row, since its fixture keys are fresh per process); `dsm` 1943/0 (23 binaries) after the refusal; `route_chain` 31/0 and `token_policy` 10/0 after the later tests; the SDK modules whose steps moved (receipts, settlement, the faucet test) 51/0; the offline end-to-end test and `balance_list_tests` 8/0 on Postgres; `money_waiting_tests` 2/0; `outcome_program_bounds` 3/0; `source_rules` 12/0; `wildstate-duel` 36/0; Core's bridge 3/0; the node gates `no_protocol_signing` 3/0 and `no_clock_reads` 3/0; the frontend's overview tests 5/0; the real-code guard clean.
 
+
+### 6.122 The hardware stage: the anchor firmware read against the appliance it serves, and the partition's failures reported (`fix/beta-requirements-completion`, 2026-10-31)
+
+The owner moved the work to the hardware stage on 2026-10-31 ("move on back to the hardware"). A read-only survey on 2026-10-26 had found four firmware defects and left them to be recorded when this stage started. Each was confirmed in source on 2026-10-31, in the serving image (the TrustZone secure monitor) as well as the Pico bring-up build, and is recorded as SA-161 to SA-164; a fifth seen on the way is SA-165.
+
+- *SA-161, fixed.* The partition's keygen and signing turned a SPHINCS+ failure into an empty keypair and an empty `σ^host`, and `prepare` signed a certificate carrying them. `PartitionSig::part_keygen` and `part_sign` now return the failure (`anchor_core::tropic::PartitionError`: the secret key refused, the message refused, or the signer's self-check failed). Each firmware maps the SPHINCS+ error into it case by case. The failure flows as follows:
+  - `birth` returns it.
+  - `prepare` refuses with `ApplianceError::Partition`, leaving the active state and the chip's counter as they were.
+  - The wire answers with its own code (`err::PARTITION`).
+  - The monitor reports its own init stage (`InitStage::Partition`), the birth now following enrollment in `init`.
+
+  Test: `anchor_core` `durable::a_partition_that_cannot_sign_prepares_nothing_and_says_so`, on the real SPHINCS+ partition. Mutation control: in a scratch worktree, a `DSM_MUTANT` switch hands back an empty `σ^host` on failure. The named test went red (the prepare succeeded), and the same tree without the switch passed. Both firmware images build for `thumbv8m.main-none-eabihf` (release, no warnings).
+- *SA-162, open.* The monitor's bundle binds `online_id_label`, a label derived from the chip, where `B` must bind `H(pk_on)` (anchor-core `Provisioning::online_id_pk`).
+- *SA-163, open.* The monitor builds a fresh `Appliance` from `h_0` on each boot. anchor-core's `DurableAppliance` already provisions once, writes its record before an operation returns, and runs §26 recovery from that record (`crates/dsm-anchor-core/tests/durable.rs`). The firmware does not use it.
+- *SA-164, open.* The phone's provisioner (`dsm-anchor-hw-verifier`, `dsm-android-anchor`: counter birth, slot-0, UAP) speaks only `OP_SPI_PASSTHROUGH`, which `service::dispatch` refuses as an unknown op. The monitor does initialize a virgin chip's counter itself in `enroll`.
+- *SA-165, open.* The monitor's `policy_hash` is `H(POLICY_ID_DOMAIN ‖ 0x00)`, a constant in place of the offline-bearer policy the SDK pins (`canonical_offline_bearer_policy`).
+
+How SA-162 to SA-165 close (one provisioning path for `pk_on`, the policy and the record's store; what serves before provisioning) is a design decision for the owner. Some of the TROPIC01 steps involved are irreversible and boot-latched. The silicon properties HW-01 to HW-06 stay not-run in the assurance record until a bench run records them.
 
 ## 7 Totals
 

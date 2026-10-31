@@ -24,7 +24,7 @@ use crate::root_advance::{
     anchor_root_advance, root_advance_message, transition_digest, Certificate, OfflineRelease,
     OwnedTransition, Transition,
 };
-use crate::tropic::{PartitionSig, Tropic, TropicError};
+use crate::tropic::{PartitionError, PartitionSig, Tropic, TropicError};
 use crate::util::{ct_eq_32, zeroize_vec};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,6 +51,8 @@ pub enum ApplianceError {
     /// A committed release is not yet present to emit/finalize.
     NotCommitted,
     Tropic(TropicError),
+    /// The partition could not sign `σ^host`; nothing is prepared.
+    Partition(PartitionError),
 }
 
 /// Prepared record (§12.2): the certificate carrying the appliance's two on-device identity
@@ -243,7 +245,7 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
         );
         // σ^chip on the die (key never leaves the chip) and σ^host from the partition.
         let sigma_chip = self.tropic.chip_sign(&m).map_err(ApplianceError::Tropic)?;
-        let sigma_host = P::part_sign(&self.partition_sk, &m);
+        let sigma_host = P::part_sign(&self.partition_sk, &m).map_err(ApplianceError::Partition)?;
 
         let cert = Certificate {
             anchor_bundle: self.bundle,

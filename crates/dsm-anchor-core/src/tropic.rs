@@ -67,15 +67,27 @@ pub trait ChipSig {
     fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool;
 }
 
+/// Why the partition could not generate its keypair or sign. No `σ^host` exists then, and none
+/// is put in its place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PartitionError {
+    /// The scheme refused the secret key it was given.
+    SecretKey,
+    /// The scheme refused the message it was given.
+    Message,
+    /// The signer's own verification of the signature it made failed.
+    SelfCheck,
+}
+
 /// The RP2350 secure-partition signature scheme (the `σ^host` factor). The partition
 /// keypair is generated at appliance birth under the birth seal; `pk_host` is bound into
 /// the anchor bundle `B` and pinned by the receiver. PartSign signs the per-transfer
 /// root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
 pub trait PartitionSig {
     /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth seal).
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>);
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
     /// Signature over a 32-byte digest under the partition secret key.
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8>;
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
     /// Verify a partition signature over a 32-byte digest under the pinned `pk`.
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
 }
