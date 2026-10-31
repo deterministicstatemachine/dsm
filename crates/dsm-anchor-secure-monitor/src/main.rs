@@ -23,8 +23,8 @@
 //!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
 //!    outcome the appliance may not serve from, the appliance stays uninitialized and every
 //!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.
-//!  * Standalone crypto self-test + NS-launch/measurement bring-up proofs are retained behind the
-//!    (default-OFF) `SIGMA_CHIP_SELFTEST` / `BRINGUP_NS_LAUNCH_PROOF` flags for silicon triage.
+//!  * A standalone crypto self-test is retained behind the default-OFF `SIGMA_CHIP_SELFTEST` flag
+//!    for silicon triage.
 
 #![no_std]
 #![no_main]
@@ -36,6 +36,7 @@ use rp235x_hal as hal;
 use subtle::ConstantTimeEq;
 
 extern crate alloc;
+use alloc::vec::Vec;
 
 mod anchor_glue;
 mod boundary;
@@ -69,25 +70,27 @@ const SIGMA_CHIP_SELFTEST: bool = false;
 // ── Secure Gateway ABI (mirror of veneer/dsm_sg_abi.h) ────────────────────────────────────────
 const SG_SLOT_INDEX: u32 = 0;
 const SG_SLOT_MAX_LEN: usize = 4096;
-const OP_STATUS: u32 = 1;
-const OP_PREPARE: u32 = 2;
-const OP_COMMIT: u32 = 3;
-const OP_EMIT: u32 = 4;
-const OP_FINALIZE: u32 = 5;
-const OP_RECOVER: u32 = 6;
+/// Mailbox ABI version: v2 moves a frame through the slot in parts.
+const SG_ABI_VERSION: u32 = 2;
+/// The largest request or response frame (anchor-core's frame bound).
+const SG_FRAME_MAX_LEN: usize = anchor_core::service::MAX_FRAME_LEN;
+/// Keep the watchdog fed while idle; touches no frame.
+const OP_KEEPALIVE: u32 = 1;
+/// One part of a request frame: `total` bytes in all, this part at `offset`.
+const OP_REQUEST_PART: u32 = 2;
+/// One part of the response frame, from `offset`.
+const OP_RESPONSE_PART: u32 = 3;
 const SG_OK: u32 = 0;
 const SG_ERR_SLOT: u32 = 1;
 const SG_ERR_SEQ: u32 = 2;
 const SG_ERR_SIZE: u32 = 3;
-/// Reserved transport ABI code. Unknown ops are now decoded and rejected as `BAD_PROTO` inside
-/// anchor-core's dispatch (a response frame, transport status SG_OK), so the monitor no longer emits
-/// this — kept for ABI stability with the Non-secure transport + spec.
-#[allow(dead_code)]
 const SG_ERR_OPCODE: u32 = 4;
 const SG_ERR_ENCODING: u32 = 5;
 const SG_ERR_STATE: u32 = 6;
 const SG_ERR_MEASUREMENT: u32 = 7;
 const SG_ERR_INTERNAL: u32 = 8;
+/// The request part was taken; the frame is not complete yet.
+const SG_MORE: u32 = 9;
 
 // ── Mailbox (§4): ONE fixed slot in Non-secure SRAM. Data plane only. ─────────────────────────
 /// Idle mailbox state. Published by the Non-secure side (which owns the slot between round trips);
@@ -109,8 +112,16 @@ struct Mailbox {
     resp_cap: u32,
     resp_len: u32,
     status: u32,
+    /// Where this part sits in its frame.
+    offset: u32,
+    /// The whole frame's length.
+    total: u32,
     body: [u8; SG_SLOT_MAX_LEN],
 }
+
+/// The request frame being assembled from its parts, and the response frame being served in parts.
+static mut REQUEST: Option<Vec<u8>> = None;
+static mut RESPONSE: Option<Vec<u8>> = None;
 
 extern "C" {
     /// The fixed mailbox, placed in the Non-secure SRAM region by the linker (both crates agree on
@@ -229,12 +240,6 @@ fn measurement_ok() -> bool {
     measured.as_bytes().ct_eq(&enrolled).into()
 }
 
-/// UNTRUSTED mailbox-opcode hint (monitor `OP_*` scheme) — used ONLY by the bring-up triage path to
-/// decide whether to fire the measurement fail-close reboot. The AUTHORITATIVE measurement gate runs
-/// on the DECODED protobuf op inside `anchor_glue::service_request`, never on this hint.
-fn op_requires_measurement_hint(op: u32) -> bool {
-    matches!(op, OP_PREPARE | OP_COMMIT | OP_EMIT | OP_FINALIZE | OP_RECOVER)
-}
 
 // ── The Secure handler behind the NSC veneer ─────────────────────────────────────────────────
 
@@ -262,65 +267,106 @@ pub extern "C" fn dsm_secure_handler(slot_index: u32, sequence_number: u32) -> u
     unsafe { core::ptr::write_volatile(&mut mb.state, MB_SECURE_PROCESSING) };
     compiler_fence(Ordering::SeqCst);
 
-    // §4.3 read the bounded length ONCE; §4.4 copy the COMPLETE request into Secure SRAM.
     let opcode = unsafe { core::ptr::read_volatile(&mb.opcode) };
-    let req_len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
-
-    // BRING-UP PROOF (step 5b / step 6, removed with the real NS response path): reaching here means
-    // the Non-secure app launched, published a STATUS request into the NS mailbox, and crossed the
-    // NSC `sg` veneer into this Secure handler — which read the NS data plane (state/seq/opcode). A
-    // self-reboot into BOOTSEL is the observable signal (post-boot SRAM readback is cleared on
-    // BOOTSEL entry on this silicon, so it cannot be the channel).
-    if BRINGUP_NS_LAUNCH_PROOF && opcode == OP_STATUS {
-        // Distinctive ~13 s delay BEFORE the reboot so a pass lands at a time nothing else produces:
-        // ROM rejection of the block re-enters BOOTSEL in <2 s; a failed NS launch / SG (bad BXNS,
-        // fault) never reboots at all (timeout). A reboot at ~13 s therefore isolates "the handler
-        // ran" = NS launched + crossed the SG + Secure read the NS mailbox. (~7M cycles/s on the
-        // post-ROM clock.)
-        delayed_reboot(SG_REBOOT_DELAY_CYCLES);
+    if unsafe { core::ptr::read_volatile(&mb.version) } != SG_ABI_VERSION {
+        return finish(mb, seq, SG_ERR_STATE);
     }
-    if req_len > SG_SLOT_MAX_LEN {
-        return finish(mb, seq, SG_ERR_SIZE);
-    }
-    let mut sreq = [0u8; SG_SLOT_MAX_LEN];
-    for (i, b) in sreq.iter_mut().enumerate().take(req_len) {
-        *b = unsafe { core::ptr::read_volatile(&mb.body[i]) };
-    }
-    // §4.5 from here we interpret ONLY the Secure copy `sreq[..req_len]` — never the mailbox.
-    let request = &sreq[..req_len];
-
-    // BRING-UP measurement fail-close proof (retained behind the flag for silicon triage): an
-    // authority op is refused because OTP `mu_enrolled` is blank on an unprovisioned board.
-    // Distinctive ~25 s reboot. The real gate below applies to the DECODED op, not this hint.
-    if BRINGUP_NS_LAUNCH_PROOF && op_requires_measurement_hint(opcode) && !measurement_ok() {
-        delayed_reboot(180_000_000);
-    }
-
-    // §5 dispatch through the REAL appliance (dsm-anchor-core `dispatch`), NOT a reimplemented state
-    // machine. `service_request` decodes the protobuf `ApplianceRequest`, applies the §2 measurement
-    // seal to the DECODED op, and drives `Appliance::{prepare,commit,emit,finalize,status,cancel}`.
-    // The returned frame is the encoded `ApplianceResponse`; the transport status is SG_OK unless
-    // the frame could not even be produced (decode / measurement / uninitialized-appliance failure).
-    let status = match unsafe { anchor_glue::service_request(request, measurement_ok()) } {
-        Ok(resp) => {
-            // §4.7 copy the bounded response back to the NS slot.
-            let resp_cap = unsafe { core::ptr::read_volatile(&mb.resp_cap) } as usize;
-            let n = resp.len().min(resp_cap).min(SG_SLOT_MAX_LEN);
-            for (i, byte) in resp.iter().enumerate().take(n) {
-                unsafe { core::ptr::write_volatile(&mut mb.body[i], *byte) };
-            }
-            unsafe { core::ptr::write_volatile(&mut mb.resp_len, n as u32) };
+    let status = match opcode {
+        OP_KEEPALIVE => {
+            unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
             SG_OK
         }
-        Err(err_status) => {
-            unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
-            err_status
+        OP_REQUEST_PART => request_part(mb),
+        OP_RESPONSE_PART => {
+            let offset = unsafe { core::ptr::read_volatile(&mb.offset) } as usize;
+            response_part(mb, offset)
         }
+        _ => SG_ERR_OPCODE,
     };
-
-    // §4.9 zeroize the Secure request copy + sensitive temporaries.
-    zeroize(&mut sreq);
     finish(mb, seq, status)
+}
+
+/// Take one part of a request frame into the Secure copy. A part out of order, past the frame's
+/// stated length, or of a frame larger than any frame is refused and the frame discarded. The
+/// frame's last part runs it: `service_request` decodes it, applies the §2 measurement seal to the
+/// DECODED op and serves it through the anchor; the response's first part is returned at once.
+fn request_part(mb: &mut Mailbox) -> u32 {
+    let total = unsafe { core::ptr::read_volatile(&mb.total) } as usize;
+    let offset = unsafe { core::ptr::read_volatile(&mb.offset) } as usize;
+    let len = unsafe { core::ptr::read_volatile(&mb.req_len) } as usize;
+    unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
+    let request = unsafe { &mut *core::ptr::addr_of_mut!(REQUEST) };
+    if total > SG_FRAME_MAX_LEN || len > SG_SLOT_MAX_LEN || offset + len > total {
+        discard(request);
+        return SG_ERR_SIZE;
+    }
+    if offset == 0 {
+        discard(request);
+        unsafe { *core::ptr::addr_of_mut!(RESPONSE) = None };
+        *request = Some(Vec::with_capacity(total));
+    }
+    let Some(frame) = request.as_mut() else {
+        return SG_ERR_SEQ;
+    };
+    if frame.len() != offset {
+        discard(request);
+        return SG_ERR_SEQ;
+    }
+    // §4.5 from here only the Secure copy is interpreted — never the mailbox.
+    for i in 0..len {
+        frame.push(unsafe { core::ptr::read_volatile(&mb.body[i]) });
+    }
+    if frame.len() < total {
+        return SG_MORE;
+    }
+    let Some(mut frame) = request.take() else {
+        return SG_ERR_STATE;
+    };
+    let served = unsafe { anchor_glue::service_request(&frame, measurement_ok()) };
+    // §4.9 zeroize the Secure request copy.
+    zeroize(&mut frame);
+    match served {
+        Ok(response) => {
+            unsafe { *core::ptr::addr_of_mut!(RESPONSE) = Some(response) };
+            response_part(mb, 0)
+        }
+        Err(status) => status,
+    }
+}
+
+/// Copy the response frame's part from `offset` into the slot, with the whole frame's length.
+/// The response is released once its last part is out.
+fn response_part(mb: &mut Mailbox, offset: usize) -> u32 {
+    let response = unsafe { &mut *core::ptr::addr_of_mut!(RESPONSE) };
+    let Some(frame) = response.as_ref() else {
+        unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
+        return SG_ERR_STATE;
+    };
+    if offset > frame.len() {
+        unsafe { core::ptr::write_volatile(&mut mb.resp_len, 0) };
+        return SG_ERR_SEQ;
+    }
+    let cap = (unsafe { core::ptr::read_volatile(&mb.resp_cap) } as usize).min(SG_SLOT_MAX_LEN);
+    let n = cap.min(frame.len() - offset);
+    for (i, byte) in frame[offset..offset + n].iter().enumerate() {
+        unsafe { core::ptr::write_volatile(&mut mb.body[i], *byte) };
+    }
+    unsafe {
+        core::ptr::write_volatile(&mut mb.resp_len, n as u32);
+        core::ptr::write_volatile(&mut mb.offset, offset as u32);
+        core::ptr::write_volatile(&mut mb.total, frame.len() as u32);
+    }
+    if offset + n == frame.len() {
+        *response = None;
+    }
+    SG_OK
+}
+
+/// Drop a partly assembled request frame, zeroized.
+fn discard(request: &mut Option<Vec<u8>>) {
+    if let Some(mut frame) = request.take() {
+        zeroize(&mut frame);
+    }
 }
 
 /// Publish the status, advance the sequence floor, transition to RESPONSE_READY (ownership barrier).
@@ -518,20 +564,13 @@ fn main() -> ! {
     }
 }
 
-/// Bring-up proof flag (step 5b/6, default OFF): when set, the Secure handler self-reboots into
-/// BOOTSEL on a STATUS call / measurement fail so the NS→S round trip is observable on silicon.
-/// Retained for triage; the default path runs the real appliance dispatch (`service_request`).
-const BRINGUP_NS_LAUNCH_PROOF: bool = false;
-
 /// Distinctive reboot timings that make silicon outcomes readable by wall-clock alone, since
 /// post-boot SRAM readback is cleared on BOOTSEL entry. The two delays are far apart so re-enumeration
 /// jitter + 2 s poll granularity cannot confuse them (empirically ~90M cycles ≈ 14 s):
 ///   ROM rejects the block ......... < 4 s   (nothing of ours ran)
 ///   DENIED (Secure fault fired) ... ~11 s   (a boundary violation trapped to Secure)
-///   ALLOWED (NS reached the SG) ... ~50 s   (no fault; NS crossed the gateway)
 ///   lockup / no path .............. timeout
 const FAULT_REBOOT_DELAY_CYCLES: u32 = 70_000_000; // ~11 s
-const SG_REBOOT_DELAY_CYCLES: u32 = 320_000_000; // ~50 s
 
 fn reboot_bootsel() -> ! {
     // Disarm the watchdog on any deliberate reboot so it cannot fire while the chip is in BOOTSEL.

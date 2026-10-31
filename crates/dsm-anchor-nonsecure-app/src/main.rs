@@ -33,7 +33,14 @@ const XTAL_HZ: u32 = 12_000_000;
 // ── Secure Gateway ABI (mirror of the monitor / veneer/dsm_sg_abi.h) ──────────────────────────
 const SG_SLOT_INDEX: u32 = 0;
 const SG_SLOT_MAX_LEN: usize = 4096;
-const OP_STATUS: u32 = 1;
+const SG_ABI_VERSION: u32 = 2;
+/// The largest request or response frame (anchor-core's `MAX_FRAME_LEN`, mirrored).
+const SG_FRAME_MAX_LEN: usize = 64 * 1024;
+const OP_KEEPALIVE: u32 = 1;
+const OP_REQUEST_PART: u32 = 2;
+const OP_RESPONSE_PART: u32 = 3;
+const SG_OK: u32 = 0;
+const SG_MORE: u32 = 9;
 
 const MB_REQUEST_READY: u32 = 1;
 const MB_RESPONSE_READY: u32 = 3;
@@ -48,6 +55,8 @@ struct Mailbox {
     resp_cap: u32,
     resp_len: u32,
     status: u32,
+    offset: u32,
+    total: u32,
     body: [u8; SG_SLOT_MAX_LEN],
 }
 
@@ -62,24 +71,31 @@ extern "C" {
 /// Non-secure sequence counter (monotonic; the Secure handler rejects a stale/replayed value).
 static mut SEQ: u32 = 0;
 
-/// Publish a bounded request into the fixed slot and invoke the Secure Gateway. Returns the Secure
-/// status. `resp` receives up to `resp.len()` response bytes; the used length is returned via `out`.
-fn secure_call(opcode: u32, req: &[u8], resp: &mut [u8]) -> (u32, usize) {
-    if req.len() > SG_SLOT_MAX_LEN {
-        return (3 /* ERR_SIZE */, 0);
-    }
+/// What one crossing of the Secure Gateway answered: its status, the response part copied into
+/// `resp`, and the whole response frame's length.
+struct Crossing {
+    status: u32,
+    part: usize,
+    total: usize,
+}
+
+/// Publish one part (`offset` into a frame of `total` bytes) into the fixed slot and cross the
+/// Secure Gateway; up to `resp.len()` response bytes come back.
+fn secure_call(opcode: u32, offset: usize, total: usize, part: &[u8], resp: &mut [u8]) -> Crossing {
     let mb = unsafe { &mut *core::ptr::addr_of_mut!(DSM_SG_MAILBOX) };
     let seq = unsafe {
         SEQ = SEQ.wrapping_add(1);
         SEQ
     };
     unsafe {
-        core::ptr::write_volatile(&mut mb.version, 1);
+        core::ptr::write_volatile(&mut mb.version, SG_ABI_VERSION);
         core::ptr::write_volatile(&mut mb.opcode, opcode);
         core::ptr::write_volatile(&mut mb.sequence, seq);
-        core::ptr::write_volatile(&mut mb.req_len, req.len() as u32);
+        core::ptr::write_volatile(&mut mb.offset, offset as u32);
+        core::ptr::write_volatile(&mut mb.total, total as u32);
+        core::ptr::write_volatile(&mut mb.req_len, part.len() as u32);
         core::ptr::write_volatile(&mut mb.resp_cap, resp.len().min(SG_SLOT_MAX_LEN) as u32);
-        for (i, &b) in req.iter().enumerate() {
+        for (i, &b) in part.iter().enumerate() {
             core::ptr::write_volatile(&mut mb.body[i], b);
         }
         compiler_fence(Ordering::SeqCst);
@@ -87,17 +103,21 @@ fn secure_call(opcode: u32, req: &[u8], resp: &mut [u8]) -> (u32, usize) {
     }
     // Cross the Secure Gateway (synchronous; the Secure handler owns the slot until it returns).
     let status = unsafe { dsm_secure_dispatch(SG_SLOT_INDEX, seq) };
-    // Read the bounded response.
-    let mut n = 0usize;
+    let mut crossing = Crossing {
+        status,
+        part: 0,
+        total: 0,
+    };
     unsafe {
         if core::ptr::read_volatile(&mb.state) == MB_RESPONSE_READY {
-            n = (core::ptr::read_volatile(&mb.resp_len) as usize).min(resp.len());
-            for (i, b) in resp.iter_mut().enumerate().take(n) {
+            crossing.part = (core::ptr::read_volatile(&mb.resp_len) as usize).min(resp.len());
+            crossing.total = core::ptr::read_volatile(&mb.total) as usize;
+            for (i, b) in resp.iter_mut().enumerate().take(crossing.part) {
                 *b = core::ptr::read_volatile(&mb.body[i]);
             }
         }
     }
-    (status, n)
+    crossing
 }
 
 type Serial<'a> = SerialPort<'a, hal::usb::UsbBus>;
@@ -116,61 +136,101 @@ fn write_all(serial: &mut Serial, usb_dev: &mut UsbDev, data: &[u8]) {
     }
 }
 
-/// Serve the anchor over USB-CDC forever: read LE32-length-prefixed protobuf request frames, cross
-/// the Secure Gateway (the monitor decodes the op from the frame, applies the §2 measurement seal,
-/// and drives the real appliance), and write the framed response back. Same wire protocol as the
-/// pico anchor, so the host / Android transport is byte-compatible. Fixed buffers (no heap): a frame
-/// is bounded by the SG mailbox slot (`SG_SLOT_MAX_LEN`).
+/// Write a response frame to USB: its length, its first part, then each further part the Secure
+/// side serves. A crossing that fails ends the frame short of its length, which the host refuses.
+fn write_response(serial: &mut Serial, usb_dev: &mut UsbDev, first: &Crossing, resp: &mut [u8]) {
+    write_all(serial, usb_dev, &(first.total as u32).to_le_bytes());
+    write_all(serial, usb_dev, &resp[..first.part]);
+    let mut sent = first.part;
+    while sent < first.total {
+        let next = secure_call(OP_RESPONSE_PART, sent, first.total, &[], resp);
+        if next.status != SG_OK || next.part == 0 {
+            return;
+        }
+        write_all(serial, usb_dev, &resp[..next.part]);
+        sent += next.part;
+    }
+}
+
+/// Serve the anchor over USB-CDC forever: read LE32-length-prefixed protobuf request frames and
+/// stream each through the Secure Gateway in slot-sized parts (the monitor assembles the frame,
+/// decodes the op, applies the §2 measurement seal and serves it through the anchor), then stream
+/// the framed response back. Fixed buffers (no heap): one slot-sized part in each direction.
+///
+/// A frame larger than any frame, or a part the Secure side refuses, is answered with an empty
+/// frame (the host refuses it); the bytes of the refused frame are read and dropped so the stream
+/// stays in step.
 fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
-    let mut rx = [0u8; SG_SLOT_MAX_LEN + 4];
-    let mut rx_len = 0usize;
+    let mut header = [0u8; 4];
+    let mut header_len = 0usize;
+    let mut part = [0u8; SG_SLOT_MAX_LEN];
+    let mut part_len = 0usize;
     let mut resp = [0u8; SG_SLOT_MAX_LEN];
+    // The frame being read: its length, how much of it has gone to the Secure side, and whether the
+    // Secure side refused it (its remaining bytes are then dropped).
+    let mut total = 0usize;
+    let mut forwarded = 0usize;
+    let mut refused = 0u8;
     // Watchdog keepalive: when idle, cross the SG at least this often so the Secure handler feeds the
-    // ~2 s watchdog (a healthy idle anchor != a hung one). The loop iterates far faster than 2 s, so
-    // this bounds the keepalive interval well under the timeout; a genuinely hung NS never reaches it.
+    // ~2 s watchdog (a healthy idle anchor != a hung one).
     const KEEPALIVE_IDLE_ITERS: u32 = 20_000;
     let mut idle: u32 = 0;
     loop {
         usb_dev.poll(&mut [serial]);
         let mut chunk = [0u8; 64];
-        let n = serial.read(&mut chunk).unwrap_or(0);
+        let n = match serial.read(&mut chunk) {
+            Ok(n) => n,
+            Err(UsbError::WouldBlock) => 0,
+            Err(_usb_fault) => 0,
+        };
         if n == 0 {
             idle = idle.wrapping_add(1);
             if idle >= KEEPALIVE_IDLE_ITERS {
                 idle = 0;
-                // Empty frame: the SG handler feeds the watchdog on entry, then decode-errors (ignored).
-                let _ = secure_call(OP_STATUS, &[], &mut resp);
+                secure_call(OP_KEEPALIVE, 0, 0, &[], &mut resp);
             }
             continue;
         }
         idle = 0;
-        {
-            if rx_len + n > rx.len() {
-                rx_len = 0; // desync guard: drop the partial buffer and resynchronize
-                continue;
+        for &byte in &chunk[..n] {
+            if header_len < 4 {
+                header[header_len] = byte;
+                header_len += 1;
+                if header_len < 4 {
+                    continue;
+                }
+                total = u32::from_le_bytes(header) as usize;
+                forwarded = 0;
+                part_len = 0;
+                refused = u8::from(total > SG_FRAME_MAX_LEN);
+                if total > 0 {
+                    continue;
+                }
+            } else {
+                if refused == 0 {
+                    part[part_len] = byte;
+                }
+                part_len += 1;
+                if part_len < SG_SLOT_MAX_LEN && forwarded + part_len < total {
+                    continue;
+                }
             }
-            rx[rx_len..rx_len + n].copy_from_slice(&chunk[..n]);
-            rx_len += n;
-
-            // Drain every complete LE32-length-prefixed frame in the buffer.
-            while rx_len >= 4 {
-                let len = u32::from_le_bytes([rx[0], rx[1], rx[2], rx[3]]) as usize;
-                if len > SG_SLOT_MAX_LEN {
-                    rx_len = 0; // oversized => cannot be a valid frame; resynchronize
-                    break;
+            // A part is complete (a full slot, or the frame's last bytes): forward it.
+            if refused == 0 {
+                let crossing = secure_call(OP_REQUEST_PART, forwarded, total, &part[..part_len], &mut resp);
+                match crossing.status {
+                    SG_MORE => {}
+                    SG_OK => write_response(serial, usb_dev, &crossing, &mut resp),
+                    _refused => refused = 1,
                 }
-                if rx_len < 4 + len {
-                    break; // frame not fully received yet
+            }
+            forwarded += part_len;
+            part_len = 0;
+            if forwarded >= total {
+                if refused != 0 {
+                    write_all(serial, usb_dev, &0u32.to_le_bytes());
                 }
-                // The mailbox opcode is only a hint; the monitor re-decodes the real op from the
-                // frame, so pass STATUS as a benign default.
-                let (_status, out) = secure_call(OP_STATUS, &rx[4..4 + len], &mut resp);
-                write_all(serial, usb_dev, &(out as u32).to_le_bytes());
-                write_all(serial, usb_dev, &resp[..out]);
-                // Consume the frame, shift any trailing bytes down.
-                let consumed = 4 + len;
-                rx.copy_within(consumed..rx_len, 0);
-                rx_len -= consumed;
+                header_len = 0;
             }
         }
     }
