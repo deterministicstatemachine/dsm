@@ -15,7 +15,7 @@ import android.util.Log
 /**
  * H2 — the Phone->Pico USB-OTG transport (the sender phone A talking to its own Pico A).
  *
- * OPAQUE BYTE TRANSPORT ONLY. This class understands nothing about TROPIC / OP_SPI_PASSTHROUGH /
+ * OPAQUE BYTE TRANSPORT ONLY. This class understands nothing about TROPIC /
  * protobuf — Rust builds the request frame and decodes the response. All this does is: open the
  * Pico's USB-CDC endpoints and move a length-prefixed frame across. Contract with the Rust
  * `UsbPicoTransport`:
@@ -197,7 +197,7 @@ object LocalPicoUsb {
         epOut = outEp
         Log.i(TAG, "Pico opened (interface ${usbInterface.id}, in=${inEp.address} out=${outEp.address})")
         // Discard the firmware boot banner / self-test output before the first transaction so the
-        // response read frames on the OP_SPI_PASSTHROUGH reply, not on stale boot chatter.
+        // response read frames on the appliance's reply, not on stale boot chatter.
         drainInput(conn, inEp)
         residual = ByteArray(0)
         return conn

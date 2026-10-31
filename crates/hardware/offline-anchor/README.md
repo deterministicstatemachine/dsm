@@ -111,7 +111,7 @@ When it's working, the appliance enumerates over USB-CDC as **"DSM Anchor"** (VI
 > [!CAUTION]
 > **Assembly and self-test change nothing permanent. The two runbooks below do,** and neither is part of building the appliance. Read each one in full and dry-run it on a sacrificial board first.
 > - [`crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md`](../../../crates/dsm-anchor-secure-monitor/scripts/anchor-secure-boot/RUNBOOK.md) burns RP2350 secure-boot and sealed-secret OTP fuses. A wrong value bricks the board.
-> - [`crates/dsm-anchor-hw-verifier/BENCH_BURN_RUNBOOK.md`](../../../crates/dsm-anchor-hw-verifier/BENCH_BURN_RUNBOOK.md) does the TROPIC01 verifier-slot and counter set-up, which consumes a pairing slot permanently.
+> - The first provisioning from the DSM app closes the TROPIC01 to a second birth: it writes the board's own pairing key, invalidates the factory key and revokes the commands a second birth would use. It cannot be undone, and the chip then serves only that owner's device.
 
 ## 6. Troubleshooting
 

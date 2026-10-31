@@ -1161,14 +1161,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dsm-anchor-verifier"
-version = "0.1.0"
-dependencies = [
- "embedded-hal",
- "tokio",
-]
-
-[[package]]
 name = "dsm-app-host"
 version = "0.1.0-beta.4"
 dependencies = [
@@ -1244,7 +1236,6 @@ dependencies = [
  "crc32fast",
  "dsm",
  "dsm-anchor-core",
- "dsm-anchor-verifier",
  "dsm_sdk",
  "dsm_storage_node",
  "ed25519-dalek",
@@ -1409,12 +1400,6 @@ name = "email_address"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
-
-[[package]]
-name = "embedded-hal"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
 name = "encoding_rs"

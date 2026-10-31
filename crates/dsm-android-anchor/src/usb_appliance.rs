@@ -36,16 +36,21 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], DsmError> {
 }
 
 /// One appliance op over the transport: frame `LE32(len) ++ ApplianceRequest`, run the opaque USB
-/// round-trip, decode `ApplianceResponse`, and fail closed unless the chip reported `ok`. Free
-/// function so it is usable from `connect()` before `self` exists.
-fn roundtrip(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
+/// round-trip and decode the `ApplianceResponse`, refused or not.
+fn exchange(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
     let body = encode_request(&req);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
     let resp_body = usb(frame)?;
-    let resp = decode_response(&resp_body).map_err(|e| {
+    decode_response(&resp_body).map_err(|e| {
         DsmError::invalid_operation(format!("anchor appliance: decode response: {e:?}"))
-    })?;
+    })
+}
+
+/// One appliance op that must succeed: fail closed unless the chip reported `ok`. Free function so
+/// it is usable from `connect()` before `self` exists.
+fn roundtrip(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
+    let resp = exchange(usb, req)?;
     if !resp.ok {
         return Err(DsmError::invalid_operation(format!(
             "anchor appliance: op {} failed on-chip (error code {})",
@@ -69,31 +74,35 @@ impl UsbAnchorAppliance {
         Ok(Self { usb })
     }
 
-    /// The pin STATUS discloses. Fails closed if it omits any pin material (pre-v2 firmware, or
-    /// firmware without the birth commitment) — an appliance whose identity cannot be checked
-    /// against its owner must never produce releases.
+    /// The pin STATUS discloses ([`pin_of`]).
     fn status_pin(&self) -> Result<AnchorPin, DsmError> {
-        let s = self.roundtrip(bare(pb::Op::Status))?;
-        let pin = AnchorPin {
-            bundle: arr32(&s.anchor_bundle)?,
-            anchor_id: arr32(&s.pin_anchor_id)?,
-            enrolled_counter: s.pin_enrolled_counter,
-            partition_pk: s.pin_partition_pk,
-            pk_chip: s.pin_chip_pk,
-            birth_commitment: arr32(&s.pin_birth_commitment)?,
-        };
-        if pin.partition_pk.is_empty() || pin.pk_chip.len() != 32 {
-            return Err(DsmError::invalid_operation(
-                "anchor appliance: STATUS returned incomplete pin material (pk_host/pk_chip) — \
-                 firmware lacks the v2 STATUS pin; cannot produce verifiable releases (fail closed)",
-            ));
-        }
-        Ok(pin)
+        pin_of(&self.roundtrip(bare(pb::Op::Status))?)
     }
 
     fn roundtrip(&self, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
         roundtrip(&self.usb, req)
     }
+}
+
+/// The pin a STATUS answer discloses. Fails closed if it omits any pin material (pre-v2 firmware,
+/// or firmware without the birth commitment) — an appliance whose identity cannot be checked
+/// against its owner must never produce releases.
+fn pin_of(s: &pb::ApplianceResponse) -> Result<AnchorPin, DsmError> {
+    let pin = AnchorPin {
+        bundle: arr32(&s.anchor_bundle)?,
+        anchor_id: arr32(&s.pin_anchor_id)?,
+        enrolled_counter: s.pin_enrolled_counter,
+        partition_pk: s.pin_partition_pk.clone(),
+        pk_chip: s.pin_chip_pk.clone(),
+        birth_commitment: arr32(&s.pin_birth_commitment)?,
+    };
+    if pin.partition_pk.is_empty() || pin.pk_chip.len() != 32 {
+        return Err(DsmError::invalid_operation(
+            "anchor appliance: STATUS returned incomplete pin material (pk_host/pk_chip) — \
+             firmware lacks the v2 STATUS pin; cannot produce verifiable releases (fail closed)",
+        ));
+    }
+    Ok(pin)
 }
 
 impl AnchorAppliance for UsbAnchorAppliance {
@@ -160,9 +169,19 @@ impl AnchorAppliance for UsbAnchorAppliance {
     }
 
     fn provisioned_pin(&mut self) -> Result<Option<AnchorPin>, DsmError> {
-        // A serving appliance is a provisioned one: the firmware answers STATUS only once it has
-        // been born for a device.
-        self.status_pin().map(Some)
+        // An unprovisioned appliance answers STATUS with `NOT_PROVISIONED`: it is waiting for its
+        // owner's provisioning. Any other refusal fails closed.
+        let status = exchange(&self.usb, bare(pb::Op::Status))?;
+        if !status.ok && status.error == anchor_core::service::err::NOT_PROVISIONED {
+            return Ok(None);
+        }
+        if !status.ok {
+            return Err(DsmError::invalid_operation(format!(
+                "anchor appliance: op {} failed on-chip (error code {})",
+                status.op, status.error
+            )));
+        }
+        pin_of(&status).map(Some)
     }
 
     fn provision(
@@ -258,6 +277,23 @@ mod tests {
                 (w, o) => panic!("wire status {w} mapped to unexpected {o:?} (ready={want_ready})"),
             }
         }
+    }
+
+    #[test]
+    fn an_unprovisioned_appliance_has_no_pin_and_is_provisioned() {
+        let usb: UsbTransceive = Arc::new(|frame| {
+            let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
+            if req.op == pb::Op::Status as i32 {
+                return Ok(anchor_core::proto::encode_response(&pb::ApplianceResponse {
+                    op: req.op,
+                    error: anchor_core::service::err::NOT_PROVISIONED,
+                    ..Default::default()
+                }));
+            }
+            Ok(status_response(0))
+        });
+        let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
+        assert_eq!(app.provisioned_pin().expect("status").map(|pin| pin.bundle), None);
     }
 
     #[test]

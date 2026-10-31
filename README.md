@@ -73,11 +73,9 @@ dsm/
 ├── dsm_client/frontend/ React wallet UI, pure rendering over the Envelope v3 bridge
 ├── crates/
 │   ├── dsm-anchor-core/          hardware-free appliance core: root-advance message, three-signature release, prepare/commit/emit/finalize   (member)
-│   ├── dsm-anchor-verifier/      receiver-side relay primitives and the exact counter check, tropic01-free   (member)
 │   ├── dsm-sphincs/              no_std BLAKE3-keyed SPHINCS+, byte-compatible with the core, shared with firmware   (member)
 │   ├── dsm-anchor-secure-monitor/ TrustZone-M Secure world: TROPIC01, partition key, counter, seal, the single NSC gateway   (excluded: thumbv8m-only)
 │   ├── dsm-anchor-nonsecure-app/ TrustZone-M Non-secure world: USB-CDC, protobuf, transport   (excluded: thumbv8m-only)
-│   ├── dsm-anchor-hw-verifier/   the real libtropic session driver   (excluded: needs the sibling libtropic-rs checkout)
 │   ├── dsm-anchor-bench/         used-chip bench harness, non-mutating proofs only   (excluded: native serial dependency)
 │   └── dsm-android-anchor/       on-device glue that installs the USB appliance into the SDK bridge   (excluded: built only by cargo-ndk)
 ├── tools/vertical_validation/    implementation traces, adversarial runs, KATs, formal report
@@ -175,7 +173,7 @@ An earlier build exercised origin admission, transfer and withdrawal against rea
 
 ## Offline protocol
 
-Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the receiver side is [crates/dsm-anchor-verifier/](crates/dsm-anchor-verifier/) and [crates/dsm-anchor-hw-verifier/](crates/dsm-anchor-hw-verifier/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
+Offline bearer transfer needs one thing software cannot provide: a way to tell a physical device from a byte-for-byte clone of it. Everything else, including transfer uniqueness, is already a software property of DSM (the device state is one resource, consumed as a whole; one parent admits exactly one accepted successor). The appliance therefore gives hardware exactly one job, device identity, and keeps it out of every other decision. Code: the appliance core is [crates/dsm-anchor-core/](crates/dsm-anchor-core/) (`root_advance.rs`, `appliance.rs`, `accept.rs`, `enrollment.rs`, `tropic.rs`, `proto.rs`), the firmware is [crates/dsm-anchor-secure-monitor/](crates/dsm-anchor-secure-monitor/), and [crates/dsm-anchor-nonsecure-app/](crates/dsm-anchor-nonsecure-app/), the signatures are [crates/dsm-sphincs/](crates/dsm-sphincs/), and the phone glue is [crates/dsm-android-anchor/](crates/dsm-android-anchor/) with its SDK routes in [anchor_routes.rs](dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/anchor_routes.rs).
 
 **Two identity domains on one phone.** The online domain is the BIP39 seed alone: no hardware, all online DSM operation. The offline domain is a fusion of three factors, and every offline release must be witnessed by all three over the same root-advance message:
 
@@ -189,7 +187,7 @@ Offline bearer transfer needs one thing software cannot provide: a way to tell a
 
 **TrustZone-M split on the RP2350.** The Secure monitor (`dsm-anchor-secure-monitor`) owns OTP, the host key, the TROPIC01 SPI bus, the physical counter, the prepare/commit/recovery state, and the exact-measurement seal, and exposes exactly one Non-secure-callable gateway with a fixed-slot mailbox. The Non-secure application (`dsm-anchor-nonsecure-app`) owns USB-CDC, protobuf, and host transport, and has no path to any Secure resource. The monitor runs from Secure SRAM after a bootrom load map and locks SAU and ACCESSCTRL before launching the app.
 
-**Receiver-side hardware verification (Path B).** `dsm-anchor-verifier` provides the relay bridge and the exact counter check without depending on libtropic; `dsm-anchor-hw-verifier` drives the real TROPIC01 session over that relay and is the only crate that pulls the sibling libtropic-rs checkout. `dsm-android-anchor` installs the USB appliance into the SDK bridge seam on the phone and exposes the gated device-setup operations.
+**The phone's link.** `dsm-android-anchor` installs the USB appliance into the SDK bridge seam on the phone. The appliance provisions itself: the phone sends its device's identity once, the monitor binds the anchor to it and closes the chip to a second birth, and no raw SPI reaches the chip from the phone.
 
 **Proven on hardware.** The appliance runs on the RP2350 Pico 2 W with the TROPIC01 secure element: the Secure monitor boots from Secure SRAM, the chip signature and the partition-sealed host signature are produced on the board, and the release is accepted on the phone. The used-chip bench harness (`dsm-anchor-bench`) reruns the non-mutating adoption and prepare/cancel proofs against an already-used chip without moving the counter; the silicon proof log is in [docs/bench-proofs/](docs/bench-proofs/). The TLA+ model `DSM_OfflineAnchorSingleAppliance.tla` covers the single-appliance case.
 

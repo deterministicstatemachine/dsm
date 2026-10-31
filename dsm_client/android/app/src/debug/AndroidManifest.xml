@@ -5,10 +5,9 @@
 
     <application>
         <!-- H2 bench self-test: launched when the Pico anchor attaches over USB-OTG (that launch
-             also grants USB permission for the device). Replays one OP_SPI_PASSTHROUGH round-trip
-             and logs whether the phone reached the real TROPIC01. Debug bring-up only: it is
-             exported, and a launch carrying its confirmation extras runs irreversible chip
-             operations (counter init, birth cage), so it is declared for debug builds alone. -->
+             also grants USB permission for the device). Sends one STATUS request and logs whether
+             the phone reached the appliance. Debug bring-up only: it is exported, so it is declared
+             for debug builds alone. -->
         <activity
             android:name="com.dsm.wallet.debug.PicoSelfTestActivity"
             android:exported="true"

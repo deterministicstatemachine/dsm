@@ -736,16 +736,15 @@ jobs:
   # exercises, plus the two excluded anchor crates that need no external
   # checkout. No untrusted GitHub event inputs are used.
   #
-  # WHAT THIS DOES NOT COVER, and why. Four anchor crates —
-  # dsm-anchor-hw-verifier, dsm-android-anchor and
-  # dsm-anchor-secure-monitor — all reach `tropic01 = { path =
+  # WHAT THIS DOES NOT COVER, and why. The anchor crate
+  # dsm-anchor-secure-monitor reaches `tropic01 = { path =
   # "../../../../libtropic-rs/tropic01" }`. That resolves ABOVE
   # $GITHUB_WORKSPACE, which actions/checkout cannot write to, and no commit is
   # pinned anywhere in this repo (tropic01 is `publish = false`, so there is no
   # registry version either). Cloning an unpinned third-party repo at CI time
-  # would also make the dependency invisible to the spdx and sbom jobs. Those
-  # four crates stay uncovered until libtropic-rs is vendored into the workspace
-  # or pinned by SHA. Do not add them to this job without doing that first.
+  # would also make the dependency invisible to the spdx and sbom jobs. That
+  # crate stays uncovered until libtropic-rs is vendored into the workspace
+  # or pinned by SHA. Do not add it to this job without doing that first.
   # --------------------------------------------------------------------------
   embedded:
     name: Embedded (no_std + excluded anchor crates)

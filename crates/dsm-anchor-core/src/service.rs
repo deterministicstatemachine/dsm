@@ -94,7 +94,6 @@ fn base(op: i32) -> pb::ApplianceResponse {
         anchor_bundle: Vec::new(),
         active_anchor_counter: 0,
         status: 0,
-        spi_response: Vec::new(),
         pin_anchor_id: Vec::new(),
         pin_enrolled_counter: 0,
         pin_partition_pk: Vec::new(),
@@ -279,9 +278,6 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
         // An appliance exists only once its anchor is provisioned, and an anchor is provisioned
         // once: provisioning it again is refused.
         Ok(pb::Op::Provision) => fail(op, err::ALREADY_PROVISIONED),
-        // OP_SPI_PASSTHROUGH is not an appliance op; the software-authority firmware offers no
-        // raw-SPI relay, so it is rejected as an unknown op.
-        Ok(pb::Op::SpiPassthrough) => fail(op, err::BAD_OP),
         Ok(pb::Op::Unspecified) | Err(_) => fail(op, err::BAD_OP),
     }
 }

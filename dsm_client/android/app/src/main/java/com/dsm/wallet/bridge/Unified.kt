@@ -75,31 +75,6 @@ object Unified {
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
 
-    // READ-ONLY self-test (default .so; never writes): ONE authenticated TROPIC01 counter read
-    // over the phone's own USB link to its own Pico. Returns the live counter H (>= 0) or -1.
-    // Callers must catch UnsatisfiedLinkError (absent in non-glue builds).
-    @Keep @JvmStatic external fun anchorCounterSelfTest(): Long
-
-    // READ-ONLY chip diagnostic (default .so; never writes): logs the local chip's mcounter[0]
-    // vs the intended device budget to logcat under "se-slot", so an operator can inspect the chip
-    // THROUGH the phone (via adb) without moving it to a bench.
-    @Keep @JvmStatic external fun anchorChipStatus(): Int
-
-    // GATED device-setup WRITE (only in on_device_installs-feature .so builds; absent otherwise):
-    // counter birth — initialize mcounter[0] to the max device budget on the local chip, via slot
-    // 0. Returns the read-back counter (>= 0) or -1. Run BEFORE birthCageSlot0. Invoked
-    // deliberately by the operator over ADB; never from app boot or a transfer. Callers must catch
-    // UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun counterInitMax(): Long
-
-    // GATED IRREVERSIBLE birth burn (only in on_device_installs-feature .so; absent otherwise):
-    // permanently seal slot-0 (revoke counter-reset / re-key / un-cage) so the down-counter's
-    // one-way monotonicity is a hardware birth invariant. Run LAST in device setup, AFTER
-    // counterInitMax. Returns the now-immutable H0 (>= 0) or -1. Invoked deliberately by the
-    // operator over ADB with explicit confirmation; never from boot or a transfer. Callers must
-    // catch UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun birthCageSlot0(): Long
-
     // GATED sender-transport install (only in on_device_installs-feature .so; absent otherwise):
     // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
     // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
