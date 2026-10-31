@@ -1,19 +1,37 @@
 file	line	lexical_reference
-crates/dsm-anchor-core/tests/durable.rs	27	const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
-crates/dsm-anchor-core/tests/durable.rs	187	dsm_sphincs::generate_keypair_from_seed(PARTITION, seed),
-crates/dsm-anchor-core/tests/durable.rs	195	dsm_sphincs::sign(PARTITION, sk, digest),
-crates/dsm-anchor-core/tests/durable.rs	201	matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
+crates/dsm-anchor-core/tests/durable.rs	28	const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
+crates/dsm-anchor-core/tests/durable.rs	207	dsm_sphincs::generate_keypair_from_seed(PARTITION, seed).map_err(partition_error)?;
+crates/dsm-anchor-core/tests/durable.rs	212	dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
+crates/dsm-anchor-core/tests/durable.rs	216	matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
+crates/dsm-anchor-core/tests/durable.rs	221	fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+crates/dsm-anchor-core/tests/durable.rs	223	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+crates/dsm-anchor-core/tests/durable.rs	226	dsm_sphincs::Error::Crypto(
+crates/dsm-anchor-core/tests/durable.rs	227	dsm_sphincs::CryptoFailure::EmptySigningMessage
+crates/dsm-anchor-core/tests/durable.rs	228	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+crates/dsm-anchor-core/tests/durable.rs	230	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
 crates/dsm-anchor-pico/src/main.rs	19	//!   - `σ^host` — BLAKE3-SPHINCS+ SPX128f, the RP2350 secure-partition key (`dsm_sphincs`),
 crates/dsm-anchor-pico/src/main.rs	62	use dsm_sphincs::SphincsVariant;
 crates/dsm-anchor-pico/src/main.rs	105	const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
-crates/dsm-anchor-pico/src/main.rs	203	match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed) {
-crates/dsm-anchor-pico/src/main.rs	209	dsm_sphincs::sign(PART_VARIANT, sk, digest).unwrap_or_default()
-crates/dsm-anchor-pico/src/main.rs	212	dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+crates/dsm-anchor-pico/src/main.rs	204	dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
+crates/dsm-anchor-pico/src/main.rs	208	dsm_sphincs::sign(PART_VARIANT, sk, digest).map_err(partition_error)
+crates/dsm-anchor-pico/src/main.rs	211	dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+crates/dsm-anchor-pico/src/main.rs	225	fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+crates/dsm-anchor-pico/src/main.rs	227	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+crates/dsm-anchor-pico/src/main.rs	230	dsm_sphincs::Error::Crypto(
+crates/dsm-anchor-pico/src/main.rs	231	dsm_sphincs::CryptoFailure::EmptySigningMessage
+crates/dsm-anchor-pico/src/main.rs	232	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+crates/dsm-anchor-pico/src/main.rs	234	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	28	use dsm_sphincs::SphincsVariant;
 crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	46	const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
-crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	66	match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed) {
-crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	72	dsm_sphincs::sign(PART_VARIANT, sk, digest).unwrap_or_default()
-crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	75	dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	67	dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, seed).map_err(partition_error)?;
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	71	dsm_sphincs::sign(PART_VARIANT, sk, digest).map_err(partition_error)
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	74	dsm_sphincs::verify(PART_VARIANT, pk, digest, sig).unwrap_or(false)
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	79	fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	81	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	84	dsm_sphincs::Error::Crypto(
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	85	dsm_sphincs::CryptoFailure::EmptySigningMessage
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	86	| dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	88	dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
 crates/dsm-anchor-secure-monitor/src/tropic.rs	11	use dsm_sphincs::SphincsVariant;
 crates/dsm-anchor-secure-monitor/src/tropic.rs	19	const PART_VARIANT: SphincsVariant = SphincsVariant::SPX128f;
 crates/dsm-anchor-secure-monitor/src/tropic.rs	119	match dsm_sphincs::generate_keypair_from_seed(PART_VARIANT, &seed) {
@@ -310,12 +328,12 @@ dsm_client/deterministic_state_machine/dsm/src/types/device_state.rs	4563	let si
 dsm_client/deterministic_state_machine/dsm/src/types/error.rs	1980	let err = DsmError::crypto_op("sphincs_sign", "signature failed", Some("oops"));
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	66	crate::crypto::sphincs::verify(
 dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	67	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	395	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	396	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	403	crate::crypto::sphincs::sign(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	404	crate::crypto::sphincs::SphincsVariant::SPX128f,
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	412	crate::crypto::sphincs::verify(
-dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	413	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	400	let kp = crate::crypto::sphincs::generate_keypair_from_seed(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	401	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	408	Ok(crate::crypto::sphincs::sign(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	409	crate::crypto::sphincs::SphincsVariant::SPX128f,
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	417	crate::crypto::sphincs::verify(
+dsm_client/deterministic_state_machine/dsm/src/types/offline_chain.rs	418	crate::crypto::sphincs::SphincsVariant::SPX128f,
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	2342	match crate::crypto::sphincs::sphincs_verify(
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3580	use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
 dsm_client/deterministic_state_machine/dsm/src/types/operations.rs	3598	generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
@@ -479,9 +497,9 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/token_sdk.rs	450	dsm::cry
 dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/wallet_sdk.rs	592	dsm::crypto::sphincs::sphincs_sign(&private_key, payload).map_err(|e| {
 dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	38	const PARTITION_VARIANT: dsm::crypto::sphincs::SphincsVariant =
 dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	39	dsm::crypto::sphincs::SphincsVariant::SPX128f;
-dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	160	match dsm::crypto::sphincs::generate_keypair_from_seed(PARTITION_VARIANT, seed) {
-dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	167	match dsm::crypto::sphincs::sign(PARTITION_VARIANT, sk, digest) {
-dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	175	dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
+dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	167	match dsm::crypto::sphincs::generate_keypair_from_seed(PARTITION_VARIANT, seed) {
+dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	174	match dsm::crypto::sphincs::sign(PARTITION_VARIANT, sk, digest) {
+dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/appliance.rs	182	dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
 dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/receipts.rs	140	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/receipts.rs	186	let sig = dsm::crypto::sphincs::sphincs_sign(&ek_sk, target).expect("the EK answers");
 dsm_client/deterministic_state_machine/dsm_sdk/src/test_support/reserve.rs	17	dsm::crypto::sphincs::generate_sphincs_keypair().expect("a claimant key");
