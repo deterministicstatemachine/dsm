@@ -2215,9 +2215,10 @@ impl CoreSDK {
 
         // §26 recovery gate: NEVER stage a fresh bearer over an unsettled chip. OBSERVE recover() and
         // apply the existing host policy (`recovery_action`); anything other than Ready fails closed to
-        // online recovery. This does NOT cancel or erase here — an orphaned/committed record is left for
-        // the dedicated `resolve_prepared_on_reattach` seam (a Committed release must be re-emitted,
-        // never erased, §26). Conservative `prepared_owned_by_session = true`: never auto-cancel in stage.
+        // online recovery. This does NOT cancel or erase here — an unfinished release is settled by
+        // the bilateral handler before a new step is staged (a Committed release is re-emitted as the
+        // same payment, never erased, §26). A prepared record is treated as owned by a session here,
+        // so stage never cancels one.
         let action = crate::anchor::recovery_action(app.recover()?, true);
         if action != crate::anchor::RecoveryAction::Ready {
             return Err(DsmError::invalid_operation(format!(
@@ -2364,39 +2365,6 @@ impl CoreSDK {
             }
         }
         Ok(())
-    }
-
-    /// §27/§28 host recovery seam. OBSERVE the sender appliance's recovery state at a re-attach
-    /// (process restart / power loss) via [`AnchorAppliance::recover`], then apply the host cancel
-    /// policy ([`crate::anchor::recovery_action`]): cancel ONLY an orphaned uncommitted `Prepared` —
-    /// one with no in-flight/durable session owning it and whose counter has not moved. A committed
-    /// release is NEVER cancelled or erased here (it is re-emitted or resolved online); a mismatch
-    /// downgrades online. `recover()` observes; this method decides and executes ONLY the
-    /// orphaned-`Prepared` cancel.
-    ///
-    /// `prepared_owned_by_session` is supplied by the caller — the bilateral handler knows whether an
-    /// in-flight session still holds the matching prepared bearer. Pass `false` at a cold re-attach
-    /// where the in-memory sessions are gone. Returns the decided [`crate::anchor::RecoveryAction`].
-    pub fn resolve_prepared_on_reattach(
-        &self,
-        prepared_owned_by_session: bool,
-    ) -> Result<crate::anchor::RecoveryAction, DsmError> {
-        let mut guard = self.anchor_appliance.lock();
-        let Some(app) = guard.as_mut().map(|attached| &mut attached.appliance) else {
-            // No appliance attached yet -> nothing is prepared -> Ready.
-            return Ok(crate::anchor::RecoveryAction::Ready);
-        };
-        let outcome = app.recover()?;
-        let action = crate::anchor::recovery_action(outcome, prepared_owned_by_session);
-        if action == crate::anchor::RecoveryAction::CancelOrphanedPrepared {
-            // Host policy executes the cancel — `recover()` did not. Only an orphaned uncommitted
-            // Prepared reaches here (no owning session, counter not moved), so nothing is lost.
-            app.cancel()?;
-            log::info!(
-                "[offline-bearer] re-attach cancelled an orphaned prepared bearer (appliance → Ready)"
-            );
-        }
-        Ok(action)
     }
 }
 

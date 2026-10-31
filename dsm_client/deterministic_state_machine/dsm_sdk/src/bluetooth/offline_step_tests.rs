@@ -1566,6 +1566,72 @@ async fn a_receiver_restarted_after_accepting_a_bearer_payment_commits_its_confi
 /// record, and A's handler settles the step by the recovery table — the release
 /// prepared for this step, emitted again — and owes B the confirm. B commits
 /// it, A files the ack, and the counter moved once.
+/// A release cut short by a power loss is settled live, without restarting the app: once the
+/// appliance has power again, the response delivered again finds the step releasing, recovery
+/// commits it with the same release, and the answer is the confirm it owes. The counter moves once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_cut_short_is_settled_live_when_the_response_comes_again() {
+    use crate::test_support::appliance::Cut;
+
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let counter_before = appliance.chip_counter();
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    // Record writes from here: 1 prepared, 2 the committed candidate.
+    appliance.cut(Cut::AfterWrite(2));
+    a.handler
+        .handle_prepare_response(&response)
+        .await
+        .expect_err("the release cannot finish without power");
+    assert_eq!(stored_phase(&commitment), "releasing");
+
+    appliance.reboot();
+    a.device.enter();
+    let (confirm, _) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("the response delivered again is answered once the step is settled");
+    assert_eq!(stored_phase(&commitment), "confirm_pending");
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits the release");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A files the ack");
+    assert_committed_on_both(&a, &b, &commitment);
+    assert_eq!(
+        appliance.chip_counter(),
+        counter_before - 1,
+        "the counter moved once"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_sender_restarted_mid_release_settles_it_and_the_payment_commits_once() {

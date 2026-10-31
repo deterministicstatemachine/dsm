@@ -1194,6 +1194,10 @@ impl BilateralBleHandler {
             )));
         }
 
+        // A step whose anchor release was left unfinished is settled first, so
+        // the anchor holds no release the new step would wait behind.
+        self.settle_releasing_steps().await?;
+
         // Through the proposer's door: the step in flight is read and the new
         // step's row written under the one door (the peer's door is the other).
         let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
@@ -2775,6 +2779,20 @@ impl BilateralBleHandler {
             },
         )?;
 
+        // A response delivered again for a step whose anchor release was left
+        // unfinished settles it first: committed with the same release when the
+        // anchor's counter moved (the confirm it owes is then the answer), back
+        // to awaiting this response when it did not.
+        let releasing = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions
+                .get(&commitment_hash)
+                .is_some_and(|session| session.phase == BilateralPhase::Releasing)
+        };
+        if releasing {
+            self.recover_releasing_step(&commitment_hash).await?;
+        }
+
         // The acceptance is not written on its own: the confirm built from it
         // commits the session's next durable state, and until then a response
         // delivered again is taken again.
@@ -3529,6 +3547,24 @@ impl BilateralBleHandler {
     /// After a restart, settle a bearer step recorded as releasing by the recovery table: back
     /// to waiting when its anchor's counter did not move, or committed — the same release,
     /// emitted again — when it did, with the anchor's frontier then advanced.
+    /// Settle every step whose anchor release was left unfinished (a USB timeout, a power cut, a
+    /// chip fault) by the recovery table, live rather than at the next restart: committed with the
+    /// same release when the anchor's counter moved, back to awaiting the response when it did not.
+    async fn settle_releasing_steps(&self) -> Result<(), DsmError> {
+        let releasing: Vec<[u8; 32]> = {
+            let sessions = self.sessions.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(_, session)| session.phase == BilateralPhase::Releasing)
+                .map(|(commitment_hash, _)| *commitment_hash)
+                .collect()
+        };
+        for commitment_hash in releasing {
+            self.recover_releasing_step(&commitment_hash).await?;
+        }
+        Ok(())
+    }
+
     async fn recover_releasing_step(&self, commitment_hash: &[u8; 32]) -> Result<(), DsmError> {
         let artifacts = match self.settle_unfinished_release(commitment_hash).await? {
             UnfinishedRelease::Reset => return Ok(()),
