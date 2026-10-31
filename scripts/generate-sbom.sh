@@ -69,6 +69,10 @@ while [[ $# -gt 0 ]]; do
                 usage >&2
                 exit 2
             }
+            [[ -f "$2" ]] || {
+                echo "Board log not found: $2" >&2
+                exit 2
+            }
             BOARD_LOG="$2"
             shift 2
             ;;
@@ -635,7 +639,9 @@ generate_assurance() {
         assurance_args+=(--skip-execution)
     fi
     if [[ -n "${BOARD_LOG}" ]]; then
-        assurance_args+=(--board-log "${BOARD_LOG}")
+        # The board travels in the bundle, so the record's log path resolves there.
+        cp "${BOARD_LOG}" "${LOG_DIR}/board.log"
+        assurance_args+=(--board-log "${LOG_DIR}/board.log")
     fi
     log "Recording security assurance"
     python3 "${SCRIPT_DIR}/generate-assurance.py" "${assurance_args[@]}"

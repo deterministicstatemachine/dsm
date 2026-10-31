@@ -143,25 +143,106 @@ def requirement_statuses():
     return statuses
 
 
+TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ")
+UNIT_BINARY = re.compile(r"Running unittests \S+ \(\S*/deps/(\w+)-[0-9a-f]+\)")
+TEST_BINARY = re.compile(r"Running tests/\S+\.rs \(\S*/deps/(\w+)-[0-9a-f]+\)")
+TEST_LINE = re.compile(r"^test (\S+)(?: - should panic)? \.\.\. ?(.*)$")
+RESULT_LINE = re.compile(r"^test result: (ok|FAILED)\.")
+FAILED_NAME = re.compile(r"^    (\S+)$")
+SEVERITY = {"pass": 0, "skipped": 1, "fail": 2}
+
+
+def crate_of_binaries():
+    """Each binary target's name -> the crate name of the package that owns it.
+
+    A package's binary can be named apart from its crate (the storage node's
+    `storage_node`), and cargo names the binary, so the owner is read from the
+    package manifests.
+    """
+    import tomllib
+
+    owners = {}
+    for manifest in git("ls-files", "*Cargo.toml").splitlines():
+        data = tomllib.loads((ROOT / manifest).read_text())
+        package = data.get("package")
+        if not package:
+            continue
+        crate = data.get("lib", {}).get("name", package["name"]).replace("-", "_")
+        bins = data.get("bin", [])
+        names = [b["name"] for b in bins]
+        declared = {b.get("path") for b in bins}
+        if "src/main.rs" not in declared and (ROOT / manifest).parent.joinpath("src", "main.rs").exists():
+            names.append(package["name"])
+        for name in names:
+            owners.setdefault(name.replace("-", "_"), set()).add(crate)
+    return owners
+
+
 def board_results(path):
-    """test name (without its crate) -> pass/fail, from cargo's own output."""
+    """Each test's full name -> pass/fail/skipped, from cargo's own output.
+
+    Cargo runs one package at a time and names each test binary before it runs
+    it: the package's unit tests as `Running unittests src/lib.rs
+    (.../deps/<crate>-<hash>)` (or src/main.rs for a binary), then its
+    integration tests as `Running tests/<file>.rs (...)`. The full name is the
+    crate, the integration binary if any, and the test's path, as the
+    verification matrix writes it, so a name is matched exactly.
+
+    Under --nocapture a test's own output can stand between its name and its
+    result, so a test whose result is not on its own line is decided by the
+    binary's summary: failed if the binary lists it among its failures, passed
+    otherwise. A binary that never prints its summary decides none of them.
+    """
     results = {}
     if not path:
         return results
-    for line in Path(path).read_text(errors="replace").splitlines():
-        m = re.match(r"test (\S+) \.\.\. (ok|FAILED)", line)
+    owners = crate_of_binaries()
+
+    def record(name, status):
+        if SEVERITY[status] >= SEVERITY[results.get(name, status)]:
+            results[name] = status
+
+    crate, binary, started, failed = None, None, [], set()
+    for raw in Path(path).read_text(errors="replace").splitlines():
+        line = TIMESTAMP.sub("", raw).rstrip()
+        m = UNIT_BINARY.search(line)
         if m:
-            results[m.group(1)] = "pass" if m.group(2) == "ok" else "fail"
+            owner = owners.get(m.group(1), set())
+            crate = crate if crate in owner else (min(owner) if len(owner) == 1 else m.group(1))
+            binary, started, failed = None, [], set()
+            continue
+        m = TEST_BINARY.search(line)
+        if m:
+            binary, started, failed = m.group(1), [], set()
+            continue
+        m = TEST_LINE.match(line)
+        if m and crate:
+            name = "::".join(part for part in (crate, binary, m.group(1)) if part)
+            outcome = {"ok": "pass", "FAILED": "fail", "ignored": "skipped"}.get(m.group(2))
+            if outcome:
+                record(name, outcome)
+            else:
+                started.append((m.group(1), name))
+            continue
+        m = FAILED_NAME.match(line)
+        if m:
+            failed.add(m.group(1))
+            continue
+        if RESULT_LINE.match(line):
+            for short, name in started:
+                record(name, "fail" if short in failed else "pass")
+            started, failed = [], set()
     return results
 
 
 def test_status(name, results):
-    # The board prints a test without its crate: `handlers::x::y` for `dsm_sdk::handlers::x::y`.
-    rest = name.split("::", 1)[1] if "::" in name else name
-    for key in (name, rest):
-        if key in results:
-            return results[key]
-    return "incomplete"
+    return results.get(name, "incomplete")
+
+
+def board_status(results):
+    if not results:
+        return "incomplete"
+    return "fail" if "fail" in results.values() else "pass"
 
 
 def run_check(name, command, logs, cwd=ROOT):
@@ -287,7 +368,7 @@ def main():
     sphincs_ref, _ = executed("sphincs-map", "Every SPHINCS+ signer and verifier is in the reviewed caller inventory", ["python3", "scripts/sphincs_source_map.py", "--check"], run_check("sphincs-map", [sys.executable, "scripts/sphincs_source_map.py", "--check"], logs) if executing else None)
     board_ref = bom.add_evidence(
         "ev-board", "The cargo board of this commit, deciding each named test",
-        "pass" if results else "incomplete", "this-run" if results else "not-given",
+        board_status(results), "this-run" if results else "not-given",
         log=bom.rel(args.board_log) if args.board_log else "",
         log_sha256=sha256_file(args.board_log) if args.board_log else "",
         reason="" if results else "no board log was given; each named test stays incomplete in this record (CI's board at this commit is where they run)",
@@ -416,6 +497,7 @@ def main():
         "## Software verification",
         "",
         f"- Requirements mapped to a gate: {len(software_rows)} rows (`specs/requirements/VERIFICATION_MATRIX.md`).",
+        f"- The cargo board of this commit: {board_status(results)}, `{bom.rel(args.board_log)}` ({sha256_file(args.board_log)[:16]}…)." if args.board_log else "- The cargo board of this commit: incomplete; no board log was given.",
         f"- Named negative tests: {len(all_tests)} ({count(all_tests)}){'' if results else '; no board log was given, so none is decided by this record'}.",
         f"- Mutation controls: {count([m for _, _, m, _, _ in software_rows])}.",
         f"- Formal artifacts named by a row: {count([f for _, _, _, f, _ in software_rows if f != 'not-run'])}.",

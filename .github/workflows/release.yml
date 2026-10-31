@@ -115,13 +115,28 @@ jobs:
 
       - name: Test (workspace, then the storage node on Postgres)
         run: |
+          set -euo pipefail
           # --test-threads=1 for the same reason as ci.yml: process-global
           # singletons make parallel test threads a nondeterministic flake
           # source, and #[serial] only serializes #[serial] tests against each
           # other. This workflow previously omitted the flag, running a
           # parallelism the merge gate never exercised.
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+          # The board is kept, headed by the commit it ran on: the
+          # security-assurance record decides each named test from it and
+          # refuses a board that names another commit.
+          mkdir -p board
+          echo "commit $(git rev-parse HEAD)" > board/board.log
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+
+      - name: Upload the board log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-board-log
+          path: board/board.log
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Security audit (every tracked Cargo.lock)
         run: |
@@ -295,10 +310,16 @@ jobs:
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
+      - name: Download the board log
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-board-log
+          path: board/
+
       - name: Generate SBOM with validation and the security-assurance record
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
-        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}"
+        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}" --board-log board/board.log
 
       - name: Package SBOM bundle
         env:
