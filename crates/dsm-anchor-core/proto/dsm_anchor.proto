@@ -88,6 +88,19 @@ enum Op {
   reserved "OP_SPI_PASSTHROUGH";
   OP_PROVISION   = 9;  // provision an unprovisioned anchor for the device `provision` names, once;
                        // answered with the STATUS pin material of the anchor it made
+  OP_RECOVER     = 10; // §26 recovery: complete a durable commit if it can, and answer the outcome
+}
+
+// The §26 recovery outcome, as OP_RECOVER answers it.
+enum Recovery {
+  RECOVERY_UNSPECIFIED                  = 0;
+  RECOVERY_ACCEPT                       = 1; // ready; active_root is the frontier h_i
+  RECOVERY_REEMIT_COMMITTED             = 2; // a committed release; active_root is its h_{i+1}
+  RECOVERY_DOWNGRADE_ONLINE             = 3;
+  RECOVERY_FAIL_CLOSED                  = 4;
+  RECOVERY_EXHAUSTED_ONLINE_ONLY        = 5;
+  RECOVERY_ACCEPT_PREPARED_CAN_COMPLETE = 6;
+  RECOVERY_ONLINE_CANCEL_OR_RESOLVE     = 7;
 }
 
 // A request from the (non-secure) host transport into the secure core. The device roots
@@ -126,6 +139,7 @@ message ApplianceResponse {
   // OP_STATUS: the public birth commitment S_birth B commits. With fields 6 and 10–13 and the
   // owner's online key and device id, B recomputes from what the chip discloses.
   bytes  pin_birth_commitment  = 14;
+  Recovery recovery            = 15; // OP_RECOVER: the outcome (its frontier in active_root)
 }
 
 // The appliance's durable record (§26): everything it holds across a power cut except the

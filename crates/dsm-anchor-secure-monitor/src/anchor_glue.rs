@@ -305,7 +305,7 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 fn op_requires_measurement(op: i32) -> bool {
     matches!(
         pb::Op::try_from(op),
-        Ok(pb::Op::Prepare | pb::Op::Commit | pb::Op::Emit | pb::Op::Finalize)
+        Ok(pb::Op::Prepare | pb::Op::Commit | pb::Op::Emit | pb::Op::Finalize | pb::Op::Recover)
     )
 }
 

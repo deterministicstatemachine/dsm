@@ -355,9 +355,11 @@ impl<T: Tropic, P: PartitionSig> Appliance<T, P> {
 
         // Phase 2: move the counter (the non-rewind floor). On failure nothing is exported;
         // recovery completes the durable candidate.
-        self.tropic
-            .counter_update()
-            .map_err(|_| ApplianceError::CounterExhausted)?;
+        match self.tropic.counter_update() {
+            Ok(()) => {}
+            Err(TropicError::CounterExhausted) => return Err(ApplianceError::CounterExhausted),
+            Err(e) => return Err(ApplianceError::Tropic(e)),
+        }
 
         // Phase 3: mark counter-committed.
         if let Record::Committed(c) = &mut self.active.record {

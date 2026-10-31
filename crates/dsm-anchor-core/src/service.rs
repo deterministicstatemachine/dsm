@@ -7,7 +7,7 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::appliance::{Appliance, ApplianceError, Status};
+use crate::appliance::{Appliance, ApplianceError, RecoverOutcome, Status};
 use crate::durable::{ActiveStore, DurableAppliance, DurableError};
 use crate::proto::{arr32, decode_request, encode_response, pb, ProtoError};
 use crate::root_advance::Transition;
@@ -99,6 +99,7 @@ fn base(op: i32) -> pb::ApplianceResponse {
         pin_partition_pk: Vec::new(),
         pin_chip_pk: Vec::new(),
         pin_birth_commitment: Vec::new(),
+        recovery: pb::Recovery::Unspecified as i32,
     }
 }
 
@@ -133,6 +134,7 @@ pub trait Served {
     fn emit(&mut self) -> Result<pb::OfflineRelease, u32>;
     fn finalize(&mut self) -> Result<[u8; 32], u32>;
     fn cancel(&mut self) -> Result<(), u32>;
+    fn recover(&mut self) -> RecoverOutcome;
 }
 
 impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
@@ -164,6 +166,9 @@ impl<T: Tropic, P: PartitionSig> Served for Appliance<T, P> {
     fn cancel(&mut self) -> Result<(), u32> {
         Appliance::cancel(self).map_err(appliance_code)
     }
+    fn recover(&mut self) -> RecoverOutcome {
+        Appliance::recover(self)
+    }
 }
 
 impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, P, S> {
@@ -194,6 +199,25 @@ impl<T: Tropic, P: PartitionSig, S: ActiveStore> Served for DurableAppliance<T, 
     }
     fn cancel(&mut self) -> Result<(), u32> {
         DurableAppliance::cancel(self).map_err(durable_code)
+    }
+    fn recover(&mut self) -> RecoverOutcome {
+        DurableAppliance::recover(self)
+    }
+}
+
+/// A recovery outcome on the wire: its kind, and the frontier it names (the active frontier for
+/// `Accept`, the committed release's successor frontier for `ReemitCommitted`).
+fn recovery_wire(outcome: RecoverOutcome) -> (pb::Recovery, Vec<u8>) {
+    match outcome {
+        RecoverOutcome::Accept(root) => (pb::Recovery::Accept, root.to_vec()),
+        RecoverOutcome::ReemitCommitted(next) => (pb::Recovery::ReemitCommitted, next.to_vec()),
+        RecoverOutcome::DowngradeOnline => (pb::Recovery::DowngradeOnline, Vec::new()),
+        RecoverOutcome::FailClosed => (pb::Recovery::FailClosed, Vec::new()),
+        RecoverOutcome::ExhaustedOnlineOnly => (pb::Recovery::ExhaustedOnlineOnly, Vec::new()),
+        RecoverOutcome::AcceptPreparedCanComplete => {
+            (pb::Recovery::AcceptPreparedCanComplete, Vec::new())
+        }
+        RecoverOutcome::OnlineCancelOrResolve => (pb::Recovery::OnlineCancelOrResolve, Vec::new()),
     }
 }
 
@@ -271,6 +295,14 @@ pub fn dispatch<A: Served>(app: &mut A, req: &pb::ApplianceRequest) -> pb::Appli
             Err(code) => fail(op, code),
         },
         Ok(pb::Op::Status) => status(op, app.view()),
+        Ok(pb::Op::Recover) => {
+            let (kind, frontier) = recovery_wire(app.recover());
+            pb::ApplianceResponse {
+                recovery: kind as i32,
+                active_root: frontier,
+                ..ok(op)
+            }
+        }
         Ok(pb::Op::Cancel) => match app.cancel() {
             Ok(()) => ok(op),
             Err(code) => fail(op, code),

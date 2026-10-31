@@ -966,3 +966,30 @@ fn recovery_completes_only_a_prepared_record_whose_signatures_verify() {
     }
     assert_eq!(moved.recover(), RecoverOutcome::OnlineCancelOrResolve);
 }
+
+/// Over the wire, recovery answers the appliance's own outcome and the frontier it names: after a
+/// commit, the committed release's successor frontier, so the host re-emits that same release.
+#[test]
+fn recovery_over_the_wire_names_the_committed_releases_successor_frontier() {
+    let anchor = Anchor::new(0x36);
+    let mut a = anchor.appliance();
+    let t = transition(a.active.root, a.active.anchor_counter);
+    ok(
+        a.prepare(&t.as_transition(), &CHALLENGE, &ROOT_BEFORE, &ROOT_AFTER),
+        "prepared",
+    );
+    ok(a.commit(), "committed");
+    let answer = ok(
+        decode_response(&anchor_core::service::handle(
+            &mut a,
+            &encode_request(&pb::ApplianceRequest {
+                op: pb::Op::Recover as i32,
+                ..Default::default()
+            }),
+        )),
+        "a response",
+    );
+    assert_eq!(answer.recovery, pb::Recovery::ReemitCommitted as i32);
+    assert_eq!(answer.active_root, t.next_root.to_vec());
+    assert_ne!(answer.active_root, a.active.root.to_vec());
+}

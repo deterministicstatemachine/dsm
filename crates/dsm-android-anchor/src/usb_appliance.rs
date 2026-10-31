@@ -156,16 +156,29 @@ impl AnchorAppliance for UsbAnchorAppliance {
     }
 
     fn recover(&mut self) -> Result<RecoverOutcome, DsmError> {
-        // The wire has no OP_RECOVER: the firmware self-recovers at boot; over USB the client
-        // OBSERVES via STATUS (0=Ready 1=Prepared 2=Committed) and maps to the §26 outcome the
-        // host policy consumes. An unreadable/unknown status downgrades online (fail-safe).
-        let r = self.roundtrip(bare(pb::Op::Status))?;
-        Ok(match r.status {
-            0 => RecoverOutcome::Accept(arr32(&r.active_root)?),
-            1 => RecoverOutcome::AcceptPreparedCanComplete,
-            2 => RecoverOutcome::ReemitCommitted(arr32(&r.active_root)?),
-            _ => RecoverOutcome::DowngradeOnline,
-        })
+        // The appliance runs §26 recovery itself and answers its outcome and the frontier it
+        // names; nothing is inferred from a status code. An outcome the wire does not name fails
+        // closed.
+        let r = self.roundtrip(bare(pb::Op::Recover))?;
+        match pb::Recovery::try_from(r.recovery) {
+            Ok(pb::Recovery::Accept) => Ok(RecoverOutcome::Accept(arr32(&r.active_root)?)),
+            Ok(pb::Recovery::ReemitCommitted) => {
+                Ok(RecoverOutcome::ReemitCommitted(arr32(&r.active_root)?))
+            }
+            Ok(pb::Recovery::DowngradeOnline) => Ok(RecoverOutcome::DowngradeOnline),
+            Ok(pb::Recovery::FailClosed) => Ok(RecoverOutcome::FailClosed),
+            Ok(pb::Recovery::ExhaustedOnlineOnly) => Ok(RecoverOutcome::ExhaustedOnlineOnly),
+            Ok(pb::Recovery::AcceptPreparedCanComplete) => {
+                Ok(RecoverOutcome::AcceptPreparedCanComplete)
+            }
+            Ok(pb::Recovery::OnlineCancelOrResolve) => Ok(RecoverOutcome::OnlineCancelOrResolve),
+            Ok(pb::Recovery::Unspecified) => Err(DsmError::invalid_operation(
+                "anchor appliance: OP_RECOVER answered no outcome",
+            )),
+            Err(unknown) => Err(DsmError::invalid_operation(format!(
+                "anchor appliance: OP_RECOVER answered an outcome the wire does not name ({unknown:?})"
+            ))),
+        }
     }
 
     fn provisioned_pin(&mut self) -> Result<Option<AnchorPin>, DsmError> {
@@ -264,19 +277,35 @@ mod tests {
     }
 
     #[test]
-    fn recover_maps_wire_status_to_the_section26_outcome() {
-        for (wire, want_ready) in [(0u32, true), (1, false), (2, false), (9, false)] {
-            let usb: UsbTransceive = Arc::new(move |_f| Ok(status_response(wire)));
+    fn recover_answers_the_appliances_own_outcome_and_frontier() {
+        for (kind, want) in [
+            (pb::Recovery::Accept, RecoverOutcome::Accept([0x11; 32])),
+            (pb::Recovery::ReemitCommitted, RecoverOutcome::ReemitCommitted([0x11; 32])),
+            (pb::Recovery::AcceptPreparedCanComplete, RecoverOutcome::AcceptPreparedCanComplete),
+            (pb::Recovery::DowngradeOnline, RecoverOutcome::DowngradeOnline),
+        ] {
+            let usb: UsbTransceive = Arc::new(move |frame| {
+                let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
+                assert_eq!(req.op, pb::Op::Recover as i32);
+                let mut answer =
+                    anchor_core::proto::decode_response(&status_response(0)).expect("an answer");
+                answer.op = req.op;
+                answer.recovery = kind as i32;
+                Ok(anchor_core::proto::encode_response(&answer))
+            });
             let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
-            let out = app.recover().expect("recover");
-            match (wire, out) {
-                (0, RecoverOutcome::Accept(r)) => assert_eq!(r, [0x11; 32]),
-                (1, RecoverOutcome::AcceptPreparedCanComplete) => {}
-                (2, RecoverOutcome::ReemitCommitted(r)) => assert_eq!(r, [0x11; 32]),
-                (9, RecoverOutcome::DowngradeOnline) => {}
-                (w, o) => panic!("wire status {w} mapped to unexpected {o:?} (ready={want_ready})"),
-            }
+            assert_eq!(app.recover().expect("recover"), want);
         }
+        let unnamed: UsbTransceive = Arc::new(|frame| {
+            let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
+            let mut answer =
+                anchor_core::proto::decode_response(&status_response(0)).expect("an answer");
+            answer.op = req.op;
+            Ok(anchor_core::proto::encode_response(&answer))
+        });
+        let mut app = UsbAnchorAppliance::connect(unnamed).expect("connect");
+        let refused = app.recover().expect_err("an outcome the wire does not name fails closed");
+        assert!(refused.to_string().contains("no outcome"), "{refused}");
     }
 
     #[test]
