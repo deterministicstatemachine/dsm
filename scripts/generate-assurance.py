@@ -106,10 +106,11 @@ def named_tests(cell):
 def matrix_rows():
     rows = []
     for line in MATRIX.read_text().splitlines():
-        if not line.startswith("| MR-"):
+        if not line.startswith("| ") or re.match(r"^\|\s*:?-", line):
             continue
         c = cells(line)
-        if len(c) < 5:
+        # Every requirement row of a matrix table: five cells, not the header.
+        if len(c) < 5 or (c[0] == "Requirement" and c[1] == "Gate"):
             continue
         ids = re.findall(r"MR-[A-Z]+-\d{4}", c[0].split(":")[0])
         rows.append({"ids": ids, "text": text_of(c[0]), "gate": text_of(c[1]), "tests": named_tests(c[2]), "mutation": text_of(c[3]), "formal": text_of(c[4])})
@@ -233,6 +234,69 @@ def board_results(path):
                 record(name, "fail" if short in failed else "pass")
             started, failed = [], set()
     return results
+
+
+TLA_REGISTRY = ROOT / "tools" / "vertical_validation" / "src" / "tla_runner.rs"
+TLA_RUN = re.compile(r"Running TLC: (\S+) \((\S+\.cfg)\)")
+TLA_VERDICT = re.compile(r"^\s+(PASSED|FAILED)\b")
+FORMAL_SEVERITY = {"pass": 0, "incomplete": 1, "fail": 2}
+
+
+def tla_results(log_path):
+    """Each TLA+ specification and configuration the run checked -> pass/fail.
+
+    The runner's registry names each configuration's label, specification and
+    `.cfg`; its log gives one verdict per configuration. A specification fails
+    if any of its configurations failed.
+    """
+    if not log_path or not Path(log_path).exists():
+        return {}
+    registry = TLA_REGISTRY.read_text()
+    spec_of = {}
+    for pattern in (
+        r'expect_violation\(\s*"([^"]+)",\s*"([^"]+\.tla)",\s*"([^"]+\.cfg)"',
+        r'label:\s*"([^"]+)"\.into\(\),\s*spec_file:\s*"([^"]+\.tla)"\.into\(\),\s*config_file:\s*"([^"]+\.cfg)"',
+    ):
+        for label, spec, _cfg in re.findall(pattern, registry):
+            spec_of[label] = spec
+    results = {}
+
+    def record(name, status):
+        if FORMAL_SEVERITY[status] >= FORMAL_SEVERITY[results.get(name, status)]:
+            results[name] = status
+
+    lines = Path(log_path).read_text(errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        m = TLA_RUN.search(line)
+        if not m:
+            continue
+        verdicts = [v.group(1) for v in (TLA_VERDICT.match(l) for l in lines[i + 1 : i + 4]) if v]
+        status = {"PASSED": "pass", "FAILED": "fail"}.get(verdicts[0], "incomplete") if verdicts else "incomplete"
+        label, cfg = m.group(1), m.group(2)
+        names = [label, cfg, cfg.removesuffix(".cfg")]
+        if label in spec_of:
+            names += [spec_of[label], spec_of[label].removesuffix(".tla")]
+        for name in names:
+            record(name, status)
+    return results
+
+
+def formal_tla_status(artifact, results, overall):
+    """A row's TLA+ artifact, decided by the specifications, configurations and labels it names.
+
+    A row that names nothing the run can attribute takes the run's verdict when
+    the run passed; when the run failed elsewhere, it is incomplete, never a
+    failure borrowed from another specification.
+    """
+    if not results:
+        return overall
+    files = re.findall(r"\w+\.(?:tla|cfg)\b", artifact)
+    words = [w for w in re.findall(r"[\w/-]+", artifact) if w in results]
+    named = files or words
+    if not named:
+        return overall if overall != "fail" else "incomplete"
+    states = [results.get(name, "incomplete") for name in named]
+    return max(states, key=lambda state: FORMAL_SEVERITY[state])
 
 
 def test_status(name, results):
@@ -361,6 +425,7 @@ def main():
             tla_why = "the SBOM run skipped TLA validation (--skip-validation; CI's Formal Validation job runs it)"
         else:
             tla = {"status": t["status"], "exit_code": t.get("exit_code"), "log": run_dir.parent.parent / t["log_path"] if t.get("log_path") else None, "command": t.get("command")}
+    tla_per_spec = tla_results(tla["log"] if tla and tla.get("log") else None)
     tla_ref, tla_status = executed("tla", "TLA+ model checking of every registered configuration", ["cargo", "run", "-p", "dsm_vertical_validation", "--", "tla-check"], tla, tla_why)
     lean_ref, lean_status = executed("lean", "Lean 4 kernel check of every module, sorry-free, warnings as errors", ["lean", "-DwarningAsError=true", "lean4/*.lean"], lean_check(logs) if executing else None)
     conf_ref, _ = executed("conformance-evidence", "Every requirement row names code and tests that exist", ["python3", "ci/conformance_evidence.py"], run_check("conformance-evidence", [sys.executable, "ci/conformance_evidence.py"], logs) if executing else None)
@@ -390,7 +455,12 @@ def main():
         evidence.append(bom.add_evidence(f"ev-mutation-{i}", f"Mutation control for {ident}", mutation_state, "recorded", record=row["mutation"], source="specs/requirements/VERIFICATION_MATRIX.md"))
         formal_state = "not-run"
         if row["formal"] not in ("", "—"):
-            formal_state = tla_status if "tla" in row["formal"].lower() or ".cfg" in row["formal"] else lean_status if "lean" in row["formal"].lower() else "recorded"
+            if "tla" in row["formal"].lower() or ".cfg" in row["formal"]:
+                formal_state = formal_tla_status(row["formal"], tla_per_spec, tla_status)
+            elif "lean" in row["formal"].lower():
+                formal_state = lean_status
+            else:
+                formal_state = "recorded"
             evidence.append(bom.add_evidence(f"ev-formal-{i}", f"Formal artifact for {ident}", formal_state, "this-run" if formal_state in ("pass", "fail", "skipped") else "recorded", artifact=row["formal"]))
         conformance = [statuses.get(x, "unrecorded") for x in row["ids"]]
         states = [s for s in test_states] + [mutation_state]

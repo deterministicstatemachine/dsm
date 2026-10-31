@@ -134,6 +134,29 @@ class AssuranceRecord(unittest.TestCase):
         self.assertNotIn("dsm_sdk::aborts::the_process_dies_here", results)
         self.assertEqual(generator().board_status(results), "fail")
 
+    def test_a_formal_artifact_takes_the_verdict_of_the_specifications_it_names(self):
+        ga = generator()
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "tla-check.log"
+            log.write_text(
+                "  Running TLC: DSM_tiny (DSM_tiny.cfg) ...\n"
+                "    PASSED (445427 states, 134183 distinct, depth 10)\n"
+                "  Running TLC: DSM/crossing-settles-reachable (DSM_CrossingSettles.cfg) ...\n"
+                "    FAILED [expected-to-fail] (1691629 states, 98968 distinct, depth 13)\n"
+                "  Running TLC: OfflineFinality (DSM_OfflineFinality.cfg) ...\n"
+                "    PASSED (6000 states, 900 distinct, depth 9)\n"
+            )
+            results = ga.tla_results(str(log))
+        self.assertEqual(results["DSM_CrossingSettles.cfg"], "fail")
+        self.assertEqual(results["DSM.tla"], "fail")
+        self.assertEqual(results["DSM_OfflineFinality.tla"], "pass")
+        self.assertEqual(ga.formal_tla_status("`tla/DSM_OfflineFinality.tla`", results, "fail"), "pass")
+        self.assertEqual(ga.formal_tla_status("`tla/DSM.tla` (`DSM_CrossingSettles.cfg`)", results, "fail"), "fail")
+        self.assertEqual(ga.formal_tla_status("`tla/DSM_Unchecked.tla`", results, "fail"), "incomplete")
+        self.assertEqual(ga.formal_tla_status("TLA+ `DSM_tiny`: TLC model check", results, "fail"), "pass")
+        self.assertEqual(ga.formal_tla_status("TLA+ `LeaderFromCommittedSet`", results, "fail"), "incomplete")
+        self.assertEqual(ga.formal_tla_status("TLA+ `LeaderFromCommittedSet`", results, "pass"), "pass")
+
     def test_without_a_board_log_no_named_test_is_reported_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
