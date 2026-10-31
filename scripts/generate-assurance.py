@@ -291,6 +291,10 @@ def formal_tla_status(artifact, results, overall):
     if not results:
         return overall
     files = re.findall(r"\w+\.(?:tla|cfg)\b", artifact)
+    # A configuration named by its suffix (`_InstallReachable.cfg`) belongs to the specification
+    # the row names (`DSM_SofiFulfillment.tla`).
+    stems = [f.removesuffix(".tla") for f in files if f.endswith(".tla")]
+    files = [stems[0] + f if f.startswith("_") and stems else f for f in files]
     words = [w for w in re.findall(r"[\w/-]+", artifact) if w in results]
     named = files or words
     if not named:

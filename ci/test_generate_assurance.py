@@ -156,6 +156,9 @@ class AssuranceRecord(unittest.TestCase):
         self.assertEqual(ga.formal_tla_status("TLA+ `DSM_tiny`: TLC model check", results, "fail"), "pass")
         self.assertEqual(ga.formal_tla_status("TLA+ `LeaderFromCommittedSet`", results, "fail"), "incomplete")
         self.assertEqual(ga.formal_tla_status("TLA+ `LeaderFromCommittedSet`", results, "pass"), "pass")
+        shorthand = "TLA `DSM_OfflineFinality.tla` (reachable by `_Missing.cfg`)"
+        self.assertEqual(ga.formal_tla_status(shorthand, results, "pass"), "incomplete")
+        self.assertEqual(ga.formal_tla_status("TLA `DSM.tla` (`_tiny.cfg`)", results, "pass"), "fail")
 
     def test_without_a_board_log_no_named_test_is_reported_passed(self):
         with tempfile.TemporaryDirectory() as tmp:
