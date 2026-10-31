@@ -365,6 +365,14 @@ pub(crate) fn stage_bearer_spend(
     Ok(StagedBearerSpend { staged, spend })
 }
 
+/// What a sender's anchor disclosure asks of the receiver accepting its release.
+enum AnchorAdmission {
+    /// No disclosure, one already pinned, or one this receiver does not act on.
+    Nothing,
+    /// The anchor to pin, written by the step that accepts its release.
+    Pin(dsm::crypto::anchor_enrollment::AnchorEnrollment),
+}
+
 /// What a bearer step's anchor holds of its release, by the recovery table, once a prepared
 /// record whose counter did not move has been cancelled.
 #[derive(Debug)]
@@ -3596,8 +3604,9 @@ impl BilateralBleHandler {
     /// disclosed keys and birth commitment, the sender's pinned online key, its
     /// device id and the offline-bearer policy (the load in the sender's online
     /// history names that bundle; the receive rule then requires this device
-    /// recorded it). Pure: the pin is written only by
-    /// [`Self::admit_anchor_disclosure`], after the confirm is checked.
+    /// recorded it). Pure: the pin is written only by the step that accepts
+    /// the release ([`Self::decide_anchor_disclosure`] decides it), in that
+    /// step's transaction.
     async fn sender_anchor(
         &self,
         sender: [u8; 32],
@@ -3642,119 +3651,118 @@ impl BilateralBleHandler {
         })
     }
 
-    async fn admit_anchor_disclosure(
+    /// What a sender's anchor disclosure asks of this receiver, decided before anything is
+    /// written. The pin is written by the step that accepts the anchor's release, in its own
+    /// transaction; a release that is not accepted leaves nothing pinned. A disclosure from an
+    /// unverified contact, one that does not parse, or one bound to a policy other than the
+    /// canonical offline-bearer policy is not acted on.
+    async fn decide_anchor_disclosure(
         &self,
         sender_device_id: [u8; 32],
         sender_online_key: &[u8],
         commitment_hash: [u8; 32],
         d: &generated::AnchorDisclosure,
-    ) {
+    ) -> AnchorAdmission {
         let contact_verified = {
             let mgr = self.bilateral_tx_manager.read().await;
             mgr.has_verified_contact(&sender_device_id)
         };
-        let parsed = disclosed_anchor(d).map(|disclosed| {
-            (
-                disclosed.policy,
-                disclosed.birth_commitment,
-                dsm::crypto::anchor_enrollment::FusedAnchorPin {
-                    bundle: disclosed.bundle,
-                    anchor_id: disclosed.anchor_id,
-                    enrolled_counter: disclosed.enrolled_counter,
-                    partition_pk: disclosed.partition_pk,
-                    pk_chip: disclosed.pk_chip,
-                    uncompromised: true,
-                },
-            )
-        });
         if !contact_verified {
             warn!("[BILATERAL] fused anchor disclosure ignored: sender is not a verified contact");
-            return;
+            return AnchorAdmission::Nothing;
         }
-        let (policy, birth_commitment, disclosed) = match parsed {
-            Ok(parsed) => parsed,
+        let disclosed = match disclosed_anchor(d) {
+            Ok(disclosed) => disclosed,
             Err(e) => {
                 warn!("[BILATERAL] fused anchor disclosure ignored: {e} (fail-closed)");
-                return;
+                return AnchorAdmission::Nothing;
             }
+        };
+        let canonical_policy = dsm::types::operations::canonical_offline_bearer_policy().policy_id;
+        if disclosed.policy != canonical_policy {
+            warn!(
+                "[BILATERAL] fused anchor disclosure ignored: it binds policy {}, not the canonical offline-bearer policy",
+                bytes_to_base32(&disclosed.policy)
+            );
+            return AnchorAdmission::Nothing;
+        }
+        let candidate = dsm::crypto::anchor_enrollment::FusedAnchorPin {
+            bundle: disclosed.bundle,
+            anchor_id: disclosed.anchor_id,
+            enrolled_counter: disclosed.enrolled_counter,
+            partition_pk: disclosed.partition_pk,
+            pk_chip: disclosed.pk_chip,
+            uncompromised: true,
         };
         let Some(store) = crate::bridge::anchor_enrollment_store() else {
-            return;
+            return AnchorAdmission::Nothing;
         };
-        {
-            {
-                let existing = store.get(&sender_device_id);
-                match dsm::crypto::anchor_enrollment::pin_admit_decision(
-                    sender_device_id,
-                    sender_online_key,
-                    policy,
-                    &birth_commitment,
-                    &disclosed,
-                    existing.as_ref(),
-                ) {
-                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => {
-                        let anchor_id = e.pin.anchor_id;
-                        match store.admit(e) {
-                            Ok(()) => {
-                                info!(
-                                    "[BILATERAL] fused anchor PINNED for {} (first-transfer TOFU admit)",
-                                    bytes_to_base32(&sender_device_id[..8])
-                                );
-                                // Stage 4 Slice 3 (signal b): surface the first-transfer trust so the
-                                // receiver UI can say "trusted anchor for <contact>". The message
-                                // carries the Base32 anchor id.
-                                self.emit_event(&generated::BilateralEventNotification {
-                                    // Rendered in emit_event, the one boundary all emitters cross.
-                                    display_amount: None,
-                                    event_type:
-                                        generated::BilateralEventType::BilateralEventAnchorPinned
-                                            .into(),
-                                    counterparty_device_id: sender_device_id.to_vec(),
-                                    commitment_hash: commitment_hash.to_vec(),
-                                    transaction_hash: None,
-                                    amount: None,
-                                    token_id: None,
-                                    status: "anchor_pinned_first_transfer".to_string(),
-                                    message: bytes_to_base32(&anchor_id),
-                                    sender_ble_address: None,
-                                    failure_reason: None,
-                                });
-                            }
-                            Err(err) => warn!(
-                                "[BILATERAL] fused anchor admit failed (continuing fail-closed): {err}"
-                            ),
-                        }
-                    }
-                    dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => {}
-                    dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
-                        // A pinned anchor's identity changed on a later transfer — a security event,
-                        // not a routine failure. The transfer is ALREADY rejected fail-closed by the
-                        // acceptance predicate (it verifies against the PINNED anchor) and the pinned
-                        // anchor is kept; here we only SURFACE it (owner directive). The log line is
-                        // the audit record; the event drives a prominent security warning in the UI.
-                        warn!(
-                            "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason}); keeping the pinned anchor",
-                            bytes_to_base32(&sender_device_id[..8])
-                        );
-                        self.emit_event(&generated::BilateralEventNotification {
-                            // Rendered in emit_event, the one boundary all emitters cross.
-                            display_amount: None,
-                            event_type: generated::BilateralEventType::BilateralEventAnchorChanged
-                                .into(),
-                            counterparty_device_id: sender_device_id.to_vec(),
-                            commitment_hash: commitment_hash.to_vec(),
-                            transaction_hash: None,
-                            amount: None,
-                            token_id: None,
-                            status: "anchor_identity_changed".to_string(),
-                            message: reason.to_string(),
-                            sender_ble_address: None,
-                            failure_reason: None,
-                        });
-                    }
-                }
+        let existing = store.get(&sender_device_id);
+        match dsm::crypto::anchor_enrollment::pin_admit_decision(
+            sender_device_id,
+            sender_online_key,
+            disclosed.policy,
+            &disclosed.birth_commitment,
+            &candidate,
+            existing.as_ref(),
+        ) {
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Admit(e) => AnchorAdmission::Pin(e),
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::NoChange => AnchorAdmission::Nothing,
+            dsm::crypto::anchor_enrollment::PinAdmitDecision::Reject(reason) => {
+                // A pinned anchor's identity changed on a later transfer — a security event,
+                // not a routine failure. The transfer is rejected fail-closed by the acceptance
+                // predicate (it verifies against the PINNED anchor) and the pinned anchor is
+                // kept; here it is SURFACED (owner directive). The log line is the audit record;
+                // the event drives a prominent security warning in the UI.
+                warn!(
+                    "[BILATERAL] fused anchor disclosure REJECTED for {} ({reason}); keeping the pinned anchor",
+                    bytes_to_base32(&sender_device_id[..8])
+                );
+                self.emit_event(&generated::BilateralEventNotification {
+                    // Rendered in emit_event, the one boundary all emitters cross.
+                    display_amount: None,
+                    event_type: generated::BilateralEventType::BilateralEventAnchorChanged.into(),
+                    counterparty_device_id: sender_device_id.to_vec(),
+                    commitment_hash: commitment_hash.to_vec(),
+                    transaction_hash: None,
+                    amount: None,
+                    token_id: None,
+                    status: "anchor_identity_changed".to_string(),
+                    message: reason.to_string(),
+                    sender_ble_address: None,
+                    failure_reason: None,
+                });
+                AnchorAdmission::Nothing
             }
         }
+    }
+
+    /// Surface a first-transfer pin once the step that wrote it has committed, so the receiver UI
+    /// can say "trusted anchor for <contact>". The message carries the Base32 anchor id.
+    fn announce_anchor_pinned(
+        &self,
+        sender_device_id: [u8; 32],
+        commitment_hash: [u8; 32],
+        anchor_id: [u8; 32],
+    ) {
+        info!(
+            "[BILATERAL] fused anchor PINNED for {} (first-transfer TOFU admit)",
+            bytes_to_base32(&sender_device_id[..8])
+        );
+        self.emit_event(&generated::BilateralEventNotification {
+            // Rendered in emit_event, the one boundary all emitters cross.
+            display_amount: None,
+            event_type: generated::BilateralEventType::BilateralEventAnchorPinned.into(),
+            counterparty_device_id: sender_device_id.to_vec(),
+            commitment_hash: commitment_hash.to_vec(),
+            transaction_hash: None,
+            amount: None,
+            token_id: None,
+            status: "anchor_pinned_first_transfer".to_string(),
+            message: bytes_to_base32(&anchor_id),
+            sender_ble_address: None,
+            failure_reason: None,
+        });
     }
 
     /// Sender-side terminal acknowledgment: finalize only after the receiver confirms it has
@@ -4199,7 +4207,7 @@ impl BilateralBleHandler {
         // ONLINE RECOVERY: an absent/malformed release, an un-enrolled anchor, or ANY failed
         // predicate check rejects HERE, before the value-release commit below — so no value is
         // released.
-        let adopted_anchor_state = {
+        let (adopted_anchor_state, anchor_admission) = {
             // `expected_receiver_challenge` is the r_R this receiver generated in
             // its prepare-response and stashed against the session — the release must bind it, so a
             // release minted for a different receiver session is rejected (defense-in-depth).
@@ -4226,24 +4234,31 @@ impl BilateralBleHandler {
             }
             let expected_receiver_challenge = receiver_challenge;
             // Receiver-admit fold: on the FIRST bearer transfer from this ALREADY-VERIFIED contact,
-            // admit (pin) the sender's disclosed fused anchor — bound to THIS confirm's disclosure +
-            // release + commitment, never standalone and never from a release alone. Existing-pin
-            // rules (`pin_admit_decision`): a matching disclosure is a no-op; a DIFFERING anchor is
-            // rejected and the pinned one kept (silent substitution never succeeds via a transfer).
-            // Admission is a memory of what to verify — acceptance is the predicate below.
+            // the sender's disclosed fused anchor is the pin the release is verified against —
+            // bound to THIS confirm's disclosure + release + commitment, never standalone and
+            // never from a release alone. It is written only by the step that accepts the
+            // release, in its transaction. Existing-pin rules (`pin_admit_decision`): a matching
+            // disclosure is a no-op; a DIFFERING anchor is rejected and the pinned one kept
+            // (silent substitution never succeeds via a transfer).
             let sender_device_id = session.counterparty_device_id;
-            if let Some(d) = confirm_request.anchor_disclosure.as_ref() {
-                self.admit_anchor_disclosure(
-                    sender_device_id,
-                    &sender_contact.public_key,
-                    commitment_hash,
-                    d,
-                )
-                .await;
-            }
-            let pin = crate::bridge::anchor_enrollment_store()
-                .and_then(|s| s.get(&sender_device_id))
-                .map(|e| e.pin);
+            let admission = match confirm_request.anchor_disclosure.as_ref() {
+                Some(d) => {
+                    self.decide_anchor_disclosure(
+                        sender_device_id,
+                        &sender_contact.public_key,
+                        commitment_hash,
+                        d,
+                    )
+                    .await
+                }
+                None => AnchorAdmission::Nothing,
+            };
+            let pin = match &admission {
+                AnchorAdmission::Pin(e) => Some(e.pin.clone()),
+                AnchorAdmission::Nothing => crate::bridge::anchor_enrollment_store()
+                    .and_then(|s| s.get(&sender_device_id))
+                    .map(|e| e.pin),
+            };
             let pinned = pin
                 .as_ref()
                 .map(crate::bluetooth::anchor_accept::PinnedAnchor::from_fused);
@@ -4266,7 +4281,7 @@ impl BilateralBleHandler {
                 "[BILATERAL] offline-bearer release accepted (v2 predicate: σ^DSM+σ^chip+σ^host) for commitment {}",
                 bytes_to_base32(&commitment_hash[..8])
             );
-            adopted
+            (adopted, admission)
         };
 
         // What the step credits: nothing online. A bearer transfer's value is
@@ -4450,6 +4465,12 @@ impl BilateralBleHandler {
                 adopted_anchor_state.next_anchor_counter,
             )
             .map_err(|e| storage("the adopted anchor frontier", e))?;
+            if let AnchorAdmission::Pin(enrollment) = &anchor_admission {
+                crate::storage::client_db::anchor_enrollments::admit_anchor_enrollment_with_conn(
+                    tx, enrollment,
+                )
+                .map_err(|e| storage("the sender's anchor pin", e))?;
+            }
             crate::storage::client_db::offline_receipts::record_pending_offline_receipt_in_tx(
                 tx,
                 &pending_receipt,
@@ -4500,6 +4521,14 @@ impl BilateralBleHandler {
                     "receiver confirm: the committed step holds no signed receipt",
                 )
             })?;
+
+        if let AnchorAdmission::Pin(enrollment) = &anchor_admission {
+            self.announce_anchor_pinned(
+                counterparty_device_id,
+                commitment_hash,
+                enrollment.pin.anchor_id,
+            );
+        }
 
         // The committed tip, in the manager's view of the relationship.
         self.bilateral_tx_manager
@@ -5906,12 +5935,13 @@ mod tests {
     }
 
     /// Stage 4 Slice 3 (signal b): the receiver-admit path emits the right UX events.
-    /// First disclosure from a verified contact -> ANCHOR_PINNED + pin stored; an identical repeat
-    /// -> NO event (NoChange); a DIFFERING anchor -> ANCHOR_CHANGED + the ORIGINAL pin retained
-    /// (never overwritten). Uses a stub event callback + a fresh in-memory enrollment store.
+    /// A first disclosure from a verified contact is decided as the pin to write, and deciding writes
+    /// nothing; a disclosure bound to a policy other than the canonical offline-bearer policy is
+    /// not acted on; once the pin is written, an identical repeat is silent and a DIFFERING anchor
+    /// surfaces ANCHOR_CHANGED with the ORIGINAL pin retained (never overwritten).
     #[tokio::test]
     #[serial]
-    async fn admit_anchor_disclosure_emits_pin_and_change_events() {
+    async fn a_disclosure_is_decided_without_writing_and_a_changed_anchor_is_surfaced() {
         use dsm::crypto::anchor_enrollment::InMemoryAnchorEnrollmentStore;
         use std::sync::Mutex as StdMutex;
 
@@ -5957,9 +5987,9 @@ mod tests {
             }));
         }
 
-        // An anchor born for the sender: its bundle recomputes from the sender's
+        // An anchor born for the sender under `policy`: its bundle recomputes from the sender's
         // online key, device id and the disclosed policy, keys and birth.
-        let disclosure = |anchor_tag: u8| generated::AnchorDisclosure {
+        let disclosure = |anchor_tag: u8, policy: [u8; 32]| generated::AnchorDisclosure {
             bundle: anchor_core::enrollment::anchor_bundle(
                 &[7u8; 32],
                 &[anchor_tag; 32],
@@ -5967,55 +5997,69 @@ mod tests {
                 &[0x07; 64],
                 1_000,
                 &sender,
-                &[0x9A; 32],
+                &policy,
                 &[0xB7; 32],
             )
             .to_vec(),
             anchor_id: vec![anchor_tag; 32],
             enrolled_counter: 1_000,
             partition_pk: vec![0x07; 64],
-            policy_hash: vec![0x9A; 32],
+            policy_hash: policy.to_vec(),
             pk_chip: vec![0x0C; 32],
             birth_commitment: vec![0xB7; 32],
         };
-        let last_type = |events: &Arc<StdMutex<Vec<generated::BilateralEventNotification>>>| {
-            events.lock().expect("evs").last().map(|e| e.event_type)
-        };
-        let anchor_pinned = generated::BilateralEventType::BilateralEventAnchorPinned as i32;
+        let canonical = dsm::types::operations::canonical_offline_bearer_policy().policy_id;
+        let store = || crate::bridge::anchor_enrollment_store().expect("the store");
         let anchor_changed = generated::BilateralEventType::BilateralEventAnchorChanged as i32;
 
-        // 1) First disclosure -> ANCHOR_PINNED + pin stored.
-        handler
-            .admit_anchor_disclosure(sender, &[7u8; 32], [0x01; 32], &disclosure(0xA1))
+        // 1) A disclosure bound to another policy is not acted on.
+        let other = handler
+            .decide_anchor_disclosure(
+                sender,
+                &[7u8; 32],
+                [0x01; 32],
+                &disclosure(0xA1, [0x9A; 32]),
+            )
             .await;
-        assert_eq!(events.lock().expect("evs").len(), 1);
-        assert_eq!(last_type(&events), Some(anchor_pinned));
-        let pinned = crate::bridge::anchor_enrollment_store()
-            .and_then(|s| s.get(&sender))
-            .expect("pin stored");
-        assert_eq!(pinned.pin.anchor_id, [0xA1; 32]);
+        assert!(matches!(other, AnchorAdmission::Nothing));
 
-        // 2) Identical repeat -> NoChange -> NO new event.
-        handler
-            .admit_anchor_disclosure(sender, &[7u8; 32], [0x02; 32], &disclosure(0xA1))
+        // 2) The first canonical disclosure is the pin to write; deciding writes nothing.
+        let first = handler
+            .decide_anchor_disclosure(sender, &[7u8; 32], [0x01; 32], &disclosure(0xA1, canonical))
             .await;
+        let AnchorAdmission::Pin(enrollment) = first else {
+            panic!("the first disclosure is the pin to write");
+        };
+        assert_eq!(enrollment.pin.anchor_id, [0xA1; 32]);
+        assert_eq!(store().get(&sender).map(|e| e.pin.anchor_id), None);
+        assert_eq!(events.lock().expect("evs").len(), 0);
+
+        // The accepting step writes it.
+        store().admit(enrollment).expect("the step pins the anchor");
+
+        // 3) Identical repeat -> nothing to write, no event.
+        let repeat = handler
+            .decide_anchor_disclosure(sender, &[7u8; 32], [0x02; 32], &disclosure(0xA1, canonical))
+            .await;
+        assert!(matches!(repeat, AnchorAdmission::Nothing));
         assert_eq!(
             events.lock().expect("evs").len(),
-            1,
+            0,
             "NoChange must be silent"
         );
 
-        // 3) Differing anchor -> ANCHOR_CHANGED + ORIGINAL pin retained (never overwritten).
-        handler
-            .admit_anchor_disclosure(sender, &[7u8; 32], [0x03; 32], &disclosure(0xEE))
+        // 4) Differing anchor -> ANCHOR_CHANGED + ORIGINAL pin retained (never overwritten).
+        let changed = handler
+            .decide_anchor_disclosure(sender, &[7u8; 32], [0x03; 32], &disclosure(0xEE, canonical))
             .await;
-        assert_eq!(events.lock().expect("evs").len(), 2);
-        assert_eq!(last_type(&events), Some(anchor_changed));
-        let still = crate::bridge::anchor_enrollment_store()
-            .and_then(|s| s.get(&sender))
-            .expect("pin still present");
+        assert!(matches!(changed, AnchorAdmission::Nothing));
         assert_eq!(
-            still.pin.anchor_id, [0xA1; 32],
+            events.lock().expect("evs").last().map(|e| e.event_type),
+            Some(anchor_changed)
+        );
+        assert_eq!(
+            store().get(&sender).map(|e| e.pin.anchor_id),
+            Some([0xA1; 32]),
             "a differing disclosure must never overwrite the pinned anchor"
         );
 

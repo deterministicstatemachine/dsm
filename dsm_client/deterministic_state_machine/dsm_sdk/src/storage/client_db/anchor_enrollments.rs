@@ -121,6 +121,15 @@ pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("anchor_enrollments: db lock poisoned"))?;
+    admit_anchor_enrollment_with_conn(&conn, e)
+}
+
+/// [`admit_anchor_enrollment`] inside the caller's transaction: the step that accepts an anchor's
+/// first release pins it in the same commit, or nothing is pinned.
+pub fn admit_anchor_enrollment_with_conn(
+    conn: &rusqlite::Connection,
+    e: &AnchorEnrollment,
+) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO anchor_enrollments
             (device_id, policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
