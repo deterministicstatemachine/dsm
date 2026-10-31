@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import { join } from 'path';
 import { answerFromRustRecord } from '../../../tests/helpers/rustIngressRecord';
 import { dsmClient } from '../../../services/dsmClient';
