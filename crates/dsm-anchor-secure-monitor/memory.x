@@ -6,9 +6,9 @@
  * executable-policy ASSERTs.
  *
  * §3/§5 TrustZone domain layout (SAU region boundaries the monitor programs at init, step 5):
- *   SECURE  [0x20000000, 0x20040000)  256 KiB  monitor vectors+code+rodata+data+bss+heap+stack
- *   NSC     [0x20040000, 0x20041000)    4 KiB  Non-Secure-Callable (.gnu.sgstubs SG veneer)
- *   NS      [0x20041000, 0x20080000)  ~252 KiB Non-secure app (separate image): RX + RW + mailbox
+ *   SECURE  [0x20000000, 0x20060000)  384 KiB  monitor vectors+code+rodata+data+bss+heap+stack
+ *   NSC     [0x20060000, 0x20061000)    4 KiB  Non-Secure-Callable (.gnu.sgstubs SG veneer)
+ *   NS      [0x20061000, 0x20080000)  124 KiB  Non-secure app (separate image): RX + RW + mailbox
  * FLASH is storage only: the image lives there and the boot-block LOAD_MAP instructs the immutable
  * bootrom to copy the SRAM-VMA payload into the regions above before entry, because external flash
  * is mutable (a runtime rewrite/glitch must not reach executing Secure code). Cryptographic
@@ -17,17 +17,17 @@
  */
 MEMORY {
     FLASH  : ORIGIN = 0x10000000, LENGTH = 4096K   /* storage / LMA only */
-    SECURE : ORIGIN = 0x20000000, LENGTH = 256K    /* Secure TCB runtime VMA */
-    NSC    : ORIGIN = 0x20040000, LENGTH = 4K      /* Non-Secure-Callable veneer VMA */
-    NS     : ORIGIN = 0x20041000, LENGTH = 252K    /* Non-secure app runtime VMA */
+    SECURE : ORIGIN = 0x20000000, LENGTH = 384K    /* Secure TCB runtime VMA */
+    NSC    : ORIGIN = 0x20060000, LENGTH = 4K      /* Non-Secure-Callable veneer VMA */
+    NS     : ORIGIN = 0x20061000, LENGTH = 124K    /* Non-secure app runtime VMA */
 }
 
 /* Fixed domain boundaries (shared with the app linker + the signed manifest). */
 __secure_sram_start = 0x20000000;
-__secure_sram_end   = 0x20040000;
-__nsc_start         = 0x20040000;
-__nsc_end           = 0x20041000;
-__ns_sram_start     = 0x20041000;
+__secure_sram_end   = 0x20060000;
+__nsc_start         = 0x20060000;
+__nsc_end           = 0x20061000;
+__ns_sram_start     = 0x20061000;
 __ns_sram_end       = 0x20080000;
 
 /* §3 Non-secure sub-layout: RX (measured, immutable) | RW (data/heap/stack) | fixed mailbox slot.

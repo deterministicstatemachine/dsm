@@ -98,11 +98,11 @@ SECTIONS
     LONG(LOADADDR(.vector_table) - __dsm_load_map);
     LONG(ADDR(.vector_table));
     LONG((LOADADDR(.data) + SIZEOF(.data)) - LOADADDR(.vector_table));
-    /* entry 2 — NSC SG veneer FLASH -> SRAM 0x20040000 */
+    /* entry 2 — NSC SG veneer FLASH -> SRAM 0x20060000 */
     LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
     LONG(ADDR(.gnu.sgstubs));
     LONG(SIZEOF(.gnu.sgstubs));
-    /* entry 3 — Non-secure app image (bring-up stub) FLASH -> NS SRAM 0x20041000 */
+    /* entry 3 — Non-secure app image (bring-up stub) FLASH -> NS SRAM 0x20061000 */
     LONG(LOADADDR(.ns_app) - __dsm_load_map);
     LONG(ADDR(.ns_app));
     LONG(SIZEOF(.ns_app));
@@ -207,7 +207,7 @@ SECTIONS
   . = ALIGN(32);
   __veneer_limit = .;
 
-  /* ### .ns_app — the Non-secure bring-up stub, VMA at the NS SRAM base (0x20041000), FLASH LMA.
+  /* ### .ns_app — the Non-secure bring-up stub, VMA at the NS SRAM base (0x20061000), FLASH LMA.
    * A LOAD_MAP entry copies it to NS SRAM; the monitor launches it Non-secure after SAU. Replaced
    * by the real dsm-anchor-nonsecure-app image once cross-crate NS packaging lands. */
   .ns_app ORIGIN(NS) : ALIGN(8)

@@ -4,9 +4,9 @@
  *
  * The Non-secure app is NOT flashed standalone: it is a PAYLOAD embedded in the Secure monitor's
  * image. The monitor's boot-block LOAD_MAP (dsm-secure-sram.x, entry 3) copies this image from the
- * monitor's flash into the Non-secure SRAM region at 0x20041000, and after enabling the SAU the
+ * monitor's flash into the Non-secure SRAM region at 0x20061000, and after enabling the SAU the
  * monitor sets MSP_NS + VTOR_NS from this image's 2-word vector table head and BXNS into the reset
- * vector. So the whole image is linked at its Non-secure SRAM VMA (0x20041000); there is no PICOBIN
+ * vector. So the whole image is linked at its Non-secure SRAM VMA (0x20061000); there is no PICOBIN
  * boot block and no self-copy here (the monitor owns the copy). cortex-m-rt's Reset still runs: with
  * VMA == LMA the .data copy is a harmless self-copy and the .bss clear zeroes the NS working set.
  *

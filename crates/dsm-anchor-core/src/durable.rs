@@ -35,6 +35,8 @@ use crate::tropic::{PartitionSig, Tropic};
 pub enum StoreError {
     /// The store did not take the write or answer the read: no power, or the bus failed.
     Unavailable,
+    /// The store's device took the command and refused it.
+    Refused,
     /// The store holds written slots that form no complete record.
     Corrupt,
     /// The record is larger than the store was laid out to hold.

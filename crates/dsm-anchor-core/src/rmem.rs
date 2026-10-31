@@ -30,6 +30,26 @@ pub trait SlotMemory {
     fn write(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError>;
 }
 
+/// Forward `SlotMemory` through a `Box`, so a firmware can hold its store in a `'static` slot with
+/// the (unnameable) chip session erased behind `Box<dyn SlotMemory>`.
+impl<M: SlotMemory + ?Sized> SlotMemory for alloc::boxed::Box<M> {
+    fn capacity(&self) -> usize {
+        (**self).capacity()
+    }
+    fn slots(&self) -> u16 {
+        (**self).slots()
+    }
+    fn read(&mut self, slot: u16) -> Result<Option<Vec<u8>>, StoreError> {
+        (**self).read(slot)
+    }
+    fn erase(&mut self, slot: u16) -> Result<(), StoreError> {
+        (**self).erase(slot)
+    }
+    fn write(&mut self, slot: u16, data: &[u8]) -> Result<(), StoreError> {
+        (**self).write(slot, data)
+    }
+}
+
 /// Why a store could not be laid out over a memory.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LayoutError {

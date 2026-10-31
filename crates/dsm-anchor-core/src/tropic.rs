@@ -21,6 +21,11 @@ pub enum TropicError {
     Comm,
     /// `MCounter_Update` on an exhausted counter (`H == 0`) — online only.
     CounterExhausted,
+    /// The chip took the command and refused it: a key or slot in the wrong state, an access the
+    /// session's pairing slot is denied, a command or parameter it does not accept.
+    Refused,
+    /// After closing its birth the chip still accepts a command the closed birth denies.
+    CageOpen,
 }
 
 /// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350

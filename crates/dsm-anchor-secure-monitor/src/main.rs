@@ -39,13 +39,15 @@ extern crate alloc;
 
 mod anchor_glue;
 mod boundary;
+mod chip;
+mod sealed;
 mod tropic;
 
 // Secure working-set heap (SPHINCS+ σ^host signing + release/proto Vec staging). Lives in Secure
 // .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
 #[global_allocator]
 static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
-const SECURE_HEAP_SIZE: usize = 56 * 1024;
+const SECURE_HEAP_SIZE: usize = 160 * 1024;
 static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
     [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
 
@@ -58,7 +60,7 @@ const SIGMA_CHIP_SELFTEST: bool = false;
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
 // LOAD_MAP whose entries need link-time LMA/VMA/size. The linker block carries IMAGE_TYPE +
-// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20040000, zero-fill
+// relative-source LOAD_MAP (contiguous Secure image → SRAM, NSC veneer → 0x20060000, zero-fill
 // Secure BSS) + explicit SRAM VECTOR_TABLE + ENTRY_POINT items, so the immutable bootrom is
 // instructed to copy the flash payload into SRAM and enter there. (Cryptographic verification of
 // that payload happens only once secure boot is enabled + validated; the LOAD_MAP itself just
