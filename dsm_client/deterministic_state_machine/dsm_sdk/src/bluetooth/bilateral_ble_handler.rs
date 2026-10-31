@@ -2771,8 +2771,8 @@ impl BilateralBleHandler {
         // commits the session's next durable state, and until then a response
         // delivered again is taken again.
         let accepted = {
-            let sessions = self.sessions.sessions.lock().await;
-            let session = sessions.get(&commitment_hash).ok_or_else(|| {
+            let mut sessions = self.sessions.sessions.lock().await;
+            let session = sessions.get_mut(&commitment_hash).ok_or_else(|| {
                 DsmError::invalid_operation("no session found for commitment hash")
             })?;
             // The response delivered again: the confirm it was answered with
@@ -2809,13 +2809,28 @@ impl BilateralBleHandler {
             accepted.counterparty_signature = Some(acceptance.signature);
             accepted.receiver_challenge = Some(acceptance.receiver_challenge);
             accepted.phase = BilateralPhase::Accepted;
+            // Claimed under the lock: a copy of the response delivered while this one is being
+            // taken finds the session taken, not awaiting a response, so the anchor's release
+            // runs once for the step.
+            session.phase = BilateralPhase::Accepted;
             accepted
         };
 
         info!("Building bilateral confirm message (3-step protocol, step 3)");
-        let (confirm_envelope, confirm_meta) = self.send_bilateral_confirm(accepted).await?;
-
-        Ok((confirm_envelope, confirm_meta))
+        match self.send_bilateral_confirm(accepted).await {
+            Ok(confirmed) => Ok(confirmed),
+            Err(e) => {
+                // A confirm that was not built leaves the session where it was taken from: still
+                // awaiting the response, unless the step moved on durably.
+                let mut sessions = self.sessions.sessions.lock().await;
+                if let Some(session) = sessions.get_mut(&commitment_hash) {
+                    if session.phase == BilateralPhase::Accepted {
+                        session.phase = BilateralPhase::Prepared;
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 
     /// 3-step protocol step 3 (sender side): build the BilateralConfirmRequest

@@ -1325,6 +1325,71 @@ async fn an_offline_payment_over_ble_is_held_pending_and_credits_nothing_online(
     assert_eq!(unexposed_spends(&a, &appliance), 1, "A records its spend");
 }
 
+/// Two copies of a bearer response arriving together are taken once: one is answered with the
+/// confirm, the other with that same confirm or as taken, and A's anchor moves its counter once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn two_copies_of_a_bearer_response_taken_together_release_once() {
+    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let before = chip(&appliance);
+    a.device.enter();
+    let (prepare, commitment) = a
+        .handler
+        .prepare_bilateral_step(
+            b.device.device_id,
+            operation.operation.clone(),
+            operation.terms.clone(),
+        )
+        .await
+        .expect("A prepares");
+    b.device.enter();
+    b.handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    let (first, second) = tokio::join!(
+        a.handler.handle_prepare_response(&response),
+        a.handler.handle_prepare_response(&response),
+    );
+    let confirm = match (first, second) {
+        (Ok((confirm, _)), Ok((again, _))) => {
+            assert_eq!(
+                again, confirm,
+                "both copies are answered with the one confirm"
+            );
+            confirm
+        }
+        (Ok((confirm, _)), Err(taken)) | (Err(taken), Ok((confirm, _))) => {
+            assert!(taken.to_string().contains("not awaiting"), "{taken}");
+            confirm
+        }
+        (Err(one), Err(other)) => panic!("neither copy was taken: {one}; {other}"),
+    };
+    assert_eq!(
+        chip(&appliance).anchor_counter,
+        before.anchor_counter + 1,
+        "A's anchor moved its counter once for the two copies taken together"
+    );
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A commits");
+    assert_committed_on_both(&a, &b, &commitment);
+}
+
 /// SA-112, a response delivered twice: B's acceptance reaches A twice. A
 /// releases once — its anchor's counter moves once — and answers the second
 /// copy with the confirm it sent for the first, byte for byte. B commits the
