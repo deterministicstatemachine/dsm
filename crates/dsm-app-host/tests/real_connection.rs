@@ -148,6 +148,8 @@ impl Host {
         let args = vec![
             "--data-dir".to_string(),
             root.join(name).display().to_string(),
+            "--ingress-secret-dir".to_string(),
+            root.join(format!("{name}-ingress")).display().to_string(),
             "--env-config".to_string(),
             config.display().to_string(),
             "--game-bind".to_string(),
@@ -208,7 +210,10 @@ impl Host {
         };
         self.child = Some(child);
         let probe = format!("{}/activity/0", self.ingress);
-        let token = self.dir.join(self.name).join("ingress-token");
+        let token = self
+            .dir
+            .join(format!("{}-ingress", self.name))
+            .join("ingress-token");
         let deadline = tokio::time::Instant::now() + STEP;
         loop {
             let Some(child) = self.child.as_mut() else {

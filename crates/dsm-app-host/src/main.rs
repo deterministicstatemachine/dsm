@@ -46,9 +46,13 @@ pub struct Args {
     pub relay_endpoint: String,
     /// The names the relay's certificate carries (an IP or a host name each).
     pub relay_names: Vec<String>,
+    /// Where this launch's ingress secret is written: a directory of its own,
+    /// apart from `data_dir` and its recovery mnemonic, so the application is
+    /// given the secret and nothing of the account.
+    pub ingress_secret_dir: PathBuf,
 }
 
-const USAGE: &str = "dsm-app-host --data-dir DIR --env-config FILE \
+const USAGE: &str = "dsm-app-host --data-dir DIR --ingress-secret-dir DIR --env-config FILE \
 --game-bind 127.0.0.1:8787 --relay-bind 0.0.0.0:8443 \
 --relay-endpoint https://HOST:8443 [--relay-name HOST ...]";
 
@@ -60,6 +64,7 @@ impl Args {
         let mut relay_bind = None;
         let mut relay_endpoint = None;
         let mut relay_names = Vec::new();
+        let mut ingress_secret_dir = None;
         while let Some(flag) = args.next() {
             let value = args
                 .next()
@@ -75,6 +80,7 @@ impl Args {
                 }
                 "--relay-endpoint" => relay_endpoint = Some(value),
                 "--relay-name" => relay_names.push(value),
+                "--ingress-secret-dir" => ingress_secret_dir = Some(PathBuf::from(value)),
                 other => return Err(format!("unknown flag {other}\nusage: {USAGE}")),
             }
         }
@@ -89,8 +95,13 @@ impl Args {
         let relay_endpoint: String = relay_endpoint.ok_or_else(|| need("--relay-endpoint"))?;
         dsm_sdk::sdk::connect::code::check_endpoint(&relay_endpoint)
             .map_err(|e| format!("--relay-endpoint: {e}"))?;
+        let data_dir: PathBuf = data_dir.ok_or_else(|| need("--data-dir"))?;
+        let ingress_secret_dir: PathBuf =
+            ingress_secret_dir.ok_or_else(|| need("--ingress-secret-dir"))?;
+        apart_from_the_account(&ingress_secret_dir, &data_dir)?;
         Ok(Self {
-            data_dir: data_dir.ok_or_else(|| need("--data-dir"))?,
+            data_dir,
+            ingress_secret_dir,
             env_config: env_config.ok_or_else(|| need("--env-config"))?,
             game_bind,
             relay_bind: relay_bind.ok_or_else(|| need("--relay-bind"))?,
@@ -100,11 +111,37 @@ impl Args {
     }
 }
 
+/// The secret's directory holds the secret alone: it is not the account's
+/// data directory and does not contain it, so handing the application that
+/// directory hands it nothing of the account (its keys, its recovery mnemonic).
+fn apart_from_the_account(
+    secret_dir: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<(), String> {
+    if data_dir.starts_with(secret_dir) {
+        return Err(format!(
+            "--ingress-secret-dir {} is or contains the account's data directory {}, which holds \
+             its keys and recovery mnemonic; give the secret a directory of its own",
+            secret_dir.display(),
+            data_dir.display()
+        ));
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), String> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse(std::env::args().skip(1))?;
     std::fs::create_dir_all(&args.data_dir)
         .map_err(|e| format!("{}: {e}", args.data_dir.display()))?;
+    std::fs::create_dir_all(&args.ingress_secret_dir)
+        .map_err(|e| format!("{}: {e}", args.ingress_secret_dir.display()))?;
+    // Once both exist, the same check on their real paths: a link cannot put
+    // the account inside the secret's directory.
+    let real = |dir: &std::path::Path| {
+        std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))
+    };
+    apart_from_the_account(&real(&args.ingress_secret_dir)?, &real(&args.data_dir)?)?;
 
     // The SDK first, on this thread: its dispatchers block on the SDK's own
     // runtime, so they never run inside the host's.
@@ -130,19 +167,23 @@ fn main() -> Result<(), String> {
 const SDK_WORKERS: usize = 16;
 const SDK_QUEUED: usize = 256;
 
-/// Where this launch's ingress secret is written, readable by the operator
+/// The file this launch's ingress secret is written to, in the secret's own
+/// directory (`--ingress-secret-dir`), readable by the operator
 /// alone: the application reads it and sends it with every call.
 pub const INGRESS_TOKEN: &str = "ingress-token";
 
-/// A new secret for this launch, written to `<data-dir>/ingress-token` at
+/// A new secret for this launch, written to `<ingress-secret-dir>/ingress-token` at
 /// mode 0600 in place of the last launch's.
-fn new_ingress_secret(data_dir: &std::path::Path) -> Result<String, String> {
+fn new_ingress_secret(secret_dir: &std::path::Path) -> Result<String, String> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let raw = dsm::crypto::rng::generate_secure_random(32)
         .map_err(|e| format!("the ingress secret: {e}"))?;
     let secret = dsm_sdk::util::text_id::encode_base32_crockford(&raw);
-    let path = data_dir.join(INGRESS_TOKEN);
+    // The directory is the operator's and the application's only: mode 0700.
+    std::fs::set_permissions(secret_dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("{}: {e}", secret_dir.display()))?;
+    let path = secret_dir.join(INGRESS_TOKEN);
     match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -203,14 +244,14 @@ async fn serve(
         requests_changed,
     };
 
-    let secret = new_ingress_secret(&args.data_dir)?;
+    let secret = new_ingress_secret(&args.ingress_secret_dir)?;
     let game_listener = tokio::net::TcpListener::bind(args.game_bind)
         .await
         .map_err(|e| format!("binding the game ingress at {}: {e}", args.game_bind))?;
     log::info!(
         "[host] game ingress on http://{}; its secret for this launch is in {}",
         args.game_bind,
-        args.data_dir.join(INGRESS_TOKEN).display()
+        args.ingress_secret_dir.join(INGRESS_TOKEN).display()
     );
     let game_server = axum::serve(
         game_listener,
@@ -252,6 +293,8 @@ mod tests {
         let base = [
             "--data-dir",
             "/tmp/x",
+            "--ingress-secret-dir",
+            "/tmp/x-ingress",
             "--env-config",
             "/tmp/x.toml",
             "--game-bind",
@@ -284,6 +327,8 @@ mod tests {
             args(&[
                 "--data-dir",
                 "/tmp/x",
+                "--ingress-secret-dir",
+                "/tmp/x-ingress",
                 "--env-config",
                 "/tmp/x.toml",
                 "--game-bind",
@@ -304,5 +349,54 @@ mod tests {
                 .expect_err("an ingress other machines can reach");
             assert!(err.contains("loopback"), "{err}");
         }
+    }
+
+    /// The application is handed the secret's directory, so it must hold
+    /// nothing of the account: the data directory itself, or a directory
+    /// containing it, is refused; a directory of its own is taken.
+    #[test]
+    fn the_ingress_secret_lives_apart_from_the_account() {
+        let with = |secret_dir: &str| {
+            args(&[
+                "--data-dir",
+                "/srv/game/account",
+                "--ingress-secret-dir",
+                secret_dir,
+                "--env-config",
+                "/tmp/x.toml",
+                "--game-bind",
+                "127.0.0.1:8787",
+                "--relay-bind",
+                "0.0.0.0:8443",
+                "--relay-endpoint",
+                "https://192.168.1.5:8443",
+            ])
+        };
+        for exposing in ["/srv/game/account", "/srv/game", "/srv", "/"] {
+            let err = with(exposing)
+                .map(|a| a.ingress_secret_dir)
+                .expect_err("a secret directory that exposes the account");
+            assert!(err.contains("recovery mnemonic"), "{err}");
+        }
+        for apart in ["/srv/game/ingress", "/srv/game/account-ingress"] {
+            let parsed = with(apart).map(|a| a.ingress_secret_dir);
+            assert_eq!(parsed, Ok(PathBuf::from(apart)));
+        }
+        let missing = args(&[
+            "--data-dir",
+            "/srv/game/account",
+            "--env-config",
+            "/tmp/x.toml",
+            "--game-bind",
+            "127.0.0.1:8787",
+            "--relay-bind",
+            "0.0.0.0:8443",
+            "--relay-endpoint",
+            "https://192.168.1.5:8443",
+        ]);
+        let err = missing
+            .map(|a| a.ingress_secret_dir)
+            .expect_err("no secret directory");
+        assert!(err.contains("--ingress-secret-dir"), "{err}");
     }
 }
