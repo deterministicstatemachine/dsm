@@ -27,9 +27,9 @@ RUSTC="$HOME/.rustup/toolchains/1.98.0-aarch64-apple-darwin/bin/rustc" \
 picotool otp list                 # human map of pages/rows
 picotool otp dump  > otp-before.json
 ```
-Confirm the DSM host-secret page (`HOST_SECRET_ROW` = **page 48**, see `src/sealed.rs`) is
+Confirm the DSM host-secret page (`SEALED_SECRET_ROW` = **page 48**, see `src/sealed.rs`) is
 **blank and free** — not claimed by the bootrom, white-label, or any factory field. If page 48 is
-taken on your silicon, change `HOST_SECRET_ROW` in `src/secure_boot.rs` to a confirmed-free page and
+taken on your silicon, change `SEALED_SECRET_ROW` in `src/sealed.rs` to a confirmed-free page and
 rebuild. Never overwrite a populated system page.
 
 ## Step 1 — create the boot signing key (keep OFF the appliance)
@@ -52,7 +52,7 @@ exact-firmware measurement.
 ## Step 3 — generate + program the OTP-sealed host secret  ⚠️ IRREVERSIBLE
 
 ```
-./provision-otp.sh --gen-secret            # 32 random bytes → host-secret.json (rows for page 48)
+./provision-otp.sh --gen-secret            # 32 random bytes → ~/.dsm-anchor-secure-boot/host-secret.json, owner-only (rows for page 48)
 ./provision-otp.sh --write-secret          # DRY RUN: prints the picotool otp commands
 ./provision-otp.sh --write-secret --commit # BURNS the host secret into OTP page 48
 ```
@@ -90,7 +90,7 @@ On the serial console the firmware must print neither `[SEC] secure context FAIL
 1. **Unsigned firmware refused:** try `picotool load` of an UNSIGNED build → the bootrom must refuse it.
 2. **Secure context asserted:** the production firmware halts if `secure_boot_enabled()` /
    `debug_disabled()` are false (they are true now) — verified by it NOT halting.
-3. **Host secret sealed:** a build with a wrong `HOST_SECRET_ROW`, or reading before provisioning,
+3. **Host secret sealed:** a build with a wrong `SEALED_SECRET_ROW`, or reading before provisioning,
    halts with `sealed host secret FAIL` — verified by the provisioned build NOT halting.
 4. **Different signed image ⇒ different bundle B:** a modified-but-signed image cannot reproduce the
    enrolled bundle unless it reads the same OTP secret AND is the enrolled measurement — confirm B is

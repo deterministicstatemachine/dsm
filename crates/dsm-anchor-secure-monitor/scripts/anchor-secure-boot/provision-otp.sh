@@ -3,9 +3,16 @@
 # IRREVERSIBLE RP2350 OTP provisioning for the DSM anchor. Dry-run by default; every burn requires
 # --commit AND typing YES. See RUNBOOK.md. Do a full dry run on a sacrificial board first.
 set -euo pipefail
+# Everything this script writes is the operator's alone.
+umask 077
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SECRET_JSON="$HERE/host-secret.json"
-# page 48, row 0 — MUST equal HOST_SECRET_ROW in ../../src/secure_boot.rs
+# The sealed secret is the board's identity root: it lives outside the repository, in a directory
+# only its owner can open.
+SECRET_DIR="${DSM_ANCHOR_SECRET_DIR:-$HOME/.dsm-anchor-secure-boot}"
+mkdir -p "$SECRET_DIR"
+chmod 700 "$SECRET_DIR"
+SECRET_JSON="$SECRET_DIR/host-secret.json"
+# page 48, row 0 — MUST equal SEALED_SECRET_ROW in ../../src/sealed.rs
 PAGE=48
 ROW_BASE=$(( PAGE * 64 ))
 
@@ -27,7 +34,9 @@ import os, sys, json
 path, base = sys.argv[1], int(sys.argv[2])
 b = os.urandom(32)  # the 256-bit sealed host-key secret
 rows = { str(base + i): (b[2*i] | (b[2*i+1] << 8)) for i in range(16) }
-json.dump({"otp": rows}, open(path, "w"), indent=2)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"otp": rows}, f, indent=2)
 print(f"wrote {path}: 16 rows @ base {base}. THIS FILE IS THE HOST SECRET — guard it like the key.")
 PY
     ;;
