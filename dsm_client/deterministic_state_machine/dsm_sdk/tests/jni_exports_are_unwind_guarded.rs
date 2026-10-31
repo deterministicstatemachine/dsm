@@ -12,11 +12,6 @@ use std::path::Path;
 
 use syn::{Expr, Item, ItemFn, Stmt};
 
-/// The JNI export Bitcoin work owns: Bitcoin is outside this round, and its
-/// export is left as it stands.
-const OUTSIDE_THIS_ROUND: [&str; 1] =
-    ["Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress"];
-
 /// Whether `expr` is a call of a panic guard, directly or as what a `match`
 /// decides on.
 fn is_guard_call(expr: &Expr) -> bool {
@@ -110,7 +105,7 @@ fn every_java_export_runs_its_work_inside_the_unwind_guard(
     }
     assert_eq!(
         unguarded,
-        OUTSIDE_THIS_ROUND,
+        Vec::<String>::new(),
         "of {} exports",
         exports.len()
     );

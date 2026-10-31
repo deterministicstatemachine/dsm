@@ -105,6 +105,7 @@ pub enum ErrorCode {
 fn map_error_code(error: &DsmError) -> ErrorCode {
     match error {
         DsmError::InvalidOperation(_)
+        | DsmError::ZeroEffectTransition
         | DsmError::InvalidArgument(_)
         | DsmError::InvalidParameter(_)
         | DsmError::InvalidState(_)

@@ -34,6 +34,7 @@ use crate::dlv::route_commit::constant_product_output_classified;
 use crate::economic::keys::balance_key;
 use crate::economic::lineage::AcceptedClaim;
 use crate::economic::state::{EconomicBalanceState, EconomicLeafState};
+use crate::shared_lineage::BundleStep;
 
 use super::admission::{preimage_admissible, NotAdmissible};
 use super::conformance::Validation;
@@ -42,9 +43,10 @@ use super::escrow;
 use super::smt::{verify_batch, FoldEntry, FoldError};
 use super::wire::{
     next_position, ComputedEscrowTerms, CoreEntry, DlvCore, EscrowKind, EscrowTerms,
-    SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderPreBalance, TraderPrecommitBody,
-    TraderRelationshipLeaf, ValidationRef, VaultRelationshipLeaf, VaultStateLeaf,
-    MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE, VAULT_STATUS_RETIRED,
+    SettlementBody, SettlementPreimage, SwapHop, TraderCore, TraderFulfillmentBody,
+    TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf, ValidationRef,
+    VaultRelationshipLeaf, VaultStateLeaf, MAX_SETTLEMENT_PREIMAGE_BYTES, VAULT_STATUS_ACTIVE,
+    VAULT_STATUS_RETIRED,
 };
 
 type D32 = [u8; 32];
@@ -176,6 +178,12 @@ pub enum Invalid {
     /// A Release's amount is not the vault's whole held amount, or the vault
     /// holds a second reserve.
     ReleaseIsNotTheWholeAmount,
+    /// `F.precommit_id` does not name this `P`, so `F` is not this
+    /// operation's exercise.
+    FulfillmentNamesAnotherPrecommit,
+    /// `F` fixes no attempt for a vault `P` names (conformance item 4), so
+    /// no attempt consumed that vault's parent.
+    NoAttemptForLeg,
 }
 
 /// The conjunction, as an accumulator: any Invalid dominates, and only in its
@@ -842,6 +850,8 @@ pub fn route_invalid_in_hand(
 /// Built by [`vault_post_states`] from the fold and by nothing else: what a
 /// vault chain grows by (`VaultChain::extend`) and what the head store
 /// records is always a state Core recomputed, never one a caller stated.
+/// Another layer holds one only as Core hands it over, established: a
+/// walk's generation or a realized advance's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPostState {
     vault_id: D32,
@@ -870,6 +880,11 @@ pub struct VaultPostState {
     /// `pre_root`: what a held witness advances through (SoFi Amendment
     /// S24).
     entries: Vec<FoldEntry>,
+    /// What a reader needs to read this generation (SoFi Amendment S23):
+    /// the attempt that consumed `pre_root`, `E`, the trader's `(G, DevID,
+    /// q)` and the route's other legs. Discovery only: the step a
+    /// checkpoint's bundle carries for this generation.
+    step: BundleStep,
 }
 
 impl VaultPostState {
@@ -915,6 +930,11 @@ impl VaultPostState {
     pub fn entries(&self) -> &[FoldEntry] {
         &self.entries
     }
+
+    /// This generation's bundle step.
+    pub fn step(&self) -> &BundleStep {
+        &self.step
+    }
 }
 
 #[cfg(test)]
@@ -938,8 +958,51 @@ impl VaultPostState {
             relationship,
             consumed_by: [0xE5; 32],
             entries,
+            step: BundleStep::Vault {
+                attempt: 0,
+                external_commitment: [0xE5; 32],
+                trader_genesis: [0x61; 32],
+                trader_device_id: [0x62; 32],
+                trader_position: 1,
+                siblings: Vec::new(),
+            },
         }
     }
+}
+
+/// The bundle step of the generation an exercise of `(P, F)` makes in
+/// `vault_id` (SoFi Amendment S23), from the pair alone: the attempt `F`
+/// fixed for that vault, `P`'s `E` and trader, `q = F.position`, and `P`'s
+/// other legs as `(vault, parent root)`. Every reader of the pair derives
+/// the same step.
+fn vault_bundle_step(
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+    vault_id: &D32,
+) -> Result<BundleStep, Refusal> {
+    require(
+        *fulfillment.precommit_id() == derive::precommit_id(precommit),
+        Invalid::FulfillmentNamesAnotherPrecommit,
+    )?;
+    let attempt = fulfillment
+        .attempts()
+        .iter()
+        .find(|entry| entry.vault_id == *vault_id)
+        .ok_or(Refusal::Invalid(Invalid::NoAttemptForLeg))?
+        .attempt;
+    Ok(BundleStep::Vault {
+        attempt,
+        external_commitment: *precommit.external_commitment(),
+        trader_genesis: *precommit.genesis(),
+        trader_device_id: *precommit.device_id(),
+        trader_position: fulfillment.position(),
+        siblings: precommit
+            .legs()
+            .iter()
+            .filter(|leg| leg.vault_id != *vault_id)
+            .map(|leg| (leg.vault_id, leg.parent_root))
+            .collect(),
+    })
 }
 
 /// Every vault's state after the operation, recomputed from the pre states the
@@ -955,8 +1018,16 @@ impl VaultPostState {
 /// The root is the fold's, so it is authenticated by the same arithmetic the
 /// verdict used: the core's entries against the pre-root the core states. A
 /// caller that stored a root from anywhere else would be storing an opinion.
-pub fn vault_post_states(
+///
+/// Core's own: a recomputation is not an establishment. What reaches another
+/// layer is a generation Core established — one a walk classified `Consumed`
+/// ([`super::resolve::SofiReads::record_generation`]) or one a realized
+/// advance selected ([`super::lineage::ResolvedAdvance::vault_generations`])
+/// — so a device's record of a vault, which follows Core (MR-DSM-0331), is
+/// written from nothing else.
+pub(crate) fn vault_post_states(
     precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
     preimage: &SettlementPreimage,
     evidence: &Evidence,
 ) -> Result<Vec<VaultPostState>, Refusal> {
@@ -1010,6 +1081,7 @@ pub fn vault_post_states(
 
         let entries = dlv_fold_entries(core, &e, evidence)?;
         let root = fold_core(&entries, core.pre_root())?;
+        let step = vault_bundle_step(precommit, fulfillment, &vault_id)?;
         out.push(VaultPostState {
             vault_id,
             pre_root: *core.pre_root(),
@@ -1019,6 +1091,7 @@ pub fn vault_post_states(
             relationship,
             consumed_by: e,
             entries,
+            step,
         });
     }
     Ok(out)
@@ -1739,6 +1812,55 @@ fn entry_path(
             reason: "an entry's authentication path is not one sibling per level",
         })
     })
+}
+
+/// Why [`generation_at`] could not place a root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NotPlaced {
+    /// The core's state entry path is not one sibling per level.
+    Path(Refusal),
+    /// The state leaf has no canonical value.
+    Leaf(super::wire::SofiWireError),
+}
+
+/// The generation `state` places vault `vault_id`'s root `root` at, when
+/// `preimage` carries that vault's core at `root` and the core's own path
+/// proves `state` is the vault's state leaf under it: the state entry states
+/// `state`'s value, and that value with the entry's path re-derives `root`.
+/// `Ok(None)` when the preimage carries no such core or the core proves
+/// another leaf; `Err` when the core's path is not one sibling per level, or
+/// `state` has no value. The one fact refuting a named parent needs (SoFi
+/// §23.5 arm (ii), MR-SOFI-0241), established from the exercise and one
+/// object, with none of the route's validation evidence.
+pub(crate) fn generation_at(
+    preimage: &SettlementPreimage,
+    vault_id: &D32,
+    root: &D32,
+    state: &VaultStateLeaf,
+) -> Result<Option<u64>, NotPlaced> {
+    let Some(core) = preimage
+        .dlv_cores()
+        .iter()
+        .find(|core| core.vault_id() == vault_id && core.pre_root() == root)
+    else {
+        return Ok(None);
+    };
+    let key = derive::vault_state_key(vault_id);
+    let Some(entry) = core.entries().iter().find(|entry| entry.key() == key) else {
+        return Ok(None);
+    };
+    let Some(value) = stated(entry).0 else {
+        return Ok(None);
+    };
+    let computed = derive::vault_state_leaf_value(state).map_err(NotPlaced::Leaf)?;
+    let path = entry_path(entry).map_err(NotPlaced::Path)?;
+    Ok((computed == value
+        && crate::economic::tree::root_from_path(
+            &key,
+            &crate::economic::tree::leaf_node(&key, Some(&value)),
+            path,
+        ) == *root)
+        .then_some(state.generation))
 }
 
 /// The pre values a vault core's leaves held, read from the core's own paths
@@ -2945,6 +3067,51 @@ pub(crate) mod fixtures {
                 .map(|reference| objects[reference].clone())
                 .collect()
         }
+
+        /// The canonical `F` of the fixture's `P`, fixing attempt `3 + i`
+        /// for its `i`-th leg.
+        pub(crate) fn fulfillment(&self) -> TraderFulfillmentBody {
+            let canonical = derive::canonical_legs(&self.preimage).unwrap();
+            let shadows: Vec<D32> = self
+                .precommit
+                .legs()
+                .iter()
+                .map(|leg| {
+                    canonical
+                        .iter()
+                        .find(|l| l.vault_id == leg.vault_id)
+                        .unwrap()
+                        .shadow_core
+                })
+                .collect();
+            let mut set: Vec<D32> =
+                crate::sofi::conformance::derive_policy_fulfillments(&self.precommit, &shadows)
+                    .unwrap()
+                    .iter()
+                    .map(derive::policy_fulfillment_id)
+                    .collect();
+            set.sort();
+            let attempts = self
+                .precommit
+                .legs()
+                .iter()
+                .enumerate()
+                .map(|(i, leg)| crate::sofi::wire::AttemptEntry {
+                    vault_id: leg.vault_id,
+                    attempt: 3 + i as u64,
+                })
+                .collect();
+            TraderFulfillmentBody::new(
+                derive::precommit_id(&self.precommit),
+                set,
+                attempts,
+                self.precommit.position() + 1,
+                self.precommit.signature_alg(),
+                self.precommit.claimant_public_key(),
+                TRADER_ATT_A,
+            )
+            .unwrap()
+        }
     }
 
     /// The trader's registered claim at [`P_POS`] over `root`, signed under
@@ -3329,6 +3496,54 @@ mod tests {
         ));
     }
 
+    /// SoFi §37, Gate G3, the vault-leaf row: with every pre value of the
+    /// vaults' leaves withheld and everything else in hand, validation waits
+    /// on a vault leaf by name; it is never Invalid for it. (The corrupt half
+    /// of the row is `a_relationship_leaf_of_another_trader_is_invalid` and
+    /// `a_vault_state_that_does_not_derive_its_own_id_is_invalid`.)
+    #[test]
+    fn a_vault_leaf_not_in_hand_waits() {
+        let f = swap_fixture();
+        let mut evidence = f.evidence.clone();
+        evidence.vault_leaves.clear();
+        assert!(matches!(
+            validate(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Incomplete(Missing::VaultLeaf { .. }))
+        ));
+    }
+
+    /// SoFi §37, Gate G3, the vault-leaf row's corrupt half for the vault's
+    /// own state: its state key fetched and found empty, or holding a
+    /// relationship leaf, is Invalid by name, never a wait. That is an
+    /// observation about the vault, not a gap in what is held.
+    ///
+    /// MUTATION CONTROL: `vault_state` answering a missing state for such a
+    /// key turns this red.
+    #[test]
+    fn a_vault_state_key_found_empty_or_holding_another_leaf_class_is_invalid() {
+        let f = swap_fixture();
+        let SettlementBody::Swap { hops, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        let vault_id = hops[0].vault_id;
+        let key = derive::vault_state_key(&vault_id);
+        for found in [
+            VaultLeafPre::Absent,
+            VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                trader_genesis: G,
+                trader_device_id: dev(),
+                leaf: [0x5E; 32],
+            }),
+        ] {
+            let mut evidence = f.evidence.clone();
+            evidence.vault_leaves.insert((vault_id, key), found);
+            assert_eq!(
+                validate(&f.precommit, &f.preimage, &evidence),
+                Err(Refusal::Invalid(Invalid::VaultLeafIsNotItsClass))
+            );
+        }
+    }
+
     /// A two-hop route: the trader spends t0, receives t2, and t1 never
     /// touches its balances — it moves inside the vaults.
     #[test]
@@ -3413,6 +3628,98 @@ mod tests {
             f.preimage.dlv_cores().to_vec(),
         )
         .unwrap()
+    }
+
+    /// SoFi §37, Gate G4, MR-SOFI-0276: changing any byte of any evidence
+    /// item changes `E` or produces a refusal. Across every object, setup and
+    /// token policy the fixture's evidence holds, the first byte, the last,
+    /// and every 61st between are each flipped in turn, and each vault leaf's
+    /// value is moved; validation over the changed evidence never accepts.
+    /// Each sampled byte of `P(E)` flipped fails to decode or recomputes
+    /// another `E`.
+    ///
+    /// MUTATION CONTROL: dropping the re-hash of a token policy against its
+    /// commit (or of an object against its address) turns this red.
+    #[test]
+    fn changing_any_evidence_byte_changes_e_or_is_refused() {
+        let f = swap_fixture();
+        let Ok(()) = validate(&f.precommit, &f.preimage, &f.evidence) else {
+            panic!("the fixture's operation validates");
+        };
+        let flips = |bytes: &[u8]| -> Vec<Vec<u8>> {
+            let mut at: BTreeSet<usize> = (0..bytes.len()).step_by(61).collect();
+            at.extend(bytes.len().checked_sub(1));
+            at.into_iter()
+                .map(|i| {
+                    let mut changed = bytes.to_vec();
+                    changed[i] ^= 0x01;
+                    changed
+                })
+                .collect()
+        };
+        let refused = |evidence: &Evidence, what: &str| {
+            let Err(..) = validate(&f.precommit, &f.preimage, evidence) else {
+                panic!("validation accepted evidence with {what} changed");
+            };
+        };
+        for (addr, bytes) in &f.evidence.objects {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.objects.insert(*addr, changed);
+                refused(&evidence, "an object's byte");
+            }
+        }
+        for (rho, bytes) in &f.evidence.setups {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.setups.insert(*rho, changed);
+                refused(&evidence, "a setup's byte");
+            }
+        }
+        for (commit, bytes) in &f.evidence.token_policies {
+            for changed in flips(bytes) {
+                let mut evidence = f.evidence.clone();
+                evidence.token_policies.insert(*commit, changed);
+                refused(&evidence, "a token policy's byte");
+            }
+        }
+        for (key, leaf) in &f.evidence.vault_leaves {
+            let moved = match leaf {
+                VaultLeafPre::State(state) => VaultLeafPre::State(VaultStateLeaf {
+                    reserve_a: state.reserve_a + 1,
+                    ..state.clone()
+                }),
+                VaultLeafPre::Relationship(relationship) => {
+                    let mut leaf = relationship.leaf;
+                    leaf[0] ^= 0x01;
+                    VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                        leaf,
+                        ..*relationship
+                    })
+                }
+                VaultLeafPre::Absent => VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                    trader_genesis: G,
+                    trader_device_id: [0x22; 32],
+                    leaf: [0x23; 32],
+                }),
+            };
+            let mut evidence = f.evidence.clone();
+            evidence.vault_leaves.insert(*key, moved);
+            refused(&evidence, "a vault leaf's value");
+        }
+
+        let e = derive::recompute_e(&f.preimage).expect("E");
+        let bytes = f.preimage.encode().expect("P(E) encodes");
+        for changed in flips(&bytes) {
+            // A changed P(E) that does not decode is refused; one that does
+            // recomputes another E.
+            let recomputed = SettlementPreimage::decode(&changed)
+                .map_err(|e| e.to_string())
+                .and_then(|other| derive::recompute_e(&other).map_err(|e| e.to_string()));
+            if let Ok(other) = recomputed {
+                assert_ne!(other, e, "a changed byte of P(E) recomputed the same E");
+            }
+        }
     }
 
     #[test]
@@ -4633,7 +4940,8 @@ mod tests {
     #[test]
     fn vault_post_states_are_recomputed_and_bound_to_the_stated_values() {
         let f = fixtures::swap_fixture_n(2);
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts.len(), f.preimage.dlv_cores().len());
         for post in &posts {
             let core = f
@@ -4693,6 +5001,80 @@ mod tests {
         assert_ne!(posts[0].root, posts[1].root, "two vaults, two roots");
     }
 
+    /// SoFi Amendment S23 (MR-SOFI-0399): each vault generation carries the
+    /// bundle step its exercise derives — the attempt `F` fixed for that
+    /// vault, `E`, the trader's `(G, DevID, q)` and the route's other legs —
+    /// from `(P, F)` alone; an `F` of another `P`, or one that fixes no
+    /// attempt for a leg, is not this operation's exercise.
+    /// MUTATION CONTROL: taking another leg's attempt, or dropping the
+    /// precommit check, turns this red.
+    #[test]
+    fn each_vault_generation_carries_the_bundle_step_its_exercise_derives() {
+        let f = fixtures::swap_fixture_n(2);
+        let fulfillment = f.fulfillment();
+        let posts =
+            vault_post_states(&f.precommit, &fulfillment, &f.preimage, &f.evidence).unwrap();
+        assert_eq!(posts.len(), 2);
+        for post in &posts {
+            let (i, _) = f
+                .precommit
+                .legs()
+                .iter()
+                .enumerate()
+                .find(|(_, leg)| leg.vault_id == post.vault_id)
+                .unwrap();
+            let other = f
+                .precommit
+                .legs()
+                .iter()
+                .find(|leg| leg.vault_id != post.vault_id)
+                .unwrap();
+            assert_eq!(
+                post.step(),
+                &BundleStep::Vault {
+                    attempt: 3 + i as u64,
+                    external_commitment: *f.precommit.external_commitment(),
+                    trader_genesis: *f.precommit.genesis(),
+                    trader_device_id: *f.precommit.device_id(),
+                    trader_position: f.precommit.position() + 1,
+                    siblings: vec![(other.vault_id, other.parent_root)],
+                }
+            );
+        }
+
+        let with = |precommit_id: D32, attempts: &[crate::sofi::wire::AttemptEntry]| {
+            TraderFulfillmentBody::new(
+                precommit_id,
+                fulfillment.policy_fulfillment_set().to_vec(),
+                attempts.to_vec(),
+                fulfillment.position(),
+                fulfillment.signature_alg(),
+                fulfillment.claimant_public_key(),
+                fixtures::TRADER_ATT_A,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            vault_post_states(
+                &f.precommit,
+                &with([0x0A; 32], fulfillment.attempts()),
+                &f.preimage,
+                &f.evidence
+            ),
+            Err(Refusal::Invalid(Invalid::FulfillmentNamesAnotherPrecommit))
+        );
+        let last = fulfillment.attempts().len() - 1;
+        assert_eq!(
+            vault_post_states(
+                &f.precommit,
+                &with(*fulfillment.precommit_id(), &fulfillment.attempts()[..last]),
+                &f.preimage,
+                &f.evidence
+            ),
+            Err(Refusal::Invalid(Invalid::NoAttemptForLeg))
+        );
+    }
+
     /// A `V°` that states a post state the arithmetic does not reach is
     /// refused, so nothing unverified can be stored as a vault head.
     #[test]
@@ -4724,7 +5106,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            vault_post_states(&f.precommit, &preimage, &f.evidence),
+            vault_post_states(&f.precommit, &f.fulfillment(), &preimage, &f.evidence),
             Err(Refusal::Invalid(Invalid::LeafPostValueMismatch))
         );
     }
@@ -6191,7 +6573,10 @@ mod tests {
     /// The same operation against an escrow vault of either kind.
     fn escrow_fixture_of(owner_device: D32, terms: EscrowKind, op: EscrowOp) -> Fixture {
         let held = *terms.token();
-        let terms_bytes = terms.encode();
+        let terms_bytes = match &terms {
+            EscrowKind::Signed(terms) => terms.encode(),
+            EscrowKind::Computed(terms) => terms.encode(),
+        };
         let terms_addr = escrow::terms_address_of(&terms_bytes);
         let vault_id = derive::vault_id(&G, &owner_device, P_CREATE);
         let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
@@ -6365,7 +6750,8 @@ mod tests {
             trader_credits(&f.preimage, &f.evidence),
             Ok(vec![tokens()[0].0])
         );
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
         assert_eq!(
@@ -6528,7 +6914,8 @@ mod tests {
             trader_credits(&f.preimage, &f.evidence),
             Ok(vec![tokens()[0].0])
         );
-        let posts = vault_post_states(&f.precommit, &f.preimage, &f.evidence).unwrap();
+        let posts =
+            vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence).unwrap();
         assert_eq!(posts[0].state().status, VAULT_STATUS_RETIRED);
 
         // The verdict cell the same Y would have under signed terms is not
@@ -6608,5 +6995,952 @@ mod tests {
                 crate::ccb::decode::DecodeError::WrongClass { .. }
             )))
         ));
+    }
+
+    // ── SoFi §36, Gate G3: each condition corrupted alone (MR-SOFI-0275) ──
+    //
+    // Owner ruling 6 (2026-10-27): every security-relevant condition on an
+    // item `P(E)` embeds needs a test that corrupts that condition alone, so
+    // that the condition's own refusal is the first one, and a mutation
+    // control. Each test below changes one thing and keeps every check that
+    // runs before it satisfied; a "withheld" companion holds back the
+    // evidence another check would need, where two checks name the same
+    // refusal and one would otherwise always answer first.
+
+    /// `f`'s operation rebuilt from `settlement`, `trader_core` and `cores`,
+    /// with `P` re-pointed at the `E` they give.
+    fn rebuilt(
+        f: &Fixture,
+        settlement: SettlementBody,
+        trader_core: TraderCore,
+        cores: Vec<DlvCore>,
+    ) -> (TraderPrecommitBody, SettlementPreimage) {
+        let preimage = SettlementPreimage::new(settlement, trader_core, cores).unwrap();
+        (rebind(f, &preimage), preimage)
+    }
+
+    fn core_digest(core: &DlvCore) -> D32 {
+        derive::dlv_core_digest(&core.encode().unwrap())
+    }
+
+    /// `f`'s settlement body with `edit` applied, over the same cores.
+    fn with_body(
+        f: &Fixture,
+        edit: impl FnOnce(&mut SettlementBody),
+    ) -> (TraderPrecommitBody, SettlementPreimage) {
+        let mut body = f.preimage.settlement().clone();
+        edit(&mut body);
+        rebuilt(
+            f,
+            body,
+            f.preimage.trader_core().clone(),
+            f.preimage.dlv_cores().to_vec(),
+        )
+    }
+
+    /// `f` with vault core `index` replaced by `core`, `B°` naming it.
+    fn with_vault_core(
+        f: &Fixture,
+        index: usize,
+        core: DlvCore,
+    ) -> (TraderPrecommitBody, SettlementPreimage) {
+        let mut cores = f.preimage.dlv_cores().to_vec();
+        let mut body = f.preimage.settlement().clone();
+        match &mut body {
+            SettlementBody::Swap { dlv_cores, .. } => dlv_cores[index] = core_digest(&core),
+            SettlementBody::Close { dlv_core, .. } | SettlementBody::Release { dlv_core, .. } => {
+                *dlv_core = core_digest(&core)
+            }
+        }
+        cores[index] = core;
+        rebuilt(f, body, f.preimage.trader_core().clone(), cores)
+    }
+
+    /// `core` with another pre-root, trader device and entries.
+    fn core_with(core: &DlvCore, pre_root: D32, device: D32, entries: Vec<CoreEntry>) -> DlvCore {
+        DlvCore::new(
+            *core.vault_id(),
+            pre_root,
+            *core.trader_genesis(),
+            device,
+            *core.relationship_base(),
+            entries,
+        )
+        .unwrap()
+    }
+
+    /// `entries` with every relationship entry's device and base set, back
+    /// in the key order every core carries.
+    fn relationships_as(entries: &[CoreEntry], device: D32, base: Option<D32>) -> Vec<CoreEntry> {
+        let mut out: Vec<CoreEntry> = entries
+            .iter()
+            .map(|e| match e {
+                CoreEntry::Relationship {
+                    genesis,
+                    vault_id,
+                    base: own,
+                    path,
+                    ..
+                } => CoreEntry::Relationship {
+                    genesis: *genesis,
+                    device_id: device,
+                    vault_id: *vault_id,
+                    base: match base {
+                        Some(chosen) => chosen,
+                        None => *own,
+                    },
+                    path: path.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        out.sort_by_key(CoreEntry::key);
+        out
+    }
+
+    /// `f`'s precommit with `legs` and `realize_root` in place of its own.
+    fn precommit_with(
+        f: &Fixture,
+        legs: Vec<PrecommitLeg>,
+        realize_root: D32,
+    ) -> TraderPrecommitBody {
+        TraderPrecommitBody::new(
+            *f.precommit.genesis(),
+            *f.precommit.device_id(),
+            f.precommit.position(),
+            *f.precommit.parent_claim_ref(),
+            *f.precommit.external_commitment(),
+            legs,
+            realize_root,
+            *f.precommit.void_root(),
+            *f.precommit.storage_set_id(),
+            f.precommit.signature_alg(),
+            f.precommit.claimant_public_key(),
+        )
+        .unwrap()
+    }
+
+    /// `f`'s legs and a second one, for vault 1, whose setup `evidence`
+    /// holds: everything about it is in order except that it is there.
+    fn with_extra_leg(f: &Fixture) -> (TraderPrecommitBody, Evidence) {
+        let extra = vault_id_of(1);
+        let mut legs = f.precommit.legs().to_vec();
+        legs.push(PrecommitLeg {
+            vault_id: extra,
+            parent_root: token(0x5D),
+            setup_ref: setup_ref_for(extra),
+        });
+        legs.sort_by_key(|l| l.vault_id);
+        let mut evidence = f.evidence.clone();
+        evidence
+            .setups
+            .insert(setup_ref_for(extra), setup_envelope_for(extra));
+        (
+            precommit_with(f, legs, *f.precommit.realize_root()),
+            evidence,
+        )
+    }
+
+    /// `f`'s evidence with the state leaf of `vault_id` edited.
+    fn with_state(f: &Fixture, vault_id: D32, edit: impl FnOnce(&mut VaultStateLeaf)) -> Evidence {
+        let key = derive::vault_state_key(&vault_id);
+        let mut evidence = f.evidence.clone();
+        let VaultLeafPre::State(mut state) = evidence.vault_leaves[&(vault_id, key)].clone() else {
+            panic!("the vault's state leaf")
+        };
+        edit(&mut state);
+        evidence
+            .vault_leaves
+            .insert((vault_id, key), VaultLeafPre::State(state));
+        evidence
+    }
+
+    fn state_of(f: &Fixture, vault_id: D32) -> VaultStateLeaf {
+        let VaultLeafPre::State(state) =
+            f.evidence.vault_leaves[&(vault_id, derive::vault_state_key(&vault_id))].clone()
+        else {
+            panic!("the vault's state leaf")
+        };
+        state
+    }
+
+    fn the_vault(f: &Fixture) -> D32 {
+        *f.preimage.dlv_cores()[0].vault_id()
+    }
+
+    /// A close and a release, each well formed.
+    fn close_and_release() -> [Fixture; 2] {
+        [
+            close_fixture(OwnerAuthority::Origin),
+            escrow_fixture(OTHER_OWNER, release(b"a-wins")),
+        ]
+    }
+
+    fn refused(
+        precommit: &TraderPrecommitBody,
+        preimage: &SettlementPreimage,
+        evidence: &Evidence,
+    ) -> Result<(), Refusal> {
+        validate(precommit, preimage, evidence)
+    }
+
+    /// `T°` is `P`'s trader at `p + 1` (§36, `T°`).
+    /// MUTATION CONTROL: removing the trader core identity check turns this
+    /// red (M05).
+    #[test]
+    fn a_trader_core_of_another_identity_or_position_is_invalid() {
+        let f = swap_fixture();
+        let core = f.preimage.trader_core();
+        for (genesis, device, position) in [
+            (token(0x5A), dev(), P_POS + 1),
+            (G, token(0x5A), P_POS + 1),
+            (G, dev(), P_POS + 2),
+        ] {
+            let other = TraderCore::new(
+                genesis,
+                device,
+                position,
+                *core.pre_root(),
+                core.entries().to_vec(),
+            )
+            .unwrap();
+            let mut body = f.preimage.settlement().clone();
+            let SettlementBody::Swap { trader_core, .. } = &mut body else {
+                panic!("a swap fixture")
+            };
+            *trader_core = derive::trader_core_digest(&other.encode().unwrap());
+            let (precommit, preimage) = rebuilt(&f, body, other, f.preimage.dlv_cores().to_vec());
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::CoreIdentityMismatch)),
+                "T° at ({genesis:?}, {device:?}, {position})"
+            );
+        }
+    }
+
+    /// A close's or a release's `B°.trader_core` is the digest of the `T°`
+    /// `P(E)` carries (§36, `B°`).
+    /// MUTATION CONTROL: removing that check for a close or a release turns
+    /// this red (M09).
+    #[test]
+    fn a_close_or_release_naming_another_trader_core_is_invalid() {
+        for f in close_and_release() {
+            let (precommit, preimage) = with_body(&f, |body| match body {
+                SettlementBody::Close { trader_core, .. }
+                | SettlementBody::Release { trader_core, .. } => *trader_core = token(0x5E),
+                SettlementBody::Swap { .. } => panic!("a close or a release"),
+            });
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                    field: "B°.trader_core",
+                }))
+            );
+        }
+    }
+
+    /// A swap's `B°.dlv_cores` has one reference per carried core and per
+    /// hop (§36, `B°`).
+    /// MUTATION CONTROL: removing the count check turns this red (M10).
+    #[test]
+    fn a_swap_naming_more_core_references_than_it_carries_is_invalid() {
+        let f = swap_fixture();
+        let (precommit, preimage) = with_body(&f, |body| {
+            let SettlementBody::Swap { dlv_cores, .. } = body else {
+                panic!("a swap fixture")
+            };
+            dlv_cores.push(token(0x5E));
+        });
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                field: "B°.dlv_cores",
+            }))
+        );
+    }
+
+    /// A close's or a release's `B°.dlv_core` is the digest of its one core
+    /// (§36, `B°`).
+    /// MUTATION CONTROL: removing that check turns this red (M12).
+    #[test]
+    fn a_close_or_release_naming_another_vault_core_is_invalid() {
+        for f in close_and_release() {
+            let (precommit, preimage) = with_body(&f, |body| match body {
+                SettlementBody::Close { dlv_core, .. }
+                | SettlementBody::Release { dlv_core, .. } => *dlv_core = token(0x5E),
+                SettlementBody::Swap { .. } => panic!("a close or a release"),
+            });
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                    field: "B°.dlv_core",
+                }))
+            );
+        }
+    }
+
+    /// A close's or a release's core starts from the parent `B°` and `P`'s
+    /// leg name (§36, `B°`, `V°`).
+    /// MUTATION CONTROL: removing the core's pre-root check turns this red
+    /// (M15).
+    #[test]
+    fn a_close_or_release_whose_core_starts_from_another_root_is_invalid() {
+        for f in close_and_release() {
+            let core = &f.preimage.dlv_cores()[0];
+            let moved = core_with(
+                core,
+                token(0x5F),
+                *core.trader_device_id(),
+                core.entries().to_vec(),
+            );
+            let (precommit, preimage) = with_vault_core(&f, 0, moved);
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::SettlementCoreReferenceMismatch {
+                    field: "B°.parent_root",
+                }))
+            );
+        }
+    }
+
+    /// Policy bytes that authenticate to the address the vault state names
+    /// and do not decode make the operation Invalid (§36, policy objects):
+    /// the fee at the denominator, and a market pair out of order.
+    /// MUTATION CONTROL: a substituted fee policy for one that does not
+    /// decode turns this red (M34), and a substituted market policy (MKT).
+    #[test]
+    fn policy_bytes_that_authenticate_but_do_not_decode_are_invalid() {
+        let f = swap_fixture();
+        let vault_id = the_vault(&f);
+        let (market, fee, _) = policies(0);
+
+        let mut fee_bytes = fee.encode();
+        let at = fee_bytes.len() - 4;
+        fee_bytes[at..].copy_from_slice(&10_000u32.to_be_bytes());
+        let fee_addr = policy_addr(crate::ccb::class::FEE_POLICY, &fee_bytes);
+        let mut evidence = with_state(&f, vault_id, |s| s.fee_policy = fee_addr);
+        evidence.objects.insert(fee_addr, fee_bytes);
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::PolicyDoesNotDecode {
+                class: crate::ccb::class::FEE_POLICY,
+            }))
+        );
+
+        let mut market_bytes = market.encode();
+        let tokens_at = market_bytes.len() - 64;
+        let (a, b) = (
+            market_bytes[tokens_at..tokens_at + 32].to_vec(),
+            market_bytes[tokens_at + 32..].to_vec(),
+        );
+        market_bytes[tokens_at..tokens_at + 32].copy_from_slice(&b);
+        market_bytes[tokens_at + 32..].copy_from_slice(&a);
+        let market_addr = policy_addr(crate::ccb::class::MARKET_POLICY, &market_bytes);
+        let mut evidence = with_state(&f, vault_id, |s| s.market_policy = market_addr);
+        evidence.objects.insert(market_addr, market_bytes);
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::PolicyDoesNotDecode {
+                class: crate::ccb::class::MARKET_POLICY,
+            }))
+        );
+    }
+
+    /// The intent trades two distinct tokens (§36, `B°`). A two-hop chain
+    /// back to the token it spends is refused by this rule before the
+    /// chain's end is.
+    /// MUTATION CONTROL: removing the distinct-tokens check turns this red
+    /// (M35).
+    #[test]
+    fn an_intent_trading_a_token_for_itself_is_invalid() {
+        let f = swap_fixture_n(2);
+        let (precommit, preimage) = with_body(&f, |body| {
+            let SettlementBody::Swap {
+                token_in,
+                token_out,
+                ..
+            } = body
+            else {
+                panic!("a swap fixture")
+            };
+            *token_out = *token_in;
+        });
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::RouteDoesNotChain { hop: 0 }))
+        );
+    }
+
+    /// The last hop pays the intent's exact output (§36, `B°`).
+    /// MUTATION CONTROL: removing the last-hop check turns this red (M108).
+    #[test]
+    fn a_route_whose_last_hop_does_not_pay_the_intent_is_invalid() {
+        let f = swap_fixture_n(2);
+        let (precommit, preimage) = with_body(&f, |body| {
+            let SettlementBody::Swap { exact_out, .. } = body else {
+                panic!("a swap fixture")
+            };
+            *exact_out += 1;
+        });
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::RouteDoesNotChain { hop: 1 }))
+        );
+    }
+
+    /// `P` has exactly one leg per hop (§36, `B°` against `P`).
+    /// MUTATION CONTROL: removing the leg count check turns this red (M36).
+    #[test]
+    fn a_precommit_naming_a_leg_no_hop_trades_is_invalid() {
+        let f = swap_fixture();
+        let (precommit, evidence) = with_extra_leg(&f);
+        assert_eq!(
+            refused(&precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))
+        );
+    }
+
+    /// Each hop is a leg of `P` with the same parent root and setup.
+    /// MUTATION CONTROL: removing the per-hop leg check turns this red (M37).
+    #[test]
+    fn a_hop_whose_leg_names_another_parent_is_invalid() {
+        let f = swap_fixture();
+        let mut legs = f.precommit.legs().to_vec();
+        legs[0].parent_root = token(0x5D);
+        let precommit = precommit_with(&f, legs, *f.precommit.realize_root());
+        assert_eq!(
+            refused(&precommit, &f.preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))
+        );
+    }
+
+    /// A swap's vault core is marked for `P`'s trader (§36, `Vj°`).
+    /// MUTATION CONTROL: removing the swap core identity check turns this red
+    /// (M38).
+    #[test]
+    fn a_swap_core_marked_for_another_trader_is_invalid() {
+        let f = swap_fixture();
+        let core = &f.preimage.dlv_cores()[0];
+        let other = token(0x6D);
+        let marked = core_with(
+            core,
+            *core.pre_root(),
+            other,
+            relationships_as(core.entries(), other, None),
+        );
+        let (precommit, preimage) = with_vault_core(&f, 0, marked);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::CoreIdentityMismatch))
+        );
+    }
+
+    /// A swap's vault core starts from the parent its hop names (§36, `Vj°`).
+    /// MUTATION CONTROL: removing that check turns this red (M39).
+    #[test]
+    fn a_swap_core_starting_from_another_root_than_its_hop_is_invalid() {
+        let f = swap_fixture();
+        let core = &f.preimage.dlv_cores()[0];
+        let moved = core_with(
+            core,
+            token(0x5C),
+            *core.trader_device_id(),
+            core.entries().to_vec(),
+        );
+        let (precommit, preimage) = with_vault_core(&f, 0, moved);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))
+        );
+    }
+
+    /// `T°` advances exactly one relationship per hop (§36, `T°`). With the
+    /// balances the trader spends withheld, the balance check cannot run, and
+    /// the extra relationship is still proven Invalid.
+    /// MUTATION CONTROL: removing the relationship count check turns this red
+    /// (M43).
+    #[test]
+    fn an_extra_trader_relationship_is_invalid_with_its_balances_withheld() {
+        let f = swap_fixture();
+        let mut entries = f.preimage.trader_core().entries().to_vec();
+        let Some(CoreEntry::Relationship { path, .. }) = entries
+            .iter()
+            .find(|e| matches!(e, CoreEntry::Relationship { .. }))
+            .cloned()
+        else {
+            panic!("the trader's relationship entry")
+        };
+        entries.push(CoreEntry::Relationship {
+            genesis: G,
+            device_id: dev(),
+            vault_id: vault_id_of(1),
+            base: base_of(1),
+            path,
+        });
+        entries.sort_by_key(CoreEntry::key);
+        let (precommit, preimage) = with_trader_core(&f, entries);
+        let mut withheld = f.evidence.clone();
+        for addr in named_pre_balances(&preimage) {
+            withheld.objects.remove(&addr);
+        }
+        assert_eq!(
+            refused(&precommit, &preimage, &withheld),
+            Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))
+        );
+    }
+
+    /// Every hop's vault has its relationship entry in `T°` (§36, `T°`).
+    /// MUTATION CONTROL: removing that check turns this red (M44).
+    #[test]
+    fn a_trader_core_advancing_another_vault_than_a_hops_is_invalid() {
+        let f = swap_fixture_n(2);
+        let second = vault_id_of(1);
+        let entries: Vec<CoreEntry> = {
+            let mut out: Vec<CoreEntry> = f
+                .preimage
+                .trader_core()
+                .entries()
+                .iter()
+                .map(|e| match e {
+                    CoreEntry::Relationship {
+                        genesis,
+                        device_id,
+                        vault_id,
+                        base,
+                        path,
+                    } if *vault_id == second => CoreEntry::Relationship {
+                        genesis: *genesis,
+                        device_id: *device_id,
+                        vault_id: token(0x5B),
+                        base: *base,
+                        path: path.clone(),
+                    },
+                    other => other.clone(),
+                })
+                .collect();
+            out.sort_by_key(CoreEntry::key);
+            out
+        };
+        let (precommit, preimage) = with_trader_core(&f, entries);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))
+        );
+    }
+
+    /// `T°`'s relationship entries name `P`'s trader (§36, `T°`).
+    /// MUTATION CONTROL: removing that check for a swap turns this red (M45),
+    /// for a close (M78), and for a release (M93).
+    #[test]
+    fn a_trader_relationship_naming_another_trader_is_invalid() {
+        for f in [
+            swap_fixture(),
+            close_fixture(OwnerAuthority::Origin),
+            escrow_fixture(OTHER_OWNER, release(b"a-wins")),
+        ] {
+            let entries = relationships_as(f.preimage.trader_core().entries(), token(0x6D), None);
+            let (precommit, preimage) = with_trader_core(&f, entries);
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::CoreIdentityMismatch))
+            );
+        }
+    }
+
+    /// `swap_vault_post` prices only an Active vault. Route validation
+    /// checks the status before it prices, so the function's own check is
+    /// reached here directly, as the producer and `vault_post_states` reach
+    /// it.
+    /// MUTATION CONTROL: removing the status check in `swap_vault_post`
+    /// turns this red (M48).
+    #[test]
+    fn a_retired_vault_has_no_swap_post_state() {
+        let f = swap_fixture();
+        let SettlementBody::Swap { hops, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        let state = VaultStateLeaf {
+            status: VAULT_STATUS_RETIRED,
+            ..state_of(&f, hops[0].vault_id)
+        };
+        let policies = Policies::resolve(&f.evidence, &state).unwrap();
+        assert_eq!(
+            swap_vault_post(&state, &policies, &hops[0], 0),
+            Err(Refusal::Invalid(Invalid::VaultIsNotActive))
+        );
+    }
+
+    /// A reserve that the input would carry past `u64::MAX` is refused, and
+    /// so is a generation at its last value; neither wraps.
+    /// MUTATION CONTROL: a wrapping reserve add turns this red (M51), and a
+    /// wrapping generation (M54).
+    #[test]
+    fn a_reserve_or_generation_that_would_overflow_has_no_swap_post_state() {
+        let f = swap_fixture();
+        let SettlementBody::Swap { hops, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        let honest = state_of(&f, hops[0].vault_id);
+        let policies = Policies::resolve(&f.evidence, &honest).unwrap();
+        // Both reserves near the top, so the curve still pays out and only
+        // the input side overflows.
+        let full = VaultStateLeaf {
+            reserve_a: u64::MAX - 500,
+            reserve_b: u64::MAX - 500,
+            ..honest.clone()
+        };
+        let mut hop = hops[0];
+        hop.amount_out = constant_product_output_classified(
+            hop.amount_in,
+            full.reserve_a,
+            full.reserve_b,
+            FEE_BPS,
+        )
+        .unwrap();
+        assert_eq!(
+            swap_vault_post(&full, &policies, &hop, 0),
+            Err(Refusal::Invalid(Invalid::CheckedArithmetic {
+                what: "reserve in"
+            }))
+        );
+        let last = VaultStateLeaf {
+            generation: u64::MAX,
+            ..honest
+        };
+        assert_eq!(
+            swap_vault_post(&last, &policies, &hops[0], 0),
+            Err(Refusal::Invalid(Invalid::CheckedArithmetic {
+                what: "vault generation",
+            }))
+        );
+    }
+
+    /// A vault core holds its state leaf and its own relationship, and
+    /// nothing else (§36, `Vj°`): a third entry, for this vault under
+    /// another trader's identity, is refused by the count before the
+    /// identity rule sees it.
+    /// MUTATION CONTROL: removing the two-entry check turns this red (M55).
+    #[test]
+    fn a_vault_core_with_a_third_entry_is_invalid() {
+        let f = swap_fixture();
+        let core = &f.preimage.dlv_cores()[0];
+        let Some(CoreEntry::Relationship { path, .. }) = core
+            .entries()
+            .iter()
+            .find(|e| matches!(e, CoreEntry::Relationship { .. }))
+            .cloned()
+        else {
+            panic!("the vault core's relationship entry")
+        };
+        let mut entries = core.entries().to_vec();
+        entries.push(CoreEntry::Relationship {
+            genesis: G,
+            device_id: token(0x6D),
+            vault_id: *core.vault_id(),
+            base: *core.relationship_base(),
+            path,
+        });
+        entries.sort_by_key(CoreEntry::key);
+        let widened = core_with(core, *core.pre_root(), *core.trader_device_id(), entries);
+        let (precommit, preimage) = with_vault_core(&f, 0, widened);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "V°" }))
+        );
+    }
+
+    /// A vault core's state entry starts from the value of the state leaf
+    /// fetched for it (§36, vault leaf pre values).
+    /// MUTATION CONTROL: removing the pre-value check turns this red (M56).
+    #[test]
+    fn a_vault_core_starting_from_another_state_than_the_fetched_one_is_invalid() {
+        let f = swap_fixture();
+        let evidence = with_state(&f, the_vault(&f), |s| s.generation += 1);
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
+        );
+    }
+
+    /// A vault core's relationship entry names the core's own trader (§36,
+    /// `Vj°`). With the vault's policies withheld the write-set check cannot
+    /// run, and the fold's own identity rule still proves it Invalid.
+    /// MUTATION CONTROL: removing the fold's identity check turns this red
+    /// (M61).
+    #[test]
+    fn a_vault_relationship_entry_naming_another_trader_is_invalid_with_the_policies_withheld() {
+        let f = swap_fixture();
+        let core = &f.preimage.dlv_cores()[0];
+        let entries = relationships_as(core.entries(), token(0x6D), None);
+        let bent = core_with(core, *core.pre_root(), *core.trader_device_id(), entries);
+        let (precommit, preimage) = with_vault_core(&f, 0, bent);
+        let state = state_of(&f, the_vault(&f));
+        let mut withheld = f.evidence.clone();
+        withheld.objects.remove(&state.market_policy);
+        assert_eq!(
+            refused(&precommit, &preimage, &withheld),
+            Err(Refusal::Invalid(Invalid::RelationshipIdentityMismatch))
+        );
+    }
+
+    /// A vault core without its relationship entry is refused (§36, `Vj°`).
+    /// MUTATION CONTROL: the two write-set rules that each refuse it, the
+    /// stray-entry rule and the both-present rule, removed together turn
+    /// this red (M59_60); each alone is answered by the other.
+    #[test]
+    fn a_vault_core_without_its_relationship_entry_is_invalid() {
+        let f = swap_fixture();
+        let core = &f.preimage.dlv_cores()[0];
+        let mut entries: Vec<CoreEntry> = core
+            .entries()
+            .iter()
+            .map(|e| match e {
+                CoreEntry::Relationship { path, .. } => CoreEntry::Read {
+                    key: token(0x5A),
+                    value: token(0x5B),
+                    path: path.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        entries.sort_by_key(CoreEntry::key);
+        let stray = core_with(core, *core.pre_root(), *core.trader_device_id(), entries);
+        let (precommit, preimage) = with_vault_core(&f, 0, stray);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "V°" }))
+        );
+    }
+
+    /// The leaf fetched at a vault's relationship key is the base the core
+    /// advances, and never a state leaf (§36, vault leaf pre values).
+    /// MUTATION CONTROL: removing the fetched-base check turns this red
+    /// (M63), and treating a state leaf there as absent (M65).
+    #[test]
+    fn the_leaf_at_a_vaults_relationship_key_is_the_base_it_advances() {
+        let f = swap_fixture();
+        let vault_id = the_vault(&f);
+        let rel_key = derive::relationship_key(&G, &dev(), &vault_id);
+
+        let mut moved = f.evidence.clone();
+        moved.vault_leaves.insert(
+            (vault_id, rel_key),
+            VaultLeafPre::Relationship(VaultRelationshipLeaf {
+                trader_genesis: G,
+                trader_device_id: dev(),
+                leaf: token(0x03),
+            }),
+        );
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &moved),
+            Err(Refusal::Invalid(Invalid::RelationshipBaseMismatch))
+        );
+
+        let mut state_there = f.evidence.clone();
+        state_there.vault_leaves.insert(
+            (vault_id, rel_key),
+            VaultLeafPre::State(state_of(&f, vault_id)),
+        );
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &state_there),
+            Err(Refusal::Invalid(Invalid::LeafPreValueMismatch))
+        );
+    }
+
+    /// A close or a release has exactly one leg, for its vault (§36, `B°`
+    /// against `P`).
+    /// MUTATION CONTROL: removing the one-leg check for a close turns this
+    /// red (M69), and for a release (M82).
+    #[test]
+    fn a_close_or_release_whose_precommit_names_a_second_leg_is_invalid() {
+        for f in close_and_release() {
+            let (precommit, evidence) = with_extra_leg(&f);
+            assert_eq!(
+                refused(&precommit, &f.preimage, &evidence),
+                Err(Refusal::Invalid(Invalid::LegsDoNotMatchPrecommit))
+            );
+        }
+    }
+
+    /// A close's or a release's vault is in `P`'s storage set and Active
+    /// (§36, vault leaf pre values).
+    /// MUTATION CONTROL: removing the scope check for a close turns this red
+    /// (M72), for a release (M84); the status check for a close (M73), for a
+    /// release (M85).
+    #[test]
+    fn a_close_or_release_of_a_vault_out_of_scope_or_retired_is_invalid() {
+        for f in close_and_release() {
+            let vault_id = the_vault(&f);
+            assert_eq!(
+                refused(
+                    &f.precommit,
+                    &f.preimage,
+                    &with_state(&f, vault_id, |s| s.storage_set_id = token(0x7F))
+                ),
+                Err(Refusal::Invalid(Invalid::NetworkScopeMismatch))
+            );
+            assert_eq!(
+                refused(
+                    &f.precommit,
+                    &f.preimage,
+                    &with_state(&f, vault_id, |s| s.status = VAULT_STATUS_RETIRED)
+                ),
+                Err(Refusal::Invalid(Invalid::VaultIsNotActive))
+            );
+        }
+    }
+
+    /// A release's vault state derives the vault id it is stored under (§36,
+    /// vault leaf pre values).
+    /// MUTATION CONTROL: removing that check for a release turns this red
+    /// (M83).
+    #[test]
+    fn a_release_whose_state_does_not_derive_its_vault_id_is_invalid() {
+        let f = escrow_fixture(OTHER_OWNER, release(b"a-wins"));
+        let evidence = with_state(&f, the_vault(&f), |s| s.create_position += 1);
+        assert_eq!(
+            refused(&f.precommit, &f.preimage, &evidence),
+            Err(Refusal::Invalid(Invalid::VaultIdIsNotTheOwnersDerivation))
+        );
+    }
+
+    /// A close's or a release's `T°` advances the vault's relationship.
+    /// With the vault's terms withheld the balance check cannot run, and the
+    /// missing relationship is still proven Invalid.
+    /// MUTATION CONTROL: removing that check for a close turns this red
+    /// (M77), and for a release (M92).
+    #[test]
+    fn a_close_or_release_without_its_trader_relationship_is_invalid_with_the_terms_withheld() {
+        for f in close_and_release() {
+            let entries: Vec<CoreEntry> = f
+                .preimage
+                .trader_core()
+                .entries()
+                .iter()
+                .filter(|e| !matches!(e, CoreEntry::Relationship { .. }))
+                .cloned()
+                .collect();
+            let (precommit, preimage) = with_trader_core(&f, entries);
+            let state = state_of(&f, the_vault(&f));
+            let mut withheld = f.evidence.clone();
+            withheld.objects.remove(&state.market_policy);
+            assert_eq!(
+                refused(&precommit, &preimage, &withheld),
+                Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))
+            );
+        }
+    }
+
+    /// A close's or a release's vault core advances from the base `T°`
+    /// advances (§36, `T°` and `V°`).
+    /// MUTATION CONTROL: removing the base check for a close turns this red
+    /// (M80), and for a release (M95).
+    #[test]
+    fn a_close_or_release_whose_trader_relationship_starts_from_another_base_is_invalid() {
+        for f in close_and_release() {
+            let entries =
+                relationships_as(f.preimage.trader_core().entries(), dev(), Some(token(0x03)));
+            let (precommit, preimage) = with_trader_core(&f, entries);
+            assert_eq!(
+                refused(&precommit, &preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::RelationshipBaseMismatch))
+            );
+        }
+    }
+
+    /// A close's or a release's realize root is `Fold(T°, E)` (§36, `T°`).
+    /// MUTATION CONTROL: removing the fold check for a close turns this red
+    /// (M81), and for a release (M96).
+    #[test]
+    fn a_close_or_release_whose_realize_root_is_not_the_fold_is_invalid() {
+        for f in close_and_release() {
+            let precommit = precommit_with(&f, f.precommit.legs().to_vec(), token(0x5B));
+            assert_eq!(
+                refused(&precommit, &f.preimage, &f.evidence),
+                Err(Refusal::Invalid(Invalid::RealizeRootIsNotTheFold))
+            );
+        }
+    }
+
+    /// A release's vault core is marked for `P`'s trader (SA-131).
+    /// MUTATION CONTROL: removing that check for a release turns this red
+    /// (M94).
+    #[test]
+    fn a_release_whose_vault_core_names_another_trader_is_invalid() {
+        let f = escrow_fixture(OTHER_OWNER, release(b"a-wins"));
+        let core = &f.preimage.dlv_cores()[0];
+        let other = token(0x6D);
+        let marked = core_with(
+            core,
+            *core.pre_root(),
+            other,
+            relationships_as(core.entries(), other, None),
+        );
+        let (precommit, preimage) = with_vault_core(&f, 0, marked);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::CoreIdentityMismatch))
+        );
+    }
+
+    /// A debit never exceeds the trader's pre balance, and a credit never
+    /// carries it past `u64::MAX` (§36, trader leaf pre values).
+    /// MUTATION CONTROL: wrapping balance arithmetic turns this red (M101).
+    #[test]
+    fn a_trader_balance_is_never_overdrawn_or_wrapped() {
+        let commit = tokens()[0].0;
+        for (amount, credit, debit) in [(10, 0, 11), (u64::MAX, 1, 0)] {
+            assert_eq!(
+                balance_after(
+                    &TraderLeafPre::Balance(balance(commit, amount)),
+                    &commit,
+                    credit,
+                    debit
+                ),
+                Err(Refusal::Invalid(Invalid::CheckedArithmetic {
+                    what: "trader balance",
+                })),
+                "a balance of {amount} credited {credit} and debited {debit}"
+            );
+        }
+    }
+
+    /// Every movement has its entry in `T°`, with the entry count kept, so
+    /// the count rule cannot answer for the missing one (§36, `T°`).
+    /// MUTATION CONTROL: skipping a movement with no entry turns this red
+    /// (M104).
+    #[test]
+    fn a_trader_core_missing_a_movement_with_its_count_kept_is_invalid() {
+        let f = swap_fixture();
+        let SettlementBody::Swap { token_out, .. } = f.preimage.settlement() else {
+            panic!("a swap fixture")
+        };
+        let out_key = balance_key(&G, &dev(), token_out);
+        let mut entries: Vec<CoreEntry> = f
+            .preimage
+            .trader_core()
+            .entries()
+            .iter()
+            .map(|e| match e {
+                CoreEntry::Mutation {
+                    key,
+                    pre,
+                    post,
+                    path,
+                } if *key == out_key => CoreEntry::Mutation {
+                    key: balance_key(&G, &dev(), &token(0x5A)),
+                    pre: *pre,
+                    post: *post,
+                    path: path.clone(),
+                },
+                other => other.clone(),
+            })
+            .collect();
+        entries.sort_by_key(CoreEntry::key);
+        let (precommit, preimage) = with_trader_core(&f, entries);
+        assert_eq!(
+            refused(&precommit, &preimage, &f.evidence),
+            Err(Refusal::Invalid(Invalid::WriteSetNotExact { core: "T°" }))
+        );
     }
 }

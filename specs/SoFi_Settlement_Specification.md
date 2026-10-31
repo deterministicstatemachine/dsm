@@ -208,6 +208,8 @@ Adding a validity check anywhere outside the constructor. If a check seems neces
 a hole in the constructor: a path that can build a state without every rule holding. Find it and close it in Core.
 A check downstream hides the hole; it does not close it.
 
+> **Amendment S29 (owner, 2026-10-28) — SDK preflight, Core authority.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Core authoritative; SDK preflight permitted. Keep the early UX checks. Core must independently enforce every bound." This is the ruling already given for transfers and burns (owner question 9, 2026-10-27: "Core must be the authoritative enforcement boundary, with SDK preflight retained for early rejection"). Rule 5 and its "Do not" read: nothing downstream is an authority for what construction guarantees. An SDK check that refuses bad input before Core sees it is preflight for the person's sake; Core refuses the same input when it arrives without the SDK, and no verifier consults the SDK's answer.
+
 **Why**
 One side door, such as a function that installs a root the SDK computed, or a path that runs with evidence it never
 fetched, would let a state exist that the rules never produced. From that moment the idea above is false, and
@@ -987,7 +989,7 @@ key
 
 **Code**
 Body:  CORE/sofi/wire/objects.rs:121, class 0x0036.     Signature              check:     verify_setup, CORE/sofi/
-signature.rs:172. Builder: build_setup, SDK/sdk/sofi_sdk.rs:210.
+signature.rs:172. Builder: setup_body, CORE/sofi/lineage.rs:745, packaged by build_setup, SDK/sdk/sofi_sdk.rs:297.
 
 Equality of setups is equality of ρ. Alternative valid envelopes over one body are the same setup. The setup body is
 published as a content addressed object (Section II); Core recomputes ρ from the fetched bytes.
@@ -2055,7 +2057,7 @@ eration to the accepted owner transition, and genesis_root (:575), which gives R
 
 <!-- spec-section: SOFI-029 -->
 ### 29 Setting up with a vault
-1. build_setup builds the signed setup body; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
+1. setup_body (CORE/sofi/lineage.rs:745) builds the setup body, which build_setup (SDK/sdk/sofi_sdk.rs:297) packages to be signed; Core derives ρ with setup_ref (CORE/sofi/derive.rs:141) and the
 setup id with setup_id (:118).
 2. The setup body is put as an object and indexed under ρ. SetupRegistered holds once it is Stored.
 3. The trader’s transition carries SofiSetup: verify_operation checks it, and the relationship leaf h0 from
@@ -2144,7 +2146,7 @@ bounds the hops.
 | 0 — parent resolved | The trader’s position p must be resolved: `descendant_fence` (`CORE/sofi/lineage.rs:244`) refuses while it is pending. The trader holds the validated root Rp. |
 | 1 — path | `sofi.findRoute` proposes hops v1, …, vn from walked heads R1, …, Rn (Section 30). |
 | 2 — draft | `draft_trade` or `draft_route` builds B◦ = `Swap{hops}` with each hop’s output from `constant_product_output` (`CORE/dlv/route_commit.rs:151`) at that head’s reserves and fee policy; each vault core Vj◦ against Rj; the trader core T◦ against Rp; E with `external_commitment_single` or `external_commitment_route` (`CORE/sofi/derive.rs:256, :285`), the second binding every hop through H(Γ) (`:280`); Rrealize = Fold(T◦, E) by `batch_fold` (`CORE/sofi/smt/fold.rs:178`), with hj+1 from `relationship_leaf_next` (`CORE/sofi/derive.rs:131`); the preimage P(E); and P with Rvoid = Rp, signed. |
-| 3 — validate | `preimage_admissible` (`CORE/sofi/admission.rs:78`); evidence acquired from storage (rebuild step R5); `route_validation` (`CORE/sofi/validation.rs:338`) must return Valid, verifying each core with `verify_batch` (`CORE/sofi/smt/fold.rs:197`) and each leaf pre value with `verify` (`CORE/sofi/smt/tree.rs:402`); `verify_precommit` (`CORE/sofi/signature.rs:215`). Any other result stops the producer. |
+| 3 — validate | `preimage_admissible` (`CORE/sofi/admission.rs:78`); evidence acquired from storage (rebuild step R5); `route_validation` (`CORE/sofi/validation.rs:338`) must return Valid, verifying each core with `verify_batch` (`CORE/sofi/smt/fold.rs:197`) and each leaf pre value against the validated pre root (Amendment S30); `verify_precommit` (`CORE/sofi/signature.rs:215`). Any other result stops the producer. |
 | 4 — publish | P indexed under PrecommitId, P(E) under `preimage_locator(E)` (`CORE/sofi/derive.rs:424`), and every closure object, each put and Stored. |
 | 5 — witnesses | `derive_policy_fulfillments` (`CORE/sofi/conformance.rs:67`) yields Gj for every hop, indexed under `policy_fulfillment_id` (`CORE/sofi/derive.rs:169`), with any auxiliary evidence. |
 | 6 — exercise | `build_fulfillment` picks each hop’s live attempt aj from the walk, advancing with `next_attempt` (`CORE/sofi/wire/mod.rs:341`), builds and signs F; `check_fulfillment_against_precommit` (`CORE/sofi/conformance.rs:100`) must return Valid; Cq comes from `resolution_claim` (`CORE/sofi/derive.rs:193`). The trader’s transition carries `SofiFulfill` through the Core transition, where `verify_operation` checks it. This is the state advancement that holds the key. |
@@ -2219,10 +2221,13 @@ consumed_route,           route_          stage 9
 impossible,     resolve_position,
 effect_of
 advance_resolved                          stage 10
-validate_staged_frontier,                 the trader’s tree store: staged post trees are validated before stage 7, and
-reachable                                 nodes not reachable from a validated root are dropped after stage 10
+trader_post_states                        stage 10 (Amendment S30): the post leaves are recomputed from verified
+                                          evidence and written only when they recompute the installed root; no
+                                          post tree is kept before stage 7
 route_outcome_key,                next_   deleted: used by no stage
 generation
+
+> **Amendment S30 (owner, 2026-10-28) — the staged tree store is replaced by Core-validated post states.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Amend the obsolete specification. Describe the existing Core-validated post-state mechanism rather than rebuilding the deleted store." The store was deleted on 2026-09-21 under the owner's ruling "replace the responsibility, not the dead implementation", because the leaves a later acquisition consumes are preimages and a node store returns leaf values. The responsibility, as built: nothing is staged before stage 7. At stage 10 the trader recomputes its post leaves from verified evidence (`trader_post_states`) and writes them only when they recompute the root Core installed; the vault side keeps each selected generation's leaves and returns a tree only when its rebuilt root matches. No leaf that does not recompute a validated root is ever written, so no unreachable node exists to drop. §31 stage 3 and §41.1 name this mechanism.
 
 
 <!-- Source PDF page 35 -->
@@ -2408,7 +2413,7 @@ whose state advances.
 1. One function prepares every transition. No SoFi producer calls a lower level advance.
 2. The SDK supplies no entropy. The value derived in step 3 is the only entropy of the transition.
 3. That same value goes into the relationship tip and into both receipt hashes, Cpre and the symmetric tip.
-4. A transfer nonce, where an operation has one, stays in the operation bytes, where it is already hashed.
+4. A transfer nonce, where an operation has one, is bound into the operation bytes by the salted terms commitment, where it is already hashed, and is never carried in the clear (Amendment S31).
 5. The SDK passes Core’s result into the transition unchanged (rule T4).
 **Gate**
 For each of the three SoFi operations: applying it twice from the same state gives byte identical results; changing
@@ -2659,8 +2664,7 @@ lineage.rs                     advance_resolved, descendant_fence, genesis_accep
 resolution.rs                  effect_of, resolve_position
 signature.rs                   verify_precommit, verify_operation
 smt/fold.rs                    verify_batch
-smt/store.rs                   validate_staged_frontier
-smt/tree.rs                    verify, reachable
+validation.rs                  trader_post_states (Amendment S30)
 validation.rs                  route_validation
 wire/mod.rs                    next_attempt, next_generation
 
@@ -2761,7 +2765,10 @@ tip, then calls DeviceState::advance (CORE/types/device_state.rs:1812).
 app_router_impl.rs:1273, SDK/sdk/core_sdk.rs:3713).
 
 The seam change removes the entropy parameter, puts the one derived value into the relationship tip and both receipt
-hashes, keeps the transfer nonce in the operation bytes, and meets Section 39. Then the seam is frozen.
+hashes, keeps the transfer nonce bound in the operation bytes by the salted terms commitment (Amendment S31), and
+meets Section 39. Then the seam is frozen.
+
+> **Amendment S31 (owner, 2026-10-28) — the transfer nonce stays confidential.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Salted commitment in operation bytes. Keep the nonce confidential. Correct the older spec wording." This records the ruling of 2026-10-02 (CONFORMANCE §6.71): "the signed transfer keeps only what admission needs (recipient, amount, policy commit, authority policy) and a salted commitment to the rest". A transfer's operation bytes carry `terms_commitment`, a hash under `DSM/transfer-terms/v1` of the token id, nonce, mode, memo and salt; the recipient opens the terms only against it, and the nonce is never transition entropy.
 
 <!-- spec-section: SOFI-044 -->
 ### 44 Step 5: rebuild
@@ -2797,7 +2804,7 @@ R5       real evidence acquisition         Evidence built only from fetched byte
 R6       the producer fails closed         SDK/sdk/sofi_sdk.rs:376 validates with real evidence and stops on
 Unavailable (T5, G5)
 R7       Core FulfillmentConformance       the full predicate of Part IV, one named test per item
-R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:210) publishes and indexes the
+R8       publication of P , G, F and       build_setup (SDK/sdk/sofi_sdk.rs:297), over Core's setup_body (CORE/sofi/lineage.rs:745), publishes and indexes the
 the setup body                    setup body, which it does not at 817123c (line 266)
 R9       the two position cells            Kful (q) and Kroot (q) written together at the leader of s(q); Cq computed
 from F and P ; PositionPairAtomic as a test
@@ -2900,6 +2907,12 @@ recipient allowlist                   none, or an inline list of device ids that
 The token’s identity is policy_commit, the hash of the whole blob. Any field that differs makes a different token.
 The ticker is display only; two tokens may share one.
 
+> **Amendment S28 (owner, 2026-10-27) — a ticker is not unique across the network, and a device holds one token per ticker.** Owner's words, 2026-10-27: "Preserve SA-148's device-local anti-spoofing protection. Two independent devices may create tokens with the same display ticker, but the SDK must preserve its restriction against accepting conflicting ticker identities within the same device's holdings. Amend the specification to distinguish global ticker non-uniqueness from device-local enforcement. Token identity remains the cryptographic policy commitment, never the ticker."
+>
+> - **Across the network.** Nothing reserves a ticker. Any device may create a token under any ticker §47 allows, whatever ticker other devices' tokens carry; no node, register or index decides who holds a ticker, and Core never resolves a ticker to a token.
+> - **On one device.** A device holds at most one token per ticker. Its creation of a token, or its adoption of one, under a ticker a token it already holds carries is refused before anything is written, so a token cannot present itself to the holder under the name of one it already trusts. Every device holds ERA and dBTC by construction, so no device creates or adopts another token whose ticker is theirs in any letter case. Adoption is permanent (SA-148), so once a device holds a ticker that ticker names that token on that device for good.
+> - **Identity.** Every protocol path names a token by its policy commit: sends, received transfers, vault legs, policy checks and balances. The device-local rule is a display and anti-spoofing rule of the holder's own wallet; it is not a protocol identity and no verifier consults it.
+
 > **Amendment S8 (owner, 2026-09-23) — the policy names its creator, and a token is created once.** The policy blob also commits the creator: the genesis `G` and device id `DevID` of the device that creates the token, placed after the release rule. A native token's genesis release is admissible only in a `CreateToken` of that device, so anyone else holding the same policy bytes releases nothing. The creating transition also inserts a creation record for the policy commit into the creator's economic tree, from zero (class `0x0060`, key `H(DSM/economic-token-creation-key/v1; G ∥ DevID ∥ policy_commit)`). Its presence under a validated root proves the creation, and a second creation of the same commit on that lineage cannot build its write set. The economic-root register keeps the lineage unforked, so the genesis supply is released exactly once.
 
 > **Amendment S11 (owner, 2026-09-26) — a network-anchored native token names no creator and no signer set; ERA's policy.** A native token whose releases are anchored to the network rather than to a creating device names no creator and no signer set: its blob omits the creator of Amendment S8 and the signer set and threshold of the table above, going from the release rule straight to the ticker, and its release rule alone governs every release. Exactly one such policy exists, ERA's, fixed in Core and checked by its commitment; any other network-anchored blob has no reserve and releases nothing, and it is never registered, adopted or published. The creator and the signer set belong to device-created tokens (release rule all-at-creation), whose layout is unchanged.
@@ -2908,7 +2921,11 @@ The ticker is display only; two tokens may share one.
 >
 > **Amendment S18 (owner, 2026-10-01) — ERA has two decimals.** ERA is divisible to hundredths: its policy's decimals are 2, and every ERA amount is held in base units of 0.01 ERA. The amounts people know are unchanged: the genesis supply is 80,000,000,000.00 ERA, which the policy states in base units as 8,000,000,000,000; one beta faucet claim releases 100.00 ERA (10,000 base units); the token creation fee is 10.00 ERA (1,000 base units). The rest of S11's policy is unchanged. ERA's commitment changes with its bytes, to `NNG176RZ6ACTWCDPRNYHXZK2DCZ72SPA9Q6XWGRGQ9JGKZYTESG0` (Crockford base32), and replaces S11's; by S11's rule this is a different ERA identity, so no balance under the old commitment carries over (a clean cut). Amounts are entered and shown in whole tokens with the token's decimals after a point, `100.00` for ERA, never as base units.
 >
-> Open: join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and by the rule above that any differing field makes a different token, a different ERA identity.
+> ~~Open: join-triggered emission (DJTE) replaces the faucet after beta. That is a different release rule, so a different blob, and by the rule above that any differing field makes a different token, a different ERA identity.~~ *Corrected by Amendment S32.*
+>
+> **Amendment S32 (owner, 2026-10-28) — replacing the faucet does not make a new ERA.** On 2026-10-28 the owner adopted one set of rulings on the decisions recorded in CONFORMANCE §6.101 and §6.105, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Your current design releases the existing ERA supply according to verified storage occupancy. Changing the release trigger must not automatically create another ERA identity or supply. The outdated implication must be corrected, without prematurely implementing emissions."
+>
+> *Closed as a replacement, not a migration (owner direction, 2026-10-29).* The owner's words, relayed into the session: "Beta is disposable. There is no requirement to migrate its state, preserve compatibility, or maintain the beta release mechanism. When DSM transitions out of beta, the network and its deployment can be replaced completely, with the finalized protocol, genesis configuration, and ERA release policy established from the beginning", and "close the supposed migration contradiction as a beta-to-production replacement decision, not an unresolved migration problem. No migration code needs to be built." So the beta network is discarded at the end of beta, its faucet policy with it; nothing converts the beta reserve's release rule in place, and no beta balance carries over. The production network starts from its own genesis, whose ERA policy names emissions by verified storage occupancy as its release rule from the beginning. That policy's commitment is the production ERA identity, and its genesis supply is the production supply: one identity and one supply, established once in that genesis, which S11's rule (a differing field makes a different token) never has to bridge.
 
 **Code**
 Balances are keyed by policy_commit (the economic balance leaf; CORE/sofi/validation.rs:553). Issuance

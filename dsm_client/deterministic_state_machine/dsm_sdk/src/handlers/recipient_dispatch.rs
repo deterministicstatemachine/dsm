@@ -96,7 +96,9 @@ pub enum Ingested {
     Staged,
     /// Recognized, but the canonical apply has already decided its step — the
     /// transfer's nonce is spent, or the receipt's step is taken — so it can
-    /// never execute here. Nothing is staged; the copy may be consumed.
+    /// never execute here. Nothing is staged, and the copy is passed over by
+    /// its content: the id it was read under is not the object's, and is
+    /// never consumed for it.
     Decided,
     /// Not checked: the contact it names already holds
     /// `MAX_UNBOUND_PER_SENDER` unbound staged objects of its kind here, and
@@ -451,10 +453,8 @@ fn verify_candidate_receipt(
         relationship_key,
         parent_tip: receipt.parent_tip,
         evidence_bytes: full_receipt_bytes.to_vec(),
-        evidence_digest: crate::storage::client_db::evidence_content_digest(
-            crate::storage::client_db::ArtifactRole::EvidenceA,
-            full_receipt_bytes,
-        ),
+        evidence_digest: dsm::crypto::spool_address::ArtifactRole::EvidenceA
+            .content_digest(full_receipt_bytes),
     };
     Ok(ReceiptRecognition::Verified(Box::new(RecognizedReceipt {
         receipt,
@@ -691,8 +691,8 @@ pub fn ingest_evidence_half(
 
 /// What a copy read on a PREVIOUS-tip route is. Such a route fixes a tip this
 /// device advanced past, so nothing on it is staged: a copy of an object the
-/// canonical apply has decided is consumed, and anything else is left where it
-/// is.
+/// canonical apply has decided is passed over by its content, and anything
+/// else is left where it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaleCopy {
     /// Recognized, and the apply has decided its step.
@@ -948,22 +948,25 @@ mod tests {
     /// sender posts its own transfer a second time under another id, the
     /// wrapper now claiming a million NOTX from a third device. Both copies
     /// reach B's spool; B syncs. They are one signed object, so they stage as
-    /// one and bind to one receipt: B is credited 10 ERA once, its history
-    /// reads the signed terms, and both copies are marked consumed under the
-    /// ids the spool holds them by.
+    /// one and bind to one receipt: B is credited 10 ERA once, and its history
+    /// reads the signed terms. The id the transfer's receipt derives is
+    /// consumed; the other is not the transfer's, so it consumes nothing that
+    /// an honest message under it would need, and the copy B read under it is
+    /// read once more, decided, and passed over by its content.
+    ///
+    /// MUTATION CONTROL: consuming every id a pair's copies were read under,
+    /// as completion did, turns this red.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_second_copy_with_a_lying_wrapper_is_the_same_transfer_credited_once() {
         let (p, one) = sent().await;
         let second_id = crate::util::text_id::encode_base32_crockford(&[0x7Au8; 16]);
-        post_as_the_sender(
+        let wrapped = lying_wrapper(&one.transfer_bytes, [0xC7; 32]);
+        post_as_the_sender(&p, &one.route, &one.message_id, &second_id, wrapped.clone()).await;
+        let second_copy = copy_key_at_b(
             &p,
-            &one.route,
-            &one.message_id,
-            &second_id,
-            lying_wrapper(&one.transfer_bytes, [0xC7; 32]),
-        )
-        .await;
+            &sealed_as_the_sender(&p, &one.message_id, &second_id, wrapped),
+        );
 
         clean(&p.b.sync().await);
         assert_eq!(p.b.era_balance(), 10, "credited once, in the signed amount");
@@ -973,19 +976,149 @@ mod tests {
             "one row, named by the transfer, with the signed terms"
         );
         p.b.enter();
-        for id in [&one.message_id, &second_id] {
-            assert!(
-                client_db::b0x_consumed::is_consumed(&one.route, id).expect("consumed"),
-                "the copy the spool holds under {id} is consumed"
-            );
-        }
+        assert!(
+            client_db::b0x_consumed::is_consumed(&one.route, &one.message_id).expect("consumed"),
+            "the id the transfer's receipt derives is consumed"
+        );
+        assert!(
+            !client_db::b0x_consumed::is_consumed(&one.route, &second_id).expect("consumed"),
+            "the id the copy was re-posted under is not the transfer's"
+        );
         nothing_staged();
+
+        clean(&p.b.sync().await);
+        p.b.enter();
+        assert!(
+            client_db::b0x_consumed::is_passed_over(&one.route, &second_copy).expect("passed over"),
+            "read once more, decided, and passed over by its content"
+        );
+        assert_eq!(p.b.era_balance(), 10);
+    }
+
+    /// Storage §8, routing rule 1: a relationship's inbox address hashes its
+    /// current chain tip and changes every step, so an item on a previous-tip
+    /// route steps from a tip this device has already advanced past, and is
+    /// never taken in. A pays B 10 and B applies it: the route for the tip A
+    /// paid from is now B's previous-tip route for A. A then forks its own
+    /// chain from that tip, a transfer of 7 to B signed as its send signs
+    /// one, which B has never decided, and posts it on that route through its
+    /// own spool client. B syncs and reads the route: the copy is left where
+    /// it is. Nothing is staged, its id is not consumed, its content is not
+    /// passed over, and B holds the 10 it was paid.
+    ///
+    /// MUTATION CONTROL: `pull_and_process_inbox` reading a previous-tip
+    /// route as a current one turns this red: the fork is staged.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn an_item_on_a_previous_tip_route_is_never_taken_in() {
+        use crate::handlers::app_router_impl::contact_relationship_tip;
+        use dsm::types::operations::{TransactionMode, TransferTerms};
+
+        let p = Pair::boot(100, 0).await;
+
+        // A's tip with B before it pays, and the position its pay advances.
+        p.a.enter();
+        let b_contact = client_db::get_contact_by_device_id(&p.b.device_id)
+            .expect("A's contacts")
+            .expect("A holds B as a contact");
+        let paid_from = contact_relationship_tip(&b_contact).expect("A's relationship tip with B");
+        let fork_position =
+            crate::economic_fixtures::admitted_position().expect("A is activated") + 1;
+
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let one = the_one_transfer(&p.b, &p.fleet).await;
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "B applied the honest payment");
+
+        p.b.enter();
+        let a_contact = client_db::get_contact_by_device_id(&p.a.device_id)
+            .expect("B's contacts")
+            .expect("B holds A as a contact");
+        assert_ne!(
+            contact_relationship_tip(&a_contact).expect("B's relationship tip with A"),
+            paid_from,
+            "B has advanced past the tip A paid from"
+        );
+        assert_eq!(
+            a_contact.previous_chain_tip.as_deref(),
+            Some(paid_from.as_slice()),
+            "the tip A paid from is B's previous tip with A"
+        );
+        let previous_route =
+            dsm::crypto::spool_address::inbox_address(&p.b.genesis, &p.b.device_id, &paid_from);
+        assert_eq!(
+            previous_route, one.route,
+            "the honest payment arrived on that route"
+        );
+
+        // The fork: a transfer A's chain never made, from the tip it paid from.
+        p.a.enter();
+        let a_key = crate::sdk::signing_authority::current_public_key().expect("A's key");
+        let a_secret =
+            crate::sdk::signing_authority::current_secret_key().expect("A's signing key");
+        let terms = TransferTerms::new(
+            b"ERA".to_vec(),
+            transfer_nonce(&paid_from, 7, "ERA", &p.b.device_id),
+            TransactionMode::Unilateral,
+            String::new(),
+        );
+        let canonical = Operation::Transfer {
+            to_device_id: p.b.device_id.to_vec(),
+            amount: dsm::types::token_types::Balance::amount(7),
+            policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            terms_commitment: terms.commitment(),
+            signature: Vec::new(),
+            authority_policy: None,
+        }
+        .to_bytes();
+        let signature = dsm::crypto::sphincs::sphincs_sign(&a_secret, &canonical).expect("A signs");
+        Operation::decode_and_bind_signed(&canonical, &signature, &a_key)
+            .expect("A's signature binds");
+        let fork = dsm::types::proto::OnlineTransferRequest {
+            signature,
+            canonical_operation_bytes: canonical,
+            sender_economic_position: fork_position,
+            sender_debit_mutation_index: 0,
+            transfer_terms: terms.to_bytes(),
+        }
+        .encode_to_vec();
+
+        p.b.enter();
+        assert_eq!(
+            classify_stale_transfer_copy(&fork, &one.header_sender).expect("classified"),
+            StaleCopy::Undecided,
+            "B recognizes the fork and has never decided it"
+        );
+        nothing_staged();
+
+        let fork_id = crate::util::text_id::encode_base32_crockford(&[0x5Eu8; 16]);
+        post_as_the_sender(&p, &previous_route, &one.message_id, &fork_id, fork.clone()).await;
+        let fork_copy = copy_key_at_b(
+            &p,
+            &sealed_as_the_sender(&p, &one.message_id, &fork_id, fork),
+        );
+
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10, "nothing of the fork reached B");
+        p.b.enter();
+        nothing_staged();
+        assert!(
+            !client_db::b0x_consumed::is_consumed(&previous_route, &fork_id).expect("consumed"),
+            "the fork's id is not consumed"
+        );
+        assert!(
+            !client_db::b0x_consumed::is_passed_over(&previous_route, &fork_copy)
+                .expect("passed over"),
+            "the fork is left where it is, not passed over"
+        );
     }
 
     /// A sender named in a wrapper is not a sender. The copy's wrapper names a
     /// third device; the boundary stages the transfer under the contact whose
-    /// key verified it, so while it waits it holds the send barrier toward A
-    /// only.
+    /// key verified it. With its receipt here too, the step in flight holds the
+    /// send barrier toward A only.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_sender_named_in_a_wrapper_blocks_nothing() {
@@ -997,13 +1130,27 @@ mod tests {
             &one.route,
             &one.message_id,
         ));
+        assert_eq!(
+            recipient_staging::unbound_transfer_count(&p.a.device_id).expect("staging"),
+            1,
+            "the transfer is staged under its real sender"
+        );
+        assert_eq!(
+            recipient_staging::unbound_transfer_count(&named).expect("staging"),
+            0,
+            "and under nobody the wrapper names"
+        );
+        staged(ingest_evidence_half(
+            &one.evidence_bytes,
+            &one.evidence_route,
+            &one.evidence_message_id,
+        ));
         assert!(
-            recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
-                .expect("barrier"),
-            "the transfer in flight holds the barrier toward its real sender"
+            recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "the step in flight holds the barrier toward its real sender"
         );
         assert!(
-            !recipient_staging::counterparty_has_unconverged_inbound(&named).expect("barrier"),
+            !recipient_staging::has_undecided_staged_receipt_from(&named).expect("barrier"),
             "and toward nobody the wrapper names"
         );
     }
@@ -1105,7 +1252,7 @@ mod tests {
         assert_eq!(recognized.terms.memo, "the memo A signed");
         assert_eq!(
             recognized.terms.policy_commit,
-            crate::policy::builtin_policy_commit("ERA").expect("ERA's policy")
+            dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy")
         );
     }
 
@@ -1130,6 +1277,59 @@ mod tests {
             "{out:?}"
         );
         nothing_staged();
+    }
+
+    /// MR-DSM-0050: a receipt is evidence of its own relationship's step and
+    /// never advances another. A pays B; C, which holds A as a contact too, is
+    /// handed both halves of that step on C's own route for A. Neither is C's:
+    /// the receipt names B as its recipient and the transfer pays B, so
+    /// nothing is staged at C and C's relationship with A has not moved.
+    ///
+    /// MUTATION CONTROL: dropping the recipient check from `candidate_receipt`
+    /// turns this red: C stages A's receipt for B.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_step_of_one_relationship_never_advances_another() {
+        let (p, one) = sent().await;
+        let mut c = crate::test_support::two_device::TestDevice::create("C", 0x0C);
+        c.boot(&p.fleet).await;
+        c.add_contact(&p.a).await;
+        p.a.add_contact(&c).await;
+        c.enter();
+        let tip = |device: &crate::test_support::two_device::TestDevice| {
+            device.enter();
+            let a = client_db::get_contact_by_device_id(&p.a.device_id)
+                .expect("C's contacts")
+                .expect("C holds A as a contact");
+            crate::handlers::app_router_impl::contact_relationship_tip(&a)
+                .expect("C's relationship tip with A")
+        };
+        let before = tip(&c);
+        let route = dsm::crypto::spool_address::inbox_address(&c.genesis, &c.device_id, &before);
+
+        c.enter();
+        let receipt = ingested(ingest_evidence_half(
+            &one.evidence_bytes,
+            &route,
+            &one.evidence_message_id,
+        ));
+        assert!(
+            matches!(&receipt, Ingested::NotRecognized(why) if why.contains("another device")),
+            "{receipt:?}"
+        );
+        let transfer = ingested(ingest_transfer_half(
+            &one.transfer_bytes,
+            &one.header_sender,
+            &route,
+            &one.message_id,
+        ));
+        assert!(
+            matches!(&transfer, Ingested::NotRecognized(why) if why.contains("another device")),
+            "{transfer:?}"
+        );
+        c.enter();
+        nothing_staged();
+        assert_eq!(tip(&c), before, "C's relationship with A has not moved");
     }
 
     /// A receipt whose `sig_a` does not verify is not recognized; the
@@ -1192,11 +1392,11 @@ mod tests {
                 &r.parent_tip,
                 &op.with_cleared_signature().to_bytes(),
                 &r.transition_entropy,
-            );
+            )
+            .expect("the step's C_pre");
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
-            r.set_kyber_ct_a(answer.kyber_ct);
             r.add_sig_a(answer.sig);
             r.to_full_protobuf().expect("re-encode")
         };
@@ -1354,8 +1554,8 @@ mod tests {
     }
 
     /// Copies of a finished transfer are decided, not staged: its nonce is
-    /// spent and its step is taken, so a later copy of either half is
-    /// consumed where it lies and never becomes staging state again.
+    /// spent and its step is taken, so a later copy of either half is passed
+    /// over by its content and never becomes staging state again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn copies_of_a_finished_transfer_are_decided_not_staged() {
@@ -1454,7 +1654,8 @@ mod tests {
         let op = Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(amount),
-            policy_commit: crate::policy::builtin_policy_commit("ERA").expect("ERA"),
+            policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA"),
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
@@ -1530,8 +1731,9 @@ mod tests {
     /// it reaches B before B polls. The two are different signed objects, so
     /// both are staged: nothing in staging decides between them. Only the one
     /// A's receipt signs can bind, and the canonical apply takes the nonce with
-    /// it. B is credited that transfer once, and the rival, its nonce spent,
-    /// holds no barrier and is collected.
+    /// it. B is credited that transfer once. No receipt signs the rival, so it
+    /// holds no barrier, while its nonce is unspent or after, and it is
+    /// collected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial]
     async fn a_rival_on_the_same_nonce_is_staged_and_never_executes() {
@@ -1549,9 +1751,8 @@ mod tests {
             "RIVAL",
         ));
         assert!(
-            recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
-                .expect("barrier"),
-            "while its nonce is unspent, the rival is in flight"
+            !recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
+            "no receipt signs the rival, so it holds nothing while its nonce is unspent"
         );
 
         clean(&p.b.sync().await);
@@ -1563,8 +1764,7 @@ mod tests {
         p.b.enter();
         nothing_staged();
         assert!(
-            !recipient_staging::counterparty_has_unconverged_inbound(&p.a.device_id)
-                .expect("barrier"),
+            !recipient_staging::has_undecided_staged_receipt_from(&p.a.device_id).expect("barrier"),
             "the rival holds nothing once its nonce is spent"
         );
     }
@@ -1637,11 +1837,11 @@ mod tests {
                 &r.parent_tip,
                 &op.with_cleared_signature().to_bytes(),
                 &r.transition_entropy,
-            );
+            )
+            .expect("the step's C_pre");
             let answer = a.answer(&b, &r.parent_tip, &c_pre, &target);
             r.set_ek_pk_a(answer.ek_pk);
             r.set_ek_cert_a(answer.ek_cert);
-            r.set_kyber_ct_a(answer.kyber_ct);
             r.add_sig_a(answer.sig);
             r.to_full_protobuf().expect("re-encode")
         };
@@ -1851,5 +2051,365 @@ mod tests {
         );
         assert_eq!(junk.sender_id, None, "and names no sender");
         assert_eq!(listed.items.len(), 4, "{:?}", listed.items);
+    }
+    // ── Copies that change nothing: SA-66, MR-DSM-0332 (§6.104) ──────────────
+
+    /// A pays B 10; B syncs and takes it; A syncs and finalizes on B's delta;
+    /// then A pays B 7, which B has not read. Each payment's halves as B's
+    /// poll read them.
+    async fn paid_twice() -> (Pair, OneTransfer, OneTransfer) {
+        let p = Pair::boot(100, 0).await;
+        let sent = p.a.send(&p.b, 10).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let first = the_one_transfer(&p.b, &p.fleet).await;
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 10);
+        clean(&p.a.sync().await);
+        let sent = p.a.send(&p.b, 7).await;
+        assert!(sent.success, "{:?}", sent.error_message);
+        let second = the_one_transfer(&p.b, &p.fleet).await;
+        (p, first, second)
+    }
+
+    /// The set's members split in two: the few a delivery quorum leaves over,
+    /// and the quorum.
+    fn split_members() -> (Vec<String>, Vec<String>) {
+        let members = crate::economic_fixtures::canonical_member_ids();
+        let quorum = crate::economic_fixtures::delivery_quorum();
+        let (few, rest) = members.split_at(members.len() - quorum);
+        (few.to_vec(), rest.to_vec())
+    }
+
+    /// A's envelope kept under `original_id`, as B opens it, re-addressed to
+    /// `message_id` and sealed to B afresh: the copy A can make of its own
+    /// earlier message under a later message's id. A keeps one seal per id
+    /// (`b0x_sdk::seal_for`), so this seals with the construction every
+    /// sender has, Kyber to B's key and the spool seal under the new id.
+    fn resealed_as_the_sender(p: &Pair, original_id: &str, message_id: &str) -> Vec<u8> {
+        use dsm::types::proto as pb;
+        use prost::Message as _;
+        p.a.enter();
+        let sealed = crate::sdk::b0x_sdk::kept_seal(original_id).expect("A kept the sealed send");
+        p.b.enter();
+        let outer = dsm::envelope::from_canonical_bytes(&sealed).expect("the sealed envelope");
+        let mut inner = crate::sdk::b0x_sdk::open_sealed(
+            &crate::sdk::b0x_sdk::local_kyber_secret().expect("B's key"),
+            &outer,
+        )
+        .expect("B opens it");
+        let decode = |b32: &str| -> [u8; 16] {
+            let raw = crate::util::text_id::decode_base32_crockford(b32).expect("a Base32 id");
+            <[u8; 16]>::try_from(raw.as_slice()).expect("a 16-byte id")
+        };
+        let (original, id) = (decode(original_id), decode(message_id));
+        inner.message_id = id.to_vec();
+        if let Some(pb::envelope::Payload::UniversalTx(tx)) = &mut inner.payload {
+            for op in &mut tx.ops {
+                if op.op_id.as_ref().map(|h| h.v.as_slice()) == Some(original.as_slice()) {
+                    op.op_id = Some(pb::Hash32 { v: id.to_vec() });
+                }
+            }
+        }
+        let (shared_secret, kem_ciphertext) =
+            dsm::crypto::kyber::kyber_encapsulate(&p.b.kyber_pk).expect("encapsulate to B");
+        let ciphertext = dsm::crypto::spool_seal::seal(&shared_secret, &id, &inner.encode_to_vec())
+            .expect("seal");
+        pb::Envelope {
+            version: 3,
+            headers: None,
+            message_id: id.to_vec(),
+            payload: Some(pb::envelope::Payload::Sealed(pb::SealedEnvelopeV1 {
+                kem_ciphertext,
+                ciphertext,
+            })),
+        }
+        .encode_to_vec()
+    }
+
+    /// The content key B passes a sealed copy over by: its envelope as B
+    /// opens it.
+    fn copy_key_at_b(p: &Pair, sealed: &[u8]) -> String {
+        p.b.enter();
+        let outer = dsm::envelope::from_canonical_bytes(sealed).expect("an envelope");
+        let inner = crate::sdk::b0x_sdk::open_sealed(
+            &crate::sdk::b0x_sdk::local_kyber_secret().expect("B's key"),
+            &outer,
+        )
+        .expect("B opens it");
+        dsm::crypto::spool_address::envelope_merge_key(&inner)
+    }
+
+    /// On each of `members`, the honest copy under `message_id` at `route`
+    /// withheld and `sealed` spooled in its place: a member serving one copy
+    /// under an id in place of another (the node keeps the first row per id).
+    async fn served_instead(
+        p: &Pair,
+        members: &[String],
+        route: &str,
+        message_id: &str,
+        sealed: &[u8],
+    ) {
+        for member_id in members {
+            let member = p
+                .nodes
+                .nodes
+                .iter()
+                .find(|n| &n.member_id == member_id)
+                .expect("a member of the fleet");
+            let honest: Vec<_> = member
+                .spool()
+                .await
+                .into_iter()
+                .filter(|s| s.address == route && s.message_id.as_deref() == Some(message_id))
+                .collect();
+            assert_eq!(honest.len(), 1, "{member_id} holds the honest copy");
+            let client = member.pool().get().await.expect("the member's database");
+            client
+                .execute(
+                    "DELETE FROM inbox_spool WHERE envelope = $1",
+                    &[&honest[0].envelope],
+                )
+                .await
+                .expect("the member withholds the honest copy");
+            dsm_storage_node::db::spool_insert(member.pool(), route, sealed)
+                .await
+                .expect("the member spools the other copy");
+        }
+    }
+
+    /// SA-66, MR-DSM-0332. A receipt this device already accepted is decided
+    /// before any signature is checked, and the id its copy travels under is
+    /// whoever sealed it's to choose. A pays B twice. Two members withhold the
+    /// second payment's receipt and serve in its place the FIRST receipt's
+    /// bytes, sealed to B under the second receipt's id. B syncs while the
+    /// other members' spools fail, so under that id the replay is all it
+    /// reads. Once it reads every member, the second receipt is read and the
+    /// payment is credited exactly once; the replay is passed over by its
+    /// content and consumed nothing.
+    ///
+    /// MUTATION CONTROL: consuming the id of a decided copy, as the poll did,
+    /// turns this red: the second receipt is never read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_receipt_replayed_under_a_later_receipts_id_hides_nothing() {
+        let (p, first, second) = paid_twice().await;
+        let replay =
+            resealed_as_the_sender(&p, &first.evidence_message_id, &second.evidence_message_id);
+        let (few, rest) = split_members();
+        served_instead(
+            &p,
+            &few,
+            &second.evidence_route,
+            &second.evidence_message_id,
+            &replay,
+        )
+        .await;
+        p.nodes.fail_spools(&rest).await;
+        p.b.sync().await;
+        p.nodes.restore_spools(&rest).await;
+        assert_eq!(p.b.era_balance(), 10, "the replay credits nothing");
+
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 17, "the second payment, credited once");
+        let history = received_history(&p);
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert!(history.contains(&(second.message_id.clone(), 7, "ERA".to_string())));
+        let replayed = copy_key_at_b(&p, &replay);
+        p.b.enter();
+        assert!(
+            client_db::b0x_consumed::is_passed_over(&second.evidence_route, &replayed)
+                .expect("passed over"),
+            "the replay is passed over by its content"
+        );
+        assert!(
+            client_db::b0x_consumed::is_consumed(
+                &second.evidence_route,
+                &second.evidence_message_id
+            )
+            .expect("consumed"),
+            "the second receipt's id, consumed by its own completion"
+        );
+        nothing_staged();
+    }
+
+    /// MR-DSM-0332. No class's message id is recomputed from its content where
+    /// a copy is read, so a decided copy consumes no id even when it verifies.
+    /// A pays B twice. Two members withhold the second payment's transfer and
+    /// serve in its place A's FIRST transfer, signed and verified, sealed to
+    /// B under the second transfer's id. B syncs while the other members'
+    /// spools fail: the first transfer verifies, its nonce is spent, and it is
+    /// decided. Once B reads every member, the second transfer is read and
+    /// credited exactly once.
+    ///
+    /// MUTATION CONTROL: consuming the id of a decided copy, as the poll did,
+    /// turns this red: the second transfer is never read.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_transfer_replayed_under_a_later_transfers_id_hides_nothing() {
+        let (p, first, second) = paid_twice().await;
+        let replay = resealed_as_the_sender(&p, &first.message_id, &second.message_id);
+        let (few, rest) = split_members();
+        served_instead(&p, &few, &second.route, &second.message_id, &replay).await;
+        p.nodes.fail_spools(&rest).await;
+        p.b.sync().await;
+        p.nodes.restore_spools(&rest).await;
+        assert_eq!(p.b.era_balance(), 10, "the replay credits nothing");
+
+        clean(&p.b.sync().await);
+        assert_eq!(p.b.era_balance(), 17, "the second payment, credited once");
+        let history = received_history(&p);
+        assert_eq!(history.len(), 2, "{history:?}");
+        assert!(history.contains(&(second.message_id.clone(), 7, "ERA".to_string())));
+        let replayed = copy_key_at_b(&p, &replay);
+        p.b.enter();
+        assert!(
+            client_db::b0x_consumed::is_passed_over(&second.route, &replayed).expect("passed over"),
+            "the replay is passed over by its content"
+        );
+        nothing_staged();
+    }
+
+    /// An envelope of the class `method` names, from `from`, its object
+    /// replaced by `body`, sealed to `to` under a fresh id and posted through
+    /// `from`'s own spool client on `to`'s current route for it. The route,
+    /// the id and the copy's content key.
+    async fn posted_under_a_class(
+        p: &Pair,
+        from: &crate::test_support::two_device::TestDevice,
+        to: &crate::test_support::two_device::TestDevice,
+        method: &str,
+        body: Vec<u8>,
+        fill: u8,
+    ) -> (String, String, String) {
+        use dsm::types::proto as pb;
+        use prost::Message as _;
+        to.enter();
+        let route = crate::handlers::app_router_impl::collect_tagged_inbox_addresses(
+            to.genesis,
+            to.device_id,
+            &client_db::get_all_contacts().expect("contacts"),
+        )
+        .expect("routes")
+        .into_iter()
+        .find(|t| {
+            matches!(
+                t.freshness,
+                crate::handlers::app_router_impl::RouteFreshness::Current
+            )
+        })
+        .expect("a current route")
+        .address;
+        let id = crate::util::text_id::encode_base32_crockford(&[fill; 16]);
+        let mut digest = dsm::crypto::blake3::dsm_domain_hasher(
+            dsm::crypto::domain::TaggedHashDomain::try_new(b"DSM/test/class-junk")
+                .expect("a domain"),
+        );
+        digest.update(&body);
+        // The class's envelope as its production builder lays it out, with
+        // the junk in its object's place; another class differs only in the
+        // method its invoke names.
+        let built = crate::sdk::b0x_sdk::B0xSDK::build_relationship_finalized_envelope(
+            &from.device_id,
+            &from.genesis,
+            &body,
+            digest.finalize().as_bytes(),
+            &id,
+        )
+        .expect("a class envelope");
+        let mut inner =
+            pb::Envelope::decode(built.bytes.as_slice()).expect("the built envelope decodes");
+        if let Some(pb::envelope::Payload::UniversalTx(tx)) = &mut inner.payload {
+            for op in &mut tx.ops {
+                if let Some(pb::universal_op::Kind::Invoke(invoke)) = &mut op.kind {
+                    invoke.method = method.to_string();
+                }
+            }
+        }
+        let copy_key = dsm::crypto::spool_address::envelope_merge_key(&inner);
+        from.enter();
+        crate::sdk::b0x_sdk::seal_for(&to.device_id, &id, &inner.encode_to_vec()).expect("seal");
+        let mut spool = crate::sdk::b0x_sdk::B0xSDK::new(
+            crate::util::text_id::encode_base32_crockford(&from.device_id),
+            from.router().core_sdk.clone(),
+            p.fleet.endpoints(),
+        )
+        .expect("a spool client");
+        spool
+            .submit_stored_envelope_with_retry(
+                &route,
+                &id,
+                &crate::sdk::b0x_sdk::B0xRetryConfig::default(),
+            )
+            .await
+            .expect("the copy reaches the members");
+        (route, id, copy_key)
+    }
+
+    /// Pre-audit item 11, MR-DSM-0332: bytes under the finality-certificate
+    /// class that are not a certificate never will be one. A posts to B,
+    /// through its own spool client, an envelope of that class carrying junk.
+    /// B's first sync reads it and passes it over by its content, consuming
+    /// no id and reporting nothing; its next sync does not take it up again.
+    ///
+    /// MUTATION CONTROL: reporting a certificate that does not decode and
+    /// leaving it, as the poll did, turns this red: every sync reports it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn junk_under_the_finality_certificate_class_is_passed_over_once_read() {
+        let p = Pair::boot(0, 0).await;
+        let (route, id, copy_key) = posted_under_a_class(
+            &p,
+            &p.a,
+            &p.b,
+            crate::sdk::b0x_sdk::RELATIONSHIP_FINALIZED_METHOD,
+            b"not a certificate".to_vec(),
+            0x6C,
+        )
+        .await;
+        clean(&p.b.sync().await);
+        p.b.enter();
+        assert!(
+            client_db::b0x_consumed::is_passed_over(&route, &copy_key).expect("passed over"),
+            "passed over by its content"
+        );
+        assert!(
+            !client_db::b0x_consumed::is_consumed(&route, &id).expect("consumed"),
+            "its id consumed nothing"
+        );
+        clean(&p.b.sync().await);
+    }
+
+    /// Pre-audit item 11, MR-DSM-0332: bytes under the countersign-delta class
+    /// that are not a delta never will be one. B posts to A, through its own
+    /// spool client, an envelope of that class carrying junk. A's first sync
+    /// reads it and passes it over by its content, consuming no id and
+    /// reporting nothing; its next sync does not take it up again.
+    ///
+    /// MUTATION CONTROL: reporting a delta that does not decode and leaving
+    /// it, as the poll did, turns this red: every sync reports it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn junk_under_the_countersign_delta_class_is_passed_over_once_read() {
+        let p = Pair::boot(0, 0).await;
+        let (route, id, copy_key) = posted_under_a_class(
+            &p,
+            &p.b,
+            &p.a,
+            crate::sdk::b0x_sdk::RECEIPT_COUNTERSIGN_B_METHOD,
+            b"not a countersign delta".to_vec(),
+            0x6D,
+        )
+        .await;
+        clean(&p.a.sync().await);
+        p.a.enter();
+        assert!(
+            client_db::b0x_consumed::is_passed_over(&route, &copy_key).expect("passed over"),
+            "passed over by its content"
+        );
+        assert!(
+            !client_db::b0x_consumed::is_consumed(&route, &id).expect("consumed"),
+            "its id consumed nothing"
+        );
+        clean(&p.a.sync().await);
     }
 }

@@ -1709,6 +1709,7 @@ mod tests {
                 ticker,
             )
             .expect("a builtin token"),
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: token_id.to_vec(),
                 nonce: vec![],
@@ -1748,6 +1749,7 @@ mod tests {
                 to_device_id,
                 amount,
                 policy_commit: [0x77; 32],
+                token_policy: Vec::new(),
                 terms_commitment,
                 signature,
                 authority_policy,

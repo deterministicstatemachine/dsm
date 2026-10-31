@@ -19,6 +19,33 @@ use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 /// The link these frames arrive on, as the radio names a peer.
 const SMOKE_LINK: &str = "ble-smoke-link";
 
+/// An offline-bearer transfer of 7 base units of ERA to `to`, with the terms it
+/// commits to: the one operation the offline door carries (MR-DSM-0219), built
+/// as the wallet builds it.
+fn bearer_transfer(
+    to: [u8; 32],
+) -> (
+    dsm::types::operations::Operation,
+    dsm::types::operations::TransferTerms,
+) {
+    let terms = dsm::types::operations::TransferTerms::new(
+        b"ERA".to_vec(),
+        Vec::new(),
+        dsm::types::operations::TransactionMode::Bilateral,
+        String::new(),
+    );
+    let operation = dsm::types::operations::Operation::Transfer {
+        to_device_id: to.to_vec(),
+        amount: dsm::types::token_types::Balance::amount(7),
+        policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
+        terms_commitment: terms.commitment(),
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        signature: Vec::new(),
+        authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
+    };
+    (operation, terms)
+}
+
 #[tokio::test]
 async fn ble_smoke_basic_chunk_roundtrip() {
     // Build a simple single-chunk BLE frame and verify reassembly returns original payload
@@ -93,8 +120,9 @@ async fn ble_smoke_prepare_roundtrip() {
     let adapter = BilateralTransportAdapter::new(handler);
     let coord = BleFrameCoordinator::new(device_id);
 
-    let prepare_payload = adapter
-        .create_prepare_message(recipient_id, dsm::types::operations::Operation::Noop)
+    let (operation, terms) = bearer_transfer(recipient_id);
+    let (prepare_payload, _commitment) = adapter
+        .create_transfer_prepare_with_commitment(recipient_id, operation, terms)
         .await
         .unwrap_or_else(|e| panic!("prepare payload failed: {e}"));
     let chunks = coord

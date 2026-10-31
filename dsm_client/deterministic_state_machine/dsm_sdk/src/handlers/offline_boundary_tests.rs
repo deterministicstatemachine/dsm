@@ -182,8 +182,6 @@ fn recorded_by(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_contacts_walk_records_the_offline_account_each_boundary_left() {
-    use crate::anchor::AnchorAppliance;
-
     let pair = Pair::boot(100, 0).await;
     let appliance = HostAppliance::birth(&pair.a, [0xC4; 32], 16).install();
     let bundle = appliance.pin().bundle;

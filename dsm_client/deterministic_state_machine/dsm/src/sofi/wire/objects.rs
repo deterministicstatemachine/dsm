@@ -636,20 +636,6 @@ impl SofiResolutionClaim {
         push_digest32(&mut out, &self.void_root);
         out
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_RESOLUTION_CLAIM, SCHEMA_V1)?;
-        let v = Self {
-            genesis: c.digest32()?,
-            device_id: c.digest32()?,
-            position: c.u64()?,
-            fulfillment_id: c.digest32()?,
-            realize_root: c.digest32()?,
-            void_root: c.digest32()?,
-        };
-        finish(&c, v)
-    }
 }
 
 // ── 0x0062 SignedSofiResolutionClaim ───────────────────────────────────────
@@ -782,9 +768,9 @@ const MAX_SIGNATURE_BYTES: usize = 64 * 1024;
 ///
 /// **`body_class` is not a dispatch hint.** It is checked against the class
 /// the inner canonical bytes actually carry, and the signing preimage is
-/// rederived from the DECODED object — see `signature::verify_signed_object`,
-/// which is where the class-specific rules live. The envelope is generic; the
-/// verification deliberately is not.
+/// rederived from the DECODED object — see `publication::recognize_precommit`
+/// and its siblings, which is where the class-specific rules live. The
+/// envelope is generic; the verification deliberately is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedSofiObject {
     body_class: u16,
@@ -795,10 +781,10 @@ pub struct SignedSofiObject {
 
 impl SignedSofiObject {
     /// The only constructor. It refuses a body class this envelope does not
-    /// carry, so no producer in this codebase can emit one — the matching
-    /// refusal on the consumer side is in `verify_signed_object`, and both
-    /// exist because a producer check and a verifier check answer different
-    /// questions.
+    /// carry, so no producer in this codebase can emit one — on the consumer
+    /// side no recognizer takes an envelope of such a class as an object, and
+    /// both exist because a producer check and a verifier check answer
+    /// different questions.
     pub fn new(
         body_class: u16,
         body_ccb: &[u8],
@@ -1160,12 +1146,6 @@ impl ValidationRef {
             got => Err(DecodeError::WrongClass { got }),
         }
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0041 PreEClosureIndex ────────────────────────────────────────────────
@@ -1185,7 +1165,7 @@ pub const CLOSURE_FORBIDDEN_CONTENT_CLASSES: &[u16] = &[
     class::SOFI_TRADER_FULFILLMENT_BODY,
     class::SOFI_RESOLUTION_CLAIM,
     class::SOFI_PRE_E_CLOSURE_INDEX,
-    class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+    crate::ccb::declared_unencoded::SOFI_POLICY_FULFILLMENT_AUX_REF,
     // The signed envelope wraps P and F, both of which commit E. Without this
     // entry the wrapper would be a back door into `𝒞_E^pre` for the two
     // objects the acyclicity argument most depends on keeping out — the list
@@ -1233,8 +1213,10 @@ impl PreEClosureIndex {
     }
 
     /// This index with `reference` among its refs, in canonical order. An
-    /// index that already references it is returned unchanged.
-    pub fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
+    /// index that already references it is returned unchanged. Only tests
+    /// grow an index; production builds it whole (`new`).
+    #[cfg(test)]
+    pub(crate) fn with(&self, reference: ValidationRef) -> Result<Self, SofiWireError> {
         let mut refs = self.refs.clone();
         if !refs.contains(&reference) {
             refs.push(reference);
@@ -1261,46 +1243,6 @@ impl PreEClosureIndex {
             refs.push(ValidationRef::at(c)?);
         }
         Self::new(refs).map_err(wire_invalid)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
-}
-
-// ── 0x0042 PolicyFulfillmentAuxRef ─────────────────────────────────────────
-
-/// One content-addressed auxiliary evidence candidate for a policy-fulfillment
-/// witness. Many may exist per `(policy_fulfillment_id, evidence_class)`; there
-/// is no singleton slot, and a candidate can only ever establish validity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PolicyFulfillmentAuxRef {
-    pub policy_fulfillment_id: D32,
-    pub evidence_class: u16,
-    pub addr: D32,
-}
-
-impl PolicyFulfillmentAuxRef {
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        push_env(&mut out, class::SOFI_POLICY_FULFILLMENT_AUX_REF);
-        push_digest32(&mut out, &self.policy_fulfillment_id);
-        push_u16(&mut out, self.evidence_class);
-        push_digest32(&mut out, &self.addr);
-        out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_POLICY_FULFILLMENT_AUX_REF, SCHEMA_V1)?;
-        let v = Self {
-            policy_fulfillment_id: c.digest32()?,
-            evidence_class: c.u16()?,
-            addr: c.digest32()?,
-        };
-        finish(&c, v)
     }
 }
 
@@ -1329,10 +1271,6 @@ impl RouteLegSet {
         Ok(Self { legs })
     }
 
-    pub fn legs(&self) -> &[RouteLegEntry] {
-        &self.legs
-    }
-
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         push_env(&mut out, class::SOFI_ROUTE_LEG_SET);
@@ -1344,23 +1282,6 @@ impl RouteLegSet {
             push_digest32(&mut out, &l.shadow_core);
         }
         out
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::SOFI_ROUTE_LEG_SET, SCHEMA_V1)?;
-        let n = read_count(&mut c, "route legs", ROUTE_MIN_LEGS, CANONICAL_MAX_LEGS)?;
-        let mut legs = Vec::with_capacity(n);
-        for _ in 0..n {
-            legs.push(RouteLegEntry {
-                vault_id: c.digest32()?,
-                parent_root: c.digest32()?,
-                setup_ref: c.digest32()?,
-                shadow_core: c.digest32()?,
-            });
-        }
-        let v = Self::new(legs).map_err(wire_invalid)?;
-        finish(&c, v)
     }
 }
 
@@ -1770,12 +1691,6 @@ impl TraderRelationshipLeaf {
             leaf: c.digest32()?,
         })
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0061 TraderPreBalance ────────────────────────────────────────────────
@@ -1976,12 +1891,6 @@ impl CoreEntry {
             got => Err(DecodeError::WrongClass { got }),
         }
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 fn check_entries(entries: &[CoreEntry]) -> Result<(), SofiWireError> {
@@ -2072,12 +1981,6 @@ impl TraderCore {
         let entries = read_entries(c)?;
         Self::new(genesis, device_id, position, pre_root, entries).map_err(wire_invalid)
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0052 DlvCore ─────────────────────────────────────────────────────────
@@ -2163,12 +2066,6 @@ impl DlvCore {
         )
         .map_err(wire_invalid)
     }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
 }
 
 // ── 0x0055 | 0x0056 OwnerAuthority ─────────────────────────────────────────
@@ -2228,12 +2125,6 @@ impl OwnerAuthority {
             }
             got => Err(DecodeError::WrongClass { got }),
         }
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 }
 
@@ -2368,41 +2259,6 @@ impl RouteDigestPreimage {
             }
         }
         Ok(out)
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = match c.peek_class()? {
-            class::SOFI_ROUTE_DIGEST_SWAP => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_SWAP, SCHEMA_V1)?;
-                Self::Swap {
-                    hops: read_hops(&mut c)?,
-                }
-            }
-            class::SOFI_ROUTE_DIGEST_CLOSE => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_CLOSE, SCHEMA_V1)?;
-                Self::Close {
-                    vault_id: c.digest32()?,
-                    parent_root: c.digest32()?,
-                    setup_ref: c.digest32()?,
-                    reserve_a: c.u64()?,
-                    reserve_b: c.u64()?,
-                }
-            }
-            class::SOFI_ROUTE_DIGEST_RELEASE => {
-                c.envelope(class::SOFI_ROUTE_DIGEST_RELEASE, SCHEMA_V1)?;
-                Self::Release {
-                    vault_id: c.digest32()?,
-                    parent_root: c.digest32()?,
-                    setup_ref: c.digest32()?,
-                    verdict_cell: c.digest32()?,
-                    outcome: read_var_bytes(&mut c, ESCROW_MAX_OUTCOME_BYTES)?,
-                    amount: c.u64()?,
-                }
-            }
-            got => return Err(DecodeError::WrongClass { got }),
-        };
-        finish(&c, v)
     }
 }
 
@@ -2644,12 +2500,6 @@ impl SettlementBody {
             }
             got => Err(DecodeError::WrongClass { got }),
         }
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
     }
 }
 
@@ -2948,10 +2798,6 @@ impl OutcomeTable {
         let labels: Vec<&[u8]> = entries.iter().map(EscrowOutcome::outcome).collect();
         check_strictly_ascending("outcome table", &labels)?;
         Ok(Self { entries })
-    }
-
-    pub fn entries(&self) -> &[EscrowOutcome] {
-        &self.entries
     }
 
     /// The exact signer set that decides `outcome`, when the table has it.
@@ -4049,26 +3895,11 @@ impl EscrowKind {
         }
     }
 
-    pub fn encode(&self) -> Vec<u8> {
-        match self {
-            Self::Signed(terms) => terms.encode(),
-            Self::Computed(terms) => terms.encode(),
-        }
-    }
-
     /// The policy commit of the held token.
     pub fn token(&self) -> &D32 {
         match self {
             Self::Signed(terms) => terms.token(),
             Self::Computed(terms) => terms.token(),
-        }
-    }
-
-    /// `Y`.
-    pub fn external_commitment(&self) -> &D32 {
-        match self {
-            Self::Signed(terms) => terms.external_commitment(),
-            Self::Computed(terms) => terms.external_commitment(),
         }
     }
 
@@ -4085,3 +3916,6 @@ impl EscrowKind {
         }
     }
 }
+
+#[cfg(test)]
+mod parse_tests;

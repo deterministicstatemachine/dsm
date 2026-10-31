@@ -86,6 +86,7 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
         partition_pk: vec![0x07; 64],
         policy_hash: vec![0x9A; 32],
         pk_chip: vec![0xCC; 32],
+        birth_commitment: vec![0xB7; 32],
     };
     let confirm = BilateralConfirmRequest {
         commitment_hash: None,
@@ -95,6 +96,7 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
         pre_entropy: Vec::new(),
         offline_release: Vec::new(),
         anchor_disclosure: Some(disclosure),
+        offline_spend_chain: None,
     };
     let confirm2 = BilateralConfirmRequest::decode(confirm.encode_to_vec().as_slice()).unwrap();
     let d = confirm2.anchor_disclosure.unwrap();
@@ -104,4 +106,5 @@ fn anchor_disclosure_roundtrips_on_bilateral_confirm() {
     assert_eq!(d.partition_pk, vec![0x07; 64]);
     assert_eq!(d.policy_hash, vec![0x9A; 32]);
     assert_eq!(d.pk_chip, vec![0xCC; 32]);
+    assert_eq!(d.birth_commitment, vec![0xB7; 32]);
 }

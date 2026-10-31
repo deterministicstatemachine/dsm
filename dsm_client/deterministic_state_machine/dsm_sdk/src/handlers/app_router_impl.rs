@@ -71,18 +71,30 @@ pub(crate) struct OnlineSendIntent {
 
 /// What an online send did with the sender's balance, and its answer.
 pub(crate) enum OnlineSent {
-    /// Nothing was committed: no debit, nothing to deliver.
+    /// Nothing was committed: no debit, nothing to deliver. Answered as a
+    /// refusal.
     NotDebited(AppResult),
-    /// The debit is committed. It stands whatever the answer says: success,
-    /// or why its admission is held or its delivery is unknown, both of which
-    /// the reconciliation sweep carries forward (§16.6).
-    Debited(AppResult),
+    /// The debit is committed and the transfer delivered.
+    Delivered(AppResult),
+    /// The debit is committed and the transfer not delivered yet, for `why`:
+    /// its admission is held, its outbox row was not marked, or its delivery
+    /// is unknown. It stands and completes on its own: the sync finishes a
+    /// held admission and the reconciliation sweep drives the outbox row
+    /// (§16.6). Answered as the committed send it is, never as a refusal.
+    Undelivered { answer: AppResult, why: String },
+    /// The debit is committed on this device and can never complete, for
+    /// `why`: its admission cannot land (its position is held by another
+    /// claim, a copy of this wallet having sent from it first), or the advance
+    /// left no admission to finish. Answered as an error that says so: the
+    /// payment will not happen.
+    Stranded { answer: AppResult, why: String },
 }
 
 impl OnlineSent {
     pub(crate) fn answer(self) -> AppResult {
         match self {
-            Self::NotDebited(answer) | Self::Debited(answer) => answer,
+            Self::NotDebited(answer) | Self::Delivered(answer) => answer,
+            Self::Undelivered { answer, .. } | Self::Stranded { answer, .. } => answer,
         }
     }
 }
@@ -749,10 +761,10 @@ impl AppRouterImpl {
         // Detect head-loss on an ESTABLISHED relationship. The Local cert head
         // is lost when there is none, no pending one either — a sent step not
         // yet finalized holds its head pending, which is in flight, not lost —
-        // and THIS device sent on the relationship before. A receive-
-        // established relationship's first send has no prior proposal: the
-        // normal root-AK genesis bootstrap, allowed through. Any of these
-        // reads failing fails the send closed.
+        // and the relationship has had a step, sent or received: every
+        // accepted step leaves this device a head. A relationship with no
+        // step yet is the normal root-AK genesis bootstrap, allowed through.
+        // Any of these reads failing fails the send closed.
         let local_head_present = match crate::storage::client_db::load_cert_chain_head_pubkey(
             &resync_rel_key,
             crate::storage::client_db::CertChainSide::Local,
@@ -773,16 +785,16 @@ impl AppRouterImpl {
                     )))
                 }
             };
-        let had_prior_send =
-            match crate::storage::client_db::relationship_had_prior_send(&resync_rel_key) {
-                Ok(sent) => sent,
+        let had_prior_step =
+            match crate::storage::client_db::relationship_had_prior_step(&resync_rel_key) {
+                Ok(stepped) => stepped,
                 Err(e) => {
                     return OnlineSent::NotDebited(err(format!(
-                        "wallet.send: prior-send read failed: {e}"
+                        "wallet.send: prior-step read failed: {e}"
                     )))
                 }
             };
-        if !local_head_present && !pending_head_present && had_prior_send {
+        if !local_head_present && !pending_head_present && had_prior_step {
             if let Err(e) = crate::storage::client_db::mark_cert_resync_required(&resync_rel_key) {
                 return OnlineSent::NotDebited(err(format!(
                     "wallet.send: the lost cert-chain head could not be recorded: {e}"
@@ -828,11 +840,17 @@ impl AppRouterImpl {
         // Sign the canonical Operation bytes (signature field cleared) so the
         // state machine and inbox verifier use the same preimage.
         // =====================================================================
+        let token_policy =
+            match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                Ok(bytes) => bytes,
+                Err(e) => return OnlineSent::NotDebited(err(format!("wallet.send: {e}"))),
+            };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
             amount: dsm::types::token_types::Balance::amount(intent.amount),
             policy_commit,
             terms_commitment: transfer_terms.commitment(),
+            token_policy,
             signature: Vec::new(),
             authority_policy: None,
         };
@@ -1109,7 +1127,10 @@ impl AppRouterImpl {
         // (the authoritative serialization is inside the advance seam; this
         // early pass keeps the deep-fence refusal from being the first line
         // of defense). Then the prerequisites for THIS send's admission are
-        // assembled: the debit registers before anything is deliverable.
+        // assembled: the debit registers before anything is deliverable. The
+        // admission is this handler's until it returns; the sync leaves it
+        // alone meanwhile, and finishes it after if it is held for resume.
+        let _admission_handler = self.core_sdk.admission_handler();
         let econ_network = match crate::sdk::economic_admission_flow::committed_network_id() {
             Ok(n) => n,
             Err(e) => {
@@ -1180,7 +1201,7 @@ impl AppRouterImpl {
         let admission_op = signed_op.clone();
         let admission_op_digest =
             dsm::economic::admission::dsm_operation_digest(&admission_op.to_bytes());
-        let econ_pre_root = econ_tree.borrow().root();
+        let econ_pre_root = econ_validated.economic_root();
         let econ_prepared = dsm::economic::admission::PendingEconomicAdmission::prepared(
             dsm::economic::admission::PendingAdmissionKind::DsmBacked,
             econ_target_position,
@@ -1250,7 +1271,7 @@ impl AppRouterImpl {
                 &chain_tip_arr,
                 &op_bytes,
                 &transition_entropy,
-            );
+            )?;
             let new_chain_tip = dsm::core::bilateral_transaction_manager::compute_successor_tip(
                 &chain_tip_arr,
                 &op_bytes,
@@ -1415,7 +1436,6 @@ impl AppRouterImpl {
                                     // Stamp per-step artifacts on the receipt.
                                     receipt.set_ek_pk_a(out.ek_pk.clone());
                                     receipt.set_ek_cert_a(out.ek_cert);
-                                    receipt.set_kyber_ct_a(out.kyber_ct);
                                     receipt.add_sig_a(out.sig);
 
                                     // §11.1 lockstep: do NOT advance the committed Local
@@ -1509,14 +1529,8 @@ impl AppRouterImpl {
                         )));
                     }
                 };
-                let operation_digest = {
-                    let mut h =
-                        dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(b"DSM/canonical-apply-op-digest/v1"));
-                    h.update(&op_bytes);
-                    let mut out32 = [0u8; 32];
-                    out32.copy_from_slice(&h.finalize().as_bytes()[..32]);
-                    out32
-                };
+                let operation_digest =
+                    crate::storage::client_db::canonical_apply_operation_digest(&op_bytes);
                 crate::storage::client_db::SenderOnlineProposal {
                     relationship_key: smt_key,
                     canonical_parent: parsed.parent_tip,
@@ -1557,7 +1571,7 @@ impl AppRouterImpl {
             };
 
             let submission_id =
-                crate::storage::client_db::derive_submission_id(&sender_proposal.commitment);
+                dsm::crypto::spool_address::submission_id(&sender_proposal.commitment);
 
             let mut outbox_record = crate::storage::client_db::SenderOutboxRecord {
                 relationship_key: sender_proposal.relationship_key,
@@ -1645,33 +1659,21 @@ impl AppRouterImpl {
                 chain_tip_arr == [0u8; 32],
             );
 
-            let routing_address = match crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+            let routing_address = dsm::crypto::spool_address::inbox_address(
                 &recipient_genesis_raw,
                 &to_device_id,
                 &chain_tip_arr,
-            ) {
-                Ok(addr) => {
-                    log::info!(
-                        "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
-                        &addr[..16.min(addr.len())]
-                    );
-                    addr
-                }
-                Err(e) => {
-                    return Err(dsm::types::error::DsmError::invalid_operation(format!(
-                        "wallet.send: b0x address rotation failed: {e}"
-                    )));
-                }
-            };
+            );
+            log::info!(
+                "[wallet.send] §16.4 Computed rotated b0x routing address: {}",
+                &routing_address[..16.min(routing_address.len())]
+            );
 
             // ADR 0003: content address of the A-side evidence artifact, over the
             // EXACT wire bytes the receiver will verify signatures against --
             // never `compute_commitment()`, which hard-zeroes fields 12-20 and
             // would let a substituted-signature object satisfy the reference.
-            let evidence_digest = crate::storage::client_db::evidence_content_digest(
-                crate::storage::client_db::ArtifactRole::EvidenceA,
-                &receipt_commit_bytes,
-            );
+            let evidence_digest = dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(&receipt_commit_bytes);
 
             let b0x_params = crate::sdk::b0x_sdk::B0xSubmissionParams {
                 // Deterministic, derived from the receipt commitment: known
@@ -1753,7 +1755,7 @@ impl AppRouterImpl {
             outbox_record.envelope_bytes = envelope_bytes.clone();
 
             let evidence_submission_id =
-                crate::storage::client_db::derive_artifact_submission_id(&evidence_digest);
+                dsm::crypto::spool_address::artifact_submission_id(&evidence_digest);
             let evidence_envelope = match evidence_builder.build_evidence_envelope(
                 &to_device_id_str,
                 &recipient_genesis_b32_for_evidence,
@@ -1782,7 +1784,7 @@ impl AppRouterImpl {
                 relationship_key: sender_proposal.relationship_key,
                 canonical_parent: sender_proposal.canonical_parent,
                 proposal_nonce: sender_proposal.nonce_hash,
-                role: crate::storage::client_db::ArtifactRole::EvidenceA,
+                role: dsm::crypto::spool_address::ArtifactRole::EvidenceA,
                 submission_id: evidence_submission_id,
                 envelope_bytes: evidence_envelope.bytes,
                 content_digest: evidence_digest,
@@ -1882,16 +1884,13 @@ impl AppRouterImpl {
         let pending_admission = match accepted_admission {
             Some(p) => p,
             None => {
-                return OnlineSent::Debited(err(
-                    "wallet.send: advance committed without an accepted admission".to_string(),
-                ))
+                return self
+                    .stranded("the advance committed without an accepted admission".to_string())
             }
         };
         let econ_parts_final = match admission_parts.into_inner() {
             Some(p) => p,
-            None => {
-                return OnlineSent::Debited(err("wallet.send: admission parts missing".to_string()))
-            }
+            None => return self.stranded("the admission parts are missing".to_string()),
         };
         if let Err(e) = crate::sdk::economic_admission_flow::finish_admission(
             &self.core_sdk,
@@ -1906,10 +1905,21 @@ impl AppRouterImpl {
         )
         .await
         {
-            return OnlineSent::Debited(err(format!(
-                "wallet.send: debit committed; economic admission is HELD for resume and \
-                 nothing was delivered: {e}"
-            )));
+            // An invalid admission cannot land: its inputs are frozen, so a
+            // resume fails the same way. Anything else holds it for resume.
+            return match e {
+                dsm::types::error::DsmError::InvalidOperation(_) => {
+                    self.stranded(format!("its economic admission cannot land: {e}"))
+                }
+                _ => self.undelivered(
+                    &token_id,
+                    &new_state.hash,
+                    format!(
+                        "its economic admission is held for resume and nothing is delivered yet; \
+                         it completes once storage is reachable: {e}"
+                    ),
+                ),
+            };
         }
 
         let mut b0x_succeeded = false;
@@ -1935,11 +1945,14 @@ impl AppRouterImpl {
             &outbox_record.proposal_nonce,
             crate::storage::client_db::OUTBOX_SUBMITTING,
         ) {
-            return OnlineSent::Debited(err(format!(
-                "wallet.send: debit committed; the outbox row could not be marked \
-                 submitting, so nothing was sent and the transfer is retained for the \
-                 reconciliation sweep: {e}"
-            )));
+            return self.undelivered(
+                &token_id,
+                &new_state.hash,
+                format!(
+                    "the outbox row could not be marked submitting, so nothing is sent yet and \
+                     the reconciliation sweep sends it: {e}"
+                ),
+            );
         }
 
         // Create B0xSDK and submit (arg order: device_id, core_sdk, endpoints)
@@ -2058,11 +2071,13 @@ impl AppRouterImpl {
                 "[wallet.send] §16.6 submission outcome UNKNOWN — retaining debit, gate and \
                  outbox; reconciling forward (a timeout is not proof of non-delivery)"
             );
-            return OnlineSent::Debited(err(
-                "wallet.send: delivery outcome unknown — the transfer is retained and will be \
-                 retried automatically. Funds are not lost; do not resend."
+            return self.undelivered(
+                &token_id,
+                &new_state.hash,
+                "its delivery outcome is unknown; the transfer is retained and retried \
+                 automatically"
                     .to_string(),
-            ));
+            );
         }
         if let Err(e) = crate::storage::client_db::advance_sender_outbox_status_if(
             &outbox_record.relationship_key,
@@ -2138,8 +2153,20 @@ impl AppRouterImpl {
             // with the sender's actual finalized relationship tip.
         }
 
-        // Get new balance for response
-        let new_balance = match self.wallet.get_balance(&token_id) {
+        OnlineSent::Delivered(self.committed_send(
+            &token_id,
+            &new_state.hash,
+            "Transfer successful".to_string(),
+        ))
+    }
+
+    /// The answer to a send whose debit is committed: an
+    /// `OnlineTransferResponse` naming the committed state, delivered or not.
+    /// A committed debit is never answered as a refusal; only a send that
+    /// moved nothing is. Where the transfer stands is the contact's send
+    /// status and the history row, both durable.
+    fn committed_send(&self, token_id: &str, state_hash: &[u8], message: String) -> AppResult {
+        let new_balance = match self.wallet.get_balance(token_id) {
             Ok(bal) => Some(bal.value()),
             Err(e) => {
                 log::error!(
@@ -2149,19 +2176,41 @@ impl AppRouterImpl {
                 None
             }
         };
-
-        let response = generated::OnlineTransferResponse {
-            success: true,
-            transaction_hash: Some(generated::Hash32 {
-                v: new_state.hash.to_vec(),
-            }),
-            message: "Transfer successful".to_string(),
-            new_balance,
-        };
-        // NEW: Return as Envelope.onlineTransferResponse (field 40)
-        OnlineSent::Debited(pack_envelope_ok(
-            generated::envelope::Payload::OnlineTransferResponse(response),
+        pack_envelope_ok(generated::envelope::Payload::OnlineTransferResponse(
+            generated::OnlineTransferResponse {
+                success: true,
+                transaction_hash: Some(generated::Hash32 {
+                    v: state_hash.to_vec(),
+                }),
+                message,
+                new_balance,
+            },
         ))
+    }
+
+    /// A committed send that can never complete, for `why`.
+    fn stranded(&self, why: String) -> OnlineSent {
+        log::error!("[wallet.send] the debit is committed and cannot complete: {why}");
+        OnlineSent::Stranded {
+            answer: err(format!(
+                "wallet.send: the debit is committed on this device and this payment cannot \
+                 complete: {why}"
+            )),
+            why,
+        }
+    }
+
+    /// A committed send not delivered yet, for `why`.
+    fn undelivered(&self, token_id: &str, state_hash: &[u8], why: String) -> OnlineSent {
+        log::warn!("[wallet.send] the debit is committed and not delivered yet: {why}");
+        OnlineSent::Undelivered {
+            answer: self.committed_send(
+                token_id,
+                state_hash,
+                format!("Sent: {why}. The debit stands; do not resend."),
+            ),
+            why,
+        }
     }
 }
 
@@ -2215,15 +2264,14 @@ pub(crate) fn collect_tagged_inbox_addresses(
     contacts: &[crate::storage::client_db::ContactRecord],
 ) -> Result<Vec<TaggedInboxAddress>, String> {
     let address_for = |tip: &[u8; 32]| {
-        crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&local_genesis, &local_device_id, tip)
-            .map_err(|e| format!("inbox address derivation failed: {e}"))
+        dsm::crypto::spool_address::inbox_address(&local_genesis, &local_device_id, tip)
     };
     let mut addresses = Vec::with_capacity(contacts.len() * 2);
 
     for contact in contacts {
         let current_tip = contact_relationship_tip(contact)?;
         addresses.push(TaggedInboxAddress {
-            address: address_for(&current_tip)?,
+            address: address_for(&current_tip),
             freshness: RouteFreshness::Current,
         });
 
@@ -2237,7 +2285,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             })?;
             if prev_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: address_for(&prev_tip)?,
+                    address: address_for(&prev_tip),
                     freshness: RouteFreshness::PreviousTip,
                 });
             }
@@ -2255,7 +2303,7 @@ pub(crate) fn collect_tagged_inbox_addresses(
             })?;
             if next_tip != current_tip {
                 addresses.push(TaggedInboxAddress {
-                    address: address_for(&next_tip)?,
+                    address: address_for(&next_tip),
                     freshness: RouteFreshness::Current,
                 });
             }
@@ -2511,15 +2559,8 @@ impl AppRouter for AppRouterImpl {
         }
     }
 
-    fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+    fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
         self.core_sdk.device_head()
-    }
-
-    fn resolve_policy_commit_strict(
-        &self,
-        token_id: &[u8],
-    ) -> Result<[u8; 32], dsm::types::error::DsmError> {
-        self.core_sdk.resolve_policy_commit_strict(token_id)
     }
 
     fn execute_on_relationship_for_bilateral(
@@ -2646,9 +2687,11 @@ impl AppRouter for AppRouterImpl {
                 self.handle_identity_query(q).await
             }
             // Balance/wallet query routes
-            "balance.get" | "balance.list" | "wallet.history" | "wallet.amount" => {
-                self.handle_wallet_query(q).await
-            }
+            "balance.get"
+            | "balance.list"
+            | "wallet.history"
+            | "wallet.amount"
+            | "wallet.pendingOffline" => self.handle_wallet_query(q).await,
             // Contacts routes
             "contacts.list" | "contacts.readContactCode" | "contacts.ownProfile" => {
                 self.handle_contacts_query(q).await
@@ -2958,9 +3001,7 @@ mod tests {
         };
 
         let addresses = inbox_addresses(genesis, device, &[contact]);
-        let expected =
-            crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(&genesis, &device, &stored_tip)
-                .expect("canonical route");
+        let expected = dsm::crypto::spool_address::inbox_address(&genesis, &device, &stored_tip);
 
         assert_eq!(addresses, vec![expected]);
     }
@@ -3113,12 +3154,8 @@ mod tests {
         };
 
         let recipient_addresses = inbox_addresses(bob_genesis, bob_device, &[alice_as_bob_contact]);
-        let sender_route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
-            &bob_genesis,
-            &bob_device,
-            &initial_tip,
-        )
-        .expect("sender route");
+        let sender_route =
+            dsm::crypto::spool_address::inbox_address(&bob_genesis, &bob_device, &initial_tip);
 
         assert!(
             recipient_addresses.contains(&sender_route),

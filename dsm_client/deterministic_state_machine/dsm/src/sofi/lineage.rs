@@ -3,6 +3,11 @@
 //! Where a resolved SoFi position joins the validated economic lineage, and
 //! where a vault's genesis becomes acceptable.
 //!
+//! The roots a trader's lineage takes are derived here too, so the SDK never
+//! computes one (SoFi §2.1): a setup body's `R_T^setup` ([`setup_body`]), and
+//! the leaf cache behind a resolved position's root
+//! ([`ResolvedAdvance::installed_leaves`]).
+//!
 //! `advance_resolved` is the ONLY new constructor of a
 //! [`ValidatedEconomicRoot`] at a SoFi position (P15-10). Everything it needs
 //! is either recomputed here or already validated: nothing is read out of the
@@ -21,9 +26,14 @@
 //! Void installing the previous root IS "SofiVoid has zero mutations": the
 //! position exists, it is terminal, and it moved nothing.
 
-use crate::economic::lineage::ValidatedEconomicRoot;
-use crate::sofi::validation::{trader_balance_changes, trader_credits, Evidence, TraderBalanceChange};
-use crate::sofi::wire::SettlementPreimage;
+use crate::economic::lineage::{tree_of_rows, LeafCacheError, LeafRow, ValidatedEconomicRoot};
+use crate::economic::state::EconomicLeafState;
+use crate::economic::tree::EconomicSmt;
+use crate::sofi::validation::{
+    trader_balance_changes, trader_credits, trader_post_states, vault_post_states, Evidence,
+    TraderBalanceChange, VaultPostState,
+};
+use crate::sofi::wire::{SettlementPreimage, SofiSetupBody, TraderRelationshipLeaf};
 use crate::types::device_state::DeviceState;
 
 use super::derive;
@@ -72,6 +82,10 @@ pub enum AdvanceError {
     /// The balances a realized position moves could not be derived from the
     /// evidence the verdict was reached on, and validation's reason why.
     BalancesNotDerivable(crate::sofi::validation::Refusal),
+    /// The state a realized position selected for a vault it moved could
+    /// not be recomputed from the evidence the verdict was reached on, and
+    /// validation's reason why.
+    VaultStatesNotDerivable(crate::sofi::validation::Refusal),
     /// The preimage the facts were established over describes a different
     /// operation from the one being installed: its settlement does not
     /// recompute this `P`'s `E`.
@@ -125,6 +139,11 @@ impl core::fmt::Display for AdvanceError {
                 f,
                 "the balances this realized position moves are not derivable from its \
                  evidence: {why:?}"
+            ),
+            Self::VaultStatesNotDerivable(why) => write!(
+                f,
+                "the vault states this realized position selected are not derivable from \
+                 its evidence: {why:?}"
             ),
             Self::TokenNotAdopted { policy_commit } => write!(
                 f,
@@ -214,9 +233,33 @@ impl ResolvedBalances {
     }
 }
 
+/// The trader leaves a resolved position writes, as [`advance_resolved`]
+/// derived them from the same settlement and evidence as its balances: each
+/// key `T°` touches and its state after the operation, `None` for a leaf the
+/// operation leaves absent. A Void writes none. Only `advance_resolved`
+/// builds one, so the leaves behind an installed root are Core's, never a
+/// caller's list ([`ResolvedAdvance::installed_leaves`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLeafStates(Vec<(D32, Option<EconomicLeafState>)>);
+
+/// The whole leaf cache behind the root a resolved position installs: every
+/// row's bytes are the state its value hashes, and together the rows
+/// recompute that root. Only [`ResolvedAdvance::installed_leaves`] builds
+/// one, so a device writes the cache it admits without recomputing a root
+/// of its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledLeaves(Vec<LeafRow>);
+
+impl InstalledLeaves {
+    pub fn rows(&self) -> &[LeafRow] {
+        &self.0
+    }
+}
+
 /// What [`advance_resolved`] establishes at `q`: the resolution the ladder
 /// reached and its effect, the validated root, the claim `C_q` accepted
-/// there, and the trader balances the root moved.
+/// there, the trader balances and leaves the root moved, and the state each
+/// vault it moved is in after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdvance {
     pub resolution: Resolution,
@@ -224,6 +267,56 @@ pub struct ResolvedAdvance {
     pub root: ValidatedEconomicRoot,
     pub claim: crate::economic::lineage::AcceptedClaim,
     pub balances: ResolvedBalances,
+    pub leaf_states: ResolvedLeafStates,
+    vault_generations: Vec<VaultPostState>,
+}
+
+impl ResolvedAdvance {
+    /// The state each vault a `Realized` position moved is in after it,
+    /// recomputed by the fold from the evidence the verdict was reached on
+    /// (§44.4): what this device keeps so the next trade against that vault
+    /// has evidence to stand on, and what its record of the vault follows
+    /// (MR-DSM-0331). A Void moved no vault, and has none.
+    pub fn vault_generations(&self) -> &[VaultPostState] {
+        &self.vault_generations
+    }
+
+    /// The leaf cache behind the root this advance installs: `current`, the
+    /// cache behind the predecessor's root, with the leaves the position
+    /// writes put in and the leaves it leaves absent taken out.
+    ///
+    /// THE ROOT IS CORE'S. Every row is bound to the state its bytes decode
+    /// to, and the rows are refused unless they recompute the root installed
+    /// at `q` (`economic::lineage::tree_of_rows`, the producer tree's rule
+    /// too). A Void writes nothing, so its rows are `current`, which must
+    /// recompute the predecessor's root it reinstalls.
+    pub fn installed_leaves(
+        &self,
+        current: Vec<LeafRow>,
+    ) -> Result<InstalledLeaves, LeafCacheError> {
+        let mut cache: std::collections::BTreeMap<D32, (D32, Vec<u8>)> = current
+            .into_iter()
+            .map(|(key, value, ccb)| (key, (value, ccb)))
+            .collect();
+        for (key, state) in &self.leaf_states.0 {
+            match state {
+                Some(state) => {
+                    let no_bytes = |why| LeafCacheError::StateHasNoBytes { key: *key, why };
+                    let value = state.leaf_value().map_err(no_bytes)?;
+                    cache.insert(*key, (value, state.encode().map_err(no_bytes)?));
+                }
+                None => {
+                    cache.remove(key);
+                }
+            }
+        }
+        let rows: Vec<LeafRow> = cache
+            .into_iter()
+            .map(|(key, (value, ccb))| (key, value, ccb))
+            .collect();
+        tree_of_rows(&rows, &self.root.economic_root())?;
+        Ok(InstalledLeaves(rows))
+    }
 }
 
 /// Advance the validated lineage through a resolved SoFi position (P15-10).
@@ -254,28 +347,45 @@ pub fn advance_resolved(
     receiver: &DeviceState,
 ) -> Result<ResolvedAdvance, AdvanceError> {
     let derived = derive_resolved(previous, precommit, fulfillment, parent_claim, established)?;
-    let balances = match derived.realized_over {
+    let (balances, leaf_states, vault_generations) = match derived.realized_over {
         Some(facts) => {
             // The adoption invariant, inside the function that installs the
             // root, so that no caller can reach a realized advance without
             // it.
             adoption_admits(precommit, &facts.preimage, &facts.evidence, receiver)?;
             // The balances the realize root holds for the tokens T° moves,
-            // from the same bytes `adoption_admits` just bound to this `E`.
-            ResolvedBalances(
+            // and the leaves it holds for every key T° touches, from the same
+            // bytes `adoption_admits` just bound to this `E`.
+            let balances = ResolvedBalances(
                 trader_balance_changes(precommit, &facts.preimage, &facts.evidence)
                     .map_err(AdvanceError::BalancesNotDerivable)?,
-            )
+            );
+            let leaves = ResolvedLeafStates(
+                trader_post_states(precommit, &facts.preimage, &facts.evidence)
+                    .map_err(AdvanceError::BalancesNotDerivable)?,
+            );
+            // The state each leg selected, from the same bytes: recomputed by
+            // the fold, never read back from what the producer stated in `V°`.
+            let vaults =
+                vault_post_states(precommit, fulfillment, &facts.preimage, &facts.evidence)
+                    .map_err(AdvanceError::VaultStatesNotDerivable)?;
+            (balances, leaves, vaults)
         }
         // Zero mutations: the lineage continues exactly where it was.
-        None => ResolvedBalances(Vec::new()),
+        None => (
+            ResolvedBalances(Vec::new()),
+            ResolvedLeafStates(Vec::new()),
+            Vec::new(),
+        ),
     };
     Ok(ResolvedAdvance {
         resolution: derived.resolution,
         effect: effect_of(derived.resolution),
         balances,
+        leaf_states,
         root: derived.root,
         claim: derived.claim,
+        vault_generations,
     })
 }
 
@@ -481,23 +591,27 @@ impl std::error::Error for FenceError {}
 /// descendant admitted on that basis would be built on a root the lineage had
 /// not chosen, and half of the time it is the wrong one.
 ///
-/// **Wired, and deliberately inert.** Both paths that create the next local
-/// economic position cross it — the advance that stages an admission plan and
-/// the transaction that makes local acceptance durable — and
+/// **Wired, and its refusals unreachable.** Both paths that create the next
+/// local economic position cross it — the advance that stages an admission
+/// plan and the transaction that makes local acceptance durable — and
 /// `ci/admitted_predecessor_readers_fenced.sh` fails the build if a third
 /// descendant-producing path appears without it.
 ///
-/// It nevertheless cannot fire today, and that is a property of the WRITER,
-/// not of this rule: `record_admitted_with_conn` records `claim_kind = 0`
-/// unconditionally because F ingress is dark, so `predecessor_claim()` can
-/// only ever answer `SingleRoot`. Deleting the calls therefore turns no test
-/// red, which is why the gate is static rather than a runtime mutation.
+/// What it can refuse is a property of the WRITERS and the builders, not of
+/// this rule. `record_admitted_with_conn` records the claim kind of the
+/// position it is given, and a resolved SoFi position is recorded as
+/// `ResolvedSofi` (`CoreSDK::admit_resolved_sofi_position`), so after a trade
+/// `predecessor_claim()` answers `ConditionalResolved` and the next descendant
+/// crosses the selected-root check. It passes: every builder builds on the
+/// root the resolution selected. No writer records `UnresolvedSofi`, so
+/// `ConditionalUnresolved` is never answered. A test of either refusal would
+/// have to stage a descendant no production builder makes, which is why the
+/// gate is static rather than a runtime mutation.
 ///
-/// E2/E3 owns production of conditional admitted rows and makes this live when
-/// that lifecycle lands. The invariant is installed ahead of its producer on
-/// purpose: a descendant path added before then would be bypassing a fence
-/// nothing could yet catch, and would become a live hole the day the writer
-/// arrives.
+/// The invariant is installed ahead of anything that could trip it on
+/// purpose: a descendant path added without the fence would bypass a check
+/// nothing could yet catch, and would become a live hole the day a writer of
+/// unresolved positions, or a builder on another root, arrives.
 pub fn descendant_fence(
     predecessor: PredecessorClaim,
     descendant_pre_root: &D32,
@@ -516,6 +630,112 @@ pub fn descendant_fence(
             }
         }
     }
+}
+
+/// What a setup names besides the predecessor it is built on: the trader's
+/// identity, the vault, the claim registered at `p` (`ClaimRef_p`, SoFi
+/// Amendment S9), and the key that signs `m_setup`.
+#[derive(Debug, Clone, Copy)]
+pub struct SetupNames<'a> {
+    pub genesis: D32,
+    pub device_id: D32,
+    pub vault_id: D32,
+    pub claim_ref: D32,
+    pub signature_alg: u16,
+    pub claimant_public_key: &'a [u8],
+}
+
+/// Why a setup body cannot be built on a predecessor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupBodyError {
+    /// The tree handed over is not the validated predecessor's root, so
+    /// `R_T^setup` derived from it would describe a mutation of another state.
+    PreTreeIsNotThePredecessor { predecessor: D32, tree: D32 },
+    /// This identity already holds a relationship with that vault. `h⁰` is a
+    /// function of the setup id, so a second setup would reset a chain that
+    /// has already advanced.
+    SetupAlreadyExists,
+    /// The relationship leaf has no canonical bytes.
+    LeafHasNoBytes(crate::ccb::CcbError),
+    /// The body has no canonical bytes in this shape.
+    Wire(SofiWireError),
+}
+
+impl core::fmt::Display for SetupBodyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::PreTreeIsNotThePredecessor { .. } => write!(
+                f,
+                "the economic tree is not the validated predecessor's root: R_T^setup derived \
+                 from it would describe a mutation of another state"
+            ),
+            Self::SetupAlreadyExists => write!(
+                f,
+                "this identity already holds a relationship with that vault; h⁰ is the setup \
+                 id's derivation and a second setup would reset the chain"
+            ),
+            Self::LeafHasNoBytes(why) => {
+                write!(f, "the relationship leaf has no canonical bytes: {why:?}")
+            }
+            Self::Wire(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for SetupBodyError {}
+
+/// The relationship setup's body (F1, §29), unsigned: what the trader signs as
+/// `m_setup` and carries in its `SofiSetup` transition.
+///
+/// `R_T^setup` IS DERIVED HERE, by the P15-6 insertion the transition's write
+/// set makes: `h⁰` of the setup id at `p`, inserted from absent at this
+/// device's relationship key for `v`, on the tree whose root is the validated
+/// predecessor's. Neither `p` nor `setup_root` is the caller's: `p` is the
+/// predecessor's position, and `setup_root` is the root after that insertion.
+/// The verifier re-derives both from the verified mutation sequence and
+/// refuses a body naming anything else (`economic::lineage`,
+/// `SetupPositionIsNotThePredecessor` and `SetupRootIsNotTheDerivedRoot`).
+pub fn setup_body(
+    previous: &ValidatedEconomicRoot,
+    pre_tree: &EconomicSmt,
+    names: &SetupNames<'_>,
+) -> Result<SofiSetupBody, SetupBodyError> {
+    // `p`, `R_p` and `R_T^setup` come from one predecessor context: a tree at
+    // another root would yield a self-consistent body for a state this device
+    // does not stand on, which the verifier then refuses.
+    let (predecessor, tree) = (previous.economic_root(), pre_tree.root());
+    if tree != predecessor {
+        return Err(SetupBodyError::PreTreeIsNotThePredecessor { predecessor, tree });
+    }
+    let position = previous.economic_position();
+    let sigma = derive::setup_id(&names.genesis, &names.device_id, position, &names.vault_id);
+    let state = EconomicLeafState::Relationship(TraderRelationshipLeaf {
+        vault_id: names.vault_id,
+        leaf: derive::relationship_leaf_genesis(&sigma),
+    });
+    let key = state.leaf_key(&names.genesis, &names.device_id);
+    // From absent, as the write set inserts it: a relationship that already
+    // exists is refused there, so a root computed over it is one no
+    // transition reaches.
+    if pre_tree.get(&key).is_some() {
+        return Err(SetupBodyError::SetupAlreadyExists);
+    }
+    let mut post = pre_tree.clone();
+    post.insert(
+        key,
+        state.leaf_value().map_err(SetupBodyError::LeafHasNoBytes)?,
+    );
+    SofiSetupBody::new(
+        names.genesis,
+        names.device_id,
+        position,
+        names.vault_id,
+        names.claim_ref,
+        post.root(),
+        names.signature_alg,
+        names.claimant_public_key,
+    )
+    .map_err(SetupBodyError::Wire)
 }
 
 /// Why a vault's market policy is not the one its genesis state commits:
@@ -943,14 +1163,20 @@ mod tests {
         .unwrap()
     }
 
+    /// `F` of `p`: one attempt for each of its legs, as every fulfillment
+    /// names, which is what a realized advance derives each vault's
+    /// generation from.
     fn fulfillment(p: &TraderPrecommitBody) -> TraderFulfillmentBody {
         TraderFulfillmentBody::new(
             derive::precommit_id(p),
             vec![d(0x01)],
-            vec![crate::sofi::wire::AttemptEntry {
-                vault_id: d(0xC1),
-                attempt: 0,
-            }],
+            p.legs()
+                .iter()
+                .map(|leg| crate::sofi::wire::AttemptEntry {
+                    vault_id: leg.vault_id,
+                    attempt: 0,
+                })
+                .collect(),
             P_POS + 1,
             SIG_ALG,
             &[0x01; 64],
@@ -1372,6 +1598,264 @@ mod tests {
         assert_eq!(advanced.resolution, Resolution::Void);
         assert_eq!(advanced.root.economic_position(), P_POS + 1);
         assert_eq!(advanced.root.economic_root(), pre);
+    }
+
+    /// A leaf cache row for `state`, as this device's tree holds it.
+    fn row_of(state: &EconomicLeafState) -> LeafRow {
+        (
+            state.leaf_key(&G, &dev()),
+            state.leaf_value().unwrap(),
+            state.encode().unwrap(),
+        )
+    }
+
+    /// The root `rows` recompute: what the test expects, computed apart from
+    /// the function under test.
+    fn root_of(rows: &[LeafRow]) -> D32 {
+        let mut tree = EconomicSmt::new();
+        for (key, value, ..) in rows {
+            tree.insert(*key, *value);
+        }
+        tree.root()
+    }
+
+    /// The realized rig's trader before the trade: the token it spends and
+    /// its relationship with the one vault, the cache behind `P.void_root`.
+    fn rig_rows(fx: &Fixture) -> Vec<LeafRow> {
+        use crate::sofi::validation::fixtures::{balance, base_of, vault_id_of};
+        let (token_in, ..) = swap_terms(fx);
+        vec![
+            row_of(&EconomicLeafState::Balance(balance(token_in, 50_000))),
+            row_of(&EconomicLeafState::Relationship(TraderRelationshipLeaf {
+                vault_id: vault_id_of(0),
+                leaf: base_of(0),
+            })),
+        ]
+    }
+
+    /// An ordinary cache of two balances, and the void advance over it: the
+    /// predecessor's root is the one these rows recompute.
+    fn void_over_rows() -> (Vec<LeafRow>, ResolvedAdvance) {
+        use crate::sofi::validation::fixtures::balance;
+        let rows = vec![
+            row_of(&EconomicLeafState::Balance(balance(d(0x7A), 40))),
+            row_of(&EconomicLeafState::Balance(balance(d(0x7B), 9))),
+        ];
+        let pre = root_of(&rows);
+        let p = precommit(pre, d(0xA1));
+        let f = fulfillment(&p);
+        let advanced = advance_resolved(
+            &previous(pre),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &established(&p, &f, &any_preimage(), &Evidence::default(), Shape::Void),
+            &bare_receiver(),
+        )
+        .unwrap();
+        (rows, advanced)
+    }
+
+    /// THE LEAVES BEHIND A REALIZED ROOT ARE CORE'S (SoFi §2.1). The
+    /// predecessor's cache with what `T°` writes put in recomputes
+    /// `P.R_realize`, and the rows are exactly the states the trade leaves:
+    /// the token spent, the token received, the relationship advanced by `E`.
+    /// The device writes them and computes no root of its own.
+    #[test]
+    fn a_realized_position_installs_the_leaves_that_recompute_its_realize_root() {
+        use crate::sofi::validation::fixtures::{balance, base_of, vault_id_of, AMOUNT_IN};
+        let (fx, receiver) = realized_rig();
+        let (token_in, token_out, exact_out) = swap_terms(&fx);
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let current = rig_rows(&fx);
+        assert_eq!(root_of(&current), *p.void_root(), "the predecessor's cache");
+        let advanced = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
+        )
+        .unwrap();
+        let installed = advanced.installed_leaves(current).unwrap();
+        assert_eq!(root_of(installed.rows()), *p.realize_root());
+        let mut expected = vec![
+            row_of(&EconomicLeafState::Balance(balance(
+                token_in,
+                50_000 - AMOUNT_IN,
+            ))),
+            row_of(&EconomicLeafState::Balance(balance(token_out, exact_out))),
+            row_of(&EconomicLeafState::Relationship(TraderRelationshipLeaf {
+                vault_id: vault_id_of(0),
+                leaf: derive::relationship_leaf_next(&base_of(0), p.external_commitment()),
+            })),
+        ];
+        expected.sort();
+        assert_eq!(installed.rows(), expected.as_slice());
+    }
+
+    /// A CACHE THAT IS NOT THE PREDECESSOR'S INSTALLS NOTHING. A realized
+    /// trade over a cache holding a leaf `P.void_root` does not, and a void
+    /// over a cache missing one, give rows that do not recompute the root the
+    /// advance installed: each is refused, and nothing is handed back to
+    /// write. A void over the whole cache installs it unchanged.
+    /// MUTATION CONTROL: the root check removed turns this red.
+    #[test]
+    fn leaves_that_do_not_recompute_the_installed_root_are_refused() {
+        use crate::sofi::validation::fixtures::balance;
+        let (fx, receiver) = realized_rig();
+        let p = fx.precommit.clone();
+        let f = fulfillment(&p);
+        let realized = advance_resolved(
+            &previous(*p.void_root()),
+            &p,
+            &f,
+            p.parent_claim_ref(),
+            &established(&p, &f, &fx.preimage, &fx.evidence, Shape::Realized),
+            &receiver,
+        )
+        .unwrap();
+        let mut extra = rig_rows(&fx);
+        extra.push(row_of(&EconomicLeafState::Balance(balance(d(0x7C), 3))));
+        assert!(matches!(
+            realized.installed_leaves(extra),
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root, .. })
+                if root == *p.realize_root()
+        ));
+
+        let (rows, void) = void_over_rows();
+        // The cache comes back in key order, the order it is stored in.
+        let mut in_key_order = rows.clone();
+        in_key_order.sort();
+        assert_eq!(
+            void.installed_leaves(rows.clone()).unwrap().rows(),
+            in_key_order.as_slice()
+        );
+        assert!(matches!(
+            void.installed_leaves(rows[..1].to_vec()),
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root, .. })
+                if root == root_of(&rows)
+        ));
+    }
+
+    /// EVERY ROW'S BYTES ARE THE STATE ITS VALUE HASHES. A row whose key and
+    /// value are right — so the root still recomputes — but whose bytes are
+    /// another state's, or no state at all, is refused: the cache a device
+    /// decodes its balances from is the one the root commits.
+    /// MUTATION CONTROL: the row binding removed turns this red.
+    #[test]
+    fn a_row_whose_bytes_are_not_its_state_is_refused() {
+        use crate::sofi::validation::fixtures::balance;
+        let (rows, void) = void_over_rows();
+        let key = rows[0].0;
+        let mut forged = rows.clone();
+        forged[0].2 = EconomicLeafState::Balance(balance(d(0x7A), 41))
+            .encode()
+            .unwrap();
+        assert_eq!(
+            root_of(&forged),
+            root_of(&rows),
+            "the root still recomputes"
+        );
+        assert_eq!(
+            void.installed_leaves(forged),
+            Err(LeafCacheError::RowIsNotItsState { key })
+        );
+        let mut junk = rows;
+        junk[0].2 = vec![0x00, 0x01];
+        assert!(matches!(
+            void.installed_leaves(junk),
+            Err(LeafCacheError::RowDoesNotDecode { key: at, .. }) if at == key
+        ));
+    }
+
+    /// The names a setup in these tests carries besides its predecessor.
+    fn setup_names(vault_id: D32) -> SetupNames<'static> {
+        SetupNames {
+            genesis: G,
+            device_id: dev(),
+            vault_id,
+            claim_ref: d(0x66),
+            signature_alg: SIG_ALG,
+            claimant_public_key: &[0x01; 64],
+        }
+    }
+
+    /// THE SETUP BODY IS CORE'S (SoFi §2.1, F1). On a predecessor at `p`
+    /// whose tree holds a balance, the body names `p` and the root of that
+    /// tree with `h⁰` of the setup id at `p` inserted at the relationship key
+    /// — the leaf a trade over the vault later advances from.
+    #[test]
+    fn a_setup_body_names_its_predecessor_and_the_root_the_insertion_gives() {
+        use crate::sofi::validation::fixtures::balance;
+        let vault_id = d(0xC1);
+        let held = [row_of(&EconomicLeafState::Balance(balance(d(0x7A), 40)))];
+        let mut pre_tree = EconomicSmt::new();
+        pre_tree.insert(held[0].0, held[0].1);
+        let body =
+            setup_body(&previous(root_of(&held)), &pre_tree, &setup_names(vault_id)).unwrap();
+        let h0 = derive::relationship_leaf_genesis(&derive::setup_id(&G, &dev(), P_POS, &vault_id));
+        let after = [
+            held[0].clone(),
+            row_of(&EconomicLeafState::Relationship(TraderRelationshipLeaf {
+                vault_id,
+                leaf: h0,
+            })),
+        ];
+        assert_eq!(body.position(), P_POS);
+        assert_eq!(*body.setup_root(), root_of(&after));
+        assert_eq!(
+            (
+                *body.genesis(),
+                *body.device_id(),
+                *body.vault_id(),
+                *body.claim_ref()
+            ),
+            (G, dev(), vault_id, d(0x66))
+        );
+    }
+
+    /// A setup body is built only on the predecessor's own tree, and only
+    /// from absent: a tree at another root, and a vault this identity already
+    /// holds a relationship with, are refused before anything is signed.
+    #[test]
+    fn a_setup_body_is_not_built_off_the_predecessor_or_over_a_relationship() {
+        use crate::sofi::validation::fixtures::balance;
+        let vault_id = d(0xC1);
+        let held = row_of(&EconomicLeafState::Balance(balance(d(0x7A), 40)));
+        let mut pre_tree = EconomicSmt::new();
+        pre_tree.insert(held.0, held.1);
+        assert_eq!(
+            setup_body(&previous(d(0xA0)), &pre_tree, &setup_names(vault_id)),
+            Err(SetupBodyError::PreTreeIsNotThePredecessor {
+                predecessor: d(0xA0),
+                tree: pre_tree.root(),
+            })
+        );
+        let first = setup_body(
+            &previous(pre_tree.root()),
+            &pre_tree,
+            &setup_names(vault_id),
+        )
+        .unwrap();
+        let mut set_up = pre_tree.clone();
+        let relationship = row_of(&EconomicLeafState::Relationship(TraderRelationshipLeaf {
+            vault_id,
+            leaf: derive::relationship_leaf_genesis(&derive::setup_id(
+                &G,
+                &dev(),
+                P_POS,
+                &vault_id,
+            )),
+        }));
+        set_up.insert(relationship.0, relationship.1);
+        assert_eq!(set_up.root(), *first.setup_root());
+        assert_eq!(
+            setup_body(&previous(set_up.root()), &set_up, &setup_names(vault_id)),
+            Err(SetupBodyError::SetupAlreadyExists)
+        );
     }
 
     #[test]
@@ -2082,12 +2566,14 @@ pub(crate) mod genesis_acceptance {
             amount_b: preimage.state.reserve_b,
         };
         let preimage_bytes = preimage.encode().unwrap();
+        let funding_policies = carried_for(&[pair.0, pair.1]);
         let build = |signature: Vec<u8>| Operation::SofiVaultCreate {
             genesis_preimage: preimage_bytes.clone(),
             creation: record.encode(),
             market_policy_preimage: market_bytes.clone(),
             funding_a_policy_commit: pair.0,
             funding_b_policy_commit: pair.1,
+            funding_policies: funding_policies.clone(),
             signature,
         };
         let signing = (build(Vec::new())).signing_bytes();
@@ -2334,9 +2820,41 @@ pub(crate) mod genesis_acceptance {
         }
     }
 
-    /// The escrow creation of `state`, carrying `terms_bytes`, as the owner
-    /// signs it.
+    /// The policies a creation funding `funded` carries: that of each token
+    /// that is not pre-rooted, from the fixture tokens or the
+    /// non-transferable token 9.
+    fn carried_for(funded: &[D32]) -> Vec<Vec<u8>> {
+        let locked = committed(token_policy_bytes_with(9, 0));
+        funded
+            .iter()
+            .filter(|c| crate::core::token::builtin_token_id_for_policy_commit(c).is_none())
+            .map(|c| {
+                tokens()
+                    .iter()
+                    .chain(std::iter::once(&locked))
+                    .find(|(commit, _)| commit == c)
+                    .map(|(_, bytes)| bytes.clone())
+                    .expect("a fixture token")
+            })
+            .collect()
+    }
+
+    /// The escrow creation of `state`, carrying `terms_bytes` and the staked
+    /// token's policy, as the owner signs it.
     fn escrow_creation_of(state: VaultStateLeaf, terms_bytes: Vec<u8>) -> Creation {
+        let staked = *crate::sofi::wire::EscrowKind::decode(&terms_bytes)
+            .expect("fixture terms decode")
+            .token();
+        escrow_creation_carrying(state, terms_bytes, carried_for(&[staked]))
+    }
+
+    /// The escrow creation of `state` carrying `funding_policies`: terms that
+    /// do not decode name no staked token, so their creation carries none.
+    fn escrow_creation_carrying(
+        state: VaultStateLeaf,
+        terms_bytes: Vec<u8>,
+        funding_policies: Vec<Vec<u8>>,
+    ) -> Creation {
         let preimage = VaultGenesisPreimage {
             owner_genesis: G,
             owner_device_id: dev(),
@@ -2355,6 +2873,7 @@ pub(crate) mod genesis_acceptance {
             genesis_preimage: preimage_bytes.clone(),
             creation: record.encode(),
             terms: terms_bytes.clone(),
+            funding_policies: funding_policies.clone(),
             signature,
         };
         let signing = build(Vec::new()).signing_bytes();
@@ -2414,9 +2933,10 @@ pub(crate) mod genesis_acceptance {
         );
         // Bytes the slots name that are not escrow terms.
         let garbage = b"no terms".to_vec();
-        let c = escrow_creation_of(
+        let c = escrow_creation_carrying(
             escrow_state(crate::sofi::escrow::terms_address_of(&garbage), 2_500, 0),
             garbage,
+            Vec::new(),
         );
         assert!(matches!(
             accept(&c),
@@ -2547,9 +3067,10 @@ pub(crate) mod genesis_acceptance {
             amount_b: 0,
         }
         .encode();
-        let c = escrow_creation_of(
+        let c = escrow_creation_carrying(
             escrow_state(crate::sofi::escrow::terms_address_of(&not_terms), 2_500, 0),
             not_terms,
+            Vec::new(),
         );
         assert!(matches!(
             accept(&c),

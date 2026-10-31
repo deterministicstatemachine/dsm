@@ -99,6 +99,7 @@ fn compute_initial_chain_tip(
 fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        token_policy: Vec::new(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![0u8; 16],
@@ -214,7 +215,9 @@ fn theorem2_two_successors_same_parent_rejected() {
             &kyber_pk,
         ))
         .unwrap();
-    let commitment = BilateralPreCommitment::new(h_0, op2.clone()).bilateral_commitment_hash;
+    let commitment = BilateralPreCommitment::new(h_0, op2.clone())
+        .expect("the second child's precommitment")
+        .bilateral_commitment_hash;
     let signature = alice
         .keypair
         .sign(&bilateral_sign_message(&commitment))

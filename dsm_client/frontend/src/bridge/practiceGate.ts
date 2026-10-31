@@ -63,6 +63,7 @@ const READ_ROUTES = new Set([
   'balance.list',
   'wallet.history',
   'wallet.amount',
+  'wallet.pendingOffline',
   'contacts.list',
   'contacts.readContactCode',
   'contacts.ownProfile',

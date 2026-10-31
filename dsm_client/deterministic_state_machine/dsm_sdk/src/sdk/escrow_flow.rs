@@ -33,7 +33,7 @@ use crate::sdk::economic_admission_flow::{
     admitted_self_loop_operation, validated_root_or_activate, BuiltOn,
 };
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
     chain_past_withheld_pairs, context, exercise_draft, head_of, identity, own_setup_ref,
     publication_addr, refuse, relationship_base, require_stored, set_up_with, sign, standing,
@@ -234,6 +234,21 @@ pub async fn create(
     set: &StorageSet,
     intent: &CreateEscrowIntent,
 ) -> Result<EscrowCreated, DsmError> {
+    let funding_policies =
+        crate::sdk::sofi_flow::vault_funding_policies(set, &[intent.token]).await?;
+    create_carrying(core, set, intent, funding_policies).await
+}
+
+/// [`create`] carrying `funding_policies` as the staked token's committed
+/// policy. Core refuses the creation in its write set unless it is exactly
+/// that policy and it lets the token be locked, so a producer that skips the
+/// early check meets the same refusal there, before anything is debited.
+pub(crate) async fn create_carrying(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &CreateEscrowIntent,
+    funding_policies: Vec<Vec<u8>>,
+) -> Result<EscrowCreated, DsmError> {
     if intent.amount == 0 {
         return Err(refuse("an escrow vault holds a non-zero stake"));
     }
@@ -274,7 +289,8 @@ pub async fn create(
             status: VAULT_STATUS_ACTIVE,
         },
     };
-    let produced = build_escrow_vault_create(&preimage, &terms).map_err(refuse)?;
+    let produced =
+        build_escrow_vault_create(&preimage, &terms, funding_policies).map_err(refuse)?;
     let genesis_object = Publication::EscrowVaultGenesis {
         preimage: &preimage,
         terms: &terms,
@@ -513,12 +529,17 @@ pub async fn adjudicate(
     })?;
     let cell = VerdictCell::new(&verdict_cell, &as_ccb_members(set)?, &set.id())
         .map_err(|e| refuse(format!("verdict cell: {e:?}")))?;
-    let write = write_recorded(set, cell.routed(), &verdict.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "verdict cell",
-            "the cell's leader did not take the verdict; nothing is decided",
-        ));
+    let write = write_recorded(set, cell.routed(), &cell.recognizes(), &verdict.encode()).await?;
+    match write.leader() {
+        // This verdict, or another one first at the cell's leader: the cell
+        // is decided, and what holds it is read back.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "verdict cell",
+                "the cell's leader did not take the verdict; nothing is decided",
+            ))
+        }
     }
     Ok(VerdictView::of(&read_cell(&verifier, &verdict_cell)?))
 }

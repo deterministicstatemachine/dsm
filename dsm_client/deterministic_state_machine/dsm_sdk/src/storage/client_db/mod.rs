@@ -24,7 +24,6 @@ pub mod bilateral_tip_sync;
 mod bitcoin_accounts;
 mod ble_chunk_buffer;
 pub mod canonical_apply;
-mod canonical_rebuild;
 pub mod cert_chain;
 mod cert_resync;
 pub mod completion_proofs;
@@ -42,6 +41,8 @@ mod manifold_seeds;
 pub mod money_received;
 pub mod native_reserve;
 mod nonces;
+pub mod offline_receipts;
+pub mod offline_spends;
 mod online_outbox;
 pub mod own_directory_entry;
 mod projection_repair;
@@ -72,7 +73,6 @@ pub use ble_chunk_buffer::*;
 pub use canonical_apply::*;
 pub use cert_chain::*;
 pub use recipient_receipt_fold::*;
-pub use canonical_rebuild::*;
 pub use cert_resync::*;
 pub use history_repair::*;
 pub use projection_repair::*;
@@ -153,6 +153,22 @@ pub(crate) fn switch_test_database_slot(slot: &'static str) {
     }
     // else: leave DB_CONNECTION empty so the next get_connection() opens the
     // slot's URI and initializes its schema.
+}
+
+/// The active slot's database as it stands now, copied to `slot`'s file: the
+/// same device restored later from a backup taken at this point. `slot` is
+/// one no test has opened yet.
+#[cfg(test)]
+pub(crate) fn copy_test_database_to_slot(slot: &'static str) -> Result<()> {
+    // The file `get_database_path` names for `slot` in this generation.
+    let base = crate::storage_utils::get_storage_base_dir()
+        .ok_or_else(|| anyhow!("Storage base directory not set"))?;
+    let gen = TEST_DB_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    let target = base.join(format!("{gen}_{slot}_{DB_FILE_NAME}"));
+    let arc = get_connection()?;
+    let conn = arc.lock().map_err(|e| anyhow!("DB lock poisoned: {e}"))?;
+    conn.execute("VACUUM INTO ?1", [target.to_string_lossy().as_ref()])?;
+    Ok(())
 }
 
 pub fn init_database() -> Result<()> {
@@ -521,7 +537,8 @@ fn get_database_path() -> Result<PathBuf> {
 /// rows A8 recorded: each is a coordinate the receiver validated itself, in
 /// the same shape and encoding. `peer_offline_account` is created on open
 /// the same way: a peer's offline account as a boundary the receiver
-/// validated left it (the owner's receive rule, 2026-10-22).
+/// validated left it (the owner's receive rule, 2026-10-22); and
+/// `own_offline_spend`, this device's spends no boundary exposed yet (SA-116).
 ///
 /// v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
 /// whole route — namespace, key, seed and committed set — and the value, and
@@ -531,7 +548,27 @@ fn get_database_path() -> Result<PathBuf> {
 /// own id (SA-141) or an own directory entry without an authority position
 /// (SA-143): beta keeps no legacy, so such a database is refused at open and
 /// the wallet is reprovisioned, never read with those rows in place.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 33;
+///
+/// v34: a receiver records a frontier at every position a passing walk
+/// validates, each with the digest of the claim it accepted there
+/// (`peer_frontier.claim_ref`), so a setup's claim behind the frontier is
+/// answered from the receiver's own record and never read again (DSM
+/// Amendment A19, MR-SOFI-0346); and `sofi_vault_step`, each recorded vault
+/// generation's bundle step (SoFi Amendment S23). A database made at 33
+/// holds frontiers without the digest and generations without their steps,
+/// and is refused at open.
+///
+/// v35: a frozen artifact may be `withheld`, kept and owed to no set until
+/// the check that withheld it releases it: a trader's fulfillment, frozen
+/// before its conformance is Valid (SoFi L1738). A database made at 34
+/// refuses that state, and is refused at open.
+///
+/// v36: every memoised reserve release keeps the reads of its cell that
+/// showed it final (`native_reserve_lineage_memo.cell_reads`), so Core
+/// proves it final again on load (`ReserveLineage::establish_final`). A
+/// database made at 35 holds releases without their reads, and is refused
+/// at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 37;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -669,7 +706,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             purpose           TEXT NOT NULL,
             storage_set_id    BLOB NOT NULL,
             state             TEXT NOT NULL CHECK (state IN
-                                ('frozen','publication_pending','stored')),
+                                ('withheld','frozen','publication_pending','stored')),
             last_error        TEXT NOT NULL DEFAULT ''
         );
 
@@ -699,11 +736,29 @@ fn create_schema(conn: &Connection) -> Result<()> {
             generation  INTEGER NOT NULL CHECK (generation >= 0),
             root        BLOB NOT NULL CHECK (length(root) = 32),
             -- v24: past genesis, the root this generation was built on and
-            -- the E of the operation that consumed it, so the recorded
-            -- chain links row to row and Core can check the links before it
-            -- stands on this device's memo (`VaultChain::from_recorded`).
+            -- the E of the operation that consumed it. A record says where
+            -- a walk may read ahead; Core's walk establishes every
+            -- generation from the genesis or an adopted baseline
+            -- (MR-DSM-0331), and stands on no row here.
             pre_root    BLOB CHECK (pre_root IS NULL OR length(pre_root) = 32),
             consumed_by BLOB CHECK (consumed_by IS NULL OR length(consumed_by) = 32),
+            PRIMARY KEY (vault_id, generation)
+        ) WITHOUT ROWID;
+        -- v34 (SoFi Amendment S23): each recorded generation's
+        -- bundle step — the attempt that consumed its parent, E, the
+        -- trader's (G, DevID, q) and the route's other legs as 64-byte
+        -- (vault, parent root) pairs — written in the transaction that
+        -- records the generation. Discovery only: what a checkpoint's bundle
+        -- carries.
+        CREATE TABLE IF NOT EXISTS sofi_vault_step(
+            vault_id            BLOB NOT NULL CHECK (length(vault_id) = 32),
+            generation          INTEGER NOT NULL CHECK (generation > 0),
+            attempt             INTEGER NOT NULL CHECK (attempt >= 0),
+            external_commitment BLOB NOT NULL CHECK (length(external_commitment) = 32),
+            trader_genesis      BLOB NOT NULL CHECK (length(trader_genesis) = 32),
+            trader_device_id    BLOB NOT NULL CHECK (length(trader_device_id) = 32),
+            trader_position     INTEGER NOT NULL CHECK (trader_position >= 0),
+            siblings            BLOB NOT NULL CHECK (length(siblings) % 64 = 0),
             PRIMARY KEY (vault_id, generation)
         ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS sofi_vault_leaf(
@@ -786,6 +841,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             recipient_devid    BLOB NOT NULL CHECK (length(recipient_devid) = 32),
             recipient_position INTEGER NOT NULL,
             envelope           BLOB NOT NULL,
+            -- The reads of the release's cell that showed it final
+            -- (dsm::route_chain::CellEvidence::encode_kept), so Core proves
+            -- it final again on load.
+            cell_reads         BLOB NOT NULL,
             PRIMARY KEY (reserve_id, generation)
         );
 
@@ -882,13 +941,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         -- DSM Amendment A19: this receiver's frontier for a peer, a
-        -- coordinate it validated itself, with the claim it accepted there.
+        -- coordinate it validated itself, with the claim it accepted there:
+        -- one row for every position a passing walk validated. v34: the
+        -- accepted claim's own digest beside the reference a later P names it
+        -- by, so a setup's claim behind the frontier is answered from here.
         CREATE TABLE IF NOT EXISTS peer_frontier(
             peer_genesis        BLOB NOT NULL,      -- 32B
             peer_devid          BLOB NOT NULL,      -- 32B
             economic_position   INTEGER NOT NULL,
             economic_root       BLOB NOT NULL,      -- 32B
             accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
+            claim_ref           BLOB NOT NULL CHECK (length(claim_ref) = 32),
             PRIMARY KEY(peer_genesis, peer_devid, economic_position)
         );
 
@@ -904,6 +967,51 @@ fn create_schema(conn: &Connection) -> Result<()> {
             account_root        BLOB NOT NULL,      -- 32B
             funding_chain       BLOB NOT NULL,      -- 32B
             PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
+        );
+
+        -- A payment a peer's offline boundary exposed online, as this
+        -- receiver's own walk of the peer verified it: one spend of the chain
+        -- the boundary carried, named by the release that signed it.
+        CREATE TABLE IF NOT EXISTS peer_offline_exposure(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            peer_genesis        BLOB NOT NULL,      -- 32B
+            peer_devid          BLOB NOT NULL,      -- 32B
+            economic_position   INTEGER NOT NULL,
+            bundle              BLOB NOT NULL,      -- 32B
+            recipient           BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            before_root         BLOB NOT NULL,
+            before_counter      INTEGER NOT NULL,
+            before_frontier     BLOB NOT NULL,
+            after_root          BLOB NOT NULL,
+            after_counter       INTEGER NOT NULL,
+            after_frontier      BLOB NOT NULL
+        );
+
+        -- Value this device received offline, pending until it is settled
+        -- online (SA-91): neither online balance nor offline allocation. A
+        -- settlement admitted online marks it settled, once.
+        CREATE TABLE IF NOT EXISTS pending_offline_receipt(
+            release_message     BLOB PRIMARY KEY,   -- 32B M
+            payer_genesis       BLOB NOT NULL,      -- 32B
+            payer_devid         BLOB NOT NULL,      -- 32B
+            bundle              BLOB NOT NULL,      -- 32B
+            asset               BLOB NOT NULL,      -- 32B
+            amount              INTEGER NOT NULL,
+            commitment_hash     BLOB NOT NULL,      -- 32B
+            settled_position    INTEGER
+        );
+
+        -- This device's own offline-bearer spends no boundary of its online
+        -- history has exposed yet: the chain each confirm carries from the
+        -- account its receivers recorded (SA-116). Written with the step that
+        -- spent, taken out by the boundary that carries them online.
+        CREATE TABLE IF NOT EXISTS own_offline_spend(
+            bundle              BLOB NOT NULL,      -- 32B
+            anchor_counter      INTEGER NOT NULL,   -- u_i the spend started from
+            hop                 BLOB NOT NULL,      -- OfflineSpendHop
+            PRIMARY KEY(bundle, anchor_counter)
         );
         DROP TABLE IF EXISTS economic_admitted;
 
@@ -1873,6 +1981,11 @@ fn create_schema(conn: &Connection) -> Result<()> {
             ek_pubkey               BLOB NOT NULL,
             ek_sk_encrypted         BLOB NOT NULL,
             is_init                 INTEGER NOT NULL CHECK(is_init IN (0, 1)),
+            -- The Local head this key was certified by when it was stashed
+            -- (NULL at the relationship's first step): promotion advances
+            -- from it, and a later step of this device chained from the
+            -- pending key may move the head past it first.
+            prev_pubkey             BLOB,
             PRIMARY KEY (relationship_key, commitment_hash)
         );
 
@@ -2243,6 +2356,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&request).expect("sync should succeed");
 
@@ -2501,6 +2615,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: new_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2538,6 +2653,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: target_tip,
             target_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2573,6 +2689,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip,
             target_tip: tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -2602,6 +2719,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: wrong_parent,
             target_tip: new_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should not error");
@@ -2644,6 +2762,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: parent_tip,
             target_tip: next_tip,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         let outcome = bilateral_tip_sync::sync_bilateral_tips_atomically(&request)
             .expect("sync should succeed");
@@ -3157,6 +3276,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_a,
             target_tip: tip_b,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req1).expect("advance A→B");
         assert_eq!(
@@ -3173,6 +3293,7 @@ mod tests {
             counterparty_device_id: device_id,
             expected_parent_tip: tip_b,
             target_tip: tip_c,
+            crossing: bilateral_tip_sync::CrossingSteps::Refuse,
         };
         bilateral_tip_sync::sync_bilateral_tips_atomically(&req2).expect("advance B→C");
         assert_eq!(

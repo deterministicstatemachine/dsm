@@ -112,6 +112,10 @@ pub enum PendingAdmissionKind {
     /// credited. The new checkpoint cannot parent further progression until
     /// admitted.
     OfflineUnload { asset_policy_commit: [u8; 32] },
+    /// A settlement of value received offline (SA-91): the online balance to
+    /// be credited, funded by the payer's spend the payer's online history
+    /// exposed. It touches no offline account, so it fences no bearer asset.
+    OfflineSettle { asset_policy_commit: [u8; 32] },
     /// SoFi v8: an outstanding `TraderFulfillment` (P15-14).
     ///
     /// It fences a POSITION, not an asset: the claim at `q` is conditional
@@ -139,6 +143,8 @@ impl PendingAdmissionKind {
             | Self::OfflineUnload {
                 asset_policy_commit,
             } => Some(*asset_policy_commit),
+            // A settlement moves no offline account: no bearer use waits on it.
+            Self::OfflineSettle { .. } => None,
             // A fulfillment fences its POSITION. Naming an asset here would
             // be false twice over: the lineage fence already stops every
             // economic write regardless of asset, and the callers of this
@@ -159,6 +165,9 @@ impl PendingAdmissionKind {
                 asset_policy_commit,
             }
             | Self::OfflineUnload {
+                asset_policy_commit,
+            }
+            | Self::OfflineSettle {
                 asset_policy_commit,
             } => Some(*asset_policy_commit),
             Self::SofiFulfillment { fulfillment_id } => Some(*fulfillment_id),
@@ -253,7 +262,9 @@ impl AcceptedSubstrateCoords {
     fn fits(&self, kind: &PendingAdmissionKind) -> bool {
         let boundary = matches!(
             kind,
-            PendingAdmissionKind::OfflineLoad { .. } | PendingAdmissionKind::OfflineUnload { .. }
+            PendingAdmissionKind::OfflineLoad { .. }
+                | PendingAdmissionKind::OfflineUnload { .. }
+                | PendingAdmissionKind::OfflineSettle { .. }
         );
         boundary == matches!(self, Self::OfflineBoundary)
     }

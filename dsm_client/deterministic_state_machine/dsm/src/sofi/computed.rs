@@ -317,11 +317,6 @@ impl VerifiedTranscript {
         self.heads.get(index as usize)
     }
 
-    /// The head after the last entry.
-    pub fn last_head(&self) -> &D32 {
-        &self.heads[self.heads.len() - 1]
-    }
-
     /// The opened entries, in order: what the program sees.
     pub fn opened(&self) -> &[Opened] {
         &self.opened
@@ -819,11 +814,6 @@ impl ComputedCells {
         &self.start_key
     }
 
-    /// `P`, the program the terms pin.
-    pub fn program(&self) -> &D32 {
-        &self.program
-    }
-
     pub fn match_routed(&self) -> &RoutedCell {
         &self.match_cell
     }
@@ -925,11 +915,6 @@ impl MatchCellRead {
     /// The occupant holding the cell, if any.
     pub fn occupant(&self) -> Option<&MatchOccupant> {
         self.held.as_ref().map(|(occupant, _)| occupant)
-    }
-
-    /// The exact bytes holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     /// Why each value ahead of the one holding the cell counts as nothing.

@@ -15,25 +15,43 @@
 # Node IND_AMBIGUOUS_SELF_TYPE 10 -> 14: SA-152's per-peer cap implements
 # `PeerAddressed` on tokio's `TcpStream` (dsm_storage_node/src/liveness.rs), a
 # Self type outside the indexed workspace. The other rows move with the code.
+#
+# 2026-10-28, PR #1158 (CI map at b152ab04, against main's at ad831f53):
+# android IND_UNRESOLVED_CALL 67 -> 97. 33 symbols of dsm-anchor-core's new
+# `durable` module (the offline account's durable appliance, phases 2-4) have
+# methods named `prepare`, `read`, `store` and `write`; rusqlite's `prepare`
+# (client_db/bilateral_tip_sync.rs), `read` (client_db/mod.rs) and an atomic's
+# `store` (sdk/inbox_poller.rs) are unresolved calls of those names in reached
+# code, so the map cannot rule the module out. Three earlier rows resolved.
+# android IND_AMBIGUOUS_SELF_TYPE 15 -> 19 (the committed 14 had drifted to
+# 15 under the tenth): dsm-anchor-core's `impl<P: PartitionSig> HostSig for P`
+# (tropic.rs) makes `PartitionSig`, `part_verify` and that `verify` read over
+# a Self type `P`; and `impl From<ConnectError> for String`, which moved into
+# Core with DSM Connect (dsm/src/connect.rs, owner ruling 2026-10-28: one copy
+# of every counterparty rule, in Core). Node IND_AMBIGUOUS_SELF_TYPE 14 -> 38:
+# the same `dsm::connect` module is in the node build through `dsm`, and its
+# `ConnectError` with its 20 variants and fields, its `Display`, `Signed` and
+# that `From` impl read over the Self type `String`. The other rows move with
+# the code.
 artifact	state	code	count
-android	dead	DEAD_NO_ROOT_PATH	1645
-android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
+android	dead	DEAD_NO_ROOT_PATH	1571
+android	indeterminate	IND_AMBIGUOUS_SELF_TYPE	19
 android	indeterminate	IND_DISPATCH_SELF_TYPE	8
 android	indeterminate	IND_NOT_CONSTRUCTED	2
 android	indeterminate	IND_NOT_DISPATCHED	13
-android	indeterminate	IND_UNINDEXED_ARTIFACT	35
+android	indeterminate	IND_UNINDEXED_ARTIFACT	33
 android	indeterminate	IND_UNLINKED_IMPL	12
-android	indeterminate	IND_UNRESOLVED_CALL	67
-android	no-definition	OUTSIDE_SYMBOL	2403
-android	no-definition	WORKSPACE_SYMBOL	2876
-android	not-in-artifact	NOT_IN_ARTIFACT	4901
-android	reached	REACHED	3229
-android	reached	REACHED_VIA_DISPATCH	9003
-node	dead	DEAD_NO_ROOT_PATH	6884
-node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	14
-node	indeterminate	IND_UNLINKED_IMPL	291
-node	no-definition	OUTSIDE_SYMBOL	2330
-node	no-definition	WORKSPACE_SYMBOL	2814
-node	not-in-artifact	NOT_IN_ARTIFACT	2463
-node	reached	REACHED	377
-node	reached	REACHED_VIA_DISPATCH	115
+android	indeterminate	IND_UNRESOLVED_CALL	97
+android	no-definition	OUTSIDE_SYMBOL	2501
+android	no-definition	WORKSPACE_SYMBOL	2963
+android	not-in-artifact	NOT_IN_ARTIFACT	5600
+android	reached	REACHED	3388
+android	reached	REACHED_VIA_DISPATCH	9735
+node	dead	DEAD_NO_ROOT_PATH	7771
+node	indeterminate	IND_AMBIGUOUS_SELF_TYPE	38
+node	indeterminate	IND_UNLINKED_IMPL	287
+node	no-definition	OUTSIDE_SYMBOL	2428
+node	no-definition	WORKSPACE_SYMBOL	2901
+node	not-in-artifact	NOT_IN_ARTIFACT	2907
+node	reached	REACHED	378
+node	reached	REACHED_VIA_DISPATCH	116

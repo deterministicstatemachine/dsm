@@ -1,6 +1,7 @@
 # Gate G1 baseline (ci/sofi_reachability.py): pub fns under CORE/sofi that the
-# rebuild has not wired into production yet. One line per function, with the
-# rebuild step expected to wire it. A step that wires one DELETES its line;
+# rebuild has not wired into production yet. One line per function, as
+# `path name` (a method as `path Type::name`), with the rebuild step expected
+# to wire it. A step that wires one DELETES its line;
 # R14 deletes the file and G1 passes with no exceptions.
 #
 # TWO ENTRIES, BOTH THE SAME HOLE (2026-09-24), WIRED AND DELETED (2026-10-24).
@@ -24,8 +25,10 @@
 #     node store returns leaf VALUES, and the vault head past its genesis
 #     needs the leaf PREIMAGES a later acquisition consumes, so wiring them
 #     would not have made one past-genesis trade work.
-#   * `genesis_accepted` is DELETED from Rust and the rule it stated now lives
-#     in the formal layer alone (§44.4 again, and `GenesisAccepted` in Lean).
+#   * the standalone `genesis_accepted` predicate of 2026-09-21 was DELETED
+#     from Rust (§44.4, and `GenesisAccepted` in Lean). The name now holds
+#     SoFi §19.8's acceptance of a vault's genesis preimage against the
+#     owner's validated creation, which `sofi::resolve` calls in production.
 #
 # R14 deletes this file when the rest of its deliverable is real: the
 # post-genesis path that produces `ParentStatus::Orphaned`, the production
@@ -33,13 +36,10 @@
 # twelve device scenarios. Until then an empty list is an honest statement,
 # where a deleted file would be a claim.
 #
-# A THIRD ENTRY (2026-09-25), found when the gate started reading whole files
-# (ci/production_text.py) instead of stopping at a file's first `#[cfg(test)]`
-# item: `verify_signed_object` is the one verifier that binds a signed SoFi
-# object's key to an EXPECTED signer, and no production path calls it. P is
-# verified under the key it carries, a setup under P's key, and F under P's
-# key (MR-SOFI-0151; the shortcut audit of 2026-09-25, "No production SoFi
-# path binds a precommit's key to the trader it names"). The change that
-# binds the claimant key to the trader's proven AK wires it and deletes this
-# line.
-dsm_client/deterministic_state_machine/dsm/src/sofi/signature.rs verify_signed_object
+# A THIRD ENTRY (2026-09-25), DELETED (2026-10-27): `verify_signed_object`,
+# a verifier binding a signed SoFi object's key to an expected signer, which
+# no production path called. Recognition verifies each object under the key
+# its body commits (`publication::recognize_*`) and the verifier binds that
+# key to the one the parent claim commits (`conformance::fulfillment_
+# conformance`, MR-SOFI-0151), so it was deleted under rule T1 rather than
+# wired, with `PolicyFulfillmentAuxRef`, which nothing built or read.

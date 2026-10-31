@@ -196,7 +196,21 @@ mod tests {
     // +6 with key schedule KS1 (Extract-then-Expand): the three Extract salts
     // and twelve Expand / keyed labels replace the six v2 key-tree tags,
     // the v2 genesis nonce, the v1 GRK seed and the SDK entropy hash.
-    const EXPECTED_TAG_COUNT: usize = 412;
+    // +1 for an offline settlement's operation id (SA-91, §6.103).
+    // +9 with the rules a counterparty computes moving into Core (owner,
+    // 2026-10-28): the inbox address's three axes, the reply and cert-resync
+    // message ids and the copy key's content digest, which the SDK declared
+    // inline, and the authored object's namespace, statement and locator.
+    // -3 with the salted address no caller derived: `DSM/addr-{G,D,T}`.
+    // +1 with the cert-restart statement moving into Core (§6.117; the SDK
+    // declared it outside the registry).
+    // +2 with the spool submission ids of a transfer and of its artifacts
+    // moving into Core (§6.119; the SDK declared them inline).
+    // +2 with the restart request and done statements of a certificate
+    // restart (DSM Amendment A20).
+    // +1 with the join of two online transfers that cross (owner ruling,
+    // 2026-10-29: "both settle"): `DSM/relationship-join/v1`.
+    const EXPECTED_TAG_COUNT: usize = 425;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///
@@ -321,6 +335,56 @@ mod tests {
             names.len(),
             "a domain-tag constant name was declared more than once"
         );
+    }
+
+    /// SoFi §14.1, MR-SOFI-0105: a retired domain is never reused. No
+    /// registered tag names one, and no `tagged_domain!` anywhere in Core's
+    /// sources declares one, registered or not.
+    #[test]
+    fn no_tag_reuses_a_retired_domain() {
+        const RETIRED: &[&str] = &["DSM/sofi/route-outcome/v2"];
+        for tag in all_tags() {
+            assert!(
+                !RETIRED
+                    .iter()
+                    .any(|retired| retired.as_bytes() == tag.source_bytes()),
+                "the registered tag {:?} reuses a retired domain",
+                String::from_utf8_lossy(tag.source_bytes())
+            );
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut pending = vec![src];
+        while let Some(dir) = pending.pop() {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) => panic!("read {}: {e}", dir.display()),
+            };
+            for entry in entries {
+                let path = match entry {
+                    Ok(entry) => entry.path(),
+                    Err(e) => panic!("an entry of {}: {e}", dir.display()),
+                };
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(e) => panic!("read {}: {e}", path.display()),
+                };
+                for retired in RETIRED {
+                    let declared = format!("tagged_domain!(b\"{retired}\")");
+                    assert!(
+                        !text.contains(&declared),
+                        "{} declares the retired domain {retired}",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 
     /// Change-control tripwire. NOT a completeness guard — see the module note.

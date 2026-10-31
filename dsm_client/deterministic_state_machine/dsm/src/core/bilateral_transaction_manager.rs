@@ -23,7 +23,9 @@ use crate::types::device_state::BalanceDelta;
 use crate::types::error::{DeterministicSafetyClass, DsmError};
 use crate::types::operations::Operation;
 use crate::core::utility::labeling;
-use crate::common::domain_tags::{TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_SMT_KEY, TAG_TIP};
+use crate::common::domain_tags::{
+    TAG_BILATERAL_PRECOMMIT, TAG_BILATERAL_SESSION, TAG_RELATIONSHIP_JOIN, TAG_SMT_KEY, TAG_TIP,
+};
 
 // -------------------- Relationship Anchor (bytes-only, single shared tip) --------------------
 /// Per whitepaper §16.6: "For each {i,j} ∈ Rel there exists a forward-only chain C_{i,j}"
@@ -114,7 +116,11 @@ pub fn compute_smt_key(dev_id_a: &[u8; 32], dev_id_b: &[u8; 32]) -> [u8; 32] {
 /// Canonical bilateral pre-commit digest.
 ///
 /// `C_pre = H("DSM/precommit/commitment-hash/v2\0" || h_n || payload_i || e_i)`.
-pub fn compute_precommit(h_n: &[u8; 32], op_bytes: &[u8], entropy: &[u8]) -> [u8; 32] {
+pub fn compute_precommit(
+    h_n: &[u8; 32],
+    op_bytes: &[u8],
+    entropy: &[u8],
+) -> Result<[u8; 32], DsmError> {
     crate::commitments::precommit::branch_commitment_hash(h_n, op_bytes, entropy)
 }
 
@@ -134,6 +140,44 @@ pub fn compute_successor_tip(
     h.update(entropy);
     h.update(receipt_digest);
     bytes32(h.finalize().as_bytes())
+}
+
+/// The relationship tip two concurrent accepted steps leave (owner ruling,
+/// 2026-10-29: "both settle"). Two online transfers that cross — each from
+/// its own sender, each consuming that sender's own parent — are each a step
+/// from the one relationship tip `h_n` both devices held, to `one` and to
+/// `other` (each [`compute_successor_tip`] of its own signed step). Neither
+/// is rewritten onto the other's successor: both keep their own parent and
+/// their own successor, and the relationship continues from
+/// `H("DSM/relationship-join/v1" ‖ h_n ‖ lo ‖ hi)`, `lo` and `hi` the two
+/// successors in byte order, so either device, taking the two steps in either
+/// order, derives the same tip. Two equal successors are one step, not two:
+/// refused.
+pub fn join_concurrent_tips(
+    h_n: &[u8; 32],
+    one: &[u8; 32],
+    other: &[u8; 32],
+) -> Result<[u8; 32], DsmError> {
+    if one == other {
+        return Err(DsmError::invalid_operation(
+            "join_concurrent_tips: one step is not two concurrent steps",
+        ));
+    }
+    if one == h_n || other == h_n {
+        return Err(DsmError::invalid_operation(
+            "join_concurrent_tips: a successor is the tip it steps from",
+        ));
+    }
+    let (lo, hi) = if one < other {
+        (one, other)
+    } else {
+        (other, one)
+    };
+    let mut h = dsm_domain_hasher(TAG_RELATIONSHIP_JOIN);
+    h.update(h_n);
+    h.update(lo);
+    h.update(hi);
+    Ok(bytes32(h.finalize().as_bytes()))
 }
 
 /// The bytes the proposer's signature σ_A over the step `commitment_hash`
@@ -193,17 +237,17 @@ pub struct BilateralPreCommitment {
     pub parent_tip: [u8; 32],
 }
 impl BilateralPreCommitment {
-    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Self {
+    /// The precommitment of `operation` on `parent_tip`, refused when the
+    /// operation's bytes are longer than the length prefix can frame.
+    pub fn new(parent_tip: [u8; 32], operation: Operation) -> Result<Self, DsmError> {
         let mut h = dsm_domain_hasher(TAG_BILATERAL_PRECOMMIT);
-        canonical_lp::write_lp(&mut h, &parent_tip);
-        canonical_lp::write_lp(&mut h, &operation.to_bytes());
-        let mut bilateral_commitment_hash = [0u8; 32];
-        bilateral_commitment_hash.copy_from_slice(h.finalize().as_bytes());
-        Self {
-            bilateral_commitment_hash,
+        canonical_lp::write_lp(&mut h, &parent_tip)?;
+        canonical_lp::write_lp(&mut h, &operation.to_bytes())?;
+        Ok(Self {
+            bilateral_commitment_hash: *h.finalize().as_bytes(),
             operation,
             parent_tip,
-        }
+        })
     }
 }
 
@@ -607,7 +651,7 @@ impl BilateralTransactionManager {
         // acceptance proof this step finalizes on. Contact exchange / online
         // verification comes before an offline prepare.
         self.require_contact_signing_key(remote_device_id)?;
-        let bilateral = BilateralPreCommitment::new(parent_tip, operation);
+        let bilateral = BilateralPreCommitment::new(parent_tip, operation)?;
         self.pending_commitments
             .insert(bilateral.bilateral_commitment_hash, bilateral.clone());
         Ok(bilateral)
@@ -816,7 +860,7 @@ impl BilateralTransactionManager {
         if !self.relationships.contains_key(remote_device_id) {
             return Err(DsmError::RelationshipNotFound("remote device".into()));
         }
-        let pre = BilateralPreCommitment::new(parent_tip, operation);
+        let pre = BilateralPreCommitment::new(parent_tip, operation)?;
         if &pre.bilateral_commitment_hash != commitment_hash {
             return Err(DsmError::invalid_operation(
                 "the persisted step does not hash to the session's commitment",
@@ -873,6 +917,48 @@ mod tests {
         assert_eq!(base, explicit);
     }
 
+    /// Two concurrent steps from one tip join into one tip both devices
+    /// derive (owner ruling, 2026-10-29: "both settle"): the same in either
+    /// order, `H("DSM/relationship-join/v1" ‖ h_n ‖ lo ‖ hi)` exactly, none of
+    /// the tips it joins, different for any other pair, and refused for one
+    /// step taken twice or a successor that is its own parent.
+    /// MUTATION CONTROL: joining the two successors in the order given, not in
+    /// byte order, turns this red, and the crossing test with it.
+    #[test]
+    fn two_concurrent_steps_join_into_one_tip_whichever_comes_first() {
+        let h_n = [0x10u8; 32];
+        let (one, other, third) = ([0x20u8; 32], [0x30u8; 32], [0x40u8; 32]);
+        let joined = join_concurrent_tips(&h_n, &one, &other).expect("two steps join");
+        assert_eq!(
+            joined,
+            join_concurrent_tips(&h_n, &other, &one).expect("in the other order"),
+            "either device, taking the two in either order, derives one tip"
+        );
+        let explicit = {
+            let mut h = dsm_domain_hasher(TAG_RELATIONSHIP_JOIN);
+            h.update(&h_n);
+            h.update(&one);
+            h.update(&other);
+            bytes32(h.finalize().as_bytes())
+        };
+        assert_eq!(joined, explicit);
+        for tip in [h_n, one, other] {
+            assert_ne!(joined, tip, "the join is a tip of its own");
+        }
+        assert_ne!(
+            joined,
+            join_concurrent_tips(&h_n, &one, &third).expect("another pair"),
+            "another pair of steps leaves another tip"
+        );
+        assert_ne!(
+            joined,
+            join_concurrent_tips(&third, &one, &other).expect("another parent"),
+            "the same steps from another tip leave another tip"
+        );
+        join_concurrent_tips(&h_n, &one, &one).expect_err("one step is not two");
+        join_concurrent_tips(&h_n, &h_n, &other).expect_err("a successor is not its parent");
+    }
+
     /// `h_0` and a step precommitment are hashed under different registered
     /// tags. Both used `DSM/bilateral-session`, so the two meanings shared one
     /// domain and were told apart only by how their fields happened to be
@@ -881,24 +967,25 @@ mod tests {
     /// MUTATION CONTROL: hash the precommitment under `TAG_BILATERAL_SESSION`
     /// again and this goes red.
     #[test]
-    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() {
+    fn a_precommitment_is_hashed_under_its_own_tag_not_h0s() -> Result<(), DsmError> {
         let parent_tip = [0x5Eu8; 32];
-        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop);
-        let under = |tag| {
+        let pre = BilateralPreCommitment::new(parent_tip, Operation::Noop)?;
+        let under = |tag| -> Result<[u8; 32], DsmError> {
             let mut h = dsm_domain_hasher(tag);
-            canonical_lp::write_lp(&mut h, &parent_tip);
-            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes());
-            bytes32(h.finalize().as_bytes())
+            canonical_lp::write_lp(&mut h, &parent_tip)?;
+            canonical_lp::write_lp(&mut h, &Operation::Noop.to_bytes())?;
+            Ok(bytes32(h.finalize().as_bytes()))
         };
         assert_eq!(
             pre.bilateral_commitment_hash,
-            under(TAG_BILATERAL_PRECOMMIT)
+            under(TAG_BILATERAL_PRECOMMIT)?
         );
-        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION));
+        assert_ne!(pre.bilateral_commitment_hash, under(TAG_BILATERAL_SESSION)?);
         assert_ne!(
             TAG_BILATERAL_PRECOMMIT.source_bytes(),
             TAG_BILATERAL_SESSION.source_bytes()
         );
+        Ok(())
     }
 
     /// Formatting the manager names its identity and its signing public key,
@@ -998,6 +1085,7 @@ mod tests {
     fn signed_transfer_op(kp: &SignatureKeyPair, message: &str, nonce: u8) -> Operation {
         let mut op = Operation::Transfer {
             policy_commit: [0u8; 32],
+            token_policy: Vec::new(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![nonce; 8],

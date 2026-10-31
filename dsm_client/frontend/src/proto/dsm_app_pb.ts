@@ -8663,7 +8663,10 @@ export class AuthorityEvidenceV1 extends Message<AuthorityEvidenceV1> {
  * chain, so the acceptance bundle references each side's predecessor by
  * signer identity through these objects. `prior_step_addr` absent means
  * relationship genesis: the expected certifying key is the signer's
- * P0-P6-proven AK.
+ * P0-P6-proven AK. A step's authority is either the previous key's
+ * certificate or, for a restart (DSM Amendment A20), both devices' AK
+ * signatures over one restart statement; a restart's `h_n` is the agreed
+ * accepted tip and its `prior_step_addr` is the step it continues.
  *
  * @generated from message dsm.EkCertStepV1
  */
@@ -8674,11 +8677,23 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   ekPk = new Uint8Array(0);
 
   /**
-   * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
-   *
-   * @generated from field: bytes ek_cert = 2;
+   * @generated from oneof dsm.EkCertStepV1.authority
    */
-  ekCert = new Uint8Array(0);
+  authority: {
+    /**
+     * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+     *
+     * @generated from field: bytes ek_cert = 2;
+     */
+    value: Uint8Array;
+    case: "ekCert";
+  } | {
+    /**
+     * @generated from field: dsm.CertRestartV1 restart = 5;
+     */
+    value: CertRestartV1;
+    case: "restart";
+  } | { case: undefined; value?: undefined } = { case: undefined };
 
   /**
    * @generated from field: bytes h_n = 3;
@@ -8699,7 +8714,8 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   static readonly typeName = "dsm.EkCertStepV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "ek_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "authority" },
+    { no: 5, name: "restart", kind: "message", T: CertRestartV1, oneof: "authority" },
     { no: 3, name: "h_n", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
@@ -8718,6 +8734,68 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
 
   static equals(a: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined, b: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined): boolean {
     return proto3.util.equals(EkCertStepV1, a, b);
+  }
+}
+
+/**
+ * The authority of a restart step (DSM Amendment A20): the epoch, the
+ * preserved acceptance commitment of the agreed accepted step, and both
+ * devices' AK signatures over
+ * H(DSM/cert-restart/v1 ‖ relationship ‖ predecessor ‖ agreed tip ‖ epoch ‖
+ * commitment ‖ new key). The relationship is the two devices' own; the
+ * predecessor, agreed tip and new key are the step's own fields.
+ *
+ * @generated from message dsm.CertRestartV1
+ */
+export class CertRestartV1 extends Message<CertRestartV1> {
+  /**
+   * @generated from field: uint64 epoch = 1;
+   */
+  epoch = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes preserved_acceptance_commitment = 2;
+   */
+  preservedAcceptanceCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes restarting_sig = 3;
+   */
+  restartingSig = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_sig = 4;
+   */
+  counterpartySig = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CertRestartV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CertRestartV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "epoch", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "preserved_acceptance_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "restarting_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CertRestartV1 | PlainMessage<CertRestartV1> | undefined, b: CertRestartV1 | PlainMessage<CertRestartV1> | undefined): boolean {
+    return proto3.util.equals(CertRestartV1, a, b);
   }
 }
 
@@ -11788,6 +11866,14 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
    */
   pkChip = new Uint8Array(0);
 
+  /**
+   * The public birth commitment S_birth B commits: with the keys above, the sender's pinned
+   * online key and its device id, the receiver recomputes B from what is disclosed.
+   *
+   * @generated from field: bytes birth_commitment = 10;
+   */
+  birthCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AnchorDisclosure>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11802,6 +11888,7 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
     { no: 4, name: "partition_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "pk_chip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "birth_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorDisclosure {
@@ -12505,7 +12592,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   /**
    * §11.1 receiver counter-sign: receiver's locally-built copy of the
    * stitched receipt with B-side per-step EK signing artifacts
-   * (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+   * (ek_pk_b / ek_cert_b / sig_b) stamped on top of the
    * sender's A-side fields. Sender verifies this on receipt and persists
    * a fully co-signed copy to its own archive. This field is required for
    * offline receipt authorization.
@@ -12604,6 +12691,15 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    */
   anchorDisclosure?: AnchorDisclosure;
 
+  /**
+   * The sender's offline spends since the boundary of its online history that left the account
+   * its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
+   * spend starts at that account.
+   *
+   * @generated from field: dsm.OfflineSpendChain offline_spend_chain = 16;
+   */
+  offlineSpendChain?: OfflineSpendChain;
+
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12619,6 +12715,7 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "anchor_disclosure", kind: "message", T: AnchorDisclosure },
+    { no: 16, name: "offline_spend_chain", kind: "message", T: OfflineSpendChain },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -12763,28 +12860,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
-   * deterministic Kyber coins from
-   *   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
-   *                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
-   * encapsulates against the recipient's Kyber public key, and the
-   * resulting ciphertext travels here. The recipient decapsulates with
-   * their local Kyber secret key to recover the same shared secret `ss`,
-   * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
-   * arrive at identical k_step, which is then mixed into the per-step
-   * EK derivation alongside Smaster. Wire-only — not part of canonical
-   * commit form (§4.2.1).
-   *
-   * @generated from field: bytes kyber_ct_a = 18;
-   */
-  kyberCtA = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes kyber_ct_b = 19;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
    * value Core derived inside DeviceState::advance for this step. CANONICAL —
    * part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -12827,8 +12902,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 15, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 16, name: "ek_pk_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 22, name: "step_writes", kind: "message", T: StepWriteSet },
   ]);
@@ -13174,6 +13247,105 @@ export class OfflineStateProof extends Message<OfflineStateProof> {
 
   static equals(a: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined, b: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined): boolean {
     return proto3.util.equals(OfflineStateProof, a, b);
+  }
+}
+
+/**
+ * One offline-bearer spend of an offline account as its anchor released it: the release
+ * (dsm.anchor.OfflineRelease — Δ, Π_i, Π_{i+1} and the certificate carrying σ^chip and σ^host),
+ * the spend's account witness, and what it moved. Π_i and Π_{i+1} prove the release's device
+ * roots commit the account before and after; the witness folds the one into the other.
+ *
+ * @generated from message dsm.OfflineSpendHop
+ */
+export class OfflineSpendHop extends Message<OfflineSpendHop> {
+  /**
+   * @generated from field: bytes release = 1;
+   */
+  release = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.StepWriteOfflineAccount spend = 2;
+   */
+  spend?: StepWriteOfflineAccount;
+
+  /**
+   * @generated from field: bytes asset = 3;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<OfflineSpendHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "spend", kind: "message", T: StepWriteOfflineAccount },
+    { no: 3, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined, b: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendHop, a, b);
+  }
+}
+
+/**
+ * An offline account's spends, in order.
+ *
+ * @generated from message dsm.OfflineSpendChain
+ */
+export class OfflineSpendChain extends Message<OfflineSpendChain> {
+  /**
+   * @generated from field: repeated dsm.OfflineSpendHop hops = 1;
+   */
+  hops: OfflineSpendHop[] = [];
+
+  constructor(data?: PartialMessage<OfflineSpendChain>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendChain";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: OfflineSpendHop, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined, b: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendChain, a, b);
   }
 }
 
@@ -18299,6 +18471,14 @@ export class Envelope extends Message<Envelope> {
     case: "moneyWaitingResponse";
   } | {
     /**
+     * Reply to `wallet.pendingOffline`.
+     *
+     * @generated from field: dsm.PendingOfflineValueResponse pending_offline_value_response = 140;
+     */
+    value: PendingOfflineValueResponse;
+    case: "pendingOfflineValueResponse";
+  } | {
+    /**
      * Reply to `token.adoptionQr`.
      *
      * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
@@ -18424,6 +18604,7 @@ export class Envelope extends Message<Envelope> {
     { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
     { no: 139, name: "money_waiting_response", kind: "message", T: MoneyWaitingResponse, oneof: "payload" },
+    { no: 140, name: "pending_offline_value_response", kind: "message", T: PendingOfflineValueResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
@@ -23220,11 +23401,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes kyber_ct_b = 6;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The recipient's own canonical relationship pair for the applied step: its
    * local lineage head before this apply (parent) and after it (child) — the
    * exact parent the recipient will sign under when IT next originates.
@@ -23270,7 +23446,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
     { no: 3, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "b_parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "b_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "recipient_economic_release_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -23914,6 +24089,132 @@ export class OfflineAllocationView extends Message<OfflineAllocationView> {
 
   static equals(a: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined, b: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined): boolean {
     return proto3.util.equals(OfflineAllocationView, a, b);
+  }
+}
+
+/**
+ * One payment this device received offline and holds pending: its value
+ * settles online only once the payer's return online exposes its signed spend
+ * chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+ * the offline allocation, and nothing spends it until it settles.
+ *
+ * @generated from message dsm.PendingOfflineReceiptView
+ */
+export class PendingOfflineReceiptView extends Message<PendingOfflineReceiptView> {
+  /**
+   * The token's policy commit, and its ticker and decimals as Rust read them.
+   *
+   * @generated from field: bytes asset = 1;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ticker = 2;
+   */
+  ticker = "";
+
+  /**
+   * @generated from field: uint32 decimals = 3;
+   */
+  decimals = 0;
+
+  /**
+   * @generated from field: uint64 base_units = 4;
+   */
+  baseUnits = protoInt64.zero;
+
+  /**
+   * Display form of `base_units`, rendered by Rust.
+   *
+   * @generated from field: string display_amount = 5;
+   */
+  displayAmount = "";
+
+  /**
+   * The paying contact's alias, or its device id in Base32 when it has none.
+   *
+   * @generated from field: string payer = 6;
+   */
+  payer = "";
+
+  /**
+   * `M`, the release message the payer's anchor signed: the receipt's id.
+   *
+   * @generated from field: bytes release_message = 7;
+   */
+  releaseMessage = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PendingOfflineReceiptView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineReceiptView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "payer", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "release_message", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined, b: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineReceiptView, a, b);
+  }
+}
+
+/**
+ * wallet.pendingOffline: every payment received offline and not yet settled,
+ * oldest first.
+ *
+ * @generated from message dsm.PendingOfflineValueResponse
+ */
+export class PendingOfflineValueResponse extends Message<PendingOfflineValueResponse> {
+  /**
+   * @generated from field: repeated dsm.PendingOfflineReceiptView receipts = 1;
+   */
+  receipts: PendingOfflineReceiptView[] = [];
+
+  constructor(data?: PartialMessage<PendingOfflineValueResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineValueResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipts", kind: "message", T: PendingOfflineReceiptView, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined, b: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineValueResponse, a, b);
   }
 }
 
@@ -28776,6 +29077,342 @@ export class CellCommitProofV1 extends Message<CellCommitProofV1> {
 
   static equals(a: CellCommitProofV1 | PlainMessage<CellCommitProofV1> | undefined, b: CellCommitProofV1 | PlainMessage<CellCommitProofV1> | undefined): boolean {
     return proto3.util.equals(CellCommitProofV1, a, b);
+  }
+}
+
+/**
+ * The reads of one cell a client kept with a final value it memoised, so
+ * Core proves the value final again, offline, from what was read (storage
+ * spec §9 rule 11). Client store only; never sent.
+ *
+ * @generated from message dsm.KeptCellReadsV1
+ */
+export class KeptCellReadsV1 extends Message<KeptCellReadsV1> {
+  /**
+   * one per route position, in route order
+   *
+   * @generated from field: repeated dsm.KeptSeatReadsV1 seats = 1;
+   */
+  seats: KeptSeatReadsV1[] = [];
+
+  constructor(data?: PartialMessage<KeptCellReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCellReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "seats", kind: "message", T: KeptSeatReadsV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined, b: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptCellReadsV1, a, b);
+  }
+}
+
+/**
+ * What the client held about one seat: its folded arrival log at the cell,
+ * its committed state there, and its mirror of the leader's ByteCommits.
+ *
+ * @generated from message dsm.KeptSeatReadsV1
+ */
+export class KeptSeatReadsV1 extends Message<KeptSeatReadsV1> {
+  /**
+   * absent when the seat was not read
+   *
+   * @generated from field: dsm.KeptHeldLogV1 values = 1;
+   */
+  values?: KeptHeldLogV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 committed = 2;
+   */
+  committed?: KeptCommittedV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 leader_seen = 3;
+   */
+  leaderSeen?: KeptCommittedV1;
+
+  constructor(data?: PartialMessage<KeptSeatReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptSeatReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "values", kind: "message", T: KeptHeldLogV1 },
+    { no: 2, name: "committed", kind: "message", T: KeptCommittedV1 },
+    { no: 3, name: "leader_seen", kind: "message", T: KeptCommittedV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined, b: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptSeatReadsV1, a, b);
+  }
+}
+
+/**
+ * A seat's arrival log at one cell as the client folded it: the running hash
+ * through every entry, and the copies of the cell it kept, each with where it
+ * arrived. Each distinct value is held once.
+ *
+ * @generated from message dsm.KeptHeldLogV1
+ */
+export class KeptHeldLogV1 extends Message<KeptHeldLogV1> {
+  /**
+   * entries folded
+   *
+   * @generated from field: uint64 count = 1;
+   */
+  count = protoInt64.zero;
+
+  /**
+   * running hash after the last
+   *
+   * @generated from field: bytes head = 2;
+   */
+  head = new Uint8Array(0);
+
+  /**
+   * running hashes a ByteCommit's proof asked for
+   *
+   * @generated from field: repeated dsm.KeptRunningHashV1 marks = 3;
+   */
+  marks: KeptRunningHashV1[] = [];
+
+  /**
+   * @generated from field: repeated bytes values = 4;
+   */
+  values: Uint8Array[] = [];
+
+  /**
+   * in arrival order
+   *
+   * @generated from field: repeated dsm.KeptHeldCopyV1 copies = 5;
+   */
+  copies: KeptHeldCopyV1[] = [];
+
+  constructor(data?: PartialMessage<KeptHeldLogV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldLogV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "count", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "head", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "marks", kind: "message", T: KeptRunningHashV1, repeated: true },
+    { no: 4, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 5, name: "copies", kind: "message", T: KeptHeldCopyV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined, b: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldLogV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptRunningHashV1
+ */
+export class KeptRunningHashV1 extends Message<KeptRunningHashV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<KeptRunningHashV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptRunningHashV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined, b: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined): boolean {
+    return proto3.util.equals(KeptRunningHashV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptHeldCopyV1
+ */
+export class KeptHeldCopyV1 extends Message<KeptHeldCopyV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes seat = 3;
+   */
+  seat = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 position = 4;
+   */
+  position = 0;
+
+  /**
+   * @generated from field: repeated dsm.ChainSlotV1 chain = 5;
+   */
+  chain: ChainSlotV1[] = [];
+
+  /**
+   * index into the log's values
+   *
+   * @generated from field: uint32 value = 6;
+   */
+  value = 0;
+
+  constructor(data?: PartialMessage<KeptHeldCopyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldCopyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "seat", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "chain", kind: "message", T: ChainSlotV1, repeated: true },
+    { no: 6, name: "value", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined, b: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldCopyV1, a, b);
+  }
+}
+
+/**
+ * A member's committed state at a cell: its ByteCommit, the one before it,
+ * and the proof the ByteCommit commits the cell's latest entry.
+ *
+ * @generated from message dsm.KeptCommittedV1
+ */
+export class KeptCommittedV1 extends Message<KeptCommittedV1> {
+  /**
+   * @generated from field: dsm.ByteCommitV4 commit = 1;
+   */
+  commit?: ByteCommitV4;
+
+  /**
+   * absent at cycle 1
+   *
+   * @generated from field: dsm.ByteCommitV4 parent = 2;
+   */
+  parent?: ByteCommitV4;
+
+  /**
+   * @generated from field: dsm.CellCommitProofV1 proof = 3;
+   */
+  proof?: CellCommitProofV1;
+
+  constructor(data?: PartialMessage<KeptCommittedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCommittedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "commit", kind: "message", T: ByteCommitV4 },
+    { no: 2, name: "parent", kind: "message", T: ByteCommitV4 },
+    { no: 3, name: "proof", kind: "message", T: CellCommitProofV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined, b: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined): boolean {
+    return proto3.util.equals(KeptCommittedV1, a, b);
   }
 }
 

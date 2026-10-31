@@ -67,9 +67,6 @@
 //! duplicate is malformed). A `RefContentAddr` may not name a class that
 //! depends on the current E or that has its own reference variant.
 //!
-//! `0x0042 PolicyFulfillmentAuxRef`: 1 `policy_fulfillment_id` digest32 ·
-//! 2 `evidence_class` u16 · 3 `addr` digest32.
-//!
 //!
 //!
 //! `0x004A RouteLegSet` (`Γ`): 1 `legs` `seq<(vault_id, parent_root,
@@ -219,9 +216,8 @@ pub mod objects;
 
 pub use objects::*;
 
-/// The fixed storage profile: exactly five committed members.
-pub const STORAGE_MEMBER_COUNT: usize = 5;
-/// Storage finality: three matching write-once cells. `3 + 3 > 5`.
+/// Storage finality: three matching write-once cells of the five committed
+/// members. `3 + 3 > 5`.
 pub const STORAGE_FINALITY_COUNT: usize = 3;
 /// Beta route cardinality: two hops across two distinct vaults.
 ///

@@ -7,6 +7,7 @@ import type { BalanceHoldingView, TokenBalanceView } from '../../../dsm/types';
 import { TokenMark } from '../../TokenMark';
 import BluetoothIcon from '../../icons/BluetoothIcon';
 import type { DomainTransaction } from '../../../domain/types';
+import type { PendingOfflineState } from './hooks/usePendingOffline';
 
 const MAX_OVERVIEW_BALANCES = 5;
 
@@ -14,6 +15,8 @@ type Props = {
   balances: TokenBalanceView[];
   /** The store has not answered balances yet: neither a holding nor an empty wallet is known. */
   balancesLoading: boolean;
+  /** Payments received offline and held pending: in no balance above until they settle. */
+  pendingOffline: PendingOfflineState;
   transactions: DomainTransaction[];
   genesisB32: string;
   deviceB32: string;
@@ -21,7 +24,7 @@ type Props = {
   onSwitchToHistory: () => void;
 };
 
-function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
+function OverviewTabInner({ balances, balancesLoading, pendingOffline, transactions, genesisB32, deviceB32, onSwitchToSend, onSwitchToHistory }: Props): React.JSX.Element {
   const [showAllBalances, setShowAllBalances] = useState(false);
   const [expandedTxId, setExpandedTxId] = useState<string | null>(null);
   // Currencies, or the state objects (supply-one tokens: creatures, items) the wallet holds.
@@ -103,6 +106,30 @@ function OverviewTabInner({ balances, balancesLoading, transactions, genesisB32,
           </>
         )}
       </section>
+
+      {/* Received offline and not yet settled: shown apart from the balances,
+          which do not include it, and not spendable until the payer comes
+          back online and the payment settles. */}
+      {(pendingOffline.receipts.length > 0 || pendingOffline.error) && (
+        <section className="sb-card" aria-label="Pending settlement" data-testid="pending-offline">
+          <div className="sb-card__title">
+            <span className="sb-hero__label">Pending settlement</span>
+          </div>
+          <div className="sb-hero__sub">Received offline. Spendable once the payer is back online and it settles.</div>
+          {pendingOffline.receipts.map((r, i) => (
+            <div className="sb-kv" style={{ padding: '6px 0' }} key={i} data-testid="pending-offline-receipt">
+              <span className="sb-kv__k" style={{ fontSize: 11, textTransform: 'none', letterSpacing: 0, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <TokenMark ticker={r.ticker} />
+                {r.ticker} from {r.payer}
+              </span>
+              <span className="sb-kv__v" style={{ fontSize: 13, fontWeight: 600 }}>{r.displayAmount}</span>
+            </div>
+          ))}
+          {pendingOffline.error && (
+            <div className="sb-hero__sub" role="alert">Pending payments could not be read: {pendingOffline.error}</div>
+          )}
+        </section>
+      )}
 
       <div className="sb-actions" style={{ marginTop: 0 }}>
         <button type="button" onClick={onSwitchToSend} className="sb-btn sb-btn--primary">Send</button>

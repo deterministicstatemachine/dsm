@@ -14,7 +14,7 @@
 use serial_test::serial;
 
 use dsm::economic::native_reserve::{
-    NativeReserveState, SuccessorCell, WalkStop, ERA_RESERVE_GENESIS_SUPPLY,
+    reserve_genesis_supply, NativeReserveState, SuccessorCell, WalkStop,
 };
 
 use crate::bridge::{AppInvoke, AppQuery, AppRouter};
@@ -58,7 +58,7 @@ async fn reserve_head() -> NativeReserveState {
     .expect("join")
     .expect("walk");
     match stop {
-        WalkStop::Head(state) => state,
+        WalkStop::Head(head) => *head.state(),
         other => panic!("the reserve walk stopped short of its head: {other:?}"),
     }
 }
@@ -66,7 +66,7 @@ async fn reserve_head() -> NativeReserveState {
 /// The release final at `generation`, as a verifier reads it.
 async fn release_at(generation: u64) -> dsm::economic::provenance::ReserveReleaseWin {
     let handle = tokio::runtime::Handle::current();
-    let reserve_id = reserve_genesis().reserve_id;
+    let reserve_id = *reserve_genesis().reserve_id();
     tokio::task::spawn_blocking(move || {
         let set = canonical_set(NETWORK).expect("canonical set");
         crate::sdk::native_reserve::release_at(&set, NETWORK, &handle, &reserve_id, generation)
@@ -186,15 +186,15 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let att_a = [0x5D; 32];
     let drain = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
-            reserve_id: r0.reserve_id,
+            reserve_id: *r0.reserve_id(),
             parent_root: r0.root(),
             generation: 1,
-            amount: r0.remaining_supply,
+            amount: r0.remaining_supply(),
             recipient_genesis: [0x5A; 32],
             recipient_devid: dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a),
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
-            storage_set_id: r0.storage_set_id,
+            storage_set_id: *r0.storage_set_id(),
             source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk,
                 claimant_att_a: att_a,
@@ -206,7 +206,7 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &drain)
         .await
         .expect("the nodes keep whatever they are given");
-    assert!(write.reached_leader());
+    assert_eq!(write.leader(), crate::sdk::route_seats::AtLeader::Link);
 
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
@@ -218,10 +218,10 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
         "generation 1 is the claimant's, not the drain's"
     );
     let head = reserve_head().await;
-    assert_eq!(head.generation, 1);
+    assert_eq!(head.generation(), 1);
     assert_eq!(
-        head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(100)
+        head.remaining_supply(),
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(100)
     );
 }
 
@@ -239,7 +239,7 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
     let impostor = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
-            reserve_id: r0.reserve_id,
+            reserve_id: *r0.reserve_id(),
             parent_root: r0.root(),
             generation: 1,
             amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
@@ -247,7 +247,7 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
             recipient_devid: d.identity.device_id,
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
-            storage_set_id: r0.storage_set_id,
+            storage_set_id: *r0.storage_set_id(),
             source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk,
                 claimant_att_a: [0x5D; 32],
@@ -259,7 +259,7 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &impostor)
         .await
         .expect("the nodes keep whatever they are given");
-    assert!(write.reached_leader());
+    assert_eq!(write.leader(), crate::sdk::route_seats::AtLeader::Link);
 
     let outcome = claim_era_faucet(d.core(), NETWORK)
         .await
@@ -271,6 +271,153 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
         "the impostor's release holds nothing"
     );
     assert_eq!(recipient_of(&won), d.identity.device_id);
+}
+
+/// A payout release of generation 1 from `r0`, signed by a fresh key for the
+/// device that key derives with `att_a`: one the claim policy allows. The
+/// release and the device it credits.
+fn payout_release(r0: &NativeReserveState, att_a: [u8; 32]) -> (Vec<u8>, [u8; 32]) {
+    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    let devid = dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a);
+    let release = dsm::economic::native_reserve::sign_release(
+        &dsm::economic::native_reserve::NativeReserveReleaseBody {
+            reserve_id: *r0.reserve_id(),
+            parent_root: r0.root(),
+            generation: 1,
+            amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            recipient_genesis: [0x5A; 32],
+            recipient_devid: devid,
+            recipient_economic_position: 1,
+            recipient_operation_digest: [0x5C; 32],
+            storage_set_id: *r0.storage_set_id(),
+            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
+                claimant_public_key: pk,
+                claimant_att_a: att_a,
+            },
+        },
+        &sk,
+    )
+    .expect("signed");
+    (release, devid)
+}
+
+/// MR-STOR-0134, the faucet's race at a reserve cell. Two claimants release
+/// generation 1 at once, and the winner's release is first at the leader of
+/// the reserve's first successor cell when the loser's reaches the faucet's
+/// writer. The writer records the cell taken, with the winner's leader
+/// record, and puts nothing of the losing release on any member. A claim
+/// then walks to the moved head and takes the generation after.
+/// MUTATION CONTROL: reading another release first at the leader as an open
+/// cell puts the losing release at the leader and carries it along the
+/// route; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_beaten_to_the_reserve_leader_is_recorded_taken() {
+    use crate::sdk::route_seats::AtLeader;
+    use dsm::route_chain::{ChainSlot, RouteEntry};
+    let d = Device::start(0xA9).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let (winner, winner_devid) = payout_release(&r0, [0x5D; 32]);
+    let (loser, _) = payout_release(&r0, [0x5E; 32]);
+
+    let won = crate::sdk::native_reserve::write_release(&set, &r0, &winner)
+        .await
+        .expect("the winner's release is written");
+    let Some(ChainSlot::Link(winner_link)) = won.slots.first().cloned() else {
+        panic!("the winner is first at the leader: {:?}", won.slots);
+    };
+    let lost = crate::sdk::native_reserve::write_release(&set, &r0, &loser)
+        .await
+        .expect("the loser's write is reported");
+    assert_eq!(lost.leader(), AtLeader::Taken);
+    assert_eq!(lost.slots, vec![ChainSlot::Taken(winner_link)]);
+    let cell =
+        SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
+    let held = crate::sdk::storage_node_sdk::SetClient::new(&set)
+        .expect("a client of the set")
+        .held_at(cell.routed().namespace(), cell.routed().key())
+        .await;
+    for (member, values) in held.iter().enumerate() {
+        let values = values.as_ref().expect("every member answers");
+        assert!(
+            values
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .all(|entry| entry.value != loser),
+            "member {member} holds the losing release"
+        );
+    }
+    assert_eq!(recipient_of(&release_at(1).await), winner_devid);
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
+}
+
+/// MR-STOR-0134, the faucet's own race. Another claimant's release lands at
+/// the leader of the reserve's first successor cell between this claim's
+/// walk, which found the cell open, and its write. The claim's write is taken
+/// there. The claim does not stop on it as on a leader that did not answer:
+/// it walks again, carries the other release's chain, which reached only the
+/// leader, to finality, and takes generation 2. Nothing of its own release
+/// for generation 1 is carried past that cell's leader.
+/// MUTATION CONTROL: answering the taken write as an unreachable leader fails
+/// the claim; this turns red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_landing_between_the_walk_and_the_write_moves_the_claim_on() {
+    use dsm::route_chain::RouteEntry;
+    let d = Device::start(0xAA).await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let r0 = reserve_genesis();
+    let cell =
+        SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
+    let route = cell.routed().route();
+    let leader = String::from_utf8(route.leader().to_vec()).expect("member ids are UTF-8");
+    let (rival, rival_devid) = payout_release(&r0, [0x5F; 32]);
+    let entry = dsm::route_chain::leader_copy(cell.routed(), &rival);
+    d.nodes.race_next_put(
+        &leader,
+        crate::test_support::rival::rival_put(
+            &set,
+            &leader,
+            (entry.namespace.clone(), entry.key, entry.encode()),
+        ),
+    );
+
+    let outcome = claim_era_faucet(d.core(), NETWORK)
+        .await
+        .expect("the claim lands");
+    assert!(
+        !d.nodes.rival_armed(&leader),
+        "the other release landed during the claim"
+    );
+    assert_eq!(outcome.tokens_received, whole_era(100));
+    assert_eq!(recipient_of(&release_at(1).await), rival_devid);
+    assert_eq!(recipient_of(&release_at(2).await), d.identity.device_id);
+    let client = crate::sdk::storage_node_sdk::SetClient::new(&set).expect("a client of the set");
+    let held = client
+        .held_at(cell.routed().namespace(), cell.routed().key())
+        .await;
+    let past_the_leader = client
+        .members()
+        .iter()
+        .zip(&held)
+        .filter(|(member, _)| member.member_id().as_bytes() != route.leader());
+    for (member, values) in past_the_leader {
+        let values = values.as_ref().expect("every member answers");
+        assert!(
+            values
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .all(|entry| entry.value == rival),
+            "{} holds a generation-1 release other than the one that won",
+            member.member_id()
+        );
+    }
 }
 
 /// The route claims for the device that makes the request, and for no other:
@@ -344,7 +491,7 @@ async fn a_repeat_claimant_succeeds_on_the_next_generation() {
         whole_era(200),
         "two claims, exactly 200 ERA"
     );
-    assert_eq!(reserve_head().await.generation, 2);
+    assert_eq!(reserve_head().await.generation(), 2);
 }
 
 /// A walk reads the reserve's cells ahead of it together. After three
@@ -411,7 +558,7 @@ async fn a_reserve_walk_reads_the_cells_ahead_of_it_together() {
     for node in &d.nodes.nodes {
         node.forget_requests();
     }
-    assert_eq!(reserve_head().await.generation, 3);
+    assert_eq!(reserve_head().await.generation(), 3);
     let asked: Vec<String> = d.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
     for state in &states[..3] {
         let read = format!(
@@ -421,7 +568,7 @@ async fn a_reserve_walk_reads_the_cells_ahead_of_it_together() {
         assert!(
             !asked.contains(&read),
             "the walk read generation {}'s cell again",
-            state.generation + 1
+            state.generation() + 1
         );
     }
 }
@@ -441,17 +588,18 @@ fn forget_the_reserve() {
 /// The memoised lineage, generation by generation: what a walk established.
 fn walked_lineage() -> Vec<(u64, [u8; 32])> {
     let mut walked = Vec::new();
-    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |state, _| {
-        walked.push((state.generation, state.root()));
+    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |_, state, _, _| {
+        walked.push((state.generation(), state.root()));
         Ok(std::ops::ControlFlow::Continue(()))
     })
     .expect("the memo");
     walked
 }
 
-/// A walker owes the epoch index a hint for every generation it established
-/// that no hint named, and the sweep publishes them: a later reader reads
-/// each generation's root there. What it owes is what it established.
+/// A walker owes the epoch index the hint of every generation it established
+/// unless that very hint was found, and the sweep publishes them: a later
+/// reader reads each generation's root there. What it owes is what it
+/// established.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() {
@@ -461,7 +609,7 @@ async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() 
         claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
     }
     forget_the_reserve();
-    assert_eq!(reserve_head().await.generation, 3);
+    assert_eq!(reserve_head().await.generation(), 3);
     let established = walked_lineage();
     assert_eq!(established.len(), 3);
     crate::handlers::artifact_republish::publish_lineage_debt()
@@ -472,19 +620,15 @@ async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() 
     let found = crate::sdk::lineage_discovery::discover(
         &set,
         LineageKind::Reserve,
-        &reserve_genesis().reserve_id,
+        reserve_genesis().reserve_id(),
         0,
     )
     .await;
     for (generation, root) in &established {
-        assert!(
-            found.hinted(*generation),
-            "generation {generation} is hinted"
-        );
         assert_eq!(
             found.roots_at(*generation).collect::<Vec<_>>(),
             vec![root],
-            "the hint names the root the walk established at {generation}"
+            "generation {generation} is hinted, naming the root the walk established"
         );
     }
 }
@@ -498,7 +642,7 @@ async fn a_reserve_walker_publishes_a_hint_for_each_generation_it_established() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
-    use dsm::shared_lineage::{epoch_locator, epoch_of, GenerationHintV1, LineageKind};
+    use dsm::shared_lineage::{GenerationHintV1, LineageKind};
     let d = Device::start(0xA6).await;
     for _ in 0..3 {
         claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
@@ -511,7 +655,7 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
         .expect("the sweep publishes what is owed");
 
     let set = canonical_set(NETWORK).expect("canonical set");
-    let reserve_id = reserve_genesis().reserve_id;
+    let reserve_id = *reserve_genesis().reserve_id();
     for (generation, root) in [(2u64, [0x6F; 32]), (1_000_000u64, [0x70; 32])] {
         let lie = GenerationHintV1::new(
             LineageKind::Reserve,
@@ -522,23 +666,7 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
             [0x72; 32],
         )
         .expect("a hint");
-        let bytes = lie.encode();
-        let (addr, took) = crate::sdk::storage_io::put_immutable(
-            &set,
-            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
-            &bytes,
-        )
-        .await
-        .expect("anyone may put an object");
-        assert!(took > 0);
-        crate::sdk::storage_io::append_to_index(
-            &set,
-            dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
-            &epoch_locator(LineageKind::Reserve, &reserve_id, epoch_of(generation)),
-            &addr,
-        )
-        .await
-        .expect("anyone may append");
+        append_hint(&set, &lie).await;
     }
     let found =
         crate::sdk::lineage_discovery::discover(&set, LineageKind::Reserve, &reserve_id, 0).await;
@@ -551,7 +679,8 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
     forget_the_reserve();
     let head = reserve_head().await;
     assert_eq!(
-        head.generation, 3,
+        head.generation(),
+        3,
         "the head is where the reserve is, not where a hint says"
     );
     assert_eq!(
@@ -559,6 +688,143 @@ async fn lying_reserve_hints_change_nothing_a_walk_establishes() {
         honest,
         "the walk established exactly what it established without the lies"
     );
+}
+
+/// Releases enough that the cells their hints name hold more than one walk's
+/// read-ahead window: each named cell's read keeps the release from every
+/// seat that holds it.
+const RELEASES_PAST_THE_WINDOW: u64 = 140;
+
+/// MR-DSM-0310, MR-DSM-0312: what a walk reads early never decides what it
+/// establishes. A walk reads ahead the cells the epoch index names within a
+/// window of `READ_AHEAD_BYTES`; a cell whose read the window cut short is a
+/// cell the walk reads again itself. Every generation of a reserve longer
+/// than the window holds is hinted, so a device that keeps nothing of it
+/// reads ahead until the window is spent, some cells only in part. Its walk
+/// still reaches the head and establishes exactly the lineage the claimant's
+/// walks did.
+///
+/// MUTATION CONTROL: taking a read-ahead read Core did not resolve final
+/// (`reserve_ahead_unresolved`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_walk_past_what_its_read_ahead_holds_establishes_the_whole_lineage() {
+    use dsm::shared_lineage::LineageKind;
+    let d = Device::start(0xAA).await;
+    for _ in 0..RELEASES_PAST_THE_WINDOW {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), RELEASES_PAST_THE_WINDOW);
+    let established = walked_lineage();
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let found = crate::sdk::lineage_discovery::discover(
+        &set,
+        LineageKind::Reserve,
+        reserve_genesis().reserve_id(),
+        0,
+    )
+    .await;
+    for (generation, root) in &established {
+        assert!(
+            found.roots_at(*generation).any(|named| named == root),
+            "generation {generation} is hinted, so the walk reads its cell ahead"
+        );
+    }
+
+    forget_the_reserve();
+    let head = reserve_head().await;
+    assert_eq!(
+        head.generation(),
+        RELEASES_PAST_THE_WINDOW,
+        "the walk reaches the head past what it read ahead"
+    );
+    assert_eq!(
+        walked_lineage(),
+        established,
+        "the walk established exactly what the claimant's walks did"
+    );
+}
+
+/// Put `hint` and append it to its epoch's index, as anyone may.
+async fn append_hint(
+    set: &crate::sdk::storage_set::StorageSet,
+    hint: &dsm::shared_lineage::GenerationHintV1,
+) {
+    use dsm::shared_lineage::{epoch_locator, epoch_of};
+    let (addr, took) = crate::sdk::storage_io::put_immutable(
+        set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_OBJECT,
+        &hint.encode(),
+    )
+    .await
+    .expect("anyone may put an object");
+    assert!(took > 0);
+    crate::sdk::storage_io::append_to_index(
+        set,
+        dsm::common::domain_tags::TAG_DSM_SHARED_LINEAGE_EPOCH_LOCATOR.source_bytes(),
+        &epoch_locator(hint.kind(), hint.lineage_id(), epoch_of(hint.generation())),
+        &addr,
+    )
+    .await
+    .expect("anyone may append");
+}
+
+/// A hint anyone appends names whatever root it likes. A walker owes the
+/// epoch index the hint of each generation it established unless that very
+/// hint was found: a hint naming another root at the generation is not the
+/// generation's own (SoFi Amendment S23), as another checkpoint for a start
+/// is not the segment's own (`owe_checkpoint`). The reserve's index holds a
+/// lie at generation 3, appended after the release at 3 and before any walk
+/// established it. A walk and the sweep later, the index names generation
+/// 3's own root beside the lie.
+///
+/// MUTATION CONTROL: owing a hint only for a generation no hint names
+/// (`owe_hint_any_root`) turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lying_hint_does_not_stop_a_walker_owing_the_generations_own() {
+    use dsm::shared_lineage::{GenerationHintV1, LineageKind};
+    let d = Device::start(0xA9).await;
+    // Each claim walks before it releases, so after the third no walk has
+    // established generation 3 and nothing owes its hint.
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let reserve_id = *reserve_genesis().reserve_id();
+    let lie = GenerationHintV1::new(
+        LineageKind::Reserve,
+        reserve_id,
+        3,
+        [0x6D; 32],
+        [0x71; 32],
+        [0x72; 32],
+    )
+    .expect("a hint");
+    append_hint(&set, &lie).await;
+
+    assert_eq!(reserve_head().await.generation(), 3);
+    let established = walked_lineage();
+    assert_eq!(established.len(), 3);
+    crate::handlers::artifact_republish::publish_lineage_debt()
+        .await
+        .expect("the sweep publishes what is owed");
+
+    let found =
+        crate::sdk::lineage_discovery::discover(&set, LineageKind::Reserve, &reserve_id, 0).await;
+    assert!(
+        found.roots_at(3).any(|named| named == lie.claimed_root()),
+        "the lie stays in the index: discovery decides nothing"
+    );
+    for (generation, root) in &established {
+        assert!(
+            found.roots_at(*generation).any(|named| named == root),
+            "generation {generation}'s own root is hinted, whatever else is"
+        );
+    }
 }
 
 /// SA-69. Anyone may append a checkpoint, and every root a walk is handed is
@@ -578,7 +844,7 @@ async fn a_checkpoint_no_walk_established_names_no_cell_the_walk_reads() {
         claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
     }
     let set = canonical_set(NETWORK).expect("canonical set");
-    let reserve_id = reserve_genesis().reserve_id;
+    let reserve_id = *reserve_genesis().reserve_id();
     let made_up: Vec<[u8; 32]> = (0..=EPOCH_GENERATIONS)
         .map(|i| {
             let mut root = [0x6E; 32];
@@ -617,7 +883,7 @@ async fn a_checkpoint_no_walk_established_names_no_cell_the_walk_reads() {
     for node in &d.nodes.nodes {
         node.forget_requests();
     }
-    assert_eq!(reserve_head().await.generation, 2);
+    assert_eq!(reserve_head().await.generation(), 2);
     let asked: Vec<String> = d.nodes.nodes.iter().flat_map(|n| n.requests()).collect();
     for root in &made_up {
         let read = format!(
@@ -645,7 +911,7 @@ async fn a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else() {
         claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
     }
     let set = canonical_set(NETWORK).expect("canonical set");
-    let reserve_id = reserve_genesis().reserve_id;
+    let reserve_id = *reserve_genesis().reserve_id();
     let locator = epoch_locator(LineageKind::Reserve, &reserve_id, 0);
     for n in 0..=crate::sdk::lineage_discovery::CANDIDATES_PER_EPOCH {
         let junk = format!("not a hint, {n}").into_bytes();
@@ -668,7 +934,8 @@ async fn a_flooded_epoch_index_makes_discovery_unavailable_and_nothing_else() {
     forget_the_reserve();
     let head = reserve_head().await;
     assert_eq!(
-        head.generation, 2,
+        head.generation(),
+        2,
         "the walk reaches the head without discovery"
     );
     assert_eq!(walked_lineage().len(), 2);
@@ -694,10 +961,10 @@ async fn another_claimants_release_moves_the_head_and_the_next_claim_takes_the_g
     assert_eq!(recipient_of(&release_at(1).await), p.b.device_id);
     assert_eq!(recipient_of(&release_at(2).await), p.a.device_id);
     let head = reserve_head().await;
-    assert_eq!(head.generation, 2);
+    assert_eq!(head.generation(), 2);
     assert_eq!(
-        head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+        head.remaining_supply(),
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(200)
     );
 }
 
@@ -720,7 +987,7 @@ async fn a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_an
         cut_short.is_err(),
         "a release with two links is not final, so the claim cannot finish"
     );
-    let frozen = client_db::native_reserve::get_frozen_release(&r0.reserve_id, &r0.root())
+    let frozen = client_db::native_reserve::get_frozen_release(r0.reserve_id(), &r0.root())
         .expect("read the frozen release")
         .expect("the release was frozen before it was written");
     assert_eq!(p.a.era_balance(), 0, "nothing was credited");
@@ -753,10 +1020,10 @@ async fn a_release_cut_short_after_the_leader_is_carried_by_the_next_claimant_an
     assert_eq!(resumed.economic_position, 1);
     assert_eq!(p.a.era_balance(), whole_era(100));
     let head = reserve_head().await;
-    assert_eq!(head.generation, 2, "A released once, B once");
+    assert_eq!(head.generation(), 2, "A released once, B once");
     assert_eq!(
-        head.remaining_supply,
-        ERA_RESERVE_GENESIS_SUPPLY - whole_era(200)
+        head.remaining_supply(),
+        reserve_genesis_supply().expect("ERA's genesis supply") - whole_era(200)
     );
 }
 
@@ -775,7 +1042,7 @@ async fn a_claim_cut_short_resumes_on_its_own_release_byte_identically() {
         claim_era_faucet(d.core(), NETWORK).await.is_err(),
         "a release with two links is not final"
     );
-    let frozen = client_db::native_reserve::get_frozen_release(&r0.reserve_id, &r0.root())
+    let frozen = client_db::native_reserve::get_frozen_release(r0.reserve_id(), &r0.root())
         .expect("read the frozen release")
         .expect("the release was frozen before it was written");
 
@@ -790,7 +1057,7 @@ async fn a_claim_cut_short_resumes_on_its_own_release_byte_identically() {
         frozen,
         "the resumed claim used the frozen release"
     );
-    assert_eq!(reserve_head().await.generation, 1, "released once");
+    assert_eq!(reserve_head().await.generation(), 1, "released once");
     assert_eq!(d.era_balance(), whole_era(100));
 }
 
@@ -977,7 +1244,7 @@ async fn a_held_first_claim_is_finished_by_the_next_claim() {
     admitted_at(d.core(), 2);
     assert_eq!(d.era_balance(), whole_era(200));
     assert_eq!(
-        reserve_head().await.generation,
+        reserve_head().await.generation(),
         2,
         "released twice, once each"
     );
@@ -1017,7 +1284,7 @@ async fn a_held_first_claim_is_finished_by_the_sync_after_a_restart() {
         other => panic!("storage.sync answered {other:?}"),
     };
     assert!(
-        !sync.errors.iter().any(|e| e.contains("stranded admission")),
+        !sync.errors.iter().any(|e| e.contains("held admission")),
         "{:?}",
         sync.errors
     );
@@ -1068,17 +1335,17 @@ async fn a_release_frozen_for_an_earlier_position_is_not_reused_at_a_later_one()
     // What a claim made before that admission froze: a release at the reserve
     // head for the position A has since taken, its write never at the leader.
     let head = reserve_head().await;
-    let generation = head.generation + 1;
+    let generation = head.generation() + 1;
     let device_head = core.device_head().expect("A's head");
     let (public_key, secret_key) =
         crate::sdk::signing_authority::current_keypair().expect("A's keys");
     let att_a = crate::sdk::signing_authority::current_att_a().expect("A's AttA");
     let op = dsm::types::operations::Operation::FaucetClaim {
-        reserve_id: head.reserve_id,
+        reserve_id: *head.reserve_id(),
         generation,
     };
     let earlier = NativeReserveReleaseBody {
-        reserve_id: head.reserve_id,
+        reserve_id: *head.reserve_id(),
         parent_root: head.root(),
         generation,
         amount: ERA_FAUCET_PAYOUT,
@@ -1093,7 +1360,7 @@ async fn a_release_frozen_for_an_earlier_position_is_not_reused_at_a_later_one()
         },
     };
     let frozen = sign_release(&earlier, &secret_key).expect("sign the earlier release");
-    client_db::native_reserve::freeze_release(&head.reserve_id, &head.root(), &frozen)
+    client_db::native_reserve::freeze_release(head.reserve_id(), &head.root(), &frozen)
         .expect("freeze it");
 
     let outcome = claim_era_faucet(core, NETWORK)
@@ -1121,7 +1388,12 @@ async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
     let refused = d.core().execute_offline_step(
         [0x71; 32],
         [0x72; 32],
-        dsm::types::operations::Operation::Noop,
+        dsm::types::operations::Operation::Generic {
+            operation_type: b"zero-effect-step".to_vec(),
+            data: vec![0x01],
+            message: String::new(),
+            signature: Vec::new(),
+        },
         &[BalanceDelta {
             policy_commit: era(),
             direction: BalanceDirection::Debit,
@@ -1144,5 +1416,192 @@ async fn a_failed_advance_keeps_the_pending_admission_it_did_not_make() {
             .cloned(),
         Some(held),
         "the held admission is still the head's"
+    );
+}
+
+/// Generation `generation`'s memo row: its envelope and the reads kept with
+/// it.
+fn memo_row(generation: u64) -> (Vec<u8>, Vec<u8>) {
+    let binding = client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store is not poisoned");
+    conn.query_row(
+        "SELECT envelope, cell_reads FROM native_reserve_lineage_memo WHERE generation = ?1",
+        [generation as i64],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .expect("the memo row")
+}
+
+/// Set generation `generation`'s memo row's `column` to `bytes`.
+fn set_memo_column(generation: u64, column: &str, bytes: &[u8]) {
+    let binding = client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store is not poisoned");
+    conn.execute(
+        &format!("UPDATE native_reserve_lineage_memo SET {column} = ?1 WHERE generation = ?2"),
+        rusqlite::params![bytes, generation as i64],
+    )
+    .expect("the memo row is changed");
+}
+
+/// DSM Amendment A15, MR-DSM-0315: a verifier is answered from the head
+/// this device's walks established. With generation 4's memo row gone, a
+/// memoised release on the chain comes with the chain's heads before and
+/// after it, and a release memoised past the gap is not established, so a
+/// verifier walks for it instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_memoised_release_past_a_gap_is_not_an_established_release() {
+    use crate::sdk::native_reserve::established_release_at;
+    let d = Device::start(0xAB).await;
+    for _ in 0..5 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), 5);
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let genesis = reserve_genesis();
+    let whole = established_release_at(&set, &genesis, 3)
+        .expect("the memo loads")
+        .expect("generation 3 is on the chain");
+    {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute(
+            "DELETE FROM native_reserve_lineage_memo WHERE generation = 4",
+            [],
+        )
+        .expect("generation 4's row is gone");
+    }
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the memo loads"),
+        Some(whole),
+        "a release before the gap is answered with the chain's heads around it"
+    );
+    assert_eq!(
+        established_release_at(&set, &genesis, 5).expect("the memo loads"),
+        None,
+        "a release memoised past the gap is not established"
+    );
+    assert_eq!(
+        established_release_at(&set, &genesis, 4).expect("the memo loads"),
+        None
+    );
+}
+
+/// How one memo row is made something Core does not establish.
+enum Corruption {
+    /// The release's envelope, in place of the one memoised.
+    Envelope(Vec<u8>),
+    /// The reads kept with the release, in place of the ones memoised.
+    Reads(Vec<u8>),
+    /// The release's kept completion proof, gone.
+    NoProof,
+}
+
+/// DSM Amendment A15, MR-DSM-0310, MR-DSM-0315: a memoised release is
+/// established again by Core on load from what the memo keeps (the release,
+/// the reads of its cell that showed it final, and its kept completion
+/// proof), never taken as a root. After three claims, generation 2's row is
+/// changed one way at a time, and restored after each:
+/// - its envelope forged;
+/// - its envelope a real release of another parent, generation 1's;
+/// - its reads with every seat after the leader unread, which no longer show
+///   the release final;
+/// - its reads gone;
+/// - its completion proof gone.
+///
+/// Each time the real loader refuses at generation 2 and answers nothing.
+/// Restored, the memo loads as it did.
+///
+/// MUTATION CONTROL: taking a memoised release without proving it final from
+/// the reads kept with it (`reserve_memo_unproven`) turns the unread-seats
+/// case red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_forged_memo_row_is_refused_on_load_and_enters_no_chain() {
+    use crate::sdk::native_reserve::established_release_at;
+    use dsm::economic::native_reserve::SuccessorCell;
+    use dsm::route_chain::CellEvidence;
+    let d = Device::start(0xAC).await;
+    for _ in 0..3 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), 3);
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let genesis = reserve_genesis();
+    let honest = established_release_at(&set, &genesis, 3)
+        .expect("the honest memo loads")
+        .expect("generation 3 is on the chain");
+
+    let (envelope, reads) = memo_row(2);
+    let (other_parents, _) = memo_row(1);
+    let mut bent = envelope.clone();
+    let last = bent.len() - 1;
+    bent[last] ^= 0x01;
+    let members = as_ccb_members(&set).expect("the set's members");
+    let cell = SuccessorCell::of(&genesis.at_generation(1).expect("generation 1"), &members)
+        .expect("generation 2's cell");
+    let mut unread = CellEvidence::decode_kept(cell.routed(), &reads, &cell.keeps())
+        .expect("the kept reads decode");
+    for seat in unread.seats.iter_mut().skip(1) {
+        seat.values = None;
+    }
+    let kept_proof = client_db::completion_proofs::get(cell.routed(), &envelope)
+        .expect("the proof store")
+        .expect("the release's completion proof is kept");
+
+    for (what, corruption) in [
+        ("a forged envelope", Corruption::Envelope(bent)),
+        (
+            "another parent's release",
+            Corruption::Envelope(other_parents),
+        ),
+        (
+            "reads with the seats after the leader unread",
+            Corruption::Reads(unread.encode_kept()),
+        ),
+        ("no reads", Corruption::Reads(Vec::new())),
+        ("no completion proof", Corruption::NoProof),
+    ] {
+        match &corruption {
+            Corruption::Envelope(bytes) => set_memo_column(2, "envelope", bytes),
+            Corruption::Reads(bytes) => set_memo_column(2, "cell_reads", bytes),
+            Corruption::NoProof => {
+                let binding = client_db::get_connection().expect("the store");
+                let conn = binding.lock().expect("the store is not poisoned");
+                conn.execute(
+                    "DELETE FROM completion_proof_slot WHERE value_digest = ?1",
+                    [dsm::storage_cell::entry_digest(&envelope).as_slice()],
+                )
+                .expect("the proof's slots are gone");
+                conn.execute(
+                    "DELETE FROM completion_proof WHERE value_digest = ?1",
+                    [dsm::storage_cell::entry_digest(&envelope).as_slice()],
+                )
+                .expect("the proof is gone");
+            }
+        }
+        match established_release_at(&set, &genesis, 3) {
+            Err(refused) => assert!(
+                refused.to_string().contains("generation 2"),
+                "{what}: the refusal names the generation: {refused}"
+            ),
+            Ok(answer) => panic!("{what} was loaded into the lineage: {answer:?}"),
+        }
+        match corruption {
+            Corruption::Envelope(..) => set_memo_column(2, "envelope", &envelope),
+            Corruption::Reads(..) => set_memo_column(2, "cell_reads", &reads),
+            Corruption::NoProof => client_db::completion_proofs::keep(
+                cell.routed(),
+                &kept_proof.digest,
+                &kept_proof.proof,
+            )
+            .expect("the proof is kept again"),
+        }
+    }
+    assert_eq!(
+        established_release_at(&set, &genesis, 3)
+            .expect("the restored memo loads")
+            .expect("generation 3 is on the chain"),
+        honest
     );
 }

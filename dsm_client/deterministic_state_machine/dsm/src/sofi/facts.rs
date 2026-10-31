@@ -62,10 +62,6 @@ impl InHandRefutation {
         &self.external_commitment
     }
 
-    pub fn fulfillment_id(&self) -> &D32 {
-        &self.fulfillment_id
-    }
-
     pub fn refuted(&self) -> RefutedInHand {
         self.refuted
     }
@@ -151,6 +147,11 @@ pub struct LegReads<'a> {
     /// The walk from the first key of the leg's parent, for
     /// `AttemptLive(K^(a))`. Not needed at attempt zero.
     pub walk: Option<&'a AttemptWalk>,
+    /// The vault state leaf the exercise's core states at the leg's parent
+    /// root, read by its value, when the chain does not name that root: what
+    /// places the parent at its generation, so the chain can refute it with
+    /// no validation evidence (§23.5 arm (ii)).
+    pub parent_state: Option<&'a super::wire::VaultStateLeaf>,
 }
 
 /// Everything that was read about one exercise, each item as Core evaluated
@@ -331,10 +332,6 @@ pub struct EstablishedFacts {
 }
 
 impl EstablishedFacts {
-    pub fn fulfillment_id(&self) -> &D32 {
-        &self.fulfillment_id
-    }
-
     pub fn external_commitment(&self) -> &D32 {
         &self.external_commitment
     }
@@ -505,7 +502,7 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     // gave it: `Canonical` where its chain names the parent, else
     // `Unavailable`, and never `Orphaned`.
     let generations: BTreeMap<D32, u64> =
-        match vault_post_states(precommit, exercise.preimage(), reads.evidence) {
+        match vault_post_states(precommit, fulfillment, exercise.preimage(), reads.evidence) {
             Ok(posts) => posts
                 .iter()
                 .map(|post| (*post.vault_id(), post.pre_generation()))
@@ -719,12 +716,28 @@ fn leg_facts(
         ));
     }
     let cell = read.cell.fact();
-    // Without the generation the evidence places the parent at, the chain
-    // can establish the root positively but cannot refute one it has not
-    // placed.
+    // The chain establishes a root it names positively. One it does not name
+    // it refutes only at the generation the parent sits at, which the state
+    // leaf the exercise's own core proves under that root gives (§23.5 arm
+    // (ii): no validation evidence); without it the parent waits.
     let parent = match read.chain {
         Some(chain) if chain.names(&leg.parent_root) => ParentStatus::Canonical,
-        Some(..) | None => ParentStatus::Unavailable,
+        Some(chain) => match read.parent_state.map(|state| {
+            super::validation::generation_at(
+                exercise.preimage(),
+                &leg.vault_id,
+                &leg.parent_root,
+                state,
+            )
+        }) {
+            Some(Ok(Some(generation))) => chain.status_of(generation, &leg.parent_root),
+            Some(Err(why)) => {
+                log::debug!("[sofi facts] the parent is not placed by its core: {why:?}");
+                ParentStatus::Unavailable
+            }
+            Some(Ok(None)) | None => ParentStatus::Unavailable,
+        },
+        None => ParentStatus::Unavailable,
     };
     // `AttemptLive`: every earlier key of this leg's chain is skipped,
     // established by a walk from the first key.
@@ -831,6 +844,7 @@ mod tests {
                     cell,
                     chain: self.chains.get(&leg.vault_id),
                     walk: None,
+                    parent_state: None,
                 })
                 .collect()
         }
@@ -1015,7 +1029,7 @@ mod tests {
         let facts = r.establish(&r.legs()).expect("every read decides");
         let p = &r.exercise.precommit().body;
         let f = &r.exercise.fulfillment().body;
-        assert_eq!(facts.fulfillment_id(), &derive::fulfillment_id(f));
+        assert_eq!(facts.fulfillment_id, derive::fulfillment_id(f));
         assert_eq!(facts.external_commitment(), p.external_commitment());
         assert_eq!(facts.pair, PairStanding::Registered);
         assert_eq!(
@@ -1111,6 +1125,7 @@ mod tests {
             cell: &other_key,
             chain: r.chains.get(&leg.vault_id),
             walk: None,
+            parent_state: None,
         }];
         assert!(matches!(
             r.establish(&at_other_key),
@@ -1380,6 +1395,69 @@ mod tests {
         );
     }
 
+    /// SoFi §23.5 arm (ii), MR-SOFI-0241: a parent the chain refutes is
+    /// refuted with no validation evidence. The ground facts — what the walk
+    /// skips a key on before any evidence is acquired — place the leg's
+    /// parent at its generation from the state leaf the exercise's own core
+    /// proves under the parent root, and the chain, naming another root
+    /// there, refutes it. A leaf the core does not prove places nothing, and
+    /// with no leaf the parent waits.
+    ///
+    /// MUTATION CONTROL: dropping the `parent_state` arm from `leg_facts`
+    /// turns the first assertion red: the parent waits, and a key held by an
+    /// exercise of the orphaned route is not skipped while evidence is
+    /// outstanding.
+    #[test]
+    fn a_parent_the_chain_refutes_is_orphaned_without_validation_evidence() {
+        let (fx, mut r) = reads(1, &[0]);
+        let leg = r.exercise.precommit().body.legs()[0];
+        r.chains
+            .insert(leg.vault_id, chain_naming(&fx, &leg.vault_id, OTHER_ROOT));
+        let state = match fx
+            .evidence
+            .vault_leaves
+            .get(&(leg.vault_id, derive::vault_state_key(&leg.vault_id)))
+        {
+            Some(crate::sofi::validation::VaultLeafPre::State(state)) => state.clone(),
+            other => panic!("the fixture's evidence holds the vault's state: {other:?}"),
+        };
+        let parent_with = |parent_state: Option<&super::super::wire::VaultStateLeaf>| {
+            let legs: Vec<LegReads<'_>> = r
+                .legs()
+                .into_iter()
+                .map(|read| LegReads {
+                    parent_state,
+                    ..read
+                })
+                .collect();
+            match establish_ground(&GroundReads {
+                exercise: &r.exercise,
+                registration: &r.registration,
+                parent: r.parent,
+                legs: &legs,
+                verdict: None,
+            }) {
+                Ok(ground) => ground.legs[0].parent,
+                Err(why) => panic!("the ground facts decide: {why:?}"),
+            }
+        };
+        assert_eq!(parent_with(Some(&state)), ParentStatus::Orphaned);
+        let unproven = super::super::wire::VaultStateLeaf {
+            reserve_a: state.reserve_a + 1,
+            ..state.clone()
+        };
+        assert_eq!(
+            parent_with(Some(&unproven)),
+            ParentStatus::Unavailable,
+            "a leaf the core does not prove places nothing"
+        );
+        assert_eq!(
+            parent_with(None),
+            ParentStatus::Unavailable,
+            "with no leaf the parent waits"
+        );
+    }
+
     /// A leg's parent is decided against the chain this verifier
     /// established: a chain naming another root at the parent's generation
     /// refutes it — the route is Void — and no chain at all leaves the
@@ -1532,6 +1610,7 @@ mod tests {
                 cell: &r.cells[0],
                 chain: r.chains.get(v),
                 walk: Some(w),
+                parent_state: None,
             }]
         }
         assert!(matches!(

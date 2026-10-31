@@ -18,6 +18,9 @@ EXTENDS Naturals, FiniteSets, Sequences, TLAPS
 \* Unique minimum element of a non-empty finite set of NATURALS.
 MinNat(S) == CHOOSE x \in S : \A y \in S : x <= y
 
+\* Unique maximum element of a non-empty finite set of NATURALS.
+MaxNat(S) == CHOOSE x \in S : \A y \in S : x >= y
+
 \* ---------------------------------------------------------------------------
 \* Deterministic “hash” abstraction for model checking
 \*
@@ -110,7 +113,11 @@ CONSTANT
     MaxNet,            \* Hard bound on in-flight network messages (bag size)
     MaxDupPerMsg,      \* Per-message duplicate budget (prevents infinite dup churn)
     MaxStep,           \* Bound for step-limited regression configs
-    UseHarness         \* BOOLEAN: TRUE for regression harness mode, FALSE for system interleavings
+    UseHarness,        \* BOOLEAN: TRUE for regression harness mode, FALSE for system interleavings
+    \* Online rules, each TRUE as the code runs it; a falsification config
+    \* flips one to show the invariant it carries.
+    RecipientChecksAdmission, \* apply only a transfer whose sender's debit was admitted
+    RecipientChecksPin        \* apply only a transfer whose signed parent is the pinned head
 
 VARIABLES
     devices,           \* devices[g] = set of device IDs for genesis g
@@ -144,7 +151,13 @@ VARIABLES
     \* Tripwire State
     ledger,            \* Set of accepted receipts: [rel: {d1,d2}, oldTip: Nat, newTip: Nat]
     \* Token balances (§8 conservation)
-    deviceBalance      \* deviceBalance[d] = available ERA balance for device d
+    deviceBalance,     \* deviceBalance[d] = available ERA balance for device d
+    \* Online bilateral protocol (see ONLINE BILATERAL PROTOCOL below)
+    online,            \* online[<<d,p>>] = d's previous/local projection tips, lineage head, pin, gate, awaited certificate
+    outbox,            \* senders' frozen sends not yet released: the admitted debits
+    journal,           \* recipients' countersign deltas awaiting the sender's certificate
+    certs,             \* step ids whose certificate reached quorum on storage
+    joins              \* the join oracle: [parent, lo, hi] -> tip
 
 \* Canonical unordered relationship key, matching k_{A<->B} =
 \* BLAKE3("DSM/smt-key\0" || min(DevID_A,DevID_B) || max(...)).
@@ -306,7 +319,8 @@ TypeInvariant ==
     /\ smtState \in [DeviceIds -> [RelKeys -> Nat]]
     /\ \A d1, d2 \in DeviceIds :
         d1 # d2 => smtState[d1][RelKey(d1, d2)] = relationships[<<d1, d2>>].tip
-    /\ net \subseteq [id: Nat, to: DeviceIds, from: DeviceIds, payload: 0..MaxPayload, dupLeft: 0..MaxDupPerMsg, parentTip: Nat]
+    /\ net \subseteq [id: Nat, copy: Nat, kind: {"transfer", "delta"}, from: DeviceIds, to: DeviceIds,
+                      payload: 0..MaxPayload, sp: Nat, sc: Nat, pp: Nat, pc: Nat, dupLeft: 0..MaxDupPerMsg]
     /\ Cardinality(net) <= MaxNet
     /\ nextMsgId \in Nat
     /\ storageNodes \subseteq DeviceIds  \* Storage nodes are also devices
@@ -329,6 +343,13 @@ TypeInvariant ==
     /\ step \in Nat
     /\ offlineSessions \subseteq DeviceIds \X DeviceIds  \* Active offline sessions
     /\ deviceBalance \in [DeviceIds -> Nat]
+    /\ ledger \subseteq [rel: RelKeys, signer: DeviceIds, oldTip: Nat, newTip: Nat]
+    /\ online \in [DeviceIds \X DeviceIds -> [prev: Nat, local: Nat, lin: Nat, pin: Nat, gate: Nat, awaits: Nat]]
+    /\ outbox \subseteq [id: Nat, from: DeviceIds, to: DeviceIds, payload: 1..MaxPayload,
+                         sp: Nat, sc: Nat, pp: Nat, pc: Nat, fin: BOOLEAN]
+    /\ journal \subseteq [id: Nat, from: DeviceIds, to: DeviceIds, sp: Nat, sc: Nat, pp: Nat, pc: Nat]
+    /\ certs \subseteq Nat
+    /\ joins \subseteq [parent: Nat, lo: Nat, hi: Nat, tip: Nat]
 
 Init ==
     /\ devices = [g \in GenesisIds |-> {}]
@@ -356,6 +377,11 @@ Init ==
     /\ offlineSessions = {}
     /\ ledger = {}
     /\ deviceBalance = [d \in DeviceIds |-> MaxPayload]  \* §8: devices start with max supply for model checking
+    /\ online = [x \in DeviceIds \X DeviceIds |-> [prev |-> 0, local |-> 0, lin |-> 0, pin |-> 0, gate |-> 0, awaits |-> 0]]
+    /\ outbox = {}
+    /\ journal = {}
+    /\ certs = {}
+    /\ joins = {}
 
 \* Add a device to a genesis
 AddDevice(g, d) ==
@@ -364,99 +390,353 @@ AddDevice(g, d) ==
     /\ Cardinality(devices[g]) < MaxDevices
     /\ devices' = [devices EXCEPT ![g] = devices[g] \union {d}]
     /\ step' = step + 1
-    /\ UNCHANGED <<relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
-\* Create a bilateral relationship between two devices
+\* Create a bilateral relationship between two devices: both projections and
+\* both lineages start at the relationship's genesis seed, and each device
+\* pins the other's head there.
 CreateRelationship(d1, d2) ==
+    LET g == nextMsgId
+        start == [prev |-> 0, local |-> g, lin |-> g, pin |-> g, gate |-> 0, awaits |-> 0]
+    IN
     /\ d1 # d2
     /\ relationships[<<d1, d2>>].state = "inactive"
     /\ relationships[<<d2, d1>>].state = "inactive"
     /\ smtState[d1][RelKey(d1, d2)] = 0
     /\ smtState[d2][RelKey(d1, d2)] = 0
     /\ relationships' = [relationships EXCEPT
-         ![<<d1, d2>>] = [tip |-> 1, state |-> "active"],
-         ![<<d2, d1>>] = [tip |-> 1, state |-> "active"]]
+         ![<<d1, d2>>] = [tip |-> g, state |-> "active"],
+         ![<<d2, d1>>] = [tip |-> g, state |-> "active"]]
     /\ smtState' = [smtState EXCEPT
-         ![d1][RelKey(d1, d2)] = 1,
-         ![d2][RelKey(d1, d2)] = 1]
+         ![d1][RelKey(d1, d2)] = g,
+         ![d2][RelKey(d1, d2)] = g]
     /\ deviceRoots' = [deviceRoots EXCEPT ![d1] = @ + 1, ![d2] = @ + 1]
-    \* Tripwire: Record the transition 0 -> 1
-    /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> 0, newTip |-> 1]}
-    /\ step' = step + 1
-    /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, deviceBalance>>
-
-\* ---------------------------------------------------------------------------
-\* GLOBAL ADVERSARIAL NETWORK MODEL (online/unilateral transport)
-\*
-\* The network is a global unordered bag of message instances.
-\* Adversary can: deliver any message (in any order), drop, or duplicate
-\* subject to a hard bag-size bound and per-message duplicate budget.
-\* ---------------------------------------------------------------------------
-
-\* Sender injects a fresh message instance into the network bag.
-NetSend(d1, d2, payload) ==
-    /\ d1 # d2
-    /\ Cardinality(net) < MaxNet
-    /\ payload > 0                        \* §8: cannot send zero
-    /\ deviceBalance[d1] >= payload       \* §8: sender must have sufficient balance
-    /\ net' = net \union { [id |-> nextMsgId, to |-> d2, from |-> d1, payload |-> payload, dupLeft |-> MaxDupPerMsg, parentTip |-> relationships[<<d1, d2>>].tip] }
+    /\ online' = [online EXCEPT ![<<d1, d2>>] = start, ![<<d2, d1>>] = start]
     /\ nextMsgId' = nextMsgId + 1
-    /\ deviceBalance' = [deviceBalance EXCEPT ![d1] = @ - payload]
-    /\ relationships' = [relationships EXCEPT
-         ![<<d1, d2>>] = [tip |-> relationships[<<d1, d2>>].tip,
-                          state |-> "active"],
-         ![<<d2, d1>>] = [tip |-> relationships[<<d2, d1>>].tip,
-                          state |-> "active"]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger>>
+    /\ UNCHANGED <<devices, net, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, outbox, journal, certs, joins>>
 
-\* Deliver any message from the bag (unordered delivery semantics).
+\* ---------------------------------------------------------------------------
+\* ONLINE BILATERAL PROTOCOL (the beta online transfer, as the code runs it)
+\*
+\* Two spaces, as in the code (`sender_online_proposal`):
+\*   - the PROJECTION: each device's view of the relationship tip
+\*     (`contacts.chain_tip` = relationships[<<d,p>>].tip = smtState[d][rel],
+\*     `previous_chain_tip` = online[<<d,p>>].prev, `local_bilateral_chain_tip`
+\*     = online[<<d,p>>].local). Routes and the transfer nonce are taken here.
+\*   - the LINEAGE: each device's own canonical chain for the relationship
+\*     (online[<<d,p>>].lin), advanced by its sends and by its applies of the
+\*     peer's sends, and its pin of the peer's head (online[<<d,p>>].pin,
+\*     `counterparty_canonical_heads`), advanced by an apply (to the sender's
+\*     signed child) and by a finalization (to the recipient's countersigned
+\*     child).
+\*
+\* The stages:
+\*   Send        T1: debit, the sender's lineage moves, the finality gate is
+\*               armed (`pending_online_outbox`), `local` takes the projected
+\*               child, the transfer is frozen in the outbox.
+\*   RecvTransfer T2+T3: the recipient applies a transfer whose debit was
+\*               admitted and whose signed parent is its pin; its
+\*               projection moves on from the tip it holds, its
+\*               lineage moves, its pin takes the sender's child, it is
+\*               credited, its journal holds the countersign delta, and it
+\*               awaits the sender's certificate.
+\*   RecvDelta   T4: the sender finalizes on the delta whose parent is its pin;
+\*               its projection converges, its pin takes the recipient's child.
+\*               The gate stays.
+\*   CertPost    T5a: the finalized send's certificate reaches quorum on
+\*               storage, where the recipient can read it. The gate stays.
+\*   GateRelease T5b: the sender's sweep finds the certificate at quorum and
+\*               releases the gate (the gate's only deleter).
+\*   RecvCert    T6: the recipient reads the certificate and is released.
+\*
+\* No stage refunds or rolls back a send. Two sends that cross (each made
+\* before its sender applied the other's) both settle: each projection is
+\* joined deterministically from the shared parent and the two children
+\* (owner ruling 2026-10-29, "both settle"; Core
+\* `join_concurrent_tips`), every transfer keeps the parent it was signed
+\* against, and no sender consumes its own parent twice.
+\*
+\* The network is an adversarial bag of message copies: any copy can be
+\* delivered in any order, dropped or duplicated (bounded). A drop is never
+\* permanent: the sender re-drives an unfinalized transfer and the recipient
+\* re-emits the delta its journal holds until the certificate arrives.
+\* A copy of a device (CopySend) can post a transfer from a parent its
+\* original already consumed; its debit was never admitted.
+\* ---------------------------------------------------------------------------
+
+onlineVars == <<online, outbox, journal, certs, joins>>
+
+\* A projection tip as one device holds it.
+View(d, p) == [chain |-> relationships[<<d, p>>].tip,
+               prev  |-> online[<<d, p>>].prev,
+               local |-> online[<<d, p>>].local]
+
+\* The join of two concurrent steps from `parent` (Core
+\* `join_concurrent_tips`): a deterministic function of the parent and the
+\* unordered pair of children, modeled as a lazily filled oracle so that both
+\* devices, computing it independently, obtain the same tip.
+JoinEntry(parent, a, b) ==
+    { j \in joins : j.parent = parent /\ j.lo = MinNat({a, b}) /\ j.hi = MaxNat({a, b}) }
+
+JoinTip(parent, a, b, fresh) ==
+    IF JoinEntry(parent, a, b) # {} THEN (CHOOSE j \in JoinEntry(parent, a, b) : TRUE).tip
+    ELSE fresh
+
+JoinsAfter(parent, a, b, fresh) ==
+    IF JoinEntry(parent, a, b) # {} THEN joins
+    ELSE joins \union {[parent |-> parent, lo |-> MinNat({a, b}), hi |-> MaxNat({a, b}), tip |-> fresh]}
+
+\* `sync_tip_projections_in_tx` with crossing steps joined, case for case.
+\* `fresh` is the tip a join takes if the oracle has none for the pair.
+TipSync(v, parent, target, fresh) ==
+    IF v.chain = target
+    THEN [ok |-> TRUE, chain |-> target, prev |-> v.prev, local |-> target, joined |-> FALSE]
+    ELSE IF v.chain = parent
+    THEN [ok |-> TRUE, chain |-> target, prev |-> parent, local |-> target, joined |-> FALSE]
+    ELSE IF v.prev = parent /\ v.local = v.chain
+    THEN [ok |-> TRUE, chain |-> JoinTip(parent, v.chain, target, fresh), prev |-> v.chain,
+          local |-> JoinTip(parent, v.chain, target, fresh), joined |-> TRUE]
+    ELSE IF /\ v.prev # 0 /\ v.prev # parent /\ v.prev # target
+            /\ JoinEntry(parent, v.prev, target) # {}
+            /\ JoinTip(parent, v.prev, target, fresh) = v.chain
+            /\ v.local = v.chain
+    THEN [ok |-> TRUE, chain |-> v.chain, prev |-> v.prev, local |-> v.local, joined |-> FALSE]
+    ELSE [ok |-> FALSE, chain |-> v.chain, prev |-> v.prev, local |-> v.local, joined |-> FALSE]
+
+\* The joins oracle after a sync that may have joined.
+JoinsAfterSync(v, parent, target, fresh) ==
+    IF v.chain # target /\ v.chain # parent /\ v.prev = parent /\ v.local = v.chain
+    THEN JoinsAfter(parent, v.chain, target, fresh)
+    ELSE joins
+
+\* A transfer is applied when the ledger holds its signed lineage step.
+Applied(t) ==
+    [rel |-> RelKey(t.from, t.to), signer |-> t.from, oldTip |-> t.sp, newTip |-> t.sc] \in ledger
+
+\* Neither side holds anything in flight toward the other.
+Settled(d, p) ==
+    /\ online[<<d, p>>].gate = 0
+    /\ online[<<d, p>>].awaits = 0
+    /\ ~\E r \in outbox : r.from = d /\ r.to = p
+
+TransferMsg(r, copy) ==
+    [id |-> r.id, copy |-> copy, kind |-> "transfer", from |-> r.from, to |-> r.to,
+     payload |-> r.payload, sp |-> r.sp, sc |-> r.sc, pp |-> r.pp, pc |-> r.pc,
+     dupLeft |-> MaxDupPerMsg]
+
+DeltaMsg(j, copy) ==
+    [id |-> j.id, copy |-> copy, kind |-> "delta", from |-> j.from, to |-> j.to,
+     payload |-> 0, sp |-> j.sp, sc |-> j.sc, pp |-> j.pp, pc |-> j.pc,
+     dupLeft |-> MaxDupPerMsg]
+
+\* T1. The finality barrier: no send while the sender's own send is in flight
+\* or while it awaits the peer's certificate for a transfer it applied, and
+\* none while an offline step is in flight with the peer.
+Send(d, p, amt) ==
+    LET id == nextMsgId
+        o  == online[<<d, p>>]
+        r  == [id |-> id, from |-> d, to |-> p, payload |-> amt,
+               sp |-> o.lin, sc |-> id, pp |-> relationships[<<d, p>>].tip, pc |-> id,
+               fin |-> FALSE]
+    IN
+    /\ d # p
+    /\ relationships[<<d, p>>].state = "active"
+    /\ <<d, p>> \notin offlineSessions
+    /\ o.gate = 0
+    /\ o.awaits = 0
+    /\ o.local = relationships[<<d, p>>].tip
+    /\ amt > 0
+    /\ deviceBalance[d] >= amt
+    /\ Cardinality(net) < MaxNet
+    /\ outbox' = outbox \union {r}
+    /\ net' = net \union {TransferMsg(r, id)}
+    /\ online' = [online EXCEPT ![<<d, p>>].lin = id, ![<<d, p>>].local = id, ![<<d, p>>].gate = id]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d] = @ - amt]
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, journal, certs, joins>>
+
+\* T2+T3. The recipient applies the transfer copy `m`.
+RecvTransfer(m) ==
+    LET d     == m.to
+        p     == m.from
+        o     == online[<<d, p>>]
+        v     == View(d, p)
+        bc    == nextMsgId
+        fresh == nextMsgId + 1
+        s     == TipSync(v, m.pp, m.pc, fresh)
+        j     == [id |-> m.id, from |-> d, to |-> p, sp |-> o.lin, sc |-> bc, pp |-> m.pp, pc |-> m.pc]
+    IN
+    /\ m.kind = "transfer"
+    /\ ~Applied(m)
+    \* recipient admission: the sender's debit for this transfer was admitted
+    /\ RecipientChecksAdmission => \E r \in outbox : r.id = m.id /\ r.from = p /\ r.to = d /\ r.sp = m.sp /\ r.sc = m.sc
+    \* held while this device awaits the sender's certificate for the last one
+    /\ o.awaits = 0
+    \* the pin: the signed parent is the sender's head this device pinned
+    /\ RecipientChecksPin => m.sp = o.pin
+    /\ s.ok
+    /\ relationships' = [relationships EXCEPT ![<<d, p>>].tip = s.chain]
+    /\ smtState' = [smtState EXCEPT ![d][RelKey(d, p)] = s.chain]
+    /\ deviceRoots' = [deviceRoots EXCEPT ![d] = @ + 1]
+    /\ online' = [online EXCEPT ![<<d, p>>] =
+                    [o EXCEPT !.prev = s.prev, !.local = s.local, !.lin = bc, !.pin = m.sc, !.awaits = m.id]]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d] = @ + m.payload]
+    /\ ledger' = ledger \union {[rel |-> RelKey(d, p), signer |-> p, oldTip |-> m.sp, newTip |-> m.sc]}
+    /\ journal' = journal \union {j}
+    /\ joins' = JoinsAfterSync(v, m.pp, m.pc, fresh)
+    /\ net' = (net \ {m}) \union {DeltaMsg(j, bc)}
+    /\ nextMsgId' = nextMsgId + 2
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, outbox, certs>>
+
+\* T4. The sender finalizes its send on the delta copy `m`.
+RecvDelta(m) ==
+    LET d     == m.to
+        p     == m.from
+        o     == online[<<d, p>>]
+        v     == View(d, p)
+        fresh == nextMsgId
+        r     == CHOOSE x \in outbox : x.id = m.id
+        s     == TipSync(v, r.pp, r.pc, fresh)
+    IN
+    /\ m.kind = "delta"
+    /\ \E x \in outbox : x.id = m.id /\ x.from = d /\ x.to = p /\ ~x.fin
+    /\ o.gate = m.id
+    \* the pin: the delta's countersigned parent is the recipient's head pinned
+    /\ m.sp = o.pin
+    /\ s.ok
+    /\ relationships' = [relationships EXCEPT ![<<d, p>>].tip = s.chain]
+    /\ smtState' = [smtState EXCEPT ![d][RelKey(d, p)] = s.chain]
+    /\ deviceRoots' = [deviceRoots EXCEPT ![d] = @ + 1]
+    /\ online' = [online EXCEPT ![<<d, p>>] = [o EXCEPT !.prev = s.prev, !.local = s.local, !.pin = m.sc]]
+    /\ outbox' = (outbox \ {r}) \union {[r EXCEPT !.fin = TRUE]}
+    /\ ledger' = ledger \union {[rel |-> RelKey(d, p), signer |-> p, oldTip |-> m.sp, newTip |-> m.sc]}
+    /\ joins' = JoinsAfterSync(v, r.pp, r.pc, fresh)
+    /\ net' = net \ {m}
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, deviceBalance, journal, certs>>
+
+\* A copy that changes nothing: a transfer already applied, or a delta for a
+\* send already finalized, is read and changes no state.
+RecvSpent(m) ==
+    /\ \/ m.kind = "transfer" /\ Applied(m)
+       \/ m.kind = "delta" /\ ~\E x \in outbox : x.id = m.id /\ ~x.fin
+    /\ net' = net \ {m}
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
+
+\* T5a. The finalized send's certificate reaches quorum on storage. The
+\* recipient can read it from here on; the sender's gate stays until its sweep
+\* sees the quorum.
+CertPost(d, p) ==
+    /\ online[<<d, p>>].gate # 0
+    /\ online[<<d, p>>].gate \notin certs
+    /\ \E r \in outbox : r.id = online[<<d, p>>].gate /\ r.fin
+    /\ certs' = certs \union {online[<<d, p>>].gate}
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, joins>>
+
+\* T5b. The sender's sweep finds its certificate at quorum and releases the
+\* gate.
+GateRelease(d, p) ==
+    /\ online[<<d, p>>].gate # 0
+    /\ online[<<d, p>>].gate \in certs
+    /\ outbox' = { r \in outbox : r.id # online[<<d, p>>].gate }
+    /\ online' = [online EXCEPT ![<<d, p>>].gate = 0]
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, journal, certs, joins>>
+
+\* T6. The recipient reads the certificate and is released.
+RecvCert(d, p) ==
+    /\ online[<<d, p>>].awaits # 0
+    /\ online[<<d, p>>].awaits \in certs
+    /\ journal' = { j \in journal : j.id # online[<<d, p>>].awaits }
+    /\ online' = [online EXCEPT ![<<d, p>>].awaits = 0]
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, outbox, certs, joins>>
+
+\* The sender re-drives a transfer it has not finalized: no drop is permanent.
+RedriveTransfer(r) ==
+    /\ r \in outbox
+    /\ ~r.fin
+    /\ ~\E m \in net : m.kind = "transfer" /\ m.id = r.id
+    /\ Cardinality(net) < MaxNet
+    /\ net' = net \union {TransferMsg(r, nextMsgId)}
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
+
+\* The recipient re-emits the delta its journal holds until the certificate.
+RedriveDelta(j) ==
+    /\ j \in journal
+    /\ ~\E m \in net : m.kind = "delta" /\ m.id = j.id
+    /\ Cardinality(net) < MaxNet
+    /\ net' = net \union {DeltaMsg(j, nextMsgId)}
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
+
+\* The lineage parents device `d` has consumed toward `p` in sends.
+ConsumedParents(d, p) ==
+    { r.sp : r \in { x \in outbox : x.from = d /\ x.to = p } }
+    \union { l.oldTip : l \in { x \in ledger : x.signer = d /\ x.rel = RelKey(d, p) } }
+
+\* A copy of `d` posts a transfer from a lineage parent `d` already consumed,
+\* aimed at a projection tip the recipient holds. Its debit is the copy's own
+\* and was never admitted: nothing in `outbox` stands behind it.
+CopySend(d, p, amt) ==
+    /\ d # p
+    /\ amt \in 1..MaxPayload
+    /\ Cardinality(net) < MaxNet
+    /\ \E parent \in ConsumedParents(d, p), pp \in {relationships[<<p, d>>].tip, online[<<p, d>>].prev} \ {0} :
+         net' = net \union {[id |-> nextMsgId, copy |-> nextMsgId, kind |-> "transfer", from |-> d, to |-> p,
+                             payload |-> amt, sp |-> parent, sc |-> nextMsgId, pp |-> pp, pc |-> nextMsgId,
+                             dupLeft |-> 0]}
+    /\ nextMsgId' = nextMsgId + 1
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
+
+\* Deliver any copy from the bag (unordered delivery semantics).
 NetDeliver ==
-    /\ net # {}
-    /\ \E msg \in net :
-         LET d1 == msg.from
-             d2 == msg.to
-         IN  /\ d1 # d2
-             /\ msg.parentTip = relationships[<<d1, d2>>].tip  \* Adjacency check
-             /\ smtState[d1][RelKey(d1, d2)] = msg.parentTip
-             /\ smtState[d2][RelKey(d1, d2)] = msg.parentTip
-             /\ relationships' = [relationships EXCEPT
-                  ![<<d1, d2>>] = [tip |-> relationships[<<d1, d2>>].tip + 1, state |-> "active"],
-                  ![<<d2, d1>>] = [tip |-> relationships[<<d2, d1>>].tip + 1, state |-> "active"]]
-             /\ smtState' = [smtState EXCEPT
-                  ![d1][RelKey(d1, d2)] = msg.parentTip + 1,
-                  ![d2][RelKey(d1, d2)] = msg.parentTip + 1]
-             /\ deviceRoots' = [deviceRoots EXCEPT ![d1] = @ + 1, ![d2] = @ + 1]
-             /\ deviceBalance' = [deviceBalance EXCEPT ![d2] = @ + msg.payload]
-             /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> msg.parentTip, newTip |-> msg.parentTip + 1]}
-             /\ net' = net \ {msg}
-             /\ step' = step + 1
-             /\ UNCHANGED <<devices, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase>>
+    \E m \in net : RecvTransfer(m) \/ RecvDelta(m) \/ RecvSpent(m)
 
-\* Drop any message (adversary).
+\* Drop any copy (adversary).
 NetDrop ==
     /\ net # {}
     /\ \E msg \in net :
          /\ net' = net \ {msg}
          /\ step' = step + 1
-         /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance>>
+         /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
-\* Duplicate any message (adversary) if its dup budget remains and MaxNet not exceeded.
+\* Duplicate any copy (adversary) while its duplicate budget remains: the copy
+\* is the same message, a separate instance in the bag.
 NetDuplicate ==
-        /\ net # {}
-        /\ Cardinality(net) < MaxNet
-        /\ \E msg \in net :
-                 /\ msg.dupLeft > 0
-                 /\ net' = (net \ {msg})
-                                        \union {
-                                            [msg EXCEPT !.dupLeft = msg.dupLeft - 1],
-                                            [id |-> nextMsgId, to |-> msg.to, from |-> msg.from, payload |-> msg.payload, dupLeft |-> msg.dupLeft - 1, parentTip |-> msg.parentTip]
-                                        }
-                 /\ nextMsgId' = nextMsgId + 1
-                 /\ step' = step + 1
-                 /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance>>
+    /\ net # {}
+    /\ Cardinality(net) < MaxNet
+    /\ \E msg \in net :
+         /\ msg.dupLeft > 0
+         /\ net' = (net \ {msg})
+                   \union { [msg EXCEPT !.dupLeft = msg.dupLeft - 1],
+                            [msg EXCEPT !.copy = nextMsgId, !.dupLeft = msg.dupLeft - 1] }
+         /\ nextMsgId' = nextMsgId + 1
+         /\ step' = step + 1
+         /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
-\* NOTE: NetReorder intentionally removed.
+\* The online actions that do not consume a copy from the bag.
+OnlineLocal ==
+    \/ \E d, p \in DeviceIds : CertPost(d, p)
+    \/ \E d, p \in DeviceIds : GateRelease(d, p)
+    \/ \E d, p \in DeviceIds : RecvCert(d, p)
+
+\* The online actions that put a copy into the bag.
+OnlineInject ==
+    \/ \E d, p \in DeviceIds, amt \in 1..MaxPayload : Send(d, p, amt)
+    \/ \E d, p \in DeviceIds, amt \in 1..MaxPayload : CopySend(d, p, amt)
+    \/ \E r \in outbox : RedriveTransfer(r)
+    \/ \E j \in journal : RedriveDelta(j)
 
 \* Add a storage node
 AddStorageNode(d) ==
@@ -464,7 +744,7 @@ AddStorageNode(d) ==
     /\ d \notin storageNodes
     /\ storageNodes' = storageNodes \union {d}
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* ============================================================================
 \* CRYPTOGRAPHIC OPERATIONS (ABSTRACTED)
@@ -480,19 +760,19 @@ GenerateKeys(d) ==
     /\ keys[d].sphincs = 0  \* Not yet generated
     /\ keys' = [keys EXCEPT ![d] = [sphincs |-> 1, kyber |-> 1]]  \* Mark as generated
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Sign a message (abstracted)
 SignMessage(d, msg) ==
     /\ keys[d].sphincs = 1  \* Keys must be generated
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Encrypt using a KEM (abstracted)
 EncryptWithKyber(d1, d2, msg) ==
     /\ keys[d1].kyber = 1 /\ keys[d2].kyber = 1  \* Both devices must have keys
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* ============================================================================
 \* OFFLINE BILATERAL TRANSFERS (ABSTRACTED)
@@ -510,27 +790,50 @@ StartOfflineSession(d1, d2) ==
     /\ <<d1, d2>> \notin offlineSessions /\ <<d2, d1>> \notin offlineSessions
     /\ relationships[<<d1, d2>>].state = "active"
     /\ relationships[<<d2, d1>>].state = "active"
+    /\ Settled(d1, d2) /\ Settled(d2, d1)
     /\ offlineSessions' = offlineSessions \union {<<d1, d2>>, <<d2, d1>>}
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
-\* Perform offline bilateral transfer (abstracted)
+\* Perform an offline bilateral transfer (abstracted to its commit on both
+\* devices; DSM_OfflineFinality.tla models the frames between). One step at a
+\* time across the online and offline processes: neither device has an online
+\* send in flight or awaits a certificate toward the other. Both lineages
+\* advance, each device pins the other's new head (as an online apply and
+\* finalization do), both projections advance, and the amount moves.
 OfflineTransfer(d1, d2, amount) ==
+    LET tip == relationships[<<d1, d2>>].tip
+        c1  == nextMsgId
+        c2  == nextMsgId + 1
+        o1  == online[<<d1, d2>>]
+        o2  == online[<<d2, d1>>]
+    IN
     /\ <<d1, d2>> \in offlineSessions
     /\ amount > 0
-    /\ smtState[d1][RelKey(d1, d2)] = relationships[<<d1, d2>>].tip
-    /\ smtState[d2][RelKey(d1, d2)] = relationships[<<d1, d2>>].tip
+    /\ deviceBalance[d1] >= amount
+    /\ Settled(d1, d2) /\ Settled(d2, d1)
+    /\ smtState[d1][RelKey(d1, d2)] = tip
+    /\ smtState[d2][RelKey(d1, d2)] = tip
+    /\ relationships[<<d2, d1>>].tip = tip
+    /\ o1.local = tip /\ o2.local = tip
+    /\ o2.pin = o1.lin /\ o1.pin = o2.lin
     /\ relationships' = [relationships EXCEPT
-         ![<<d1, d2>>] = [tip |-> relationships[<<d1, d2>>].tip + 1, state |-> "active"],
-         ![<<d2, d1>>] = [tip |-> relationships[<<d2, d1>>].tip + 1, state |-> "active"]]
+         ![<<d1, d2>>] = [tip |-> c1, state |-> "active"],
+         ![<<d2, d1>>] = [tip |-> c1, state |-> "active"]]
     /\ smtState' = [smtState EXCEPT
-         ![d1][RelKey(d1, d2)] = relationships[<<d1, d2>>].tip + 1,
-         ![d2][RelKey(d1, d2)] = relationships[<<d1, d2>>].tip + 1]
+         ![d1][RelKey(d1, d2)] = c1,
+         ![d2][RelKey(d1, d2)] = c1]
     /\ deviceRoots' = [deviceRoots EXCEPT ![d1] = @ + 1, ![d2] = @ + 1]
-    /\ ledger' = ledger \union {[rel |-> {d1, d2}, oldTip |-> relationships[<<d1, d2>>].tip, newTip |-> relationships[<<d1, d2>>].tip + 1]}
+    /\ online' = [online EXCEPT
+         ![<<d1, d2>>] = [o1 EXCEPT !.prev = tip, !.local = c1, !.lin = c1, !.pin = c2],
+         ![<<d2, d1>>] = [o2 EXCEPT !.prev = tip, !.local = c1, !.lin = c2, !.pin = c1]]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d1] = @ - amount, ![d2] = @ + amount]
+    /\ ledger' = ledger \union {[rel |-> RelKey(d1, d2), signer |-> d1, oldTip |-> o1.lin, newTip |-> c1],
+                                [rel |-> RelKey(d1, d2), signer |-> d2, oldTip |-> o2.lin, newTip |-> c2]}
     /\ offlineSessions' = offlineSessions \ {<<d1, d2>>, <<d2, d1>>}
-        /\ step' = step + 1
-        /\ UNCHANGED <<devices, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, deviceBalance>>
+    /\ nextMsgId' = nextMsgId + 2
+    /\ step' = step + 1
+    /\ UNCHANGED <<devices, net, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, outbox, journal, certs, joins>>
 
 \* ============================================================================
 \* DLV (ABSTRACTED)
@@ -549,7 +852,7 @@ CreateVault(d, v, initialBalance, condition) ==
     /\ vaults' = [vaults EXCEPT ![d] = vaults[d] \union {v}]
     /\ vaultState' = [vaultState EXCEPT ![v] = [owner |-> d, balance |-> initialBalance, locked |-> TRUE, condition |-> condition]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Unlock a DLV vault when condition is met
 UnlockVault(v, proof) ==
@@ -557,7 +860,7 @@ UnlockVault(v, proof) ==
     /\ proof = vaultState[v].condition  \* Simplified: proof matches condition
     /\ vaultState' = [vaultState EXCEPT ![v] = [vaultState[v] EXCEPT !.locked = FALSE]]
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* ============================================================================
 \* STORAGE NODES (ABSTRACTED)
@@ -571,13 +874,13 @@ UnlockVault(v, proof) ==
 StoreData(d, data) ==
     /\ d \in storageNodes
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Replicate data across storage nodes
 ReplicateData(data) ==
     /\ Cardinality(storageNodes) >= 3  \* Need at least 3 nodes for replication
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* ============================================================================
 \* DJTE (ABSTRACTED)
@@ -611,7 +914,7 @@ UnlockSpendGate(d) ==
     /\ djteSeed' = djteSeed + 1
     /\ phase' = 0
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, emissionIndex, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, emissionIndex, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Additional activation instances for an already-activated device.
 \* This models re-activation / re-issuance without turning the model into an infinite JAP printer:
@@ -624,7 +927,7 @@ ActivateAgain(d) ==
      /\ djteSeed' = djteSeed + 1
     /\ phase' = 0
      /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, emissionIndex, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Trigger DJTE emission event
 \*
@@ -675,7 +978,7 @@ ConsumeJAPAndEmit ==
            /\ phase' = 1
            /\ step' = step + 1
            /\ actCount' = actCount
-           /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, shardLists, phase, actCount, offlineSessions, ledger, deviceBalance>>
+           /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, shardLists, phase, actCount, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 
 \* Backwards-compat stub (deprecated): keep as stutter to avoid changing historical docs.
@@ -683,7 +986,7 @@ ConsumeJAPAndEmit ==
 SelectWinner ==
     /\ phase = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Phase 2 "consume" step: abstracts the SpentProofSMT leaf insertion effect being
 \* recognized. Since spentJaps is already updated in ConsumeJAPAndEmit, this action
@@ -695,7 +998,7 @@ ConsumeSpentProof ==
          /\ consumedProofs' = consumedProofs \union {p}
          /\ phase' = 2
          /\ step' = step + 1
-         /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+         /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Milestone transitions: advance between phase buckets without forcing a single scripted step.
 EnterPhase1 ==
@@ -703,27 +1006,27 @@ EnterPhase1 ==
     /\ activatedDevices # {}
     /\ phase' = 1
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 EnterPhase2 ==
     /\ phase = 1
     /\ spentJaps # {}
     /\ phase' = 2
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 EnterPhase3 ==
     /\ phase = 2
     /\ phase' = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Deterministic stutter/termination once phase 3 reached (keeps state space finite).
 PhaseDone ==
     /\ phase = 3
     /\ phase' = 3
     /\ step' = step + 1
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Total stutter/termination for bounded runs: keep state fixed.
 \*
@@ -733,65 +1036,59 @@ PhaseDone ==
 \* Explicit stuttering action (useful for debugging enablement/coverage).
 \* It keeps all state variables unchanged. NOTE: this still increments no counters.
 Stutter ==
-    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance>>
+    /\ UNCHANGED <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 \* Regression harness Next: preserves previous structure.
-HarnessNext ==
-    \* Network semantic progress guard:
-    \* If there is at least one in-flight message, the next step MUST consume
-    \* (deliver or drop) a message. This prevents pathological "duplicate forever"
-    \* behaviors from dominating exploration.
-    IF net # {} THEN
-        \/ NetDeliver
-        \/ NetDrop
-    ELSE
-        \/ NetDuplicate
-        \/ \E d1, d2 \in DeviceIds, payload \in 0..MaxPayload : NetSend(d1, d2, payload)
-        \* NOTE: Stutter can let TLC end traces in a state where it prints
-        \* internal placeholders (e.g., showing some vars as null); we keep
-        \* it disabled by default in regression runs.
-        \/ FALSE
-        \* Also allow phase progression and phase-local actions regardless of network activity.
-        \/ EnterPhase1
-        \/ EnterPhase2
-        \/ EnterPhase3
-        \/ PhaseDone
-        \/ IF phase = 0 THEN
-               \/ \E d \in DeviceIds : UnlockSpendGate(d)
-               \/ \E d \in DeviceIds : ActivateAgain(d)
-           ELSE IF phase = 1 THEN
-               \/ ConsumeJAPAndEmit
-           ELSE IF phase = 2 THEN
-               \/ ConsumeSpentProof
-           ELSE
-               \* PhaseDone already allowed above
-               FALSE
+\* The online protocol's steps. The bag is bounded (MaxNet, each copy's
+\* duplicate budget) and every run by StepBound, so the online actions
+\* interleave freely with everything else: two sends can cross, a copy can be
+\* delivered while another is in flight, a certificate can land at any point.
+OnlineNext ==
+    \/ NetDeliver
+    \/ NetDrop
+    \/ NetDuplicate
+    \/ OnlineLocal
+    \/ OnlineInject
 
-\* System Next: explores interleavings with the same net-consumption guard,
-\* but without the phase harness gating.
+\* Regression harness Next: the phase-bucket structure for DJTE, beside the
+\* online protocol on relationships it establishes.
+HarnessNext ==
+    \/ OnlineNext
+    \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
+    \/ EnterPhase1
+    \/ EnterPhase2
+    \/ EnterPhase3
+    \/ PhaseDone
+    \/ IF phase = 0 THEN
+           \/ \E d \in DeviceIds : UnlockSpendGate(d)
+           \/ \E d \in DeviceIds : ActivateAgain(d)
+       ELSE IF phase = 1 THEN
+           \/ ConsumeJAPAndEmit
+       ELSE IF phase = 2 THEN
+           \/ ConsumeSpentProof
+       ELSE
+           \* PhaseDone already allowed above
+           FALSE
+
+\* System Next: explores interleavings without the phase harness gating.
 SystemNext ==
-    IF net # {} THEN
-        \/ NetDeliver
-        \/ NetDrop
-    ELSE
-        \/ NetDuplicate
-        \/ \E d1, d2 \in DeviceIds, payload \in 0..MaxPayload : NetSend(d1, d2, payload)
-        \/ \E g \in GenesisIds, d \in DeviceIds : AddDevice(g, d)
-        \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
-        \/ \E d \in DeviceIds : AddStorageNode(d)
-        \/ \E d \in DeviceIds : GenerateKeys(d)
-        \* Offline bilateral
-        \/ \E d1, d2 \in DeviceIds : StartOfflineSession(d1, d2)
-        \/ \E d1, d2 \in DeviceIds, amount \in 1..MaxPayload : OfflineTransfer(d1, d2, amount)
-        \* Vault lifecycle
-        \/ \E d \in DeviceIds, v \in VaultIds, initialBalance \in 0..MaxPayload, condition \in 0..MaxPayload :
-               CreateVault(d, v, initialBalance, condition)
-        \/ \E v \in VaultIds, proof \in 0..MaxPayload : UnlockVault(v, proof)
-        \* DJTE
-        \/ \E d \in DeviceIds : UnlockSpendGate(d)
-        \/ \E d \in DeviceIds : ActivateAgain(d)
-        \/ ConsumeJAPAndEmit
-        \/ ConsumeSpentProof
+    \/ OnlineNext
+    \/ \E g \in GenesisIds, d \in DeviceIds : AddDevice(g, d)
+    \/ \E d1, d2 \in DeviceIds : CreateRelationship(d1, d2)
+    \/ \E d \in DeviceIds : AddStorageNode(d)
+    \/ \E d \in DeviceIds : GenerateKeys(d)
+    \* Offline bilateral
+    \/ \E d1, d2 \in DeviceIds : StartOfflineSession(d1, d2)
+    \/ \E d1, d2 \in DeviceIds, amount \in 1..MaxPayload : OfflineTransfer(d1, d2, amount)
+    \* Vault lifecycle
+    \/ \E d \in DeviceIds, v \in VaultIds, initialBalance \in 0..MaxPayload, condition \in 0..MaxPayload :
+           CreateVault(d, v, initialBalance, condition)
+    \/ \E v \in VaultIds, proof \in 0..MaxPayload : UnlockVault(v, proof)
+    \* DJTE
+    \/ \E d \in DeviceIds : UnlockSpendGate(d)
+    \/ \E d \in DeviceIds : ActivateAgain(d)
+    \/ ConsumeJAPAndEmit
+    \/ ConsumeSpentProof
 
 Next ==
     \* Dual-mode execution:
@@ -799,7 +1096,7 @@ Next ==
     \* - System mode explores the full interleavings without phase gating.
     IF UseHarness THEN HarnessNext ELSE SystemNext
 
-vars == <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance>>
+vars == <<devices, relationships, deviceRoots, smtState, net, nextMsgId, storageNodes, keys, vaults, vaultState, activatedDevices, actCount, emissionIndex, shardTree, djteSeed, shardLists, spentJaps, spentProofs, consumedProofs, sourceRemaining, phase, step, offlineSessions, ledger, deviceBalance, online, outbox, journal, certs, joins>>
 
 Spec == Init /\ [][Next]_vars
 
@@ -807,12 +1104,24 @@ Spec == Init /\ [][Next]_vars
 \* This is clockless: `step` is a monotone transition counter, not wall time.
 StepBound == step \in 0..MaxStep
 
+\* State constraint for the online witnesses: only the online protocol and the
+\* relationship it runs on move, so a bounded search reaches deep enough to
+\* settle two crossing sends. Clockless, like StepBound.
+OnlineScope ==
+    /\ StepBound
+    /\ \A g \in GenesisIds : devices[g] = {}
+    /\ storageNodes = {}
+    /\ \A d \in DeviceIds : keys[d].sphincs = 0 /\ vaults[d] = {}
+    /\ activatedDevices = {}
+    /\ offlineSessions = {}
+
 \* ==========================================================================
 \* TLAPS proof surface (Concrete DSM -> DSM_ProtocolCore)
 \* ==========================================================================
 
 NetworkStep ==
-    \/ \E d1, d2 \in DeviceIds, payload \in 0..MaxPayload : NetSend(d1, d2, payload)
+    \/ OnlineInject
+    \/ OnlineLocal
     \/ NetDeliver
     \/ NetDrop
     \/ NetDuplicate
@@ -1078,17 +1387,64 @@ ProofGlue ==
 \* ============================================================================
 \* TRIPWIRE & FORK EXCLUSION (Atomic Interlock)
 \* ============================================================================
-\* Check that no two receipts in the ledger claim the same parent (oldTip) 
-\* for the same relationship but produce different outcomes.
-TripwireInvariant == 
+\* No signer consumes its own lineage parent twice: no two accepted steps of
+\* one signer on one relationship claim the same parent with different
+\* children. Two sends that cross share a projection parent but consume
+\* different lineage parents, so both stand.
+TripwireInvariant ==
     \A r1, r2 \in ledger :
-        (r1.rel = r2.rel /\ r1.oldTip = r2.oldTip) => (r1.newTip = r2.newTip)
+        (r1.rel = r2.rel /\ r1.signer = r2.signer /\ r1.oldTip = r2.oldTip) => (r1.newTip = r2.newTip)
 
-RefinedSafety == 
+\* Sum of the payloads of a finite set of frozen sends.
+RECURSIVE SumPayload(_)
+SumPayload(S) == IF S = {} THEN 0
+                 ELSE LET r == CHOOSE x \in S : TRUE IN r.payload + SumPayload(S \ {r})
+
+\* Sum of the balances of a finite set of devices.
+RECURSIVE SumBalances(_)
+SumBalances(S) == IF S = {} THEN 0
+                  ELSE LET d == CHOOSE x \in S : TRUE IN deviceBalance[d] + SumBalances(S \ {d})
+
+\* Value is neither minted nor lost: every balance plus every admitted debit
+\* not yet credited is what the devices started with.
+TokenConservation ==
+    SumBalances(DeviceIds) + SumPayload({ r \in outbox : ~Applied(r) })
+        = Cardinality(DeviceIds) * MaxPayload
+
+\* With nothing in flight either way, the two devices hold one relationship
+\* tip, and each pins the other's lineage head.
+ProjectionAgreement ==
+    \A d, p \in DeviceIds :
+        (d # p /\ relationships[<<d, p>>].state = "active" /\ Settled(d, p) /\ Settled(p, d))
+            => /\ relationships[<<d, p>>].tip = relationships[<<p, d>>].tip
+               /\ online[<<d, p>>].pin = online[<<p, d>>].lin
+
+\* The barrier is held by durable state: a gate by the frozen send it guards,
+\* an awaited certificate by the journal that holds the delta.
+BarrierHeldDurably ==
+    \A d, p \in DeviceIds :
+        /\ online[<<d, p>>].gate # 0 => \E r \in outbox : r.id = online[<<d, p>>].gate /\ r.from = d /\ r.to = p
+        /\ online[<<d, p>>].awaits # 0 => \E j \in journal : j.id = online[<<d, p>>].awaits /\ j.from = d /\ j.to = p
+
+\* Non-vacuity witness (expected violated in DSM_CrossingSettles.cfg): two
+\* sends crossed — a join exists only for two steps from one projection
+\* parent — and both devices have settled, released both gates and both
+\* recipients, on the joined tip.
+NoCrossingSettles ==
+    ~\E d, p \in DeviceIds :
+        /\ d # p
+        /\ Settled(d, p) /\ Settled(p, d)
+        /\ relationships[<<d, p>>].tip = relationships[<<p, d>>].tip
+        /\ relationships[<<d, p>>].tip \in { j.tip : j \in joins }
+
+RefinedSafety ==
     /\ DJTESafety
     /\ RefinementStrengthening
     /\ TripwireInvariant
     /\ SourceVaultBounded
+    /\ TokenConservation
+    /\ ProjectionAgreement
+    /\ BarrierHeldDurably
 
 THEOREM ConcreteInitRefinesCore == Init => Core!Init
   BY DEF Init, Core!Init, Core_actCount, Core_spent, Core_commit, Core_supply,

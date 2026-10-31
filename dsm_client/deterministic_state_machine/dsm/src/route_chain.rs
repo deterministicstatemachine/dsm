@@ -547,6 +547,12 @@ impl HeldLog {
         if entry.namespace != self.namespace || entry.key != self.key || !keep(&entry) {
             return;
         }
+        self.hold(self.count, self.head, entry);
+    }
+
+    /// Hold `entry`, a kept copy of the cell that arrived at `index` with the
+    /// seat's running hash `running_hash` after it.
+    fn hold(&mut self, index: u64, running_hash: [u8; 32], entry: RouteEntry) {
         let RouteEntry {
             value,
             seat,
@@ -574,8 +580,8 @@ impl HeldLog {
             .kept_bytes
             .saturating_add(HELD_COPY_COST + seat.len() + records);
         self.copies.push(HeldCopy {
-            index: self.count,
-            running_hash: self.head,
+            index,
+            running_hash,
             seat,
             position,
             chain,
@@ -650,6 +656,213 @@ impl RunningHashes for HeldLog {
             .get(at)
             .filter(|copy| copy.index == index)
             .map(|copy| copy.running_hash)
+    }
+}
+
+// ── reads kept with a final value ──────────────────────────────────────────
+
+/// Why bytes are not reads of a cell a client kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptReadsError {
+    /// The bytes do not decode.
+    Undecodable(String),
+    /// The bytes decode, but are not the one canonical encoding of what
+    /// they decode to.
+    NotCanonical,
+    /// Other than one seat per route position.
+    SeatCount { got: usize },
+    /// A field is out of its bounds, or a kept copy is not a copy of the
+    /// cell the reader keeps.
+    Malformed(String),
+}
+
+fn digest32(bytes: &[u8], what: &str) -> Result<[u8; 32], KeptReadsError> {
+    <[u8; 32]>::try_from(bytes).map_err(|e| KeptReadsError::Malformed(format!("{what}: {e}")))
+}
+
+impl HeldLog {
+    fn to_kept(&self) -> proto::KeptHeldLogV1 {
+        proto::KeptHeldLogV1 {
+            count: self.count,
+            head: self.head.to_vec(),
+            marks: self
+                .marks
+                .iter()
+                .map(|(index, hash)| proto::KeptRunningHashV1 {
+                    index: *index,
+                    running_hash: hash.to_vec(),
+                })
+                .collect(),
+            values: self.values.clone(),
+            copies: self
+                .copies
+                .iter()
+                .map(|copy| proto::KeptHeldCopyV1 {
+                    index: copy.index,
+                    running_hash: copy.running_hash.to_vec(),
+                    seat: copy.seat.clone(),
+                    position: copy.position as u32,
+                    chain: copy.chain.iter().map(ChainSlot::to_proto).collect(),
+                    value: copy.value as u32,
+                })
+                .collect(),
+        }
+    }
+
+    /// A log kept with a final value at `cell`, read back. Each kept copy
+    /// must be a well-formed copy of the cell that `keep` keeps, arriving
+    /// after the copy before it and no later than the last entry folded.
+    fn from_kept(
+        cell: &RoutedCell,
+        kept: &proto::KeptHeldLogV1,
+        keep: &dyn Fn(&RouteEntry) -> bool,
+    ) -> Result<Self, KeptReadsError> {
+        let malformed = |what: &str| KeptReadsError::Malformed(what.to_string());
+        let mut log = Self::new(&cell.namespace, &cell.key);
+        log.count = kept.count;
+        log.head = digest32(&kept.head, "the log's head")?;
+        for mark in &kept.marks {
+            if mark.index == 0 || mark.index > kept.count {
+                return Err(malformed("a running hash past the log"));
+            }
+            log.marks
+                .insert(mark.index, digest32(&mark.running_hash, "a running hash")?);
+        }
+        let mut last = 0u64;
+        for copy in &kept.copies {
+            let value_at = usize::try_from(copy.value)
+                .map_err(|e| KeptReadsError::Malformed(format!("a copy's value: {e}")))?;
+            let position = usize::try_from(copy.position)
+                .map_err(|e| KeptReadsError::Malformed(format!("a copy's position: {e}")))?;
+            let chain = copy
+                .chain
+                .iter()
+                .map(ChainSlot::from_proto)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| malformed("a copy's chain"))?;
+            let entry = RouteEntry {
+                namespace: cell.namespace.clone(),
+                key: cell.key,
+                value: kept
+                    .values
+                    .get(value_at)
+                    .ok_or_else(|| malformed("a copy names no value"))?
+                    .clone(),
+                seat: copy.seat.clone(),
+                position,
+                chain,
+            };
+            if copy.index <= last || copy.index > kept.count {
+                return Err(malformed("copies out of arrival order"));
+            }
+            if RouteEntry::decode(&entry.encode()).as_ref() != Some(&entry) || !keep(&entry) {
+                return Err(malformed("a copy the reader does not keep at this cell"));
+            }
+            last = copy.index;
+            log.hold(
+                copy.index,
+                digest32(&copy.running_hash, "a copy's running hash")?,
+                entry,
+            );
+        }
+        Ok(log)
+    }
+}
+
+impl CommittedAt {
+    fn to_kept(&self) -> proto::KeptCommittedV1 {
+        proto::KeptCommittedV1 {
+            commit: Some(self.commit.to_proto()),
+            parent: self.parent.as_ref().map(ByteCommit::to_proto),
+            proof: Some(self.proof.to_proto()),
+        }
+    }
+
+    fn from_kept(kept: &proto::KeptCommittedV1) -> Result<Self, KeptReadsError> {
+        let malformed = |what: &str| KeptReadsError::Malformed(what.to_string());
+        let commit = kept
+            .commit
+            .as_ref()
+            .and_then(ByteCommit::from_proto)
+            .ok_or_else(|| malformed("a ByteCommit"))?;
+        let parent = match &kept.parent {
+            Some(parent) => Some(
+                ByteCommit::from_proto(parent).ok_or_else(|| malformed("a parent ByteCommit"))?,
+            ),
+            None => None,
+        };
+        let proof = kept
+            .proof
+            .as_ref()
+            .and_then(CellCommitProof::from_proto)
+            .ok_or_else(|| malformed("a cell commit proof"))?;
+        Ok(Self {
+            commit,
+            parent,
+            proof,
+        })
+    }
+}
+
+impl CellEvidence {
+    /// The reads of a cell a client keeps with a final value it memoised,
+    /// as canonical bytes ([`CellEvidence::decode_kept`] reads them back),
+    /// so Core can prove the value final again from what was read.
+    pub fn encode_kept(&self) -> Vec<u8> {
+        use prost::Message;
+        proto::KeptCellReadsV1 {
+            seats: self
+                .seats
+                .iter()
+                .map(|seat| proto::KeptSeatReadsV1 {
+                    values: seat.values.as_ref().map(HeldLog::to_kept),
+                    committed: seat.committed.as_ref().map(CommittedAt::to_kept),
+                    leader_seen: seat.leader_seen.as_ref().map(CommittedAt::to_kept),
+                })
+                .collect(),
+        }
+        .encode_to_vec()
+    }
+
+    /// Reads kept with a final value at `cell`, read back: only the one
+    /// canonical encoding of reads of `cell`, one seat per route position,
+    /// each kept copy a well-formed copy of the cell that `keep` keeps. What
+    /// they show is Core's to evaluate, as any reads.
+    pub fn decode_kept(
+        cell: &RoutedCell,
+        bytes: &[u8],
+        keep: &dyn Fn(&RouteEntry) -> bool,
+    ) -> Result<Self, KeptReadsError> {
+        use prost::Message;
+        let kept = proto::KeptCellReadsV1::decode(bytes)
+            .map_err(|e| KeptReadsError::Undecodable(e.to_string()))?;
+        if kept.seats.len() != ROUTE_LEN {
+            return Err(KeptReadsError::SeatCount {
+                got: kept.seats.len(),
+            });
+        }
+        let mut seats = Vec::with_capacity(ROUTE_LEN);
+        for seat in &kept.seats {
+            seats.push(SeatEvidence {
+                values: match &seat.values {
+                    Some(log) => Some(HeldLog::from_kept(cell, log, keep)?),
+                    None => None,
+                },
+                committed: match &seat.committed {
+                    Some(at) => Some(CommittedAt::from_kept(at)?),
+                    None => None,
+                },
+                leader_seen: match &seat.leader_seen {
+                    Some(at) => Some(CommittedAt::from_kept(at)?),
+                    None => None,
+                },
+            });
+        }
+        let reads = Self { seats };
+        if reads.encode_kept() != bytes {
+            return Err(KeptReadsError::NotCanonical);
+        }
+        Ok(reads)
     }
 }
 
@@ -851,6 +1064,40 @@ fn is_cell_copy_at(entry: &RouteEntry, cell: &RoutedCell, position: usize) -> bo
         && entry.fits(&cell.route)
 }
 
+/// The first of `cell`'s position-0 copies in the leader's log that `pick`
+/// makes something of, with where it arrived and what `pick` made of it. The
+/// one rule for which value is first at the leader (§9 route chains, rule
+/// 3): Core's evaluation reads it ([`leader_link`]) and so does the writer
+/// ([`first_recognized_at_leader`]).
+fn first_at_leader<R>(
+    cell: &RoutedCell,
+    log: &SeatLog<'_>,
+    pick: impl Fn(&RouteEntry) -> Option<R>,
+) -> Option<(RouteEntry, (u64, [u8; 32]), R)> {
+    log.copies(cell, 0)
+        .find_map(|(entry, at)| pick(&entry).map(|made| (entry, at, made)))
+}
+
+/// The first recognized value at `cell`'s leader, read from the leader's
+/// arrival log, with the record the leader returned for its copy: the first
+/// position-0 copy that `recognized` keeps, the cell's rule for what can
+/// count there ([`recognized_copies`]). Once a ByteCommit of the leader's
+/// commits that record it is the cell's leader link (§9 route chains, rule
+/// 3), whichever value it carries. `None` while the log holds no such copy.
+///
+/// A writer reads this before it puts a value at the leader and again after:
+/// another value first there means the cell is decided for that value, and
+/// the writer records a taken empty carrying this record (§9 rule 5).
+pub fn first_recognized_at_leader(
+    cell: &RoutedCell,
+    leader_log: &HeldLog,
+    recognized: &dyn Fn(&RouteEntry) -> bool,
+) -> Option<(Vec<u8>, ArrivalRecord)> {
+    let log = SeatLog::of(cell.route.leader(), leader_log);
+    first_at_leader(cell, &log, |entry| recognized(entry).then_some(()))
+        .map(|(entry, at, ())| (entry.value, log.record(at)))
+}
+
 /// The leader link of a cell: the first recognized value in the leader's
 /// arrival log, stored there as the cell's position-0 copy, with the record
 /// the leader returned for it (§9 route chains, rule 3), and the leader's
@@ -879,9 +1126,9 @@ where
         cell.route.leader(),
         leader.values.as_ref().ok_or(Missing::LeaderUnread)?,
     );
-    let Some((entry, at, id, object)) = log.copies(cell, 0).find_map(|(entry, at)| {
-        recognize(&entry.value).map(|(id, object)| (entry, at, id, object))
-    }) else {
+    let Some((entry, at, (id, object))) =
+        first_at_leader(cell, &log, |entry| recognize(&entry.value))
+    else {
         return Ok(None);
     };
     let record = log.record(at);
@@ -1273,6 +1520,7 @@ pub(crate) mod fixtures {
     }
 
     /// One cell across its five seats.
+    #[derive(Clone)]
     pub(crate) struct Cell {
         pub(crate) namespace: Vec<u8>,
         pub(crate) key: [u8; 32],
@@ -1811,6 +2059,35 @@ mod tests {
         );
     }
 
+    /// MR-DSM-0216: visibility to the storage set grants no priority. Every
+    /// later seat holds a copy of `ok-b` — its bytes seen across the set —
+    /// before `ok-a` reaches the leader. `ok-a` is first at the leader and its
+    /// chain holds the cell final; `ok-b`, written in full afterwards, holds
+    /// nothing.
+    ///
+    /// MUTATION CONTROL: taking the first recognized value at any seat, not
+    /// at the leader, turns this red.
+    #[test]
+    fn a_value_the_set_saw_first_holds_nothing_unless_it_is_first_at_the_leader() {
+        let mut c = cell();
+        let routed = c.routed();
+        let seen = RouteEntry::at_leader(
+            routed.namespace().to_vec(),
+            *routed.key(),
+            b"ok-b".to_vec(),
+            routed.route(),
+        );
+        for position in 1..ROUTE_LEN {
+            c.put(position, seen.encode());
+        }
+        c.write(b"ok-a", ROUTE_LEN - 1, &[]);
+        c.write(b"ok-b", ROUTE_LEN - 1, &[]);
+        assert_eq!(
+            evaluate(&c.routed(), &c.evidence(), recognize_ok),
+            held(ChainState::Final, b"ok-a")
+        );
+    }
+
     /// Rule 7: the leader link is checkable only once a ByteCommit of the
     /// leader's commits its record.
     #[test]
@@ -2020,6 +2297,40 @@ mod tests {
         );
         assert_eq!(
             leader_copy_record(&routed, b"ok-x", &held(b"ok-x", &[])),
+            None
+        );
+    }
+
+    /// MR-STOR-0134: the writer decides which value is first at the leader by
+    /// the rule Core's evaluation reads. Past junk, a copy of a value nothing
+    /// recognizes, and a copy for another position, the first recognized
+    /// position-0 copy is `ok-a`'s, with the record the leader gave it; a
+    /// later recognized value is not first. Evaluated over the same log, Core
+    /// holds the cell for that value at that record.
+    #[test]
+    fn the_writer_and_core_name_one_first_value_at_the_leader() {
+        let mut c = cell();
+        c.put(0, b"not a route entry".to_vec());
+        c.write(b"junk", 0, &[]);
+        let routed = c.routed();
+        let later = RouteEntry::at_leader(NS.to_vec(), c.key, b"ok-b".to_vec(), &c.route)
+            .next(ChainSlot::NoResponse, &c.route)
+            .expect("position 1");
+        c.put(0, later.encode());
+        c.write(b"ok-a", 0, &[]);
+        c.write(b"ok-b", 0, &[]);
+        let recognized = recognized_copies(&routed, |value: &[u8]| recognize_ok(value).is_some());
+        let log = HeldLog::of(&routed, &c.logs[0], &recognized);
+        let first = first_recognized_at_leader(&routed, &log, &recognized);
+        assert_eq!(first, Some((b"ok-a".to_vec(), c.record_at(0, 4))));
+        let Ok(CellReading::Held { value, .. }) = evaluate(&routed, &c.evidence(), recognize_ok)
+        else {
+            panic!("the cell is held");
+        };
+        assert_eq!(Some(value), first.map(|(value, _)| value));
+        let none = HeldLog::of(&routed, &c.logs[0][..3], &recognized);
+        assert_eq!(
+            first_recognized_at_leader(&routed, &none, &recognized),
             None
         );
     }
@@ -2342,5 +2653,235 @@ mod tests {
             evaluate(&c.routed(), &c.evidence(), recognize_ok),
             held(ChainState::LeaderHeld, b"ok-x")
         );
+    }
+
+    // ── model-to-code correspondence: tla/DSM_RouteChain.tla ───────────────
+
+    /// The state of `tla/DSM_RouteChain.tla` (`Mutation = "none"`), with
+    /// seats as route positions (the model's seats are symmetric) and values
+    /// as indexes into [`MODEL_VALUES`].
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct RouteChainModel {
+        /// The leader's arrivals, in order.
+        arrivals: Vec<usize>,
+        /// `copies[p]`: the values the seat at route position `p` holds a
+        /// copy of (positions 1..5; position 0 is the leader's arrivals).
+        copies: [std::collections::BTreeSet<usize>; ROUTE_LEN],
+        /// `last[x]`: the route position x's chain has reached, as the model
+        /// counts it (0: not written, 1: the leader, 5: the last seat).
+        last: [usize; 2],
+        /// Lost seats, by route position (at most two).
+        lost: std::collections::BTreeSet<usize>,
+    }
+
+    /// The model's `Values = {v1, v2}`, as recognized bytes.
+    const MODEL_VALUES: [&[u8]; 2] = [b"ok-v1", b"ok-v2"];
+
+    impl RouteChainModel {
+        fn init() -> Self {
+            Self {
+                arrivals: Vec::new(),
+                copies: Default::default(),
+                last: [0; 2],
+                lost: Default::default(),
+            }
+        }
+
+        fn leader_link(&self, x: usize) -> bool {
+            self.arrivals.first() == Some(&x)
+        }
+
+        /// `ValidLinks(x)`.
+        fn valid_links(&self, x: usize) -> usize {
+            if self.leader_link(x) {
+                1 + self
+                    .copies
+                    .iter()
+                    .skip(1)
+                    .filter(|held| held.contains(&x))
+                    .count()
+            } else {
+                0
+            }
+        }
+    }
+
+    /// One action of the model's `Next`.
+    #[derive(Debug, Clone, Copy)]
+    enum RouteChainAction {
+        WriteLeader(usize),
+        /// `Extend(x, i)`, with `i` as a route position 1..5 (the model's 2..5).
+        Extend(usize, usize),
+        Lose(usize),
+    }
+
+    fn enabled(m: &RouteChainModel) -> Vec<RouteChainAction> {
+        let mut out = Vec::new();
+        for x in 0..MODEL_VALUES.len() {
+            if !m.lost.contains(&0) && m.last[x] == 0 {
+                out.push(RouteChainAction::WriteLeader(x));
+            }
+            for p in 1..ROUTE_LEN {
+                if m.last[x] >= 1 && p + 1 > m.last[x] && !m.lost.contains(&p) && m.leader_link(x) {
+                    out.push(RouteChainAction::Extend(x, p));
+                }
+            }
+        }
+        if m.lost.len() < 2 {
+            for p in (0..ROUTE_LEN).filter(|p| !m.lost.contains(p)) {
+                out.push(RouteChainAction::Lose(p));
+            }
+        }
+        out
+    }
+
+    /// The writes the model's actions stand for, made the way a writer makes
+    /// them: real arrival logs at each seat, each copy carrying the chain
+    /// built so far, a seat passed over recorded as no response.
+    #[derive(Clone)]
+    struct Writes {
+        cell: fixtures::Cell,
+        /// Each value's entry for the next route position it would extend
+        /// to, once it has reached the leader.
+        next: [Option<RouteEntry>; 2],
+    }
+
+    impl Writes {
+        fn new() -> Self {
+            Self {
+                cell: fixtures::Cell::new(b"model", [0x52; 32], [0x43; 32]),
+                next: [None, None],
+            }
+        }
+
+        fn apply(&mut self, action: RouteChainAction) {
+            match action {
+                RouteChainAction::WriteLeader(x) => {
+                    let copy = RouteEntry::at_leader(
+                        self.cell.namespace.clone(),
+                        self.cell.key,
+                        MODEL_VALUES[x].to_vec(),
+                        &self.cell.route,
+                    );
+                    let record = self.cell.put(0, copy.encode());
+                    self.next[x] = copy.next(ChainSlot::Link(record), &self.cell.route);
+                }
+                RouteChainAction::Extend(x, p) => {
+                    let mut entry = self.next[x]
+                        .clone()
+                        .expect("a value extends after its leader write");
+                    while entry.position < p {
+                        entry = entry
+                            .next(ChainSlot::NoResponse, &self.cell.route)
+                            .expect("a passed-over position before the last");
+                    }
+                    let record = self.cell.put(p, entry.encode());
+                    self.next[x] = entry.next(ChainSlot::Link(record), &self.cell.route);
+                }
+                RouteChainAction::Lose(_) => {}
+            }
+        }
+
+        /// Core's reading of the cell over every seat's reads, and each
+        /// value's chain state there.
+        fn states(&self) -> [Option<ChainState>; 2] {
+            let held = evaluate(
+                &self.cell.routed(),
+                &self.cell.evidence(),
+                fixtures::recognize_ok,
+            )
+            .expect("every seat is read and committed");
+            let mut states = [None, None];
+            if let CellReading::Held { value, state, .. } = held {
+                let x = MODEL_VALUES
+                    .iter()
+                    .position(|v| *v == value.as_slice())
+                    .expect("the value holding the cell is one the model wrote");
+                states[x] = Some(state);
+            }
+            states
+        }
+
+        /// The route positions of `x`'s valid links, the leader's included.
+        fn link_positions(&self, x: usize) -> Vec<usize> {
+            let cell = self.cell.routed();
+            let ev = self.cell.evidence();
+            let Ok(Some(leader)) = leader_link(&cell, &ev, fixtures::recognize_ok) else {
+                return Vec::new();
+            };
+            if leader.value != MODEL_VALUES[x] {
+                return Vec::new();
+            }
+            let mut positions = vec![0];
+            positions.extend(valid_links(&cell, &ev, &leader).iter().map(|l| l.position));
+            positions
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28: "Model-to-code
+    /// correspondence remains in scope for active beta mechanisms. Use genuine
+    /// executable tests and mutation controls"): every state of
+    /// `tla/DSM_RouteChain.tla` (its checked configuration: two values, five
+    /// seats, up to two lost) is reached by breadth-first search, each action
+    /// applied to the model and made as real writes; in every state Core's
+    /// `evaluate` gives each value exactly the model's `LeaderHeld` /
+    /// `Preserved` / `Final`, and the model's invariants hold of Core's
+    /// answers: one value holds the cell, a final value survives two losses,
+    /// and no step takes a value's state back.
+    /// MUTATION CONTROL: taking any arrival at the leader as its link, or
+    /// counting a copy whose chain does not begin with the leader link, turns
+    /// this red.
+    #[test]
+    fn route_chain_evaluation_refines_the_route_chain_model() {
+        let mut seen = std::collections::HashSet::new();
+        let mut frontier = vec![(RouteChainModel::init(), Writes::new())];
+        let mut states = 0usize;
+        while let Some((model, writes)) = frontier.pop() {
+            if !seen.insert((model.clone(), writes.cell.logs.clone())) {
+                continue;
+            }
+            states += 1;
+            let core = writes.states();
+            for (x, state) in core.iter().enumerate() {
+                let expected = ChainState::of_links(model.valid_links(x));
+                assert_eq!(*state, expected, "value {x} in {model:?}");
+                if *state == Some(ChainState::Final) {
+                    assert!(
+                        writes
+                            .link_positions(x)
+                            .iter()
+                            .any(|p| !model.lost.contains(p)),
+                        "a final value lost every holder of its chain: {model:?}"
+                    );
+                }
+            }
+            for action in enabled(&model) {
+                let mut next_model = model.clone();
+                let mut next_writes = writes.clone();
+                match action {
+                    RouteChainAction::WriteLeader(x) => {
+                        next_model.arrivals.push(x);
+                        next_model.last[x] = 1;
+                    }
+                    RouteChainAction::Extend(x, p) => {
+                        next_model.copies[p].insert(x);
+                        next_model.last[x] = p + 1;
+                    }
+                    RouteChainAction::Lose(p) => {
+                        next_model.lost.insert(p);
+                    }
+                }
+                next_writes.apply(action);
+                let after = next_writes.states();
+                for (x, (before, now)) in core.iter().zip(after.iter()).enumerate() {
+                    assert!(
+                        before.is_none() || now >= before,
+                        "{action:?} took value {x} back from {before:?} to {now:?}"
+                    );
+                }
+                frontier.push((next_model, next_writes));
+            }
+        }
+        assert!(states > 100, "the model's states were reached: {states}");
     }
 }

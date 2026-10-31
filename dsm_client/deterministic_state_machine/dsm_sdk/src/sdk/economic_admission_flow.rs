@@ -181,27 +181,16 @@ pub(crate) fn admitted_root_and_tree(
     Ok(Some((validated, tree, pre)))
 }
 
-/// Rebuild the producer-side economic tree.
-///
-/// Strategy A (cache) with root-equality admission; the cache is NEVER an
-/// authority — on mismatch it is discarded and the flow falls back to the
-/// recovery truth (for position 0/1 in beta: the empty tree, since nothing
-/// beyond the first admissions exists to replay yet).
+/// The producer-side economic tree at `validated`: Core's
+/// ([`producer_tree_and_pre_state`]).
 pub(crate) fn producer_tree(validated: &ValidatedEconomicRoot) -> Result<EconomicSmt, DsmError> {
     Ok(producer_tree_and_pre_state(validated)?.0)
 }
 
-/// The admitted pre-state a write set reads: every leaf class in `R_econ` that
-/// a mutation can start from, owned so it can outlive the decode.
-///
-/// It is NOT "the balances plus some extras". `build_write_set` reads exactly
-/// two classes — balances, and the vault reserves an owner apply or a close
-/// draws down — and a class the producer drops is not a smaller pre-state but
-/// an ABSENT LEAF: `DlvOwnerApply` and `DlvWithdraw` fail closed with "the
-/// vault holds no output reserve for that settlement" against a validated root
-/// that commits exactly that reserve. Receipt and consumed-source leaves are
-/// deliberately absent: they are write-once records a write set inserts, never
-/// a state it starts from.
+/// The admitted pre-state a write set reads: every balance `R_econ` holds,
+/// owned so it can outlive the decode, and the position the next transition
+/// lands at. Core decides which leaf classes a write set starts from
+/// (`ValidatedEconomicRoot::admitted_tree`).
 #[derive(Debug, Default, Clone)]
 pub(crate) struct AdmittedPreState {
     pub balances: BTreeMap<[u8; 32], u64>,
@@ -217,77 +206,49 @@ impl AdmittedPreState {
     }
 }
 
-/// The producer tree PLUS the admitted pre-state decoded from the same
-/// cache rows. Admission pre-states come from `R_econ` ITSELF — never the
-/// device head, whose balance map can carry credits no admission backs (a
-/// received transfer awaiting PR4 recipient admission). Building from the
-/// head would pair a mutation pre-state the validated pre-root cannot prove;
-/// building from the tree makes unadmitted value simply unspendable, which
-/// is the economic-root guarantee working.
+/// The producer tree PLUS the admitted pre-state, both Core's: this device's
+/// leaf cache handed to `ValidatedEconomicRoot::admitted_tree`, which binds
+/// every row to its state and refuses rows that do not recompute the
+/// validated root. This module computes no root (SoFi §2.1). Admission
+/// pre-states come from `R_econ` ITSELF — never the device head, whose
+/// balance map can carry credits no admission backs (a received transfer
+/// awaiting PR4 recipient admission). Building from the head would pair a
+/// mutation pre-state the validated pre-root cannot prove; building from the
+/// tree makes unadmitted value simply unspendable, which is the economic-root
+/// guarantee working.
 pub(crate) fn producer_tree_and_pre_state(
     validated: &ValidatedEconomicRoot,
 ) -> Result<(EconomicSmt, AdmittedPreState), DsmError> {
-    let mut tree = EconomicSmt::new();
-    let mut pre = AdmittedPreState {
-        // The NEXT position: a pre-state at `p` is the pre-state of `p + 1`.
-        // CHECKED: a counter with no successor is a refusal, never a clamp —
-        // a saturated position would silently claim to be its own successor.
-        economic_position: validated
-            .economic_position()
-            .checked_add(1)
-            .ok_or_else(|| {
-                DsmError::invalid_operation("economic position has no successor".to_string())
-            })?,
-        ..AdmittedPreState::default()
-    };
-    if validated.economic_position() == 0 {
-        return Ok((tree, pre));
-    }
-    let leaves =
+    // The NEXT position: a pre-state at `p` is the pre-state of `p + 1`.
+    // CHECKED: a counter with no successor is a refusal, never a clamp — a
+    // saturated position would silently claim to be its own successor.
+    let economic_position = validated
+        .economic_position()
+        .checked_add(1)
+        .ok_or_else(|| {
+            DsmError::invalid_operation("economic position has no successor".to_string())
+        })?;
+    let rows =
         economic_lineage::load_leaf_cache().map_err(|e| storage_err("load leaf cache", e))?;
-    for (key, value, ccb) in &leaves {
-        tree.insert(*key, *value);
-        let state = dsm::economic::decode::decode_leaf_state(ccb)
-            .map_err(|e| storage_err("decode cached leaf state", e))?;
-        // Every class the tree carries is decoded here, and the two a write
-        // set can START from are kept. Dropping one would not narrow the
-        // pre-state — it would assert the leaf is absent from a root that
-        // commits it, and the write set would fail closed on state the device
-        // provably holds.
-        match state {
-            dsm::economic::state::EconomicLeafState::Balance(b) => {
-                pre.balances.insert(b.policy_commit, b.amount);
-            }
-            // Write-once records, inserted by a write set and never a
-            // predecessor it reads. The bundle-acceptance leaf (2c-D) belongs
-            // here for the same reason and one more: its `pre` is required to
-            // be `None`, so a pre-state that carried it would contradict the
-            // shape its own write-set arm enforces.
-            dsm::economic::state::EconomicLeafState::ConsumedSource(..) => {}
-            // A SoFi relationship leaf IS a predecessor a write set reads —
-            // its whole content is the base `hʲ` the next operation advances
-            // from — but the reader is `sofi::validation`, which fetches it by
-            // key with the vault's own evidence. This pre-state map exists for
-            // the bilateral write sets and has no slot it belongs in; adding a
-            // half-slot here would be a second place for the base to live.
-            dsm::economic::state::EconomicLeafState::Relationship(..) => {}
-            // Creation records are write-once and insert-only: a write set
-            // that found one would be creating a vault or a token that
-            // already exists, which its own arm refuses by reading the tree.
-            // Nothing reads one as a predecessor.
-            dsm::economic::state::EconomicLeafState::VaultCreation(..)
-            | dsm::economic::state::EconomicLeafState::TokenCreation(..) => {}
-        }
-    }
-    if tree.root() != validated.economic_root() {
-        return Err(DsmError::storage(
-            "economic leaf cache does not recompute the admitted root — discarded; witness \
-             replay recovery is required and no replay source exists yet"
-                .to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    Ok((tree, pre))
+    let (tree, balances) = validated
+        .admitted_tree(&rows)
+        .map_err(|e| {
+            DsmError::storage(
+                format!(
+                    "economic leaf cache: {e} — discarded; witness replay recovery is required \
+                     and no replay source exists yet"
+                ),
+                None::<std::io::Error>,
+            )
+        })?
+        .into_parts();
+    Ok((
+        tree,
+        AdmittedPreState {
+            balances,
+            economic_position,
+        },
+    ))
 }
 
 /// The portable P0–P6 authority material for THIS device, built from the
@@ -349,7 +310,6 @@ pub(crate) fn build_dsm_admission(
     authority: &AuthorityMaterial,
     extra_artifacts: Vec<(String, Vec<u8>, &'static str)>,
 ) -> Result<DsmAdmissionParts, DsmError> {
-    let pre_root = tree.root();
     let c_dsm_plus = chain_state.compute_chain_tip();
     let op_bytes = operation.to_bytes();
     let op_digest = dsm::economic::admission::dsm_operation_digest(&op_bytes);
@@ -366,6 +326,8 @@ pub(crate) fn build_dsm_admission(
         facts,
     )
     .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+    // Both roots the witness names are the builder's, never this module's.
+    let pre_root = built.pre_root;
     // THE DEBIT LOCATOR IS A TRANSFER FACT, AND ONLY A TRANSFER FACT. Its one
     // consumer is the online-transfer wire, where the recipient uses it to
     // locate the sender's debit; a Transfer sender's write set has exactly one
@@ -606,7 +568,7 @@ pub(crate) async fn stage_admission(
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         target_position,
-        tree.root(),
+        validated.economic_root(),
         op_digest,
     );
     Ok(StagedAdmission {
@@ -655,6 +617,9 @@ pub(crate) async fn admitted_self_loop_operation(
     >,
     built_on: Option<BuiltOn>,
 ) -> Result<(dsm::types::device_state::AdvanceOutcome, AdmittedOutcome), DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     let StagedAdmission {
         network_id,
         genesis,
@@ -730,6 +695,56 @@ const OFFLINE_BOUNDARY_BODY_PURPOSE: &str = "economic-offline-boundary-body";
 /// took, make the boundary and its admission durable together, then publish,
 /// register, validate and admit — the one finish every admission runs. The
 /// boundary registers BEFORE the route reports success.
+/// This device's offline account's ancestry, for the boundary `boundary` Core
+/// took: the anchor its bundle commits, where the account stood since its last
+/// boundary, and every spend this device's anchor released since, which the
+/// boundary exposes. Read under the state-machine lock the boundary is taken
+/// under, so no spend lands between the chain and the boundary.
+fn own_boundary_ancestry(
+    pin: &crate::anchor::AnchorPin,
+    bundle: &[u8; 32],
+    boundary: &dsm::types::device_state::OfflineBoundaryOutcome,
+) -> Result<dsm::economic::offline_boundary::BoundaryAncestry, DsmError> {
+    use dsm::economic::offline_boundary::{BoundaryAncestry, BoundaryAnchor, BoundarySince};
+    if pin.bundle != *bundle {
+        return Err(DsmError::invalid_operation(
+            "offline boundary: the attached anchor is not the account's",
+        ));
+    }
+    let chain = client_db::offline_spends::own_offline_spends(bundle)
+        .map_err(|e| storage_err("this device's unexposed offline spends", e))?;
+    let funded = match &boundary.account_move.before {
+        dsm::types::offline_account::StepBefore::Boundary { funding_chain, .. } => *funding_chain,
+        dsm::types::offline_account::StepBefore::Spend { .. } => {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: Core took a spend where a boundary was asked",
+            ))
+        }
+    };
+    let since = match (funded, chain.first()) {
+        (None, _) => BoundarySince::Opened {
+            frontier: boundary.account_move.account.frontier(),
+        },
+        (Some(_), Some(first)) => BoundarySince::Previous {
+            account_root: dsm::types::offline_chain::SpendHop::from_bytes(first)?.starts_from(),
+        },
+        (Some(_), None) => BoundarySince::Previous {
+            account_root: boundary.pre_account_root,
+        },
+    };
+    Ok(BoundaryAncestry {
+        anchor: BoundaryAnchor {
+            anchor_id: pin.anchor_id,
+            pk_chip: pin.pk_chip.clone(),
+            pk_host: pin.partition_pk.clone(),
+            enrolled_counter: pin.enrolled_counter,
+            birth_commitment: pin.birth_commitment,
+        },
+        since,
+        chain,
+    })
+}
+
 pub(crate) async fn admitted_offline_boundary(
     core: &CoreSDK,
     bundle: [u8; 32],
@@ -743,6 +758,9 @@ pub(crate) async fn admitted_offline_boundary(
     ),
     DsmError,
 > {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     use dsm::economic::offline_boundary::{
         offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineBoundaryBody,
     };
@@ -773,24 +791,45 @@ pub(crate) async fn admitted_offline_boundary(
                 asset_policy_commit: asset,
             }
         }
+        // A settlement moves nothing across the account: it credits a payment
+        // received offline, and is admitted by `admitted_offline_settlement`.
+        dsm::types::device_state::OfflineBoundaryKind::Settle => {
+            return Err(DsmError::invalid_operation(
+                "offline boundary: a settlement is no account boundary — it is admitted as the \
+                 settlement of the payment it names",
+            ))
+        }
     };
     let mut built: Option<(
         EconomicTransitionWitness,
         EconomicAdmissionManifest,
         Vec<u8>,
     )> = None;
+    // The anchor the account belongs to, read before the boundary is taken: its
+    // lock is never taken under the state-machine lock the boundary holds.
+    let pin = core.attached_anchor_pin().ok_or_else(|| {
+        DsmError::invalid_operation(
+            "offline boundary: no anchor is attached, so the account's anchor cannot be named",
+        )
+    })?;
     let (outcome, pending) = core.admitted_boundary(
         &bundle,
         kind,
         &asset,
         amount,
         |boundary| {
-            let body = OfflineBoundaryBody::of(boundary, kind, bundle, asset, amount)?
-                .encode()
-                .map_err(|e| storage_err("boundary body", e))?;
+            let body = OfflineBoundaryBody::of(
+                boundary,
+                kind,
+                bundle,
+                asset,
+                amount,
+                own_boundary_ancestry(&pin, &bundle, boundary)?,
+            )?
+            .encode()
+            .map_err(|e| storage_err("boundary body", e))?;
             let digest = offline_boundary_operation_digest(&body);
             let evidence_addr = offline_boundary_evidence_addr(&body);
-            let pre_root = tree.root();
             let write_set = dsm::economic::write_set::build_boundary_write_set(
                 &dsm::economic::write_set::BoundaryEffect {
                     kind,
@@ -804,6 +843,8 @@ pub(crate) async fn admitted_offline_boundary(
                 &mut tree,
             )
             .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+            // Both roots are the builder's, never this module's.
+            let pre_root = write_set.pre_root;
             let witness = EconomicTransitionWitness::new(
                 pre_root,
                 write_set.post_root,
@@ -905,6 +946,240 @@ pub(crate) async fn admitted_offline_boundary(
     )
     .await?;
     Ok((outcome, admitted))
+}
+
+/// Settle a payment this device received offline (SA-91): once the payer's
+/// online history exposed the spend — a walk of the payer this device ran
+/// itself recorded the exposure — the payment is credited to the online balance
+/// by an admitted economic transition of its own, funded by that spend and
+/// consumed once. The settlement, its admission and the pending receipt's
+/// settled mark are durable together; then the one finish runs.
+pub(crate) async fn admitted_offline_settlement(
+    core: &CoreSDK,
+    release_message: [u8; 32],
+) -> Result<AdmittedOutcome, DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
+    use dsm::economic::offline_boundary::{
+        offline_boundary_evidence_addr, offline_boundary_operation_digest, OfflineSettlementBody,
+    };
+    let (receipt, settled) = client_db::offline_receipts::offline_receipt(&release_message)
+        .map_err(|e| storage_err("the payment received offline", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline settlement: no payment received under this release",
+            )
+        })?;
+    if let Some(position) = settled {
+        return Err(DsmError::invalid_operation(format!(
+            "offline settlement: the payment was settled at position {position}"
+        )));
+    }
+    let exposure = client_db::economic_lineage::offline_exposure(&release_message)
+        .map_err(|e| storage_err("the exposure of the payment", e))?
+        .ok_or_else(|| {
+            DsmError::invalid_operation(
+                "offline settlement: the payer's online history has not exposed this spend yet — \
+                 the payment stays pending",
+            )
+        })?;
+    if *exposure.genesis() != receipt.payer_genesis
+        || *exposure.device_id() != receipt.payer_device
+        || *exposure.bundle() != receipt.bundle
+        || exposure.payment().asset != receipt.asset
+        || exposure.payment().amount != receipt.amount
+    {
+        return Err(DsmError::invalid_operation(
+            "offline settlement: the exposed payment is not the one this device received",
+        ));
+    }
+    let network_id = committed_network_id()?;
+    if let Some(pending) = core
+        .device_head()
+        .and_then(|h| h.pending_economic_admission().cloned())
+    {
+        resume_pending_admission(core, &network_id, pending).await?;
+    }
+    let head = core
+        .device_head()
+        .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
+    let genesis = head.genesis_digest();
+    let devid = head.devid();
+    let set = canonical_set(&network_id)?;
+    let validated = validated_root_or_activate(core)?;
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
+    let authority = authority_material(&network_id, &genesis)?;
+    let body = OfflineSettlementBody::of(&exposure).encode();
+    let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &exposure)?;
+    let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
+    let pending = core.admitted_settlement(
+        &receipt,
+        || {
+            let digest = offline_boundary_operation_digest(&body);
+            let evidence_addr = offline_boundary_evidence_addr(&body);
+            let pre_root = tree.root();
+            let write_set = dsm::economic::write_set::build_boundary_write_set(
+                &dsm::economic::write_set::BoundaryEffect {
+                    kind: dsm::types::device_state::OfflineBoundaryKind::Settle,
+                    asset: verified.asset(),
+                    amount: verified.amount(),
+                    boundary_id: verified.operation_id(),
+                },
+                &genesis,
+                &devid,
+                &pre_state.as_write_set_pre_state(),
+                &mut tree,
+            )
+            .map_err(|e| DsmError::invalid_operation(format!("write set: {e}")))?;
+            let witness = EconomicTransitionWitness::new(
+                pre_root,
+                write_set.post_root,
+                verified.operation_id(),
+                digest,
+                write_set.mutations,
+                write_set.credit_sources,
+            )
+            .map_err(|e| storage_err("witness", e))?;
+            let witness_bytes = witness
+                .encode()
+                .map_err(|e| storage_err("witness encode", e))?;
+            let manifest = EconomicAdmissionManifest::new(
+                authority.position,
+                immutable_inner(
+                    dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                    &witness_bytes,
+                ),
+                authority.addr,
+                AdmissionSubstrate::OfflineBoundary { evidence_addr },
+                witness.derived_provenance_index(),
+            )
+            .map_err(|e| storage_err("manifest", e))?;
+            let manifest_bytes = manifest
+                .encode()
+                .map_err(|e| storage_err("manifest encode", e))?;
+            let coords = AcceptedAdmissionCoords {
+                post_economic_root: write_set.post_root,
+                accepted_substrate_addr: evidence_addr,
+                admission_manifest_addr: manifest
+                    .addr()
+                    .map_err(|e| storage_err("manifest addr", e))?,
+                substrate: dsm::economic::admission::AcceptedSubstrateCoords::OfflineBoundary,
+            };
+            let key = |tag, bytes: &[u8]| {
+                crate::sdk::economic_registers::immutable_object_key(tag, bytes)
+            };
+            let artifacts = vec![
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_TRANSITION_WITNESS_OBJ,
+                        &witness_bytes,
+                    ),
+                    witness_bytes,
+                    "economic-transition-witness",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_ADMISSION_MANIFEST,
+                        &manifest_bytes,
+                    ),
+                    manifest_bytes,
+                    "economic-admission-manifest",
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE,
+                        &body,
+                    ),
+                    body.clone(),
+                    OFFLINE_BOUNDARY_BODY_PURPOSE,
+                ),
+                (
+                    key(
+                        dsm::common::domain_tags::TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
+                        &authority.bytes,
+                    ),
+                    authority.bytes.clone(),
+                    "economic-authority-evidence",
+                ),
+            ];
+            let prepared = PendingEconomicAdmission::prepared(
+                dsm::economic::admission::PendingAdmissionKind::OfflineSettle {
+                    asset_policy_commit: verified.asset(),
+                },
+                validated.economic_position() + 1,
+                pre_root,
+                digest,
+            );
+            built = Some((witness, manifest));
+            Ok((prepared, coords, artifacts))
+        },
+        &set.id(),
+    )?;
+    let (witness, manifest) = built.ok_or_else(|| {
+        DsmError::storage(
+            "settlement committed without building its admission".to_string(),
+            None::<std::io::Error>,
+        )
+    })?;
+    finish_admission(
+        core,
+        &network_id,
+        &set,
+        &validated,
+        witness,
+        manifest,
+        AdmittedSubstrate::OfflineBoundary(body),
+        pending,
+        Vec::new(),
+    )
+    .await
+}
+
+/// Settle every payment this device received offline that its payer's online
+/// history now exposes (SA-91). Each payer is walked from this device's
+/// frontier for it toward the head its register holds — the walk records the
+/// spends the payer's boundaries exposed — and each exposed payment is settled
+/// by its own admitted transition. A payment its payer has not exposed yet
+/// stays pending; it is no failure. Returns how many were settled, and what
+/// could not be done.
+pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>) {
+    let mut failures = Vec::new();
+    let receipts = match client_db::offline_receipts::pending_offline_receipts() {
+        Ok(receipts) => receipts,
+        Err(e) => {
+            failures.push(format!("the payments received offline are unreadable: {e}"));
+            return (0, failures);
+        }
+    };
+    let mut walked: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    for receipt in &receipts {
+        if walked.insert(receipt.payer_device) {
+            if let Err(e) = crate::sdk::economic_registers::prevalidate_contact(
+                receipt.payer_genesis,
+                receipt.payer_device,
+            )
+            .await
+            {
+                failures.push(format!(
+                    "the payer {} of a payment received offline could not be walked: {e}",
+                    crate::util::text_id::encode_base32_crockford(&receipt.payer_device)
+                ));
+            }
+        }
+    }
+    let mut settled = 0u32;
+    for receipt in receipts {
+        match client_db::economic_lineage::offline_exposure(&receipt.release_message) {
+            Ok(Some(_)) => match admitted_offline_settlement(core, receipt.release_message).await {
+                Ok(_) => settled += 1,
+                Err(e) => failures.push(format!("a payment received offline: {e}")),
+            },
+            Ok(None) => {}
+            Err(e) => failures.push(format!("the exposure of a payment received offline: {e}")),
+        }
+    }
+    (settled, failures)
 }
 
 /// ONE admission finish at a time on this device. The sync's crash recovery and
@@ -1137,14 +1412,26 @@ async fn finish_locked(
         &validated.economic_root(),
     )?;
     let write = register_economic_root(set, &cell, &frozen_root).await?;
-    if !write.reached_leader() {
-        return Err(storage_err(
-            "root register",
-            "the root cell's leader did not answer — the admission stays held for resume",
-        ));
+    let at_leader = write.leader();
+    match at_leader {
+        crate::sdk::route_seats::AtLeader::Link => {
+            pending.state = EconomicAdmissionState::Registered;
+            core.update_pending_admission_state(&pending)?;
+        }
+        // Another claim is first at the root cell's leader: the position is
+        // decided for it, and nothing of this claim was put there. Which
+        // claim holds it is Core's reading of the cell, below.
+        crate::sdk::route_seats::AtLeader::Taken => log::warn!(
+            "root register: another claim is first at position {}'s leader",
+            pending.economic_position
+        ),
+        crate::sdk::route_seats::AtLeader::Unanswered => {
+            return Err(storage_err(
+                "root register",
+                "the root cell's leader did not answer — the admission stays held for resume",
+            ))
+        }
     }
-    pending.state = EconomicAdmissionState::Registered;
-    core.update_pending_admission_state(&pending)?;
     // The position is this device's only once its claim is FINAL at the
     // cell. Another claim holding the leader link — this trader's own SoFi
     // `C_q`, for one — takes the position, and this admission never lands.
@@ -1166,9 +1453,16 @@ async fn finish_locked(
             )));
         }
         crate::sdk::economic_registers::RootClaimSettlement::Pending(why) => {
+            let what = match at_leader {
+                crate::sdk::route_seats::AtLeader::Taken => {
+                    "another claim is first at the leader, and the reads do not show it yet"
+                }
+                crate::sdk::route_seats::AtLeader::Link
+                | crate::sdk::route_seats::AtLeader::Unanswered => "the claim is not final yet",
+            };
             return Err(storage_err(
                 "root register",
-                format!("the claim is not final yet ({why}) — the admission stays held for resume"),
+                format!("{what} ({why}) — the admission stays held for resume"),
             ));
         }
     }
@@ -1209,9 +1503,39 @@ async fn finish_locked(
                     "the boundary body is not the one the admission names",
                 ));
             }
-            let verified = dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
-                &body, &genesis, &devid,
-            )?;
+            let verified = match dsm::economic::offline_boundary::offline_body_kind(&body)? {
+                dsm::economic::offline_boundary::OfflineBodyKind::Boundary => {
+                    dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
+                        &body,
+                        &genesis,
+                        &devid,
+                        head.public_key(),
+                    )
+                    .map(|(verified, ..)| verified)?
+                }
+                // A settlement is held to the exposure this device's own walk of
+                // the payer recorded.
+                dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
+                    let named =
+                        dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
+                            .map_err(|e| {
+                                DsmError::invalid_operation(format!(
+                                    "an offline settlement body: {e}"
+                                ))
+                            })?;
+                    let exposure =
+                        client_db::economic_lineage::offline_exposure(&named.release_message)
+                            .map_err(|e| storage_err("the exposure the settlement names", e))?
+                            .ok_or_else(|| {
+                                DsmError::invalid_operation(
+                                    "the settlement names an exposure this device never recorded",
+                                )
+                            })?;
+                    dsm::economic::offline_boundary::OfflineSettlementBody::verify(
+                        &body, &genesis, &devid, &exposure,
+                    )?
+                }
+            };
             AcceptedSubstrate::from_verified_offline_boundary(
                 verified,
                 coords.accepted_substrate_addr,
@@ -1842,7 +2166,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
     let prepared = PendingEconomicAdmission::prepared(
         dsm::economic::admission::PendingAdmissionKind::DsmBacked,
         validated.economic_position() + 1,
-        tree.root(),
+        validated.economic_root(),
         op_digest,
     );
 
@@ -1905,17 +2229,14 @@ pub(crate) fn build_recipient_admission(
         .split_countersign_b()
         .map_err(|e| DsmError::invalid_operation(format!("countersign split: {e}")))?
         .1;
-    let evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-        evidence_bytes,
-    );
+    let evidence_digest_a =
+        dsm::crypto::spool_address::ArtifactRole::EvidenceA.content_digest(evidence_bytes);
     let countersign_bytes = dsm::types::proto::ReceiptCountersignB {
         commitment: b_artifacts.commitment.to_vec(),
         receipt_evidence_digest_a: evidence_digest_a.to_vec(),
         sig_b: b.sig_b.clone(),
         ek_cert_b: b.ek_cert_b.clone(),
         ek_pk_b: b.ek_pk_b.clone(),
-        kyber_ct_b: b.kyber_ct_b.clone(),
         b_parent_tip: b_artifacts.applied_parent_tip_b.to_vec(),
         b_child_tip: b_artifacts.applied_child_tip_b.to_vec(),
         // The bundle is acceptance PROVENANCE — it never carries the
@@ -1929,19 +2250,74 @@ pub(crate) fn build_recipient_admission(
     let a_prior = client_db::economic_lineage::latest_ek_step(rel_key, &prereqs.peer_devid)
         .map_err(|e| storage_err("ek step chain (A)", e))?
         .map(|(_, addr, _)| addr);
-    let b_prior = client_db::economic_lineage::latest_ek_step(rel_key, devid)
+    let b_chain_head = client_db::economic_lineage::latest_ek_step(rel_key, devid)
         .map_err(|e| storage_err("ek step chain (B)", e))?
         .map(|(_, addr, _)| addr);
+    // This device's countersignature chains, by Core's lineage rule, from its
+    // own send still in flight when this apply follows it in its canonical
+    // lineage — a transfer that crossed that send (owner ruling, 2026-10-29:
+    // "both settle"). Its predecessor step is then that send's own step
+    // object, built from the send's frozen A-side evidence on the chain as it
+    // stood before the send, and recorded and published ahead of it.
+    let own_send_step: Option<Vec<u8>> =
+        match client_db::sender_proposal::get_unfinalized_proposal_for_relationship(rel_key)
+            .map_err(|e| storage_err("this device's send in flight", e))?
+        {
+            Some(send)
+                if matches!(
+                    dsm::verification::receipt_verification::per_step_ek_predecessor_in_lineage(
+                        &b_artifacts.applied_parent_tip_b,
+                        Some((&send.canonical_child, ())),
+                        None,
+                        (),
+                    ),
+                    dsm::verification::receipt_verification::EkPredecessor::OwnStepInFlight(())
+                ) =>
+            {
+                let evidence = crate::handlers::online_finalize::load_retained_evidence_a(&send)
+                    .map_err(|e| storage_err("the send in flight's evidence", e))?
+                    .ok_or_else(|| {
+                        storage_err(
+                            "the send in flight's evidence",
+                            "the send retains no A-side evidence",
+                        )
+                    })?;
+                let send_receipt =
+                    dsm::types::receipt_types::StitchedReceiptV2::from_canonical_protobuf(
+                        &evidence.full_receipt_bytes,
+                    )?;
+                Some(
+                    dsm::types::proto::EkCertStepV1 {
+                        ek_pk: send_receipt.ek_pk_a.clone(),
+                        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                            send_receipt.ek_cert_a.clone(),
+                        )),
+                        h_n: send_receipt.parent_tip.to_vec(),
+                        prior_step_addr: b_chain_head.map(|a| a.to_vec()),
+                    }
+                    .encode_to_vec(),
+                )
+            }
+            _ => None,
+        };
+    let b_prior = match &own_send_step {
+        Some(step) => Some(dsm::economic::peer_acceptance::ek_cert_step_addr(step)),
+        None => b_chain_head,
+    };
     let a_step_bytes = dsm::types::proto::EkCertStepV1 {
         ek_pk: receipt.ek_pk_a.clone(),
-        ek_cert: receipt.ek_cert_a.clone(),
+        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+            receipt.ek_cert_a.clone(),
+        )),
         h_n: receipt.parent_tip.to_vec(),
         prior_step_addr: a_prior.map(|a| a.to_vec()),
     }
     .encode_to_vec();
     let b_step_bytes = dsm::types::proto::EkCertStepV1 {
         ek_pk: b.ek_pk_b.clone(),
-        ek_cert: b.ek_cert_b.clone(),
+        authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+            b.ek_cert_b.clone(),
+        )),
         h_n: receipt.parent_tip.to_vec(),
         prior_step_addr: b_prior.map(|a| a.to_vec()),
     }
@@ -1979,7 +2355,7 @@ pub(crate) fn build_recipient_admission(
         peer_debit_mutation_index: prereqs.sender_debit_mutation_index,
         acceptance_evidence_addr,
     };
-    let extra_artifacts = vec![
+    let mut extra_artifacts = vec![
         (
             crate::sdk::economic_registers::immutable_object_key(
                 dsm::common::domain_tags::TAG_DSM_PEER_TRANSFER_ACCEPTANCE,
@@ -2005,6 +2381,25 @@ pub(crate) fn build_recipient_admission(
             "ek-cert-step",
         ),
     ];
+    let own_send_row = match own_send_step {
+        Some(step) => {
+            let addr = dsm::economic::peer_acceptance::ek_cert_step_addr(&step);
+            let ek_pk = match dsm::types::proto::EkCertStepV1::decode(step.as_slice()) {
+                Ok(decoded) => decoded.ek_pk,
+                Err(e) => return Err(storage_err("the send in flight's step object", e)),
+            };
+            extra_artifacts.push((
+                crate::sdk::economic_registers::immutable_object_key(
+                    dsm::common::domain_tags::TAG_DSM_EK_CERT_STEP,
+                    &step,
+                ),
+                step,
+                "ek-cert-step",
+            ));
+            Some((*devid, addr, ek_pk))
+        }
+        None => None,
+    };
     let parts = build_dsm_admission(
         genesis,
         devid,
@@ -2036,10 +2431,11 @@ pub(crate) fn build_recipient_admission(
     )
     .map_err(|e| DsmError::invalid_operation(format!("release sign: {e}")))?;
 
-    let ek_step_rows = vec![
-        (prereqs.peer_devid, a_step_addr, receipt.ek_pk_a.clone()),
-        (*devid, b_step_addr, b.ek_pk_b.clone()),
-    ];
+    // In chain order: the send in flight's own step before the
+    // countersignature it precedes.
+    let mut ek_step_rows = vec![(prereqs.peer_devid, a_step_addr, receipt.ek_pk_a.clone())];
+    ek_step_rows.extend(own_send_row);
+    ek_step_rows.push((*devid, b_step_addr, b.ek_pk_b.clone()));
     Ok(RecipientAdmissionBuild {
         parts,
         release_bytes,
@@ -2171,7 +2567,9 @@ pub(crate) fn record_ble_ek_steps_in_tx(
             .map(|(_, addr, _)| addr);
         let step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: step.ek_pk.to_vec(),
-            ek_cert: step.ek_cert.to_vec(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                step.ek_cert.to_vec(),
+            )),
             h_n: step.h_n.to_vec(),
             prior_step_addr: prior.map(|a| a.to_vec()),
         }

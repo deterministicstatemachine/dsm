@@ -9,15 +9,13 @@
 //! account verifies; a trade shows through this account's own vault or a
 //! later proof.
 
+use dsm::connect::{canonical, card_identity, offer_digest, session_id, verify, CardIdentity, Signed};
 use dsm::types::proto as generated;
 use prost::Message;
 
 use super::code::{check_endpoint, ConnectCode};
 use super::grant::{narrows, scopes_from_wire, scopes_to_wire, Scope};
-use super::signed::{
-    canonical, card_identity, offer_digest, own_card, session_id, sign_own, verify, CardIdentity,
-    Signed,
-};
+use super::signed::{own_card, sign_own};
 use super::wallet::{payment_ref, MAX_DISPLAY_NAME};
 use super::d32;
 use crate::storage::client_db::connect::AppSession;

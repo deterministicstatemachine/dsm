@@ -139,7 +139,11 @@ pub(crate) fn verify_inbound_receipt_sig_a(
     commitment: &[u8; 32],
     ak_pk_genesis: &[u8],
 ) -> Result<Result<(), String>, String> {
-    let expected_prev_pk = expected_counterparty_ek_root(receipt, ak_pk_genesis)?;
+    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
+        &receipt.devid_a,
+        &receipt.devid_b,
+    );
+    let expected_prev_pk = counterparty_ek_predecessor(&rel_key, ak_pk_genesis)?;
     Ok(
         dsm::verification::receipt_verification::verify_per_step_ek_signing(
             receipt,
@@ -152,28 +156,28 @@ pub(crate) fn verify_inbound_receipt_sig_a(
     )
 }
 
-/// The key an inbound receipt's `ek_cert_a` must chain to. From the receiver's
-/// viewpoint the SENDER (A-side) is the Counterparty; at relationship genesis
-/// (no Counterparty head yet) the sender's `ek_cert_a` chains back to the
-/// sender's AK — the legitimate predecessor. A head that could not be READ is
-/// not "no head": the check cannot be made, and that is an error.
-fn expected_counterparty_ek_root(
-    receipt: &dsm::types::receipt_types::StitchedReceiptV2,
-    ak_pk_genesis: &[u8],
+/// The key the counterparty's next `ek_cert` must chain to on `rel_key`:
+/// Core's [`per_step_ek_predecessor`](dsm::verification::receipt_verification::per_step_ek_predecessor)
+/// of the Counterparty cert-chain head this device stored and the
+/// counterparty's AK. A head that could not be READ is not "no head": the
+/// check cannot be made, and the caller retries rather than judging the chain
+/// against the root AK.
+pub(crate) fn counterparty_ek_predecessor(
+    rel_key: &[u8; 32],
+    counterparty_ak: &[u8],
 ) -> Result<Vec<u8>, String> {
     use crate::storage::client_db::{load_cert_chain_head_pubkey, CertChainSide};
 
-    let rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-        &receipt.devid_a,
-        &receipt.devid_b,
-    );
-    match load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty) {
-        Ok(Some(head)) => Ok(head),
-        Ok(None) => Ok(ak_pk_genesis.to_vec()),
-        Err(e) => Err(format!(
-            "the counterparty's cert-chain head could not be read: {e}"
-        )),
-    }
+    let head = load_cert_chain_head_pubkey(rel_key, CertChainSide::Counterparty)
+        .map_err(|e| format!("the counterparty's cert-chain head could not be read: {e}"))?;
+    Ok(
+        dsm::verification::receipt_verification::per_step_ek_predecessor(
+            head.as_deref(),
+            counterparty_ak,
+        )
+        .key()
+        .to_vec(),
+    )
 }
 
 /// What one B-side countersign delta did on the sender. Every arm is a
@@ -211,8 +215,8 @@ pub(crate) enum CountersignOutcome {
 ///
 /// The recipient never ships the whole countersigned receipt (218 KB, over the
 /// node cap). It ships `ReceiptCountersignB`; this overlays it onto the A-side
-/// receipt the sender froze at send time and runs the UNCHANGED acceptance
-/// verifier and the UNCHANGED atomic finalization. That reconstruction is the
+/// receipt the sender froze at send time and runs Core's acceptance verifier
+/// and the UNCHANGED atomic finalization. That reconstruction is the
 /// load-bearing binding — B material is only ever judged against the A side the
 /// sender itself authored.
 async fn finalize_from_countersign_delta(
@@ -221,9 +225,8 @@ async fn finalize_from_countersign_delta(
     use crate::handlers::online_finalize::{
         bind_countersign_delta, load_retained_evidence_a, DeltaBinding,
     };
-    use crate::storage::client_db::sender_outbox::{
-        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
-    };
+    use crate::storage::client_db::sender_outbox::SenderOutboxArtifact;
+    use dsm::crypto::spool_address::ArtifactRole;
     use crate::storage::client_db::sender_proposal::{
         get_sender_proposal_by_commitment, PROPOSAL_FINALIZED,
     };
@@ -293,7 +296,7 @@ async fn finalize_from_countersign_delta(
     let bound = match bind_countersign_delta(&retained, &wire) {
         Ok(DeltaBinding::Bound(b)) => *b,
         Ok(DeltaBinding::Rejected { reason }) => {
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::DigestMismatch(reason);
         }
         Err(e) => {
@@ -337,17 +340,37 @@ async fn finalize_from_countersign_delta(
         }
     };
 
+    // The recipient's chain as this device holds it: its EK head, or at the
+    // relationship's first step its AK. A head that could not be read is no
+    // verdict; the delta is read again.
+    let expected_prev_pk_b = match counterparty_ek_predecessor(
+        &dsm::core::bilateral_transaction_manager::compute_smt_key(
+            &self_device_id,
+            &proposal.counterparty_device_id,
+        ),
+        &recipient_ak_pk,
+    ) {
+        Ok(key) => key,
+        Err(e) => {
+            log::error!(
+                "[storage.sync] ADR 0003 countersign delta {short}.. verification errored: {e}"
+            );
+            return CountersignOutcome::Unverifiable(format!("verification errored: {e}"));
+        }
+    };
+
     let receipt = &bound.receipt;
-    match crate::handlers::online_finalize::verify_acceptance_receipt(
+    match dsm::verification::receipt_verification::verify_acceptance_receipt(
         &self_device_id,
         &proposal.counterparty_device_id,
         receipt,
-        &proposal,
-        &recipient_ak_pk,
+        (proposal.canonical_parent, proposal.canonical_child),
+        &proposal.commitment,
+        &expected_prev_pk_b,
         bound.b_pair(),
     ) {
-        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Verified { .. }) => {}
-        Ok(crate::handlers::online_finalize::ReceiptVerifyOutcome::Rejected { reason }) => {
+        Ok(dsm::verification::receipt_verification::ReceiptVerifyOutcome::Verified { .. }) => {}
+        Ok(dsm::verification::receipt_verification::ReceiptVerifyOutcome::Rejected { reason }) => {
             // The gate is retained (correct — this artifact proved nothing), but
             // the step must NOT be left stranded at `submitted` with no exit.
             // Receipt fields 12-20 are outside every signature, so a middlebox or
@@ -361,7 +384,7 @@ async fn finalize_from_countersign_delta(
             // credited the transfer, so nothing is un-spent or reverted; the step
             // is simply marked as awaiting a VALID replacement artifact for the
             // same commitment, which can still finalize it.
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
         Err(e) => {
@@ -385,13 +408,13 @@ async fn finalize_from_countersign_delta(
         let reason = "countersign delta carries no recipient economic release — bare sig_b \
                       cannot finalize the sender"
             .to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     }
     let Ok(release_addr) = <[u8; 32]>::try_from(wire.recipient_economic_release_addr.as_slice())
     else {
         let reason = "recipient economic release addr is not 32 bytes".to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     };
     // Fetch the exact release bytes by content address (re-hash verified by
@@ -433,7 +456,7 @@ async fn finalize_from_countersign_delta(
         Ok(f) => f,
         Err(e) => {
             let reason = format!("recipient economic release refused: {e}");
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
     };
@@ -442,7 +465,7 @@ async fn finalize_from_countersign_delta(
     {
         let reason = "recipient economic release is bound to a different transition or recipient"
             .to_string();
-        park_awaiting_valid_reply(&proposal, &short, &reason);
+        log_refused_artifact(&short, &reason);
         return CountersignOutcome::Rejected(reason);
     }
     // The release's genesis must be the PINNED contact identity — otherwise a
@@ -454,7 +477,7 @@ async fn finalize_from_countersign_delta(
             let reason =
                 "recipient economic release names a genesis that is not the pinned contact's"
                     .to_string();
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
         Err(e) => {
@@ -473,7 +496,7 @@ async fn finalize_from_countersign_delta(
         }
         Err(crate::sdk::economic_admission_flow::ReleaseRegisterCheck::Mismatch(m)) => {
             let reason = format!("release does not match the registered economic root: {m}");
-            park_awaiting_valid_reply(&proposal, &short, &reason);
+            log_refused_artifact(&short, &reason);
             return CountersignOutcome::Rejected(reason);
         }
     }
@@ -528,7 +551,7 @@ async fn finalize_from_countersign_delta(
                     crate::util::text_id::encode_base32_crockford(&bound.b_parent_tip[..4]),
                     crate::util::text_id::encode_base32_crockford(&pinned[..4]),
                 );
-                park_awaiting_valid_reply(&proposal, &short, &reason);
+                log_refused_artifact(&short, &reason);
                 return CountersignOutcome::Rejected(reason);
             }
         }
@@ -541,13 +564,13 @@ async fn finalize_from_countersign_delta(
         }
     }
 
-    let content_digest = evidence_content_digest(ArtifactRole::CountersignB, &delta.body);
+    let content_digest = ArtifactRole::CountersignB.content_digest(&delta.body);
     let countersign_artifact = SenderOutboxArtifact {
         relationship_key: proposal.relationship_key,
         canonical_parent: proposal.canonical_parent,
         proposal_nonce: proposal.nonce_hash,
         role: ArtifactRole::CountersignB,
-        submission_id: derive_artifact_submission_id(&content_digest),
+        submission_id: dsm::crypto::spool_address::artifact_submission_id(&content_digest),
         envelope_bytes: delta.envelope_bytes.clone(),
         content_digest,
         routing_address: None,
@@ -606,22 +629,42 @@ async fn finalize_from_countersign_delta(
         };
         let a_step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: receipt.ek_pk_a.clone(),
-            ek_cert: receipt.ek_cert_a.clone(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                receipt.ek_cert_a.clone(),
+            )),
             h_n: receipt.parent_tip.to_vec(),
             prior_step_addr: a_prior.map(|a| a.to_vec()),
         }
         .encode_to_vec();
         let b_step_bytes = dsm::types::proto::EkCertStepV1 {
             ek_pk: receipt.ek_pk_b.clone(),
-            ek_cert: receipt.ek_cert_b.clone(),
+            authority: Some(dsm::types::proto::ek_cert_step_v1::Authority::EkCert(
+                receipt.ek_cert_b.clone(),
+            )),
             h_n: receipt.parent_tip.to_vec(),
             prior_step_addr: b_prior.map(|a| a.to_vec()),
         }
         .encode_to_vec();
+        // This send's own step object, when this device already recorded it:
+        // it countersigned a transfer that crossed this send, and recorded the
+        // send's step then, on the chain as it stood before the send (owner
+        // ruling, 2026-10-29: "both settle"). Taken as built, never rebuilt
+        // on the chain as it stands now.
+        let a_step_addr = match crate::storage::client_db::economic_lineage::recorded_ek_step_addr(
+            &proposal.relationship_key,
+            &self_device_id,
+            &receipt.ek_pk_a,
+        ) {
+            Ok(Some(addr)) => addr,
+            Ok(None) => dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes),
+            Err(e) => {
+                return CountersignOutcome::FinalizeFailed(format!("ek step chain (A): {e}"));
+            }
+        };
         vec![
             (
                 self_device_id,
-                dsm::economic::peer_acceptance::ek_cert_step_addr(&a_step_bytes),
+                a_step_addr,
                 receipt.ek_pk_a.clone(),
                 a_step_bytes,
             ),
@@ -675,30 +718,14 @@ async fn finalize_from_countersign_delta(
     }
 }
 
-/// Park a step whose delta proved nothing: awaiting a VALID replacement
-/// artifact for the same commitment. Not a rollback — see the caller.
-fn park_awaiting_valid_reply(
-    proposal: &crate::storage::client_db::sender_proposal::SenderOnlineProposal,
-    short: &str,
-    reason: &str,
-) {
-    match crate::storage::client_db::mark_sender_proposal_awaiting_valid_reply(
-        &proposal.relationship_key,
-        &proposal.canonical_parent,
-    ) {
-        Ok(true) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained, step now awaiting a valid replacement artifact"
-        ),
-        Ok(false) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained; proposal status unchanged (already finalized, or never submitted)"
-        ),
-        Err(e) => log::error!(
-            "[storage.sync] ADR 0003 countersign delta {short}.. REJECTED: {reason} — gate \
-             retained, but recording the awaiting-valid-reply state FAILED: {e}"
-        ),
-    }
+/// A delta that proved nothing records nothing (MR-DSM-0018): the step stays
+/// `submitted`, so a valid artifact for the same commitment still finalizes it,
+/// and the refused bytes are raw material, never a verdict on the transfer.
+fn log_refused_artifact(short: &str, reason: &str) {
+    log::error!(
+        "[storage.sync] ADR 0003 countersign delta {short}.. REFUSED: {reason} — nothing \
+         recorded; the step stays submitted for a valid artifact"
+    );
 }
 
 /// Build and sign the `RelationshipFinalizedV1` for a verified acceptance,
@@ -712,9 +739,8 @@ fn build_relationship_finalized_artifact(
     b_pair: ([u8; 32], [u8; 32]),
     receipt_ek_pk_a: &[u8],
 ) -> Result<crate::storage::client_db::SenderOutboxArtifact, String> {
-    use crate::storage::client_db::sender_outbox::{
-        derive_artifact_submission_id, evidence_content_digest, ArtifactRole, SenderOutboxArtifact,
-    };
+    use crate::storage::client_db::sender_outbox::SenderOutboxArtifact;
+    use dsm::crypto::spool_address::ArtifactRole;
     use prost::Message;
 
     let wrap_key = crate::init::current_chain_head_at_rest_key()
@@ -751,8 +777,8 @@ fn build_relationship_finalized_artifact(
     dsm::types::receipt_types::decode_relationship_finalized_wire(&wire)
         .map_err(|e| format!("certificate fails its own wire codec: {e}"))?;
 
-    let content_digest = evidence_content_digest(ArtifactRole::RelationshipFinalized, &wire);
-    let submission_id = derive_artifact_submission_id(&content_digest);
+    let content_digest = ArtifactRole::RelationshipFinalized.content_digest(&wire);
+    let submission_id = dsm::crypto::spool_address::artifact_submission_id(&content_digest);
 
     // Frozen route: the recipient polls at the tip it converged to — the
     // proposal's projection target — under ITS genesis and device.
@@ -767,12 +793,11 @@ fn build_relationship_finalized_artifact(
             Ok(None) => return Err("no contact for the recipient".to_string()),
             Err(e) => return Err(format!("recipient contact lookup: {e}")),
         };
-    let route = crate::sdk::b0x_sdk::B0xSDK::compute_b0x_address(
+    let route = dsm::crypto::spool_address::inbox_address(
         &recipient_genesis,
         &proposal.counterparty_device_id,
         &proposal.projection_target,
-    )
-    .map_err(|e| format!("certificate route: {e}"))?;
+    );
     let local_genesis: [u8; 32] = crate::sdk::app_state::AppState::get_genesis_hash()
         .and_then(|g| <[u8; 32]>::try_from(g.as_slice()).ok())
         .ok_or_else(|| "local genesis unavailable".to_string())?;
@@ -818,8 +843,8 @@ async fn deliver_pending_finalization_checkpoints(
     use crate::storage::client_db::{
         finalization_checkpoint_pending_sender_outbox, get_sender_proposal_by_commitment,
         load_sender_outbox_artifacts, release_gate_on_finalization_checkpoint_atomically,
-        ArtifactRole,
     };
+    use dsm::crypto::spool_address::ArtifactRole;
 
     let rows = finalization_checkpoint_pending_sender_outbox().map_err(|e| e.to_string())?;
     if rows.is_empty() {
@@ -1122,7 +1147,7 @@ impl AppRouterImpl {
             ) {
                 Ok(a) => a
                     .into_iter()
-                    .filter(|a| a.role.is_initial_send_artifact())
+                    .filter(|a| crate::storage::client_db::is_initial_send_artifact(a.role))
                     .collect(),
                 Err(e) => {
                     log::warn!(
@@ -1291,6 +1316,22 @@ impl AppRouterImpl {
         };
         let self_device_b32 = crate::util::text_id::encode_base32_crockford(&self_device);
 
+        // Another handler is creating or finishing this device's admission:
+        // it is that handler's until it returns, and every apply would be
+        // fenced behind it, so the whole pass is held (pairs stay bound,
+        // retried next poll). Otherwise every admission this pass creates,
+        // and the one Step 0 resumes, is this pass's until it returns (owner
+        // ruling, 2026-10-30).
+        if self.core_sdk.admission_handler_running() {
+            failures.push(
+                "an economic admission's handler is running; every pair is held for the next \
+                 pass"
+                    .to_string(),
+            );
+            return (consumed, release, failures);
+        }
+        let _admission_handler = self.core_sdk.admission_handler();
+
         // ── Step 0 (3.5b PR4): a pending economic admission is DEVICE-global
         // — resume it before any pair. Still pending afterwards means our own
         // quorum is unreachable; every apply would be fenced, so hold the
@@ -1350,11 +1391,10 @@ impl AppRouterImpl {
                 match crate::storage::client_db::relationship_awaits_peer_finalization(&rel_key) {
                     Ok(awaiting) => {
                         if awaiting {
-                            log::info!(
-                                "[storage.sync] ADR 0003 completion: {name} HELD — a prior \
-                                 acceptance on this relationship awaits the peer's finality \
-                                 certificate"
-                            );
+                            failures.push(format!(
+                                "split transfer {name}: held: a prior acceptance on this \
+                                 relationship awaits the peer's finality certificate"
+                            ));
                             continue;
                         }
                     }
@@ -1418,6 +1458,39 @@ impl AppRouterImpl {
                     failures.push(format!("split transfer {name}: {e}"));
                     continue;
                 }
+                // The sender's A-side head this device pinned is state it holds,
+                // so a signed parent that is not that head (the genesis seed
+                // before any step) is refused here too, before prevalidation
+                // reads the sender's register. A pinned head that is already
+                // the signed child is a pair this device applied: the apply
+                // reports it as a duplicate. The apply pins the parent again,
+                // under the state-machine lock.
+                let pinned_head = match crate::storage::client_db::pinned_counterparty_a_head(
+                    &rel_key,
+                ) {
+                    Ok(Some(pinned)) => pinned,
+                    // No row is a fresh relationship: its one tip both sides
+                    // derive is the genesis seed.
+                    Ok(None) => {
+                        dsm::core::bilateral_transaction_manager::initial_chain_tip_from_device_ids(
+                            &self_device,
+                            &sender_device,
+                        )
+                    }
+                    Err(e) => {
+                        failures.push(format!(
+                            "split transfer {name}: the sender's pinned head is unreadable: {e}"
+                        ));
+                        continue;
+                    }
+                };
+                if v.receipt.parent_tip != pinned_head && v.receipt.child_tip != pinned_head {
+                    failures.push(format!(
+                        "split transfer {name}: the signed parent is not the sender's head this \
+                         device pinned"
+                    ));
+                    continue;
+                }
 
                 // ── PREVALIDATION (3.5b PR4, corrections 3+5+8): every foreign
                 // dependency that CAN be established before local acceptance IS
@@ -1434,7 +1507,10 @@ impl AppRouterImpl {
                         continue;
                     }
                 };
+                // Every locator's refusal, reported if none resolves: a hint
+                // that does not resolve is no verdict while another may.
                 let mut resolved = None;
+                let mut refused = Vec::new();
                 for hint in hints {
                     let incoming = crate::sdk::economic_admission_flow::IncomingTransfer {
                         canonical_operation_bytes: &v.canonical_operation_bytes,
@@ -1458,20 +1534,23 @@ impl AppRouterImpl {
                         }
                         Err(refusal) => {
                             use crate::sdk::economic_admission_flow::PrevalidationRefusal as PR;
-                            match &refusal {
-                                PR::Terminal(m) | PR::Quarantined(m) => log::warn!(
-                                    "[storage.sync] ADR 0003 completion: {name} not admissible \
-                                     at locator {hint:?} — economic prevalidation: {m}"
+                            refused.push(match &refusal {
+                                PR::Terminal(m) | PR::Quarantined(m) => format!(
+                                    "not admissible at locator {hint:?}: economic \
+                                     prevalidation: {m}"
                                 ),
-                                PR::Incomplete(m) => log::info!(
-                                    "[storage.sync] ADR 0003 completion: {name} held at locator \
-                                     {hint:?} — {m}"
-                                ),
-                            }
+                                PR::Incomplete(m) => format!("held at locator {hint:?}: {m}"),
+                            });
                         }
                     }
                 }
                 let Some((prereqs, admitted_hint)) = resolved else {
+                    let why = if refused.is_empty() {
+                        "held: no copy names a locator for the sender's debit".to_string()
+                    } else {
+                        refused.join("; ")
+                    };
+                    failures.push(format!("split transfer {name}: {why}"));
                     continue;
                 };
                 let wrap_key = match crate::init::current_chain_head_at_rest_key() {
@@ -1529,7 +1608,12 @@ impl AppRouterImpl {
                         &signed_parent,
                         &v.canonical_operation_bytes,
                         &transition_entropy,
-                    );
+                    )
+                    .map_err(|e| format!("the signed step's C_pre: {e}"))?;
+                    // The projection moves on from the tip this device holds,
+                    // whatever it holds: the signed pair alone decides the
+                    // apply (AWYPCNK8), a transfer crossing this device's own
+                    // send included (owner ruling, 2026-10-29: "both settle").
                     let projection_parent: [u8; 32] =
                         crate::storage::client_db::get_contact_chain_tip(&sender_device)
                             .map_err(|e| {
@@ -1537,11 +1621,13 @@ impl AppRouterImpl {
                             })?
                             .ok_or_else(|| "the sender is not a contact".to_string())?;
                     let projection_target: [u8; 32] = {
-                        let sigma_sym = dsm::core::bilateral_transaction_manager::compute_precommit(
-                            &projection_parent,
-                            &v.canonical_operation_bytes,
-                            &transition_entropy,
-                        );
+                        let sigma_sym =
+                            dsm::core::bilateral_transaction_manager::compute_precommit(
+                                &projection_parent,
+                                &v.canonical_operation_bytes,
+                                &transition_entropy,
+                            )
+                            .map_err(|e| format!("the projected step's C_pre: {e}"))?;
                         dsm::core::bilateral_transaction_manager::compute_successor_tip(
                             &projection_parent,
                             &v.canonical_operation_bytes,
@@ -1713,10 +1799,9 @@ impl AppRouterImpl {
                     )),
                 };
                 if let Err(e) = converged {
-                    log::warn!(
-                        "[storage.sync] ADR 0003 completion: {name} accepted but convergence \
-                         deferred: {e}"
-                    );
+                    failures.push(format!(
+                        "split transfer {name}: accepted; convergence deferred: {e}"
+                    ));
                     if let Err(e) = mark_contact_needs_online_reconcile_and_refresh(&sender_device)
                     {
                         failures.push(e);
@@ -1763,15 +1848,14 @@ impl AppRouterImpl {
                     )
                     .await
                     {
-                        log::warn!(
-                            "[storage.sync] ADR 0003 completion: {name} accepted; economic \
-                             admission HELD for resume ({e}) — release undelivered"
-                        );
-                        if let Err(e) =
-                            mark_contact_needs_online_reconcile_and_refresh(&sender_device)
-                        {
-                            failures.push(e);
-                        }
+                        // Nothing diverged: the projection has converged above.
+                        // The pending admission holds this device's applies and
+                        // sends until Step 0 finishes it on a later pass, which
+                        // delivers the release.
+                        failures.push(format!(
+                            "split transfer {name}: accepted; economic admission held for \
+                             resume ({e}); release undelivered"
+                        ));
                         continue;
                     }
                 }
@@ -1784,8 +1868,23 @@ impl AppRouterImpl {
                 failures.push(format!("split transfer {name} history: {e}"));
                 continue;
             }
+            // Only the ids an honest sender spools this pair's halves under
+            // are consumed, recomputed here from the halves themselves: the
+            // transfer's from its receipt's commitment, the evidence's from
+            // its own bytes. A copy of this pair observed under any other id
+            // was re-posted under an id its content does not name, and
+            // consuming that id would hide whatever honest message holds it.
+            // That copy is read once more, decided, and passed over by its
+            // content.
+            let evidence_name = dsm::crypto::spool_address::artifact_submission_id(
+                &dsm::crypto::spool_address::ArtifactRole::EvidenceA
+                    .content_digest(&v.evidence_bytes),
+            );
             match recipient_staging::observed_ids_of_pair(&pair) {
-                Ok(ids) => consumed.extend(ids),
+                Ok(ids) => consumed.extend(
+                    ids.into_iter()
+                        .filter(|(_, id)| *id == name || *id == evidence_name),
+                ),
                 Err(e) => {
                     failures.push(format!(
                         "split transfer {name}: observations unreadable: {e}"
@@ -1971,9 +2070,9 @@ enum StaleOrIngested {
     Stale(crate::handlers::recipient_dispatch::StaleCopy),
 }
 
-/// What a sync records about the copies it read, by route: copies of decided
-/// objects consumed by the id the spool holds them by, and copies that never
-/// will be anything this device can take passed over by their content.
+/// What a sync records about the copies it read, by route: the ids of what
+/// this device verified and took in under them consumed, and copies that
+/// never will be anything this device can take passed over by their content.
 #[derive(Default)]
 struct CopiesTaken {
     consume: std::collections::BTreeMap<String, Vec<String>>,
@@ -1998,8 +2097,8 @@ impl CopiesTaken {
 
 /// Act on what the boundary made of one copy read at `address` under
 /// `message_id`, whose content key is `copy_key`. A copy of an object the
-/// canonical apply has decided is consumed, under the id the spool holds it
-/// by; a copy that is not recognized is passed over by its content.
+/// canonical apply has decided, and a copy that is not recognized, are each
+/// passed over by their content; neither consumes the id it was read under.
 fn take_in_copy(
     copy: Result<StaleOrIngested, String>,
     address: &str,
@@ -2047,7 +2146,17 @@ fn take_in_copy(
     };
     match ingested {
         Ingested::Staged => {}
-        Ingested::Decided => taken.consume(address, message_id),
+        // That its step is decided is a fact about the object, and for a
+        // receipt whose commitment this device already accepted it is read
+        // before any signature is checked. The id the copy was read under is
+        // not a fact about the object: no class's id is recomputed from its
+        // content here, and whoever seals a copy chooses the id it travels
+        // under. Consuming that id hid, on every member and for good, the
+        // honest copy another message holds under it (SA-66; storage spec §8:
+        // the recipient takes a payload's content only on the signature that
+        // content carries). So the copy is passed over by its content, as a
+        // finality certificate or countersign delta reached unverified is.
+        Ingested::Decided => taken.pass_over(address, copy_key),
         // Its sender's backlog is full (SA-100): neither consumed nor passed
         // over, so it is taken on a later sync once that backlog clears.
         Ingested::Held(why) => log::info!(
@@ -2094,6 +2203,15 @@ fn take_in_finality_certificate(
             taken.consume(address, &certificate.message_id);
         }
         O::AlreadyFinalized | O::NoJournal => taken.pass_over(address, &certificate.copy_key),
+        // Bytes that are not a certificate never will be one: passed over by
+        // their content after this read, never read and refused again.
+        O::WireRejected(why) => {
+            log::info!(
+                "[storage.sync] finality checkpoint {} is not a certificate: {why}",
+                certificate.message_id
+            );
+            taken.pass_over(address, &certificate.copy_key);
+        }
         other => report.errors.push(format!(
             "finality checkpoint {}: {other:?}",
             certificate.message_id
@@ -2119,6 +2237,23 @@ fn take_in_countersign_delta(
             taken.consume(address, &delta.message_id);
         }
         CountersignOutcome::AlreadyFinalized => taken.pass_over(address, &delta.copy_key),
+        // A body that is not a countersign delta, or a delta for no proposal
+        // of this device's, never will be one it finalizes on: passed over by
+        // its content after this read, never read and refused again.
+        CountersignOutcome::WireRejected(why) => {
+            log::info!(
+                "[storage.sync] countersign delta {} is not a delta: {why}",
+                delta.message_id
+            );
+            taken.pass_over(address, &delta.copy_key);
+        }
+        CountersignOutcome::NoProposal => {
+            log::info!(
+                "[storage.sync] countersign delta {} names no proposal of this device's",
+                delta.message_id
+            );
+            taken.pass_over(address, &delta.copy_key);
+        }
         other => report
             .errors
             .push(format!("countersign delta {}: {other:?}", delta.message_id)),
@@ -2152,10 +2287,12 @@ async fn record_copies_taken(
     }
 }
 
-/// Act on what became of one cert-resync message read at `address`. One its
-/// own bytes say never will be taken is passed over by its content, so it is
-/// not read and refused again on every sync; one that could not be taken now
-/// is read again.
+/// Act on what became of one cert-resync message read at `address`. One this
+/// device verified and handled is taken in, and one its own bytes say never
+/// will be taken is passed over: each by its content, so it is not read,
+/// handled or refused again on every sync. A cert-resync message carries no
+/// id of its own at this end; its content is what names it. One that could
+/// not be taken now is read again.
 fn take_in_cert_resync(
     outcome: Result<(), super::cert_resync_flow::CertResyncRefusal>,
     address: &str,
@@ -2165,7 +2302,7 @@ fn take_in_cert_resync(
 ) {
     use super::cert_resync_flow::CertResyncRefusal;
     match outcome {
-        Ok(()) => {}
+        Ok(()) => taken.pass_over(address, &message.copy_key),
         Err(CertResyncRefusal::NotRecognized(e)) => {
             errors.push(format!("cert resync {}: {e}; passed over", message.method));
             taken.pass_over(address, &message.copy_key);
@@ -2285,6 +2422,7 @@ impl AppRouterImpl {
         // Copies that never will be anything this device can take, by their
         // content: passed over.
         let mut taken = CopiesTaken::default();
+        let mut resyncs_answered = std::collections::BTreeSet::<[u8; 32]>::new();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
@@ -2330,8 +2468,8 @@ impl AppRouterImpl {
                 // inbox address hashes the relationship's tip (storage node spec
                 // §8). Every item on a previous-tip route steps from a tip this
                 // device has already advanced past: nothing on it is staged. A copy
-                // of an object the canonical apply has decided is consumed; any
-                // other is left where it is.
+                // of an object the canonical apply has decided is passed over by
+                // its content; any other is left where it is.
                 let stale = tagged.freshness == RouteFreshness::PreviousTip;
                 for artifact in route_sdk.take_evidence_artifacts() {
                     let copy = if stale {
@@ -2357,14 +2495,43 @@ impl AppRouterImpl {
                     );
                 }
                 for message in route_sdk.take_cert_resync_messages() {
-                    let outcome = if message.method
-                        == crate::storage::client_db::CERT_RESYNC_REQUEST_METHOD
-                    {
-                        self.handle_cert_resync_request(&message.body, storage_endpoints.to_vec())
-                            .await
-                    } else {
-                        self.handle_cert_resync_ack(&message.body).await
+                    use crate::storage::client_db::{
+                        CERT_RESYNC_CONFIRM_METHOD, CERT_RESYNC_DONE_METHOD,
+                        CERT_RESYNC_OFFER_METHOD, CERT_RESYNC_REQUEST_METHOD,
                     };
+                    let endpoints = storage_endpoints.to_vec();
+                    let outcome = match message.method.as_str() {
+                        CERT_RESYNC_REQUEST_METHOD => {
+                            self.handle_cert_resync_request(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_OFFER_METHOD => {
+                            self.handle_cert_resync_offer(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_CONFIRM_METHOD => {
+                            self.handle_cert_resync_confirm(&message.body, endpoints)
+                                .await
+                        }
+                        CERT_RESYNC_DONE_METHOD => {
+                            self.handle_cert_resync_done(&message.body).await
+                        }
+                        other => Err(
+                            crate::handlers::cert_resync_flow::CertResyncRefusal::NotRecognized(
+                                dsm::types::error::DsmError::invalid_operation(format!(
+                                    "cert resync: no leg answers the method {other}"
+                                )),
+                            ),
+                        ),
+                    };
+                    // An offer this device answered with its restart step is
+                    // a resync in progress: it is not asked again this sync.
+                    if let (CERT_RESYNC_OFFER_METHOD, Ok(())) = (message.method.as_str(), &outcome)
+                    {
+                        if let Some(rel) = message.body.first_chunk::<32>() {
+                            resyncs_answered.insert(*rel);
+                        }
+                    }
                     take_in_cert_resync(
                         outcome,
                         &tagged.address,
@@ -2373,8 +2540,6 @@ impl AppRouterImpl {
                         &mut report.errors,
                     );
                 }
-                self.initiate_required_cert_resyncs(storage_endpoints, &mut report)
-                    .await;
 
                 let (polled, read_on) = match retrieved {
                     Ok(outcome) => {
@@ -2452,6 +2617,12 @@ impl AppRouterImpl {
                 }
             }
         }
+        // A resync this device owes starts, or starts again, once per sync and
+        // only after every route was read: an ack waiting on any route meets
+        // the epoch it answers, not one this sync raised while reading.
+        self.initiate_required_cert_resyncs(storage_endpoints, &resyncs_answered, &mut report)
+            .await;
+
         // At most `limit` per route, which the request bounds by
         // STORAGE_SYNC_MAX_LIMIT, over the few routes this device's contacts
         // give it: far below u32::MAX.
@@ -2459,7 +2630,7 @@ impl AppRouterImpl {
         for (route, ids) in taken.consume {
             if let Err(e) = b0x_sdk.record_consumed_b0x(&route, ids).await {
                 report.errors.push(format!(
-                    "consume decided copies on {}..: {e}",
+                    "consume taken copies on {}..: {e}",
                     short_route(&route)
                 ));
             }
@@ -2469,7 +2640,7 @@ impl AppRouterImpl {
                 crate::storage::client_db::b0x_consumed::record_passed_over(&route, &copy_keys)
             {
                 report.errors.push(format!(
-                    "pass over unrecognized copies on {}..: {e}",
+                    "pass over copies on {}..: {e}",
                     short_route(&route)
                 ));
             }
@@ -2477,6 +2648,13 @@ impl AppRouterImpl {
 
         self.complete_split_transfers(&mut b0x_sdk, &mut report)
             .await;
+
+        // SA-91: payments received offline are settled once their payers'
+        // online histories expose the spends.
+        let (settled, failures) =
+            crate::sdk::economic_admission_flow::settle_received_offline(&self.core_sdk).await;
+        report.processed += settled;
+        report.errors.extend(failures);
 
         // §16.6 on-access acceptance recovery, from the durable apply record.
         match crate::init::current_chain_head_at_rest_key() {
@@ -2577,10 +2755,13 @@ impl AppRouterImpl {
     }
 
     /// Every relationship the send gate marked REQUIRED gets its resync
-    /// request sent (which moves it to PENDING).
+    /// request sent (which moves it to PENDING), and every PENDING one is
+    /// asked again under a later epoch, recovering a message lost on the way;
+    /// except those `answered` this sync, whose restart step is on its way.
     async fn initiate_required_cert_resyncs(
         &self,
         storage_endpoints: &[String],
+        answered: &std::collections::BTreeSet<[u8; 32]>,
         report: &mut StorageSyncReport,
     ) {
         let relationships = match crate::storage::client_db::relationships_requiring_resync() {
@@ -2590,10 +2771,10 @@ impl AppRouterImpl {
                 return;
             }
         };
-        for relationship in relationships {
+        for relationship in relationships.iter().filter(|r| !answered.contains(*r)) {
             match crate::handlers::cert_resync_flow::peer_device_for_relationship(
                 &self.device_id_bytes,
-                &relationship,
+                relationship,
             ) {
                 Ok(Some(peer)) => {
                     if let Err(e) = self
@@ -2653,7 +2834,7 @@ impl AppRouterImpl {
 
     /// The liveness sweeps: resubmit uncertain sends, replay frozen
     /// certificates and publication artifacts, and finish an economic
-    /// admission a crash stranded.
+    /// admission held for resume that no running handler holds.
     async fn push_owed(
         &self,
         report: &mut StorageSyncReport,
@@ -2684,14 +2865,33 @@ impl AppRouterImpl {
         if let Err(e) = crate::handlers::artifact_republish::continue_route_writes().await {
             report.errors.push(e);
         }
-        // An admission the head already carried when this process restored
-        // it; one created after startup belongs to the handler that created it.
-        let stranded = self
+        // The owner's duty (SoFi Amendment S24): a baseline at the head of
+        // every vault this device created. One not published is reported and
+        // the sync goes on: it costs a fresh reader speed, never an admission.
+        match crate::sdk::economic_admission_flow::committed_network_id()
+            .and_then(|network| crate::sdk::storage_set::canonical_set(&network))
+        {
+            Ok(set) => {
+                let (published, left) =
+                    crate::sdk::vault_baseline::publish_owned_baselines(&self.core_sdk, &set).await;
+                report.pushed += published;
+                report
+                    .errors
+                    .extend(left.into_iter().map(|why| format!("owner baseline: {why}")));
+            }
+            Err(e) => report
+                .errors
+                .push(format!("owner baselines: no committed set: {e}")),
+        }
+        // A pending admission no running handler holds: its handler returned
+        // with it held for resume, or a restart restored it (owner ruling,
+        // 2026-10-30). While its handler runs, it is the handler's.
+        let held = self
             .core_sdk
             .device_head()
             .and_then(|head| head.pending_economic_admission().cloned())
-            .filter(|pending| self.core_sdk.admission_predates_startup(pending));
-        if let Some(pending) = stranded {
+            .filter(|_| !self.core_sdk.admission_handler_running());
+        if let Some(pending) = held {
             let position = pending.economic_position;
             let resumed = match crate::sdk::economic_admission_flow::committed_network_id() {
                 Ok(network) => {
@@ -2707,7 +2907,7 @@ impl AppRouterImpl {
             match resumed {
                 Ok(..) => report.pushed += 1,
                 Err(e) => report.errors.push(format!(
-                    "stranded admission at position {position} not finished: {e}"
+                    "held admission at position {position} not finished: {e}"
                 )),
             }
         }
@@ -2829,7 +3029,6 @@ mod tests {
             &mut taken,
             &mut errors,
         );
-        take_in_cert_resync(Ok(()), "ROUTE", &message("TAKEN"), &mut taken, &mut errors);
 
         assert_eq!(
             taken.pass_over.get("ROUTE").cloned(),
@@ -2837,6 +3036,33 @@ mod tests {
         );
         assert!(taken.consume.is_empty());
         assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
+    /// MR-DSM-0332. A cert-resync message this device verified and handled is
+    /// taken in by its content, so it is not read and handled again on every
+    /// sync: a request it answered is not answered again, nor an ack it
+    /// finalized on refused for want of a pending resync. A cert-resync
+    /// message carries no id of its own at this end, so nothing is consumed
+    /// by id.
+    /// MUTATION CONTROL: leaving a handled message where it lies, as the poll
+    /// did, turns this red.
+    #[test]
+    fn a_handled_cert_resync_message_is_taken_in_by_its_content() {
+        use super::{take_in_cert_resync, CopiesTaken};
+        let message = crate::sdk::b0x_sdk::CertResyncMessage {
+            method: crate::storage::client_db::CERT_RESYNC_DONE_METHOD.to_string(),
+            body: vec![0x03, 0x04],
+            copy_key: "HANDLED".to_string(),
+        };
+        let mut taken = CopiesTaken::default();
+        let mut errors = Vec::new();
+        take_in_cert_resync(Ok(()), "ROUTE", &message, &mut taken, &mut errors);
+        assert_eq!(
+            taken.pass_over.get("ROUTE").cloned(),
+            Some(vec!["HANDLED".to_string()])
+        );
+        assert!(taken.consume.is_empty());
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     /// SA-66. A finality certificate or countersign delta reached with no
@@ -2932,8 +3158,7 @@ mod tests {
     use crate::sdk::b0x_sdk::CountersignDelta;
     use crate::storage::client_db;
     use crate::storage::client_db::sender_proposal::{
-        get_sender_proposal_by_commitment, PROPOSAL_AWAITING_VALID_REPLY, PROPOSAL_FINALIZED,
-        PROPOSAL_SUBMITTED,
+        get_sender_proposal_by_commitment, PROPOSAL_FINALIZED, PROPOSAL_SUBMITTED,
     };
     use crate::test_support::two_device::Pair;
     use prost::Message;
@@ -3026,7 +3251,7 @@ mod tests {
     /// redelivered honest delta is an idempotent no-op.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[serial_test::serial]
-    async fn a_poisoned_delta_parks_the_step_and_the_honest_delta_still_finalizes() {
+    async fn a_poisoned_delta_records_nothing_and_the_honest_delta_still_finalizes() {
         let p = Pair::boot(100, 0).await;
         let (honest, commitment) = step_with_reply(&p, 10).await;
         p.a.enter();
@@ -3046,24 +3271,22 @@ mod tests {
         }
         assert_eq!(
             status(&commitment),
-            PROPOSAL_AWAITING_VALID_REPLY,
-            "a rejected artifact parks the step; it is not a rollback"
+            PROPOSAL_SUBMITTED,
+            "a refused artifact records nothing: the step stays submitted"
         );
 
         // A-bytes this sender never retained: refused before any signature
         // work.
         let foreign_digest = tampered(&honest, |w| {
-            w.receipt_evidence_digest_a = dsm::crypto::blake3::domain_hash_bytes(
-                dsm::common::domain_tags::TAG_DSM_RECEIPT_EVIDENCE_A,
-                &w.commitment,
-            )
-            .to_vec()
+            w.receipt_evidence_digest_a = dsm::crypto::spool_address::ArtifactRole::EvidenceA
+                .content_digest(&w.commitment)
+                .to_vec()
         });
         assert!(matches!(
             finalize_from_countersign_delta(&foreign_digest).await,
             CountersignOutcome::DigestMismatch(..)
         ));
-        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
 
         // sig_b is acceptance provenance only: a delta with no recipient
         // economic release cannot finalize the sender.
@@ -3074,7 +3297,7 @@ mod tests {
             }
             other => panic!("a delta without a release must be Rejected, got {other:?}"),
         }
-        assert_eq!(status(&commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&commitment), PROPOSAL_SUBMITTED);
 
         // The honest delta for the SAME step finalizes it.
         assert_eq!(
@@ -3127,7 +3350,7 @@ mod tests {
             ),
             other => panic!("a replayed release must be Rejected, got {other:?}"),
         }
-        assert_eq!(status(&second_commitment), PROPOSAL_AWAITING_VALID_REPLY);
+        assert_eq!(status(&second_commitment), PROPOSAL_SUBMITTED);
         assert_eq!(
             finalize_from_countersign_delta(&second).await,
             CountersignOutcome::Finalized

@@ -42,6 +42,7 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
         to_device_id: to.to_vec(),
         amount: Balance::amount(amount),
         policy_commit,
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"T".to_vec(),
             nonce: vec![7; 32],
@@ -55,11 +56,47 @@ fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
     }
 }
 
+/// A Transfer of `token`, carrying `carried` as its token's policy.
+fn transfer_carrying(to: [u8; 32], amount: u64, token: [u8; 32], carried: &[u8]) -> Operation {
+    match transfer(to, amount, token) {
+        Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            terms_commitment,
+            signature,
+            authority_policy,
+            ..
+        } => Operation::Transfer {
+            to_device_id,
+            amount,
+            policy_commit,
+            terms_commitment,
+            token_policy: carried.to_vec(),
+            signature,
+            authority_policy,
+        },
+        other => other,
+    }
+}
+
+/// A Burn of `token`, carrying `carried` as its token's policy.
+fn burn_carrying(amount: u64, token: [u8; 32], carried: &[u8]) -> Operation {
+    Operation::Burn {
+        amount: Balance::amount(amount),
+        token_id: b"T".to_vec(),
+        policy_commit: token,
+        token_policy: carried.to_vec(),
+        message: String::new(),
+    }
+}
+
 fn burn(amount: u64, policy_commit: [u8; 32]) -> Operation {
     Operation::Burn {
         amount: Balance::amount(amount),
         token_id: b"T".to_vec(),
         policy_commit,
+        token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
         message: String::new(),
     }
 }
@@ -131,6 +168,124 @@ fn round_trip(
     verify_operation_write_set(operation, &G, &DEV, &witness, P_CREATE)
         .expect("exact effect verifies");
     witness
+}
+
+// ── A token's committed policy, read in the write set (owner question 9) ──
+
+/// `build_write_set` for `operation` over a tree funded with `amount` of `token`.
+fn build_over(
+    operation: &Operation,
+    token: [u8; 32],
+    amount: u64,
+) -> Result<dsm::economic::write_set::BuiltWriteSet, WriteSetError> {
+    let (mut tree, balances) = funded_tree(token, amount);
+    build_write_set(
+        operation,
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE),
+        &mut tree,
+        &CreditSourceFacts::None,
+    )
+}
+
+/// Owner question 9 (2026-10-27): Core is the enforcement boundary for a
+/// Transfer or Burn its token's committed policy forbids. The write set
+/// refuses it, from the policy bytes the signed operation carries, before
+/// anything moves: the producer's device cannot build it, and a verifier
+/// handed the debit refuses the operation that names it. A token whose policy
+/// permits the move passes both.
+///
+/// MUTATION CONTROL: removing the `transferable` refusal from the write set's
+/// Transfer arm turns this red, and so does removing the `burn_enabled`
+/// refusal from its Burn arm.
+#[test]
+fn a_transfer_or_burn_its_tokens_policy_forbids_has_no_write_set() {
+    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    let (burns_only, burns_only_policy) = policy_token(70, POLICY_FLAG_BURN);
+    let (moves_only, moves_only_policy) = policy_token(71, POLICY_FLAG_TRANSFERABLE);
+
+    let forbidden_transfer = transfer_carrying(PEER_DEV, 40, burns_only, &burns_only_policy);
+    match build_over(&forbidden_transfer, burns_only, 100) {
+        Err(refused) => assert_eq!(
+            refused,
+            WriteSetError::TokenNotTransferable { token: burns_only }
+        ),
+        Ok(_) => panic!("a transfer of a token that does not transfer has a write set"),
+    }
+    let forbidden_burn = burn_carrying(40, moves_only, &moves_only_policy);
+    match build_over(&forbidden_burn, moves_only, 100) {
+        Err(refused) => assert_eq!(
+            refused,
+            WriteSetError::TokenNotBurnable { token: moves_only }
+        ),
+        Ok(_) => panic!("a burn of a token that does not burn has a write set"),
+    }
+
+    // The permitted twins build, and their witnesses verify.
+    let (tree, balances) = funded_tree(moves_only, 100);
+    round_trip(
+        &transfer_carrying(PEER_DEV, 40, moves_only, &moves_only_policy),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+    let (tree, balances) = funded_tree(burns_only, 100);
+    let pre_root = tree.root();
+    let burned = round_trip(
+        &burn_carrying(40, burns_only, &burns_only_policy),
+        tree,
+        balances,
+        &CreditSourceFacts::None,
+    );
+
+    // A verifier handed that exact debit under a Transfer of the same token
+    // refuses the Transfer: the debit is a burn's shape, the token does not
+    // transfer.
+    let as_transfer = EconomicTransitionWitness::new(
+        pre_root,
+        burned.post_economic_root,
+        econ_op_id(),
+        dsm::economic::admission::dsm_operation_digest(&forbidden_transfer.to_bytes()),
+        burned.mutations.clone(),
+        burned.credit_sources.clone(),
+    )
+    .expect("a well-formed witness");
+    assert_eq!(
+        verify_operation_write_set(&forbidden_transfer, &G, &DEV, &as_transfer, P_CREATE),
+        Err(WriteSetError::TokenNotTransferable { token: burns_only })
+    );
+}
+
+/// The policy bytes a Transfer or Burn carries are its token's committed
+/// policy, ERA's included, re-hashed to its commit before anything is read
+/// out of them: another token's bytes, or none, are refused.
+///
+/// MUTATION CONTROL: skipping the re-hash turns this red.
+#[test]
+fn a_transfer_or_burn_carries_exactly_its_tokens_committed_policy() {
+    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
+    let (token, _) = policy_token(72, POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
+    let (_, other_policy) = policy_token(73, POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
+    for moved in [token, era()] {
+        for carried in [other_policy.clone(), Vec::new()] {
+            for operation in [
+                transfer_carrying(PEER_DEV, 40, moved, &carried),
+                burn_carrying(40, moved, &carried),
+            ] {
+                match build_over(&operation, moved, 100) {
+                    Err(refused) => {
+                        assert_eq!(
+                            refused,
+                            WriteSetError::TokenPolicyNotTheToken { token: moved }
+                        )
+                    }
+                    Ok(_) => panic!("an operation carrying bytes that are not its token's built"),
+                }
+            }
+        }
+    }
 }
 
 // ── Round trips: the producer output IS the verifier's expectation ─────────
@@ -476,15 +631,37 @@ fn a_debit_with_an_extra_mutation_is_refused() {
     }
 }
 
+/// Same witness, different claimed operations: each is refused by the check
+/// for exactly what it changes. The near-miss on the asset names a burnable
+/// token and carries its own committed policy, so the policy check passes and
+/// only the asset binding can refuse it.
+///
+/// MUTATION CONTROL: delete the asset comparison in the pure-debit arm of
+/// `verify_operation_write_set` and the asset near-miss is accepted: red.
 #[test]
 fn a_debit_of_the_wrong_amount_or_asset_is_refused() {
+    use dsm::economic::token_policy::POLICY_FLAG_BURN;
     let (tree, balances) = funded_tree(era(), 100);
     let op = burn(40, era());
     let witness = round_trip(&op, tree, balances, &CreditSourceFacts::None);
-    // Same witness, different claimed operations.
-    assert!(verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE).is_err());
-    assert!(
-        verify_operation_write_set(&burn(40, [0xEE; 32]), &G, &DEV, &witness, P_CREATE).is_err()
+    assert_eq!(
+        verify_operation_write_set(&burn(41, era()), &G, &DEV, &witness, P_CREATE),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit delta is not exactly the operation amount"
+        })
+    );
+    let (other, other_policy) = policy_token(74, POLICY_FLAG_BURN);
+    assert_eq!(
+        verify_operation_write_set(
+            &burn_carrying(40, other, &other_policy),
+            &G,
+            &DEV,
+            &witness,
+            P_CREATE
+        ),
+        Err(WriteSetError::WrongWriteSet {
+            detail: "debit touches a different asset than the operation names"
+        })
     );
     // And the role near-miss: the same delta presented as a transfer TO us
     // (credit role) is refused.
@@ -550,6 +727,214 @@ fn a_recipient_credit_without_its_consumed_source_is_refused() {
         verify_operation_write_set(&op, &G, &DEV, &stripped, P_CREATE),
         Err(WriteSetError::WrongWriteSet { .. })
     ));
+}
+
+// ── A consumed source is write-once (MR-DSM-0161) ──────────────────────────
+
+/// One planned leaf write: its key, its pre-state and its post-state.
+type Planned = (
+    [u8; 32],
+    Option<EconomicLeafState>,
+    Option<EconomicLeafState>,
+);
+
+/// The peer debit every credit below draws on.
+fn peer_debit() -> CreditSourceFacts {
+    CreditSourceFacts::PeerDebit {
+        peer_genesis: [0x55; 32],
+        peer_devid: PEER_DEV,
+        peer_economic_position: 3,
+        peer_debit_mutation_index: 0,
+        acceptance_evidence_addr: [0x66; 32],
+    }
+}
+
+/// Another operation on the same lineage than the one that consumed the
+/// source.
+fn second_op_id() -> [u8; 32] {
+    dsm_economic_operation_id(&G, &DEV, &[0xCE; 32])
+}
+
+/// A credit of 40 ERA from [`peer_debit`], built on an empty tree: the tree
+/// it leaves, holding the balance and the consumed-source leaf the builder
+/// wrote, and the write set itself.
+fn credited_tree() -> (EconomicSmt, dsm::economic::write_set::BuiltWriteSet) {
+    let mut tree = EconomicSmt::new();
+    let built = build_write_set(
+        &transfer(DEV, 40, era()),
+        &G,
+        &DEV,
+        &econ_op_id(),
+        &EconomicPreState::new(&BTreeMap::new(), P_CREATE),
+        &mut tree,
+        &peer_debit(),
+    )
+    .expect("the first credit consumes the source");
+    (tree, built)
+}
+
+/// The consumed-source record a write set wrote.
+fn consumed_by(
+    built: &dsm::economic::write_set::BuiltWriteSet,
+) -> dsm::economic::state::EconomicConsumedSourceState {
+    built
+        .mutations
+        .iter()
+        .find_map(|m| match &m.post_state {
+            Some(EconomicLeafState::ConsumedSource(c)) => Some(c.clone()),
+            _ => None,
+        })
+        .expect("a peer-funded credit writes its consumed source")
+}
+
+/// `planned`, applied to `tree` in the order given with progressive
+/// siblings, as the builder applies its own plan, formed into the witness of
+/// `operation`.
+fn witness_applying(
+    tree: &mut EconomicSmt,
+    planned: Vec<Planned>,
+    operation: &Operation,
+    economic_operation_id: [u8; 32],
+    sources: Vec<dsm::economic::credit::CreditSource>,
+) -> EconomicTransitionWitness {
+    let pre_root = tree.root();
+    let mut mutations = Vec::with_capacity(planned.len());
+    for (key, pre, post) in planned {
+        let siblings = tree.siblings(&key).to_vec();
+        match &post {
+            Some(state) => tree.insert(key, state.leaf_value().unwrap()),
+            None => tree.remove(&key),
+        }
+        mutations.push(EconomicLeafMutation::new(pre, post, siblings).unwrap());
+    }
+    EconomicTransitionWitness::new(
+        pre_root,
+        tree.root(),
+        economic_operation_id,
+        dsm::economic::admission::dsm_operation_digest(&operation.to_bytes()),
+        mutations,
+        sources,
+    )
+    .expect("the witness forms")
+}
+
+/// MR-DSM-0161: a peer debit funds one credit. Once its consumed-source leaf
+/// is in the tree, the builder refuses a second credit from that debit, under
+/// another operation, and the tree is left as it was.
+///
+/// MUTATION CONTROL: removing the builder's `SourceAlreadyConsumed` refusal
+/// from the peer-funded credit (`build_write_set`) turns this test red.
+#[test]
+fn a_consumed_peer_debit_funds_no_second_credit() {
+    let (mut tree, first) = credited_tree();
+    let consumed = EconomicLeafState::ConsumedSource(consumed_by(&first));
+    assert_eq!(
+        tree.get(&consumed.leaf_key(&G, &DEV)),
+        Some(&consumed.leaf_value().unwrap()),
+        "the first credit wrote the consumed-source leaf"
+    );
+    let held = tree.root();
+    let mut balances = BTreeMap::new();
+    balances.insert(era(), 40);
+    let again = build_write_set(
+        &transfer(DEV, 40, era()),
+        &G,
+        &DEV,
+        &second_op_id(),
+        &EconomicPreState::new(&balances, P_CREATE + 1),
+        &mut tree,
+        &peer_debit(),
+    );
+    assert!(
+        matches!(again, Err(WriteSetError::SourceAlreadyConsumed)),
+        "a second credit from a consumed debit: {again:?}"
+    );
+    assert_eq!(tree.root(), held, "a refused build writes nothing");
+}
+
+/// MR-DSM-0161: a witness that rewrites a consumed-source leaf, re-pointing
+/// it at a second operation so that the same peer debit funds a second
+/// credit, is a consistent mutation sequence and is refused by the write-set
+/// rule.
+///
+/// MUTATION CONTROL: letting the verifier take a consumed-source write
+/// whatever its pre-state (`verify_operation_write_set`, the
+/// `(None, Some(ConsumedSource))` arm) turns this test red.
+#[test]
+fn a_witness_that_rewrites_a_consumed_source_is_refused() {
+    let (mut tree, first) = credited_tree();
+    let consumed = consumed_by(&first);
+    let rewritten = dsm::economic::state::EconomicConsumedSourceState {
+        source_id: consumed.source_id,
+        consumer_economic_operation_id: second_op_id(),
+    };
+    let balance_key = dsm::economic::keys::balance_key(&G, &DEV, &era());
+    let mut planned: Vec<Planned> = vec![
+        (
+            balance_key,
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 40).unwrap(),
+            )),
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 80).unwrap(),
+            )),
+        ),
+        (
+            EconomicLeafState::ConsumedSource(consumed.clone()).leaf_key(&G, &DEV),
+            Some(EconomicLeafState::ConsumedSource(consumed)),
+            Some(EconomicLeafState::ConsumedSource(rewritten)),
+        ),
+    ];
+    planned.sort_by_key(|(key, ..)| *key);
+    let credit_index = planned
+        .iter()
+        .position(|(key, ..)| *key == balance_key)
+        .unwrap();
+    let mut sources = first.credit_sources;
+    if let dsm::economic::credit::CreditSource::ValidatedPeerDebit(d) = &mut sources[0] {
+        d.credit_mutation_index = u32::try_from(credit_index).unwrap();
+    }
+    let op = transfer(DEV, 40, era());
+    let witness = witness_applying(&mut tree, planned, &op, second_op_id(), sources);
+    verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV)
+        .expect("the rewrite is a consistent sequence over the tree");
+    let verdict = verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE + 1);
+    assert!(
+        matches!(verdict, Err(WriteSetError::WrongWriteSet { .. })),
+        "a rewritten consumed source: {verdict:?}"
+    );
+}
+
+/// MR-DSM-0161: a debit whose witness also deletes the consumed-source leaf,
+/// reopening the peer debit for reuse, is a consistent mutation sequence and
+/// is refused by the write-set rule.
+///
+/// MUTATION CONTROL: letting the verifier pass over the removal of a
+/// consumed-source leaf (`verify_operation_write_set`) turns this test red.
+#[test]
+fn a_witness_that_removes_a_consumed_source_is_refused() {
+    let (mut tree, first) = credited_tree();
+    let consumed = EconomicLeafState::ConsumedSource(consumed_by(&first));
+    let mut planned: Vec<Planned> = vec![
+        (
+            dsm::economic::keys::balance_key(&G, &DEV, &era()),
+            Some(EconomicLeafState::Balance(
+                EconomicBalanceState::new(era(), 40).unwrap(),
+            )),
+            None,
+        ),
+        (consumed.leaf_key(&G, &DEV), Some(consumed), None),
+    ];
+    planned.sort_by_key(|(key, ..)| *key);
+    let op = burn(40, era());
+    let witness = witness_applying(&mut tree, planned, &op, second_op_id(), Vec::new());
+    verify_mutation_sequence(&witness.mutation_sequence(), &G, &DEV)
+        .expect("the removal is a consistent sequence over the tree");
+    let verdict = verify_operation_write_set(&op, &G, &DEV, &witness, P_CREATE + 1);
+    assert!(
+        matches!(verdict, Err(WriteSetError::WrongWriteSet { .. })),
+        "a removed consumed source: {verdict:?}"
+    );
 }
 
 #[test]
@@ -767,6 +1152,78 @@ fn sofi_genesis_state(market: ([u8; 32], [u8; 32])) -> dsm::sofi::wire::VaultSta
     }
 }
 
+/// Fixture token `i`: a native token whose committed policy transfers. Its
+/// commit, and the `TokenPolicyV3` bytes that commit names.
+fn sofi_token(i: u8) -> ([u8; 32], Vec<u8>) {
+    policy_token(i, dsm::economic::token_policy::POLICY_FLAG_TRANSFERABLE)
+}
+
+/// Fixture token `i` whose committed policy has the movement flags `flags`.
+fn policy_token(i: u8, flags: u8) -> ([u8; 32], Vec<u8>) {
+    use dsm::economic::token_policy as tp;
+    let mut blob = vec![
+        tp::TOKEN_POLICY_VERSION,
+        tp::TOKEN_KIND_FUNGIBLE,
+        tp::SUPPLY_CLASS_NATIVE,
+        flags,
+        tp::ReleaseRule::AllAtCreation.code(),
+    ];
+    blob.extend_from_slice(&G);
+    blob.extend_from_slice(&DEV);
+    blob.extend_from_slice(&[1, 1]);
+    blob.extend_from_slice(&3u16.to_be_bytes());
+    blob.extend_from_slice(b"key");
+    let ticker = format!("T{i:02}");
+    blob.push(ticker.len() as u8);
+    blob.extend_from_slice(ticker.as_bytes());
+    blob.extend_from_slice(&5u16.to_be_bytes());
+    blob.extend_from_slice(b"Token");
+    blob.push(0);
+    blob.extend_from_slice(&1_000_000u128.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    blob.push(tp::ALLOWLIST_KIND_NONE);
+    blob.extend_from_slice(&0u16.to_be_bytes());
+    let bytes =
+        prost::Message::encode_to_vec(&dsm::types::proto::TokenPolicyV3 { policy_bytes: blob });
+    (
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, &bytes),
+        bytes,
+    )
+}
+
+/// The fixture tokens a creation may fund.
+fn sofi_tokens() -> Vec<([u8; 32], Vec<u8>)> {
+    (0..64).map(sofi_token).collect()
+}
+
+/// Two fixture tokens, in canonical order.
+fn sofi_pair() -> ([u8; 32], [u8; 32]) {
+    let (x, y) = (sofi_token(1).0, sofi_token(2).0);
+    if x < y {
+        (x, y)
+    } else {
+        (y, x)
+    }
+}
+
+/// The policies a creation funding `funded` carries (MR-SOFI-0311): each
+/// fixture token's, in the funded order. A commit no fixture token has
+/// carries none, which only a creation refused before its policies are read
+/// funds.
+fn sofi_carried(funded: &[[u8; 32]]) -> Vec<Vec<u8>> {
+    let tokens = sofi_tokens();
+    funded
+        .iter()
+        .filter_map(|commit| {
+            tokens
+                .iter()
+                .find(|(c, _)| c == commit)
+                .map(|(_, bytes)| bytes.clone())
+        })
+        .collect()
+}
+
 fn sofi_create_operation(
     market: ([u8; 32], [u8; 32]),
     funding_a: [u8; 32],
@@ -794,6 +1251,7 @@ fn sofi_create_operation(
         market_policy_preimage: sofi_market_policy(market).encode(),
         funding_a_policy_commit: funding_a,
         funding_b_policy_commit: funding_b,
+        funding_policies: sofi_carried(&[funding_a, funding_b]),
         signature: vec![0xA1; 8],
     }
 }
@@ -864,7 +1322,7 @@ fn a_setup_refuses_to_replace_an_existing_relationship() {
 /// P15-12: two debits and the record, as ONE write set, through both halves.
 #[test]
 fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let (tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
     let witness = round_trip(
         &sofi_create_operation((a, b), a, b, 1_000, 2_000),
@@ -898,7 +1356,7 @@ fn a_vault_creation_debits_the_pair_and_inserts_the_record() {
 /// The creation's own conjuncts, each refusing on its own.
 #[test]
 fn a_creation_is_refused_on_each_missing_conjunct() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let balances = |x: u64, y: u64| {
         let mut m = BTreeMap::new();
         m.insert(a, x);
@@ -957,7 +1415,7 @@ fn a_creation_is_refused_on_each_missing_conjunct() {
 /// relationship leaf, has to be refused BY CLASS.
 #[test]
 fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
-    let (a, b) = ([0x40; 32], [0x41; 32]);
+    let (a, b) = sofi_pair();
     let (mut tree, balances) = sofi_funded(&[(a, 5_000), (b, 9_000)]);
 
     // The witness a CREATION produces, verified against a SETUP.
@@ -1019,7 +1477,13 @@ fn a_sofi_leaf_is_refused_under_the_wrong_operation() {
 /// rather than quietly becoming a duplicate of the happy path.
 #[test]
 fn a_creation_verifies_when_key_order_opposes_asset_order() {
-    let (a, b) = ([0x00; 32], [0x01; 32]);
+    let key = |asset: &[u8; 32]| dsm::economic::keys::balance_key(&G, &DEV, asset);
+    let tokens = sofi_tokens();
+    let (a, b) = tokens
+        .iter()
+        .flat_map(|x| tokens.iter().map(move |y| (x.0, y.0)))
+        .find(|(a, b)| a < b && key(a) > key(b))
+        .expect("an inverting pair among the fixture tokens");
     assert!(a < b, "the assets are in canonical order");
     assert!(
         dsm::economic::keys::balance_key(&G, &DEV, &a)
@@ -1052,7 +1516,7 @@ fn a_creation_verifies_when_key_order_opposes_asset_order() {
 /// producer.
 #[test]
 fn funding_assets_outside_the_declared_market_are_refused_even_when_funded() {
-    let market = ([0x40; 32], [0x41; 32]);
+    let market = sofi_pair();
     let (junk_a, junk_b) = ([0x70; 32], [0x71; 32]);
     assert!(
         junk_a < junk_b,

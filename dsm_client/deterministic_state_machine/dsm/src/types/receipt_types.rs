@@ -114,17 +114,6 @@ pub struct StitchedReceiptV2 {
     /// Per-step ephemeral SPHINCS+ public key for party B.
     /// Same semantics as `ek_pk_a`.
     pub ek_pk_b: Vec<u8>,
-
-    /// Per-step Kyber/ML-KEM ciphertext for party A's contribution to
-    /// `k_step` (whitepaper §11). The sender encapsulates with deterministic
-    /// coins against the recipient's Kyber pubkey; the resulting ct travels
-    /// here. Recipient decapsulates with their Kyber sk to recover `ss`
-    /// and derive `k_step = BLAKE3("DSM/kyber-ss\0" || ss)`.
-    pub kyber_ct_a: Vec<u8>,
-
-    /// Per-step Kyber ciphertext for party B's contribution.
-    /// Mirrors `kyber_ct_a` but encapsulated by B against A's Kyber pubkey.
-    pub kyber_ct_b: Vec<u8>,
 }
 
 /// Which leaf one of a receipt's writes is, and the one witness a verifier
@@ -151,27 +140,11 @@ pub struct ReceiptWrite {
 
 impl ReceiptWrite {
     fn to_proto(&self) -> crate::types::proto::StepWrite {
-        use crate::types::proto::{
-            step_write::Leaf, SmtPath, StepWriteOfflineAccount, StepWriteRelationship,
-        };
+        use crate::types::proto::{step_write::Leaf, StepWriteRelationship};
         crate::types::proto::StepWrite {
             leaf: Some(match &self.leaf {
                 ReceiptLeaf::Relationship => Leaf::Relationship(StepWriteRelationship {}),
-                ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(StepWriteOfflineAccount {
-                    pre_account_root: w.pre_account_root.to_vec(),
-                    pre_allocation: w.pre_allocation,
-                    pre_counter: w.pre_counter,
-                    pre_frontier: w.pre_frontier.to_vec(),
-                    next_frontier: w.next_frontier.to_vec(),
-                    account_paths: w
-                        .account_paths
-                        .iter()
-                        .map(|p| SmtPath {
-                            heights: p.explicit_heights.to_vec(),
-                            siblings: p.siblings.clone(),
-                        })
-                        .collect(),
-                }),
+                ReceiptLeaf::OfflineAccount(w) => Leaf::OfflineAccount(w.to_proto()),
             }),
             path_heights: self.path.explicit_heights.to_vec(),
             path_siblings: self.path.siblings.clone(),
@@ -185,38 +158,9 @@ impl ReceiptWrite {
         let leaf = match w.leaf {
             None => return Err(DsmError::invalid_operation("a receipt write names no leaf")),
             Some(Leaf::Relationship(_)) => ReceiptLeaf::Relationship,
-            Some(Leaf::OfflineAccount(a)) => {
-                let fixed = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
-                    bytes.try_into().map_err(|e| {
-                        DsmError::invalid_operation(format!(
-                            "a receipt's offline account {what}: {e}"
-                        ))
-                    })
-                };
-                let account_paths = a
-                    .account_paths
-                    .into_iter()
-                    .map(|p| {
-                        decode::<DeviceSmtHashes>(&p.heights, &p.siblings).map_err(|e| {
-                            DsmError::invalid_operation(format!(
-                                "a receipt's offline account path: {e}"
-                            ))
-                        })?;
-                        Ok(EncodedPath {
-                            explicit_heights: fixed(&p.heights, "path height set")?,
-                            siblings: p.siblings,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, DsmError>>()?;
-                ReceiptLeaf::OfflineAccount(Box::new(crate::types::offline_account::SpendWitness {
-                    pre_account_root: fixed(&a.pre_account_root, "pre-root")?,
-                    pre_allocation: a.pre_allocation,
-                    pre_counter: a.pre_counter,
-                    pre_frontier: fixed(&a.pre_frontier, "pre-frontier")?,
-                    next_frontier: fixed(&a.next_frontier, "next frontier")?,
-                    account_paths,
-                }))
-            }
+            Some(Leaf::OfflineAccount(a)) => ReceiptLeaf::OfflineAccount(Box::new(
+                crate::types::offline_account::SpendWitness::from_proto(a)?,
+            )),
         };
         // Only the one canonical encoding of a device-tree path is a path.
         decode::<DeviceSmtHashes>(&w.path_heights, &w.path_siblings)
@@ -248,16 +192,16 @@ fn receipt_commit_field_limit(tag: u32) -> Option<FieldLimit> {
         1..=7 => Some(FieldLimit::Fixed(32)),
         10 => Some(FieldLimit::Max(128 * 1024)),
         12..=17 => Some(FieldLimit::Max(65_535)),
-        18..=19 => Some(FieldLimit::Max(2_048)),
         21 => Some(FieldLimit::Fixed(32)),
         22 => Some(FieldLimit::Max(128 * 1024)),
         _ => None,
     }
 }
 
-/// `ReceiptCountersignB` (ADR 0003 return leg): the four B-side receipt
+/// `ReceiptCountersignB` (ADR 0003 return leg): the three B-side receipt
 /// fields, two 32-byte references, and the recipient's authenticated
-/// canonical pair (`b_parent_tip`, `b_child_tip`). Fields 1-8 are required;
+/// canonical pair (`b_parent_tip`, `b_child_tip`). Fields 1-5, 7 and 8 are
+/// required, and 6 (a Kyber ciphertext no signature covered) is refused;
 /// field 9 (3.5b PR4: the recipient economic RELEASE content address) is
 /// OPTIONAL at the wire layer — an acceptance BUNDLE's countersign carries
 /// none (provenance never carries finalization authority), while the sender
@@ -268,7 +212,6 @@ fn receipt_countersign_b_field_limit(tag: u32) -> Option<FieldLimit> {
     match tag {
         1..=2 => Some(FieldLimit::Fixed(32)),
         3..=5 => Some(FieldLimit::Max(65_535)),
-        6 => Some(FieldLimit::Max(2_048)),
         7..=9 => Some(FieldLimit::Fixed(32)),
         _ => None,
     }
@@ -433,7 +376,7 @@ fn validate_receipt_countersign_b_wire(bytes: &[u8]) -> Result<(), DsmError> {
         "countersign wire",
         RECEIPT_COUNTERSIGN_B_TAGS,
         receipt_countersign_b_field_limit,
-        |tag| tag != 9,
+        |tag| matches!(tag, 1..=5 | 7..=8),
     )
 }
 
@@ -516,6 +459,64 @@ pub fn relationship_finalized_signing_target(
     )
 }
 
+/// The recipient's check of a `RelationshipFinalizedV1` against the
+/// transition it journaled (finality barrier): the certificate names
+/// `sender_device_id` as its sender and `recipient_device_id` as its
+/// recipient, the sender child tip the recipient accepted, and the pair the
+/// recipient applied; and `signature_a` verifies over
+/// [`relationship_finalized_signing_target`] under `sender_ek_head`, the
+/// sender's per-step EK for that transition as the recipient journaled it
+/// (never the live head, which moves on). The relationship key and the
+/// commitment are bound by the caller's lookup of the journal they name.
+pub fn verify_relationship_finalized(
+    cert: &crate::types::proto::RelationshipFinalizedV1,
+    sender_device_id: &[u8; 32],
+    recipient_device_id: &[u8; 32],
+    sender_child_tip_a: &[u8; 32],
+    recipient_pair: (&[u8; 32], &[u8; 32]),
+    sender_ek_head: &[u8],
+) -> Result<(), DsmError> {
+    if cert.sender_device_id.as_slice() != sender_device_id.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate sender is not the journal's counterparty",
+        ));
+    }
+    if cert.recipient_device_id.as_slice() != recipient_device_id.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate recipient is not this device",
+        ));
+    }
+    if cert.sender_child_tip_a.as_slice() != sender_child_tip_a.as_slice() {
+        return Err(DsmError::invalid_operation(
+            "certificate sender_child_tip_a != journaled signed child",
+        ));
+    }
+    if cert.recipient_parent_tip_b.as_slice() != recipient_pair.0.as_slice()
+        || cert.recipient_child_tip_b.as_slice() != recipient_pair.1.as_slice()
+    {
+        return Err(DsmError::invalid_operation(
+            "certificate recipient pair != the pair this device journaled",
+        ));
+    }
+    if sender_ek_head.is_empty() {
+        return Err(DsmError::invalid_operation(
+            "journal carries no sender per-step EK head to verify under",
+        ));
+    }
+    let verified = crate::crypto::sphincs::sphincs_verify(
+        sender_ek_head,
+        &relationship_finalized_signing_target(cert),
+        &cert.signature_a,
+    )
+    .map_err(|e| DsmError::invalid_operation(format!("certificate signature verify error: {e}")))?;
+    if !verified {
+        return Err(DsmError::invalid_operation(
+            "certificate signature_a does not verify under the journal's sender EK head",
+        ));
+    }
+    Ok(())
+}
+
 /// The B-side receipt fields the recipient adds at acceptance (ADR 0003
 /// return leg): exactly what the sender lacks after authoring the A side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -523,7 +524,6 @@ pub struct CountersignB {
     pub sig_b: Vec<u8>,
     pub ek_cert_b: Vec<u8>,
     pub ek_pk_b: Vec<u8>,
-    pub kyber_ct_b: Vec<u8>,
 }
 
 impl CountersignB {
@@ -532,15 +532,11 @@ impl CountersignB {
             sig_b: delta.sig_b.clone(),
             ek_cert_b: delta.ek_cert_b.clone(),
             ek_pk_b: delta.ek_pk_b.clone(),
-            kyber_ct_b: delta.kyber_ct_b.clone(),
         }
     }
 
     fn is_complete(&self) -> bool {
-        !self.sig_b.is_empty()
-            && !self.ek_cert_b.is_empty()
-            && !self.ek_pk_b.is_empty()
-            && !self.kyber_ct_b.is_empty()
+        !self.sig_b.is_empty() && !self.ek_cert_b.is_empty() && !self.ek_pk_b.is_empty()
     }
 }
 
@@ -612,8 +608,6 @@ impl StitchedReceiptV2 {
             ek_cert_b: Vec::new(),
             ek_pk_a: Vec::new(),
             ek_pk_b: Vec::new(),
-            kyber_ct_a: Vec::new(),
-            kyber_ct_b: Vec::new(),
         }
     }
 
@@ -677,9 +671,8 @@ impl StitchedReceiptV2 {
 
     /// Convert to prost-generated `ReceiptCommit` (canonical form, no sigs):
     /// fields 1–7, 10, 21 and 22. Signatures (12, 13), ephemeral-key certs
-    /// (14, 15), EK pubkeys (16, 17), Kyber cts (18, 19) and the fork-aware
-    /// finalization witness (20) live in the envelope only and are explicitly
-    /// absent here.
+    /// (14, 15) and EK pubkeys (16, 17) live in the envelope only and are
+    /// explicitly absent here.
     fn to_proto_canonical(&self) -> crate::types::proto::ReceiptCommit {
         crate::types::proto::ReceiptCommit {
             genesis: self.genesis.to_vec(),
@@ -704,12 +697,10 @@ impl StitchedReceiptV2 {
             ek_cert_b: vec![],
             ek_pk_a: vec![],
             ek_pk_b: vec![],
-            kyber_ct_a: vec![],
-            kyber_ct_b: vec![],
         }
     }
 
-    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks + Kyber ct).
+    /// Convert to prost-generated `ReceiptCommit` (full form, with sigs + certs + EK pks).
     fn to_proto_full(&self) -> crate::types::proto::ReceiptCommit {
         let mut proto = self.to_proto_canonical();
         proto.sig_a.clone_from(&self.sig_a);
@@ -718,8 +709,6 @@ impl StitchedReceiptV2 {
         proto.ek_cert_b.clone_from(&self.ek_cert_b);
         proto.ek_pk_a.clone_from(&self.ek_pk_a);
         proto.ek_pk_b.clone_from(&self.ek_pk_b);
-        proto.kyber_ct_a.clone_from(&self.kyber_ct_a);
-        proto.kyber_ct_b.clone_from(&self.kyber_ct_b);
         proto
     }
 
@@ -770,12 +759,6 @@ impl StitchedReceiptV2 {
         }
         if !rc.ek_pk_b.is_empty() {
             receipt.set_ek_pk_b(rc.ek_pk_b);
-        }
-        if !rc.kyber_ct_a.is_empty() {
-            receipt.set_kyber_ct_a(rc.kyber_ct_a);
-        }
-        if !rc.kyber_ct_b.is_empty() {
-            receipt.set_kyber_ct_b(rc.kyber_ct_b);
         }
         Ok(receipt)
     }
@@ -864,16 +847,6 @@ impl StitchedReceiptV2 {
         self.ek_pk_b = pk;
     }
 
-    /// Set party A's per-step Kyber ciphertext (whitepaper §11).
-    pub fn set_kyber_ct_a(&mut self, ct: Vec<u8>) {
-        self.kyber_ct_a = ct;
-    }
-
-    /// Set party B's per-step Kyber ciphertext (counterparty's contribution).
-    pub fn set_kyber_ct_b(&mut self, ct: Vec<u8>) {
-        self.kyber_ct_b = ct;
-    }
-
     /// Split a countersigned receipt into the A-side receipt (fields 1-11 plus
     /// the A-side authorization material) and the B-side `CountersignB` the
     /// recipient added at acceptance. Errors if any B field is absent: a receipt
@@ -888,7 +861,6 @@ impl StitchedReceiptV2 {
             sig_b: self.sig_b.clone(),
             ek_cert_b: self.ek_cert_b.clone(),
             ek_pk_b: self.ek_pk_b.clone(),
-            kyber_ct_b: self.kyber_ct_b.clone(),
         };
         if !b.is_complete() {
             return Err(DsmError::invalid_operation(
@@ -899,7 +871,6 @@ impl StitchedReceiptV2 {
         a_side.sig_b.clear();
         a_side.ek_cert_b.clear();
         a_side.ek_pk_b.clear();
-        a_side.kyber_ct_b.clear();
         Ok((a_side, b))
     }
 
@@ -909,11 +880,7 @@ impl StitchedReceiptV2 {
     /// receipt that was not the sender's own A side) or if the delta is
     /// incomplete.
     pub fn with_countersign_b(&self, b: CountersignB) -> Result<Self, DsmError> {
-        if !self.sig_b.is_empty()
-            || !self.ek_cert_b.is_empty()
-            || !self.ek_pk_b.is_empty()
-            || !self.kyber_ct_b.is_empty()
-        {
+        if !self.sig_b.is_empty() || !self.ek_cert_b.is_empty() || !self.ek_pk_b.is_empty() {
             return Err(DsmError::invalid_operation(
                 "with_countersign_b: receipt already carries B-side material",
             ));
@@ -926,7 +893,6 @@ impl StitchedReceiptV2 {
         let mut full = self.clone();
         full.set_ek_pk_b(b.ek_pk_b);
         full.set_ek_cert_b(b.ek_cert_b);
-        full.set_kyber_ct_b(b.kyber_ct_b);
         full.add_sig_b(b.sig_b);
         Ok(full)
     }
@@ -1049,7 +1015,6 @@ mod tests {
         assert_eq!(from_full.ek_pk_b, receipt.ek_pk_b);
         assert_eq!(from_full.ek_cert_b, receipt.ek_cert_b);
         assert_eq!(from_full.sig_b, receipt.sig_b);
-        assert_eq!(from_full.kyber_ct_b, receipt.kyber_ct_b);
 
         // Canonical bytes decode WITHOUT COMPLAINT and silently drop them all.
         let from_canonical =
@@ -1060,7 +1025,6 @@ mod tests {
             from_canonical.sig_b.is_empty(),
             "this is the trap: the countersignature is gone and nothing errored"
         );
-        assert!(from_canonical.kyber_ct_b.is_empty());
 
         // And the commitment is identical across both, so a commitment check
         // cannot be what catches the mistake.
@@ -1116,7 +1080,6 @@ mod tests {
         receipt.add_sig_a(a.sig);
         receipt.set_ek_cert_a(a.ek_cert);
         receipt.set_ek_pk_a(a.ek_pk);
-        receipt.set_kyber_ct_a(a.kyber_ct);
         receipt
     }
 
@@ -1137,7 +1100,6 @@ mod tests {
                 sig_b: b.sig,
                 ek_cert_b: b.ek_cert,
                 ek_pk_b: b.ek_pk,
-                kyber_ct_b: b.kyber_ct,
             },
             (b_parent, b_child),
         )
@@ -1163,7 +1125,6 @@ mod tests {
             sig_b: b.sig_b,
             ek_cert_b: b.ek_cert_b,
             ek_pk_b: b.ek_pk_b,
-            kyber_ct_b: b.kyber_ct_b,
             b_parent_tip: b_parent_tip.to_vec(),
             b_child_tip: b_child_tip.to_vec(),
             recipient_economic_release_addr: Vec::new(),
@@ -1396,11 +1357,10 @@ mod tests {
         let a_bytes = a_side.to_full_protobuf().unwrap();
         // The A side is what the sender ships and retains: two SPHINCS+
         // objects of 49,856 bytes (σ_A and the EK certificate), the 64-byte
-        // EK, the 1,088-byte ML-KEM ciphertext, and the step's fields with
-        // its one compressed relationship path — 101 KB class, against the
-        // 109 KB of the uncompressed path.
+        // EK, and the step's fields with its one compressed relationship
+        // path — 100 KB class, against the 108 KB of the uncompressed path.
         assert!(
-            (101_000..102_000).contains(&a_bytes.len()),
+            (100_000..101_000).contains(&a_bytes.len()),
             "{}",
             a_bytes.len()
         );
@@ -1409,18 +1369,13 @@ mod tests {
         let (b, _) = countersign_b();
         let full = a_side.with_countersign_b(b.clone()).unwrap();
         let full_bytes = full.to_full_protobuf().unwrap();
-        // The countersignature adds exactly its four fields (σ_B 13, its EK
-        // certificate 15, the EK 17, the ML-KEM ciphertext 19), each with its
-        // field header, and nothing else.
-        let b_fields: usize = [
-            (13, &b.sig_b),
-            (15, &b.ek_cert_b),
-            (17, &b.ek_pk_b),
-            (19, &b.kyber_ct_b),
-        ]
-        .into_iter()
-        .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
-        .sum();
+        // The countersignature adds exactly its three fields (σ_B 13, its EK
+        // certificate 15, the EK 17), each with its field header, and nothing
+        // else.
+        let b_fields: usize = [(13, &b.sig_b), (15, &b.ek_cert_b), (17, &b.ek_pk_b)]
+            .into_iter()
+            .map(|(tag, value)| prost::encoding::bytes::encoded_len(tag, value))
+            .sum();
         assert_eq!(
             full_bytes.len(),
             a_bytes.len() + b_fields,
@@ -1480,7 +1435,7 @@ mod tests {
         );
 
         let mut incomplete = b;
-        incomplete.kyber_ct_b.clear();
+        incomplete.ek_pk_b.clear();
         let err = a_side().with_countersign_b(incomplete).unwrap_err();
         assert!(format!("{err}").contains("incomplete"), "{err}");
     }
@@ -1503,11 +1458,11 @@ mod tests {
         // split/overlay byte identity above is untouched by it.
         assert_eq!(CountersignB::from_wire(&decoded), b);
         assert_eq!(decoded.encode_to_vec(), wire);
-        // Two SPHINCS objects plus ~1.3 KB of everything else: the normative
-        // budget class (ADR 0003), well under the 131,072-byte node cap even
-        // before the transport wrapper.
+        // Two SPHINCS objects of 49,856 bytes plus about 200 bytes of
+        // everything else: the normative budget class (ADR 0003), well under
+        // the 131,072-byte node cap even before the transport wrapper.
         assert!(
-            wire.len() > 100_000 && wire.len() < 102_000,
+            wire.len() > 99_712 && wire.len() < 100_000,
             "{}",
             wire.len()
         );
@@ -1515,10 +1470,9 @@ mod tests {
 
     /// A full countersigned receipt fed to the delta decoder is refused — the
     /// sender can never mistake a whole receipt for a delta, so no legacy
-    /// full-receipt reply can be consumed by accident. Tags 1–7 of a receipt
-    /// are 32-byte fields the delta's first seven tags admit; the first
-    /// divergence is `ReceiptCommit` tag 10, the device proof, which the delta
-    /// does not have.
+    /// full-receipt reply can be consumed by accident. Tags 1–5 of a receipt
+    /// are 32-byte fields the delta's first five tags admit; the first
+    /// divergence is `ReceiptCommit` tag 6, a number the delta reserves.
     #[test]
     fn countersign_wire_refuses_a_full_receipt_commit_body() {
         let full_bytes = a_side()
@@ -1528,7 +1482,7 @@ mod tests {
             .unwrap();
         let err = decode_receipt_countersign_b_wire(&full_bytes).unwrap_err();
         assert!(
-            format!("{err}").contains("countersign wire: unknown field 10"),
+            format!("{err}").contains("countersign wire: unknown field 6"),
             "{err}"
         );
     }
@@ -1566,15 +1520,21 @@ mod tests {
         use prost::Message;
         let good = delta_wire();
 
-        // Missing kyber_ct_b (field 6): the live gate is structural, so the
-        // wire must not let it through silently.
-        let mut no_ct = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
-        no_ct.kyber_ct_b.clear();
-        let err = decode_receipt_countersign_b_wire(&no_ct.encode_to_vec()).unwrap_err();
+        // Missing ek_pk_b (field 5): σ_B cannot be checked without it.
+        let mut no_ek = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
+        no_ek.ek_pk_b.clear();
+        let err = decode_receipt_countersign_b_wire(&no_ek.encode_to_vec()).unwrap_err();
         assert!(
-            format!("{err}").contains("missing required field 6"),
+            format!("{err}").contains("missing required field 5"),
             "{err}"
         );
+
+        // Field 6, the Kyber ciphertext no signature covered, is no field of
+        // the delta: a writer that still sends one is refused.
+        let mut with_ct = good.clone();
+        prost::encoding::bytes::encode(6, &vec![0x5A_u8; 1_088], &mut with_ct);
+        let err = decode_receipt_countersign_b_wire(&with_ct).unwrap_err();
+        assert!(format!("{err}").contains("unknown field 6"), "{err}");
 
         // Wrong fixed length on the digest binding.
         let mut short_digest = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
@@ -1597,12 +1557,12 @@ mod tests {
         let err = decode_receipt_countersign_b_wire(&dup).unwrap_err();
         assert!(format!("{err}").contains("duplicate field 1"), "{err}");
 
-        // A hostile kyber_ct_b past its cap (2,048).
+        // A hostile ek_pk_b past its cap (65,535).
         let mut fat = crate::types::proto::ReceiptCountersignB::decode(&good[..]).unwrap();
-        fat.kyber_ct_b = vec![0u8; 2_049];
+        fat.ek_pk_b = vec![0u8; 65_536];
         let err = decode_receipt_countersign_b_wire(&fat.encode_to_vec()).unwrap_err();
         assert!(
-            format!("{err}").contains("field 6 exceeds max length 2048"),
+            format!("{err}").contains("field 5 exceeds max length 65535"),
             "{err}"
         );
 
@@ -1707,5 +1667,62 @@ mod tests {
             f[0] ^= 0x01;
             assert_ne!(relationship_finalized_signing_target(&c), t0, "field {i}");
         }
+    }
+
+    /// The sender's per-step EK for the transition signs the certificate; the
+    /// recipient journaled its sender, itself, the sender child tip and its
+    /// own applied pair. The certificate is taken; one signed by that very key
+    /// but naming another sender, recipient, sender child or recipient pair is
+    /// refused at that field; so is one under another key, or a journal with
+    /// no EK head to check against.
+    #[test]
+    fn a_certificate_verifies_only_for_the_transition_the_recipient_journaled() {
+        use crate::crypto::sphincs::{generate_keypair_from_seed, sphincs_sign, SphincsVariant};
+        let head = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x5Eu8; 32])
+            .expect("the sender's EK for the transition");
+        let other = generate_keypair_from_seed(SphincsVariant::SPX256f, &[0x6Fu8; 32])
+            .expect("another key");
+        let signed = |mut cert: crate::types::proto::RelationshipFinalizedV1, sk: &[u8]| {
+            cert.signature_a =
+                sphincs_sign(sk, &relationship_finalized_signing_target(&cert)).expect("sign");
+            cert
+        };
+        let honest = signed(production_shaped_certificate(), &head.secret_key);
+        let check = |cert: &crate::types::proto::RelationshipFinalizedV1, ek_head: &[u8]| {
+            verify_relationship_finalized(
+                cert,
+                &[0x03; 32],
+                &[0x04; 32],
+                &[0x05; 32],
+                (&[0x06; 32], &[0x07; 32]),
+                ek_head,
+            )
+        };
+        check(&honest, &head.public_key).expect("the journaled transition's certificate");
+
+        let refused =
+            |cert: &crate::types::proto::RelationshipFinalizedV1, ek_head: &[u8], why: &str| {
+                let err = check(cert, ek_head).expect_err(why);
+                assert!(err.to_string().contains(why), "{why}: {err}");
+            };
+        type Field = fn(&mut crate::types::proto::RelationshipFinalizedV1) -> &mut Vec<u8>;
+        let fields: [(Field, &str); 5] = [
+            (|c| &mut c.sender_device_id, "sender is not"),
+            (|c| &mut c.recipient_device_id, "recipient is not"),
+            (|c| &mut c.sender_child_tip_a, "sender_child_tip_a"),
+            (|c| &mut c.recipient_parent_tip_b, "recipient pair"),
+            (|c| &mut c.recipient_child_tip_b, "recipient pair"),
+        ];
+        for (field, why) in fields {
+            let mut cert = honest.clone();
+            field(&mut cert)[0] ^= 0x01;
+            refused(&signed(cert, &head.secret_key), &head.public_key, why);
+        }
+        refused(
+            &signed(honest.clone(), &other.secret_key),
+            &head.public_key,
+            "does not verify",
+        );
+        refused(&honest, &[], "no sender per-step EK head");
     }
 }

@@ -908,7 +908,12 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
     let written = crate::sdk::sofi_exercise::write_exercise(&set, &exercise, &recognized)
         .await
         .expect("any party may write an exercise");
-    assert!(written.iter().all(|leg| leg.reached_leader), "{written:?}");
+    assert!(
+        written
+            .iter()
+            .all(|leg| leg.leader == crate::sdk::route_seats::AtLeader::Link),
+        "{written:?}"
+    );
     let held = verifier
         .read_attempt_cell(&a.vault_id, &vault.root, 0)
         .expect("read")
@@ -942,6 +947,210 @@ async fn a_release_naming_another_cell_than_the_match_cell_holds_no_key() {
     // And A takes its stake back at the next key.
     collect(&p.a, &a.vault_id).await;
     assert_eq!(balance(&p.a, &era()), a_start);
+}
+
+/// SoFi Amendments S22 and S27, MR-SOFI-0396: a wallet locks a stake only
+/// when the setup names, for its side, exactly the session key it derives for
+/// the setup's nonce; only against a counterpart vault that mirrors its own
+/// stake — the same match and the same amount; and it derives no session key
+/// while it is locked. Each refusal moves nothing and keeps no match. A
+/// counterpart's terms are its own, so each mirror check refuses on its own:
+/// a vault that is not the opponent's, one under another `Y` that keeps this
+/// match's table and branches, one in another token, one whose branches do
+/// not mirror, one no longer Active and one holding another amount.
+///
+/// MUTATION CONTROL: dropping the session-key comparison from `create`, or the
+/// commitment or amount check from `mirrors`, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_not_mirror() {
+    let p = Pair::boot(100, 100).await;
+    let teams = teams(&p).await;
+    let nonce = [0x71; 32];
+    let stake = whole_era(25);
+    let b_start = balance(&p.b, &era());
+    let refused = |result: Result<Locked, DsmError>, reason: &str| match result {
+        Err(e) => assert!(
+            e.to_string().contains(reason),
+            "refused for another reason: {e}"
+        ),
+        Ok(locked) => panic!("locked where {reason}: {locked:?}"),
+    };
+
+    // A setup naming A's key on B's side.
+    let key_a = session_key(&p.a, &nonce);
+    let foreign = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &teams.0), (&key_a, &teams.1));
+    refused(
+        lock(&p.b, &p.a, &foreign, MatchSide::B, stake, None).await,
+        "session key for this side is not this wallet's",
+    );
+
+    // A locks in one match; B's lock in another names A's vault.
+    let first = setup(&p, nonce, &teams);
+    let a = lock(&p.a, &p.b, &first, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock");
+    let second = setup(&p, [0x72; 32], &teams);
+    refused(
+        lock(&p.b, &p.a, &second, MatchSide::B, stake, Some(a.vault_id)).await,
+        "bound to another match",
+    );
+    // A vault of A's whose terms are this match's, table and branches, under
+    // another `Y`: another match cell, however much else it mirrors.
+    let first_read = crate::sdk::outcome_programs::read_setup(&first).expect("the setup");
+    let honest = computed_flow::terms_of(&first, &first_read, era(), (p.a.genesis, p.a.device_id))
+        .expect("A's terms");
+    let other_y = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        [0x5A; 32],
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms under another Y");
+    p.a.enter();
+    let (elsewhere, _) = computed_flow::create_vault(
+        &p.a.router().core_sdk,
+        &set(),
+        (p.a.genesis, p.a.device_id),
+        &other_y,
+        era(),
+        stake,
+    )
+    .await
+    .expect("A's vault under another Y");
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(elsewhere)).await,
+        "bound to another match",
+    );
+    // And B's stake in A's match is another amount than A's.
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &first,
+            MatchSide::B,
+            stake + 1,
+            Some(a.vault_id),
+        )
+        .await,
+        "this stake matches",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_start,
+        "no refused lock moved B's ERA"
+    );
+    assert_eq!(pending_position(&p.b), None);
+
+    // A locked wallet derives no session key.
+    p.b.enter();
+    crate::sdk::recovery_sdk::RecoverySDK::clear_wallet_seed_cache();
+    match computed_flow::session_public_key(&nonce) {
+        Err(e) => assert!(e.to_string().contains("wallet locked"), "{e}"),
+        Ok(..) => panic!("a locked wallet derived a session key"),
+    }
+    p.b.enter();
+
+    // Each mirror check refuses on its own. A vault of B's own under A's
+    // terms is not the opponent's.
+    let small = whole_era(1);
+    let (bs_own, _) = computed_flow::create_vault(
+        &p.b.router().core_sdk,
+        &set(),
+        (p.b.genesis, p.b.device_id),
+        &honest,
+        era(),
+        small,
+    )
+    .await
+    .expect("B's vault under A's terms");
+    let b_mid = balance(&p.b, &era());
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(bs_own)).await,
+        "not the expected player's",
+    );
+    // A vault of A's whose a-wins branch pays B does not mirror the match.
+    let crossed = dsm::sofi::wire::ComputedEscrowTerms::new(
+        *honest.token(),
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest
+            .branches()
+            .iter()
+            .map(|branch| match branch.label() {
+                label if label == dsm::sofi::wire::COMPUTED_LABEL_A_WINS => {
+                    dsm::sofi::wire::ComputedBranch::new(label, p.b.genesis, p.b.device_id)
+                }
+                _ => branch.clone(),
+            })
+            .collect(),
+    )
+    .expect("terms whose a-wins pays B");
+    // A vault of A's under this match's terms in another token A holds.
+    let tkn = super::node_e2e_tests::create_token(&p.a, "TKN", 10_000).await;
+    let other_token = dsm::sofi::wire::ComputedEscrowTerms::new(
+        tkn,
+        *honest.external_commitment(),
+        honest.table().clone(),
+        honest.branches().to_vec(),
+    )
+    .expect("terms in another token");
+    p.a.enter();
+    let mut hostile = Vec::new();
+    for (terms, token, amount) in [(&crossed, era(), small), (&other_token, tkn, 1)] {
+        let (vault, _) = computed_flow::create_vault(
+            &p.a.router().core_sdk,
+            &set(),
+            (p.a.genesis, p.a.device_id),
+            terms,
+            token,
+            amount,
+        )
+        .await
+        .expect("A's hostile vault");
+        hostile.push(vault);
+    }
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[0])).await,
+        "branches are not this match's mirrored",
+    );
+    refused(
+        lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(hostile[1])).await,
+        "bound to another match",
+    );
+    // A stake A withdrew and took back is no longer Active.
+    let third = setup(&p, [0x73; 32], &teams);
+    let withdrawn = lock(&p.a, &p.b, &third, MatchSide::A, stake, None)
+        .await
+        .expect("A's lock in a third match");
+    p.a.enter();
+    let voided = computed_flow::withdraw(&p.a.router().core_sdk, &set(), &withdrawn.match_cell)
+        .await
+        .expect("A withdraws");
+    assert_eq!(voided.final_outcome(), Some(b"void".to_vec()));
+    collect(&p.a, &withdrawn.vault_id).await;
+    refused(
+        lock(
+            &p.b,
+            &p.a,
+            &third,
+            MatchSide::B,
+            stake,
+            Some(withdrawn.vault_id),
+        )
+        .await,
+        "no longer Active",
+    );
+    assert_eq!(
+        balance(&p.b, &era()),
+        b_mid,
+        "no refused lock moved B's ERA"
+    );
+
+    // The mirrored stake locks.
+    lock(&p.b, &p.a, &first, MatchSide::B, stake, Some(a.vault_id))
+        .await
+        .expect("B's mirrored lock");
 }
 
 /// A wallet locks a stake only in a setup whose teams are the creatures as

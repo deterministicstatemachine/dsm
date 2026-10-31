@@ -136,6 +136,7 @@ async fn test_bilateral_relationship_anchor_generation() {
 fn test_operation_serialization() {
     let op = Operation::Transfer {
         policy_commit: [0u8; 32],
+        token_policy: Vec::new(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"DSM_TOKEN".to_vec(),
             nonce: vec![1, 2, 3, 4],

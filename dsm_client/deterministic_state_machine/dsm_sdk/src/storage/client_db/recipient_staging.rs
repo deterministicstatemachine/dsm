@@ -621,24 +621,27 @@ pub fn step_decided(relationship_key: &[u8; 32], parent_tip: &[u8; 32]) -> Resul
         .is_some())
 }
 
-/// Whether an INBOUND transfer from `counterparty_device_id` is recognized
-/// here and can still execute. The finality barrier treats this as
-/// PendingCatchup for originating toward that peer: an inbound step is in
-/// flight on the relationship and originating under it would cross it.
+/// Whether a staged receipt from `counterparty_device_id` names a step the
+/// apply has not taken: it can still execute once its transfer is here. This
+/// is the send barrier toward that peer (`relationship_status`): an inbound
+/// step is in flight on the relationship.
+///
+/// It reads only signed material and this device's own decisions: the parent
+/// the receipt signs, against the parents the canonical apply took, never the
+/// projection (AWYPCNK8). A receipt from a parent already taken — a copy of
+/// the sender forking from a position the sender's step consumed — holds
+/// nothing. A transfer half holds nothing on its own: until its receipt is here
+/// no signed parent says which step it is, and a send that crosses it settles
+/// with it (owner ruling, 2026-10-29: "both settle").
 ///
 /// The counterparty is the contact whose key verified the object — never a
-/// field the object carries. An object the apply has decided (its nonce spent,
-/// its step taken) no longer holds the barrier.
-pub fn counterparty_has_unconverged_inbound(counterparty_device_id: &[u8]) -> Result<bool> {
+/// field the object carries.
+pub fn has_undecided_staged_receipt_from(counterparty_device_id: &[u8]) -> Result<bool> {
     let binding = get_connection()?;
     let conn = lock(&binding)?;
     Ok(conn
         .query_row(
-            "SELECT 1 FROM recipient_staged_transfer t
-             WHERE t.sender_device_id = ?1
-               AND NOT EXISTS (SELECT 1 FROM spent_nonces s WHERE s.nonce_hash = t.nonce_hash)
-             UNION ALL
-             SELECT 1 FROM recipient_staged_receipt r
+            "SELECT 1 FROM recipient_staged_receipt r
              WHERE r.sender_device_id = ?1
                AND NOT EXISTS (SELECT 1 FROM canonical_apply_identity c
                                WHERE c.relationship_key = r.relationship_key

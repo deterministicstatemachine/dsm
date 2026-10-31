@@ -48,7 +48,7 @@ pub struct RecipientAcceptanceJournal {
     /// op + entropy), NOT a digest of the whole accepted transition.
     pub precommit_digest: [u8; 32],
     /// `BLAKE3("DSM/acceptance-artifact/v1" || exact_persisted_full_receipt_bytes)`.
-    /// Binds the EXACT signed EK artifact (sig_b / ek_pk_b / ek_cert_b / kyber_ct_b
+    /// Binds the EXACT signed EK artifact (sig_b / ek_pk_b / ek_cert_b
     /// and any non-commitment envelope fields), separate from the semantic
     /// `commitment`. Computed over `receipt_bytes` verbatim — never reserialized.
     pub prepared_receipt_artifact_hash: [u8; 32],
@@ -550,7 +550,7 @@ pub fn promote_prepared_to_applied(
 
     // Recompute the exact-artifact hash from the journal's PRECISE stored bytes
     // (verbatim — never deserialized/reserialized). This binds the exact signed EK
-    // artifact (sig_b/ek_pk_b/ek_cert_b/kyber_ct_b/envelope), which the semantic
+    // artifact (sig_b/ek_pk_b/ek_cert_b/envelope), which the semantic
     // commitment does not cover. Require both self-consistency (stored hash matches
     // stored bytes) and marker agreement.
     let recomputed_artifact = acceptance_artifact_hash(&rec.receipt_bytes);
@@ -856,13 +856,37 @@ pub fn complete_applied_acceptance(
         }
     };
     if !ek_sk_b.is_empty() {
-        match cas_advance_local_cert_chain_head_with_sk(
+        let advanced = match cas_advance_local_cert_chain_head_with_sk(
             &rec.relationship_key,
             rec.expected_local_b_head.as_deref(),
             &rec.new_local_b_head,
             &ek_sk_b,
             chain_head_wrap_key,
         )? {
+            // The countersignature chained from this device's own send still
+            // in flight (owner ruling, 2026-10-29: "both settle"): the head is
+            // still the one that send's key was certified by, and moves past
+            // it to this step's key.
+            CasHeadOutcome::Conflict { .. } => match rec.expected_local_b_head.as_deref() {
+                Some(pending) => {
+                    super::cert_chain::cas_advance_local_cert_chain_head_past_pending_with_sk(
+                        &rec.relationship_key,
+                        pending,
+                        &rec.new_local_b_head,
+                        &ek_sk_b,
+                        chain_head_wrap_key,
+                    )?
+                }
+                None => CasHeadOutcome::Conflict {
+                    current: super::cert_chain::load_cert_chain_head_pubkey(
+                        &rec.relationship_key,
+                        CertChainSide::Local,
+                    )?,
+                },
+            },
+            other => other,
+        };
+        match advanced {
             CasHeadOutcome::Advanced { .. }
             | CasHeadOutcome::GenesisInit
             | CasHeadOutcome::AlreadyAtTarget => {}

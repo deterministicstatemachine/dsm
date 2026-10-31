@@ -31,6 +31,11 @@ use super::get_connection;
 /// Where an artifact sits in its forward-only lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactState {
+    /// Frozen, and owed to no set until the check that withheld it releases
+    /// it ([`release_withheld`]). Every trader fulfillment is frozen so (SoFi
+    /// L1738: a producer obtains Valid before it publishes F); the sweep never
+    /// puts it.
+    Withheld,
     /// Frozen in the canonical transaction; not put to the set yet.
     Frozen,
     /// Put at least once; `Stored` not established yet. Retried.
@@ -42,6 +47,7 @@ pub enum ArtifactState {
 impl ArtifactState {
     pub fn as_str(self) -> &'static str {
         match self {
+            ArtifactState::Withheld => "withheld",
             ArtifactState::Frozen => "frozen",
             ArtifactState::PublicationPending => "publication_pending",
             ArtifactState::Stored => "stored",
@@ -50,6 +56,7 @@ impl ArtifactState {
 
     fn parse(s: &str) -> Option<Self> {
         match s {
+            "withheld" => Some(ArtifactState::Withheld),
             "frozen" => Some(ArtifactState::Frozen),
             "publication_pending" => Some(ArtifactState::PublicationPending),
             "stored" => Some(ArtifactState::Stored),
@@ -96,6 +103,12 @@ pub fn parse_immutable_object_key(
 /// namespace. Freezing the same key again is a no-op: the key fixes the
 /// bytes.
 ///
+/// A trader's fulfillment (its namespace is `TAG_DSM_SOFI_FULFILLMENT_OBJECT`)
+/// is frozen [`ArtifactState::Withheld`]: SoFi L1738 has a producer obtain
+/// Valid before it publishes F, so nothing puts it until the conformance
+/// check releases it ([`release_withheld`]). Every other artifact is frozen
+/// owed to its set.
+///
 /// Runs on the caller's `Connection`/transaction: `Err` from here rolls the
 /// canonical advance back with it.
 pub fn freeze_artifact_with_conn(
@@ -116,6 +129,13 @@ pub fn freeze_artifact_with_conn(
             "freeze_artifact: the payload is not the object at {object_key}"
         ));
     }
+    let state = if namespace.source_bytes()
+        == dsm::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT_OBJECT.source_bytes()
+    {
+        ArtifactState::Withheld
+    } else {
+        ArtifactState::Frozen
+    };
     conn.execute(
         "INSERT OR IGNORE INTO frozen_publication_artifact
             (object_key, payload, bound_root, purpose, storage_set_id, state, last_error)
@@ -126,14 +146,32 @@ pub fn freeze_artifact_with_conn(
             bound_root.as_slice(),
             purpose,
             storage_set_id.as_slice(),
-            ArtifactState::Frozen.as_str(),
+            state.as_str(),
         ],
     )?;
     Ok(())
 }
 
-/// Advance an artifact's state, forward-only: `stored` never regresses.
-/// Returns `true` if the row changed.
+/// Release a withheld artifact: it becomes [`ArtifactState::Frozen`], owed to
+/// the set it was frozen for, and the sweep puts it from then on. Returns
+/// whether a withheld row was released; an artifact never withheld, or
+/// released already, is left as it is.
+pub fn release_withheld(object_key: &str) -> Result<bool> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("frozen artifacts: the store is poisoned: {e}"))?;
+    let n = conn.execute(
+        "UPDATE frozen_publication_artifact SET state = 'frozen'
+          WHERE object_key = ?1 AND state = 'withheld'",
+        params![object_key],
+    )?;
+    Ok(n > 0)
+}
+
+/// Advance an artifact's state, forward-only: `stored` never regresses, and
+/// a withheld artifact moves only by [`release_withheld`].
+/// Returns whether the row changed.
 pub fn upsert_artifact_publication_state(
     object_key: &str,
     state: ArtifactState,
@@ -144,7 +182,7 @@ pub fn upsert_artifact_publication_state(
     let n = conn.execute(
         "UPDATE frozen_publication_artifact
             SET state = ?2, last_error = ?3
-          WHERE object_key = ?1 AND state != 'stored'",
+          WHERE object_key = ?1 AND state NOT IN ('stored', 'withheld')",
         params![object_key, state.as_str(), last_error],
     )?;
     Ok(n > 0)
@@ -312,6 +350,7 @@ mod tests {
     #[test]
     #[serial]
     fn an_artifact_is_frozen_under_its_own_content_address() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let set = [0xA1u8; 32];
         let key = freeze(&set, b"hello");
@@ -326,6 +365,7 @@ mod tests {
     #[test]
     #[serial]
     fn bytes_that_are_not_the_object_at_the_key_are_refused() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let binding = get_connection().expect("db");
         let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -344,6 +384,7 @@ mod tests {
     #[test]
     #[serial]
     fn a_failing_transaction_leaves_no_row() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let key = key_of(b"bytes");
         {
@@ -360,6 +401,7 @@ mod tests {
     #[test]
     #[serial]
     fn stored_never_regresses() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let key = freeze(&[0xA1; 32], b"x");
         assert!(upsert_artifact_publication_state(&key, ArtifactState::Stored, "").unwrap());
@@ -378,6 +420,7 @@ mod tests {
     #[test]
     #[serial]
     fn unpublished_work_is_ordered_by_insertion_ordinal() {
+        crate::economic_fixtures::use_test_storage_dir();
         reset_database_for_tests();
         let set = [0xA1u8; 32];
         let first = freeze(&set, b"1");
@@ -389,5 +432,51 @@ mod tests {
             .map(|a| a.object_key)
             .collect();
         assert_eq!(keys, vec![first, second], "oldest first, bounded");
+    }
+
+    /// A trader's fulfillment is frozen withheld (SoFi L1738): the sweep
+    /// lists nothing withheld, a publication state cannot move it, and only
+    /// its release makes it owed to its set.
+    #[test]
+    #[serial]
+    fn a_fulfillment_is_withheld_until_it_is_released() {
+        crate::economic_fixtures::use_test_storage_dir();
+        reset_database_for_tests();
+        let namespace = dsm::common::domain_tags::TAG_DSM_SOFI_FULFILLMENT_OBJECT;
+        let payload = b"a trader's fulfillment";
+        let key = crate::sdk::economic_registers::immutable_object_key(namespace, payload);
+        {
+            let binding = get_connection().expect("db");
+            let conn = binding.lock().expect("the store");
+            freeze_artifact_with_conn(&conn, &[0xA1; 32], &key, payload, &[0x11; 32], "test")
+                .expect("freeze");
+        }
+        let state = || get_artifact(&key).unwrap().expect("row").state;
+        assert_eq!(state(), ArtifactState::Withheld);
+        assert_eq!(
+            list_unpublished_artifacts(16).unwrap().len(),
+            0,
+            "the sweep lists nothing withheld"
+        );
+        upsert_artifact_publication_state(&key, ArtifactState::PublicationPending, "")
+            .expect("the store writes");
+        assert_eq!(
+            state(),
+            ArtifactState::Withheld,
+            "a publication does not move it"
+        );
+        release_withheld(&key).expect("the store writes");
+        assert_eq!(
+            state(),
+            ArtifactState::Frozen,
+            "released, it is owed to its set"
+        );
+        assert_eq!(list_unpublished_artifacts(16).unwrap().len(), 1);
+        release_withheld(&key).expect("the store writes");
+        assert_eq!(
+            state(),
+            ArtifactState::Frozen,
+            "a second release changes nothing"
+        );
     }
 }

@@ -373,7 +373,6 @@ fn every_object_matches_the_independent_encoder_and_round_trips() {
         c.encode(),
         indep::resolution_claim(&G, &DEV, 42, &fid, &[0xC1; 32], &[0xC2; 32])
     );
-    assert_eq!(SofiResolutionClaim::decode(&c.encode()).expect("decode"), c);
 
     let gamma = RouteLegSet::new(vec![
         RouteLegEntry {
@@ -394,7 +393,6 @@ fn every_object_matches_the_independent_encoder_and_round_trips() {
         gamma.encode(),
         indep::route_leg_set(&[(V1, R1, rho, SHADOWS[0]), (V2, R2, [0xBB; 32], SHADOWS[1])])
     );
-    assert_eq!(RouteLegSet::decode(&gamma.encode()).expect("decode"), gamma);
 }
 
 #[test]
@@ -407,39 +405,6 @@ fn every_union_variant_round_trips() {
     ] {
         assert_eq!(ParentClaimRef::decode(&r.encode()).expect("decode"), r);
     }
-    let refs = [
-        ValidationRef::ContentAddr {
-            object_class: 0x001C,
-            addr: [3; 32],
-        },
-        ValidationRef::SingleRootClaim { claim_ref: [4; 32] },
-        ValidationRef::ConditionalClaim {
-            genesis: G,
-            device_id: DEV,
-            position: 9,
-            fulfillment_id: [5; 32],
-        },
-        ValidationRef::Setup { setup_ref: [6; 32] },
-    ];
-    for r in refs {
-        assert_eq!(ValidationRef::decode(&r.encode()).expect("decode"), r);
-    }
-    let mut sorted = refs.to_vec();
-    sorted.sort_by_key(|r| r.encode());
-    let idx = PreEClosureIndex::new(sorted).expect("closure");
-    assert_eq!(
-        PreEClosureIndex::decode(&idx.encode()).expect("decode"),
-        idx
-    );
-    let aux = PolicyFulfillmentAuxRef {
-        policy_fulfillment_id: [14; 32],
-        evidence_class: 0x0042,
-        addr: [15; 32],
-    };
-    assert_eq!(
-        PolicyFulfillmentAuxRef::decode(&aux.encode()).expect("decode"),
-        aux
-    );
 }
 
 #[test]
@@ -1040,7 +1005,7 @@ fn closure_index_enforces_bounds_order_and_current_e_exclusion() {
         class::SOFI_DLV_POLICY_FULFILLMENT_BODY,
         class::SOFI_TRADER_FULFILLMENT_BODY,
         class::SOFI_RESOLUTION_CLAIM,
-        class::SOFI_POLICY_FULFILLMENT_AUX_REF,
+        dsm::ccb::declared_unencoded::SOFI_POLICY_FULFILLMENT_AUX_REF,
         class::SOFI_PRE_E_CLOSURE_INDEX,
         class::SOFI_SIGNED_OBJECT,
         class::SOFI_SETUP_BODY,
@@ -1081,10 +1046,7 @@ fn bounds_are_the_ruled_values() {
     assert_eq!(MAX_VALIDATION_FETCH_BYTES, 4 * 1024 * 1024);
     assert_eq!(MAX_PROVENANCE_FANOUT, 16);
     assert_eq!(MAX_SETTLEMENT_PREIMAGE_BYTES, 256 * 1024);
-    assert_eq!(
-        (STORAGE_MEMBER_COUNT, STORAGE_FINALITY_COUNT, ROUTE_MAX_LEGS),
-        (5, 3, 2)
-    );
+    assert_eq!((STORAGE_FINALITY_COUNT, ROUTE_MAX_LEGS), (3, 2));
 }
 
 /// The signed transport envelope, byte for byte, from the field table.
@@ -1199,12 +1161,15 @@ fn class_discriminants_do_not_collide() {
             "{name} is declared under burned_class but is not in burned_class::ALL"
         );
     }
-    // The SoFi v8 range is fully accounted for: every number is a live class
-    // or a burned one, and the demolition's seven are burned.
+    // The SoFi v8 range is fully accounted for: every number is a live class,
+    // a burned one, or one the registry defines with no encoder in beta, and
+    // the demolition's seven are burned.
     for v in 0x0036u16..=0x004A {
         assert!(
-            live.contains_key(&v) || burned.contains_key(&v),
-            "{v:#06x} is neither a live SoFi v8 class nor a burned one"
+            live.contains_key(&v)
+                || burned.contains_key(&v)
+                || dsm::ccb::declared_unencoded::is_declared_unencoded(v),
+            "{v:#06x} is neither a live SoFi v8 class, a burned one nor a declared one"
         );
     }
     for v in 0x0043u16..=0x0049 {

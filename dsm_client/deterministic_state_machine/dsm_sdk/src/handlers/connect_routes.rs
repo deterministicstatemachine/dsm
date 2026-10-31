@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dsm::connect::{canonical, session_id, verify, Signed};
 use dsm::types::proto as generated;
 use generated::connect_reply_v1::Reply;
 use prost::Message;
@@ -46,9 +47,7 @@ use crate::sdk::connect::grant::{
 };
 use crate::sdk::connect::wager::{self, Player, Referee};
 use crate::sdk::connect::pinned_tls::Relay;
-use crate::sdk::connect::signed::{
-    canonical, own_card, own_network, session_id, sign_own, verify, Signed,
-};
+use crate::sdk::connect::signed::{own_card, own_network, sign_own};
 use crate::sdk::connect::wallet::{
     describe_request, describe_scope, granted_scopes, issued_by, payment_memo, short, Names,
     signed_response, verify_offer,
@@ -1156,11 +1155,10 @@ impl AppRouterImpl {
                     // A committed debit is paid, delivered or not: it stands
                     // and the sweep carries it forward (§16.6), so it counts
                     // against the grant (SA-19).
-                    OnlineSent::Debited(answer) => match (answer.success, answer.error_message) {
-                        (ok, _) if ok => Executed::carried_out(None),
-                        (_, Some(why)) => Executed::paid_undelivered(why),
-                        (_, None) => Executed::paid_undelivered("the send said nothing more"),
-                    },
+                    OnlineSent::Delivered(_) => Executed::carried_out(None),
+                    OnlineSent::Undelivered { why, .. } | OnlineSent::Stranded { why, .. } => {
+                        Executed::paid_undelivered(why)
+                    }
                     OnlineSent::NotDebited(answer) => match answer.error_message {
                         Some(why) => Executed::failed(why),
                         None => {
@@ -1748,9 +1746,8 @@ impl AppRouterImpl {
         // Replayed over the public relay, one accept cost a SPHINCS+
         // verification and a directory read every time (SA-81).
         if let Some(card) = probe.wallet_card.as_ref() {
-            let named =
-                crate::sdk::connect::signed::card_identity(card, &probe.wallet_att_a, &network)
-                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let named = dsm::connect::card_identity(card, &probe.wallet_att_a, &network)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
             let sid = session_id(&digest, &named.device_id);
             if let Some(held) = store::app_session(&sid).map_err(|e| format!("{ROUTE}: {e}"))? {
                 return if held.accept == accept.encode_to_vec() {

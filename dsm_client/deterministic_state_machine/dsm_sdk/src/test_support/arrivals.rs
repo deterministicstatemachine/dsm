@@ -88,7 +88,7 @@ pub async fn the_one_transfer(device: &TestDevice, fleet: &FleetGuard) -> OneTra
         .compute_commitment()
         .expect("the receipt commitment");
     assert_eq!(
-        crate::storage::client_db::derive_submission_id(&commitment),
+        dsm::crypto::spool_address::submission_id(&commitment),
         transfer.transaction_id,
         "an honest sender spools the transfer under the id its receipt derives"
     );

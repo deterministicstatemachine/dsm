@@ -68,7 +68,7 @@ fn every_root_is_proven_under_every_later_head() {
                 Err(why) => panic!("R_{g} under the head at {n}: {why:?}"),
             };
             assert_eq!(
-                (proven.vault_id(), proven.generation(), proven.root()),
+                (&proven.vault_id, proven.generation(), proven.root()),
                 (&VAULT, g, &root_of(g))
             );
         }

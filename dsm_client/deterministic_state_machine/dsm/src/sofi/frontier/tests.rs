@@ -325,7 +325,10 @@ impl Vault {
             *witness.state_path(),
             self.tree.siblings(&derive::vault_state_key(&self.id))
         );
-        assert_eq!(witness.relationship(), self.relationships.get(&rel_key));
+        assert_eq!(
+            witness.relationship.as_ref(),
+            self.relationships.get(&rel_key)
+        );
         assert_eq!(*witness.relationship_path(), self.tree.siblings(&rel_key));
     }
 }
@@ -349,7 +352,7 @@ fn an_owner_baseline_authenticates_its_frontier() {
         .expect("the owner's baseline");
     assert_eq!(*verified.frontier(), frontier);
     assert_eq!(*verified.commitment(), frontier_commitment(&frontier));
-    assert_eq!(verified.owner().device_id, owner().devid);
+    assert_eq!(verified.owner.device_id, owner().devid);
 }
 
 /// Every binding is load-bearing: each mutation below breaks one, and each
@@ -718,6 +721,106 @@ fn the_baseline_objects_decode_strictly() {
     let mut trailing = frontier.encode();
     trailing.push(0x01);
     VaultFrontierV1::decode(&trailing).expect_err("a trailing byte is refused");
+    let mut trailing = auth.encode();
+    trailing.push(0x01);
+    OwnerBaselineAuthV1::decode(&trailing).expect_err("a trailing byte is refused");
     VaultFrontierV1::decode(&auth.encode()).expect_err("another class is refused");
     OwnerBaselineAuthV1::decode(&frontier.encode()).expect_err("another class is refused");
+}
+
+/// A vault record's rows: the state leaf at the vault's state key, and a
+/// relationship leaf for each trader, as an owner's device stores them.
+fn vault_rows(vault_id: &D32, traders: &[u8]) -> Vec<(D32, D32, Vec<u8>)> {
+    let state = state_of(owner(), 4, 9_000);
+    let mut rows = vec![(
+        derive::vault_state_key(vault_id),
+        derive::vault_state_leaf_value(&state).expect("a state value"),
+        state.encode().expect("state bytes"),
+    )];
+    for i in traders {
+        let (g, devid) = trader(*i);
+        let leaf = VaultRelationshipLeaf {
+            trader_genesis: g,
+            trader_device_id: devid,
+            leaf: d(0xB0 | i),
+        };
+        rows.push((
+            derive::relationship_key(&g, &devid, vault_id),
+            derive::vault_relationship_leaf_value(&leaf),
+            leaf.encode(),
+        ));
+    }
+    rows
+}
+
+/// The root `rows` recompute, computed apart from the function under test.
+fn root_of_rows(rows: &[(D32, D32, Vec<u8>)]) -> D32 {
+    let mut tree = EconomicSmt::new();
+    for (key, value, ..) in rows {
+        tree.insert(*key, *value);
+    }
+    tree.root()
+}
+
+/// THE OWNER'S WHOLE TREE IS CORE'S (SoFi §2.1). A record that recomputes
+/// the root gives its tree, its state leaf and every relationship by key,
+/// and the witness stated from it is accepted under that root.
+#[test]
+fn a_vault_record_that_recomputes_its_root_is_its_tree() {
+    let vault_id = d(0x5A);
+    let rows = vault_rows(&vault_id, &[1, 2]);
+    let root = root_of_rows(&rows);
+    let whole = vault_tree_at(&vault_id, &root, &rows).expect("the record is the tree");
+    assert_eq!(whole.tree.root(), root);
+    assert_eq!(whole.state, state_of(owner(), 4, 9_000));
+    let (g, devid) = trader(1);
+    let key = derive::relationship_key(&g, &devid, &vault_id);
+    assert_eq!(whole.relationships.len(), 2);
+    assert_eq!(
+        whole.relationships.get(&key).map(|leaf| leaf.leaf),
+        Some(d(0xB1))
+    );
+}
+
+/// A RECORD THAT IS NOT THE VAULT'S TREE AT THE ROOT STATES NOTHING. A record
+/// missing a leaf does not recompute the root; a row whose bytes are another
+/// leaf than its value hashes is refused although the root recomputes; and a
+/// record with no state leaf is refused.
+/// MUTATION CONTROL: the root check removed, or the leaf binding removed,
+/// turns this red.
+#[test]
+fn a_vault_record_that_is_not_its_tree_at_the_root_is_refused() {
+    let vault_id = d(0x5A);
+    let rows = vault_rows(&vault_id, &[1, 2]);
+    let root = root_of_rows(&rows);
+
+    assert!(matches!(
+        vault_tree_at(&vault_id, &root, &rows[..2]),
+        Err(VaultTreeError::DoesNotRecomputeTheRoot { root: named, .. }) if named == root
+    ));
+
+    let mut forged = rows.clone();
+    let (g, devid) = trader(2);
+    forged[2].2 = VaultRelationshipLeaf {
+        trader_genesis: g,
+        trader_device_id: devid,
+        leaf: d(0xEE),
+    }
+    .encode();
+    assert_eq!(root_of_rows(&forged), root, "the root still recomputes");
+    assert_eq!(
+        vault_tree_at(&vault_id, &root, &forged).map(|whole| whole.tree.root()),
+        Err(VaultTreeError::RowIsNotItsLeaf { key: rows[2].0 })
+    );
+
+    let relationships_only = rows[1..].to_vec();
+    assert_eq!(
+        vault_tree_at(
+            &vault_id,
+            &root_of_rows(&relationships_only),
+            &relationships_only
+        )
+        .map(|whole| whole.tree.root()),
+        Err(VaultTreeError::NoStateLeaf)
+    );
 }

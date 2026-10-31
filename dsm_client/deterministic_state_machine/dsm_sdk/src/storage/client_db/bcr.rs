@@ -26,7 +26,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
-use dsm::types::device_state::{DeviceState, RelChainTip, RelationshipChainState, ValueCapability};
+use dsm::types::device_state::{
+    DeviceState, RealizedHead, RelChainTip, RelationshipChainState, ValueCapability,
+};
 use dsm::types::offline_account::OfflineAccount;
 use dsm::types::operations::Operation;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -321,7 +323,7 @@ pub fn decode_device_state(
     // forgot would silently produce an unfenced head. Making it explicit means
     // the compiler names every rebuild path.
     pending_economic_admission: Option<dsm::economic::admission::PendingEconomicAdmission>,
-) -> Result<(DeviceState, [u8; 32])> {
+) -> Result<(RealizedHead, [u8; 32])> {
     let mut cursor = bytes;
 
     let version = read_u8(&mut cursor).map_err(|e| anyhow!("device_state version: {e}"))?;
@@ -451,16 +453,9 @@ pub fn decode_device_state(
         extra_leaves,
         offline_accounts,
         pending_economic_admission,
+        smt_root,
     )
-    .map_err(|e| anyhow!("DeviceState::restore failed: {e}"))?;
-
-    if head.root() != smt_root {
-        return Err(anyhow!(
-            "device_state SMT root mismatch: encoded {} != recomputed {}",
-            crate::util::text_id::encode_base32_crockford(&smt_root),
-            crate::util::text_id::encode_base32_crockford(&head.root())
-        ));
-    }
+    .map_err(|e| anyhow!("device_state: {e}"))?;
 
     Ok((head, smt_root))
 }
@@ -518,11 +513,8 @@ pub(crate) fn store_bcr_chain_state_with_conn(
 }
 
 /// Load all archived [`RelationshipChainState`]s for a device, in insertion
-/// order. Optionally filter to published-only.
-pub fn get_bcr_chain_states(
-    device_id: &[u8],
-    published_only: bool,
-) -> Result<Vec<RelationshipChainState>> {
+/// order.
+pub fn get_bcr_chain_states(device_id: &[u8]) -> Result<Vec<RelationshipChainState>> {
     if device_id.len() != 32 {
         return Err(anyhow!("Invalid device_id length: {}", device_id.len()));
     }
@@ -533,19 +525,11 @@ pub fn get_bcr_chain_states(
         poisoned.into_inner()
     });
 
-    let mut stmt = if published_only {
-        conn.prepare(
-            "SELECT state_bytes, chain_tip FROM bcr_chain_states
-             WHERE device_id = ?1 AND published = 1
-             ORDER BY rowid ASC",
-        )?
-    } else {
-        conn.prepare(
-            "SELECT state_bytes, chain_tip FROM bcr_chain_states
-             WHERE device_id = ?1
-             ORDER BY rowid ASC",
-        )?
-    };
+    let mut stmt = conn.prepare(
+        "SELECT state_bytes, chain_tip FROM bcr_chain_states
+         WHERE device_id = ?1
+         ORDER BY rowid ASC",
+    )?;
 
     let iter = stmt.query_map(params![device_id], |row| {
         let bytes: Vec<u8> = row.get(0)?;
@@ -647,7 +631,7 @@ pub(crate) fn update_bcr_device_head_with_conn(
 ///
 /// Returns `Ok(None)` for an unknown device. Returns `Err` only on a database
 /// or codec failure (corrupt row, root mismatch).
-pub fn load_bcr_device_head(device_id: &[u8; 32]) -> Result<Option<DeviceState>> {
+pub fn load_bcr_device_head(device_id: &[u8; 32]) -> Result<Option<RealizedHead>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
@@ -781,6 +765,7 @@ mod tests {
     fn sample_operation(tag: &[u8], amount: u64) -> Operation {
         Operation::Transfer {
             policy_commit: [0xD4; 32],
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: b"ERA".to_vec(),
                 nonce: vec![0xCC; 8],
@@ -799,7 +784,7 @@ mod tests {
     /// Attach the honest gate precondition for one credit-direction advance
     /// (PR4): a matching Prepared DsmBacked admission. `Prepared` is never
     /// durable, so callers strip it from the produced head before persisting.
-    fn with_credit_admission(head: DeviceState, op: &Operation) -> DeviceState {
+    fn with_credit_admission(head: &RealizedHead, op: &Operation) -> RealizedHead {
         head.with_pending_economic_admission(Some(
             dsm::economic::admission::PendingEconomicAdmission::prepared(
                 dsm::economic::admission::PendingAdmissionKind::DsmBacked,
@@ -847,14 +832,15 @@ mod tests {
         [u8; 32],
         [u8; 32],
         RelationshipChainState,
-        DeviceState,
+        RealizedHead,
     ) {
         let device_id = [0xA1; 32];
         let counterparty = [0xB2; 32];
         let rel_key =
             dsm::core::bilateral_transaction_manager::compute_smt_key(&device_id, &counterparty);
         let policy_commit = [0xD4; 32];
-        let device = DeviceState::new([0x11; 32], device_id, owner_keypair().public_key.clone());
+        let device =
+            DeviceState::genesis_head([0x11; 32], device_id, owner_keypair().public_key.clone());
         // Adoption precedes receipt (owner ruling 2026-09-13): a credit of a
         // policy the head has not adopted is refused at `advance`, so the
         // fixture adopts through the real self-loop `AdoptToken` transition
@@ -941,6 +927,12 @@ mod tests {
             })
             .collect();
 
+        let stored_root = DeviceState::root_over(
+            new_device_state.devid(),
+            &tips_in_order,
+            outcome.new_device_state.extra_leaves_snapshot(),
+            outcome.new_device_state.offline_accounts(),
+        );
         let head = DeviceState::restore(
             new_device_state.genesis_digest(),
             new_device_state.devid(),
@@ -951,6 +943,7 @@ mod tests {
             outcome.new_device_state.extra_leaves_snapshot().clone(),
             outcome.new_device_state.offline_accounts().clone(),
             None, // no admission pending in this fixture
+            stored_root,
         )
         .expect("restore head with signed rel state");
 
@@ -966,7 +959,7 @@ mod tests {
         store_bcr_chain_state(&device_id, &rel0, true).expect("store published rel state");
 
         let op2 = sample_operation(b"rel-2", 9);
-        let outcome1 = with_credit_admission(head0, &op2)
+        let outcome1 = with_credit_admission(&head0, &op2)
             .advance(
                 rel_key,
                 counterparty,
@@ -982,14 +975,12 @@ mod tests {
         store_bcr_chain_state(&device_id, &outcome1.new_chain_state, false)
             .expect("store unpublished rel state");
 
-        let published = get_bcr_chain_states(&device_id, true).expect("load published rel states");
-        let all = get_bcr_chain_states(&device_id, false).expect("load all rel states");
+        let all = get_bcr_chain_states(&device_id).expect("load all rel states");
         let per_rel = get_bcr_chain_states_for_rel(&device_id, &rel_key).expect("load rel");
 
-        assert_eq!(published.len(), 1);
         assert_eq!(all.len(), 2);
         assert_eq!(per_rel.len(), 2);
-        assert_eq!(published[0].compute_chain_tip(), rel0.compute_chain_tip());
+        assert_eq!(all[0].compute_chain_tip(), rel0.compute_chain_tip());
         assert_eq!(
             all[1].compute_chain_tip(),
             outcome1.new_chain_state.compute_chain_tip()
@@ -1021,14 +1012,7 @@ mod tests {
                 .expect("corrupt the row");
                 assert_eq!(changed, 1);
             }
-            assert!(
-                get_bcr_chain_states(&device_id, false).is_err(),
-                "{corrupt}: device load"
-            );
-            assert!(
-                get_bcr_chain_states(&device_id, true).is_err(),
-                "{corrupt}: published load"
-            );
+            get_bcr_chain_states(&device_id).expect_err("a corrupt row fails the device load");
             assert!(
                 get_bcr_chain_states_for_rel(&device_id, &rel_key).is_err(),
                 "{corrupt}: relationship load"
@@ -1050,7 +1034,7 @@ mod tests {
         assert_eq!(cached0.chain_tip(&rel_key), Some(rel0.compute_chain_tip()));
 
         let op3 = sample_operation(b"rel-3", 11);
-        let outcome1 = with_credit_admission(head0, &op3)
+        let outcome1 = with_credit_admission(&head0, &op3)
             .advance(
                 rel_key,
                 rel0.counterparty_devid,
@@ -1149,29 +1133,33 @@ mod tests {
         assert!(err.to_string().contains("tip count"), "{err}");
     }
 
-    fn head_with_state_less_tip() -> ([u8; 32], [u8; 32], DeviceState) {
+    fn head_with_state_less_tip() -> ([u8; 32], [u8; 32], RealizedHead) {
         let device_id = [0xA9; 32];
         let rel_key = [0xBC; 32];
         let counterparty = [0xCD; 32];
         let chain_tip = [0xDE; 32];
+        let tips = vec![(
+            rel_key,
+            RelChainTip {
+                chain_tip,
+                counterparty_devid: counterparty,
+                tip_entropy: Vec::new(),
+                value_capability: ValueCapability::Unknown,
+            },
+        )];
+        let stored_root =
+            DeviceState::root_over(device_id, &tips, &BTreeMap::new(), &BTreeMap::new());
         let head = DeviceState::restore(
             [0xEF; 32],
             device_id,
             vec![0xAB; 64],
             None,
             BTreeMap::new(),
-            vec![(
-                rel_key,
-                RelChainTip {
-                    chain_tip,
-                    counterparty_devid: counterparty,
-                    tip_entropy: Vec::new(),
-                    value_capability: ValueCapability::Unknown,
-                },
-            )],
+            tips,
             BTreeMap::new(),
             BTreeMap::new(),
             None, // no admission pending in this fixture
+            stored_root,
         )
         .expect("restore head with state-less tip");
         (device_id, rel_key, head)

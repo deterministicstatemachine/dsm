@@ -59,10 +59,7 @@ impl AppRouterImpl {
         }
 
         // Resolve the asset's CPTA policy_commit (strict — no silent fallback).
-        let asset = match self
-            .core_sdk
-            .resolve_policy_commit_strict(req.token_id.as_bytes())
-        {
+        let asset = match crate::policy::resolve_policy_commit_strict(req.token_id.as_bytes()) {
             Ok(pc) => pc,
             Err(e) => return err(format!("wallet.{verb}: policy_commit resolve failed: {e}")),
         };
@@ -219,6 +216,82 @@ mod tests {
         assert!(!res.success);
         let msg = res.error_message.unwrap_or_default();
         assert!(msg.contains("invalid amount"), "{msg}");
+    }
+
+    /// Phase 3, provisioning. An anchor never provisioned is provisioned, once,
+    /// for the device that attaches it: its bundle binds that device's id, its
+    /// online key and the offline-bearer policy, and it serves that device.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_anchor_never_provisioned_is_provisioned_for_the_device_that_attaches_it() {
+        let r = router_on_a_device();
+        let core = &r.core_sdk;
+        let appliance =
+            crate::test_support::appliance::HostAppliance::unprovisioned([0xD1; 32], 16).install();
+        let snap = core.anchor_appliance_status();
+        assert!(snap.connected, "{}", snap.status);
+        let pin = appliance.pin();
+        assert_eq!(
+            snap.bundle, pin.bundle,
+            "the anchor it attached is the one provisioned"
+        );
+        let device = core.device_head().expect("a head");
+        assert_eq!(
+            anchor_core::enrollment::anchor_bundle(
+                &crate::sdk::app_state::AppState::get_public_key().expect("the device's AK"),
+                &pin.anchor_id,
+                &pin.pk_chip,
+                &pin.partition_pk,
+                16,
+                &device.devid(),
+                &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                &pin.birth_commitment,
+            ),
+            pin.bundle,
+            "B binds this device, its online key and the offline-bearer policy"
+        );
+    }
+
+    /// Phase 3, provisioning. An anchor provisioned for another device is never
+    /// attached: no status, no offline cash, and no offline account opens on it.
+    /// MUTATION CONTROL: dropping the bundle check in `anchor_for_this_device`
+    /// attaches the other device's anchor and turns this red.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_anchor_provisioned_for_another_device_is_not_attached() {
+        use crate::anchor::AnchorAppliance;
+
+        let r = router_on_a_device();
+        let mut chip = crate::test_support::appliance::HostAppliance::unprovisioned([0xD2; 32], 16);
+        let other = chip
+            .provision(&anchor_core::enrollment::Provisioning {
+                device_id: *blake3::hash(b"another device").as_bytes(),
+                online_id_pk: blake3::hash(b"another device's online key")
+                    .as_bytes()
+                    .to_vec(),
+                policy_hash: dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+                genesis_root: *blake3::hash(b"another device's genesis").as_bytes(),
+            })
+            .expect("provisioned for the other device");
+        let installed = chip.install();
+        let snap = r.core_sdk.anchor_appliance_status();
+        assert!(!snap.connected, "the other device's anchor is not attached");
+        assert!(
+            snap.status.contains("not provisioned for this device"),
+            "{}",
+            snap.status
+        );
+        let res = invoke(&r, "wallet.loadOffline", "10").await;
+        assert!(!res.success, "no offline cash on another device's anchor");
+        assert!(
+            r.core_sdk
+                .device_head()
+                .expect("a head")
+                .offline_account(&other.bundle)
+                .is_none(),
+            "no offline account opened under its bundle"
+        );
+        drop(installed);
     }
 
     /// The software counter is the authority and the chip its mirror: an

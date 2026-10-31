@@ -52,13 +52,31 @@ use crate::economic::mutation::EconomicLeafMutation;
 use crate::economic::state::EconomicLeafState;
 use crate::economic::witness::EconomicTransitionWitness;
 
-/// What a verified source establishes.
+/// What a verified source establishes. Only Core's verification makes one
+/// (MR-SOFI-0017).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FundedCredit {
     /// Derived from authenticated facts, never supplied.
-    pub source_id: [u8; 32],
-    pub policy_commit: [u8; 32],
-    pub amount: u64,
+    pub(crate) source_id: [u8; 32],
+    pub(crate) policy_commit: [u8; 32],
+    pub(crate) amount: u64,
+}
+
+impl FundedCredit {
+    /// The source the credit consumes, derived from authenticated facts.
+    pub fn source_id(&self) -> &[u8; 32] {
+        &self.source_id
+    }
+
+    /// The asset funded.
+    pub fn policy_commit(&self) -> &[u8; 32] {
+        &self.policy_commit
+    }
+
+    /// The amount funded, in base units.
+    pub fn amount(&self) -> u64 {
+        self.amount
+    }
 }
 
 /// A peer transition this verifier has **already validated**, carrying the
@@ -314,14 +332,18 @@ pub struct ProvenanceContext<'a> {
 
 /// The release that installed one generation of the native reserve: the
 /// exact envelope bytes a walk of the reserve lineage established as FINAL at
-/// that generation's cell (Part II §13), with the reserve state it succeeded.
-/// The verifier re-runs the construction predicate over both; nothing here is
-/// believed because a member returned it.
+/// that generation's cell (Part II §13), with the reader's established heads
+/// before and after it (DSM Amendment A15). The verifier takes the parent
+/// state from the parent head, re-runs the construction predicate, and
+/// requires the head the release establishes there to be the child head;
+/// nothing here is believed because a member returned it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReserveReleaseWin {
     pub envelope_bytes: Vec<u8>,
-    /// `R_{generation − 1}`, validated by the walk from `R_0`.
-    pub parent: crate::economic::native_reserve::NativeReserveState,
+    /// The reader's established head at `generation − 1`.
+    pub parent: crate::shared_lineage::EstablishedSharedHead,
+    /// The reader's established head at `generation`.
+    pub child: crate::shared_lineage::EstablishedSharedHead,
 }
 
 /// Why a peer's lineage could not be resolved to a validated transition.
@@ -467,14 +489,6 @@ pub enum ProvenanceError {
     /// genesis release: not fetched, or the bytes did not re-hash to the
     /// commit. The taxonomy survives, so an outage is retried.
     GenesisReleasePolicy(PeerLineageFailure),
-    /// A Transfer moves a token whose committed policy does not let it
-    /// transfer: SoFi §49 checks `transferable` "on every transfer, online
-    /// and offline", so a foreign verifier refuses it as the endpoints do.
-    AssetNotTransferable,
-    /// The committed policy of a transferred token could not be established:
-    /// not fetched, or the bytes did not re-hash to the commit. The taxonomy
-    /// survives, so an outage is retried.
-    TransferPolicy(PeerLineageFailure),
     /// A `0x0075` credit on an admission whose substrate is not an offline
     /// unload: there is no offline debit to fund it.
     NotAnOfflineUnload,
@@ -543,10 +557,18 @@ pub enum ProvenanceError {
         generation: u64,
         failure: PeerLineageFailure,
     },
-    /// The established envelope is not a valid release, is not the successor
-    /// of the state the walk validated, or names different coordinates than
-    /// the descriptor.
+    /// The established envelope is not a valid release, or names different
+    /// coordinates than the descriptor.
     ReleaseInvalid(&'static str),
+    /// The parent head the reader holds is not a state of this network's
+    /// reserve.
+    ReleaseParentNotOnTheReserve(crate::economic::native_reserve::ReserveHeadError),
+    /// The release is not the successor of the state at the reader's
+    /// established head before it.
+    ReleaseNotTheSuccessor(crate::economic::native_reserve::ReserveHeadError),
+    /// The release is not the step between the reader's established heads:
+    /// the head it establishes on the parent is not the child head.
+    ReleaseIsNotTheEstablishedStep { generation: u64 },
     /// The release's recipient is not the identity under validation, or the
     /// claimant key is not the P0–P6-proven AK.
     ReleaseRecipientMismatch,
@@ -554,9 +576,6 @@ pub enum ProvenanceError {
     /// than the transition under validation. Position + digest binding IS the
     /// non-reuse mechanism.
     ReleaseBindingMismatch,
-    /// The release names a storage set other than the canonical one for the
-    /// claimant's network — a release from a foreign register masquerading.
-    ReleaseForeignSet,
     /// The release's bytes do not hash to the descriptor's evidence address.
     ReleaseEvidenceAddrMismatch,
     /// The claimant's network has no resolvable pinned register, decided
@@ -569,43 +588,6 @@ pub enum ProvenanceError {
     RegisterNotEstablished(PeerLineageFailure),
 }
 
-/// The transfer conjunct of SoFi §49: a Transfer moves the token
-/// `policy_commit` names only when that token's committed policy transfers.
-/// The policy is read as every conjunct here reads one: ERA's from Core's
-/// own bytes (Amendment S11), any other from the bytes the resolver anchors,
-/// which must re-hash to the commit.
-pub fn check_transfer_policy(
-    policy_commit: &[u8; 32],
-    resolver: &dyn ProvenanceResolver,
-) -> Result<(), ProvenanceError> {
-    let bytes = if *policy_commit == crate::core::token::era_policy::era_policy_commit() {
-        crate::core::token::era_policy::era_policy_bytes().to_vec()
-    } else {
-        resolver
-            .anchored_policy_bytes(policy_commit)
-            .map_err(ProvenanceError::TransferPolicy)?
-    };
-    if crate::crypto::blake3::domain_hash_bytes(crate::common::domain_tags::TAG_DSM_POLICY, &bytes)
-        != *policy_commit
-    {
-        return Err(ProvenanceError::TransferPolicy(
-            PeerLineageFailure::Incomplete(
-                "policy bytes do not re-hash to the transferred token's policy commit".into(),
-            ),
-        ));
-    }
-    let policy = crate::economic::token_policy::parse_token_policy(&bytes).map_err(|e| {
-        ProvenanceError::TransferPolicy(PeerLineageFailure::Invalid(format!(
-            "the transferred token's committed policy does not parse: {e}"
-        )))
-    })?;
-    if policy.transferable {
-        Ok(())
-    } else {
-        Err(ProvenanceError::AssetNotTransferable)
-    }
-}
-
 impl core::fmt::Display for ProvenanceError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -615,11 +597,6 @@ impl core::fmt::Display for ProvenanceError {
             Self::GenesisReleasePolicy(e) => {
                 write!(f, "genesis-release token policy: {e}")
             }
-            Self::AssetNotTransferable => write!(
-                f,
-                "the transferred token's committed policy does not let it transfer"
-            ),
-            Self::TransferPolicy(e) => write!(f, "transferred token policy: {e}"),
             Self::NotAnOfflineUnload => write!(
                 f,
                 "an offline-boundary debit funds a credit only on an offline unload's admission"
@@ -714,6 +691,20 @@ impl core::fmt::Display for ProvenanceError {
             Self::ReleaseInvalid(why) => {
                 write!(f, "credit provenance: reserve release invalid: {why}")
             }
+            Self::ReleaseNotTheSuccessor(e) => write!(
+                f,
+                "credit provenance: the release is not the successor of its parent: {e}"
+            ),
+            Self::ReleaseParentNotOnTheReserve(e) => write!(
+                f,
+                "credit provenance: the established head before the release is not a state \
+                 of this network's reserve: {e}"
+            ),
+            Self::ReleaseIsNotTheEstablishedStep { generation } => write!(
+                f,
+                "credit provenance: the release is not the step that established reserve \
+                 generation {generation}"
+            ),
             Self::ReleaseRecipientMismatch => write!(
                 f,
                 "credit provenance: the release's recipient is not the identity under \
@@ -725,11 +716,6 @@ impl core::fmt::Display for ProvenanceError {
                 "credit provenance: the release binds a different economic position or \
                  operation digest than this transition — position + digest binding is the \
                  non-reuse mechanism, so a mismatch is a reuse attempt or a stale release"
-            ),
-            Self::ReleaseForeignSet => write!(
-                f,
-                "credit provenance: the release names a storage set other than the canonical \
-                 one for the claimant's network"
             ),
             Self::OwnerLineage(e) => {
                 write!(f, "credit provenance: owner lineage: {e}")
@@ -839,6 +825,13 @@ fn verify_genesis_release(
     if (*creator_genesis, *creator_device_id) != (*ctx.genesis, *ctx.device_id) {
         return Err(ProvenanceError::GenesisReleaseInvalid(
             "the token's policy names another creator".into(),
+        ));
+    }
+    // The recipient allowlist governs who may receive issuance (SoFi §49): a
+    // policy that names recipients releases its supply only to one of them.
+    if !policy.admits_issuance_to(ctx.device_id) {
+        return Err(ProvenanceError::GenesisReleaseInvalid(
+            "the token's recipient allowlist does not name its creator".into(),
         ));
     }
     let amount = u64::try_from(policy.genesis_supply).map_err(|_| {
@@ -1062,7 +1055,17 @@ pub fn verify_credit_source(
         // device's own offline account. The source is the boundary's own
         // identity, consumed below from ZERO.
         CreditSource::OfflineBoundaryDebit(_) => match ctx.offline_boundary {
-            Some(b) if b.kind() == crate::types::device_state::OfflineBoundaryKind::Unload => {
+            // An unload, funded by its own account debit; or a settlement of
+            // value received offline, funded by the payer's spend the payer's
+            // online history exposed, verified against it before the boundary
+            // was built (SA-91). Either consumes its own identity's source.
+            Some(b)
+                if matches!(
+                    b.kind(),
+                    crate::types::device_state::OfflineBoundaryKind::Unload
+                        | crate::types::device_state::OfflineBoundaryKind::Settle
+                ) =>
+            {
                 FundedCredit {
                     source_id: crate::economic::offline_boundary::offline_boundary_debit_source_id(
                         ctx.genesis,
@@ -1188,14 +1191,31 @@ pub fn verify_credit_source(
                     generation: d.generation,
                     failure,
                 })?;
-            // 4. The release verifies and IS the successor of the state the
-            //    walk validated: `remaining' = remaining − amount`, so the
-            //    amount below cannot exceed what the reserve held.
+            // 4. The release verifies and IS the successor of the state at
+            //    the reader's established head before it (DSM Amendment A15):
+            //    `remaining' = remaining − amount`, so the amount below cannot
+            //    exceed what the reserve held. The head it establishes there
+            //    must be the reader's head at its generation.
+            let genesis = native_reserve::NativeReserveState::genesis(
+                ctx.network_id,
+                ctx.canonical_storage_set_id,
+            )
+            .map_err(|e| ProvenanceError::ReleaseNotEstablished {
+                generation: d.generation,
+                failure: PeerLineageFailure::Incomplete(format!("the reserve's genesis: {e}")),
+            })?;
+            let parent = native_reserve::EstablishedReserve::of(&genesis, &win.parent)
+                .map_err(ProvenanceError::ReleaseParentNotOnTheReserve)?;
             let release = native_reserve::decode_and_verify_release(&win.envelope_bytes)
                 .map_err(|_| ProvenanceError::ReleaseInvalid("does not verify"))?;
-            native_reserve::release_constructible(&win.parent, &release).map_err(|_| {
-                ProvenanceError::ReleaseInvalid("is not the successor of its parent")
-            })?;
+            let child = parent
+                .succeeded_by(&release)
+                .map_err(ProvenanceError::ReleaseNotTheSuccessor)?;
+            if child.head() != &win.child {
+                return Err(ProvenanceError::ReleaseIsNotTheEstablishedStep {
+                    generation: d.generation,
+                });
+            }
             if release.body.reserve_id != d.reserve_id || release.body.generation != d.generation {
                 return Err(ProvenanceError::ReleaseInvalid(
                     "release names different coordinates than the descriptor",
@@ -1225,13 +1245,11 @@ pub fn verify_credit_source(
             {
                 return Err(ProvenanceError::ReleaseBindingMismatch);
             }
-            // 7. The release was won in the CANONICAL set for this network —
-            //    accepting whatever set it names would let a foreign register
-            //    masquerade.
-            if release.body.storage_set_id != ctx.canonical_storage_set_id {
-                return Err(ProvenanceError::ReleaseForeignSet);
-            }
-            // 8. The bytes the members hold are the bytes the DAG addresses.
+            // 7. The bytes the members hold are the bytes the DAG addresses.
+            //    (The release was won in the CANONICAL set for this network:
+            //    the parent state comes from the genesis that commits that set,
+            //    and the construction predicate refuses a release naming any
+            //    other, at step 4.)
             if native_reserve::release_evidence_addr(&win.envelope_bytes) != d.release_evidence_addr
             {
                 return Err(ProvenanceError::ReleaseEvidenceAddrMismatch);
@@ -1241,7 +1259,7 @@ pub fn verify_credit_source(
             // then forces the credit mutation to be exactly that.
             FundedCredit {
                 source_id: native_reserve::release_source_id(&d.reserve_id, d.generation),
-                policy_commit: win.parent.policy_commit,
+                policy_commit: *parent.state().policy_commit(),
                 amount: release.body.amount,
             }
         }

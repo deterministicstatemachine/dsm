@@ -119,11 +119,21 @@ pub fn keep(cell: &RoutedCell, digest: &[u8; 32], proof: &CompletionProof) -> Re
 
 /// The kept completion proof of `value` at `cell`, if any.
 pub fn get(cell: &RoutedCell, value: &[u8]) -> Result<Option<KeptProof>> {
-    let key = ProofKey::of(cell, value);
     let binding = get_connection()?;
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    get_with_conn(&conn, cell, value)
+}
+
+/// [`get`], on a connection the caller already holds: what a reader asks
+/// while it folds another table on that connection.
+pub fn get_with_conn(
+    conn: &rusqlite::Connection,
+    cell: &RoutedCell,
+    value: &[u8],
+) -> Result<Option<KeptProof>> {
+    let key = ProofKey::of(cell, value);
     let digest: Option<Vec<u8>> = conn
         .query_row(
             "SELECT digest FROM completion_proof

@@ -47,7 +47,7 @@ use crate::sdk::economic_admission_flow::{
 };
 use crate::sdk::outcome_programs::{read_setup, DuelProgress, MatchSetup};
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
-use crate::sdk::route_seats::write_recorded;
+use crate::sdk::route_seats::{write_recorded, AtLeader};
 use crate::sdk::sofi_flow::{
     identity, publication_addr, refuse, require_stored, sign, standing, storage, vault_at_head,
     PositionOutcome, SIGNATURE_ALG,
@@ -314,8 +314,7 @@ pub async fn create(
         .as_deref()
         .ok_or_else(|| refuse("no proof that the opponent holds the creatures it fields"))?;
     let their_holdings: dsm::types::proto::HoldingsProofV1 =
-        crate::sdk::connect::signed::canonical(relayed, "the opponent's holdings proof")
-            .map_err(refuse)?;
+        dsm::connect::canonical(relayed, "the opponent's holdings proof").map_err(refuse)?;
     crate::sdk::outcome_programs::check_teams(
         core,
         set,
@@ -346,73 +345,8 @@ pub async fn create(
         .await?;
     }
 
-    let validated = validated_root_or_activate(core)?;
-    let create_position = next_position(validated.economic_position()).map_err(refuse)?;
-    let terms_object = Publication::ComputedEscrowTerms(&terms);
-    let addr = publication_addr(&terms_object)?;
-    let preimage = VaultGenesisPreimage {
-        owner_genesis: me.0,
-        owner_device_id: me.1,
-        create_position,
-        state: VaultStateLeaf {
-            owner_genesis: me.0,
-            owner_device_id: me.1,
-            create_position,
-            market_policy: addr,
-            fee_policy: addr,
-            release_policy: addr,
-            storage_set_id: set.id(),
-            generation: 0,
-            reserve_a: intent.amount,
-            reserve_b: 0,
-            status: VAULT_STATUS_ACTIVE,
-        },
-    };
-    let produced = build_computed_vault_create(&preimage, &terms).map_err(refuse)?;
-    let genesis_object = Publication::ComputedEscrowVaultGenesis {
-        preimage: &preimage,
-        terms: &terms,
-    };
-    let (terms_published, genesis_published) =
-        futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
-            .await?;
-    require_stored("computed escrow terms", &terms_published)?;
-    if terms_published.addr != addr {
-        return Err(refuse("the computed terms were stored at another address"));
-    }
-    require_stored("computed escrow vault genesis", &genesis_published)?;
-    let operation = produced
-        .operation
-        .clone()
-        .with_signature(sign(produced.signs.bytes())?);
-    let deltas = [BalanceDelta {
-        policy_commit: intent.token,
-        direction: BalanceDirection::Debit,
-        amount: intent.amount,
-    }];
-    let (outcome, admitted) = admitted_self_loop_operation(
-        core,
-        operation,
-        &deltas,
-        CreditSourceFacts::None,
-        Vec::new(),
-        None,
-        Some(BuiltOn::of(&validated)),
-    )
-    .await?;
-    let vault_id = preimage.vault_id();
-    record_realized(
-        &outcome.new_device_state,
-        Realized::EscrowLock,
-        &vault_id,
-        admitted.economic_position,
-        &[vault_id],
-        &[Moved {
-            policy_commit: intent.token,
-            direction: BalanceDirection::Debit,
-            amount: intent.amount,
-        }],
-    );
+    let (vault_id, position) =
+        create_vault(core, set, me, &terms, intent.token, intent.amount).await?;
     let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.reason))?;
     store::insert_match(&DuelMatchRow {
         match_cell,
@@ -436,8 +370,92 @@ pub async fn create(
         external_commitment: *terms.external_commitment(),
         program: read.program,
         session_public_key: session.public_key().to_vec(),
-        position: admitted.economic_position,
+        position,
     })
+}
+
+/// Create `owner`'s computed escrow vault under `terms`, holding `amount` of
+/// `token`: the terms and the vault's genesis stored first, then the creation
+/// admitted as one self-loop operation, and the lock recorded for the wallet
+/// to show. The vault id and the admitted position.
+pub(crate) async fn create_vault(
+    core: &CoreSDK,
+    set: &StorageSet,
+    owner: (D32, D32),
+    terms: &ComputedEscrowTerms,
+    token: D32,
+    amount: u64,
+) -> Result<(D32, u64), DsmError> {
+    let funding_policies = crate::sdk::sofi_flow::vault_funding_policies(set, &[token]).await?;
+    let validated = validated_root_or_activate(core)?;
+    let create_position = next_position(validated.economic_position()).map_err(refuse)?;
+    let terms_object = Publication::ComputedEscrowTerms(terms);
+    let addr = publication_addr(&terms_object)?;
+    let preimage = VaultGenesisPreimage {
+        owner_genesis: owner.0,
+        owner_device_id: owner.1,
+        create_position,
+        state: VaultStateLeaf {
+            owner_genesis: owner.0,
+            owner_device_id: owner.1,
+            create_position,
+            market_policy: addr,
+            fee_policy: addr,
+            release_policy: addr,
+            storage_set_id: set.id(),
+            generation: 0,
+            reserve_a: amount,
+            reserve_b: 0,
+            status: VAULT_STATUS_ACTIVE,
+        },
+    };
+    let produced =
+        build_computed_vault_create(&preimage, terms, funding_policies).map_err(refuse)?;
+    let genesis_object = Publication::ComputedEscrowVaultGenesis {
+        preimage: &preimage,
+        terms,
+    };
+    let (terms_published, genesis_published) =
+        futures::future::try_join(publish(set, &terms_object), publish(set, &genesis_object))
+            .await?;
+    require_stored("computed escrow terms", &terms_published)?;
+    if terms_published.addr != addr {
+        return Err(refuse("the computed terms were stored at another address"));
+    }
+    require_stored("computed escrow vault genesis", &genesis_published)?;
+    let operation = produced
+        .operation
+        .clone()
+        .with_signature(sign(produced.signs.bytes())?);
+    let deltas = [BalanceDelta {
+        policy_commit: token,
+        direction: BalanceDirection::Debit,
+        amount,
+    }];
+    let (outcome, admitted) = admitted_self_loop_operation(
+        core,
+        operation,
+        &deltas,
+        CreditSourceFacts::None,
+        Vec::new(),
+        None,
+        Some(BuiltOn::of(&validated)),
+    )
+    .await?;
+    let vault_id = preimage.vault_id();
+    record_realized(
+        &outcome.new_device_state,
+        Realized::EscrowLock,
+        &vault_id,
+        admitted.economic_position,
+        &[vault_id],
+        &[Moved {
+            policy_commit: token,
+            direction: BalanceDirection::Debit,
+            amount,
+        }],
+    );
+    Ok((vault_id, admitted.economic_position))
 }
 
 // ── the kept match ──────────────────────────────────────────────────────────
@@ -707,14 +725,22 @@ async fn write_start(
     let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b)
         .map_err(|why| refuse(format!("the Start does not assemble: {why:?}")))?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &start.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &start.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Start, or a Withdraw or another Start first at the cell's
+        // leader: the start cell is decided, and the caller reads which.
+        AtLeader::Link | AtLeader::Taken => Ok(()),
+        AtLeader::Unanswered => Err(storage(
             "start cell",
             "the cell's leader did not take the Start; nothing is started",
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// Withdraw from the match while no Start holds its start cell: this
@@ -737,12 +763,23 @@ pub async fn withdraw(
     }
     let withdrawal = computed::sign_withdraw(kept.y(), kept.table(), kept.side, &kept.secret()?)?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.start_routed(), &withdrawal.encode()).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "start cell",
-            "the cell's leader did not take the Withdraw; nothing is withdrawn",
-        ));
+    let write = write_recorded(
+        set,
+        cells.start_routed(),
+        &cells.keeps_start(),
+        &withdrawal.encode(),
+    )
+    .await?;
+    match write.leader() {
+        // This Withdraw, or a Start first at the cell's leader: the start
+        // cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "start cell",
+                "the cell's leader did not take the Withdraw; nothing is withdrawn",
+            ))
+        }
     }
     Ok(MatchView::of(&read_cells(&verifier, &kept.terms)?))
 }
@@ -1162,15 +1199,27 @@ pub async fn settle(
         ))
     })?;
     let cells = kept.cells(set)?;
-    let write = write_recorded(set, cells.match_routed(), &occupant).await?;
-    if !write.reached_leader() {
-        return Err(storage(
-            "match cell",
-            format!(
-                "the cell's leader did not take the {:?} occupant; nothing is settled",
-                String::from_utf8_lossy(recognized.label())
-            ),
-        ));
+    let programs = crate::sdk::outcome_programs::registry();
+    let write = write_recorded(
+        set,
+        cells.match_routed(),
+        &cells.keeps_match(programs),
+        &occupant,
+    )
+    .await?;
+    match write.leader() {
+        // This occupant, or another one first at the cell's leader: the
+        // match cell is decided, and the view says which holds it.
+        AtLeader::Link | AtLeader::Taken => {}
+        AtLeader::Unanswered => {
+            return Err(storage(
+                "match cell",
+                format!(
+                    "the cell's leader did not take the {:?} occupant; nothing is settled",
+                    String::from_utf8_lossy(recognized.label())
+                ),
+            ))
+        }
     }
     view(core, set, match_cell)
 }

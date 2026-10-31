@@ -19,7 +19,8 @@ use prost::Message;
 
 use super::d32;
 use super::grant::{scopes_from_wire, Request, Scope, ScopeKind};
-use super::signed::{canonical, card_identity, offer_digest, own_network, verify, CardIdentity, Signed};
+use super::signed::own_network;
+use dsm::connect::{canonical, card_identity, offer_digest, verify, CardIdentity, Signed};
 use crate::util::text_id::encode_base32_crockford;
 
 /// The longest display name an offer may carry.

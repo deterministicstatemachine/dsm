@@ -27,13 +27,11 @@ pub(crate) struct Party {
 }
 
 /// One per-step EK answer: the EK the step derived, the prior key's
-/// certificate over it, the EK's signature over the response target, and the
-/// ML-KEM ciphertext the EK's derivation consumed.
+/// certificate over it, and the EK's signature over the response target.
 pub(crate) struct StepAnswer {
     pub ek_pk: Vec<u8>,
     pub ek_cert: Vec<u8>,
     pub sig: Vec<u8>,
-    pub kyber_ct: Vec<u8>,
 }
 
 impl Party {
@@ -117,6 +115,7 @@ impl Party {
             to_device_id: to_device_id.to_vec(),
             amount: Balance::amount(amount),
             policy_commit: era_policy_commit(),
+            token_policy: crate::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: crate::types::operations::TransferTerms {
                 token_id: token_id.clone(),
                 nonce: nonce.clone(),
@@ -162,7 +161,7 @@ impl Party {
             c_pre,
             &self.device_id(),
         );
-        let (shared_secret, kyber_ct) = crate::crypto::kyber::kyber_encapsulate_deterministic(
+        let (shared_secret, _ciphertext) = crate::crypto::kyber::kyber_encapsulate_deterministic(
             toward.kyber_public_key(),
             &coins,
         )
@@ -185,7 +184,6 @@ impl Party {
             ek_pk,
             ek_cert,
             sig,
-            kyber_ct,
         }
     }
 }
@@ -238,7 +236,8 @@ fn step(
         &h_n,
         &operation.with_cleared_signature().to_bytes(),
         &outcome.transition_entropy(),
-    );
+    )
+    .expect("the step's C_pre");
     Step {
         operation,
         outcome,

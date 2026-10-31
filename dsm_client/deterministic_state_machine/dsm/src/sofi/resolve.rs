@@ -68,8 +68,7 @@ use super::registration::{
     Registration, RegistrationRead,
 };
 use super::resolution::{
-    skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, RecordedGeneration,
-    VaultChain, WalkOutcome,
+    skip_without_evidence, walk, AttemptClass, AttemptWalk, KeyFacts, VaultChain, WalkOutcome,
 };
 use super::storage::{Discovered, Resolved};
 use super::validation::{
@@ -103,11 +102,6 @@ pub const WALK_BUDGET: usize = 16;
 /// complete.
 pub const CHAIN_DEPTH: usize = 2;
 
-/// How many generations one call extends a vault's chain by. A budget only,
-/// never a verdict: a chain that stops here is short, not complete, and a
-/// generation it did not reach is `Unavailable`.
-pub const GENERATION_BUDGET: usize = 16;
-
 /// How far the chain walk recurses into OTHER vaults' chains. A multi-leg
 /// route can only have consumed this vault's root if every leg's parent was
 /// canonical, so establishing this chain can require establishing a
@@ -120,10 +114,10 @@ pub const SIBLING_DEPTH: usize = 2;
 pub const ACQUIRE_ROUNDS: usize = 3;
 
 std::thread_local! {
-    /// The vaults whose chains this thread is extending now
-    /// ([`Extending`]).
-    static EXTENDING: std::cell::RefCell<BTreeSet<D32>> =
-        const { std::cell::RefCell::new(BTreeSet::new()) };
+    /// The vaults whose chains this thread is extending now, each with the
+    /// chain the extension has established so far ([`Extending`]).
+    static EXTENDING: std::cell::RefCell<BTreeMap<D32, VaultChain>> =
+        const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
 /// What proving a root below a chain's baseline came to (SoFi Amendment
@@ -166,11 +160,26 @@ impl core::fmt::Display for BelowBaseline {
     }
 }
 
+/// What a walk of a chain's head found after it.
+enum Next {
+    /// The post state of the exercise that consumed the head.
+    Generation(Box<VaultPostState>),
+    /// Nothing established consumed the head: the first key the walk did
+    /// not skip is open, or holds an exercise whose facts are established
+    /// and do not decide it yet.
+    Head,
+    /// What was read does not decide what follows the head yet, and why: a
+    /// network status, never a verdict.
+    NotYet(String),
+}
+
 /// This thread extends `vault`'s chain while the value lives. A chain's
 /// extension judges each consumption, and a judgement reaches other
 /// traders' lineages, which can ask for this vault's chain again on the
-/// same thread: that request is answered from what is recorded, never by a
-/// second extension of the chain the first is extending.
+/// same thread: that request is answered with the chain the running
+/// extension has established so far, from the same start, one realized
+/// consumption at a time — never by a second extension of it, and never
+/// from what this device recorded of the vault (MR-DSM-0331).
 struct Extending(D32);
 
 impl Extending {
@@ -178,10 +187,46 @@ impl Extending {
     /// guard is built only when this entry marked the vault: a guard built
     /// for a refused entry would unmark the vault when dropped, while the
     /// extension that marked it is still running.
-    fn enter(vault: D32) -> Option<Self> {
-        EXTENDING
-            .with(|extending| extending.borrow_mut().insert(vault))
-            .then(|| Self(vault))
+    fn enter(vault: D32, start: &VaultChain) -> Option<Self> {
+        EXTENDING.with(|extending| match extending.borrow_mut().entry(vault) {
+            std::collections::btree_map::Entry::Occupied(..) => None,
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(start.clone());
+                Some(Self(vault))
+            }
+        })
+    }
+
+    /// The chain the extension of `vault` running on this thread has
+    /// established so far, if one is running.
+    fn so_far(vault: &D32) -> Option<VaultChain> {
+        EXTENDING.with(|extending| extending.borrow().get(vault).cloned())
+    }
+
+    /// The extension established one more generation, `post`, and `chain`
+    /// is the chain it extends now: what a request for this vault's chain on
+    /// this thread is answered with. The chain kept here is extended by
+    /// `post` in place, one generation at a time; only one that `post` does
+    /// not extend is replaced by `chain` whole.
+    fn advance(&self, chain: &VaultChain, post: &VaultPostState) {
+        EXTENDING.with(|extending| {
+            if let Some(so_far) = extending.borrow_mut().get_mut(&self.0) {
+                match so_far.extend(post) {
+                    Ok(()) => {}
+                    Err(..) => so_far.clone_from(chain),
+                }
+            }
+        });
+    }
+}
+
+/// Where a walk that consumed nothing stopped: at the head when every key
+/// it read is decided as far as the facts go, and not complete yet when
+/// what it read did not establish them.
+fn stopped_at(walked: Walked) -> Next {
+    match walked.not_established {
+        None => Next::Head,
+        Some(why) => Next::NotYet(format!("{why:?}")),
     }
 }
 
@@ -200,6 +245,54 @@ pub struct ReadFailure(pub String);
 impl core::fmt::Display for ReadFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// What this device's record of a vault held at a generation that Core's
+/// walk established otherwise (MR-DSM-0331).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contradicted {
+    /// Another root.
+    Root,
+    /// The same root, built on another root or by another consumption.
+    Link,
+    /// The same root and link, with another bundle step.
+    Step,
+}
+
+/// A generation of this device's record of a vault that contradicted what
+/// Core established there, replaced by it together with every generation
+/// recorded above it (MR-DSM-0331). The record is a cache of what Core
+/// established and has no standing to block Core; the replacement is named
+/// so that it is never silent. It decides nothing about the contradiction:
+/// it records no verdict on the vault and refuses nothing on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplacedRecord {
+    pub vault_id: D32,
+    /// The lowest generation the record contradicted.
+    pub generation: u64,
+    /// The root the record held at `generation`; `None` where it held a
+    /// bundle step there and no root.
+    pub recorded_root: Option<D32>,
+    /// The root Core established at `generation`.
+    pub established_root: D32,
+    pub contradicted: Contradicted,
+}
+
+impl core::fmt::Display for ReplacedRecord {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "vault {}: the record at generation {} held root {} ({:?} contradicted); Core \
+             established root {} there, and the record from there up is replaced by it",
+            short_id(&self.vault_id),
+            self.generation,
+            self.recorded_root
+                .as_ref()
+                .map_or_else(|| "none".to_string(), short_id),
+            self.contradicted,
+            short_id(&self.established_root)
+        )
     }
 }
 
@@ -227,19 +320,6 @@ impl From<ReadFailure> for VerifierFailure {
     fn from(failure: ReadFailure) -> Self {
         Self::Read(failure.0)
     }
-}
-
-/// One generation this device recorded for a vault, as its store holds it:
-/// the root at that generation, and — past genesis — the root it was built
-/// on and the operation that consumed it. Rows are handed contiguously from
-/// generation zero; what they link to is checked by
-/// [`VaultChain::from_recorded`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecordedGenerationRow {
-    pub generation: u64,
-    pub root: D32,
-    pub pre_root: Option<D32>,
-    pub consumed_by: Option<D32>,
 }
 
 /// What the verifier reads. Every answer is bytes, cells or this device's
@@ -360,14 +440,13 @@ pub trait SofiReads {
         device_id: &D32,
         position: u64,
     ) -> Result<AcceptedClaim, PeerLineageFailure>;
-    /// The generations this device recorded for `vault_id`, contiguous from
-    /// zero, in generation order.
-    fn recorded_generations(
+    /// Record a generation Core's walk established. The record follows
+    /// Core: what it held there that contradicts `post` is replaced, with
+    /// every generation recorded above it, and named.
+    fn record_generation(
         &self,
-        vault_id: &D32,
-    ) -> Result<Vec<RecordedGenerationRow>, ReadFailure>;
-    /// Record a generation the walk established.
-    fn record_generation(&self, post: &VaultPostState) -> Result<(), ReadFailure>;
+        post: &VaultPostState,
+    ) -> Result<Option<ReplacedRecord>, ReadFailure>;
     /// Keep the completion proof of the value final at `cell` (storage spec
     /// §9 rule 11), with the reads `evidence` that showed it final. A final
     /// value holds the cell for good, so those reads answer for the cell
@@ -516,10 +595,6 @@ impl LocalLeaves {
             root,
             leaves: map,
         })
-    }
-
-    pub fn root(&self) -> D32 {
-        self.root
     }
 
     /// The `TraderPreBalance` of every balance `core` states as present
@@ -704,6 +779,15 @@ pub struct Verifier<'a, R: SofiReads + ?Sized> {
     /// The finals this verifier checked against fresh reads
     /// ([`Verifier::rely_on_final`]).
     proven: ProvenFinals,
+    /// What this verifier's walks replaced in this device's record of a
+    /// vault ([`Verifier::replaced_records`]).
+    replaced: std::sync::Mutex<Vec<ReplacedRecord>>,
+    /// Each vault's chain as this verifier's walks established it, for this
+    /// operation: where its next walk of the vault resumes. A chain only
+    /// grows, so one established earlier in the operation is a start no
+    /// later walk needs to establish again; it lives as long as the
+    /// verifier, and nothing outside Core puts one here.
+    walked: std::sync::Mutex<BTreeMap<D32, VaultChain>>,
 }
 
 /// Vault geneses one operation accepted from the network, keyed by the vault
@@ -756,7 +840,19 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
             accepted,
             programs: ProgramRegistry::new(),
             proven: ProvenFinals::default(),
+            replaced: std::sync::Mutex::new(Vec::new()),
+            walked: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Every generation of this device's record of a vault that this
+    /// verifier's walks found contradicting what Core established, and
+    /// replaced, in the order they were met.
+    pub fn replaced_records(&self) -> Result<Vec<ReplacedRecord>, VerifierFailure> {
+        self.replaced
+            .lock()
+            .map(|replaced| replaced.clone())
+            .map_err(|e| VerifierFailure::Read(format!("the replaced records: {e}")))
     }
 
     /// This verifier, running the outcome programs `programs` holds (SoFi
@@ -765,11 +861,6 @@ impl<'a, R: SofiReads + ?Sized> Verifier<'a, R> {
     pub fn with_programs(mut self, programs: ProgramRegistry) -> Self {
         self.programs = programs;
         self
-    }
-
-    /// The outcome programs this verifier runs.
-    pub fn programs(&self) -> &ProgramRegistry {
-        &self.programs
     }
 }
 
@@ -883,6 +974,9 @@ struct LegsRead {
     registration: RegistrationRead,
     cells: Vec<AttemptCellRead>,
     walks: Vec<Option<AttemptWalk>>,
+    /// Per leg, the state leaf its core states at a parent root the chain
+    /// does not name ([`Verifier::parent_state`]).
+    parent_states: Vec<Option<VaultStateLeaf>>,
     /// For a Release, the cell its vault's kind binds it to: the verdict
     /// cell (SoFi Amendment S21) or the start and match cells (Amendment
     /// S22).
@@ -899,11 +993,17 @@ impl LegsRead {
         precommit
             .legs()
             .iter()
-            .zip(self.cells.iter().zip(self.walks.iter()))
-            .map(|(leg, (cell, walk))| LegReads {
+            .zip(
+                self.cells
+                    .iter()
+                    .zip(self.walks.iter())
+                    .zip(self.parent_states.iter()),
+            )
+            .map(|(leg, ((cell, walk), parent_state))| LegReads {
                 cell,
                 chain: chains.get(&leg.vault_id),
                 walk: walk.as_ref(),
+                parent_state: parent_state.as_ref(),
             })
             .collect()
     }
@@ -2018,16 +2118,16 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
 
     // ── the chain (§30, R14) ─────────────────────────────────────────────
 
-    /// The canonical chain of `vault_id`, extended as far as the committed
-    /// set and the budget allow, recording each generation it establishes.
+    /// The canonical chain of `vault_id`, extended as far as what the
+    /// committed set holds establishes it, recording each generation it
+    /// establishes.
     ///
-    /// The chain starts where every chain starts, at the accepted genesis
-    /// (§30 step 1), read from the network by this verifier: the generations this
-    /// device recorded before are its own memo, anchored at that genesis and
-    /// linked one to the next ([`VaultChain::from_recorded`]) before they
-    /// are stood on. Past the memo the chain grows by one consumption at a
-    /// time — the exercise the walk classifies `Consumed` at the head, and
-    /// the post state `vault_post_states` recomputes from it.
+    /// The chain starts at the owner baseline this device adopted (SoFi
+    /// Amendment S24), authenticated again now, or where there is none at
+    /// the accepted genesis (§30 step 1; MR-DSM-0331), and grows by one
+    /// consumption at a time: the exercise the walk classifies `Consumed` at
+    /// the head, and the post state `vault_post_states` recomputes from it.
+    /// What this device recorded of the vault establishes nothing here.
     pub fn chain(&self, vault_id: &D32) -> Result<VaultChain, VerifierFailure> {
         self.chain_to_depth(*vault_id, SIBLING_DEPTH, None)
     }
@@ -2061,17 +2161,46 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 )))
             }
         };
-        let mut chain = self.recorded_chain(&vault_id, &genesis)?;
         // Extending a chain judges each consumption, and a judgement can ask
         // for a root of this same vault: the parent of a position some
         // trader's lineage holds. On this thread that chain is being
-        // extended already, so the root asked for is one it names, or one
-        // below its baseline that extending it never reaches — and
-        // extending it again would ask again, without end.
-        let extending = Extending::enter(vault_id);
-        if extending.is_some() {
-            self.extend_chain(&vault_id, &mut chain, depth, until)?;
-        }
+        // extended already, so the root asked for is one the chain so far
+        // names, or one below its baseline that extending it never reaches
+        // — and extending it again would ask again, without end.
+        let mut chain = match Extending::so_far(&vault_id) {
+            Some(so_far) => so_far,
+            None => {
+                // A chain this verifier established earlier in the operation
+                // is resumed where it stood; otherwise the walk starts.
+                let walked = |e: &dyn core::fmt::Display| {
+                    VerifierFailure::Read(format!("the walked chains: {e}"))
+                };
+                let resumed = self
+                    .walked
+                    .lock()
+                    .map_err(|e| walked(&e))?
+                    .get(&vault_id)
+                    .cloned();
+                let mut chain = match resumed {
+                    Some(mut chain) => {
+                        chain.resume();
+                        chain
+                    }
+                    None => self.start_chain(&genesis)?,
+                };
+                if let Some(extending) = Extending::enter(vault_id, &chain) {
+                    self.extend_chain(&vault_id, &mut chain, depth, until, &extending)?;
+                }
+                let mut kept = self.walked.lock().map_err(|e| walked(&e))?;
+                match kept.get(&vault_id) {
+                    Some(longer) if longer.head() >= chain.head() => {}
+                    Some(..) | None => {
+                        kept.insert(vault_id, chain.clone());
+                    }
+                }
+                chain
+            }
+        };
         // A root below the baseline the chain starts at: proven under the
         // baseline's history root, never reached by replaying the vault
         // (SoFi Amendment S26).
@@ -2165,57 +2294,31 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         })
     }
 
-    /// The chain this device recorded of `vault_id`, anchored and linked
-    /// before anything stands on it: at the accepted genesis when the
-    /// record starts at zero, and at the owner baseline it adopted (SoFi
-    /// Amendment S24), authenticated again now, when it starts above.
-    fn recorded_chain(
-        &self,
-        vault_id: &D32,
-        genesis: &AcceptedVaultGenesis,
-    ) -> Result<VaultChain, VerifierFailure> {
-        let recorded: Vec<RecordedGeneration> = self
-            .reads
-            .recorded_generations(vault_id)?
-            .into_iter()
-            .map(|row| RecordedGeneration {
-                generation: row.generation,
-                root: row.root,
-                pre_root: row.pre_root,
-                consumed_by: row.consumed_by,
-            })
-            .collect();
-        let anchored = match recorded.first() {
-            Some(first) if first.generation > 0 => match self.reads.recorded_baseline(genesis)? {
-                Some(baseline) => VaultChain::from_baseline(&baseline, &recorded),
-                None => {
-                    return Err(VerifierFailure::Refused(format!(
-                        "chain: this device's record of vault {} starts at generation {} with \
-                         no baseline it authenticates",
-                        short_id(vault_id),
-                        first.generation
-                    )))
-                }
-            },
-            _ => VaultChain::from_recorded(genesis, &recorded),
-        };
-        anchored.map_err(|e| {
-            VerifierFailure::Refused(format!(
-                "chain: this device's record of vault {}: {e}",
-                short_id(vault_id)
-            ))
+    /// Where a walk of a vault starts: the owner baseline this device
+    /// adopted (SoFi Amendment S24), authenticated again now by
+    /// `recorded_baseline`, or the accepted genesis where there is none.
+    fn start_chain(&self, genesis: &AcceptedVaultGenesis) -> Result<VaultChain, VerifierFailure> {
+        Ok(match self.reads.recorded_baseline(genesis)? {
+            Some(baseline) => VaultChain::from_baseline(&baseline),
+            None => VaultChain::from_genesis(genesis),
         })
     }
 
     /// Extend `chain` from its head, one realized consumption at a time,
-    /// recording each generation, until it names `until`, or by
-    /// [`GENERATION_BUDGET`] generations.
+    /// recording each generation, until it names `until`, or until nothing
+    /// established consumed its head: every successor of the chain's start
+    /// (MR-DSM-0331), however many. Every walk starts at the genesis or the
+    /// baseline, so a cap on generations per call would be a cap on how far
+    /// past its start any chain reaches. Where what was read does not decide
+    /// the next generation, the chain says so (`VaultChain::not_complete`):
+    /// it is never a shorter chain read as the head.
     fn extend_chain(
         &self,
         vault_id: &D32,
         chain: &mut VaultChain,
         depth: usize,
         until: Option<&D32>,
+        extending: &Extending,
     ) -> Result<(), VerifierFailure> {
         // What the resolver is told while this chain is being extended:
         // this vault's chain SO FAR, plus any sibling chain a multi-leg
@@ -2224,22 +2327,38 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // resolved through one realized consumption per step.
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
         chains.insert(*vault_id, chain.clone());
-        let mut extended = 0;
-        while extended < GENERATION_BUDGET {
+        loop {
             if until.is_some_and(|root| chain.names(root)) {
                 break;
             }
-            extended += 1;
             // The chain is non-empty here, but say so in the type rather
             // than in a panic: an empty chain means nothing was
             // established, which is a stop, never a crash.
             let Some((.., current)) = chain.head() else {
                 break;
             };
-            let Some(post) = self.next_generation(vault_id, &current, &mut chains, depth)? else {
-                break;
+            let post = match self.next_generation(vault_id, &current, &mut chains, depth)? {
+                Next::Generation(post) => *post,
+                Next::Head => break,
+                Next::NotYet(why) => {
+                    log::info!(
+                        "[sofi chain] vault {}: not complete yet past generation {}: {why}",
+                        short_id(vault_id),
+                        chain
+                            .head()
+                            .map_or(chain.base(), |(generation, _)| generation)
+                    );
+                    chain.stop_short(why);
+                    break;
+                }
             };
-            self.reads.record_generation(&post)?;
+            if let Some(replaced) = self.reads.record_generation(&post)? {
+                log::warn!("[sofi verifier] {replaced}");
+                self.replaced
+                    .lock()
+                    .map_err(|e| VerifierFailure::Read(format!("the replaced records: {e}")))?
+                    .push(replaced);
+            }
             log::info!(
                 "[sofi verifier] vault {}: generation {} established",
                 short_id(vault_id),
@@ -2250,14 +2369,23 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                     "chain: the consumption does not extend the chain: {e}"
                 ))
             })?;
-            chains.insert(*vault_id, chain.clone());
+            // What the resolver and a nested request read follow the chain
+            // one generation at a time, each extended in place: a walk of N
+            // generations copies no chain N times.
+            match chains.get_mut(vault_id).map(|so_far| so_far.extend(&post)) {
+                Some(Ok(())) => {}
+                Some(Err(..)) | None => {
+                    chains.insert(*vault_id, chain.clone());
+                }
+            }
+            extending.advance(chain, &post);
         }
         Ok(())
     }
 
-    /// The post state of the exercise that consumed `current`, or `None` when
-    /// nothing has consumed it yet, nothing could be read, or the consumption
-    /// cannot be recomputed. Every `None` stops the chain WITHOUT refuting
+    /// The post state of the exercise that consumed `current`; or that
+    /// nothing established consumed it, so `current` is the head; or why
+    /// what was read does not decide that yet. Neither stop refutes
     /// anything.
     fn next_generation(
         &self,
@@ -2265,7 +2393,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         current: &D32,
         chains: &mut BTreeMap<D32, VaultChain>,
         depth: usize,
-    ) -> Result<Option<VaultPostState>, VerifierFailure> {
+    ) -> Result<Next, VerifierFailure> {
         // Two passes at most. The first can stall because a SIBLING leg's
         // parent is not established yet, which is not a fact about this
         // vault; the second runs once those chains have been walked.
@@ -2287,40 +2415,43 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             match walked.outcome {
                 WalkOutcome::Consumed { .. } => {
                     let Some(exercise) = walked.consumed else {
-                        return Ok(None);
+                        return Ok(Next::NotYet(
+                            "the exercise that consumed the head is not in hand".to_string(),
+                        ));
                     };
-                    return self.post_state_of(vault_id, current, &exercise);
+                    return Ok(match self.post_state_of(vault_id, current, &exercise)? {
+                        Ok(post) => Next::Generation(Box::new(post)),
+                        Err(why) => Next::NotYet(why),
+                    });
                 }
                 WalkOutcome::Unresolved { attempt } if pass == 0 && depth > 0 => {
                     let in_hand = walked.unresolved_reading();
                     if !self
                         .establish_siblings(vault_id, current, attempt, in_hand, chains, depth)?
                     {
-                        return Ok(None);
+                        return Ok(stopped_at(walked));
                     }
                 }
                 WalkOutcome::Unresolved { .. }
                 | WalkOutcome::CounterExhausted { .. }
-                | WalkOutcome::Continue { .. } => {
-                    if let Some(why) = walked.not_established {
-                        log::info!("[sofi chain] the walk stopped short: {why:?}");
-                    }
-                    return Ok(None);
-                }
+                | WalkOutcome::Continue { .. } => return Ok(stopped_at(walked)),
             }
         }
-        Ok(None)
+        Ok(Next::NotYet(
+            "the walk did not settle in two passes".to_string(),
+        ))
     }
 
     /// Recompute what `exercise` did to this vault. The post root is the
     /// fold's, over the pre state the evidence holds — never the value the
     /// producer wrote into `V°`, which is what `vault_post_states` checks.
+    /// Where it cannot be recomputed yet, why.
     fn post_state_of(
         &self,
         vault_id: &D32,
         current: &D32,
         exercise: &RecognizedExercise,
-    ) -> Result<Option<VaultPostState>, VerifierFailure> {
+    ) -> Result<Result<VaultPostState, String>, VerifierFailure> {
         let precommit = &exercise.precommit().body;
         let evidence = match self.acquire_evidence(
             precommit,
@@ -2329,20 +2460,29 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         )? {
             Acquired::Complete(evidence) => evidence,
             Acquired::Exhausted(missing) => {
-                log::info!("[sofi chain] a consumption's evidence is not in hand: {missing:?}");
-                return Ok(None);
+                return Ok(Err(format!(
+                    "a consumption's evidence is not in hand: {missing:?}"
+                )))
             }
         };
         // The evidence this verifier holds may not let it recompute the
         // consumption. The chain then stops; nothing is refuted.
-        match vault_post_states(precommit, exercise.preimage(), &evidence) {
+        match vault_post_states(
+            precommit,
+            &exercise.fulfillment().body,
+            exercise.preimage(),
+            &evidence,
+        ) {
             Ok(posts) => Ok(posts
                 .into_iter()
-                .find(|p| p.vault_id() == vault_id && p.pre_root() == current)),
-            Err(refusal) => {
-                log::info!("[sofi chain] the consumption is not recomputable: {refusal:?}");
-                Ok(None)
-            }
+                .find(|p| p.vault_id() == vault_id && p.pre_root() == current)
+                .ok_or_else(|| {
+                    "the consumption recomputes no state of this vault on the head's root"
+                        .to_string()
+                })),
+            Err(refusal) => Ok(Err(format!(
+                "the consumption is not recomputable: {refusal:?}"
+            ))),
         }
     }
 
@@ -2628,6 +2768,12 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             },
             SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
         };
+        let key_state = self.parent_state(
+            exercise.preimage(),
+            key.read.vault_id(),
+            key.read.parent_root(),
+            chains.get(key.read.vault_id()),
+        )?;
         let key_ground = match establish_key_ground(&KeyGroundReads {
             exercise,
             registration: &registration,
@@ -2636,6 +2782,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
                 cell: key.read,
                 chain: chains.get(key.read.vault_id()),
                 walk: Some(key.reached),
+                parent_state: key_state.as_ref(),
             },
             verdict: verdict.as_ref(),
         }) {
@@ -2804,6 +2951,15 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             cells.push(cell);
             walks.push(walk);
         }
+        let mut parent_states = Vec::with_capacity(precommit.legs().len());
+        for leg in precommit.legs() {
+            parent_states.push(self.parent_state(
+                exercise.preimage(),
+                &leg.vault_id,
+                &leg.parent_root,
+                chains.get(&leg.vault_id),
+            )?);
+        }
         // A Release stands on the cell its vault's kind binds it to (SoFi
         // Amendments S21, S22): the verdict cell, or the start and match
         // cells. Nothing is read for any other operation.
@@ -2822,8 +2978,36 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             registration,
             cells,
             walks,
+            parent_states,
             verdict,
         }))
+    }
+
+    /// The state leaf `preimage`'s core for `vault_id` states at
+    /// `parent_root`, read by its value (SoFi Amendment S26), when the vault's
+    /// chain does not name that root: what places a parent the chain does not
+    /// hold at its generation, so the chain can refute it with no validation
+    /// evidence (§23.5 arm (ii), MR-SOFI-0241). `None` when the chain names
+    /// the root, when there is no chain, or when the leaf is not in hand.
+    fn parent_state(
+        &self,
+        preimage: &SettlementPreimage,
+        vault_id: &D32,
+        parent_root: &D32,
+        chain: Option<&VaultChain>,
+    ) -> Result<Option<VaultStateLeaf>, VerifierFailure> {
+        match chain {
+            Some(chain) if !chain.names(parent_root) => {}
+            Some(..) | None => return Ok(None),
+        }
+        let Some(core) = preimage
+            .dlv_cores()
+            .iter()
+            .find(|core| core.vault_id() == vault_id && core.pre_root() == parent_root)
+        else {
+            return Ok(None);
+        };
+        self.published_state(core)
     }
 
     /// The complete facts of the exercise over `read`: its validation
@@ -3174,6 +3358,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             | AdvanceError::CreditsNotDerivable
             | AdvanceError::TokenNotAdopted { .. }
             | AdvanceError::BalancesNotDerivable(..)
+            | AdvanceError::VaultStatesNotDerivable(..)
             | AdvanceError::PreimageIsNotThisOperation { .. }
             | AdvanceError::Counter(..) => Invalid(format!("position {q}: {e}")),
         })
@@ -3190,22 +3375,43 @@ mod tests {
     /// a walk of a trader whose positions each resolve through this vault
     /// asked for the chain again without end, until the stack overflowed
     /// (`node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history`
-    /// under DSM Amendment A19).
+    /// under DSM Amendment A19). A nested request reads the chain the running
+    /// extension established so far, and nothing once it ends.
+    /// The chain kept for nested requests follows the extension one
+    /// generation at a time, extended in place (the node tests that walk a
+    /// trader's positions through the vault stand on that); one the
+    /// generation does not extend is replaced by the extension's chain whole.
     /// MUTATION CONTROL: building the guard for a refused entry
-    /// (`then_some(Self(vault))`) turns this red.
+    /// (`Entry::Occupied(..) => Some(Self(vault))`) turns this red.
     #[test]
     fn a_refused_entry_leaves_the_running_extension_marked() {
+        use crate::sofi::lineage::genesis_acceptance::{accept, valid};
         let vault = [0x5E; 32];
-        let running = Extending::enter(vault).expect("the first entry marks the vault");
+        let start = VaultChain::default();
+        let running = Extending::enter(vault, &start).expect("the first entry marks the vault");
         for nested in 1..=3 {
             assert!(
-                Extending::enter(vault).is_none(),
+                Extending::enter(vault, &start).is_none(),
                 "nested entry {nested}: the vault's chain is being extended"
             );
         }
+        assert_eq!(Extending::so_far(&vault), Some(start));
+        let f = crate::sofi::validation::fixtures::swap_fixture_n(1);
+        let post = vault_post_states(&f.precommit, &f.fulfillment(), &f.preimage, &f.evidence)
+            .expect("the fixture's post states")
+            .remove(0);
+        let genesis = accept(&valid()).expect("the fixture's genesis is accepted");
+        let extended = VaultChain::from_genesis(&genesis);
+        running.advance(&extended, &post);
+        assert_eq!(
+            Extending::so_far(&vault),
+            Some(extended),
+            "a generation the kept chain is not at replaces it with the extension's chain"
+        );
         drop(running);
+        assert_eq!(Extending::so_far(&vault), None);
         assert!(
-            Extending::enter(vault).is_some(),
+            Extending::enter(vault, &VaultChain::default()).is_some(),
             "once the extension ends, the vault can be extended again"
         );
     }

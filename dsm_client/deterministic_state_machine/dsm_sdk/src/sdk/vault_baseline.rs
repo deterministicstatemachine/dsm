@@ -30,18 +30,16 @@ use dsm::common::domain_tags::{
 };
 use dsm::crypto::domain::TaggedHashDomain;
 use dsm::sofi::derive;
+use dsm::shared_lineage::GenerationChain;
 use dsm::sofi::history::{history_locator, HistoryBuilder};
 use dsm::sofi::frontier::{
-    authenticate_frontier_owner, baseline_commitment, frontier_commitment, witness_from_tree,
-    VaultWitness, VerifiedFrontier,
+    authenticate_frontier_owner, baseline_commitment, frontier_commitment, vault_tree_at,
+    witness_from_tree, VaultTree, VaultTreeError, VaultWitness, VerifiedFrontier,
 };
 use dsm::sofi::lineage::AcceptedVaultGenesis;
 use dsm::sofi::resolve::{VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
-use dsm::sofi::wire::{
-    OwnerBaselineAuthV1, VaultFrontierV1, VaultFrontierWitnessV1, VaultRelationshipLeaf,
-    VaultStateLeaf,
-};
+use dsm::sofi::wire::{OwnerBaselineAuthV1, VaultFrontierV1, VaultFrontierWitnessV1};
 use dsm::types::error::DsmError;
 
 use crate::generated;
@@ -51,7 +49,7 @@ use crate::sdk::identity_presentation::{
 };
 use crate::sdk::sofi_reads::LiveSofiReads;
 use crate::sdk::storage_set::StorageSet;
-use crate::storage::client_db::sofi_vault_head;
+use crate::storage::client_db::sofi_vault_head::{self, BaselineAdoption};
 
 type D32 = [u8; 32];
 
@@ -161,41 +159,25 @@ pub(crate) fn sign(
 }
 
 /// The owner's whole tree of `vault_id` at `generation`, its state, and its
-/// relationship leaves by key — rebuilt from this device's record and
-/// checked against the root it recorded there.
+/// relationship leaves by key: this device's record, which Core binds leaf by
+/// leaf and refuses unless it recomputes the root recorded there
+/// (`sofi::frontier::vault_tree_at`). `None` when the record does not
+/// recompute that root: this device did not see every leaf.
 pub(crate) fn tree_at(
     vault_id: &D32,
     generation: u64,
     root: &D32,
-) -> Result<
-    Option<(
-        dsm::economic::tree::EconomicSmt,
-        VaultStateLeaf,
-        BTreeMap<D32, VaultRelationshipLeaf>,
-    )>,
-    DsmError,
-> {
-    let rows =
-        sofi_vault_head::leaf_rows(vault_id, generation).map_err(|e| failure("leaves", e))?;
-    let mut tree = dsm::economic::tree::EconomicSmt::new();
-    let mut state = None;
-    let mut relationships = BTreeMap::new();
-    let state_key = derive::vault_state_key(vault_id);
-    for (key, value, _, preimage) in &rows {
-        tree.insert(*key, *value);
-        if *key == state_key {
-            state = Some(VaultStateLeaf::decode(preimage).map_err(|e| failure("state", e))?);
-        } else {
-            relationships.insert(
-                *key,
-                VaultRelationshipLeaf::decode(preimage).map_err(|e| failure("relationship", e))?,
-            );
-        }
+) -> Result<Option<VaultTree>, DsmError> {
+    let rows: Vec<(D32, D32, Vec<u8>)> = sofi_vault_head::leaf_rows(vault_id, generation)
+        .map_err(|e| failure("leaves", e))?
+        .into_iter()
+        .map(|(key, value, _, preimage)| (key, value, preimage))
+        .collect();
+    match vault_tree_at(vault_id, root, &rows) {
+        Ok(tree) => Ok(Some(tree)),
+        Err(VaultTreeError::DoesNotRecomputeTheRoot { .. }) => Ok(None),
+        Err(e) => Err(failure("tree", e)),
     }
-    if tree.root() != *root {
-        return Ok(None);
-    }
-    Ok(state.map(|state| (tree, state, relationships)))
 }
 
 /// What the owner hands a trader: each vault's witness, and why each vault
@@ -222,24 +204,39 @@ pub(crate) async fn offer(
     };
     // Without its standing this device names none of its vaults: every one
     // is left to the wallet's walk.
-    let (creations, own_g) = match (crate::sdk::sofi_flow::standing(core), core.device_head()) {
-        (Ok(standing), Some(head)) => (standing.local.vault_creations(), head.genesis_digest()),
-        (Err(why), _) => {
+    let (creations, own_g, own_d) =
+        match (crate::sdk::sofi_flow::standing(core), core.device_head()) {
+            (Ok(standing), Some(head)) => (
+                standing.local.vault_creations(),
+                head.genesis_digest(),
+                head.devid(),
+            ),
+            (Err(why), _) => {
+                offered
+                    .not_offered
+                    .push(format!("every vault: no standing: {why}"));
+                return offered;
+            }
+            (.., None) => {
+                offered
+                    .not_offered
+                    .push("every vault: no device head".into());
+                return offered;
+            }
+        };
+    let ctx = match crate::sdk::sofi_reads::VerifierContext::new(set, Some((own_g, own_d)), None) {
+        Ok(ctx) => ctx,
+        Err(why) => {
             offered
                 .not_offered
-                .push(format!("every vault: no standing: {why}"));
-            return offered;
-        }
-        (.., None) => {
-            offered
-                .not_offered
-                .push("every vault: no device head".into());
+                .push(format!("every vault: no verifier: {why}"));
             return offered;
         }
     };
+    let verifier = ctx.verifier();
     for creation in creations {
         let vault = crate::util::text_id::encode_base32_crockford(&creation.vault_id[..5]);
-        match offer_one(set, &own_g, &creation.vault_id, tokens, trader).await {
+        match offer_one(set, &verifier, &own_g, &creation.vault_id, tokens, trader).await {
             Ok(Some(witness)) => offered.witnesses.push(witness),
             Ok(None) => {}
             Err(why) => offered.not_offered.push(format!("{vault}: {why}")),
@@ -250,22 +247,24 @@ pub(crate) async fn offer(
 
 async fn offer_one(
     set: &StorageSet,
+    verifier: &Verifier<'_, crate::sdk::sofi_reads::LiveSofiReads<'_>>,
     own_g: &D32,
     vault_id: &D32,
     tokens: &[D32],
     trader: (D32, D32),
 ) -> Result<Option<dsm::types::proto::ConnectVaultWitnessV1>, DsmError> {
-    let Some(head) = sofi_vault_head::head(vault_id).map_err(|e| failure("head", e))? else {
+    let Some(history) = owner_chain(verifier, vault_id)? else {
         return Ok(None);
     };
+    let (generation, root) = (history.head().generation(), *history.head().state_root());
     // At the genesis a reader needs no baseline: the genesis is one read.
-    if head.generation == 0 {
+    if generation == 0 {
         return Ok(None);
     }
-    let Some((tree, state, relationships)) = tree_at(vault_id, head.generation, &head.root)? else {
+    let Some(whole) = tree_at(vault_id, generation, &root)? else {
         return Ok(None);
     };
-    let market = crate::sdk::storage_io::read_stored_bytes_kept(set, &state.market_policy)
+    let market = crate::sdk::storage_io::read_stored_bytes_kept(set, &whole.state.market_policy)
         .await?
         .ok_or_else(|| failure("market", "the vault's market policy is not Stored"))?;
     let market =
@@ -276,83 +275,193 @@ async fn offer_one(
     {
         return Ok(None);
     }
-    if sofi_vault_head::owner_baseline(vault_id, head.generation)
-        .map_err(|e| failure("baseline", e))?
-        .is_none()
-    {
-        // The history first: a baseline commits it, and a reader proves a
-        // root below the baseline from it (SoFi Amendment S26).
-        let history_root = publish_history(set, vault_id, head.generation).await?;
-        let frontier = VaultFrontierV1 {
-            vault_id: *vault_id,
-            generation: head.generation,
-            root: head.root,
-            history_root,
-        };
-        let network = crate::sdk::economic_admission_flow::committed_network_id()?;
-        let bundle = sign(&network, own_g, &frontier)?;
-        publish(set, &frontier, &bundle).await?;
-        sofi_vault_head::put_owner_baseline(vault_id, head.generation, &bundle)
-            .map_err(|e| failure("baseline", e))?;
-        log::info!(
-            "[vault baseline] {}: published the baseline at generation {}",
-            crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
-            head.generation
-        );
-    }
+    ensure_baseline(set, own_g, vault_id, &history).await?;
     let rel_key = derive::relationship_key(&trader.0, &trader.1, vault_id);
     let witness = witness_from_tree(
-        &tree,
+        &whole.tree,
         vault_id,
-        &state,
-        relationships.get(&rel_key).copied(),
+        &whole.state,
+        whole.relationships.get(&rel_key).copied(),
         &trader.0,
         &trader.1,
     );
     Ok(Some(dsm::types::proto::ConnectVaultWitnessV1 {
         vault_id: vault_id.to_vec(),
-        generation: head.generation,
+        generation,
         witness_ccb: witness.encode().map_err(|e| failure("witness", e))?,
     }))
+}
+
+/// Whether [`ensure_baseline`] published a baseline, or found one published.
+pub(crate) enum BaselineAt {
+    Published,
+    AlreadyPublished,
+}
+
+/// `vault_id`'s generation chain as Core walks the vault now, from its
+/// accepted genesis: what its owner signs a baseline over. `None` while the
+/// genesis is not accepted, and for a chain from a baseline this device
+/// adopted, which holds no history from the genesis to sign.
+fn owner_chain(
+    verifier: &Verifier<'_, crate::sdk::sofi_reads::LiveSofiReads<'_>>,
+    vault_id: &D32,
+) -> Result<Option<GenerationChain>, DsmError> {
+    let VaultGenesis::Accepted(genesis) = verifier
+        .vault_genesis(vault_id)
+        .map_err(|e| failure("genesis", e))?
+    else {
+        return Ok(None);
+    };
+    let chain = verifier.chain(vault_id).map_err(|e| failure("chain", e))?;
+    Ok(chain
+        .generation_chain(vault_id, &genesis)
+        .map_err(|e| failure("generation chain", format!("{e:?}")))?
+        .map(|(history, _)| history))
+}
+
+/// Sign and publish the owner's baseline of `vault_id` at the head of
+/// `history`, the vault's chain as Core walked it, unless one is published at
+/// that generation already: its history first, which the baseline commits and
+/// a reader proves a root below it from (SoFi Amendment S26), then the
+/// frontier and the baseline.
+async fn ensure_baseline(
+    set: &StorageSet,
+    own_g: &D32,
+    vault_id: &D32,
+    history: &GenerationChain,
+) -> Result<BaselineAt, DsmError> {
+    let (generation, root) = (history.head().generation(), *history.head().state_root());
+    if sofi_vault_head::owner_baseline(vault_id, generation)
+        .map_err(|e| failure("baseline", e))?
+        .is_some()
+    {
+        return Ok(BaselineAt::AlreadyPublished);
+    }
+    let history_root = publish_history(set, vault_id, history).await?;
+    let frontier = VaultFrontierV1 {
+        vault_id: *vault_id,
+        generation,
+        root,
+        history_root,
+    };
+    let network = crate::sdk::economic_admission_flow::committed_network_id()?;
+    let bundle = sign(&network, own_g, &frontier)?;
+    publish(set, &frontier, &bundle).await?;
+    sofi_vault_head::put_owner_baseline(vault_id, generation, &bundle)
+        .map_err(|e| failure("baseline", e))?;
+    log::info!(
+        "[vault baseline] {}: published the baseline at generation {generation}",
+        crate::util::text_id::encode_base32_crockford(&vault_id[..5]),
+    );
+    Ok(BaselineAt::Published)
+}
+
+/// The owner's duty (SoFi Amendment S24): a continuously online owner
+/// publishes a baseline after each realized generation. Each vault this
+/// device created is walked by Core from its accepted genesis, and a
+/// baseline is published at the head the walk established when none is
+/// published at that generation yet. Never on an admission's path: a baseline not published
+/// costs a fresh reader speed and nothing else. Returns how many baselines
+/// were published, and why each vault that has none at its head was left.
+pub(crate) async fn publish_owned_baselines(
+    core: &crate::sdk::core_sdk::CoreSDK,
+    set: &StorageSet,
+) -> (u32, Vec<String>) {
+    let mut left = Vec::new();
+    // A device mid-admission publishes after it; one with no admitted
+    // position has created no vault.
+    let Some(head) = core
+        .device_head()
+        .filter(|head| head.pending_economic_admission().is_none())
+    else {
+        return (0, left);
+    };
+    let (genesis, device_id) = (head.genesis_digest(), head.devid());
+    match crate::storage::client_db::economic_lineage::get_admitted() {
+        Ok(Some(..)) => {}
+        Ok(None) => return (0, left),
+        Err(e) => return (0, vec![format!("every vault: the admitted position: {e}")]),
+    }
+    let creations = match crate::sdk::economic_admission_flow::validated_root_or_activate(core)
+        .and_then(|validated| {
+            crate::sdk::sofi_reads::local_leaves_of_validated(&genesis, &device_id, &validated)
+        }) {
+        Ok(local) => local.vault_creations(),
+        Err(why) => return (0, vec![format!("every vault: this device's leaves: {why}")]),
+    };
+    if creations.is_empty() {
+        return (0, left);
+    }
+    let ctx =
+        match crate::sdk::sofi_reads::VerifierContext::new(set, Some((genesis, device_id)), None) {
+            Ok(ctx) => ctx,
+            Err(why) => return (0, vec![format!("every vault: no verifier: {why}")]),
+        };
+    let verifier = ctx.verifier();
+    let mut published = 0u32;
+    for creation in creations {
+        let vault = crate::util::text_id::encode_base32_crockford(&creation.vault_id[..5]);
+        let history = match owner_chain(&verifier, &creation.vault_id) {
+            Ok(Some(history)) => history,
+            Ok(None) => {
+                left.push(format!("{vault}: no chain from its accepted genesis"));
+                continue;
+            }
+            Err(why) => {
+                left.push(format!("{vault}: its chain: {why}"));
+                continue;
+            }
+        };
+        let generation = history.head().generation();
+        // At the genesis a reader needs no baseline: the genesis is one read.
+        if generation == 0 {
+            continue;
+        }
+        match ensure_baseline(set, &genesis, &creation.vault_id, &history).await {
+            Ok(BaselineAt::Published) => published += 1,
+            Ok(BaselineAt::AlreadyPublished) => {}
+            Err(why) => left.push(format!("{vault}: generation {generation}: {why}")),
+        }
+    }
+    (published, left)
 }
 
 /// How many objects of a history are put at once.
 const HISTORY_PUTS_AT_ONCE: usize = 16;
 
-/// Publish `vault_id`'s history up to `generation` (SoFi Amendment S26), from
-/// this device's record of the vault from its genesis: for every generation
-/// not published yet, its leaf, indexed under its root, the interior nodes
-/// it completed and the state leaf at its root; then the head. Returns the
-/// history root a frontier at `generation` commits. Every object must reach
-/// a member, or nothing is recorded as published and no baseline is signed.
+/// Publish `vault_id`'s history up to the head of `history` (SoFi Amendment
+/// S26), the vault's chain as Core walked it from its genesis: for every
+/// generation not published yet, its leaf, indexed under its root, the
+/// interior nodes it completed and the state leaf at its root; then the head.
+/// Returns the history root a frontier at that generation commits. Every
+/// object must reach a member, or nothing is recorded as published and no
+/// baseline is signed.
 pub(crate) async fn publish_history(
     set: &StorageSet,
     vault_id: &D32,
-    generation: u64,
+    history: &GenerationChain,
 ) -> Result<D32, DsmError> {
-    let rows =
-        sofi_vault_head::recorded_generations(vault_id).map_err(|e| failure("history", e))?;
-    match rows.first() {
-        Some(first) if first.generation == 0 => {}
-        Some(..) | None => {
-            return Err(failure(
-                "history",
-                "this device holds no record of the vault from its genesis",
-            ))
-        }
-    }
+    let generation = history.head().generation();
+    let roots: Vec<(u64, D32)> = (0..=generation)
+        .map(|g| {
+            history
+                .at(g)
+                .map(|(root, _)| (g, root))
+                .ok_or_else(|| failure("history", format!("generation {g} is not walked")))
+        })
+        .collect::<Result<_, _>>()?;
     let published =
         sofi_vault_head::history_published(vault_id).map_err(|e| failure("history", e))?;
     let mut builder = HistoryBuilder::new(*vault_id);
     let mut objects: Vec<(TaggedHashDomain<'static>, Vec<u8>)> = Vec::new();
     let mut index: Vec<(D32, D32)> = Vec::new();
-    for row in rows.iter().take_while(|row| row.generation <= generation) {
-        let appended = builder.append(&row.root);
-        if published.is_some_and(|published| row.generation <= published) {
+    for (row_generation, row_root) in &roots {
+        let appended = builder.append(row_root);
+        if published.is_some_and(|published| *row_generation <= published) {
             continue;
         }
         index.push((
-            history_locator(vault_id, &row.root),
+            history_locator(vault_id, row_root),
             dsm::storage_object::immutable_addr(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, &appended.leaf),
         ));
         objects.push((TAG_DSM_SOFI_VAULT_HISTORY_LEAF, appended.leaf));
@@ -360,13 +469,13 @@ pub(crate) async fn publish_history(
             objects.push((TAG_DSM_SOFI_VAULT_HISTORY_NODE, node));
         }
         // The genesis state is the genesis preimage's own.
-        if row.generation > 0 {
-            let state = sofi_vault_head::state_at(vault_id, &row.root)
+        if *row_generation > 0 {
+            let state = sofi_vault_head::state_at(vault_id, row_root)
                 .map_err(|e| failure("history", e))?
                 .ok_or_else(|| {
                     failure(
                         "history",
-                        format!("no state recorded at generation {}", row.generation),
+                        format!("no state recorded at generation {row_generation}"),
                     )
                 })?;
             objects.push((
@@ -452,32 +561,70 @@ pub(crate) async fn publish(
 
 // ── The reader ─────────────────────────────────────────────────────────────
 
+/// An owner baseline Core authenticated whose root is not the one this
+/// device's record holds at its generation: two authenticated roots at one
+/// generation. Named, never decided: the record is kept as it is and the
+/// baseline is not taken, and no verdict is recorded on the vault. A record
+/// the next walk heals (MR-DSM-0331, the record follows Core) takes the
+/// baseline after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ContradictedBaseline {
+    pub vault_id: D32,
+    pub generation: u64,
+    /// The root this device's record holds at `generation`.
+    pub held_root: D32,
+    /// The root the owner's authenticated baseline names there.
+    pub baseline_root: D32,
+}
+
+impl core::fmt::Display for ContradictedBaseline {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let id = |d: &D32| crate::util::text_id::encode_base32_crockford(&d[..5]);
+        write!(
+            f,
+            "vault {}: the record holds root {} at generation {}, and the owner's \
+             authenticated baseline there names {}; the record is kept and the baseline is \
+             not taken",
+            id(&self.vault_id),
+            id(&self.held_root),
+            self.generation,
+            id(&self.baseline_root)
+        )
+    }
+}
+
 /// What adopting one offered baseline came to.
 enum Adoption {
     Adopted(u64),
-    /// This device already holds a record of the vault, or nothing usable
-    /// was offered or published: the walk goes on as it would have.
+    /// The baseline is not later than the one this device's record starts
+    /// at, or nothing usable was offered or published: the walk goes on as
+    /// it would have.
     NotAdopted(String),
+    /// The record holds another root at the baseline's generation.
+    Contradicted(ContradictedBaseline),
     /// The owner signed two frontiers at the generation (Req 6.3).
     Quarantined(String),
     /// The baseline authenticates and the witness contradicts its root.
     Refused(String),
 }
 
-/// Adopt the baselines `offered` for the vaults this device holds nothing
-/// of, as `own`. A vault whose owner equivocated is quarantined and a
-/// witness its authenticated baseline contradicts is refused; either is an
-/// error, and neither falls back to a walk from the genesis. Every other
-/// outcome leaves the vault to its walk.
+/// Adopt each baseline `offered` that is later than the one this device's
+/// record of its vault starts at, as `own` (MR-DSM-0331: the latest
+/// authenticated owner baseline). A vault whose owner equivocated is
+/// quarantined and a witness its authenticated baseline contradicts is
+/// refused; either is an error, and neither falls back to a walk from the
+/// genesis. A baseline the record contradicts at its generation is named in
+/// what this returns. Every other outcome leaves the vault to its walk.
 pub(crate) async fn adopt(
     set: &StorageSet,
     verifier: &Verifier<'_, LiveSofiReads<'_>>,
     offered: &[dsm::types::proto::ConnectVaultWitnessV1],
     own: (D32, D32),
-) -> Result<(), DsmError> {
+) -> Result<Vec<ContradictedBaseline>, DsmError> {
     let adoptions =
         futures::future::join_all(offered.iter().map(|o| adopt_one(set, verifier, o, own))).await;
     let mut refused = Vec::new();
+    let mut contradicted = Vec::new();
     for (offered, adoption) in offered.iter().zip(adoptions) {
         let vault = crate::util::text_id::encode_base32_crockford(
             &offered.vault_id[..offered.vault_id.len().min(5)],
@@ -487,7 +634,14 @@ pub(crate) async fn adopt(
                 "[vault baseline] {vault}: started at the owner's baseline, generation {generation}"
             ),
             Adoption::NotAdopted(why) => {
-                log::info!("[vault baseline] {vault}: walked from what this device holds: {why}")
+                log::info!(
+                    "[vault baseline] {vault}: walked from its genesis or the baseline this \
+                     device adopted before: {why}"
+                )
+            }
+            Adoption::Contradicted(named) => {
+                log::warn!("[vault baseline] {named}");
+                contradicted.push(named);
             }
             Adoption::Quarantined(why) | Adoption::Refused(why) => {
                 refused.push(format!("{vault}: {why}"))
@@ -495,7 +649,7 @@ pub(crate) async fn adopt(
         }
     }
     if refused.is_empty() {
-        Ok(())
+        Ok(contradicted)
     } else {
         Err(failure("adopt", refused.join("; ")))
     }
@@ -522,12 +676,18 @@ async fn adopt_one(
         Ok(None) => {}
         Err(e) => return unavailable("quarantine", e),
     }
-    match sofi_vault_head::head(&vault_id) {
-        Ok(Some(..)) => {
-            return Adoption::NotAdopted("this device holds a record of the vault".into())
+    // Only a later baseline is the latest; one at or below the baseline the
+    // record starts at is not taken, and nothing is read for it.
+    match sofi_vault_head::baseline(&vault_id) {
+        Ok(Some((held, ..))) if held >= offered.generation => {
+            return Adoption::NotAdopted(format!(
+                "the baseline at generation {} is not later than the one this device's \
+                 record starts at, {held}",
+                offered.generation
+            ))
         }
-        Ok(None) => {}
-        Err(e) => return unavailable("head", e),
+        Ok(..) => {}
+        Err(e) => return unavailable("the held baseline", e),
     }
     let genesis = match tokio::task::block_in_place(|| verifier.vault_genesis(&vault_id)) {
         Ok(VaultGenesis::Accepted(genesis)) => *genesis,
@@ -596,7 +756,20 @@ async fn adopt_one(
         }
     };
     match sofi_vault_head::adopt_baseline(&witness, &bundle) {
-        Ok(()) => Adoption::Adopted(witness.generation()),
+        Ok(BaselineAdoption::Adopted) => Adoption::Adopted(witness.generation()),
+        Ok(BaselineAdoption::NotLater { held }) => Adoption::NotAdopted(format!(
+            "the baseline at generation {} is not later than the one this device's record \
+             starts at, {held}",
+            witness.generation()
+        )),
+        Ok(BaselineAdoption::Contradicted { held_root }) => {
+            Adoption::Contradicted(ContradictedBaseline {
+                vault_id,
+                generation: witness.generation(),
+                held_root,
+                baseline_root: *witness.root(),
+            })
+        }
         Err(e) => unavailable("recording the baseline", e),
     }
 }

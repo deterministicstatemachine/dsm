@@ -44,10 +44,14 @@ echo ""
 # stay where the conjunctions that earn them are written.
 bash ci/sofi_validated_root_constructors.sh
 
-# Gate G1 (SoFi §37): every pub fn under CORE/sofi has a production caller.
-# The baseline lists what the rebuild (R1..R14) has not wired yet and only
-# ever shrinks; R14 deletes it.
+# Gate G1 (SoFi §37): every pub fn under CORE/sofi, free or a method, has a
+# production caller, resolved by rust-analyzer's index of the workspace. The
+# baseline lists what the rebuild has not wired yet and only ever shrinks.
 python3 ci/sofi_reachability.py
+# Its negative control (MR-SOFI-0273): the same gate fails, naming it, on a
+# workspace whose public SoFi method has no production caller, beside a
+# called method of the same name on another type.
+bash ci/sofi_reachability_negative_control.sh
 echo ""
 
 # A vault genesis must not be consumable from a PRESENTED creation operation.
@@ -73,6 +77,9 @@ bash ci/storage_is_dumb.sh
 # Requirement status is derived from evidence: pins, counts, and every named
 # code item and test exist (specs/requirements/CONFORMANCE_GAPS.md §2 rule 6).
 python3 ci/conformance_evidence.py
+# The gate's Jest index is read from the files' structure, and a frontend test
+# name that does not resolve, or that a log does not show passing, fails it.
+python3 ci/test_conformance_evidence.py
 
 # Gate G2 (spec §37): SoFi evidence is fetched, never defaulted.
 bash ci/sofi_no_default_evidence.sh

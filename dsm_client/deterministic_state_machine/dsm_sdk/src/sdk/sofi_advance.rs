@@ -18,9 +18,11 @@
 //! and `F` and never reads it out of a register, checks the parent claim
 //! against the one this device itself registered at `p`, and selects the
 //! root — `P.R_realize` for Realized, the predecessor's for Void. The leaves
-//! that form the installed root are recomputed by Core too
-//! (`trader_post_states`) and bound to the values `T°` states; the cache is
-//! written only once it recomputes exactly that root.
+//! that form the installed root are Core's too
+//! (`ResolvedAdvance::installed_leaves`): the states `T°` writes, bound to the
+//! values it states, put into this device's cache, and refused unless the
+//! whole cache recomputes exactly that root. This module writes them and
+//! computes no root of its own (SoFi §2.1).
 use std::collections::BTreeMap;
 
 use dsm::economic::admission::{
@@ -28,8 +30,6 @@ use dsm::economic::admission::{
 };
 use dsm::economic::lineage::{AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::economic::register::read_root_cell;
-use dsm::economic::state::EconomicLeafState;
-use dsm::economic::tree::EconomicSmt;
 use dsm::route_chain::{CellReading, ChainState, Missing as CellMissing};
 use dsm::sofi::conformance::ConformanceMissing;
 use dsm::sofi::derive;
@@ -40,7 +40,7 @@ use dsm::sofi::registration::Registration;
 use dsm::sofi::resolution::{PositionEffect, Resolution};
 use dsm::sofi::resolve::{AcceptedGeneses, Acquired, SofiReads as _};
 use dsm::sofi::storage::Resolved;
-use dsm::sofi::validation::{trader_balance_changes, trader_post_states, vault_post_states};
+use dsm::sofi::validation::trader_balance_changes;
 use dsm::sofi::wire::{
     next_position, ParentClaimRef, SettlementBody, SettlementPreimage, TraderFulfillmentBody,
     TraderPrecommitBody, ValidationRef,
@@ -52,7 +52,7 @@ use dsm::types::operations::Operation;
 use crate::sdk::core_sdk::CoreSDK;
 use crate::sdk::realized_records::{record_realized, Moved, Realized};
 use crate::sdk::economic_admission_flow::validated_root_or_activate;
-use crate::sdk::route_seats::{read_cell_kept, root_claim_final, NodeSeats};
+use crate::sdk::route_seats::{read_cell_kept, root_claim_final, AtLeader, NodeSeats};
 use crate::sdk::sofi_exercise::{write_exercise, LegWrite};
 use crate::sdk::sofi_publish::{fetch_fulfillment, fetch_precommit, fetch_preimage};
 use crate::sdk::sofi_reads::{verifier_error, VerifierContext};
@@ -177,6 +177,9 @@ pub async fn fulfill(
     set: &StorageSet,
     request: &FulfillRequest<'_>,
 ) -> Result<Fulfilled, DsmError> {
+    // The admission this flow creates is its own until it returns; the sync
+    // finishes it after, if it is held for resume (owner ruling, 2026-10-30).
+    let _admission_handler = core.admission_handler();
     let precommit = request.precommit;
     let head = core
         .device_head()
@@ -302,11 +305,16 @@ impl OwnStanding {
 
 /// What an install that wrote nothing means: the network's status when the
 /// leader did not answer or the evidence is not in hand, an error otherwise
-/// — a non-conforming `F`, an object without canonical bytes, a member or
-/// this device's own store that could not be read or written.
+/// — a position another claim took, a non-conforming `F`, an object without
+/// canonical bytes, a member or this device's own store that could not be
+/// read or written.
 fn install_failure(e: InstallError) -> Result<NotTaken, DsmError> {
     match e {
         InstallError::LeaderUnreached => Ok(NotTaken::PairLeaderUnreached),
+        InstallError::PositionTaken => Err(refuse(
+            "install: another value is first at the leader of the position's pair: the \
+             position went to it, and this fulfillment can never register there",
+        )),
         InstallError::Unavailable(missing) => Ok(NotTaken::Evidence(missing)),
         InstallError::NotConforming(why) => Err(refuse(format!("install: {why:?}"))),
         InstallError::Wire(e) => Err(refuse(format!("install: {e:?}"))),
@@ -352,9 +360,12 @@ async fn exercise_legs(
     let recognized = dsm::sofi::exercise::recognize_exercise(&exercise.encode())
         .ok_or_else(|| refuse("the exercise built here does not recognize"))?;
     let writes = write_exercise(set, &exercise, &recognized).await?;
+    // A key another exercise is first at is decided for it: what that means
+    // for this position is the ladder's, from the cells (stage 10). Only a
+    // leader that did not answer leaves the stage to run again.
     let unreached: Vec<D32> = writes
         .iter()
-        .filter(|write| !write.reached_leader)
+        .filter(|write| write.leader == AtLeader::Unanswered)
         .map(|write| write.vault_id)
         .collect();
     if !unreached.is_empty() {
@@ -376,7 +387,8 @@ fn pending_fulfillment(core: &CoreSDK) -> Result<(PendingEconomicAdmission, D32)
         PendingAdmissionKind::SofiFulfillment { fulfillment_id } => Ok((pending, fulfillment_id)),
         PendingAdmissionKind::DsmBacked
         | PendingAdmissionKind::OfflineLoad { .. }
-        | PendingAdmissionKind::OfflineUnload { .. } => Err(refuse(format!(
+        | PendingAdmissionKind::OfflineUnload { .. }
+        | PendingAdmissionKind::OfflineSettle { .. } => Err(refuse(format!(
             "the pending admission at position {} is not a SoFi fulfillment",
             pending.economic_position
         ))),
@@ -666,31 +678,6 @@ pub(crate) fn own_parent_claim(
     }
 }
 
-/// The full post-transition leaf cache: the current cache with the states
-/// `T°` wrote replaced (or removed), as Core recomputed and bound them.
-fn post_leaf_cache(
-    current: Vec<(D32, D32, Vec<u8>)>,
-    post: &[(D32, Option<EconomicLeafState>)],
-) -> Result<Vec<(D32, D32, Vec<u8>)>, DsmError> {
-    let mut cache: BTreeMap<D32, (D32, Vec<u8>)> = current
-        .into_iter()
-        .map(|(k, v, ccb)| (k, (v, ccb)))
-        .collect();
-    for (key, state) in post {
-        match state {
-            Some(state) => {
-                let value = state.leaf_value().map_err(|e| storage("leaf value", e))?;
-                let ccb = state.encode().map_err(|e| storage("leaf state", e))?;
-                cache.insert(*key, (value, ccb));
-            }
-            None => {
-                cache.remove(key);
-            }
-        }
-    }
-    Ok(cache.into_iter().map(|(k, (v, ccb))| (k, v, ccb)).collect())
-}
-
 /// A vault or position named in a log line by its first five bytes.
 fn short_id(id: &D32) -> String {
     crate::util::text_id::encode_base32_crockford(&id[..5])
@@ -835,8 +822,9 @@ pub async fn resolve_pending_position(
 
     // What this verifier brings: its leaves, the position it resolved
     // itself, and the canonical chain of each vault a leg names — walked
-    // forward from the genesis or from the generations this device already
-    // recorded, so a parent past genesis is decided rather than deferred.
+    // forward by Core from the genesis or from the owner baseline this
+    // device adopted (MR-DSM-0331), so a parent past genesis is decided
+    // rather than deferred.
     log::info!("[sofi settle] position {q}: its exercise read back");
     let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
     for leg in precommit.legs() {
@@ -888,18 +876,17 @@ pub async fn resolve_pending_position(
         Err(e) => return Err(refuse(e.to_string())),
     };
 
-    // The leaves behind the installed root. Void moved nothing; Realized
-    // wrote exactly what T° states, recomputed by Core from the evidence the
-    // verdict was reached on — the evidence inside the established facts,
-    // the same bytes the advance derived the balances from. Either way the
-    // cache must recompute the root before it is written.
+    // The leaves behind the installed root, as Core binds them to it. Void
+    // moved nothing; Realized wrote exactly what T° states, recomputed by
+    // Core from the evidence the verdict was reached on — the same bytes the
+    // advance derived the balances from.
     let current = economic_lineage::load_leaf_cache().map_err(|e| storage("leaf cache", e))?;
-    let mut vault_heads = Vec::new();
+    let leaves = advanced
+        .installed_leaves(current)
+        .map_err(|e| refuse(format!("nothing written: {e}")))?;
     let mut realized = None;
-    let leaves = match (advanced.resolution, &established) {
+    match (advanced.resolution, &established) {
         (Resolution::Realized, Established::Facts(facts)) => {
-            let post = trader_post_states(&precommit, facts.preimage(), facts.evidence())
-                .map_err(|e| refuse(format!("post states: {e:?}")))?;
             // What realized, and every token it moved, from the same
             // evidence: what the history row names once the position is
             // installed.
@@ -919,16 +906,8 @@ pub async fn resolve_pending_position(
                 ));
             }
             realized = Some((what, moved));
-            // The vaults moved too, and this device is the one that resolved
-            // it: the post state each leg selected is kept so the NEXT trade
-            // against that vault has evidence to stand on (§44.4). Recomputed
-            // from the same evidence the verdict used, and bound to what each
-            // `V°` states — never read back from anything the producer said.
-            vault_heads = vault_post_states(&precommit, facts.preimage(), facts.evidence())
-                .map_err(|e| refuse(format!("vault post states: {e:?}")))?;
-            post_leaf_cache(current, &post)?
         }
-        (Resolution::Void, _) => current,
+        (Resolution::Void, _) => {}
         // The advance answers Realized over established facts only, and
         // never Invalid; stated so that a change to it is refused here.
         (Resolution::Realized, Established::RefutedInHand(..)) | (Resolution::Invalid, _) => {
@@ -936,15 +915,6 @@ pub async fn resolve_pending_position(
                 "the advance installed a root these facts cannot have produced",
             ))
         }
-    };
-    let mut tree = EconomicSmt::new();
-    for (key, value, ..) in &leaves {
-        tree.insert(*key, *value);
-    }
-    if tree.root() != advanced.root.economic_root() {
-        return Err(refuse(
-            "the post leaves do not recompute the installed root — nothing written",
-        ));
     }
     core.admit_resolved_sofi_position(
         &advanced,
@@ -952,8 +922,18 @@ pub async fn resolve_pending_position(
         &pending.operation_digest,
         &leaves,
         &set.id(),
-        &vault_heads,
     )?;
+    // The position is committed; what it owes each vault's epoch index comes
+    // after, never on its path (SoFi Amendment S23, "who writes"). What is
+    // not owed here, a later walk owes.
+    if let Err(e) =
+        crate::sdk::vault_history::owe_realized(set, &verifier, advanced.vault_generations())
+    {
+        log::error!(
+            "[sofi advance] the position stands; its vault generations are not owed to the \
+             epoch index yet: {e}"
+        );
+    }
     // A realized route is the event the wallet shows: its history row, and
     // the projection of every token it moved rebuilt from the installed
     // head. A void route moved nothing and has none.
@@ -980,13 +960,18 @@ mod tests {
 
     /// An install the network did not take — the leader of `s(q)` silent,
     /// the evidence not in hand after the rounds — is the network's status.
-    /// An install refused, or one whose read or write failed, is an error:
-    /// never the status, never `RetriesExhausted`.
+    /// An install refused, a position another claim took, or an install
+    /// whose read or write failed, is an error: never the status, never
+    /// `RetriesExhausted`.
     #[test]
     fn only_an_install_the_network_did_not_take_is_the_network_status() {
         assert!(matches!(
             install_failure(InstallError::LeaderUnreached),
             Ok(NotTaken::PairLeaderUnreached)
+        ));
+        assert!(matches!(
+            install_failure(InstallError::PositionTaken),
+            Err(DsmError::InvalidOperation(..))
         ));
         assert!(matches!(
             install_failure(InstallError::Unavailable(vec![ConformanceMissing::Preimage])),

@@ -336,6 +336,7 @@ fn discovery_code_names_no_constructor_of_established_state() {
         "record_walked",
         "record_final_release",
         "NativeReserveState",
+        "EstablishedReserve",
         "ValidatedEconomicRoot",
         "VaultPostState",
     ] {

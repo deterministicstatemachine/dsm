@@ -157,6 +157,16 @@ pub struct TokenPolicy {
     pub allowlist_device_ids: Vec<[u8; 32]>,
 }
 
+impl TokenPolicy {
+    /// Whether `device_id` may receive issuance under this policy (SoFi §49,
+    /// MR-SOFI-0312): anyone when the policy names no recipients, otherwise
+    /// only a device it names. Issuance is the only thing the allowlist
+    /// governs; no transfer, vault or market leg reads it.
+    pub fn admits_issuance_to(&self, device_id: &[u8; 32]) -> bool {
+        self.allowlist_device_ids.is_empty() || self.allowlist_device_ids.contains(device_id)
+    }
+}
+
 /// Bounds-checked cursor; the blob must be consumed exactly.
 struct Reader<'a> {
     b: &'a [u8],
@@ -380,6 +390,12 @@ mod tests {
     /// layout above — not from the SDK packer, so the parser is checked
     /// against the layout.
     fn blob() -> Vec<u8> {
+        created_blob(1, &[b"key".to_vec()], &tail())
+    }
+
+    /// A device-created blob with `threshold` over `signers`, then `tail`,
+    /// each written as the layout lays it out.
+    fn created_blob(threshold: u8, signers: &[Vec<u8>], tail: &[u8]) -> Vec<u8> {
         let mut b = vec![
             TOKEN_POLICY_VERSION,
             TOKEN_KIND_FUNGIBLE,
@@ -389,11 +405,17 @@ mod tests {
         ];
         b.extend_from_slice(&CREATOR_GENESIS);
         b.extend_from_slice(&CREATOR_DEVICE);
-        b.push(1); // threshold
-        b.push(1); // signers
-        b.extend_from_slice(&3u16.to_be_bytes());
-        b.extend_from_slice(b"key");
-        b.extend_from_slice(&tail());
+        b.push(threshold);
+        b.push(u8::try_from(signers.len()).expect("a signer count fits its byte"));
+        for key in signers {
+            b.extend_from_slice(
+                &u16::try_from(key.len())
+                    .expect("a key length fits its two bytes")
+                    .to_be_bytes(),
+            );
+            b.extend_from_slice(key);
+        }
+        b.extend_from_slice(tail);
         b
     }
 
@@ -413,17 +435,78 @@ mod tests {
 
     /// Everything after the release section: ticker through allowlist.
     fn tail() -> Vec<u8> {
-        let mut b = vec![3];
-        b.extend_from_slice(b"TKN");
-        b.extend_from_slice(&5u16.to_be_bytes());
-        b.extend_from_slice(b"Token");
-        b.push(6); // decimals
-        b.extend_from_slice(&1_000_000u128.to_be_bytes());
+        tail_with("TKN", "Token", 6, 1_000_000)
+    }
+
+    /// The tail with `ticker`, `alias`, `decimals` and `supply`, and no
+    /// description, icon or allowlist.
+    fn tail_with(ticker: &str, alias: &str, decimals: u8, supply: u128) -> Vec<u8> {
+        let mut b = vec![u8::try_from(ticker.len()).expect("a ticker length fits its byte")];
+        b.extend_from_slice(ticker.as_bytes());
+        b.extend_from_slice(
+            &u16::try_from(alias.len())
+                .expect("an alias length fits its two bytes")
+                .to_be_bytes(),
+        );
+        b.extend_from_slice(alias.as_bytes());
+        b.push(decimals);
+        b.extend_from_slice(&supply.to_be_bytes());
         b.extend_from_slice(&0u16.to_be_bytes()); // description
         b.extend_from_slice(&0u16.to_be_bytes()); // icon
         b.push(ALLOWLIST_KIND_NONE);
         b.extend_from_slice(&0u16.to_be_bytes());
         b
+    }
+
+    /// `blob` parses; `what` names it in the failure.
+    fn parses(blob: &[u8], what: &str) {
+        if let Err(why) = parse_token_policy_blob(blob) {
+            panic!("{what} must parse: {why}");
+        }
+    }
+
+    /// The refusal `blob` meets, which must name `reason`.
+    fn refused_for(blob: &[u8], reason: &str) {
+        match parse_token_policy_blob(blob) {
+            Err(why) => assert!(
+                why.contains(reason),
+                "refused, but for {why:?}, not {reason:?}"
+            ),
+            Ok(policy) => panic!("parsed, though it breaks {reason:?}: {policy:?}"),
+        }
+    }
+
+    /// MR-DSM-0194 (owner ruling, 2026-10-28: "Transferable tokens may trade
+    /// freely by default. Test the default."): a policy enumerates no pairs.
+    /// Two device-created tokens of different creators, tickers and decimals
+    /// are each a permitted market leg, so any pair of them may be traded;
+    /// the one fact the leg check reads is `transferable`, and a token whose
+    /// policy is not transferable is refused as a leg.
+    /// MUTATION CONTROL: dropping the `transferable` check from
+    /// `check_market_leg_permitted` admits the non-transferable leg and turns
+    /// this red.
+    #[test]
+    fn any_two_transferable_tokens_are_permitted_legs_and_only_transferable_decides() {
+        use crate::economic::issuance::{check_market_leg_permitted, MarketLegRefusal};
+        let one = parse_token_policy_blob(&created_blob(
+            1,
+            &[b"key".to_vec()],
+            &tail_with("AAA", "A", 2, 1_000),
+        ))
+        .expect("one token");
+        let mut other_blob = created_blob(1, &[b"other".to_vec()], &tail_with("BBB", "B", 0, 7));
+        other_blob[5] ^= 0xFF;
+        let other = parse_token_policy_blob(&other_blob).expect("another creator's token");
+        for (what, policy) in [("one token", &one), ("another creator's token", &other)] {
+            assert_eq!(check_market_leg_permitted(policy), Ok(()), "{what}");
+        }
+        let mut fixed_blob = created_blob(1, &[b"key".to_vec()], &tail_with("CCC", "C", 2, 9));
+        fixed_blob[3] = POLICY_FLAG_BURN;
+        let fixed = parse_token_policy_blob(&fixed_blob).expect("a non-transferable token");
+        assert_eq!(
+            check_market_leg_permitted(&fixed),
+            Err(MarketLegRefusal::NotTransferable)
+        );
     }
 
     #[test]
@@ -532,25 +615,36 @@ mod tests {
         assert!(parse_token_policy(&repeated).is_err());
     }
 
-    /// A named edit that breaks one rule of a policy's bytes.
+    /// An edit that breaks one rule of a policy's bytes, and the reason the
+    /// refusal must give: a blob refused for another rule than the one it
+    /// breaks leaves that rule untested.
     type Violation = (&'static str, Box<dyn Fn(&mut Vec<u8>)>);
 
     #[test]
     fn every_rule_refuses_its_violation() {
         let cases: Vec<Violation> = vec![
-            ("version", Box::new(|b| b[0] = 2)),
-            ("kind", Box::new(|b| b[1] = 1)),
+            ("version 2 is not", Box::new(|b| b[0] = 2)),
+            ("is not FUNGIBLE", Box::new(|b| b[1] = 1)),
             (
                 "externally backed",
                 Box::new(|b| b[2] = SUPPLY_CLASS_EXTERNALLY_BACKED),
             ),
-            ("unknown class", Box::new(|b| b[2] = 7)),
-            ("meaningless flag", Box::new(|b| b[3] |= 0x08)),
-            ("unknown release rule", Box::new(|b| b[4] = 9)),
-            ("zero threshold", Box::new(|b| b[THRESHOLD_AT] = 0)),
-            ("threshold above n", Box::new(|b| b[THRESHOLD_AT] = 2)),
-            ("zero signers", Box::new(|b| b[THRESHOLD_AT + 1] = 0)),
-            ("trailing byte", Box::new(|b| b.push(0))),
+            ("supply class 7 is unknown", Box::new(|b| b[2] = 7)),
+            ("flag bit that has no meaning", Box::new(|b| b[3] |= 0x08)),
+            ("release rule 9 is unknown", Box::new(|b| b[4] = 9)),
+            (
+                "threshold is not satisfiable",
+                Box::new(|b| b[THRESHOLD_AT] = 0),
+            ),
+            (
+                "threshold is not satisfiable",
+                Box::new(|b| b[THRESHOLD_AT] = 2),
+            ),
+            (
+                "signer count 0 is outside",
+                Box::new(|b| b[THRESHOLD_AT + 1] = 0),
+            ),
+            ("trailing bytes", Box::new(|b| b.push(0))),
             (
                 "truncated",
                 Box::new(|b| {
@@ -558,28 +652,117 @@ mod tests {
                 }),
             ),
             (
-                "allowlist flag without payload",
+                "allowlist flag disagrees with its payload",
                 Box::new(|b| b[3] |= POLICY_FLAG_ALLOWLIST),
             ),
         ];
-        for (why, edit) in cases {
+        for (reason, edit) in cases {
             let mut b = blob();
             edit(&mut b);
-            assert!(
-                parse_token_policy_blob(&b).is_err(),
-                "{why} must be refused"
-            );
+            refused_for(&b, reason);
         }
     }
 
+    /// SoFi §47 and MR-SOFI-0021: every bound the SDK's `token.create` checks
+    /// before it packs a policy, Core refuses by itself, from the bytes alone.
+    /// Each is taken at its edge, which parses, and one past it, which is
+    /// refused naming that bound. A Core bound looser or stricter than its
+    /// edge fails here whatever the SDK checks.
+    ///
+    /// MUTATION CONTROL: moving any one bound in `parse_token_policy_blob` or
+    /// `creator_and_signers` by one (the signer count's ceiling, the
+    /// threshold's, the ticker's ceiling, the decimals' ceiling), or deleting
+    /// one (the zero supply, the blank alias, the empty key, the repeated
+    /// key), turns this red.
+    #[test]
+    fn each_bound_parses_at_its_edge_and_is_refused_one_past_it() {
+        let key = |i: usize| format!("key-{i}").into_bytes();
+        let keys = |n: usize| (0..n).map(key).collect::<Vec<_>>();
+
+        // The signer set: 1 to MAX_POLICY_SIGNERS keys.
+        for n in [1, MAX_POLICY_SIGNERS] {
+            parses(
+                &created_blob(1, &keys(n), &tail()),
+                &format!("{n} signers parse"),
+            );
+        }
+        refused_for(
+            &created_blob(1, &keys(MAX_POLICY_SIGNERS + 1), &tail()),
+            &format!("signer count {} is outside", MAX_POLICY_SIGNERS + 1),
+        );
+
+        // The threshold: 1 to the signer count.
+        let three = keys(3);
+        parses(
+            &created_blob(3, &three, &tail()),
+            "a threshold of the whole set parses",
+        );
+        refused_for(
+            &created_blob(4, &three, &tail()),
+            "threshold is not satisfiable",
+        );
+
+        // Every key is a key, and none counts twice toward the threshold.
+        refused_for(
+            &created_blob(1, &[key(0), Vec::new()], &tail()),
+            "empty signer key",
+        );
+        refused_for(
+            &created_blob(2, &[key(0), key(0)], &tail()),
+            "names a signer twice",
+        );
+
+        // The ticker: 2 to 8 characters.
+        for ticker in ["TK", "TKNTKNTK"] {
+            parses(
+                &created_blob(1, &keys(1), &tail_with(ticker, "Token", 6, 1)),
+                &format!("the ticker {ticker:?} parses"),
+            );
+        }
+        refused_for(
+            &created_blob(1, &keys(1), &tail_with("TKNTKNTKN", "Token", 6, 1)),
+            "9 characters",
+        );
+
+        // The alias: any non-blank text.
+        parses(
+            &created_blob(1, &keys(1), &tail_with("TKN", "T", 6, 1)),
+            "a one-letter alias parses",
+        );
+        refused_for(
+            &created_blob(1, &keys(1), &tail_with("TKN", "   ", 6, 1)),
+            "alias is blank",
+        );
+
+        // The decimals: 0 to MAX_DECIMALS.
+        let most = u8::try_from(MAX_DECIMALS).expect("the most decimals fit their byte");
+        parses(
+            &created_blob(1, &keys(1), &tail_with("TKN", "Token", most, 1)),
+            &format!("{most} decimals parse"),
+        );
+        refused_for(
+            &created_blob(1, &keys(1), &tail_with("TKN", "Token", most + 1, 1)),
+            &format!("decimals {} exceed", most + 1),
+        );
+
+        // The supply: at least one base unit.
+        parses(
+            &created_blob(1, &keys(1), &tail_with("TKN", "Token", 6, 1)),
+            "a supply of one unit parses",
+        );
+        refused_for(
+            &created_blob(1, &keys(1), &tail_with("TKN", "Token", 6, 0)),
+            "zero genesis supply",
+        );
+    }
+
+    /// §50: a zero supply is not a token.
     #[test]
     fn a_zero_genesis_supply_is_refused() {
-        let mut b = blob();
-        // header (5) + creator (64) + threshold and n (2) + pk (2 + 3)
-        // + ticker (1 + 3) + alias (2 + 5) + decimals (1)
-        let at = THRESHOLD_AT + 2 + 5 + 4 + 7 + 1;
-        b[at..at + 16].copy_from_slice(&0u128.to_be_bytes());
-        assert!(parse_token_policy_blob(&b).is_err());
+        refused_for(
+            &created_blob(1, &[b"key".to_vec()], &tail_with("TKN", "Token", 6, 0)),
+            "zero genesis supply",
+        );
     }
 
     #[test]

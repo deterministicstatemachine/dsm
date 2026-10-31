@@ -605,6 +605,51 @@ mod tests {
         assert!(crate::economic::register::root_claim_naming(&honest, &k_root).is_some());
     }
 
+    /// `K_root(q)` is derived from the trader's genesis, its device and the
+    /// position (SoFi §7.2, §17.4), and a claim names the cell its own
+    /// genesis, device and position derive, nothing else. The trader's
+    /// honest claim at position 4 names `K_root(G, DevID, 4)`; at the key of
+    /// position 5, or of another genesis at position 4, it names nothing.
+    ///
+    /// MUTATION CONTROL: `economic_root_register_key` without its position,
+    /// or without its genesis, turns this red: the claim names the other
+    /// position's, or the other genesis's, cell.
+    #[test]
+    fn a_root_claim_names_only_the_cell_of_its_own_genesis_and_position() {
+        use crate::economic::register::{economic_root_register_key, root_claim_naming};
+        let trader = device([0xA7; 32]).unwrap();
+        let claim = sign_economic_root_claim(
+            &root_body(trader.devid, &trader, trader.att_a, 4),
+            &trader.sk,
+        )
+        .unwrap();
+        let genesis = [0x11; 32];
+        assert!(
+            root_claim_naming(
+                &claim,
+                &economic_root_register_key(&genesis, &trader.devid, 4)
+            )
+            .is_some(),
+            "the claim names its own cell"
+        );
+        assert!(
+            root_claim_naming(
+                &claim,
+                &economic_root_register_key(&genesis, &trader.devid, 5)
+            )
+            .is_none(),
+            "a claim of position 4 names nothing at position 5's cell"
+        );
+        assert!(
+            root_claim_naming(
+                &claim,
+                &economic_root_register_key(&[0x22; 32], &trader.devid, 4)
+            )
+            .is_none(),
+            "a claim of one genesis names nothing at another genesis's cell"
+        );
+    }
+
     /// Audit SA-25: a register value's key is checked against the device it
     /// names, by hash, before its signature is verified. Each claim below
     /// names the victim under another device's key and would also fail its

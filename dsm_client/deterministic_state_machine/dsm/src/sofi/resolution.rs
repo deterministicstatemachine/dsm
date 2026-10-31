@@ -180,12 +180,10 @@ pub fn parent_status(established: Option<[u8; 32]>, claimed: &[u8; 32]) -> Paren
 /// A chain is established, never assembled: it starts at an accepted genesis
 /// ([`VaultChain::from_genesis`]) or at an owner baseline Core authenticated
 /// ([`VaultChain::from_baseline`], SoFi Amendment S24), and grows by one
-/// Core-recomputed consumption at a time ([`VaultChain::extend`]). The one other way in is
-/// this verifier's own memo of generations it established before, anchored
-/// at the genesis it accepts now and linked row to row before it is stood on
-/// ([`VaultChain::from_recorded`]), which the CI gate
-/// `ci/sofi_validated_root_constructors.sh` pins to its one caller. Nothing
-/// read off the network becomes a root here.
+/// Core-recomputed consumption at a time ([`VaultChain::extend`]). Nothing a
+/// device recorded and nothing read off the network becomes a root here
+/// (MR-DSM-0331): a recorded generation tells a walk where to read, never
+/// what holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VaultChain {
     /// The generation `roots[0]` is at: zero for a chain from the genesis,
@@ -193,35 +191,54 @@ pub struct VaultChain {
     /// S24). Below it, only what `proven` holds is established.
     base: u64,
     roots: Vec<[u8; 32]>,
+    /// `steps[i]` is the bundle step of the exercise that consumed
+    /// `roots[i]` and built `roots[i + 1]`, as Core derived it (SoFi
+    /// Amendment S23): the attempt, `E`, the trader's `(G, DevID, q)` and
+    /// the route's other legs.
+    steps: Vec<crate::shared_lineage::BundleStep>,
     /// Roots below `base`, each proven under the baseline's authenticated
     /// history root (SoFi Amendment S26), by generation.
     proven: BTreeMap<u64, [u8; 32]>,
+    /// Why the walk that built this chain stopped before the vault's head:
+    /// what it read did not decide the generation after the last one. `None`
+    /// when it stopped at the head, or where it was asked to.
+    not_complete: Option<String>,
 }
 
-/// One generation as this device recorded it (`VaultChain::from_recorded`):
-/// the root, and — past genesis — the root it was built on and the operation
-/// that consumed that root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RecordedGeneration {
-    pub generation: u64,
-    pub root: [u8; 32],
-    pub pre_root: Option<[u8; 32]>,
-    pub consumed_by: Option<[u8; 32]>,
+/// A vault's generation chain from its genesis as a [`VaultChain`]
+/// established it, and each generation's step digest.
+pub type EstablishedGenerationChain = (
+    crate::shared_lineage::GenerationChain,
+    BTreeMap<u64, [u8; 32]>,
+);
+
+/// `vault_id`'s genesis as a shared lineage (SoFi Amendment S23): the accepted
+/// genesis root, and the address of its preimage object.
+pub fn vault_lineage_genesis(
+    vault_id: &[u8; 32],
+    genesis: &super::lineage::AcceptedVaultGenesis,
+) -> Result<crate::shared_lineage::SharedGenesisV1, super::wire::SofiWireError> {
+    let preimage = genesis.preimage().encode()?;
+    Ok(crate::shared_lineage::SharedGenesisV1::new(
+        crate::shared_lineage::LineageKind::Vault,
+        *vault_id,
+        *genesis.genesis_root(),
+        crate::storage_object::immutable_addr(
+            crate::common::domain_tags::TAG_DSM_SOFI_VAULT_GENESIS_OBJECT,
+            &preimage,
+        ),
+    ))
 }
 
-/// This device's own record of a chain contradicts itself, or the genesis it
-/// is anchored at. Not a network status: the local store is incoherent, and
-/// nothing is stood on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MemoBroken {
-    pub generation: u64,
-    pub why: &'static str,
-}
-
-impl core::fmt::Display for MemoBroken {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "recorded generation {}: {}", self.generation, self.why)
-    }
+/// Why a chain's generation chain cannot be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerationChainError {
+    /// The accepted genesis's preimage does not encode.
+    Genesis(super::wire::SofiWireError),
+    /// A generation does not extend the chain.
+    Lineage(crate::shared_lineage::LineageObjectError),
+    /// A generation of the chain was built by a step that is not a vault's.
+    NotAVaultStep(u64),
 }
 
 /// Why a post state does not extend a chain: it was not built on the chain's
@@ -252,70 +269,25 @@ impl VaultChain {
         Self {
             base: 0,
             roots: vec![*genesis.genesis_root()],
+            steps: Vec::new(),
             proven: BTreeMap::new(),
+            not_complete: None,
         }
     }
 
     /// The chain at an owner baseline (SoFi Amendment S24): `R*_b` is the
     /// root of the frontier the vault's owner signed, as Core authenticated
-    /// it, and nothing below `b` is established. The generations this
-    /// verifier recorded from `b` are its own memo, linked one to the next
-    /// exactly as [`Self::from_recorded`] links them; the first must be the
-    /// baseline's own. The CI gate pins this constructor to its one caller.
-    pub fn from_baseline(
-        baseline: &super::frontier::VerifiedFrontier,
-        rows: &[RecordedGeneration],
-    ) -> Result<Self, MemoBroken> {
+    /// it, and nothing below `b` is established. The CI gate pins this
+    /// constructor to its one caller, the chain walk's start.
+    pub fn from_baseline(baseline: &super::frontier::VerifiedFrontier) -> Self {
         let frontier = baseline.frontier();
-        let mut chain = Self {
+        Self {
             base: frontier.generation,
             roots: vec![frontier.root],
+            steps: Vec::new(),
             proven: BTreeMap::new(),
-        };
-        let Some((first, later)) = rows.split_first() else {
-            return Ok(chain);
-        };
-        if first.generation != frontier.generation || first.root != frontier.root {
-            return Err(MemoBroken {
-                generation: first.generation,
-                why: "the recorded baseline is not the authenticated one",
-            });
+            not_complete: None,
         }
-        chain.link(later)?;
-        Ok(chain)
-    }
-
-    /// Append recorded rows, each built on the head before it and naming
-    /// the operation that consumed it.
-    fn link(&mut self, rows: &[RecordedGeneration]) -> Result<(), MemoBroken> {
-        for row in rows {
-            let Some((generation, head)) = self.head() else {
-                return Err(MemoBroken {
-                    generation: row.generation,
-                    why: "no head to link to",
-                });
-            };
-            if row.generation != generation + 1 {
-                return Err(MemoBroken {
-                    generation: row.generation,
-                    why: "the rows are not contiguous",
-                });
-            }
-            if row.pre_root != Some(head) {
-                return Err(MemoBroken {
-                    generation: row.generation,
-                    why: "the generation was not built on the one before it",
-                });
-            }
-            if row.consumed_by.is_none() {
-                return Err(MemoBroken {
-                    generation: row.generation,
-                    why: "no operation is recorded as consuming the generation before it",
-                });
-            }
-            self.roots.push(row.root);
-        }
-        Ok(())
     }
 
     /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
@@ -334,52 +306,80 @@ impl VaultChain {
             });
         }
         self.roots.push(*post.root());
+        self.steps.push(post.step().clone());
         Ok(())
     }
 
-    /// THE MEMO: the generations this verifier itself established earlier,
-    /// as it recorded them, anchored at the genesis it accepts NOW and
-    /// linked one to the next before any of it is stood on. Row zero is the
-    /// accepted genesis root; every later row was built on the root before
-    /// it and names the operation that consumed it. A memo proves nothing by
-    /// existing — what it holds is this device's own earlier conclusion, read
-    /// back — so what can be checked is checked here, and a record that does
-    /// not anchor or does not link is a contradiction, never a chain. The CI
-    /// gate pins this constructor to its one caller, the chain walk's start.
-    pub fn from_recorded(
+    /// The vault's generation chain as this chain established it (DSM
+    /// Amendment A15): the genesis `d_0` from the accepted genesis, then each
+    /// generation with its consumption's step digest, and that step digest
+    /// by generation. `None` for a chain that starts at an owner baseline,
+    /// which holds no generation digest from the genesis.
+    pub fn generation_chain(
+        &self,
+        vault_id: &[u8; 32],
         genesis: &super::lineage::AcceptedVaultGenesis,
-        rows: &[RecordedGeneration],
-    ) -> Result<Self, MemoBroken> {
-        let mut chain = Self::from_genesis(genesis);
-        let Some((first, later)) = rows.split_first() else {
-            return Ok(chain);
-        };
-        if first.generation != 0 {
-            return Err(MemoBroken {
-                generation: first.generation,
-                why: "the rows are not contiguous from generation zero",
-            });
+    ) -> Result<Option<EstablishedGenerationChain>, GenerationChainError> {
+        if self.base != 0 {
+            return Ok(None);
         }
-        if first.root != *genesis.genesis_root() {
-            return Err(MemoBroken {
-                generation: 0,
-                why: "the recorded genesis is not the accepted genesis",
-            });
+        let mut chain = crate::shared_lineage::GenerationChain::from_genesis(
+            &vault_lineage_genesis(vault_id, genesis).map_err(GenerationChainError::Genesis)?,
+        );
+        let mut steps = BTreeMap::new();
+        for (at, (root, consumed)) in self.roots.iter().skip(1).zip(&self.steps).enumerate() {
+            let crate::shared_lineage::BundleStep::Vault {
+                external_commitment,
+                ..
+            } = consumed
+            else {
+                return Err(GenerationChainError::NotAVaultStep(at as u64 + 1));
+            };
+            let step = crate::shared_lineage::vault_step_digest(external_commitment);
+            chain
+                .push(*root, step)
+                .map_err(GenerationChainError::Lineage)?;
+            steps.insert(at as u64 + 1, step);
         }
-        if first.pre_root.is_some() || first.consumed_by.is_some() {
-            return Err(MemoBroken {
-                generation: 0,
-                why: "the genesis generation records a consumption",
-            });
-        }
-        chain.link(later)?;
-        Ok(chain)
+        Ok(Some((chain, steps)))
     }
 
-    /// `R*_g` for every generation established, in generation order, from
-    /// [`Self::base`].
-    pub fn roots(&self) -> &[[u8; 32]] {
-        &self.roots
+    /// The bundle steps of the `count` generations after `start`, as Core
+    /// derived each from the exercise that built it: what a segment's
+    /// bundle carries (SoFi Amendment S23). `None` where the chain does not
+    /// hold all of them.
+    pub fn bundle_steps(
+        &self,
+        start: u64,
+        count: u64,
+    ) -> Option<&[crate::shared_lineage::BundleStep]> {
+        let from = start.checked_sub(self.base)?;
+        let to = from.checked_add(count)?;
+        // Within the chain's own length, which a `usize` holds, or nothing.
+        if to > self.steps.len() as u64 {
+            return None;
+        }
+        self.steps.get(from as usize..to as usize)
+    }
+
+    /// Why the walk that built this chain did not reach the vault's head,
+    /// when it did not: the chain is then a prefix of the vault's
+    /// chain and its head is not the vault's. A reader of the head reads
+    /// "not complete yet": a network status, never a verdict.
+    pub fn not_complete(&self) -> Option<&str> {
+        self.not_complete.as_deref()
+    }
+
+    /// The walk stopped here because what it read does not decide the next
+    /// generation yet.
+    pub(crate) fn stop_short(&mut self, why: String) {
+        self.not_complete = Some(why);
+    }
+
+    /// A walk resumes this chain from its head: whatever stopped the walk
+    /// before is read again.
+    pub(crate) fn resume(&mut self) {
+        self.not_complete = None;
     }
 
     /// The generation the chain starts at.
@@ -393,7 +393,9 @@ impl VaultChain {
         Self {
             base: 0,
             roots,
+            steps: Vec::new(),
             proven: BTreeMap::new(),
+            not_complete: None,
         }
     }
 
@@ -1170,18 +1172,8 @@ impl AttemptWalk {
         &self.parent_root
     }
 
-    /// The attempt the walk started at.
-    pub fn base(&self) -> u64 {
-        self.base
-    }
-
     pub fn outcome(&self) -> WalkOutcome {
         self.outcome
-    }
-
-    /// `E` of the exercise that consumed the parent, when the walk found one.
-    pub fn consumed_by(&self) -> Option<&[u8; 32]> {
-        self.consumed_by.as_ref()
     }
 
     /// `AttemptLive(K^(attempt))` — every key before `attempt` skipped — and
@@ -1365,104 +1357,26 @@ mod tests {
         assert_eq!(resolve_position(&realized(&refuted)), Ok(Resolution::Void));
     }
 
-    /// The genesis the memo tests anchor at, accepted as the fixture owner's
-    /// creation.
+    /// A genesis accepted as the fixture owner's creation.
     fn accepted_genesis() -> crate::sofi::lineage::AcceptedVaultGenesis {
         use crate::sofi::lineage::genesis_acceptance::{accept, valid};
         accept(&valid()).expect("the fixture's genesis is accepted")
     }
 
-    /// Rows as this device records them: the genesis at zero, then each
-    /// root built on the one before it and consumed by a distinct operation.
-    fn recorded(genesis: &[u8; 32], roots: &[[u8; 32]]) -> Vec<RecordedGeneration> {
-        let mut rows = vec![RecordedGeneration {
-            generation: 0,
-            root: *genesis,
-            pre_root: None,
-            consumed_by: None,
-        }];
-        let mut previous = *genesis;
-        for (i, root) in roots.iter().enumerate() {
-            rows.push(RecordedGeneration {
-                generation: i as u64 + 1,
-                root: *root,
-                pre_root: Some(previous),
-                consumed_by: Some([0xC0 | i as u8; 32]),
-            });
-            previous = *root;
-        }
-        rows
-    }
-
-    /// THE MEMO IS ANCHORED AND LINKED, OR IT IS NOTHING. The rows this
-    /// device recorded become a chain only from the genesis it accepts now,
-    /// each generation built on the one before it and consumed by a named
-    /// operation; a record that does not anchor, does not link, names no
-    /// consumption or skips a generation is a contradiction and no chain.
-    /// MUTATION CONTROL: a constructor that takes the rows as they are turns
-    /// this red.
+    /// A chain at its start yields the vault's generation chain from the
+    /// genesis the verifier accepted: generation 0 at the genesis root, with
+    /// no step before a consumption.
     #[test]
-    fn the_memo_becomes_a_chain_only_anchored_at_the_genesis_and_linked_row_to_row() {
+    fn a_chain_from_the_genesis_yields_its_generation_chain_from_that_genesis() {
         let genesis = accepted_genesis();
-        let g = *genesis.genesis_root();
-        let (r1, r2) = ([0xA1; 32], [0xA2; 32]);
-
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &[]).unwrap().roots(),
-            &[g][..],
-            "no rows: the chain is the genesis alone"
-        );
-        let rows = recorded(&g, &[r1, r2]);
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &rows).unwrap().roots(),
-            &[g, r1, r2][..]
-        );
-
-        // Not anchored: row zero is not the genesis accepted now.
-        let mut unanchored = rows.clone();
-        unanchored[0].root = OTHER_ROOT;
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &unanchored)
-                .unwrap_err()
-                .generation,
-            0
-        );
-        // The genesis row records a consumption.
-        let mut consumed_genesis = rows.clone();
-        consumed_genesis[0].pre_root = Some(OTHER_ROOT);
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &consumed_genesis)
-                .unwrap_err()
-                .generation,
-            0
-        );
-        // Not linked: generation 2 was not built on generation 1.
-        let mut unlinked = rows.clone();
-        unlinked[2].pre_root = Some(OTHER_ROOT);
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &unlinked)
-                .unwrap_err()
-                .generation,
-            2
-        );
-        // No consumption named.
-        let mut unnamed = rows.clone();
-        unnamed[1].consumed_by = None;
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &unnamed)
-                .unwrap_err()
-                .generation,
-            1
-        );
-        // A generation skipped.
-        let mut gapped = rows.clone();
-        gapped.remove(1);
-        assert_eq!(
-            VaultChain::from_recorded(&genesis, &gapped)
-                .unwrap_err()
-                .generation,
-            2
-        );
+        let Ok(Some((chain, steps))) =
+            VaultChain::from_genesis(&genesis).generation_chain(&[0x5B; 32], &genesis)
+        else {
+            panic!("a chain from the genesis has a generation chain")
+        };
+        assert_eq!(chain.head().generation(), 0);
+        assert_eq!(chain.head().state_root(), genesis.genesis_root());
+        assert_eq!(steps.len(), 0);
     }
 
     /// A leg that consumed its canonical parent on this operation's E.
@@ -2439,7 +2353,7 @@ mod tests {
         let consumed = walk(&V, &PRE, 0, 16, facts_for);
         assert_eq!(consumed.outcome(), WalkOutcome::Consumed { attempt: 3 });
         assert_eq!(
-            consumed.consumed_by(),
+            consumed.consumed_by.as_ref(),
             Some(&E),
             "the walk names who consumed"
         );
@@ -2939,5 +2853,246 @@ mod tests {
             };
             assert_eq!(resolve_position(&facts), Ok(Resolution::Invalid));
         }
+    }
+
+    // ── model-to-code correspondence: tla/DSM_SofiFulfillment.tla ──────────
+
+    /// The model's resolution of trader T's position (`Resolve(T)`), over the
+    /// facts Core is handed. States whose facts are not complete (validation
+    /// evidence unavailable, conformance unavailable, the trader parent's
+    /// branch undecided) are never handed to Core: the SDK keeps reading
+    /// (Amendment S7), so they are not enumerated.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ModelResolution {
+        Pending,
+        Invalid,
+        Realized,
+        Void,
+    }
+
+    /// The trader parent states the model names, as the facts Core holds:
+    /// single and taken leave `PRE`; other and none, and a lineage Invalid,
+    /// leave no root `P` can build on.
+    fn model_parents() -> [(ParentPosition, &'static str); 5] {
+        [
+            (HELD, "single"),
+            (
+                ParentPosition::ConditionalSelected { selected_root: PRE },
+                "taken",
+            ),
+            (
+                ParentPosition::ConditionalSelected {
+                    selected_root: OTHER_ROOT,
+                },
+                "other",
+            ),
+            (ParentPosition::ConditionalNoRoot, "none"),
+            (NOT_HELD, "other claim held"),
+        ]
+    }
+
+    /// Whether a fact holds, as the model enumerates both cases.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Holds {
+        Yes,
+        No,
+    }
+
+    /// Every leg the model's facts give: the key empty, final on `E1`, or
+    /// final on another operation's commitment; the parent canonical,
+    /// orphaned or not yet established; the attempt live or not; the parent
+    /// consumed by another operation or not.
+    fn model_legs() -> Vec<LegFacts> {
+        let mut legs = Vec::new();
+        for cell in [
+            CellFact::Open,
+            CellFact::Held {
+                id: E,
+                state: ChainState::Final,
+            },
+            CellFact::Held {
+                id: OTHER_E,
+                state: ChainState::Final,
+            },
+        ] {
+            for parent in [
+                ParentStatus::Canonical,
+                ParentStatus::Orphaned,
+                ParentStatus::Unavailable,
+            ] {
+                for live in [Holds::Yes, Holds::No] {
+                    for consumed in [Holds::Yes, Holds::No] {
+                        legs.push(LegFacts {
+                            cell,
+                            parent,
+                            attempt_live: live == Holds::Yes,
+                            parent_consumed_elsewhere: consumed == Holds::Yes,
+                        });
+                    }
+                }
+            }
+        }
+        legs
+    }
+
+    /// `ConsumedRoute`: registered, conforming, valid, the parent compatible,
+    /// and every leg final on `E1` from a canonical, live parent.
+    fn model_consumed(facts: &RouteFacts<'_>, compatible: bool) -> bool {
+        facts.pair == PairStanding::Registered
+            && facts.conformance == Valid
+            && facts.validation == Valid
+            && compatible
+            && facts
+                .legs
+                .iter()
+                .all(|l| l.parent == ParentStatus::Canonical && l.attempt_live && l.final_on(&E))
+    }
+
+    /// `Resolve(T)`, transcribed from the model.
+    fn model_resolve(facts: &RouteFacts<'_>, compatible: bool) -> ModelResolution {
+        if facts.pair != PairStanding::Registered {
+            return ModelResolution::Pending;
+        }
+        if !compatible {
+            return ModelResolution::Invalid;
+        }
+        if facts.conformance == Invalid {
+            return ModelResolution::Invalid;
+        }
+        if facts.validation == Invalid {
+            return ModelResolution::Invalid;
+        }
+        if model_consumed(facts, compatible) {
+            return ModelResolution::Realized;
+        }
+        let void_evidence = facts.legs.iter().any(|l| {
+            l.final_on_other(&E)
+                || l.parent == ParentStatus::Orphaned
+                || l.parent_consumed_elsewhere
+        });
+        if facts.storage_resolved && void_evidence {
+            return ModelResolution::Void;
+        }
+        ModelResolution::Pending
+    }
+
+    /// `Skipped(k)` and `ConsumesAt(E1, k)` for the key of leg `at`, final on
+    /// `E1`: the route rejected by validation or conformance (arm i), another
+    /// leg's parent orphaned (ii) or consumed elsewhere (iii), the trader
+    /// parent impossible (iv), or the position lost; consumed when the route
+    /// consumed.
+    fn model_classify(facts: &RouteFacts<'_>, at: usize, compatible: bool) -> AttemptClass {
+        let others = || {
+            facts
+                .legs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, l)| l)
+        };
+        let rejected = facts.validation == Invalid
+            || facts.conformance == Invalid
+            || others().any(|l| l.parent == ParentStatus::Orphaned)
+            || others().any(|l| l.parent_consumed_elsewhere)
+            || !compatible;
+        if rejected || facts.pair == PairStanding::Lost {
+            AttemptClass::Skipped
+        } else if model_consumed(facts, compatible) {
+            AttemptClass::Consumed
+        } else {
+            AttemptClass::Unresolved
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's resolution layer
+    /// refines `tla/DSM_SofiFulfillment.tla` for trader T's two-leg route
+    /// (its checked configuration: `CreationValidB`, every fault off). Every
+    /// combination of the facts the model's states give Core — the pair
+    /// registered, pending or lost; five trader-parent states; conformance and
+    /// validation each Valid or Invalid; each of two legs empty, final on
+    /// `E1` or final on another commitment, its parent canonical, orphaned or
+    /// unestablished, its attempt live or not, its parent consumed elsewhere
+    /// or not; storage-resolved as the model derives it — is resolved by
+    /// `resolve_position` exactly as the model's `Resolve(T)` resolves it
+    /// (Realized, Void, Invalid, or not yet), and each leg final on `E1` is
+    /// classified by `classify_attempt` exactly as the model's `Skipped` and
+    /// `ConsumesAt` classify its key. The model skips a key for the other
+    /// legs' lost parents and Core for any leg's, so a leg whose own parent
+    /// is already lost (its key then reaches no consumption either way) is
+    /// compared only for not being consumed.
+    /// MUTATION CONTROL: resolving on past a conformance failure, or past a
+    /// validation failure, turns this red.
+    #[test]
+    fn the_resolution_layer_refines_the_fulfillment_model() {
+        let legs = model_legs();
+        let mut compared = 0usize;
+        for pair in [
+            PairStanding::Registered,
+            PairStanding::Pending,
+            PairStanding::Lost,
+        ] {
+            for (parent, name) in model_parents() {
+                let compatible = trader_parent_compatible(&parent, &PRE);
+                assert_eq!(
+                    compatible,
+                    name == "single" || name == "taken",
+                    "{name}: the model's ParentCompatible"
+                );
+                for conformance in [Valid, Invalid] {
+                    for validation in [Valid, Invalid] {
+                        for a in &legs {
+                            for b in &legs {
+                                let route = [*a, *b];
+                                let storage_resolved =
+                                    route.iter().all(|l| l.final_on(&E) || l.final_on_other(&E));
+                                let facts = RouteFacts {
+                                    external_commitment: E,
+                                    pair,
+                                    conformance,
+                                    parent,
+                                    parent_pre_root: PRE,
+                                    validation,
+                                    storage_resolved,
+                                    verdict: VerdictFact::NotARelease,
+                                    legs: &route,
+                                };
+                                let core = match resolve_position(&facts) {
+                                    Ok(Resolution::Realized) => ModelResolution::Realized,
+                                    Ok(Resolution::Void) => ModelResolution::Void,
+                                    Ok(Resolution::Invalid) => ModelResolution::Invalid,
+                                    Err(
+                                        Incomplete::NotRegistered | Incomplete::StorageNotFinal,
+                                    ) => ModelResolution::Pending,
+                                };
+                                assert_eq!(
+                                    core,
+                                    model_resolve(&facts, compatible),
+                                    "{name}: {facts:?}"
+                                );
+                                for (at, leg) in route.iter().enumerate() {
+                                    if !leg.final_on(&E) {
+                                        continue;
+                                    }
+                                    let (class, _) = classify_attempt(&facts, leg);
+                                    let own_lost = leg.parent == ParentStatus::Orphaned
+                                        || leg.parent_consumed_elsewhere;
+                                    if own_lost {
+                                        assert_ne!(class, AttemptClass::Consumed, "{facts:?}");
+                                    } else {
+                                        assert_eq!(
+                                            class,
+                                            model_classify(&facts, at, compatible),
+                                            "{name}: leg {at}: {facts:?}"
+                                        );
+                                    }
+                                }
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 3 * 5 * 2 * 2 * legs.len() * legs.len());
     }
 }

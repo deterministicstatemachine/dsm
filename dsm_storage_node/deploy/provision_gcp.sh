@@ -29,11 +29,11 @@ fi
 PUB_KEY_CONTENT="$(cat "${SSH_PUB_KEY}")"
 
 echo "=============================================="
-echo " DSM Storage Node Multi-Region Deployment (GCP)"
+echo " DSM Storage Node Deployment (GCP)"
 echo "=============================================="
 echo "  Project:    ${GCP_PROJECT}"
-echo "  Regions:    us-east1, europe-west1, asia-southeast1"
-echo "  Nodes:      6 total (2 per region)"
+echo "  Region:     us-central1 (terraform/gcp/main.tf)"
+echo "  Nodes:      5 (quorum 3 of 5)"
 echo "  SSH key:    ${SSH_KEY}"
 echo ""
 

@@ -48,10 +48,9 @@ Vars == <<deviceRoots, smtState, ledger>>
 \*       (XChaCha20-Poly1305 with a chain-head-wrap-key-derived AEAD key).
 \*
 \*   (3) Bilateral both-side stamping. In every accepted bilateral
-\*       transition the sender stamps {ek_pk_a, ek_cert_a, kyber_ct_a,
-\*       sig_a} on the stitched receipt, and the receiver
-\*       counter-stamps {ek_pk_b, ek_cert_b, kyber_ct_b, sig_b} on
-\*       their own copy. This is what materialises CountersignedByBoth
+\*       transition the sender stamps {ek_pk_a, ek_cert_a, sig_a} on the
+\*       stitched receipt, and the receiver counter-stamps {ek_pk_b,
+\*       ek_cert_b, sig_b} on their own copy. This is what materialises CountersignedByBoth
 \*       at the byte level — both EKs chain back to their respective
 \*       AKs independently.
 \*

@@ -79,3 +79,17 @@ pub trait PartitionSig {
     /// Verify a partition signature over a 32-byte digest under the pinned `pk`.
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
 }
+
+/// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an
+/// offline account needs, which never generates a partition key or signs. Every
+/// [`PartitionSig`] verifies.
+pub trait HostSig {
+    /// Verify a partition signature over a 32-byte digest under the pinned `pk_host`.
+    fn verify(pk_host: &[u8], message: &[u8; 32], sig: &[u8]) -> bool;
+}
+
+impl<P: PartitionSig> HostSig for P {
+    fn verify(pk_host: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
+        P::part_verify(pk_host, message, sig)
+    }
+}

@@ -83,6 +83,7 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
         to_device_id: vec![1; 32],
         amount: Balance::amount(5),
         policy_commit,
+        token_policy: Vec::new(),
         terms_commitment: dsm::types::operations::TransferTerms {
             token_id: b"ERA".to_vec(),
             nonce: vec![0; 8],
@@ -98,16 +99,25 @@ fn bearer_transfer(policy_commit: [u8; 32]) -> Operation {
 
 // ── The fence predicate ────────────────────────────────────────────────────
 
+/// Activity that touches no economic leaf: a token adoption commits a policy
+/// leaf and moves no value.
+fn ordinary_activity() -> Operation {
+    Operation::AdoptToken {
+        policy_commit: ERA,
+        signature: Vec::new(),
+    }
+}
+
 #[test]
 fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
     let p = pending(
         PendingAdmissionKind::DsmBacked,
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
-    let op = Operation::Noop;
+    let op = ordinary_activity();
 
-    // A publication delay must not look like a device fault: relationship
-    // activity that touches no economic leaf continues throughout.
+    // A publication delay must not look like a device fault: activity that
+    // touches no economic leaf continues throughout.
     assert!(fence_allows(&p, EconomicEffect::None, &op).is_ok());
 
     assert!(matches!(
@@ -122,7 +132,7 @@ fn the_fence_blocks_economic_writes_and_allows_ordinary_activity() {
 
 #[test]
 fn the_fence_engages_only_while_actually_pending() {
-    let op = Operation::Noop;
+    let op = ordinary_activity();
     // Before local acceptance nothing durable changed, and after admission the
     // protection has served its purpose. Fencing in either state would stall
     // the device for no benefit.
@@ -214,7 +224,11 @@ fn an_unidentifiable_bearer_operation_fails_closed_during_a_boundary_fence() {
         EconomicAdmissionState::LocalAcceptedPendingEcon,
     );
     assert!(matches!(
-        fence_allows(&load, EconomicEffect::OfflineAccountOnly, &Operation::Noop),
+        fence_allows(
+            &load,
+            EconomicEffect::OfflineAccountOnly,
+            &ordinary_activity()
+        ),
         Err(FenceBlock::BearerUseOfPendingAllocation { .. })
     ));
 }
@@ -253,6 +267,7 @@ struct FaucetFixture {
 /// The reserve state the fixture's release succeeds: `R_0`.
 fn reserve_genesis() -> dsm::economic::native_reserve::NativeReserveState {
     dsm::economic::native_reserve::NativeReserveState::genesis(b"dsm-testnet", canonical_set_id())
+        .expect("R_0")
 }
 
 fn faucet_fixture(position: u64) -> FaucetFixture {
@@ -264,7 +279,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     };
     let (pk, sk) = trader().clone();
     let parent = reserve_genesis();
-    let reserve_id = parent.reserve_id;
+    let reserve_id = *parent.reserve_id();
     let generation = 1u64;
     let op = Operation::FaucetClaim {
         reserve_id,
@@ -361,14 +376,23 @@ impl ProvenanceResolver for OneTicket {
         generation: u64,
     ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
         let parent = reserve_genesis();
-        if *reserve_id != parent.reserve_id || generation != 1 {
+        if reserve_id != parent.reserve_id() || generation != 1 {
             return Err(PeerLineageFailure::Incomplete(format!(
                 "this fixture's walk reached generation 1 only, not {generation} of {reserve_id:?}"
             )));
         }
+        // The reader's heads around the release: the genesis, and this
+        // release established on it by Core as generation 1.
+        let mut lineage = dsm::economic::native_reserve::ReserveLineage::from_genesis(&parent)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
+        let before = lineage.chain().head();
+        lineage
+            .establish(&self.envelope)
+            .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
-            parent,
+            parent: before,
+            child: lineage.chain().head(),
         })
     }
 
@@ -401,168 +425,6 @@ impl ProvenanceResolver for OneTicket {
             "this fixture roots no token anchors: {policy_commit:?}"
         )))
     }
-}
-
-// ── The transfer conjunct (SoFi §49) ────────────────────────────────────────
-
-/// A created token's policy, as the wallet packs it and the network anchors
-/// it: the `TokenPolicyV3` proto around the blob, with the movement flags
-/// `flags`.
-fn created_policy(flags: u8) -> Vec<u8> {
-    use dsm::economic::token_policy::{
-        ReleaseRule, ALLOWLIST_KIND_NONE, SUPPLY_CLASS_NATIVE, TOKEN_KIND_FUNGIBLE,
-        TOKEN_POLICY_VERSION,
-    };
-    let mut blob = vec![
-        TOKEN_POLICY_VERSION,
-        TOKEN_KIND_FUNGIBLE,
-        SUPPLY_CLASS_NATIVE,
-        flags,
-        ReleaseRule::AllAtCreation.code(),
-    ];
-    blob.extend_from_slice(&G);
-    blob.extend_from_slice(dev());
-    blob.push(1);
-    blob.push(1);
-    blob.extend_from_slice(&3u16.to_be_bytes());
-    blob.extend_from_slice(b"key");
-    blob.push(4);
-    blob.extend_from_slice(b"NOTX");
-    blob.extend_from_slice(&4u16.to_be_bytes());
-    blob.extend_from_slice(b"Notx");
-    blob.push(2);
-    blob.extend_from_slice(&100_000u128.to_be_bytes());
-    blob.extend_from_slice(&0u16.to_be_bytes());
-    blob.extend_from_slice(&0u16.to_be_bytes());
-    blob.push(ALLOWLIST_KIND_NONE);
-    blob.extend_from_slice(&0u16.to_be_bytes());
-    prost::Message::encode_to_vec(&dsm::types::proto::TokenPolicyV3 { policy_bytes: blob })
-}
-
-fn commit_of(policy: &[u8]) -> [u8; 32] {
-    dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_POLICY, policy)
-}
-
-/// [`OneTicket`] that roots exactly one token policy: `served` under
-/// `commit`, whatever bytes those are.
-struct RootsOnePolicy {
-    commit: [u8; 32],
-    served: Vec<u8>,
-    rest: OneTicket,
-}
-impl ProvenanceResolver for RootsOnePolicy {
-    fn root_register_candidate_set(
-        &self,
-        network_id: &[u8],
-    ) -> Result<dsm::ccb::StorageSetMembers, PeerLineageFailure> {
-        self.rest.root_register_candidate_set(network_id)
-    }
-    fn validated_peer_transition(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        self.rest
-            .validated_peer_transition(genesis, device_id, position)
-    }
-    fn native_reserve_release(
-        &self,
-        reserve_id: &[u8; 32],
-        generation: u64,
-    ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
-        self.rest.native_reserve_release(reserve_id, generation)
-    }
-    fn immutable_evidence(
-        &self,
-        namespace: dsm::crypto::domain::TaggedHashDomain<'static>,
-        addr: &[u8; 32],
-    ) -> Result<Vec<u8>, PeerLineageFailure> {
-        self.rest.immutable_evidence(namespace, addr)
-    }
-    fn held_ek_step(
-        &self,
-        signer: &[u8; 32],
-        addr: &[u8; 32],
-    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        self.rest.held_ek_step(signer, addr)
-    }
-    fn anchored_policy_bytes(
-        &self,
-        policy_commit: &[u8; 32],
-    ) -> Result<Vec<u8>, PeerLineageFailure> {
-        if *policy_commit == self.commit {
-            Ok(self.served.clone())
-        } else {
-            self.rest.anchored_policy_bytes(policy_commit)
-        }
-    }
-}
-
-/// SA-136, SoFi §49: `transferable` is checked "on every transfer, online
-/// and offline", so Core's transfer rule — the one every verifier of a step
-/// runs, not only the two endpoints' wallets — refuses a Transfer of a token
-/// whose committed policy does not transfer. A transferable token passes;
-/// ERA's policy is Core's own and asks no resolver. A policy that could not
-/// be established — not rooted, or bytes that are not the committed policy
-/// — keeps the class it was established in: not a verdict on the token.
-/// MUTATION CONTROL: dropping the `transferable` test from
-/// `check_transfer_policy` turns the first assertion red.
-#[test]
-fn a_transfer_of_a_token_whose_policy_does_not_transfer_is_refused_by_core() {
-    use dsm::economic::provenance::{check_transfer_policy, ProvenanceError};
-    use dsm::economic::token_policy::{POLICY_FLAG_BURN, POLICY_FLAG_TRANSFERABLE};
-    let roots = |policy: Vec<u8>| RootsOnePolicy {
-        commit: commit_of(&policy),
-        served: policy,
-        rest: OneTicket {
-            envelope: Vec::new(),
-        },
-    };
-    let held = created_policy(POLICY_FLAG_BURN);
-    let resolver = roots(held.clone());
-    assert!(
-        matches!(
-            check_transfer_policy(&commit_of(&held), &resolver),
-            Err(ProvenanceError::AssetNotTransferable)
-        ),
-        "a non-transferable token's transfer is refused"
-    );
-    let moves = created_policy(POLICY_FLAG_BURN | POLICY_FLAG_TRANSFERABLE);
-    let resolver = roots(moves.clone());
-    check_transfer_policy(&commit_of(&moves), &resolver).expect("a transferable token moves");
-    check_transfer_policy(
-        &dsm::core::token::token_state_manager::era_policy_commit(),
-        &resolver,
-    )
-    .expect("ERA's own policy transfers");
-
-    let unrooted = roots(moves.clone());
-    assert!(
-        matches!(
-            check_transfer_policy(&commit_of(&held), &unrooted),
-            Err(ProvenanceError::TransferPolicy(
-                PeerLineageFailure::Incomplete(_)
-            ))
-        ),
-        "a policy not rooted is not established, never refused"
-    );
-    let lying = RootsOnePolicy {
-        commit: commit_of(&held),
-        served: moves,
-        rest: OneTicket {
-            envelope: Vec::new(),
-        },
-    };
-    assert!(
-        matches!(
-            check_transfer_policy(&commit_of(&held), &lying),
-            Err(ProvenanceError::TransferPolicy(
-                PeerLineageFailure::Incomplete(_)
-            ))
-        ),
-        "bytes that are not the committed policy prove nothing about the token"
-    );
 }
 
 /// [`OneTicket`] whose catalog could not be read: the network's register
@@ -989,29 +851,36 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 /// E2: `advance_validated` already holds the predecessor and the root derived
 /// from the verified mutation sequence, which is exactly the normative
 /// relation. (`ClaimRef_p` still needs the parent envelope, so it stays E2's.)
+///
+/// The body that passes both is Core's own producer's
+/// (`sofi::lineage::setup_body`, SoFi §2.1): the root it derives on the
+/// predecessor's tree is the root the verifier derives from the transition.
+/// MUTATION CONTROL: the setup-root check removed turns this red.
 #[test]
 fn a_setup_transition_binds_its_position_and_its_derived_root() {
-    use dsm::economic::state::EconomicLeafState;
     use dsm::economic::tree::EconomicSmt;
 
     let vault_id = dsm::sofi::derive::vault_id(&G, dev(), 7);
     // The predecessor is the activation root at position 0, so `p` is 0.
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
-    let sigma = dsm::sofi::derive::setup_id(&G, dev(), zero.economic_position(), &vault_id);
-    let state = EconomicLeafState::Relationship(dsm::sofi::wire::TraderRelationshipLeaf {
-        vault_id,
-        leaf: dsm::sofi::derive::relationship_leaf_genesis(&sigma),
-    });
-    let mut tree = EconomicSmt::new();
-    let pre_root = tree.root();
-    tree.insert(
-        state.leaf_key(&G, dev()),
-        state.leaf_value().expect("a leaf value"),
-    );
-    let derived_root = tree.root();
+    let pre_tree = EconomicSmt::new();
+    let pre_root = pre_tree.root();
+    let produced = dsm::sofi::lineage::setup_body(
+        &zero,
+        &pre_tree,
+        &dsm::sofi::lineage::SetupNames {
+            genesis: G,
+            device_id: *dev(),
+            vault_id,
+            claim_ref: [0x66; 32],
+            signature_alg: dsm::ccb::genesis::sigalg::SPHINCS_PLUS_SPX256F,
+            claimant_public_key: &[0x01; 64],
+        },
+    )
+    .expect("Core builds the setup body on the activation root");
+    let derived_root = *produced.setup_root();
 
-    // A body whose `p` and `R_T^setup` are the derived ones, and three that
-    // are wrong in exactly one way each.
+    // The producer's body, and two that are wrong in exactly one way each.
     let body = |position: u64, setup_root: [u8; 32]| {
         dsm::sofi::wire::SofiSetupBody::new(
             G,
@@ -1100,11 +969,12 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         "R_T^setup is derived, never asserted"
     );
 
-    // And the correct body reaches the conjuncts and passes them. It may be
-    // refused further down for faucet-fixture reasons; what this asserts is
-    // that it is NOT refused by either setup conjunct, which is what makes
+    // And the producer's body reaches the conjuncts and passes them. It may
+    // be refused further down for faucet-fixture reasons; what this asserts
+    // is that it is NOT refused by either setup conjunct, which is what makes
     // the two refusals above meaningful rather than unreachable.
-    let outcome = go(&body(zero.economic_position(), derived_root));
+    assert_eq!(produced.position(), zero.economic_position());
+    let outcome = go(&produced);
     assert!(
         !matches!(
             outcome,
@@ -1156,14 +1026,49 @@ fn held_first_claim(
 }
 
 /// The trader's head as it reloads: `balances`, `allocations`, and the
-/// admission in flight.
+/// admission in flight. `restore` takes the root the device persisted with the
+/// fields; it is computed here, independently, over the leaves those fields
+/// hold: the device's own relationship at `h_0` and, with allocations, the
+/// one offline account a load leaves.
 fn head_of(
     genesis: [u8; 32],
     fx: &FaucetFixture,
     balances: &[([u8; 32], u64)],
     allocations: &[([u8; 32], u64)],
     pending: Option<PendingEconomicAdmission>,
-) -> dsm::types::device_state::DeviceState {
+) -> dsm::types::device_state::RealizedHead {
+    use dsm::core::bilateral_transaction_manager::{compute_smt_key, initial_chain_tip_from_device_ids};
+    let accounts: std::collections::BTreeMap<
+        [u8; 32],
+        dsm::types::offline_account::OfflineAccount,
+    > = Some(allocations)
+        .filter(|held| !held.is_empty())
+        .map(|held| {
+            (
+                [0xB0; 32],
+                dsm::types::offline_account::OfflineAccount::restore(
+                    held.iter().copied().collect(),
+                    0,
+                    [0x01; 32],
+                    Some([0x0F; 32]),
+                ),
+            )
+        })
+        .into_iter()
+        .collect();
+    let stored_root = *dsm::merkle::sparse_merkle_tree::SparseMerkleTree::from_leaves(
+        std::iter::once((
+            compute_smt_key(dev(), dev()),
+            initial_chain_tip_from_device_ids(dev(), dev()),
+        ))
+        .chain(accounts.iter().map(|(bundle, account)| {
+            (
+                dsm::types::offline_account::offline_account_leaf_key(bundle),
+                account.root(),
+            )
+        })),
+    )
+    .root();
     dsm::types::device_state::DeviceState::restore(
         genesis,
         *dev(),
@@ -1172,23 +1077,9 @@ fn head_of(
         balances.iter().copied().collect(),
         Vec::new(),
         std::collections::BTreeMap::new(),
-        // Any allocation is held in one offline account, as a load leaves it.
-        Some(allocations)
-            .filter(|held| !held.is_empty())
-            .map(|held| {
-                (
-                    [0xB0; 32],
-                    dsm::types::offline_account::OfflineAccount::restore(
-                        held.iter().copied().collect(),
-                        0,
-                        [0x01; 32],
-                        Some([0x0F; 32]),
-                    ),
-                )
-            })
-            .into_iter()
-            .collect(),
+        accounts,
         pending,
+        stored_root,
     )
     .expect("the head reloads")
 }
@@ -1311,7 +1202,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
 
     // The witness of another operation than the one pending.
     let other = Operation::FaucetClaim {
-        reserve_id: reserve_genesis().reserve_id,
+        reserve_id: *reserve_genesis().reserve_id(),
         generation: 2,
     };
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &other);
@@ -1354,10 +1245,35 @@ struct AdmittedBoundary {
     witness: EconomicTransitionWitness,
 }
 
-const BUNDLE: [u8; 32] = [0xB0; 32];
+/// The anchor of the trader's offline account: pin material whose bundle
+/// recomputes for the trader's online key and device id.
+fn boundary_anchor() -> dsm::economic::offline_boundary::BoundaryAnchor {
+    dsm::economic::offline_boundary::BoundaryAnchor {
+        anchor_id: [0xB1; 32],
+        pk_chip: vec![0xB2; 32],
+        pk_host: vec![0xB3; 64],
+        enrolled_counter: 16,
+        birth_commitment: [0xB4; 32],
+    }
+}
+
+/// The bundle `B` of [`boundary_anchor`] provisioned for the trader.
+fn bundle() -> [u8; 32] {
+    let a = boundary_anchor();
+    anchor_core::enrollment::anchor_bundle(
+        &trader().0,
+        &a.anchor_id,
+        &a.pk_chip,
+        &a.pk_host,
+        16,
+        dev(),
+        &dsm::types::operations::canonical_offline_bearer_policy().policy_id,
+        &a.birth_commitment,
+    )
+}
 
 fn boundary(
-    head: &dsm::types::device_state::DeviceState,
+    head: &dsm::types::device_state::RealizedHead,
     kind: dsm::types::device_state::OfflineBoundaryKind,
     amount: u64,
     pre_root: [u8; 32],
@@ -1368,13 +1284,39 @@ fn boundary(
     use dsm::economic::offline_boundary::{offline_boundary_evidence_addr, OfflineBoundaryBody};
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let outcome = head
-        .cross_offline_boundary(&BUNDLE, kind, &era, amount)
+        .cross_offline_boundary(&bundle(), kind, &era, amount)
         .expect("the head takes the boundary");
-    let bytes = OfflineBoundaryBody::of(&outcome, kind, BUNDLE, era, amount)
-        .expect("body")
-        .encode()
-        .expect("encode");
-    let verified = OfflineBoundaryBody::verify(&bytes, &G, dev()).expect("the body verifies");
+    // No spends here: the boundary starts from the account as it stands,
+    // which is the account its previous boundary left, or the one opened.
+    let account = head
+        .offline_account(&bundle())
+        .expect("the account is open");
+    let since = match account.funding_chain() {
+        None => dsm::economic::offline_boundary::BoundarySince::Opened {
+            frontier: account.frontier(),
+        },
+        Some(_) => dsm::economic::offline_boundary::BoundarySince::Previous {
+            account_root: account.root(),
+        },
+    };
+    let bytes = OfflineBoundaryBody::of(
+        &outcome,
+        kind,
+        bundle(),
+        era,
+        amount,
+        dsm::economic::offline_boundary::BoundaryAncestry {
+            anchor: boundary_anchor(),
+            since,
+            chain: Vec::new(),
+        },
+    )
+    .expect("body")
+    .encode()
+    .expect("encode");
+    let (verified, exposed) =
+        OfflineBoundaryBody::verify(&bytes, &G, dev(), &trader().0).expect("the body verifies");
+    assert!(exposed.is_empty(), "no spends, no exposure");
     let built = dsm::economic::write_set::build_boundary_write_set(
         &dsm::economic::write_set::BoundaryEffect {
             kind,
@@ -1468,7 +1410,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     );
     assert_eq!(tree.root(), at_one.economic_root());
     let head = head_of(G, &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
-        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
 
     // ── position 2: load 300 ──
@@ -1488,7 +1430,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     assert_eq!(
         load.outcome
             .new_device_state
-            .offline_allocation(&BUNDLE, &era),
+            .offline_allocation(&bundle(), &era),
         Some(300)
     );
 
@@ -1507,7 +1449,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let at_three =
         validate_boundary(&fx, &at_two, 3, &unload, &unload.witness).expect("the unload validates");
     assert_eq!(at_three.funded.len(), 1, "the unload's credit is funded");
-    assert_eq!(at_three.funded[0].amount, 100);
+    assert_eq!(at_three.funded[0].amount(), 100);
 
     // The same unload cannot fund a second credit: its source is consumed.
     let again = dsm::economic::write_set::build_boundary_write_set(
@@ -1617,7 +1559,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let fx = faucet_fixture(1);
     let online = std::collections::BTreeMap::from([(era, 500)]);
     let head = head_of(G, &fx, &[(era, 500)], &[], None)
-        .open_offline_account(&BUNDLE, [0x01; 32], 0)
+        .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
     let mut tree = EconomicSmt::new();
     let held = bal(era, 500);

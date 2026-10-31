@@ -224,7 +224,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
-            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+            if let Some(c) = dsm::core::token::builtin_policy_commit_for_token("dBTC") {
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
@@ -577,6 +577,7 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
+    token_policy: Vec<u8>,
 ) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
     // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
     // the canonical offline-bearer authority policy rides on the transfer so
@@ -598,6 +599,7 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit: *policy_commit,
         terms_commitment: terms.commitment(),
+        token_policy,
         signature: Vec::new(),
         authority_policy: Some(policy),
     };
@@ -816,6 +818,14 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- wallet.pendingOffline --------
+            "wallet.pendingOffline" => match pending_offline_value() {
+                Ok(reply) => pack_envelope_ok(
+                    generated::envelope::Payload::PendingOfflineValueResponse(reply),
+                ),
+                Err(e) => err(format!("wallet.pendingOffline: {e}")),
+            },
+
             _ => err(format!("unknown wallet query path: {}", q.path)),
         }
     }
@@ -888,23 +898,27 @@ impl AppRouterImpl {
                         Ok(amount) => amount,
                         Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
                     };
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => {
-                        return err(format!(
-                            "wallet.sendOffline: policy_commit resolve failed: {e}"
-                        ))
-                    }
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
+                let token_policy =
+                    match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                        Ok(bytes) => bytes,
+                        Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                    };
                 let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
                     transfer_amount,
                     &token_id,
                     req.memo.trim(),
                     &policy_commit,
+                    token_policy,
                 );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
@@ -1138,13 +1152,11 @@ impl AppRouterImpl {
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                    };
                 let token_decimals = match token_of_commit(&policy_commit) {
                     Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),
@@ -1169,6 +1181,42 @@ impl AppRouterImpl {
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
         }
     }
+}
+
+/// Every payment received offline and not yet settled, oldest first, each
+/// with its token's ticker and decimals and its payer as this device names it
+/// (owner ruling, 2026-10-28: "Show it separately from spendable balance,
+/// including asset, amount and pending-settlement status. It must not
+/// contribute to either spendable online funds or offline allocation.").
+///
+/// The value is read from the receipts held pending (§6.103), the rows
+/// `balance.list` never reads: it settles online once the payer's return
+/// online exposes its signed spend chain, and only then is it a balance.
+pub(crate) fn pending_offline_value() -> Result<generated::PendingOfflineValueResponse, String> {
+    let pending = crate::storage::client_db::offline_receipts::pending_offline_receipts()
+        .map_err(|e| format!("the receipts held pending are unreadable: {e}"))?;
+    let aliases = contact_aliases()?;
+    let receipts = pending
+        .into_iter()
+        .map(|receipt| {
+            let (ticker, decimals) = token_of_commit(&receipt.asset)?;
+            let payer_b32 = crate::util::text_id::encode_base32_crockford(&receipt.payer_device);
+            let payer = match aliases.get(&payer_b32) {
+                Some(alias) if !alias.is_empty() => alias.clone(),
+                _ => payer_b32,
+            };
+            Ok(generated::PendingOfflineReceiptView {
+                asset: receipt.asset.to_vec(),
+                ticker,
+                decimals,
+                base_units: receipt.amount,
+                display_amount: format_base_units_for_display(receipt.amount, decimals),
+                payer,
+                release_message: receipt.release_message.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::PendingOfflineValueResponse { receipts })
 }
 
 /// This device's contacts' aliases by device id (Base32), for naming a
@@ -1744,6 +1792,7 @@ mod tests {
             "DBTC",
             "memo",
             &[0u8; 32],
+            vec![0x0A; 40],
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
@@ -2086,7 +2135,7 @@ mod history_tests {
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
         let peer_id = [0x76u8; 32];
         let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
-        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
         // The nonce the sender's send derives (§4.1), over the relationship.
         let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &peer_id,
@@ -2107,6 +2156,7 @@ mod history_tests {
             to_device_id: device.router.device_id_bytes.to_vec(),
             amount: dsm::types::token_types::Balance::amount(100),
             policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,

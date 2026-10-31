@@ -113,14 +113,16 @@ pub(crate) async fn next_root_cell(
 
 /// Write this device's frozen root claim at its root cell, along the cell's
 /// route (storage spec §9), continuing an earlier write of the same claim.
-/// Which claim holds the cell is read back ([`root_claim_settlement`]),
-/// never inferred from the write.
+/// At the leader the cell's own rule for what can count there decides
+/// whether another claim is first, and the write is then taken. Which claim
+/// holds the cell is read back ([`root_claim_settlement`]), never inferred
+/// from the write.
 pub async fn register_economic_root(
     set: &StorageSet,
     cell: &RootCell,
     frozen_envelope: &[u8],
 ) -> Result<WriteReport, DsmError> {
-    write_recorded(set, cell.routed(), frozen_envelope).await
+    write_recorded(set, cell.routed(), &cell.keeps(), frozen_envelope).await
 }
 
 /// What the root cell settled for one claim.
@@ -385,6 +387,21 @@ impl PeerFrontiers for StoredFrontiers {
                 PeerLineageFailure::Incomplete(format!("the frontier store is unreadable: {e}"))
             })
     }
+
+    fn offline_account_below(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        bundle: &[u8; 32],
+        position: u64,
+    ) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>, PeerLineageFailure> {
+        crate::storage::client_db::economic_lineage::offline_account_below(
+            genesis, device_id, bundle, position,
+        )
+        .map_err(|e| {
+            PeerLineageFailure::Incomplete(format!("the offline account store is unreadable: {e}"))
+        })
+    }
 }
 
 /// What one verification of a peer cost, logged where it ran (DSM Amendment
@@ -418,6 +435,7 @@ fn record_established<T>(
     crate::storage::client_db::economic_lineage::record_validated(
         checked.reached(),
         checked.offline_accounts(),
+        checked.offline_exposures(),
     )
     .map_err(|e| {
         PeerLineageFailure::Incomplete(format!("recording what this walk validated: {e}"))
@@ -756,35 +774,73 @@ pub(crate) fn anchored_policy_bytes(
     policy_commit: &[u8; 32],
     runtime: &tokio::runtime::Handle,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => tokio::task::block_in_place(|| {
+            runtime.block_on(fetched_policy_bytes(set, policy_commit))
+        }),
+    }
+}
+
+/// [`anchored_policy_bytes`] for a caller already on the runtime.
+pub(crate) async fn anchored_policy_bytes_async(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    match held_policy_bytes(policy_commit)? {
+        Some(bytes) => Ok(bytes),
+        None => fetched_policy_bytes(set, policy_commit).await,
+    }
+}
+
+/// The policy bytes a Transfer or Burn of `policy_commit` carries (owner
+/// question 9, 2026-10-27): the token's committed policy as this device holds
+/// it, ERA's being Core's own bytes. A device moves only a token it holds,
+/// and it adopted that token's policy to hold it. Core re-hashes the bytes to
+/// the commit in the write set; this is only where they come from.
+pub(crate) fn carried_token_policy(policy_commit: &[u8; 32]) -> Result<Vec<u8>, DsmError> {
+    match held_policy_bytes(policy_commit) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err(DsmError::invalid_operation(
+            "this device holds no committed policy for the token: it moves only tokens whose \
+             policy it adopted",
+        )),
+        Err(failure) => Err(DsmError::invalid_operation(format!(
+            "the token's committed policy: {failure}"
+        ))),
+    }
+}
+
+/// The policy this device already holds for `policy_commit`, or none.
+fn held_policy_bytes(policy_commit: &[u8; 32]) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
     // ERA's policy is Core's own (SoFi Amendment S11): answered from its
     // bytes, never fetched and never stored.
     if *policy_commit == dsm::core::token::token_state_manager::era_policy_commit() {
-        return Ok(dsm::core::token::era_policy::era_policy_bytes().to_vec());
+        return Ok(Some(
+            dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+        ));
     }
-    match crate::storage::client_db::token_registry::load_policy_verified(policy_commit) {
-        Ok(Some(bytes)) => return Ok(bytes),
-        Ok(None) => {}
-        Err(e) => {
-            return Err(PeerLineageFailure::Incomplete(format!(
-                "the local token policy store is unreadable: {e}"
-            )))
-        }
-    }
-    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
-    let bytes = tokio::task::block_in_place(|| {
-        runtime.block_on(crate::sdk::storage_io::fetch_immutable(
-            set,
-            tag,
-            policy_commit,
-        ))
+    crate::storage::client_db::token_registry::load_policy_verified(policy_commit).map_err(|e| {
+        PeerLineageFailure::Incomplete(format!("the local token policy store is unreadable: {e}"))
     })
-    .map_err(|e| incomplete("token policy fetch", e))?
-    .ok_or_else(|| {
-        PeerLineageFailure::Incomplete(format!(
-            "no member holds the policy {}",
-            text_id::encode_base32_crockford(policy_commit)
-        ))
-    })?;
+}
+
+/// The policy object `policy_commit` names, fetched from `set`, re-hashed,
+/// and kept.
+async fn fetched_policy_bytes(
+    set: &StorageSet,
+    policy_commit: &[u8; 32],
+) -> Result<Vec<u8>, PeerLineageFailure> {
+    let tag = dsm::common::domain_tags::TAG_DSM_POLICY;
+    let bytes = crate::sdk::storage_io::fetch_immutable(set, tag, policy_commit)
+        .await
+        .map_err(|e| incomplete("token policy fetch", e))?
+        .ok_or_else(|| {
+            PeerLineageFailure::Incomplete(format!(
+                "no member holds the policy {}",
+                text_id::encode_base32_crockford(policy_commit)
+            ))
+        })?;
     if dsm::crypto::blake3::domain_hash_bytes(tag, &bytes) != *policy_commit {
         return Err(PeerLineageFailure::Incomplete(format!(
             "the bytes served for policy {} are not that policy",

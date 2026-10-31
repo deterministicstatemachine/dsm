@@ -49,7 +49,7 @@ use dsm::sofi::conformance::{
 use dsm::sofi::derive;
 use dsm::economic::lineage::ValidatedEconomicRoot;
 use dsm::economic::tree::EconomicSmt;
-use dsm::sofi::lineage::GenesisError;
+use dsm::sofi::lineage::{setup_body, GenesisError, SetupBodyError, SetupNames};
 use dsm::sofi::publication::Signed;
 use dsm::sofi::signature::{verify_precommit, SignatureError, SigningPayload};
 use dsm::sofi::validation::{realize_root, validate, Evidence, Invalid, Missing, Refusal};
@@ -89,13 +89,8 @@ pub enum BuildError {
     Genesis(GenesisError),
     /// The trader's own leaves cannot supply the pre values its core names.
     LocalLeaves(String),
-    /// This identity already holds a relationship with that vault. `h⁰` is a
-    /// function of the setup id, so a second setup would reset a chain that
-    /// has already advanced.
-    SetupAlreadyExists,
-    /// The producer's tree is not the predecessor's root, so `R_T^setup`
-    /// computed from it would describe a mutation of some other state.
-    PreTreeIsNotThePredecessor,
+    /// Core builds no setup body on this predecessor, for the reason named.
+    Setup(SetupBodyError),
     /// `P`'s key, with the `AttA` given, does not derive the device `P` names,
     /// so `F` would occupy no cell of it (DSM Amendment A10, SoFi Amendment
     /// S20).
@@ -120,20 +115,11 @@ impl core::fmt::Display for BuildError {
             ),
             Self::Genesis(e) => write!(f, "{e}"),
             Self::LocalLeaves(e) => write!(f, "the trader's own leaves: {e}"),
-            Self::PreTreeIsNotThePredecessor => write!(
-                f,
-                "the producer's economic tree is not the validated predecessor's root: \
-                 R_T^setup derived from it would describe a mutation of another state"
-            ),
+            Self::Setup(e) => write!(f, "{e}"),
             Self::KeyIsNotTheDevices => write!(
                 f,
                 "the precommit's key, with this device's AttA, does not derive the device it \
                  names; the fulfillment would occupy no cell of it"
-            ),
-            Self::SetupAlreadyExists => write!(
-                f,
-                "this identity already holds a relationship with that vault; h⁰ is the \
-                 setup id's derivation and a second setup would reset the chain"
             ),
             Self::PrecommitSignature(e) => write!(
                 f,
@@ -303,70 +289,17 @@ impl PrecommitDraft {
 
 /// The relationship setup (F1). Non-economic: it establishes the right to
 /// trade with one vault, and moves nothing.
-/// `R_T^setup` IS DERIVED HERE, exactly as the verifier derives it.
 ///
-/// The body is built rather than accepted, because two of its fields are not
-/// the caller's to choose: `p` is the position the parent claim names, and
-/// `setup_root` is the trader economic root AFTER the P15-6 absent→`h⁰`
-/// insertion is applied to the root at that position. A producer that took a
-/// body would let a caller put arbitrary bytes in `R_T^setup`, sign them, and
-/// discover at admission that the transition is refused — or, worse, have a
-/// first setup pin an index entry committing bytes nothing ever checked.
-///
-/// `pre_tree` is the producer's own `R_econ` at `p`; the insertion is computed
-/// against it so the root is the one the mutation sequence will actually
-/// yield.
-#[allow(clippy::too_many_arguments)]
+/// The body is Core's (`sofi::lineage::setup_body`): Core derives `p` and
+/// `R_T^setup` from the validated predecessor and the tree at its root, and
+/// this producer only states what the trader signs and what is published
+/// (SoFi §2.1). `pre_tree` is the producer's own `R_econ` at `p`.
 pub fn build_setup(
     previous: &ValidatedEconomicRoot,
     pre_tree: &EconomicSmt,
-    genesis: D32,
-    device_id: D32,
-    vault_id: D32,
-    claim_ref: D32,
-    signature_alg: u16,
-    claimant_public_key: &[u8],
+    names: &SetupNames<'_>,
 ) -> Result<Produced, BuildError> {
-    // `p`, `R_p` AND `R_T^setup` COME FROM ONE PREDECESSOR CONTEXT. A naked
-    // `position` argument let a caller pass p = 12 against the real tree at
-    // p = 7 and get a perfectly self-consistent σ(12) → h⁰(12) →
-    // R_T^setup(12, real tree) — an operation the verifier then deterministically
-    // refuses. Fail-closed, but the producer should not be able to build
-    // something known-impossible at construction time.
-    let position = previous.economic_position();
-    if pre_tree.root() != previous.economic_root() {
-        return Err(BuildError::PreTreeIsNotThePredecessor);
-    }
-    let sigma = derive::setup_id(&genesis, &device_id, position, &vault_id);
-    let leaf = dsm::sofi::wire::TraderRelationshipLeaf {
-        vault_id,
-        leaf: derive::relationship_leaf_genesis(&sigma),
-    };
-    let state = dsm::economic::state::EconomicLeafState::Relationship(leaf);
-    let key = state.leaf_key(&genesis, &device_id);
-    // INSERT-FROM-ZERO, the same rule the write set enforces: a producer that
-    // overwrote an existing relationship would compute a root the verifier
-    // refuses to reach.
-    if pre_tree.get(&key).is_some() {
-        return Err(BuildError::SetupAlreadyExists);
-    }
-    let mut post = pre_tree.clone();
-    post.insert(
-        key,
-        state
-            .leaf_value()
-            .map_err(|e| BuildError::LocalLeaves(format!("relationship leaf value: {e}")))?,
-    );
-    let body = SofiSetupBody::new(
-        genesis,
-        device_id,
-        position,
-        vault_id,
-        claim_ref,
-        post.root(),
-        signature_alg,
-        claimant_public_key,
-    )?;
+    let body = setup_body(previous, pre_tree, names).map_err(BuildError::Setup)?;
     Ok(Produced {
         signs: SigningPayload::SetupDigest(derive::setup_signing_digest(&body)),
         operation: Operation::SofiSetup {
@@ -387,6 +320,7 @@ pub fn build_setup(
 pub fn build_vault_create(
     preimage: &VaultGenesisPreimage,
     market_policy_bytes: &[u8],
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
     let vault_id = preimage.vault_id();
     // THE FUNDING ASSETS ARE DERIVED, NOT TAKEN. A caller that could pass the
@@ -427,6 +361,9 @@ pub fn build_vault_create(
         market_policy_preimage: market_policy_bytes.to_vec(),
         funding_a_policy_commit: token_a,
         funding_b_policy_commit: token_b,
+        // The funded tokens' committed policies, which Core re-hashes and
+        // checks before it debits anything (MR-SOFI-0311).
+        funding_policies,
         signature: Vec::new(),
     };
     Ok(Produced {
@@ -447,8 +384,9 @@ pub fn build_vault_create(
 pub fn build_escrow_vault_create(
     preimage: &VaultGenesisPreimage,
     terms: &dsm::sofi::wire::EscrowTerms,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
-    escrow_vault_create(preimage, &terms.encode())
+    escrow_vault_create(preimage, &terms.encode(), funding_policies)
 }
 
 /// `EscrowVaultCreate` of a computed escrow vault (SoFi Amendment S22): the
@@ -457,8 +395,9 @@ pub fn build_escrow_vault_create(
 pub fn build_computed_vault_create(
     preimage: &VaultGenesisPreimage,
     terms: &dsm::sofi::wire::ComputedEscrowTerms,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
-    escrow_vault_create(preimage, &terms.encode())
+    escrow_vault_create(preimage, &terms.encode(), funding_policies)
 }
 
 /// The creation of an escrow vault of either kind whose three slots name
@@ -466,6 +405,7 @@ pub fn build_computed_vault_create(
 fn escrow_vault_create(
     preimage: &VaultGenesisPreimage,
     terms_bytes: &[u8],
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<Produced, BuildError> {
     let addr = dsm::sofi::escrow::terms_address_of(terms_bytes);
     let state = &preimage.state;
@@ -485,6 +425,7 @@ fn escrow_vault_create(
         genesis_preimage: preimage.encode()?,
         creation: creation.encode(),
         terms: terms_bytes.to_vec(),
+        funding_policies,
         signature: Vec::new(),
     };
     Ok(Produced {

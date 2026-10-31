@@ -14,27 +14,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context};
 use serde::Serialize;
 
-use crate::live_device::{commit, connect, marked, Decision, LiveDevice};
 use crate::tla_runner::TlaSpec;
-use dsm::crypto::blake3::{domain_hash, domain_hash_bytes};
-use dsm::crypto::kyber::generate_kyber_keypair_from_entropy;
-use dsm::crypto::sphincs::{generate_keypair_from_seed, SphincsVariant};
-use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
-use dsm::emissions::{JoinActivationProof, SourceDlvState};
-use dsm::types::operations::Operation;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TlaTraceReplayResult {
-    pub spec_label: String,
-    pub trace_path: PathBuf,
-    pub steps: u64,
-    pub passed: bool,
-    pub failures: Vec<String>,
-    pub duration_ms: f64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TlaImplementationReplayResult {
     pub spec_label: String,
     pub trace_path: PathBuf,
     pub steps: u64,
@@ -62,8 +45,6 @@ enum TlaValue {
 }
 
 type TlaState = BTreeMap<String, TlaValue>;
-
-const TRACE_VARIANT: SphincsVariant = SphincsVariant::SPX256f;
 
 pub fn simulation_profile_for_spec(_spec: &TlaSpec) -> TlaSimulationProfile {
     TlaSimulationProfile { seed: 42, depth: 5 }
@@ -95,41 +76,6 @@ pub fn replay_trace_file(
     };
 
     Ok(TlaTraceReplayResult {
-        spec_label: spec.label.clone(),
-        trace_path: trace_path.to_path_buf(),
-        steps: (states.len() - 1) as u64,
-        passed: failures.is_empty(),
-        failures,
-        duration_ms: start.elapsed().as_secs_f64() * 1000.0,
-    })
-}
-
-pub fn replay_trace_into_implementation(
-    spec: &TlaSpec,
-    trace_path: &Path,
-) -> anyhow::Result<TlaImplementationReplayResult> {
-    let start = instant::Instant::now();
-    let trace_text = std::fs::read_to_string(trace_path)
-        .with_context(|| format!("failed to read TLC trace file {}", trace_path.display()))?;
-    let states = parse_trace_states(&trace_text)
-        .with_context(|| format!("failed to parse TLC trace file {}", trace_path.display()))?;
-
-    if states.len() < 2 {
-        bail!("TLC trace for {} did not contain a transition", spec.label);
-    }
-
-    let failures = match spec.spec_file.as_str() {
-        "DSM_Tripwire.tla" => replay_tripwire_trace_into_implementation(&states),
-        "DSM_OfflineFinality.tla" => {
-            replay_structural_trace(&states, &["chain", "phase", "parent", "net", "link"])
-        }
-        "DSM_NonInterference.tla" => {
-            replay_structural_trace(&states, &["chainTip", "balance", "relTip", "sessions"])
-        }
-        _ => replay_dsm_trace_into_implementation(&states),
-    };
-
-    Ok(TlaImplementationReplayResult {
         spec_label: spec.label.clone(),
         trace_path: trace_path.to_path_buf(),
         steps: (states.len() - 1) as u64,
@@ -204,1129 +150,6 @@ fn parse_trace_states(trace_text: &str) -> anyhow::Result<Vec<TlaState>> {
     }
 
     Ok(states)
-}
-
-/// One model device, as a real device: its canonical head, keys and the
-/// chain head its per-step keys certify back to (`LiveDevice`).
-struct DirectDevice {
-    live: LiveDevice,
-    /// The SPHINCS+ and ML-KEM public keys `GenerateKeys` produced, once it
-    /// has run for this device.
-    generated_keys: Option<(Vec<u8>, Vec<u8>)>,
-    /// Real ERA above the model's initial balance: the device is funded in
-    /// whole faucet payouts, and the model starts it at `MaxPayload`.
-    funding_offset: u64,
-}
-
-/// A model relationship on the real pair: whether `CreateRelationship` ran,
-/// how many steps were delivered, and whether any message activated it.
-struct DirectRelationship {
-    created: bool,
-    delivered: i64,
-    active: bool,
-}
-
-impl DirectRelationship {
-    /// The model's tip: creation is the relationship's first step, and every
-    /// delivered transfer is one more.
-    fn model_tip(&self) -> i64 {
-        i64::from(self.created) + self.delivered
-    }
-}
-
-/// A message in the model's network bag. `send_group` is the id of the
-/// `NetSend` it was sent as — a duplicate keeps it — and `operation` is the
-/// transfer its sender signed then.
-#[derive(Clone)]
-struct PendingNetMessage {
-    id: i64,
-    from: TlaValue,
-    to: TlaValue,
-    payload: TlaValue,
-    dup_left: i64,
-    parent_tip: i64,
-    send_group: i64,
-    operation: Operation,
-}
-
-struct DsmImplementationHarness {
-    devices: BTreeMap<TlaValue, DirectDevice>,
-    genesis_devices: BTreeMap<TlaValue, BTreeSet<TlaValue>>,
-    relationships: BTreeMap<(TlaValue, TlaValue), DirectRelationship>,
-    pending_messages: Vec<PendingNetMessage>,
-    /// Sends the model has debited whose transfer no copy has delivered:
-    /// `send_group -> (sender, amount)`.
-    undelivered: BTreeMap<i64, (TlaValue, u64)>,
-    ledger: BTreeSet<TlaValue>,
-    next_msg_id: i64,
-    storage_nodes: BTreeSet<TlaValue>,
-    activated_devices: BTreeSet<TlaValue>,
-    activation_counts: BTreeMap<TlaValue, i64>,
-    activation_identities: BTreeMap<TlaValue, [u8; 32]>,
-    djte_state: SourceDlvState,
-    djte_seed: i64,
-    phase: i64,
-    step: i64,
-    source_remaining: i64,
-    vaults: BTreeMap<TlaValue, TlaValue>,
-    vault_state: BTreeMap<TlaValue, TlaValue>,
-    spent_japs: BTreeSet<TlaValue>,
-    spent_proofs: BTreeSet<TlaValue>,
-    consumed_proofs: BTreeSet<TlaValue>,
-    offline_sessions: BTreeSet<TlaValue>,
-}
-
-impl DsmImplementationHarness {
-    fn new(initial: &TlaState) -> anyhow::Result<Self> {
-        let key_map = map_var(initial, "keys")?;
-        let initial_balance = map_var(initial, "deviceBalance").ok();
-        let mut devices = BTreeMap::new();
-        for device in key_map.keys() {
-            let label = tla_atom(device)?;
-            let model_balance = match initial_balance.and_then(|b| b.get(device)) {
-                Some(value) => u64::try_from(int_from_value(value)?)
-                    .map_err(|_| anyhow!("{label}: a negative initial balance"))?,
-                None => 0,
-            };
-            let mut live = LiveDevice::new(&format!("tla-{label}"))
-                .with_context(|| format!("direct replay device {label}"))?;
-            let claims = model_balance.div_ceil(ERA_FAUCET_PAYOUT);
-            for generation in 1..=claims {
-                live.claim_faucet(generation)
-                    .with_context(|| format!("funding direct replay device {label}"))?;
-            }
-            devices.insert(
-                device.clone(),
-                DirectDevice {
-                    live,
-                    generated_keys: None,
-                    funding_offset: claims * ERA_FAUCET_PAYOUT - model_balance,
-                },
-            );
-        }
-
-        let mut genesis_devices = BTreeMap::new();
-        for (genesis, devices) in map_var(initial, "devices")? {
-            genesis_devices.insert(genesis.clone(), set_value(devices)?.clone());
-        }
-
-        let shard_depth = map_var(initial, "shardLists")
-            .ok()
-            .map(|map| map.len())
-            .and_then(shard_depth_from_count)
-            .unwrap_or(2);
-        let source_remaining = int_var(initial, "sourceRemaining").unwrap_or(0);
-
-        let mut activation_counts = BTreeMap::new();
-        if let Ok(act_count_map) = map_var(initial, "actCount") {
-            for (device, count) in act_count_map {
-                activation_counts.insert(device.clone(), int_from_value(count)?);
-            }
-        }
-
-        let ledger = cloned_set_var(initial, "ledger");
-        if !ledger.is_empty() {
-            bail!("direct replay starts from an empty ledger; the initial state carries receipts");
-        }
-
-        Ok(Self {
-            devices,
-            genesis_devices,
-            relationships: BTreeMap::new(),
-            pending_messages: Vec::new(),
-            undelivered: BTreeMap::new(),
-            ledger,
-            next_msg_id: int_var(initial, "nextMsgId").unwrap_or(0),
-            storage_nodes: cloned_set_var(initial, "storageNodes"),
-            activated_devices: cloned_set_var(initial, "activatedDevices"),
-            activation_counts,
-            activation_identities: BTreeMap::new(),
-            djte_state: SourceDlvState::new(shard_depth, source_remaining.max(0) as u64)
-                .map_err(|e| anyhow::anyhow!("DJTE source state: {e}"))?,
-            djte_seed: int_var(initial, "djteSeed").unwrap_or(0),
-            phase: int_var(initial, "phase").unwrap_or(0),
-            step: int_var(initial, "step").unwrap_or(0),
-            source_remaining,
-            vaults: cloned_map_var(initial, "vaults"),
-            vault_state: cloned_map_var(initial, "vaultState"),
-            spent_japs: cloned_set_var(initial, "spentJaps"),
-            spent_proofs: cloned_set_var(initial, "spentProofs"),
-            consumed_proofs: cloned_set_var(initial, "consumedProofs"),
-            offline_sessions: cloned_set_var(initial, "offlineSessions"),
-        })
-    }
-
-    fn replay_action(
-        &mut self,
-        action: &str,
-        current: &TlaState,
-        next: &TlaState,
-    ) -> anyhow::Result<()> {
-        match action {
-            "generate_keys" => self.apply_generate_keys(current, next)?,
-            "add_device" => self.apply_add_device(current, next)?,
-            "create_relationship" => self.apply_create_relationship(current, next)?,
-            "net_send" => self.apply_net_send(current, next)?,
-            "net_duplicate" => self.apply_net_duplicate(current, next)?,
-            "net_deliver" => self.apply_net_deliver(current, next)?,
-            "net_drop" => self.apply_net_drop(current, next)?,
-            "add_storage_node" => self.apply_add_storage_node(current, next)?,
-            "unlock_spend_gate" => self.apply_unlock_spend_gate(current, next)?,
-            "activate_again" => self.apply_activate_again(current, next)?,
-            "phase_transition" => self.apply_phase_transition(next)?,
-            "step_only" => self.step += 1,
-            unrefined => bail!(
-                "the direct implementation replay does not refine TLC action {unrefined}: \
-                 no Rust transition is driven for it"
-            ),
-        }
-        self.verify_projected_state(next)
-    }
-
-    fn apply_generate_keys(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_keys = map_var(current, "keys")?;
-        let next_keys = map_var(next, "keys")?;
-        let changed_device = current_keys
-            .keys()
-            .find(|device| current_keys.get(*device) != next_keys.get(*device))
-            .cloned()
-            .ok_or_else(|| anyhow!("generate_keys had no changed device"))?;
-
-        let label = tla_atom(&changed_device)?;
-        let signing = generate_keypair_from_seed(
-            TRACE_VARIANT,
-            &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-signing"), &label),
-        )
-        .with_context(|| format!("failed to generate replay SPHINCS+ key for {label}"))?;
-        let kyber_pk = generate_kyber_keypair_from_entropy(
-            &trace_seed(dsm::tagged_domain!(b"DSM/VV/generated-kyber"), &label),
-            &label,
-        )
-        .with_context(|| format!("failed to generate replay Kyber key for {label}"))?
-        .0;
-
-        let device = self
-            .devices
-            .get_mut(&changed_device)
-            .ok_or_else(|| anyhow!("missing replay device {label}"))?;
-        device.generated_keys = Some((signing.public_key.clone(), kyber_pk));
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_add_device(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_devices = map_var(current, "devices")?;
-        let next_devices = map_var(next, "devices")?;
-        let mut target: Option<(TlaValue, TlaValue)> = None;
-        for genesis in current_devices.keys() {
-            let current_set = set_value(
-                current_devices
-                    .get(genesis)
-                    .ok_or_else(|| anyhow!("missing current genesis device set"))?,
-            )?;
-            let next_set = set_value(
-                next_devices
-                    .get(genesis)
-                    .ok_or_else(|| anyhow!("missing next genesis device set"))?,
-            )?;
-            let added = set_difference(next_set, current_set);
-            if added.len() == 1 {
-                target = Some((genesis.clone(), added[0].clone()));
-                break;
-            }
-        }
-
-        let (genesis, device) = target.ok_or_else(|| anyhow!("add_device had no added device"))?;
-        self.genesis_devices
-            .get_mut(&genesis)
-            .ok_or_else(|| anyhow!("missing direct replay genesis device set"))?
-            .insert(device);
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_create_relationship(
-        &mut self,
-        current: &TlaState,
-        next: &TlaState,
-    ) -> anyhow::Result<()> {
-        let current_relationships = map_var(current, "relationships")?;
-        let next_relationships = map_var(next, "relationships")?;
-        let mut target: Option<(TlaValue, TlaValue)> = None;
-
-        for pair_key in current_relationships.keys() {
-            let pair = seq_items(pair_key)?;
-            if pair.len() != 2 || pair[0] == pair[1] {
-                continue;
-            }
-            let current_pair = record_fields(
-                current_relationships
-                    .get(pair_key)
-                    .ok_or_else(|| anyhow!("missing current relationship"))?,
-            )?;
-            let next_pair = record_fields(
-                next_relationships
-                    .get(pair_key)
-                    .ok_or_else(|| anyhow!("missing next relationship"))?,
-            )?;
-            if record_int(current_pair, "tip")? == 0
-                && record_str(current_pair, "state")? == "inactive"
-                && record_int(next_pair, "tip")? == 1
-                && record_str(next_pair, "state")? == "active"
-            {
-                target = Some((pair[0].clone(), pair[1].clone()));
-                break;
-            }
-        }
-
-        let (left, right) =
-            target.ok_or_else(|| anyhow!("create_relationship had no activated pair"))?;
-        // The relationship is established on both devices, each writing its
-        // leaf at the h_0 Core derives; the two must hold one h_0.
-        self.establish_pair(&left, &right)?;
-        let (left_live, right_live) = (&self.device(&left)?.live, &self.device(&right)?.live);
-        if left_live.tip_with(right_live) != right_live.tip_with(left_live) {
-            bail!("the two devices hold different h_0 for their relationship");
-        }
-        let key = canonical_pair_key(&left, &right);
-        let relationship = self.relationships.entry(key).or_insert(DirectRelationship {
-            created: false,
-            delivered: 0,
-            active: false,
-        });
-        if relationship.created || relationship.delivered != 0 {
-            bail!("create_relationship on a relationship that already has steps");
-        }
-        relationship.created = true;
-        relationship.active = true;
-        self.ledger.insert(ledger_record(left, right, 0, 1));
-        self.step += 1;
-        Ok(())
-    }
-
-    /// Establish the relationship between `a` and `b` on both devices, as
-    /// adding each other as contacts does. An established one stays as it is.
-    fn establish_pair(&mut self, a: &TlaValue, b: &TlaValue) -> anyhow::Result<()> {
-        for (me, other) in [(a, b), (b, a)] {
-            let other_devid = self.device(other)?.live.devid;
-            let direct = self
-                .devices
-                .get_mut(me)
-                .ok_or_else(|| anyhow!("unknown device {}", me.display()))?;
-            direct
-                .live
-                .establish_with(other_devid)
-                .map_err(|e| anyhow!("establishing the relationship: {e}"))?;
-        }
-        Ok(())
-    }
-
-    fn apply_net_send(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_net = set_var(current, "net")?;
-        let next_net = set_var(next, "net")?;
-        let added = set_difference(next_net, current_net);
-        let added_message = added
-            .first()
-            .ok_or_else(|| anyhow!("net_send did not add a network message"))?;
-        let msg = record_fields(added_message)?;
-        let from = msg
-            .get("from")
-            .cloned()
-            .ok_or_else(|| anyhow!("net message missing from"))?;
-        let to = msg
-            .get("to")
-            .cloned()
-            .ok_or_else(|| anyhow!("net message missing to"))?;
-        let payload = msg
-            .get("payload")
-            .cloned()
-            .ok_or_else(|| anyhow!("net message missing payload"))?;
-        let msg_id = receipt_int(msg, "id")?;
-        let dup_left = receipt_int(msg, "dupLeft")?;
-        let parent_tip = receipt_int(msg, "parentTip")?;
-        if msg_id != self.next_msg_id {
-            bail!(
-                "net_send message id {} did not match direct replay nextMsgId {}",
-                msg_id,
-                self.next_msg_id
-            );
-        }
-        let amount = u64::try_from(int_from_value(&payload)?)
-            .map_err(|_| anyhow!("net_send payload is negative"))?;
-
-        // The sender signs the transfer now; the step it describes commits
-        // when a copy is delivered.
-        let operation = {
-            let (sender, recipient) = (&self.device(&from)?.live, &self.device(&to)?.live);
-            let mut nonce = (msg_id as u64).to_le_bytes().to_vec();
-            nonce.extend_from_slice(&(parent_tip as u64).to_le_bytes());
-            sender
-                .transfer(recipient, amount, &nonce)
-                .map_err(|e| anyhow!("the sender could not sign the transfer: {e}"))?
-        };
-
-        let key = canonical_pair_key(&from, &to);
-        self.relationships
-            .entry(key)
-            .or_insert(DirectRelationship {
-                created: false,
-                delivered: 0,
-                active: false,
-            })
-            .active = true;
-        self.undelivered.insert(msg_id, (from.clone(), amount));
-        self.pending_messages.push(PendingNetMessage {
-            id: msg_id,
-            from,
-            to,
-            payload,
-            dup_left,
-            parent_tip,
-            send_group: msg_id,
-            operation,
-        });
-        self.next_msg_id += 1;
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_net_duplicate(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_net = set_var(current, "net")?;
-        let next_net = set_var(next, "net")?;
-        let removed = set_difference(current_net, next_net);
-        let original = record_fields(
-            removed
-                .first()
-                .ok_or_else(|| anyhow!("net_duplicate did not replace a network message"))?,
-        )?;
-        let original_id = receipt_int(original, "id")?;
-        let idx = self
-            .pending_messages
-            .iter()
-            .position(|pending| pending.id == original_id)
-            .ok_or_else(|| anyhow!("net_duplicate could not find pending message {original_id}"))?;
-        if self.pending_messages[idx].dup_left <= 0 {
-            bail!("net_duplicate on a message with no duplicate budget");
-        }
-        self.pending_messages[idx].dup_left -= 1;
-        let copy = PendingNetMessage {
-            id: self.next_msg_id,
-            ..self.pending_messages[idx].clone()
-        };
-        self.pending_messages.push(copy);
-        self.next_msg_id += 1;
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_net_deliver(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_net = set_var(current, "net")?;
-        let next_net = set_var(next, "net")?;
-        let removed = set_difference(current_net, next_net);
-        let msg = record_fields(
-            removed
-                .first()
-                .ok_or_else(|| anyhow!("net_deliver did not remove a network message"))?,
-        )?;
-        let msg_id = receipt_int(msg, "id")?;
-        let pending_idx = self
-            .pending_messages
-            .iter()
-            .position(|pending| pending.id == msg_id)
-            .ok_or_else(|| anyhow!("net_deliver could not find pending message {msg_id}"))?;
-        let pending = self.pending_messages.remove(pending_idx);
-        let key = canonical_pair_key(&pending.from, &pending.to);
-        let model_tip = self
-            .relationships
-            .get(&key)
-            .map(DirectRelationship::model_tip)
-            .unwrap_or(0);
-        if pending.parent_tip != model_tip {
-            bail!(
-                "net_deliver of a message sent at tip {} onto tip {model_tip}",
-                pending.parent_tip
-            );
-        }
-
-        // Contacts precede transfers: a pair the model never created is
-        // established on both devices before its first step.
-        self.establish_pair(&pending.from, &pending.to)?;
-
-        // The step, as production runs it: the sender proposes it on the tip
-        // it holds, the recipient decides it with Core's decisions against
-        // the tip it holds, and both commit it.
-        if pending.from == pending.to {
-            bail!("net_deliver of a step from a device to itself");
-        }
-        let mut sender = self
-            .devices
-            .remove(&pending.from)
-            .ok_or_else(|| anyhow!("unknown sender {}", pending.from.display()))?;
-        let Some(mut recipient) = self.devices.remove(&pending.to) else {
-            self.devices.insert(pending.from.clone(), sender);
-            bail!("unknown recipient {}", pending.to.display());
-        };
-        let delivered = deliver_step(&mut sender.live, &mut recipient.live, &pending.operation);
-        self.devices.insert(pending.from.clone(), sender);
-        self.devices.insert(pending.to.clone(), recipient);
-        delivered?;
-
-        self.relationships
-            .get_mut(&key)
-            .ok_or_else(|| anyhow!("delivery on a relationship no message activated"))?
-            .delivered += 1;
-        self.undelivered.remove(&pending.send_group);
-        self.ledger.insert(ledger_record(
-            pending.from.clone(),
-            pending.to.clone(),
-            pending.parent_tip,
-            pending.parent_tip + 1,
-        ));
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_net_drop(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_net = set_var(current, "net")?;
-        let next_net = set_var(next, "net")?;
-        let removed = set_difference(current_net, next_net);
-        let msg = record_fields(
-            removed
-                .first()
-                .ok_or_else(|| anyhow!("net_drop did not remove a network message"))?,
-        )?;
-        let msg_id = receipt_int(msg, "id")?;
-        let pending_idx = self
-            .pending_messages
-            .iter()
-            .position(|pending| pending.id == msg_id)
-            .ok_or_else(|| anyhow!("net_drop could not find pending message {msg_id}"))?;
-        self.pending_messages.remove(pending_idx);
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_add_storage_node(
-        &mut self,
-        current: &TlaState,
-        next: &TlaState,
-    ) -> anyhow::Result<()> {
-        let current_nodes = set_var(current, "storageNodes")?;
-        let next_nodes = set_var(next, "storageNodes")?;
-        let added = set_difference(next_nodes, current_nodes);
-        let node = added
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("add_storage_node had no added storage node"))?;
-        self.storage_nodes.insert(node);
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_unlock_spend_gate(
-        &mut self,
-        current: &TlaState,
-        next: &TlaState,
-    ) -> anyhow::Result<()> {
-        let current_activated = set_var(current, "activatedDevices")?;
-        let next_activated = set_var(next, "activatedDevices")?;
-        let added = set_difference(next_activated, current_activated);
-        let device = added
-            .first()
-            .cloned()
-            .ok_or_else(|| anyhow!("unlock_spend_gate had no newly activated device"))?;
-        let next_counts = map_var(next, "actCount")?;
-        let next_count = int_from_value(
-            next_counts
-                .get(&device)
-                .ok_or_else(|| anyhow!("missing next actCount for activated device"))?,
-        )?;
-
-        let expected_shard = changed_shard_key(current, next, &device)?;
-        let jap = self.join_activation_proof(&device, next_count as u64, expected_shard)?;
-        let shard_idx = self
-            .djte_state
-            .add_activation(&jap)
-            .map_err(|e| anyhow!("SourceDlvState::add_activation failed on unlock: {e}"))?;
-        if let Some(expected_shard) = expected_shard {
-            if expected_shard != shard_idx as i64 {
-                bail!(
-                    "unlock_spend_gate actual shard {shard_idx} diverged from TLC shard {expected_shard}"
-                );
-            }
-        }
-        self.activated_devices.insert(device.clone());
-        self.activation_counts.insert(device, next_count);
-        self.djte_seed += 1;
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_activate_again(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        let current_counts = map_var(current, "actCount")?;
-        let next_counts = map_var(next, "actCount")?;
-        let changed_device = current_counts
-            .keys()
-            .find(|device| current_counts.get(*device) != next_counts.get(*device))
-            .cloned()
-            .ok_or_else(|| anyhow!("activate_again had no changed device"))?;
-        let next_count = int_from_value(
-            next_counts
-                .get(&changed_device)
-                .ok_or_else(|| anyhow!("missing next actCount for activate_again device"))?,
-        )?;
-        let jap = self.join_activation_proof(&changed_device, next_count as u64, None)?;
-        self.djte_state
-            .add_activation(&jap)
-            .map_err(|e| anyhow!("SourceDlvState::add_activation failed on activate_again: {e}"))?;
-        self.activation_counts.insert(changed_device, next_count);
-        self.djte_seed += 1;
-        self.step += 1;
-        Ok(())
-    }
-
-    fn apply_phase_transition(&mut self, next: &TlaState) -> anyhow::Result<()> {
-        self.phase = int_var(next, "phase")?;
-        self.step += 1;
-        Ok(())
-    }
-
-    fn verify_projected_state(&self, expected: &TlaState) -> anyhow::Result<()> {
-        if expected.contains_key("keys") {
-            let expected_keys = map_var(expected, "keys")?;
-            if self.project_keys(expected_keys) != *expected_keys {
-                bail!("direct replay key projection diverged from TLC");
-            }
-        }
-        if expected.contains_key("devices") {
-            let expected_devices = map_var(expected, "devices")?;
-            if self.project_devices(expected_devices)? != *expected_devices {
-                bail!("direct replay device-tree projection diverged from TLC");
-            }
-        }
-        if expected.contains_key("relationships") {
-            let expected_relationships = map_var(expected, "relationships")?;
-            if self.project_relationships(expected_relationships)? != *expected_relationships {
-                bail!("direct replay relationship projection diverged from TLC");
-            }
-        }
-        if expected.contains_key("net") && self.project_net() != *set_var(expected, "net")? {
-            bail!("direct replay network projection diverged from TLC");
-        }
-        if expected.contains_key("ledger") && self.ledger != *set_var(expected, "ledger")? {
-            bail!("direct replay ledger projection diverged from TLC");
-        }
-        if expected.contains_key("storageNodes")
-            && self.storage_nodes != *set_var(expected, "storageNodes")?
-        {
-            bail!("direct replay storage-node projection diverged from TLC");
-        }
-        if expected.contains_key("activatedDevices")
-            && self.activated_devices != *set_var(expected, "activatedDevices")?
-        {
-            bail!("direct replay activatedDevices projection diverged from TLC");
-        }
-        if expected.contains_key("actCount") {
-            let expected_counts = map_var(expected, "actCount")?;
-            if self.project_activation_counts(expected_counts) != *expected_counts {
-                bail!("direct replay actCount projection diverged from TLC");
-            }
-        }
-        if expected.contains_key("vaults") && self.vaults != *map_var(expected, "vaults")? {
-            bail!("direct replay vault projection diverged from TLC");
-        }
-        if expected.contains_key("vaultState")
-            && self.vault_state != *map_var(expected, "vaultState")?
-        {
-            bail!("direct replay vault state projection diverged from TLC");
-        }
-        if expected.contains_key("spentJaps") && self.spent_japs != *set_var(expected, "spentJaps")?
-        {
-            bail!("direct replay spentJaps projection diverged from TLC");
-        }
-        if expected.contains_key("spentProofs")
-            && self.spent_proofs != *set_var(expected, "spentProofs")?
-        {
-            bail!("direct replay spentProofs projection diverged from TLC");
-        }
-        if expected.contains_key("consumedProofs")
-            && self.consumed_proofs != *set_var(expected, "consumedProofs")?
-        {
-            bail!("direct replay consumedProofs projection diverged from TLC");
-        }
-        if expected.contains_key("offlineSessions")
-            && self.offline_sessions != *set_var(expected, "offlineSessions")?
-        {
-            bail!("direct replay offlineSessions projection diverged from TLC");
-        }
-        if expected.contains_key("sourceRemaining")
-            && self.source_remaining != int_var(expected, "sourceRemaining")?
-        {
-            bail!("direct replay sourceRemaining projection diverged from TLC");
-        }
-        if expected.contains_key("djteSeed") && self.djte_seed != int_var(expected, "djteSeed")? {
-            bail!("direct replay djteSeed projection diverged from TLC");
-        }
-        if expected.contains_key("shardTree") {
-            let total_activations = self.djte_state.count_smt.total() as i64;
-            if total_activations != int_var(expected, "shardTree")? {
-                bail!("direct replay shardTree projection diverged from TLC");
-            }
-        }
-        if expected.contains_key("nextMsgId") && self.next_msg_id != int_var(expected, "nextMsgId")?
-        {
-            bail!("direct replay nextMsgId projection diverged from TLC");
-        }
-        if expected.contains_key("phase") && self.phase != int_var(expected, "phase")? {
-            bail!("direct replay phase projection diverged from TLC");
-        }
-        if expected.contains_key("step") && self.step != int_var(expected, "step")? {
-            bail!("direct replay step projection diverged from TLC");
-        }
-        if expected.contains_key("deviceBalance") {
-            let expected_balance = map_var(expected, "deviceBalance")?;
-            if self.project_device_balance(expected_balance)? != *expected_balance {
-                bail!("direct replay deviceBalance projection diverged from TLC");
-            }
-        }
-        Ok(())
-    }
-
-    fn project_keys(
-        &self,
-        expected: &BTreeMap<TlaValue, TlaValue>,
-    ) -> BTreeMap<TlaValue, TlaValue> {
-        expected
-            .keys()
-            .cloned()
-            .map(|device| {
-                let generated = self
-                    .devices
-                    .get(&device)
-                    .map(|trace| trace.generated_keys.is_some())
-                    .unwrap_or(false);
-                (
-                    device,
-                    if generated {
-                        key_record(1, 1)
-                    } else {
-                        key_record(0, 0)
-                    },
-                )
-            })
-            .collect()
-    }
-
-    fn project_devices(
-        &self,
-        expected: &BTreeMap<TlaValue, TlaValue>,
-    ) -> anyhow::Result<BTreeMap<TlaValue, TlaValue>> {
-        let mut projected = BTreeMap::new();
-        for genesis in expected.keys() {
-            let devices = self
-                .genesis_devices
-                .get(genesis)
-                .ok_or_else(|| anyhow!("missing projected genesis device set"))?;
-            projected.insert(genesis.clone(), TlaValue::Set(devices.clone()));
-        }
-        Ok(projected)
-    }
-
-    fn project_relationships(
-        &self,
-        expected: &BTreeMap<TlaValue, TlaValue>,
-    ) -> anyhow::Result<BTreeMap<TlaValue, TlaValue>> {
-        let mut projected = BTreeMap::new();
-        for pair_key in expected.keys() {
-            let pair = seq_items(pair_key)?;
-            let record = match (pair.len() == 2 && pair[0] != pair[1])
-                .then(|| {
-                    self.relationships
-                        .get(&canonical_pair_key(&pair[0], &pair[1]))
-                })
-                .flatten()
-            {
-                Some(relationship) => relationship_record(
-                    relationship.model_tip(),
-                    if relationship.active {
-                        "active"
-                    } else {
-                        "inactive"
-                    },
-                ),
-                None => relationship_record(0, "inactive"),
-            };
-            projected.insert(pair_key.clone(), record);
-        }
-        Ok(projected)
-    }
-
-    /// The model's balances, from the real heads: a device's ERA, less the
-    /// whole-payout funding above its model balance, less every send the
-    /// model has debited that no delivered copy has committed yet. The model
-    /// debits at send; the protocol debits when the step commits.
-    fn project_device_balance(
-        &self,
-        expected: &BTreeMap<TlaValue, TlaValue>,
-    ) -> anyhow::Result<BTreeMap<TlaValue, TlaValue>> {
-        let mut projected = BTreeMap::new();
-        for device in expected.keys() {
-            let direct = self.device(device)?;
-            let charged: u64 = self
-                .undelivered
-                .values()
-                .filter(|(sender, _)| sender == device)
-                .map(|(_, amount)| amount)
-                .sum();
-            let model = direct
-                .live
-                .era_balance()
-                .checked_sub(direct.funding_offset + charged)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "{} holds less real ERA than the model's debits allow",
-                        device.display()
-                    )
-                })?;
-            projected.insert(
-                device.clone(),
-                TlaValue::Int(i64::try_from(model).map_err(|_| anyhow!("balance overflows"))?),
-            );
-        }
-        Ok(projected)
-    }
-
-    fn project_net(&self) -> BTreeSet<TlaValue> {
-        self.pending_messages
-            .iter()
-            .map(|message| {
-                TlaValue::Record(BTreeMap::from([
-                    ("dupLeft".into(), TlaValue::Int(message.dup_left)),
-                    ("from".into(), message.from.clone()),
-                    ("id".into(), TlaValue::Int(message.id)),
-                    ("parentTip".into(), TlaValue::Int(message.parent_tip)),
-                    ("payload".into(), message.payload.clone()),
-                    ("to".into(), message.to.clone()),
-                ]))
-            })
-            .collect()
-    }
-
-    fn project_activation_counts(
-        &self,
-        expected: &BTreeMap<TlaValue, TlaValue>,
-    ) -> BTreeMap<TlaValue, TlaValue> {
-        expected
-            .keys()
-            .cloned()
-            .map(|device| {
-                (
-                    device.clone(),
-                    TlaValue::Int(*self.activation_counts.get(&device).unwrap_or(&0)),
-                )
-            })
-            .collect()
-    }
-
-    fn join_activation_proof(
-        &mut self,
-        device: &TlaValue,
-        ordinal: u64,
-        expected_shard: Option<i64>,
-    ) -> anyhow::Result<JoinActivationProof> {
-        let label = tla_atom(device)?;
-        let activation_id = self.activation_identity(device, expected_shard)?;
-        let nonce = trace_seed(
-            dsm::tagged_domain!(b"DSM/VV/jap"),
-            &format!("{label}:{ordinal}"),
-        );
-        Ok(JoinActivationProof {
-            id: activation_id,
-            gate_proof: ordinal.to_le_bytes().to_vec(),
-            nonce,
-        })
-    }
-
-    fn activation_identity(
-        &mut self,
-        device: &TlaValue,
-        expected_shard: Option<i64>,
-    ) -> anyhow::Result<[u8; 32]> {
-        if let Some(identity) = self.activation_identities.get(device) {
-            return Ok(*identity);
-        }
-
-        let label = tla_atom(device)?;
-        let shard_depth = self.djte_state.count_smt.shard_depth;
-        let target_shard = expected_shard.unwrap_or(0).max(0) as u64;
-
-        for attempt in 0..4096u64 {
-            let candidate = bytes32_from_hash(
-                dsm::tagged_domain!(b"DSM/VV/jap-id"),
-                format!("{label}:{attempt}").as_bytes(),
-            );
-            if activation_shard_index(&candidate, shard_depth) == target_shard {
-                self.activation_identities.insert(device.clone(), candidate);
-                return Ok(candidate);
-            }
-        }
-
-        bail!(
-            "failed to derive deterministic activation identity for {label} in shard {target_shard}"
-        )
-    }
-
-    fn device(&self, device: &TlaValue) -> anyhow::Result<&DirectDevice> {
-        self.devices
-            .get(device)
-            .ok_or_else(|| anyhow!("unknown direct replay device {}", device.display()))
-    }
-}
-
-/// One step of `operation` from `sender` to `recipient`, as production runs
-/// it: proposed on the sender's tip, decided by the recipient with Core's
-/// `decide_prepare` and `decide_confirm`, and committed on both.
-fn deliver_step(
-    sender: &mut LiveDevice,
-    recipient: &mut LiveDevice,
-    operation: &Operation,
-) -> anyhow::Result<()> {
-    let step = sender
-        .propose(recipient, operation.clone())
-        .map_err(|e| anyhow!("the step could not be proposed: {e}"))?;
-    if step.receipt.child_tip == step.receipt.parent_tip {
-        bail!("the delivered step did not move the sender's tip");
-    }
-    match recipient.decide(sender, &step) {
-        Decision::Accepted(verified) => commit(sender, recipient, step, &verified)
-            .map_err(|e| anyhow!("the step did not commit: {e}")),
-        other => bail!("the recipient refused the step: {other}"),
-    }
-}
-
-/// A Tripwire trace replayed on production's receiver: every relation of the
-/// model is a relationship between two real devices, and every receipt the
-/// model adds is a step one of them proposes and the other decides with
-/// Core's decisions and commits. The model's tips map onto the shared tips
-/// the devices hold: a receipt must extend the tip its `oldTip` maps to, and
-/// its `newTip` maps to the successor both devices then hold.
-#[derive(Default)]
-struct TripwireImplementation {
-    devices: BTreeMap<TlaValue, LiveDevice>,
-    tips: BTreeMap<(TlaValue, TlaValue), BTreeMap<i64, [u8; 32]>>,
-}
-
-fn replay_tripwire_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
-    let mut failures = Vec::new();
-    let mut implementation = TripwireImplementation::default();
-
-    for (idx, pair) in states.windows(2).enumerate() {
-        if let Err(err) = implementation.replay_step(&pair[0], &pair[1]) {
-            failures.push(format!("step {}: {err}", idx + 1));
-        }
-    }
-
-    failures
-}
-
-impl TripwireImplementation {
-    fn replay_step(&mut self, current: &TlaState, next: &TlaState) -> anyhow::Result<()> {
-        // First require the TLC step to satisfy the abstract Tripwire
-        // transition: current root revisions must match the receipt anchors,
-        // and the relation-local SMT tips must advance deterministically for
-        // both participants.
-        replay_tripwire_step(current, next)?;
-
-        let current_ledger = set_var(current, "ledger")?;
-        let next_ledger = set_var(next, "ledger")?;
-        let added = set_difference(next_ledger, current_ledger);
-        let receipt = added
-            .first()
-            .ok_or_else(|| anyhow!("Tripwire implementation replay expected one added receipt"))?;
-        let record = record_fields(receipt)?;
-        let rel_devices = set_items(
-            record
-                .get("rel")
-                .ok_or_else(|| anyhow!("Tripwire receipt missing rel"))?,
-        )?;
-        let [proposer, decider] = rel_devices.as_slice() else {
-            bail!("Tripwire implementation replay expected binary relation");
-        };
-        let old_tip = receipt_int(record, "oldTip")?;
-        let new_tip = receipt_int(record, "newTip")?;
-
-        for device in [proposer, decider] {
-            if !self.devices.contains_key(device) {
-                let live = LiveDevice::new(&format!("tla-tripwire-{}", tla_atom(device)?))
-                    .map_err(|e| anyhow!("device {}: {e}", device.display()))?;
-                self.devices.insert(device.clone(), live);
-            }
-        }
-        let mut sender = self
-            .devices
-            .remove(proposer)
-            .ok_or_else(|| anyhow!("missing device {}", proposer.display()))?;
-        let Some(mut recipient) = self.devices.remove(decider) else {
-            self.devices.insert(proposer.clone(), sender);
-            bail!("missing device {}", decider.display());
-        };
-        let tips = self
-            .tips
-            .entry((proposer.clone(), decider.clone()))
-            .or_default();
-        let replayed = Self::step(tips, &mut sender, &mut recipient, old_tip, new_tip);
-        self.devices.insert(proposer.clone(), sender);
-        self.devices.insert(decider.clone(), recipient);
-        replayed
-    }
-
-    fn step(
-        tips: &mut BTreeMap<i64, [u8; 32]>,
-        sender: &mut LiveDevice,
-        recipient: &mut LiveDevice,
-        old_tip: i64,
-        new_tip: i64,
-    ) -> anyhow::Result<()> {
-        connect(sender, recipient).map_err(|e| anyhow!("contacts: {e}"))?;
-        let held = recipient
-            .shared_tip_with(sender)
-            .ok_or_else(|| anyhow!("the recipient holds no tip for the sender"))?;
-        match tips.get(&old_tip) {
-            Some(mapped) if *mapped == held => {}
-            Some(_) => bail!("the model's tip {old_tip} is not the tip the recipient holds"),
-            None if tips.is_empty() => {
-                tips.insert(old_tip, held);
-            }
-            None => {
-                bail!("the receipt extends model tip {old_tip}, which no committed step produced")
-            }
-        }
-        // The model's tip names the step's operation: its low byte marks it.
-        let step = sender
-            .propose(recipient, marked(new_tip.to_le_bytes()[0]))
-            .map_err(|e| anyhow!("the step could not be proposed: {e}"))?;
-        let successor = step.successor_tip;
-        match recipient.decide(sender, &step) {
-            Decision::Accepted(verified) => commit(sender, recipient, step, &verified)
-                .map_err(|e| anyhow!("the step did not commit: {e}"))?,
-            other => {
-                bail!("production refused the model's receipt {old_tip}->{new_tip}: {other}")
-            }
-        }
-        match tips.insert(new_tip, successor) {
-            Some(previous) if previous != successor => {
-                bail!("the model's tip {new_tip} maps to two different successors")
-            }
-            _ => Ok(()),
-        }
-    }
-}
-
-fn replay_dsm_trace_into_implementation(states: &[TlaState]) -> Vec<String> {
-    let mut failures = Vec::new();
-    let mut harness = match DsmImplementationHarness::new(&states[0]) {
-        Ok(harness) => harness,
-        Err(err) => return vec![format!("failed to initialize direct DSM harness: {err}")],
-    };
-
-    if let Err(err) = harness.verify_projected_state(&states[0]) {
-        failures.push(format!("initial state: {err}"));
-        return failures;
-    }
-
-    for (idx, pair) in states.windows(2).enumerate() {
-        match matching_dsm_action(&pair[0], &pair[1]) {
-            Ok(Some(action)) => {
-                if let Err(err) = harness.replay_action(action, &pair[0], &pair[1]) {
-                    failures.push(format!("step {} ({action}): {err}", idx + 1));
-                }
-            }
-            Ok(None) => failures.push(format!(
-                "step {}: unable to classify TLC action for direct implementation replay",
-                idx + 1
-            )),
-            Err(err) => failures.push(format!(
-                "step {}: direct implementation replay could not classify action: {err}",
-                idx + 1
-            )),
-        }
-    }
-
-    failures
-}
-
-fn changed_shard_key(
-    current: &TlaState,
-    next: &TlaState,
-    device: &TlaValue,
-) -> anyhow::Result<Option<i64>> {
-    let current_shards = map_var(current, "shardLists")?;
-    let next_shards = map_var(next, "shardLists")?;
-    for key in current_shards.keys() {
-        let current_seq = seq_value(
-            current_shards
-                .get(key)
-                .ok_or_else(|| anyhow!("missing current shard list"))?,
-        )?;
-        let next_seq = seq_value(
-            next_shards
-                .get(key)
-                .ok_or_else(|| anyhow!("missing next shard list"))?,
-        )?;
-        if next_seq.len() == current_seq.len() + 1
-            && next_seq[..current_seq.len()] == current_seq[..]
-            && next_seq.last() == Some(device)
-        {
-            return Ok(Some(int_from_value(key)?));
-        }
-    }
-    Ok(None)
-}
-
-fn canonical_pair_key(left: &TlaValue, right: &TlaValue) -> (TlaValue, TlaValue) {
-    if left <= right {
-        (left.clone(), right.clone())
-    } else {
-        (right.clone(), left.clone())
-    }
-}
-
-fn tla_atom(value: &TlaValue) -> anyhow::Result<String> {
-    match value {
-        TlaValue::Symbol(value) | TlaValue::Str(value) => Ok(value.clone()),
-        TlaValue::Int(value) => Ok(value.to_string()),
-        other => bail!("expected atom-like TLC value, found {}", other.display()),
-    }
-}
-
-fn trace_seed(tag: dsm::crypto::domain::TaggedHashDomain<'_>, label: &str) -> [u8; 32] {
-    bytes32_from_hash(tag, label.as_bytes())
-}
-
-fn bytes32_from_hash(tag: dsm::crypto::domain::TaggedHashDomain<'_>, bytes: &[u8]) -> [u8; 32] {
-    *domain_hash(tag, bytes).as_bytes()
-}
-
-fn activation_shard_index(id: &[u8; 32], depth: u8) -> u64 {
-    let shard_hash = domain_hash_bytes(dsm::common::domain_tags::TAG_DJTE_SHARD, id);
-    let mut bytes = [0u8; 8];
-    bytes.copy_from_slice(&shard_hash[0..8]);
-    let value = u64::from_be_bytes(bytes);
-    if depth == 0 {
-        0
-    } else if depth < 64 {
-        value >> (64 - depth)
-    } else {
-        value
-    }
-}
-
-fn shard_depth_from_count(count: usize) -> Option<u8> {
-    if count == 0 || !count.is_power_of_two() {
-        None
-    } else {
-        Some(count.trailing_zeros() as u8)
-    }
 }
 
 fn replay_tripwire_trace(states: &[TlaState]) -> Vec<String> {
@@ -1491,8 +314,13 @@ fn dsm_replay_candidates() -> &'static [(&'static str, ReplayFn)] {
     &[
         ("add_device", apply_add_device),
         ("create_relationship", apply_create_relationship),
-        ("net_send", apply_net_send),
-        ("net_deliver", apply_net_deliver),
+        ("send", apply_send),
+        ("recv_transfer", apply_recv_transfer),
+        ("recv_delta", apply_recv_delta),
+        ("cert_post", apply_cert_post),
+        ("gate_release", apply_gate_release),
+        ("recv_cert", apply_recv_cert),
+        ("injected_copy", apply_injected_copy),
         ("net_drop", apply_net_drop),
         ("net_duplicate", apply_net_duplicate),
         ("add_storage_node", apply_add_storage_node),
@@ -1508,13 +336,6 @@ fn dsm_replay_candidates() -> &'static [(&'static str, ReplayFn)] {
         ("phase_transition", apply_phase_transition),
         ("step_only", apply_step_only),
     ]
-}
-
-fn matching_dsm_action(
-    current: &TlaState,
-    next: &TlaState,
-) -> anyhow::Result<Option<&'static str>> {
-    matching_dsm_action_with_candidates(current, next, dsm_replay_candidates())
 }
 
 fn matching_dsm_action_with_candidates<'a>(
@@ -1563,205 +384,653 @@ fn apply_add_device(current: &TlaState, next: &TlaState) -> anyhow::Result<bool>
     Ok(expected == *next)
 }
 
-fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_relationships = map_var(current, "relationships")?;
-    let next_relationships = map_var(next, "relationships")?;
+// ---------------------------------------------------------------------------
+// DSM.tla's online protocol, restated over TLC's values. Each `apply_*`
+// rebuilds the next state from the current one for every choice the action
+// allows and reports whether one is the state TLC printed.
+// ---------------------------------------------------------------------------
 
-    for pair_key in current_relationships.keys() {
+fn pair_of(d: &TlaValue, p: &TlaValue) -> TlaValue {
+    TlaValue::Seq(vec![d.clone(), p.clone()])
+}
+
+fn int_value(n: i64) -> TlaValue {
+    TlaValue::Int(n)
+}
+
+fn record_of(fields: &[(&str, TlaValue)]) -> TlaValue {
+    TlaValue::Record(
+        fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect(),
+    )
+}
+
+fn online_of(
+    state: &TlaState,
+    d: &TlaValue,
+    p: &TlaValue,
+) -> anyhow::Result<BTreeMap<String, TlaValue>> {
+    let online = map_var(state, "online")?;
+    Ok(record_fields(
+        online
+            .get(&pair_of(d, p))
+            .ok_or_else(|| anyhow!("missing online[{}]", pair_of(d, p).display()))?,
+    )?
+    .clone())
+}
+
+fn set_online(
+    state: &mut TlaState,
+    d: &TlaValue,
+    p: &TlaValue,
+    rec: BTreeMap<String, TlaValue>,
+) -> anyhow::Result<()> {
+    set_map_entry(state, "online", pair_of(d, p), TlaValue::Record(rec))
+}
+
+fn with_field(
+    mut rec: BTreeMap<String, TlaValue>,
+    field: &str,
+    value: i64,
+) -> BTreeMap<String, TlaValue> {
+    rec.insert(field.to_string(), int_value(value));
+    rec
+}
+
+/// d's projection tip moves to `tip`: its relationship view, its SMT leaf and
+/// its root revision.
+fn move_tip(state: &mut TlaState, d: &TlaValue, p: &TlaValue, tip: i64) -> anyhow::Result<()> {
+    set_map_entry(
+        state,
+        "relationships",
+        pair_of(d, p),
+        relationship_record(tip, "active"),
+    )?;
+    set_nested_map_entry(
+        state,
+        "smtState",
+        d.clone(),
+        rel_key_value(d, p),
+        int_value(tip),
+    )?;
+    increment_map_entry(state, "deviceRoots", d.clone(), 1)
+}
+
+fn ledger_entry(rel: TlaValue, signer: &TlaValue, old_tip: i64, new_tip: i64) -> TlaValue {
+    record_of(&[
+        ("rel", rel),
+        ("signer", signer.clone()),
+        ("oldTip", int_value(old_tip)),
+        ("newTip", int_value(new_tip)),
+    ])
+}
+
+fn unfinalized(rec: &BTreeMap<String, TlaValue>) -> anyhow::Result<bool> {
+    Ok(!record_bool(rec, "fin")?)
+}
+
+/// The join oracle's tip for (parent, a, b), if it holds one.
+fn join_known(state: &TlaState, parent: i64, a: i64, b: i64) -> anyhow::Result<Option<i64>> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    for j in set_var(state, "joins")? {
+        let j = record_fields(j)?;
+        if record_int(j, "parent")? == parent
+            && record_int(j, "lo")? == lo
+            && record_int(j, "hi")? == hi
+        {
+            return Ok(Some(record_int(j, "tip")?));
+        }
+    }
+    Ok(None)
+}
+
+/// `TipSync(v, parent, target, fresh)`; `Some((chain, prev, local, joined))`
+/// where the sync commits, `joined` naming a join the oracle had to take.
+fn tip_sync_values(
+    state: &TlaState,
+    chain: i64,
+    prev: i64,
+    local: i64,
+    parent: i64,
+    target: i64,
+    fresh: i64,
+) -> anyhow::Result<Option<(i64, i64, i64, Option<(i64, i64, i64)>)>> {
+    if chain == target {
+        return Ok(Some((target, prev, target, None)));
+    }
+    if chain == parent {
+        return Ok(Some((target, parent, target, None)));
+    }
+    if prev == parent && local == chain {
+        return Ok(Some(match join_known(state, parent, chain, target)? {
+            Some(tip) => (tip, chain, tip, None),
+            None => (fresh, chain, fresh, Some((parent, chain, target))),
+        }));
+    }
+    if prev != 0 && prev != parent && prev != target && local == chain {
+        if join_known(state, parent, prev, target)? == Some(chain) {
+            return Ok(Some((chain, prev, local, None)));
+        }
+    }
+    Ok(None)
+}
+
+fn add_join(state: &mut TlaState, join: Option<(i64, i64, i64)>, tip: i64) -> anyhow::Result<()> {
+    match join {
+        Some((parent, a, b)) => insert_set_var(
+            state,
+            "joins",
+            record_of(&[
+                ("parent", int_value(parent)),
+                ("lo", int_value(a.min(b))),
+                ("hi", int_value(a.max(b))),
+                ("tip", int_value(tip)),
+            ]),
+        ),
+        None => Ok(()),
+    }
+}
+
+fn create_relationship_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let g = int_var(current, "nextMsgId")?;
+    let relationships = map_var(current, "relationships")?;
+    for pair_key in relationships.keys() {
         let pair = seq_items(pair_key)?;
         if pair.len() != 2 || pair[0] == pair[1] {
             continue;
         }
-
-        let reverse = TlaValue::Seq(vec![pair[1].clone(), pair[0].clone()]);
-        let current_pair = record_fields(
-            current_relationships
-                .get(pair_key)
-                .ok_or_else(|| anyhow!("missing current relationship"))?,
-        )?;
-        let next_pair = record_fields(
-            next_relationships
-                .get(pair_key)
-                .ok_or_else(|| anyhow!("missing next relationship"))?,
-        )?;
-        let current_reverse = record_fields(
-            current_relationships
-                .get(&reverse)
-                .ok_or_else(|| anyhow!("missing reverse relationship"))?,
-        )?;
-        let next_reverse = record_fields(
-            next_relationships
-                .get(&reverse)
-                .ok_or_else(|| anyhow!("missing next reverse relationship"))?,
-        )?;
-
-        if record_int(current_pair, "tip")? != 0
-            || record_int(current_reverse, "tip")? != 0
-            || record_str(current_pair, "state")? != "inactive"
-            || record_str(current_reverse, "state")? != "inactive"
-            || record_int(next_pair, "tip")? != 1
-            || record_int(next_reverse, "tip")? != 1
-            || record_str(next_pair, "state")? != "active"
-            || record_str(next_reverse, "state")? != "active"
-        {
-            continue;
-        }
-
+        let (d1, d2) = (&pair[0], &pair[1]);
+        let start = BTreeMap::from([
+            ("prev".to_string(), int_value(0)),
+            ("local".to_string(), int_value(g)),
+            ("lin".to_string(), int_value(g)),
+            ("pin".to_string(), int_value(g)),
+            ("gate".to_string(), int_value(0)),
+            ("awaits".to_string(), int_value(0)),
+        ]);
         let mut expected = current.clone();
         set_map_entry(
             &mut expected,
             "relationships",
-            pair_key.clone(),
-            relationship_record(1, "active"),
+            pair_of(d1, d2),
+            relationship_record(g, "active"),
         )?;
         set_map_entry(
             &mut expected,
             "relationships",
-            reverse,
-            relationship_record(1, "active"),
+            pair_of(d2, d1),
+            relationship_record(g, "active"),
         )?;
+        update_relationship_smt_leaf(&mut expected, d1, d2, g)?;
+        set_online(&mut expected, d1, d2, start.clone())?;
+        set_online(&mut expected, d2, d1, start)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(g + 1))?;
+        bump_step(&mut expected)?;
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_create_relationship(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(create_relationship_candidates(current)?.contains(next))
+}
+
+fn transfer_msg(
+    r: &BTreeMap<String, TlaValue>,
+    copy: i64,
+    dup_left: TlaValue,
+) -> anyhow::Result<TlaValue> {
+    let field = |f: &str| {
+        r.get(f)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing outbox field {f}"))
+    };
+    Ok(record_of(&[
+        ("id", field("id")?),
+        ("copy", int_value(copy)),
+        ("kind", TlaValue::Str("transfer".into())),
+        ("from", field("from")?),
+        ("to", field("to")?),
+        ("payload", field("payload")?),
+        ("sp", field("sp")?),
+        ("sc", field("sc")?),
+        ("pp", field("pp")?),
+        ("pc", field("pc")?),
+        ("dupLeft", dup_left),
+    ]))
+}
+
+fn delta_msg(
+    j: &BTreeMap<String, TlaValue>,
+    copy: i64,
+    dup_left: TlaValue,
+) -> anyhow::Result<TlaValue> {
+    let field = |f: &str| {
+        j.get(f)
+            .cloned()
+            .ok_or_else(|| anyhow!("missing journal field {f}"))
+    };
+    Ok(record_of(&[
+        ("id", field("id")?),
+        ("copy", int_value(copy)),
+        ("kind", TlaValue::Str("delta".into())),
+        ("from", field("from")?),
+        ("to", field("to")?),
+        ("payload", int_value(0)),
+        ("sp", field("sp")?),
+        ("sc", field("sc")?),
+        ("pp", field("pp")?),
+        ("pc", field("pc")?),
+        ("dupLeft", dup_left),
+    ]))
+}
+
+/// The duplicate budget a fresh copy carries: whatever the copies already in
+/// the bag were given, read from the transfer the step under check added.
+fn dup_budget(msg: &BTreeMap<String, TlaValue>) -> anyhow::Result<TlaValue> {
+    msg.get("dupLeft")
+        .cloned()
+        .ok_or_else(|| anyhow!("missing dupLeft"))
+}
+
+fn send_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let added = set_difference(set_var(next, "outbox")?, set_var(current, "outbox")?);
+    let [r] = added.as_slice() else {
+        return Ok(out);
+    };
+    let rec = record_fields(r)?;
+    let id = int_var(current, "nextMsgId")?;
+    let (d, p) = (
+        rec.get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?,
+        rec.get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?,
+    );
+    let o = online_of(current, &d, &p)?;
+    let amt = record_int(rec, "payload")?;
+    if record_int(rec, "id")? != id
+        || record_int(rec, "sc")? != id
+        || record_int(rec, "pc")? != id
+        || record_int(rec, "sp")? != record_int(&o, "lin")?
+        || record_int(rec, "pp")? != relationship_tip(current, &pair_of(&d, &p))?
+        || !unfinalized(rec)?
+    {
+        return Ok(out);
+    }
+    let sent = set_difference(set_var(next, "net")?, set_var(current, "net")?);
+    let [msg] = sent.as_slice() else {
+        return Ok(out);
+    };
+    let mut expected = current.clone();
+    insert_set_var(&mut expected, "outbox", r.clone())?;
+    insert_set_var(
+        &mut expected,
+        "net",
+        transfer_msg(rec, id, dup_budget(record_fields(msg)?)?)?,
+    )?;
+    let o = with_field(
+        with_field(with_field(o, "lin", id), "local", id),
+        "gate",
+        id,
+    );
+    set_online(&mut expected, &d, &p, o)?;
+    increment_map_entry(&mut expected, "deviceBalance", d, -amt)?;
+    set_var_value(&mut expected, "nextMsgId", int_value(id + 1))?;
+    bump_step(&mut expected)?;
+    out.push(expected);
+    Ok(out)
+}
+
+fn apply_send(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(send_candidates(current, next)?.contains(next))
+}
+
+fn recv_transfer_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let base = int_var(current, "nextMsgId")?;
+    for m in set_var(current, "net")? {
+        let msg = record_fields(m)?;
+        if record_str(msg, "kind")? != "transfer" {
+            continue;
+        }
+        let d = msg
+            .get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?;
+        let p = msg
+            .get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?;
+        let o = online_of(current, &d, &p)?;
+        let chain = relationship_tip(current, &pair_of(&d, &p))?;
+        let (sp, sc, pp, pc) = (
+            record_int(msg, "sp")?,
+            record_int(msg, "sc")?,
+            record_int(msg, "pp")?,
+            record_int(msg, "pc")?,
+        );
+        let Some((new_chain, new_prev, new_local, join)) = tip_sync_values(
+            current,
+            chain,
+            record_int(&o, "prev")?,
+            record_int(&o, "local")?,
+            pp,
+            pc,
+            base + 1,
+        )?
+        else {
+            continue;
+        };
+        let bc = base;
+        let rel = rel_key_value(&d, &p);
+        let journal = record_of(&[
+            (
+                "id",
+                msg.get("id")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing id"))?,
+            ),
+            ("from", d.clone()),
+            ("to", p.clone()),
+            (
+                "sp",
+                o.get("lin")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing lin"))?,
+            ),
+            ("sc", int_value(bc)),
+            ("pp", int_value(pp)),
+            ("pc", int_value(pc)),
+        ]);
+        let mut expected = current.clone();
+        move_tip(&mut expected, &d, &p, new_chain)?;
+        let mut rec = o.clone();
+        rec.insert("prev".into(), int_value(new_prev));
+        rec.insert("local".into(), int_value(new_local));
+        rec.insert("lin".into(), int_value(bc));
+        rec.insert("pin".into(), int_value(sc));
+        rec.insert(
+            "awaits".into(),
+            msg.get("id")
+                .cloned()
+                .ok_or_else(|| anyhow!("missing id"))?,
+        );
+        set_online(&mut expected, &d, &p, rec)?;
+        increment_map_entry(
+            &mut expected,
+            "deviceBalance",
+            d.clone(),
+            record_int(msg, "payload")?,
+        )?;
+        insert_set_var(&mut expected, "ledger", ledger_entry(rel, &p, sp, sc))?;
+        add_join(&mut expected, join, new_chain)?;
+        remove_set_var(&mut expected, "net", m)?;
+        let delta = delta_msg(record_fields(&journal)?, bc, dup_budget(msg)?)?;
+        insert_set_var(&mut expected, "journal", journal)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(base + 2))?;
+        bump_step(&mut expected)?;
+        // The delta's duplicate budget is the configuration's; take it from
+        // the delta TLC printed, if the rest of the state is this step's.
+        let printed = set_difference(set_var(next, "net")?, set_var(&expected, "net")?);
+        if let [printed] = printed.as_slice() {
+            let mut printed_fields = record_fields(printed)?.clone();
+            let mut ours = record_fields(&delta)?.clone();
+            printed_fields.remove("dupLeft");
+            ours.remove("dupLeft");
+            if printed_fields == ours {
+                insert_set_var(&mut expected, "net", printed.clone())?;
+            }
+        }
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_transfer_candidates(current, next)?.contains(next))
+}
+
+fn recv_delta_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let fresh = int_var(current, "nextMsgId")?;
+    for m in set_var(current, "net")? {
+        let msg = record_fields(m)?;
+        if record_str(msg, "kind")? != "delta" {
+            continue;
+        }
+        let d = msg
+            .get("to")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing to"))?;
+        let p = msg
+            .get("from")
+            .cloned()
+            .ok_or_else(|| anyhow!("missing from"))?;
+        let id = record_int(msg, "id")?;
+        let mut found = None;
+        for r in set_var(current, "outbox")? {
+            if record_int(record_fields(r)?, "id")? == id {
+                found = Some(r);
+            }
+        }
+        let Some(r) = found else {
+            continue;
+        };
+        let rec = record_fields(r)?;
+        let o = online_of(current, &d, &p)?;
+        let chain = relationship_tip(current, &pair_of(&d, &p))?;
+        let Some((new_chain, new_prev, new_local, join)) = tip_sync_values(
+            current,
+            chain,
+            record_int(&o, "prev")?,
+            record_int(&o, "local")?,
+            record_int(rec, "pp")?,
+            record_int(rec, "pc")?,
+            fresh,
+        )?
+        else {
+            continue;
+        };
+        let mut expected = current.clone();
+        move_tip(&mut expected, &d, &p, new_chain)?;
+        let mut on = o.clone();
+        on.insert("prev".into(), int_value(new_prev));
+        on.insert("local".into(), int_value(new_local));
+        on.insert("pin".into(), int_value(record_int(msg, "sc")?));
+        set_online(&mut expected, &d, &p, on)?;
+        remove_set_var(&mut expected, "outbox", r)?;
+        let mut finalized = rec.clone();
+        finalized.insert("fin".into(), TlaValue::Bool(unfinalized(rec)?));
+        insert_set_var(&mut expected, "outbox", TlaValue::Record(finalized))?;
         insert_set_var(
             &mut expected,
             "ledger",
-            ledger_record(pair[0].clone(), pair[1].clone(), 0, 1),
+            ledger_entry(
+                rel_key_value(&d, &p),
+                &p,
+                record_int(msg, "sp")?,
+                record_int(msg, "sc")?,
+            ),
         )?;
-        update_relationship_smt_leaf(&mut expected, &pair[0], &pair[1], 1)?;
+        add_join(&mut expected, join, new_chain)?;
+        remove_set_var(&mut expected, "net", m)?;
+        set_var_value(&mut expected, "nextMsgId", int_value(fresh + 1))?;
         bump_step(&mut expected)?;
-        if expected == *next {
-            return Ok(true);
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_delta(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_delta_candidates(current)?.contains(next))
+}
+
+fn cert_post_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let gate = record_int(record_fields(rec)?, "gate")?;
+        if pair.len() != 2 || gate == 0 {
+            continue;
         }
+        let mut expected = current.clone();
+        insert_set_var(&mut expected, "certs", int_value(gate))?;
+        bump_step(&mut expected)?;
+        out.push(expected);
     }
-
-    Ok(false)
+    Ok(out)
 }
 
-fn apply_net_send(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_net = set_var(current, "net")?;
-    let next_net = set_var(next, "net")?;
-    let added = set_difference(next_net, current_net);
-    if added.len() != 1 || next_net.len() != current_net.len() + 1 {
-        return Ok(false);
+fn apply_cert_post(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(cert_post_candidates(current)?.contains(next))
+}
+
+fn gate_release_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let rec = record_fields(rec)?;
+        let gate = record_int(rec, "gate")?;
+        if pair.len() != 2 || gate == 0 {
+            continue;
+        }
+        let mut expected = current.clone();
+        let mut outbox = BTreeSet::new();
+        for r in set_var(current, "outbox")? {
+            if record_int(record_fields(r)?, "id")? != gate {
+                outbox.insert(r.clone());
+            }
+        }
+        set_var_value(&mut expected, "outbox", TlaValue::Set(outbox))?;
+        set_online(
+            &mut expected,
+            &pair[0],
+            &pair[1],
+            with_field(rec.clone(), "gate", 0),
+        )?;
+        bump_step(&mut expected)?;
+        out.push(expected);
     }
+    Ok(out)
+}
 
-    let msg = record_fields(&added[0])?;
-    let from = msg
-        .get("from")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing from"))?;
-    let to = msg
-        .get("to")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing to"))?;
+fn apply_gate_release(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(gate_release_candidates(current)?.contains(next))
+}
 
+fn recv_cert_candidates(current: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    for (pair_key, rec) in map_var(current, "online")? {
+        let pair = seq_items(pair_key)?;
+        let rec = record_fields(rec)?;
+        let awaits = record_int(rec, "awaits")?;
+        if pair.len() != 2 || awaits == 0 {
+            continue;
+        }
+        let mut expected = current.clone();
+        let mut journal = BTreeSet::new();
+        for j in set_var(current, "journal")? {
+            if record_int(record_fields(j)?, "id")? != awaits {
+                journal.insert(j.clone());
+            }
+        }
+        set_var_value(&mut expected, "journal", TlaValue::Set(journal))?;
+        set_online(
+            &mut expected,
+            &pair[0],
+            &pair[1],
+            with_field(rec.clone(), "awaits", 0),
+        )?;
+        bump_step(&mut expected)?;
+        out.push(expected);
+    }
+    Ok(out)
+}
+
+fn apply_recv_cert(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(recv_cert_candidates(current)?.contains(next))
+}
+
+/// A copy put into the bag: a re-drive (from the outbox or a journal) or a
+/// copy's post. Each takes a fresh copy id.
+fn injected_copy_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let added = set_difference(set_var(next, "net")?, set_var(current, "net")?);
+    let [msg] = added.as_slice() else {
+        return Ok(out);
+    };
+    let fields = record_fields(msg)?;
+    let copy = int_var(current, "nextMsgId")?;
+    if record_int(fields, "copy")? != copy {
+        return Ok(out);
+    }
+    let budget = dup_budget(fields)?;
+    let redriven = set_var(current, "outbox")?
+        .iter()
+        .chain(set_var(current, "journal")?.iter())
+        .map(|src| {
+            let src = record_fields(src)?;
+            if src.contains_key("fin") {
+                transfer_msg(src, copy, budget.clone())
+            } else {
+                delta_msg(src, copy, budget.clone())
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let posted_by_a_copy = record_str(fields, "kind")? == "transfer"
+        && record_int(fields, "id")? == copy
+        && record_int(fields, "sc")? == copy
+        && record_int(fields, "pc")? == copy;
+    if !redriven.contains(msg) && !posted_by_a_copy {
+        return Ok(out);
+    }
     let mut expected = current.clone();
-    insert_set_var(&mut expected, "net", added[0].clone())?;
-    let current_next_msg_id = int_var(current, "nextMsgId")?;
-    if receipt_int(msg, "id")? != current_next_msg_id {
-        return Ok(false);
-    }
-    set_var_value(
-        &mut expected,
-        "nextMsgId",
-        TlaValue::Int(current_next_msg_id + 1),
-    )?;
-    increment_map_entry(
-        &mut expected,
-        "deviceBalance",
-        from.clone(),
-        -receipt_int(msg, "payload")?,
-    )?;
-    let pair = TlaValue::Seq(vec![from.clone(), to.clone()]);
-    let reverse = TlaValue::Seq(vec![to, from]);
-    let tip = relationship_tip(current, &pair)?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair,
-        relationship_record(tip, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(tip, "active"),
-    )?;
+    insert_set_var(&mut expected, "net", msg.clone())?;
+    set_var_value(&mut expected, "nextMsgId", int_value(copy + 1))?;
     bump_step(&mut expected)?;
-    Ok(expected == *next)
+    out.push(expected);
+    Ok(out)
 }
 
-fn apply_net_deliver(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+fn apply_injected_copy(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(injected_copy_candidates(current, next)?.contains(next))
+}
+
+fn net_drop_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
     let current_net = set_var(current, "net")?;
     let next_net = set_var(next, "net")?;
     let removed = set_difference(current_net, next_net);
     if removed.len() != 1 || next_net.len() + 1 != current_net.len() {
-        return Ok(false);
+        return Ok(out);
     }
-
-    let msg = record_fields(&removed[0])?;
-    let from = msg
-        .get("from")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing from"))?;
-    let to = msg
-        .get("to")
-        .cloned()
-        .ok_or_else(|| anyhow!("net message missing to"))?;
-    let parent_tip = receipt_int(msg, "parentTip")?;
-    let pair = TlaValue::Seq(vec![from.clone(), to.clone()]);
-    let reverse = TlaValue::Seq(vec![to.clone(), from.clone()]);
 
     let mut expected = current.clone();
     remove_set_var(&mut expected, "net", &removed[0])?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair.clone(),
-        relationship_record(parent_tip + 1, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(parent_tip + 1, "active"),
-    )?;
-    update_relationship_smt_leaf(&mut expected, &from, &to, parent_tip + 1)?;
-    increment_map_entry(
-        &mut expected,
-        "deviceBalance",
-        to.clone(),
-        receipt_int(msg, "payload")?,
-    )?;
-    insert_set_var(
-        &mut expected,
-        "ledger",
-        ledger_record(from, to, parent_tip, parent_tip + 1),
-    )?;
     bump_step(&mut expected)?;
-    Ok(expected == *next)
+    out.push(expected);
+    Ok(out)
 }
 
 fn apply_net_drop(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_net = set_var(current, "net")?;
-    let next_net = set_var(next, "net")?;
-    let removed = set_difference(current_net, next_net);
-    if removed.len() != 1 || next_net.len() + 1 != current_net.len() {
-        return Ok(false);
-    }
-
-    let mut expected = current.clone();
-    remove_set_var(&mut expected, "net", &removed[0])?;
-    bump_step(&mut expected)?;
-    Ok(expected == *next)
+    Ok(net_drop_candidates(current, next)?.contains(next))
 }
 
-fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+fn net_duplicate_candidates(current: &TlaState, next: &TlaState) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
     let current_net = set_var(current, "net")?;
     let next_net = set_var(next, "net")?;
     if next_net.len() != current_net.len() + 1 {
-        return Ok(false);
+        return Ok(out);
     }
 
-    let current_next_msg_id = int_var(current, "nextMsgId")?;
+    let copy = int_var(current, "nextMsgId")?;
     for original in current_net {
         let msg = record_fields(original)?;
         let dup_left = receipt_int(msg, "dupLeft")?;
@@ -1771,26 +1040,109 @@ fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bo
 
         let mut reduced = msg.clone();
         reduced.insert("dupLeft".into(), TlaValue::Int(dup_left - 1));
-        let mut clone = msg.clone();
-        clone.insert("id".into(), TlaValue::Int(current_next_msg_id));
-        clone.insert("dupLeft".into(), TlaValue::Int(dup_left - 1));
+        let mut clone = reduced.clone();
+        clone.insert("copy".into(), TlaValue::Int(copy));
 
         let mut expected = current.clone();
         remove_set_var(&mut expected, "net", original)?;
         insert_set_var(&mut expected, "net", TlaValue::Record(reduced))?;
         insert_set_var(&mut expected, "net", TlaValue::Record(clone))?;
-        set_var_value(
-            &mut expected,
-            "nextMsgId",
-            TlaValue::Int(current_next_msg_id + 1),
-        )?;
+        set_var_value(&mut expected, "nextMsgId", TlaValue::Int(copy + 1))?;
         bump_step(&mut expected)?;
-        if expected == *next {
-            return Ok(true);
-        }
+        out.push(expected);
     }
 
-    Ok(false)
+    Ok(out)
+}
+
+fn apply_net_duplicate(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(net_duplicate_candidates(current, next)?.contains(next))
+}
+
+fn offline_transfer_candidates(
+    current: &TlaState,
+    next: &TlaState,
+) -> anyhow::Result<Vec<TlaState>> {
+    let mut out = Vec::new();
+    let current_sessions = set_var(current, "offlineSessions")?;
+    let next_sessions = set_var(next, "offlineSessions")?;
+    if current_sessions.len() < 2 || next_sessions.len() + 2 != current_sessions.len() {
+        return Ok(out);
+    }
+    let removed = set_difference(current_sessions, next_sessions);
+    let [first, second] = removed.as_slice() else {
+        return Ok(out);
+    };
+    let base = int_var(current, "nextMsgId")?;
+    for session in [first, second] {
+        let ends = seq_items(session)?;
+        let (d1, d2) = (&ends[0], &ends[1]);
+        let tip = relationship_tip(current, &pair_of(d1, d2))?;
+        let (o1, o2) = (online_of(current, d1, d2)?, online_of(current, d2, d1)?);
+        let (c1, c2) = (base, base + 1);
+        let old_balance = map_var(current, "deviceBalance")?
+            .get(d1)
+            .map(int_from_value)
+            .transpose()?
+            .ok_or_else(|| anyhow!("missing balance"))?;
+        let new_balance = map_var(next, "deviceBalance")?
+            .get(d1)
+            .map(int_from_value)
+            .transpose()?
+            .ok_or_else(|| anyhow!("missing balance"))?;
+        let amount = old_balance - new_balance;
+        let mut expected = current.clone();
+        remove_set_var(&mut expected, "offlineSessions", first)?;
+        remove_set_var(&mut expected, "offlineSessions", second)?;
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d1, d2),
+            relationship_record(c1, "active"),
+        )?;
+        set_map_entry(
+            &mut expected,
+            "relationships",
+            pair_of(d2, d1),
+            relationship_record(c1, "active"),
+        )?;
+        update_relationship_smt_leaf(&mut expected, d1, d2, c1)?;
+        let mut n1 = o1.clone();
+        n1.insert("prev".into(), int_value(tip));
+        n1.insert("local".into(), int_value(c1));
+        n1.insert("lin".into(), int_value(c1));
+        n1.insert("pin".into(), int_value(c2));
+        let mut n2 = o2.clone();
+        n2.insert("prev".into(), int_value(tip));
+        n2.insert("local".into(), int_value(c1));
+        n2.insert("lin".into(), int_value(c2));
+        n2.insert("pin".into(), int_value(c1));
+        set_online(&mut expected, d1, d2, n1)?;
+        set_online(&mut expected, d2, d1, n2)?;
+        increment_map_entry(&mut expected, "deviceBalance", d1.clone(), -amount)?;
+        increment_map_entry(&mut expected, "deviceBalance", d2.clone(), amount)?;
+        let rel = rel_key_value(d1, d2);
+        insert_set_var(
+            &mut expected,
+            "ledger",
+            ledger_entry(rel.clone(), d1, record_int(&o1, "lin")?, c1),
+        )?;
+        insert_set_var(
+            &mut expected,
+            "ledger",
+            ledger_entry(rel, d2, record_int(&o2, "lin")?, c2),
+        )?;
+        set_var_value(&mut expected, "nextMsgId", int_value(base + 2))?;
+        bump_step(&mut expected)?;
+        if amount > 0 {
+            out.push(expected);
+        }
+    }
+    Ok(out)
+}
+
+fn apply_offline_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
+    Ok(offline_transfer_candidates(current, next)?.contains(next))
 }
 
 fn apply_add_storage_node(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
@@ -1867,52 +1219,6 @@ fn apply_start_offline_session(current: &TlaState, next: &TlaState) -> anyhow::R
     let mut expected = current.clone();
     insert_set_var(&mut expected, "offlineSessions", added[0].clone())?;
     insert_set_var(&mut expected, "offlineSessions", added[1].clone())?;
-    bump_step(&mut expected)?;
-    Ok(expected == *next)
-}
-
-fn apply_offline_transfer(current: &TlaState, next: &TlaState) -> anyhow::Result<bool> {
-    let current_sessions = set_var(current, "offlineSessions")?;
-    let next_sessions = set_var(next, "offlineSessions")?;
-    if current_sessions.len() < 2 || next_sessions.len() + 2 != current_sessions.len() {
-        return Ok(false);
-    }
-
-    let removed = set_difference(current_sessions, next_sessions);
-    if removed.len() != 2 {
-        return Ok(false);
-    }
-    let a = seq_items(&removed[0])?;
-    let b = seq_items(&removed[1])?;
-    if a.len() != 2 || b.len() != 2 || a[0] != b[1] || a[1] != b[0] {
-        return Ok(false);
-    }
-
-    let pair = TlaValue::Seq(vec![a[0].clone(), a[1].clone()]);
-    let reverse = TlaValue::Seq(vec![a[1].clone(), a[0].clone()]);
-    let old_tip = relationship_tip(current, &pair)?;
-
-    let mut expected = current.clone();
-    remove_set_var(&mut expected, "offlineSessions", &removed[0])?;
-    remove_set_var(&mut expected, "offlineSessions", &removed[1])?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        pair,
-        relationship_record(old_tip + 1, "active"),
-    )?;
-    set_map_entry(
-        &mut expected,
-        "relationships",
-        reverse,
-        relationship_record(old_tip + 1, "active"),
-    )?;
-    update_relationship_smt_leaf(&mut expected, &a[0], &a[1], old_tip + 1)?;
-    insert_set_var(
-        &mut expected,
-        "ledger",
-        ledger_record(a[0].clone(), a[1].clone(), old_tip, old_tip + 1),
-    )?;
     bump_step(&mut expected)?;
     Ok(expected == *next)
 }
@@ -2175,17 +1481,6 @@ fn key_record(sphincs: i64, kyber: i64) -> TlaValue {
     ]))
 }
 
-fn ledger_record(d1: TlaValue, d2: TlaValue, old_tip: i64, new_tip: i64) -> TlaValue {
-    let mut rel = BTreeSet::new();
-    rel.insert(d1);
-    rel.insert(d2);
-    TlaValue::Record(BTreeMap::from([
-        ("rel".into(), TlaValue::Set(rel)),
-        ("oldTip".into(), TlaValue::Int(old_tip)),
-        ("newTip".into(), TlaValue::Int(new_tip)),
-    ]))
-}
-
 fn rel_key_value(d1: &TlaValue, d2: &TlaValue) -> TlaValue {
     let mut rel = BTreeSet::new();
     rel.insert(d1.clone());
@@ -2378,18 +1673,6 @@ fn append_seq_map_entry(
         }
         _ => bail!("{name} was not a map"),
     }
-}
-
-fn cloned_map_var(state: &TlaState, name: &str) -> BTreeMap<TlaValue, TlaValue> {
-    map_var(state, name)
-        .map(|value| value.clone())
-        .unwrap_or_default()
-}
-
-fn cloned_set_var(state: &TlaState, name: &str) -> BTreeSet<TlaValue> {
-    set_var(state, name)
-        .map(|value| value.clone())
-        .unwrap_or_default()
 }
 
 fn int_var(state: &TlaState, name: &str) -> anyhow::Result<i64> {
@@ -2789,6 +2072,76 @@ mod tests {
         assert!(matches!(value, TlaValue::Map(_)));
     }
 
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 42): a
+    /// relationship, two sends that cross, a dropped copy and its re-drive,
+    /// and both transfers applied. Every step is one the online rules explain.
+    #[test]
+    fn replays_a_dsm_simulation_where_two_sends_cross() {
+        let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_42_simulation.trace"))
+            .expect("parse the simulation");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// TLC's own simulation of DSM.tla (`DSM_tiny.cfg`, seed 7): a send
+    /// applied, finalized on its delta, copies of its delta, and its
+    /// certificate reaching storage.
+    #[test]
+    fn replays_a_dsm_simulation_through_finalization_and_the_certificate() {
+        let states = parse_trace_states(include_str!("../fixtures/dsm_tiny_7_simulation.trace"))
+            .expect("parse the simulation");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// TLC's counterexample to `NoCrossingSettles` (`DSM_CrossingSettles.cfg`):
+    /// two sends cross, both apply, both finalize on the joined tip, both
+    /// certificates reach storage, both gates release and both recipients
+    /// read them.
+    #[test]
+    fn replays_the_crossing_witness_through_both_certificates() {
+        let states = parse_trace_states(include_str!(
+            "../fixtures/dsm_crossing_settles_witness.trace"
+        ))
+        .expect("parse the witness");
+        assert_eq!(states.len(), 14, "the witness's thirteen steps");
+        let failures = replay_dsm_trace(&states);
+        assert!(failures.is_empty(), "DSM replay failures: {failures:?}");
+    }
+
+    /// The same simulation with the recipient credited one more than the
+    /// transfer carried: no rule explains the step.
+    #[test]
+    fn rejects_a_dsm_simulation_whose_apply_mints() {
+        let text = include_str!("../fixtures/dsm_tiny_7_simulation.trace");
+        let mut states = parse_trace_states(text).expect("parse the simulation");
+        let apply = states
+            .windows(2)
+            .position(|w| w[0].get("journal") != w[1].get("journal"))
+            .expect("the simulation applies a transfer")
+            + 1;
+        let mut minted = 0;
+        if let Some(TlaValue::Map(balances)) = states[apply].get_mut("deviceBalance") {
+            for value in balances.values_mut() {
+                if let TlaValue::Int(n) = value {
+                    *n += 1;
+                    minted += 1;
+                }
+            }
+        }
+        assert!(
+            minted > 0,
+            "the simulation's balances are a function of ints"
+        );
+        let failures = replay_dsm_trace(&states);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.starts_with(&format!("step {apply}:"))),
+            "the minted credit at step {apply} was explained: {failures:?}"
+        );
+    }
+
     #[test]
     fn replays_minimal_tripwire_trace() {
         let trace = r#"
@@ -2812,7 +2165,7 @@ STATE_2 ==
     }
 
     #[test]
-    fn rejects_tripwire_impl_replay_when_roots_do_not_advance() {
+    fn rejects_tripwire_replay_when_roots_do_not_advance() {
         let trace = r#"
 ---------------- MODULE tripwire_impl_bad_roots -----------------
 STATE_1 ==
@@ -2826,10 +2179,10 @@ STATE_2 ==
 /\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
 "#;
         let states = parse_trace_states(trace).expect("parse malformed tripwire states");
-        let failures = replay_tripwire_trace_into_implementation(&states);
+        let failures = replay_tripwire_trace(&states);
         assert!(
             !failures.is_empty(),
-            "implementation replay unexpectedly accepted malformed tripwire roots"
+            "the Tripwire replay unexpectedly accepted malformed tripwire roots"
         );
         assert!(
             failures.iter().any(|failure| failure.contains("diverged")),
@@ -2838,7 +2191,7 @@ STATE_2 ==
     }
 
     #[test]
-    fn rejects_tripwire_impl_replay_when_bilateral_smt_update_is_incomplete() {
+    fn rejects_tripwire_replay_when_bilateral_smt_update_is_incomplete() {
         let trace = r#"
 ---------------- MODULE tripwire_impl_bad_smt -----------------
 STATE_1 ==
@@ -2852,10 +2205,10 @@ STATE_2 ==
 /\ ledger = {[oldTip |-> 0, newTip |-> 1, rel |-> {d1, d2}, r1 |-> 0, r2 |-> 0]}
 "#;
         let states = parse_trace_states(trace).expect("parse malformed tripwire SMT states");
-        let failures = replay_tripwire_trace_into_implementation(&states);
+        let failures = replay_tripwire_trace(&states);
         assert!(
             !failures.is_empty(),
-            "implementation replay unexpectedly accepted malformed bilateral SMT update"
+            "the Tripwire replay unexpectedly accepted malformed bilateral SMT update"
         );
         assert!(
             failures.iter().any(|failure| failure.contains("diverged")),

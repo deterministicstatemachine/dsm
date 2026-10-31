@@ -453,7 +453,6 @@ pub fn recognize_fulfillment(bytes: &[u8]) -> Option<(D32, Signed<TraderFulfillm
 mod tests {
     use super::*;
     use crate::ccb::sigalg::SPHINCS_PLUS_SPX256F as ALG;
-    use crate::sofi::signature::verify_signed_object;
     use crate::sofi::validation::fixtures::{swap_fixture_n, trader_keys, dev, G};
     use crate::sofi::wire::{AttemptEntry, PrecommitLeg};
 
@@ -502,6 +501,68 @@ mod tests {
             parent_root: leg.parent_root,
             shadow_core: d(0x5D),
         }
+    }
+
+    /// MR-SOFI-0007, MR-SOFI-0110, MR-SOFI-0134: an object's identity is
+    /// computed over its canonical body, never its envelope. Each recognizer
+    /// names a setup, a precommit and a fulfillment by the identity its body
+    /// derives; an envelope over the same body whose signature differs is
+    /// not recognized at all, so no envelope can name another object.
+    /// MUTATION CONTROL: deriving a recognized identity over the envelope
+    /// bytes turns this red.
+    #[test]
+    fn an_objects_identity_is_its_body_whatever_envelope_carries_it() {
+        let f = swap_fixture_n(2);
+        let s = setup();
+        let p = f.precommit.clone();
+        let fb = fulfillment(&p);
+        let setup_sig = signed(derive::setup_signing_digest(&s));
+        let p_sig = signed(derive::precommit_signing_digest(&p));
+        let f_sig = signed(derive::fulfillment_signing_digest(&fb));
+        let bytes = |publication: Publication<'_>| publication.object_bytes().unwrap();
+        let flipped = |signature: &[u8]| {
+            let mut other = signature.to_vec();
+            other[0] ^= 0x01;
+            other
+        };
+
+        let Some((setup_id, _)) = recognize_setup(&bytes(Publication::Setup {
+            body: &s,
+            signature: &setup_sig,
+        })) else {
+            panic!("the setup is recognized");
+        };
+        assert_eq!(setup_id, derive::setup_ref(&s));
+        let Some((precommit_id, _)) = recognize_precommit(&bytes(Publication::Precommit {
+            body: &p,
+            signature: &p_sig,
+        })) else {
+            panic!("the precommit is recognized");
+        };
+        assert_eq!(precommit_id, derive::precommit_id(&p));
+        let Some((fulfillment_id, _)) = recognize_fulfillment(&bytes(Publication::Fulfillment {
+            body: &fb,
+            signature: &f_sig,
+        })) else {
+            panic!("the fulfillment is recognized");
+        };
+        assert_eq!(fulfillment_id, derive::fulfillment_id(&fb));
+
+        assert!(recognize_setup(&bytes(Publication::Setup {
+            body: &s,
+            signature: &flipped(&setup_sig),
+        }))
+        .is_none());
+        assert!(recognize_precommit(&bytes(Publication::Precommit {
+            body: &p,
+            signature: &flipped(&p_sig),
+        }))
+        .is_none());
+        assert!(recognize_fulfillment(&bytes(Publication::Fulfillment {
+            body: &fb,
+            signature: &flipped(&f_sig),
+        }))
+        .is_none());
     }
 
     /// Every kind round-trips through its own recognizer with the identity
@@ -616,8 +677,8 @@ mod tests {
     /// own authority). A junk signature, or a real signature under another
     /// key, is not this object; neither is an envelope over non-canonical
     /// body bytes, or one whose algorithm disagrees with the body. Binding the
-    /// committed key to the trader is `verify_signed_object`'s question,
-    /// against the signer the caller proved.
+    /// committed key to the trader is the verifier's question, against the
+    /// key the parent claim commits (`conformance::fulfillment_conformance`).
     #[test]
     fn an_envelope_is_recognized_only_when_its_signature_verifies_under_its_bodys_key() {
         let s = setup();
@@ -656,13 +717,6 @@ mod tests {
             "a real signature under a key the body does not commit"
         );
 
-        let env = SignedSofiObject::decode(&bytes).unwrap();
-        assert!(verify_signed_object(&env, key()).is_ok());
-        let wrong_signer = [0x32; 64];
-        assert!(matches!(
-            verify_signed_object(&env, &wrong_signer),
-            Err(crate::sofi::signature::SignatureError::NotTheExpectedSigner { .. })
-        ));
         // A body padded with a trailing byte does not decode: the decoders
         // are strict, which is what makes decoded bytes canonical.
         let mut padded = s.encode();

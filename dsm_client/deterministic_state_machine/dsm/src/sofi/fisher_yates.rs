@@ -55,6 +55,13 @@ fn prf_word(seed: &[u8; 32], index: u32, ctr: u32) -> u64 {
     u64::from_be_bytes(w)
 }
 
+/// The draw counter after `ctr`: 32 bits, and exhausting it is a defined
+/// error for draw `index`, never a wrap back to a word already rejected.
+fn next_counter(ctr: u32, index: u32) -> Result<u32, FisherYatesError> {
+    ctr.checked_add(1)
+        .ok_or(FisherYatesError::PrfCounterExhausted { index })
+}
+
 fn uniform_draw(seed: &[u8; 32], index: u32, range: u64) -> Result<u64, FisherYatesError> {
     // 2^64 mod range, computed without a 128-bit intermediate.
     let threshold = u64::MAX.wrapping_sub(range).wrapping_add(1) % range;
@@ -64,9 +71,7 @@ fn uniform_draw(seed: &[u8; 32], index: u32, range: u64) -> Result<u64, FisherYa
         if w >= threshold {
             return Ok(w % range);
         }
-        ctr = ctr
-            .checked_add(1)
-            .ok_or(FisherYatesError::PrfCounterExhausted { index })?;
+        ctr = next_counter(ctr, index)?;
     }
 }
 
@@ -101,6 +106,19 @@ pub fn first_member(seed: &[u8; 32], view: &[Vec<u8>]) -> Result<Vec<u8>, Fisher
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SoFi §7.1, MR-SOFI-0075: the draw counter is 32 bits, and exhausting
+    /// it is a defined error, never a wrap. MUTATION CONTROL: stepping the
+    /// counter with `wrapping_add` turns this red.
+    #[test]
+    fn the_draw_counter_is_exhausted_at_its_last_value_and_never_wraps() {
+        assert_eq!(next_counter(0, 3), Ok(1));
+        assert_eq!(next_counter(u32::MAX - 1, 3), Ok(u32::MAX));
+        assert_eq!(
+            next_counter(u32::MAX, 3),
+            Err(FisherYatesError::PrfCounterExhausted { index: 3 })
+        );
+    }
 
     fn ids(n: u8) -> Vec<Vec<u8>> {
         (0..n).map(|k| vec![k; 4]).collect()

@@ -798,7 +798,7 @@ impl AppRouterImpl {
                 if key.is_empty() {
                     return err("token.adoptionQr: params must name a ticker or token id".into());
                 }
-                if crate::policy::builtin_policy_commit(&key).is_some() {
+                if dsm::core::token::builtin_policy_commit_for_token(&key).is_some() {
                     return err(format!(
                         "token.adoptionQr: {key} is a protocol asset — every device already has it"
                     ));
@@ -1040,14 +1040,48 @@ impl AppRouterImpl {
         }
 
         // THE AUTHENTICATED PART OF ADDING A TOKEN (owner ruling
-        // 2026-09-13). The registry rows below are local bookkeeping;
-        // the adoption LEAF is what every later credit of this token is
+        // 2026-09-13). The registry rows are local bookkeeping; the
+        // adoption LEAF is what every later credit of this token is
         // checked against in `DeviceState::advance`, so the device can
         // validate what it accepts from its OWN committed state — with
         // no connectivity at the moment of receipt. No fee, no balance
-        // delta; committed first, so nothing is registered that the
-        // state does not stand behind. Idempotent: an adopted token is
-        // not re-advanced.
+        // delta. The policy bytes and the registry row land inside the
+        // adoption's own transaction, as creation's do: a token is
+        // registered exactly when the state stands behind it, and a row
+        // that cannot be written adopts nothing. Idempotent: an adopted
+        // token is not re-advanced, and its row is already there.
+        let row = crate::storage::client_db::token_registry::TokenRegistryRow {
+            token_id: token_id.clone(),
+            policy_commit: anchor,
+            ticker: parsed.ticker.clone(),
+            alias: parsed.alias.clone(),
+            decimals: parsed.decimals,
+            genesis_supply: parsed.genesis_supply,
+            creator_device_id,
+        };
+        let register = |tx: &rusqlite::Transaction<'_>,
+                        _: &dsm::types::device_state::AdvanceOutcome|
+         -> Result<(), dsm::types::error::DsmError> {
+            crate::storage::client_db::token_registry::upsert_policy_with_conn(
+                tx,
+                &anchor,
+                &policy_bytes,
+            )
+            .map_err(|e| {
+                dsm::types::error::DsmError::storage(
+                    format!("the adopted policy: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+            crate::storage::client_db::token_registry::insert_token_with_conn(tx, &row).map_err(
+                |e| {
+                    dsm::types::error::DsmError::invalid_operation(format!(
+                        "token {} could not be registered: {e}",
+                        row.ticker
+                    ))
+                },
+            )
+        };
         {
             let Some(head) = self.core_sdk.device_head() else {
                 return err(
@@ -1077,38 +1111,13 @@ impl AppRouterImpl {
                     dev_id,
                     signed,
                     &[],
-                    None,
+                    Some(&register),
                     None,
                 ) {
                     return err(format!(
                         "tokens.addByAnchor: adoption could not be committed to state: {e}"
                     ));
                 }
-            }
-        }
-
-        if let Err(e) =
-            crate::storage::client_db::token_registry::upsert_policy(&anchor, &policy_bytes)
-        {
-            return err(format!("tokens.addByAnchor: could not store policy: {e}"));
-        }
-        let row = crate::storage::client_db::token_registry::TokenRegistryRow {
-            token_id: token_id.clone(),
-            policy_commit: anchor,
-            ticker: parsed.ticker.clone(),
-            alias: parsed.alias.clone(),
-            decimals: parsed.decimals,
-            genesis_supply: parsed.genesis_supply,
-            creator_device_id,
-        };
-        if let Err(e) = crate::storage::client_db::token_registry::insert_token(&row) {
-            // Already present is the idempotent case, not a failure.
-            if crate::storage::client_db::token_registry::get_token(&token_id)
-                .ok()
-                .flatten()
-                .is_none()
-            {
-                return err(format!("tokens.addByAnchor: could not register token: {e}"));
             }
         }
 
@@ -1223,6 +1232,16 @@ impl AppRouterImpl {
                     transferable: req.transferable,
                     allowlist_device_ids,
                 };
+                // The whole supply is issued to this device at creation, and
+                // Core releases it only to a recipient the allowlist admits:
+                // a policy that leaves the creator out could never be issued.
+                if !parsed.admits_issuance_to(&creator_device_id) {
+                    return err(
+                        "token.create: the recipient allowlist must name this device, which \
+                         receives the whole supply at creation"
+                            .into(),
+                    );
+                }
 
                 // Pack the canonical policy HERE. The blob is protocol: it is
                 // hashed into the CPTA anchor and fixes the token's supply and
@@ -1600,9 +1619,7 @@ impl AppRouterImpl {
 
     /// Resolve a token to its committed policy commit, failing closed.
     fn resolve_token_for_value_op(&self, token_id: &str) -> Result<[u8; 32], String> {
-        self.wallet
-            .token_sdk
-            .resolve_policy_commit_strict(token_id)
+        crate::policy::resolve_policy_commit_strict(token_id.as_bytes())
             .map_err(|e| format!("unknown token {token_id}: {e}"))
     }
 
@@ -1629,10 +1646,13 @@ impl AppRouterImpl {
         if amount == 0 {
             return Err("amount must be > 0".into());
         }
+        let token_policy = crate::sdk::economic_registers::carried_token_policy(&policy_commit)
+            .map_err(|e| format!("token.burn: {e}"))?;
         let op = dsm::types::operations::Operation::Burn {
             amount: dsm::types::token_types::Balance::amount(amount),
             token_id: req.token_id.as_bytes().to_vec(),
             policy_commit,
+            token_policy,
             message: req.message.clone(),
         };
         let deltas = [dsm::types::device_state::BalanceDelta {
