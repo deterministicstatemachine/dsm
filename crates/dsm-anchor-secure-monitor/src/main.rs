@@ -23,8 +23,6 @@
 //!  * Fail-closed: if the chip/session/enroll bring-up in `init` fails, or §26 recovery returns an
 //!    outcome the appliance may not serve from, the appliance stays uninitialized and every
 //!    authority op is refused (`SG_ERR_INTERNAL`); the failing stage lands in heartbeat word 1.
-//!  * A standalone crypto self-test is retained behind the default-OFF `SIGMA_CHIP_SELFTEST` flag
-//!    for silicon triage.
 
 #![no_std]
 #![no_main]
@@ -42,7 +40,6 @@ mod anchor_glue;
 mod boundary;
 mod chip;
 mod sealed;
-mod tropic;
 
 // Secure working-set heap (SPHINCS+ σ^host signing + release/proto Vec staging). Lives in Secure
 // .bss; the Non-secure app has its own separate heap. Initialized once at reset before any alloc.
@@ -51,12 +48,6 @@ static HEAP: embedded_alloc::LlffHeap = embedded_alloc::LlffHeap::empty();
 const SECURE_HEAP_SIZE: usize = 160 * 1024;
 static mut SECURE_HEAP_MEM: [core::mem::MaybeUninit<u8>; SECURE_HEAP_SIZE] =
     [core::mem::MaybeUninit::uninit(); SECURE_HEAP_SIZE];
-
-/// Bring-up DIAGNOSTIC (default OFF): run the standalone σ^chip/σ^host self-test from Secure and
-/// signal the result by reboot timing, INSTEAD of the real appliance path. Retained behind this
-/// flag so a future bench session can re-probe the crypto after a clean TROPIC power cycle; the
-/// default path builds the real appliance (`anchor_glue::init`) and launches Non-secure.
-const SIGMA_CHIP_SELFTEST: bool = false;
 
 // RP2350 boot block: emitted entirely by the linker (dsm-secure-sram.x `.start_block`), NOT by
 // `ImageDef`. `ImageDef::secure_exe()` carries only an IMAGE_TYPE item — it cannot express the
@@ -452,30 +443,6 @@ fn main() -> ! {
         cortex_m::register::msplim::write(limit);
     }
 
-    // σ^chip / σ^host bring-up: drive the crypto from Secure and publish the exact result CODE in
-    // watchdog SCRATCH1 (peripheral RAM survives the ROM BOOTSEL entry that wipes main SRAM), so the
-    // host reads the byte directly with `picotool save` — NO timing inference. A short beat delay is
-    // kept only so the board is quiescent before it drops to BOOTSEL.
-    if SIGMA_CHIP_SELFTEST {
-        let r = tropic::sigma_chip_selftest();
-        // Timing channel with HUGE monotonic gaps so the variable TROPIC-session time (a few seconds)
-        // can never push one bucket into another. 3-way headline (subdivide later if needed):
-        //   ~57 s .. σ^host FULL (σ^chip + keygen + sign + verify)   r == 0xFF
-        //   ~37 s .. σ^chip OK, σ^host incomplete                    r >= 0x1F
-        //   ~15 s .. σ^chip FAILED (no session / sign)               r <  0x1F
-        let beats: u32 = if r == 0xFF {
-            50
-        } else if r >= 0x1F {
-            30
-        } else {
-            8
-        };
-        for _ in 0..beats {
-            cortex_m::asm::delay(150_000_000); // ~1 s @150 MHz
-        }
-        reboot_bootsel();
-    }
-
     // Diagnostic heartbeat for the unlocked-board bringup (see DSM_SECURE_HEARTBEAT).
     unsafe {
         let hb = core::ptr::addr_of_mut!(DSM_SECURE_HEARTBEAT);
@@ -512,7 +479,13 @@ fn main() -> ! {
     // Step 5: configure the Secure/Non-secure boundary BEFORE any Non-secure launch. This runs from
     // Secure SRAM; if the attribution were wrong (e.g. Secure code marked NS) the Secure world would
     // fault here and never reach the self-reboot below — so a self-reboot proves SAU enable is safe.
-    boundary::assert_core1_contained();
+    // Core 1 held off by the power-on state machine, confirmed; otherwise nothing launches.
+    match boundary::contain_core1() {
+        Ok(()) => {}
+        Err(boundary::Core1NotContained) => loop {
+            cortex_m::asm::wfi();
+        },
+    }
     {
         // Single-threaded reset context; core peripherals are borrowed only here.
         let mut cp = unsafe { cortex_m::Peripherals::steal() };

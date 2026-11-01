@@ -69,7 +69,6 @@ bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	6ebfbaa8c8c5229c
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	763b0fdef3967e02
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	ae7eab11c9e52b7f
 bool-literal	crates/dsm-anchor-secure-monitor/src/main.rs	dabbdf16b8204c2b
-bool-literal	crates/dsm-anchor-secure-monitor/src/tropic.rs	59b1c8f31b140ca4
 bool-literal	crates/dsm-android-anchor/src/install.rs	b8fa17c73a1f8cb7
 bool-literal	crates/dsm-android-anchor/src/usb_appliance.rs	100d4b7dfeef03cb
 bool-literal	crates/dsm-android-anchor/src/usb_appliance.rs	a6a10c61cab52549
@@ -3847,7 +3846,6 @@ rust-default-on-error	crates/dsm-anchor-secure-monitor/build.rs	56b2f2450c0cf737
 rust-default-on-error	crates/dsm-anchor-secure-monitor/build.rs	b7ec9e8809b3fd9b
 rust-default-on-error	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	2fb50c4b47e272bc
 rust-default-on-error	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	77049c0222e37088
-rust-default-on-error	crates/dsm-anchor-secure-monitor/src/tropic.rs	59b1c8f31b140ca4
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/build.rs	8fe0d92695576bc7
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	4c8fc76989c760ac
 rust-default-on-error	dsm_client/deterministic_state_machine/dsm/src/bilateral/offline.rs	9d1779cc398dd57b
@@ -4923,12 +4921,6 @@ rust-error-discarded	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	a5cb00e
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	ab98016b5d9c2709
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/main.rs	2a39dd1b53d52128
 rust-error-discarded	crates/dsm-anchor-secure-monitor/src/main.rs	c69327708ee2dab2
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	00d77ca01631c0ef
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	00d77ca01631c0ef
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	98d02996bf5c6cda
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	e7a59e437d94ebd5
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	f4ec43c3f6b8efbe
-rust-error-discarded	crates/dsm-anchor-secure-monitor/src/tropic.rs	f63e8720e60b625b
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	0669f6b20abdf9a5
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	6d0fec92ee37350d
 rust-error-discarded	crates/dsm-android-anchor/src/usb_appliance.rs	9fccaed7b0c1e83f
@@ -6461,7 +6453,6 @@ rust-zero-id	crates/dsm-anchor-pico/src/main.rs	7e3db05b1847caab
 rust-zero-id	crates/dsm-anchor-pico/src/secure_boot.rs	b41c2477f4e535f8
 rust-zero-id	crates/dsm-anchor-secure-monitor/src/anchor_glue.rs	7bc361d809a5a1e6
 rust-zero-id	crates/dsm-anchor-secure-monitor/src/main.rs	b41c2477f4e535f8
-rust-zero-id	crates/dsm-anchor-secure-monitor/src/tropic.rs	7bc361d809a5a1e6
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	46d25b954f03715e
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	b41c2477f4e535f8
 rust-zero-id	crates/dsm-sphincs/src/lib.rs	b41c2477f4e535f8

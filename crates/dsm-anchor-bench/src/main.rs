@@ -514,8 +514,11 @@ fn run() -> Result<(), String> {
         }
     })?;
 
+    // What this harness binary is, from its own build: the firmware's hardware mode is the
+    // appliance's to report (STATUS), never this host's to claim.
     println!(
-        "[BUILD] mode=release debug_assertions=false hw=production harness={}",
+        "[BUILD] debug_assertions={} harness={}",
+        cfg!(debug_assertions),
         harness_build()
     );
     println!(

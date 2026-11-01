@@ -38,7 +38,7 @@ Datasheets: [Secure Tropic Click (MIKROE-6559)](https://www.mouser.com/datasheet
 
 ## 2. Wiring
 
-The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/tropic.rs`), so the wiring below is the only one that works.
+The firmware fixes the pin map (`crates/dsm-anchor-secure-monitor/src/anchor_glue.rs`), so the wiring below is the only one that works.
 
 | Wire | Signal | Pico 2 W | Pico pin | Click pad (left header) | Direction | Suggested colour |
 |---|---|---|---|---|---|---|

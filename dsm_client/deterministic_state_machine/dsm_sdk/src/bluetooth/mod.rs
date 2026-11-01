@@ -146,7 +146,9 @@ impl BluetoothManager {
             crate::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate,
         ));
 
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
+        // Bilateral events go to the WebView through the JNI bridge; a build
+        // without one has nowhere to deliver them, so it installs no callback.
+        #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
         {
             use std::sync::Arc;
             let callback_arc: Arc<dyn Fn(&[u8]) + Send + Sync> =
@@ -165,7 +167,7 @@ impl BluetoothManager {
                             );
                         }
                         if let Err(e) = post_bilateral_event_to_webview_jni(data) {
-                            log::debug!("(stub) WebView post skipped: {}", e);
+                            log::warn!("the bilateral event did not reach the WebView: {e}");
                         }
                     });
                 });
@@ -336,24 +338,6 @@ pub async fn sync_contact_to_bluetooth_manager(
 #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
 pub fn post_bilateral_event_to_webview_jni(event_bytes: Vec<u8>) -> Result<(), DsmError> {
     crate::jni::event_dispatch::post_event_to_webview("bilateral.event", &event_bytes)
-}
-
-// Compatibility stub when JNI feature not enabled (desktop builds / non-JNI Android)
-#[cfg(all(target_os = "android", feature = "bluetooth", not(feature = "jni")))]
-pub fn post_bilateral_event_to_webview_jni(event_bytes: Vec<u8>) -> Result<(), DsmError> {
-    log::debug!(
-        "(stub-no-jni) post_bilateral_event_to_webview_jni len={} (JNI feature disabled)",
-        event_bytes.len()
-    );
-    Ok(())
-}
-
-// Non-Android stub
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
-pub fn post_bilateral_event_to_webview_jni(
-    _event_bytes: Vec<u8>,
-) -> Result<(), dsm::types::error::DsmError> {
-    Ok(())
 }
 
 #[cfg(test)]

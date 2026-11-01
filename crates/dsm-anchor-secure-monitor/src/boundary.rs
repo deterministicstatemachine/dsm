@@ -175,12 +175,32 @@ pub fn lock_accessctrl() {
         cortex_m::asm::dsb();
     }
 }
-/// Core-1 containment. RP2350 core 1 does not execute until core 0 launches it via the SIO FIFO
-/// vector handshake; the monitor never performs that handshake, so core 1 stays powered-down with
-/// no bus master activity. v1 is deliberately single-core (no reviewed Secure multicore design), so
-/// "disabled" is the absence of the launch, asserted here as an explicit invariant. A hard PSM
-/// reset-hold is added when the peripheral set that could be reached by a rogue core-1 is wired.
-#[inline(always)]
-pub fn assert_core1_contained() {
-    // No-op by construction: core 1 is never launched. Kept as a named invariant + integration seam.
+/// Core 1 is not held off: the power-on state machine did not report its power domain off after
+/// the force-off was written.
+#[derive(Debug)]
+pub struct Core1NotContained;
+
+/// How many reads of `PSM.DONE` the force-off may take to show core 1's domain off. A bounded
+/// count, not a time: the domain drops within a few `clk_ref` cycles of the write.
+const CORE1_OFF_READS: u32 = 1_000_000;
+
+/// Core-1 containment. RP2350 core 1 runs only once core 0 launches it through the SIO FIFO
+/// handshake, which the monitor never performs; v1 is single-core (no reviewed Secure multicore
+/// design). On top of that, the power-on state machine is told to hold core 1's power domain off
+/// (`PSM.FRCE_OFF.PROC1`), and the force-off is read back and the domain seen off (`PSM.DONE.PROC1`
+/// clear) before the boundary is configured. A board that does not confirm both is refused here,
+/// before anything Non-secure runs. Built for the RP2350; not yet run on silicon.
+pub fn contain_core1() -> Result<(), Core1NotContained> {
+    let psm = unsafe { &*hal::pac::PSM::ptr() };
+    psm.frce_off().modify(|_, w| w.proc1().set_bit());
+    cortex_m::asm::dsb();
+    if psm.frce_off().read().proc1().bit_is_clear() {
+        return Err(Core1NotContained);
+    }
+    for _ in 0..CORE1_OFF_READS {
+        if psm.done().read().proc1().bit_is_clear() {
+            return Ok(());
+        }
+    }
+    Err(Core1NotContained)
 }
