@@ -49,7 +49,6 @@ use jni::objects::{JByteArray, JClass, JString};
 use jni::JNIEnv;
 use prost::Message;
 use std::sync::atomic::Ordering;
-use crate::storage::client_db::get_contact_by_device_id;
 use crate::sdk::session_manager::SDK_READY;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use crate::jni::state::BILATERAL_INIT_POLL_STARTED;
@@ -61,7 +60,7 @@ use crate::jni::bilateral_poll::{
 };
 // Symbols used only on the Android BLE path (moved during the domain-tags / jni-state refactor;
 // these `use`s restore the android+bluetooth build, which had not been recompiled since).
-use crate::bluetooth::frame_classify::{detect_ble_frame_type_from_bytes, strip_envelope_v3_framing};
+use crate::bluetooth::frame_classify::detect_ble_frame_type_from_bytes;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -1295,11 +1294,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isBleCoordina
 // ----------------------------------------------------------------------------
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn ble_frame_type_from_i32(v: i32) -> pb::BleFrameType {
-    pb::BleFrameType::try_from(v).unwrap_or(pb::BleFrameType::Unspecified)
-}
-
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
 fn build_chunk_array<'a>(
     env: &mut JNIEnv<'a>,
     chunks: &[Vec<u8>],
@@ -1463,11 +1457,10 @@ fn request_gatt_connect<'a>(
     Ok(())
 }
 
-// BLE frame-type classification (`detect_ble_frame_type_from_bytes`,
-// `strip_envelope_v3_framing`) and chunking eligibility (`ble_frame_needs_chunking`)
-// live in the host-compiled `crate::bluetooth::frame_classify` module so they are unit
-// tested in host CI (this JNI shim only compiles for `target_os = "android"`). They are
-// imported at the top of this module; this shim only routes and frames.
+// BLE frame-type classification (`detect_ble_frame_type_from_bytes`) lives in the
+// host-compiled `crate::bluetooth::frame_classify` module so it is unit tested in host CI
+// (this JNI shim only compiles for `target_os = "android"`). It is imported at the top of
+// this module; this shim only routes and frames.
 
 #[no_mangle]
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
@@ -1758,8 +1751,9 @@ mod unified_protobuf_bridge_tests {
     use prost::Message;
     use super::{
         detect_ble_frame_type_from_bytes, dispatch_envelope_via_ingress, is_error_envelope_bytes,
-        route_hardware_facts_via_ingress, strip_envelope_v3_framing,
+        route_hardware_facts_via_ingress,
     };
+    use crate::bluetooth::frame_classify::strip_envelope_v3_framing;
 
     static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 

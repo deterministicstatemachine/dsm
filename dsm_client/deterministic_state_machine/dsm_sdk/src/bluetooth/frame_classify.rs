@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! BLE frame-type classification and chunking eligibility.
+//! BLE frame-type classification.
 //!
-//! These helpers decide, for a canonical DSM envelope or a frame type, which
-//! `BleFrameType` a payload carries and whether the outbound reply must be
-//! `BleChunk`-framed rather than pushed raw. They are consumed by the Android JNI
+//! These helpers decide, for a canonical DSM envelope, which `BleFrameType` a
+//! payload carries. They are consumed by the Android JNI
 //! bridge (`crate::jni::unified_protobuf_bridge`, compiled only for
 //! `target_os = "android"`), so they live here in the host-compiled transport layer
 //! to keep the routing/classification logic under host CI unit tests.
@@ -86,19 +85,6 @@ pub(crate) fn detect_ble_frame_type_from_bytes(bytes: &[u8]) -> i32 {
     pb::BleFrameType::Unspecified as i32
 }
 
-/// Frame types whose outbound reply must be `BleChunk`-framed rather than pushed raw.
-///
-/// A frame needs chunking when its payload can exceed a single BLE notification, or
-/// when the peer recovers the frame type from the `BleChunk` header (so a raw frame
-/// would be misdecoded).
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-pub(crate) fn ble_frame_needs_chunking(frame_type: i32) -> bool {
-    frame_type == pb::BleFrameType::BilateralPrepareReject as i32
-        || frame_type == pb::BleFrameType::BilateralCommit as i32
-        || frame_type == pb::BleFrameType::BilateralCommitResponse as i32
-        || frame_type == pb::BleFrameType::BilateralConfirm as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,21 +149,5 @@ mod tests {
             detect_ble_frame_type_from_bytes(&framed),
             pb::BleFrameType::BilateralConfirm as i32
         );
-    }
-
-    #[test]
-    fn chunking_eligibility_matches_frame_budget() {
-        assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralConfirm as i32
-        ));
-        assert!(ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralCommitResponse as i32
-        ));
-        assert!(!ble_frame_needs_chunking(
-            pb::BleFrameType::BilateralPrepareResponse as i32
-        ));
-        assert!(!ble_frame_needs_chunking(
-            pb::BleFrameType::Unspecified as i32
-        ));
     }
 }
