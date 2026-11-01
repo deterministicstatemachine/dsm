@@ -21,6 +21,8 @@ pub mod owed_frame_driver;
 pub mod pairing_orchestrator;
 pub mod peer_address;
 pub mod radio_ingress;
+#[cfg(feature = "bluetooth")]
+pub mod radio_link;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{
@@ -193,7 +195,7 @@ impl BluetoothManager {
                 }
             });
             // Steps restored in flight may owe frames nobody is reaching for.
-            #[cfg(all(target_os = "android", feature = "bluetooth"))]
+            #[cfg(feature = "bluetooth")]
             owed_frame_driver::kick();
         });
 
@@ -312,7 +314,7 @@ pub(crate) fn reset_bluetooth_stack_for_tests() {
 /// Hand a contact to the live BLE stack's handler. With no stack yet there is
 /// nothing to hand it to, and nothing is lost: `init_dsm_sdk` loads every
 /// stored contact into the stack it builds. Returns whether a stack took it.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn sync_contact_to_bluetooth_manager(
     contact: dsm::types::contact_types::DsmVerifiedContact,
 ) -> Result<bool, String> {

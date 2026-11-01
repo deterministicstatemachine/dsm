@@ -140,9 +140,10 @@ impl HostBridge for IosHost {
     ) -> Result<(), String> {
         // The callback reads an empty hint as "no address to try first": that
         // is its spelling of the absent hint, as Kotlin's requestGattConnect.
+        const NO_HINT: &str = "";
         let hint_text = match address_hint {
             Some(address) => address,
-            None => "",
+            None => NO_HINT,
         };
         let hint = c_string(hint_text, "an address hint")?;
         answered(
@@ -187,7 +188,10 @@ impl IosHost {
             log::Level::Trace => 5,
         };
         let text = record.args().to_string();
-        match (c_string(record.target(), "a log target"), c_string(&text, "a log line")) {
+        match (
+            c_string(record.target(), "a log target"),
+            c_string(&text, "a log line"),
+        ) {
             (Ok(target), Ok(message)) => {
                 (self.callbacks.log_line)(level, target.as_ptr(), message.as_ptr())
             }
@@ -273,7 +277,12 @@ mod tests {
         let framed = frame_records(&records);
         assert_eq!(framed.len(), 12 + 501 + 3);
         assert_eq!(split_records(&framed).expect("splits"), records);
-        let (ok, short) = unsafe { (bytes_from(framed.as_ptr(), 4), bytes_from(framed.as_ptr(), 3)) };
+        let (ok, short) = unsafe {
+            (
+                bytes_from(framed.as_ptr(), 4),
+                bytes_from(framed.as_ptr(), 3),
+            )
+        };
         assert!(split_records(ok).is_err_and(|e| e.contains("bytes behind it")));
         assert!(split_records(short).is_err_and(|e| e.contains("no record length")));
     }

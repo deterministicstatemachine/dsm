@@ -965,7 +965,7 @@ impl AppRouterImpl {
                     return err(format!("wallet.sendOffline: {e}"));
                 }
 
-                #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+                #[cfg(feature = "bluetooth")]
                 {
                     // The live BLE stack carries the step; `init_dsm_sdk` builds it
                     // once the identity exists, and nothing builds a second one.
@@ -1061,51 +1061,34 @@ impl AppRouterImpl {
                         }
                     };
 
-                    use crate::jni::jni_common::get_java_vm_borrowed;
                     // From here the proposal is prepared and its prepare is owed:
                     // a send that does not complete fails nothing, and the prepare
-                    // is sent again when the link returns.
-                    let vm = match get_java_vm_borrowed() {
-                        Some(vm) => vm,
-                        None => {
-                            return err(
-                                "wallet.sendOffline: Java VM unavailable for BLE dispatch; the \
-                                 prepare is sent when the link returns"
-                                    .into(),
-                            );
-                        }
-                    };
-                    // JNI AttachGuard is !Send — do all JNI work in a sync block,
-                    // drop the guard, THEN handle errors with async.
-                    //
-                    // Send the bilateral prepare chunks via the single BLE dispatch path.
-                    let ble_send_result: Result<bool, String> = (|| {
-                        let mut jni_env = vm.attach_current_thread().map_err(|e| {
-                            format!("wallet.sendOffline: attach_current_thread failed: {e}")
-                        })?;
-                        crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
-                            &mut jni_env,
+                    // is sent again when the link returns. The chunks go on the
+                    // one BLE dispatch path: sealed on the link Rust chose, written
+                    // by the host.
+                    let ble_send_result: Result<crate::host::Delivery, String> =
+                        crate::bluetooth::radio_link::send_to_contact(
                             &counterparty_device_id,
                             address_hint.as_deref(),
                             &chunks,
                         )
-                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"))
-                    })();
-                    // jni_env is dropped here — safe to .await below
-                    if !matches!(ble_send_result, Ok(true)) {
+                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"));
+                    if !matches!(ble_send_result, Ok(crate::host::Delivery::Sent)) {
                         crate::bluetooth::owed_frame_driver::kick();
                     }
                     match ble_send_result {
-                        Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
-                            counterparty_device_id,
-                            &[(
-                                commitment_hash,
-                                crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
-                            )],
-                        ),
-                        Ok(false) => {
+                        Ok(crate::host::Delivery::Sent) => {
+                            crate::bluetooth::owed_frame_driver::delivered(
+                                counterparty_device_id,
+                                &[(
+                                    commitment_hash,
+                                    crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
+                                )],
+                            )
+                        }
+                        Ok(crate::host::Delivery::NotNow) => {
                             return err(
-                                "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
+                                "wallet.sendOffline: no paired link to the counterparty now; the \
                                  prepare is sent again when the link returns"
                                     .into(),
                             );
@@ -1134,10 +1117,10 @@ impl AppRouterImpl {
                     ))
                 }
 
-                #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
+                #[cfg(not(feature = "bluetooth"))]
                 {
                     let _ = (counterparty_device_id, address_hint, operation);
-                    err("wallet.sendOffline is only available on Android BLE builds".into())
+                    err("wallet.sendOffline is only available on a build with the bluetooth feature".into())
                 }
             }
 

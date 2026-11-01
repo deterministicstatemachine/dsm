@@ -190,7 +190,12 @@ fn identity_part(read: fn() -> Option<Vec<u8>>) -> DsmBytes {
     }
 }
 
-/// `isErrorEnvelope`: the code of a framed or bare Error envelope, else 0.
+/// The code `dsm_ffi_error_code_of` answers for bytes that are not an Error
+/// envelope: no DSM error code is 0, as Kotlin's `isErrorEnvelope` reads it.
+pub const NOT_AN_ERROR_ENVELOPE: u32 = 0;
+
+/// `isErrorEnvelope`: the code of a framed or bare Error envelope, else
+/// `NOT_AN_ERROR_ENVELOPE`.
 ///
 /// # Safety
 /// `envelope` must point to `len` readable bytes.
@@ -198,7 +203,7 @@ fn identity_part(read: fn() -> Option<Vec<u8>>) -> DsmBytes {
 pub unsafe extern "C" fn dsm_ffi_error_code_of(envelope: *const u8, len: usize) -> u32 {
     match crate::envelope::transport::error_code_of_transport_bytes(bytes_from(envelope, len)) {
         Some(code) => code,
-        None => 0,
+        None => NOT_AN_ERROR_ENVELOPE,
     }
 }
 
@@ -427,8 +432,7 @@ mod tests {
     fn an_error_envelope_is_framed_and_names_its_code() {
         let framed = error_envelope(ErrorCode::NotReady, "the BLE stack is not live yet");
         assert_eq!(framed[0], 0x03);
-        let code =
-            unsafe { dsm_ffi_error_code_of(framed.as_ptr(), framed.len()) };
+        let code = unsafe { dsm_ffi_error_code_of(framed.as_ptr(), framed.len()) };
         assert_eq!(code, ErrorCode::NotReady as u32);
         let envelope = pb::Envelope::decode(&framed[1..]).expect("decodes");
         match envelope.payload {
@@ -456,6 +460,9 @@ mod tests {
         let answer = unsafe { dsm_ffi_init_storage_base_dir(std::ptr::null()) };
         let why = unsafe { bytes_from(answer.ptr, answer.len) }.to_vec();
         unsafe { crate::ffi::dsm_bytes_free(answer) };
-        assert_eq!(String::from_utf8(why).expect("utf-8"), "the storage base dir is null");
+        assert_eq!(
+            String::from_utf8(why).expect("utf-8"),
+            "the storage base dir is null"
+        );
     }
 }

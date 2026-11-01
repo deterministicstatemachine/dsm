@@ -504,13 +504,13 @@ pub fn ble_runtime() -> Option<Arc<crate::handlers::BiImpl>> {
     BLE_RUNTIME.get().cloned()
 }
 
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 fn installed_ble_runtime() -> Result<Arc<crate::handlers::BiImpl>, String> {
     ble_runtime().ok_or_else(|| "BLE runtime not installed".to_string())
 }
 
 /// Inject the BleFrameCoordinator into the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn inject_ble_coordinator(
     coordinator: std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>,
 ) -> Result<(), String> {
@@ -522,7 +522,7 @@ pub async fn inject_ble_coordinator(
 }
 
 /// Inject the bilateral transport adapter into the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn inject_ble_transport_adapter(
     adapter: std::sync::Arc<
         crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter,
@@ -536,7 +536,7 @@ pub async fn inject_ble_transport_adapter(
 }
 
 /// Get the BleFrameCoordinator from the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn get_ble_coordinator(
 ) -> Result<std::sync::Arc<crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator>, String> {
     installed_ble_runtime()?
@@ -546,7 +546,7 @@ pub async fn get_ble_coordinator(
 }
 
 /// Get the bilateral transport adapter from the BLE runtime (Android only).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn get_ble_transport_adapter() -> Result<
     std::sync::Arc<crate::bluetooth::bilateral_transport_adapter::BilateralTransportAdapter>,
     String,

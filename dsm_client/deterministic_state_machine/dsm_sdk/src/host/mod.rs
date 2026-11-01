@@ -44,8 +44,11 @@ pub trait HostBridge: Send + Sync {
     /// Connect for the contact `device_id`, reaching for `address_hint`
     /// first when it names an address. The link that opens names the contact
     /// as its handshake target.
-    fn request_connect(&self, device_id: &[u8; 32], address_hint: Option<&str>)
-        -> Result<(), String>;
+    fn request_connect(
+        &self,
+        device_id: &[u8; 32],
+        address_hint: Option<&str>,
+    ) -> Result<(), String>;
 
     /// Advertise this appliance; `Err` when the radio refused.
     fn start_advertising(&self) -> Result<(), String>;

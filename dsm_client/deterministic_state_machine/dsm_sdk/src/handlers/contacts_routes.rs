@@ -97,7 +97,7 @@ impl AppRouterImpl {
         // add does not wait for it.
         prevalidate_contact_lineage(resolved.entry.body.genesis, device_id).await;
 
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
+        #[cfg(feature = "bluetooth")]
         {
             let Some(stored) = cm.get_verified_contact(device_id).await else {
                 return Err("contact added, but it is not held in memory".into());

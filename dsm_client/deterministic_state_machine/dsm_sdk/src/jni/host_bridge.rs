@@ -17,10 +17,7 @@ const KEYSTORE_VAULT: &str = "com/dsm/wallet/security/KeystoreVault";
 pub struct AndroidHost;
 
 /// A `byte[][]` of `chunks`.
-fn chunk_array<'a>(
-    env: &mut JNIEnv<'a>,
-    chunks: &[Vec<u8>],
-) -> Result<JObjectArray<'a>, String> {
+fn chunk_array<'a>(env: &mut JNIEnv<'a>, chunks: &[Vec<u8>]) -> Result<JObjectArray<'a>, String> {
     let byte_array_class = env
         .find_class("[B")
         .map_err(|e| format!("find_class([B) failed: {e}"))?;

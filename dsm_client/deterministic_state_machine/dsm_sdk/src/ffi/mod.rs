@@ -26,6 +26,7 @@
 //! it did. A Rust panic is not caught at this boundary: it is logged by the
 //! panic hook and ends the process, visibly.
 
+pub mod ble;
 pub mod bridge;
 pub mod codec;
 pub mod host_bridge;

@@ -4,8 +4,15 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+/**
+ * The code `dsm_ffi_error_code_of` answers for bytes that are not an Error
+ * envelope: no DSM error code is 0, as Kotlin's `isErrorEnvelope` reads it.
+ */
+#define NOT_AN_ERROR_ENVELOPE 0
 
 /**
  * `write_on_link` answered that every record was written.
@@ -493,9 +500,20 @@
  */
 typedef struct DsmBytes {
   uint8_t *ptr;
-  uintptr_t len;
-  uintptr_t cap;
+  size_t len;
+  size_t cap;
 } DsmBytes;
+
+/**
+ * What a radio event came to: records to write back on the link (each
+ * behind its big-endian u32 length, back to back), or why the bytes were
+ * refused, in which case the host closes the link. Exactly one of the two
+ * carries bytes, unless the event called for nothing.
+ */
+typedef struct DsmRadioAnswer {
+  struct DsmBytes reply;
+  struct DsmBytes refusal;
+} DsmRadioAnswer;
 
 /**
  * What the host measured of the phone, each flag 0 or not: the fields of
@@ -522,7 +540,7 @@ typedef struct DsmHostCallbacks {
   /**
    * Hand the page `payload` under the NUL-terminated `topic`.
    */
-  int32_t (*post_event)(const char *topic, const uint8_t *payload, uintptr_t len);
+  int32_t (*post_event)(const char *topic, const uint8_t *payload, size_t len);
   /**
    * The count on the app icon; zero takes it down.
    */
@@ -533,7 +551,7 @@ typedef struct DsmHostCallbacks {
    * big-endian u32 length, back to back. Answers [`WRITE_SENT`],
    * [`WRITE_NOT_NOW`], or a negative code for a failure to try.
    */
-  int32_t (*write_on_link)(const char *address, int32_t role, const uint8_t *records, uintptr_t len);
+  int32_t (*write_on_link)(const char *address, int32_t role, const uint8_t *records, size_t len);
   /**
    * Connect for the contact `device_id` (32 bytes), reaching for `hint`
    * first when it is not empty.
@@ -546,11 +564,11 @@ typedef struct DsmHostCallbacks {
    * Seal `input` under the device's sealing key into `out`, a buffer the
    * host takes from `dsm_bytes_alloc`; Rust owns `out` afterwards.
    */
-  int32_t (*seal_seed)(const uint8_t *input, uintptr_t len, struct DsmBytes *out);
+  int32_t (*seal_seed)(const uint8_t *input, size_t len, struct DsmBytes *out);
   /**
    * Open a blob `seal_seed` made on this device, into `out` as above.
    */
-  int32_t (*open_seed)(const uint8_t *input, uintptr_t len, struct DsmBytes *out);
+  int32_t (*open_seed)(const uint8_t *input, size_t len, struct DsmBytes *out);
   /**
    * One line of Rust's log: `level` 1 error, 2 warn, 3 info, 4 debug,
    * 5 trace; `target` the module that wrote it. The host keeps it where its
@@ -576,7 +594,80 @@ void dsm_bytes_free(struct DsmBytes bytes);
  * Allocate `len` zeroed bytes for the host to fill and hand back to Rust
  * through a callback's out-parameter (`host_bridge`): Rust owns them.
  */
-struct DsmBytes dsm_bytes_alloc(uintptr_t len);
+struct DsmBytes dsm_bytes_alloc(size_t len);
+
+/**
+ * `bleLinkOpened`: a GATT link came up at `address`, this device on it as
+ * `role` (1 client, 2 server); `target` is the 32-byte contact the client
+ * reached for, or null for any DSM device. The reply is the client's first
+ * Hello, nothing for the server. A refusal means the link is not opened.
+ *
+ * # Safety
+ * `address` must be a NUL-terminated string; `target` null or 32 readable bytes.
+ */
+struct DsmRadioAnswer dsm_ffi_ble_link_opened(const char *address,
+                                              int32_t role,
+                                              const uint8_t *target);
+
+/**
+ * `bleLinkClosed`: the GATT link at `address`, this device on it as `role`,
+ * closed. Answers nothing, or why the close was not taken (a bad address or
+ * role).
+ *
+ * # Safety
+ * `address` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_ble_link_closed(const char *address, int32_t role);
+
+/**
+ * `processIncomingBleData`: bytes a peer wrote over BLE on the link at
+ * `address`, this device on it as `role`. The reply is written back on the
+ * same link; a refusal closes it.
+ *
+ * # Safety
+ * `address` must be a NUL-terminated string; `bytes` must point to `len` readable bytes.
+ */
+struct DsmRadioAnswer dsm_ffi_ble_inbound(const char *address,
+                                          int32_t role,
+                                          const uint8_t *bytes,
+                                          size_t len);
+
+/**
+ * `acceptBilateralByCommitment`: the framed accept envelope, or an error envelope.
+ *
+ * # Safety
+ * `commitment` must point to 32 readable bytes.
+ */
+struct DsmBytes dsm_ffi_ble_accept(const uint8_t *commitment);
+
+/**
+ * `rejectBilateralByCommitment`: the framed reject envelope, or an error envelope.
+ *
+ * # Safety
+ * `commitment` must point to 32 readable bytes; `reason` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_ble_reject(const uint8_t *commitment, const char *reason);
+
+/**
+ * `cancelBilateralByCommitment`: the framed cancellation, or an error envelope.
+ *
+ * # Safety
+ * `commitment` must point to 32 readable bytes; `reason` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_ble_cancel(const uint8_t *commitment, const char *reason);
+
+/**
+ * `initializeBilateralSdk`: mark the bilateral runtime ready once the SDK
+ * context is initialized and the BLE stack is live. Answers nothing, or why
+ * it is not ready yet; the host calls again when its preconditions can have
+ * changed (the identity restored, a wallet created).
+ */
+struct DsmBytes dsm_ffi_initialize_bilateral_sdk(void);
+
+/**
+ * `isBleCoordinatorReady`: 1 when the BLE frame coordinator is injected, else 0.
+ */
+int32_t dsm_ffi_ble_stack_ready(void);
 
 /**
  * `dispatchStartup`: a `StartupRequest`, answered with `StartupResponse` bytes.
@@ -584,7 +675,7 @@ struct DsmBytes dsm_bytes_alloc(uintptr_t len);
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_startup(const uint8_t *request, uintptr_t len);
+struct DsmBytes dsm_ffi_startup(const uint8_t *request, size_t len);
 
 /**
  * `dispatchIngress`: an `IngressRequest`, answered with `IngressResponse` bytes.
@@ -592,7 +683,7 @@ struct DsmBytes dsm_ffi_startup(const uint8_t *request, uintptr_t len);
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_ingress(const uint8_t *request, uintptr_t len);
+struct DsmBytes dsm_ffi_ingress(const uint8_t *request, size_t len);
 
 /**
  * `initStorageBaseDir`: where the SDK keeps its files. Nothing, or why not.
@@ -640,12 +731,13 @@ struct DsmBytes dsm_ffi_device_id(void);
 struct DsmBytes dsm_ffi_genesis_hash(void);
 
 /**
- * `isErrorEnvelope`: the code of a framed or bare Error envelope, else 0.
+ * `isErrorEnvelope`: the code of a framed or bare Error envelope, else
+ * `NOT_AN_ERROR_ENVELOPE`.
  *
  * # Safety
  * `envelope` must point to `len` readable bytes.
  */
-uint32_t dsm_ffi_error_code_of(const uint8_t *envelope, uintptr_t len);
+uint32_t dsm_ffi_error_code_of(const uint8_t *envelope, size_t len);
 
 /**
  * `processEnvelopeV3`: an Envelope v3 this device's own app built (never a
@@ -654,7 +746,7 @@ uint32_t dsm_ffi_error_code_of(const uint8_t *envelope, uintptr_t len);
  * # Safety
  * `envelope` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_process_envelope_v3(const uint8_t *envelope, uintptr_t len);
+struct DsmBytes dsm_ffi_process_envelope_v3(const uint8_t *envelope, size_t len);
 
 /**
  * `getAllBalancesStrict`: `0x03 ‖ Envelope(BalancesListResponse)`, or an error envelope.
@@ -720,7 +812,7 @@ struct DsmBytes dsm_ffi_restore_identity_context(const uint8_t *device_id,
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bridge_request_method(const uint8_t *request, uintptr_t len);
+struct DsmBytes dsm_ffi_bridge_request_method(const uint8_t *request, size_t len);
 
 /**
  * Why a `BridgeRpcRequest` is refused, as UTF-8; no bytes when it is valid.
@@ -728,7 +820,7 @@ struct DsmBytes dsm_ffi_bridge_request_method(const uint8_t *request, uintptr_t 
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bridge_request_refusal(const uint8_t *request, uintptr_t len);
+struct DsmBytes dsm_ffi_bridge_request_refusal(const uint8_t *request, size_t len);
 
 /**
  * The payload of a valid `BridgeRpcRequest` (see [`bridge_request_payload`]).
@@ -736,7 +828,7 @@ struct DsmBytes dsm_ffi_bridge_request_refusal(const uint8_t *request, uintptr_t
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bridge_request_payload(const uint8_t *request, uintptr_t len);
+struct DsmBytes dsm_ffi_bridge_request_payload(const uint8_t *request, size_t len);
 
 /**
  * A `BridgeRpcResponse` carrying `data` as its success.
@@ -744,7 +836,7 @@ struct DsmBytes dsm_ffi_bridge_request_payload(const uint8_t *request, uintptr_t
  * # Safety
  * `data` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bridge_success(const uint8_t *data, uintptr_t len);
+struct DsmBytes dsm_ffi_bridge_success(const uint8_t *data, size_t len);
 
 /**
  * A `BridgeRpcResponse` carrying an error. The debug string is the Base32
@@ -780,13 +872,42 @@ struct DsmBytes dsm_ffi_phone_contact_picked_event(const char *display_name,
                                                    const char *phone_lookup_key);
 
 /**
+ * A radio state event for the page, as the Android host's
+ * `createBleScanStartedEnvelope` and its three siblings frame one: `kind` 1
+ * the scan, 2 advertising; `on` not 0 when it started, 0 when it stopped.
+ * The host reports what the stack confirmed, never what it requested.
+ */
+struct DsmBytes dsm_ffi_ble_radio_event(int32_t kind, int32_t on);
+
+/**
+ * A device event for the page: `kind` 1 found (with its advertised `name`
+ * and `rssi`), 2 connected, 3 disconnected, at `address`.
+ *
+ * # Safety
+ * `address` must be a NUL-terminated string; `name` null or NUL-terminated.
+ */
+struct DsmBytes dsm_ffi_ble_device_event(int32_t kind,
+                                         const char *address,
+                                         const char *name,
+                                         int32_t rssi);
+
+/**
+ * The page's `ble.permission.error`: the system refused `operation`
+ * ("scan" or "advertise") to the radio.
+ *
+ * # Safety
+ * `operation` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_ble_permission_denied_event(const char *operation);
+
+/**
  * The kind of a `NativeHostRequest` the page sent on the private host
  * boundary, as its enum number; 0 when the bytes do not decode.
  *
  * # Safety
  * `request` must point to `len` readable bytes.
  */
-int32_t dsm_ffi_native_host_request_kind(const uint8_t *request, uintptr_t len);
+int32_t dsm_ffi_native_host_request_kind(const uint8_t *request, size_t len);
 
 /**
  * The `NativeHostResponse` to a host request, from what the host did: with
@@ -807,7 +928,7 @@ struct DsmBytes dsm_ffi_native_host_response(uint32_t code, const char *message)
  * # Safety
  * `payload` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_preference_key(const uint8_t *payload, uintptr_t len);
+struct DsmBytes dsm_ffi_preference_key(const uint8_t *payload, size_t len);
 
 /**
  * Whether a `PreferencePayload` carries a value (a set), 1, or none (a get), 0.
@@ -815,7 +936,7 @@ struct DsmBytes dsm_ffi_preference_key(const uint8_t *payload, uintptr_t len);
  * # Safety
  * `payload` must point to `len` readable bytes.
  */
-int32_t dsm_ffi_preference_has_value(const uint8_t *payload, uintptr_t len);
+int32_t dsm_ffi_preference_has_value(const uint8_t *payload, size_t len);
 
 /**
  * The value of a `PreferencePayload`, as UTF-8; no bytes when it carries none.
@@ -823,7 +944,7 @@ int32_t dsm_ffi_preference_has_value(const uint8_t *payload, uintptr_t len);
  * # Safety
  * `payload` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_preference_value(const uint8_t *payload, uintptr_t len);
+struct DsmBytes dsm_ffi_preference_value(const uint8_t *payload, size_t len);
 
 /**
  * The 32-byte commitment of a `BilateralPayload`; no bytes when it does not
@@ -832,7 +953,7 @@ struct DsmBytes dsm_ffi_preference_value(const uint8_t *payload, uintptr_t len);
  * # Safety
  * `payload` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bilateral_commitment(const uint8_t *payload, uintptr_t len);
+struct DsmBytes dsm_ffi_bilateral_commitment(const uint8_t *payload, size_t len);
 
 /**
  * The reason of a `BilateralPayload`, as UTF-8; no bytes when it carries none.
@@ -840,7 +961,7 @@ struct DsmBytes dsm_ffi_bilateral_commitment(const uint8_t *payload, uintptr_t l
  * # Safety
  * `payload` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_bilateral_reason(const uint8_t *payload, uintptr_t len);
+struct DsmBytes dsm_ffi_bilateral_reason(const uint8_t *payload, size_t len);
 
 /**
  * The identity a framed `GenesisCreatedResponse` envelope installs: its
@@ -850,7 +971,7 @@ struct DsmBytes dsm_ffi_bilateral_reason(const uint8_t *payload, uintptr_t len);
  * # Safety
  * `envelope` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_genesis_created_identity(const uint8_t *envelope, uintptr_t len);
+struct DsmBytes dsm_ffi_genesis_created_identity(const uint8_t *envelope, size_t len);
 
 /**
  * An `ArchitectureInfoProto`, the diagnostics screen's picture of the device
@@ -873,7 +994,7 @@ struct DsmBytes dsm_ffi_architecture_info(const char *status,
  * # Safety
  * `pack` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_result_pack_body(const uint8_t *pack, uintptr_t len);
+struct DsmBytes dsm_ffi_result_pack_body(const uint8_t *pack, size_t len);
 
 /**
  * An `ArgPack` of codec PROTO around `body`, the argument shape router
@@ -882,15 +1003,7 @@ struct DsmBytes dsm_ffi_result_pack_body(const uint8_t *pack, uintptr_t len);
  * # Safety
  * `body` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_arg_pack(const uint8_t *body, uintptr_t len);
-
-/**
- * A `WalletCreateGenesisV2Request` around `mnemonic`.
- *
- * # Safety
- * `mnemonic` must be a NUL-terminated string.
- */
-struct DsmBytes dsm_ffi_create_genesis_v2_request(const char *mnemonic);
+struct DsmBytes dsm_ffi_arg_pack(const uint8_t *body, size_t len);
 
 /**
  * An `IngressRequest` for a router invoke of `method` with `args`.
@@ -898,9 +1011,7 @@ struct DsmBytes dsm_ffi_create_genesis_v2_request(const char *mnemonic);
  * # Safety
  * `method` must be a NUL-terminated string; `args` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_router_invoke_request(const char *method,
-                                              const uint8_t *args,
-                                              uintptr_t len);
+struct DsmBytes dsm_ffi_router_invoke_request(const char *method, const uint8_t *args, size_t len);
 
 /**
  * An `IngressRequest` for a router query of `method` with `args`.
@@ -908,9 +1019,7 @@ struct DsmBytes dsm_ffi_router_invoke_request(const char *method,
  * # Safety
  * `method` must be a NUL-terminated string; `args` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_router_query_request(const char *method,
-                                             const uint8_t *args,
-                                             uintptr_t len);
+struct DsmBytes dsm_ffi_router_query_request(const char *method, const uint8_t *args, size_t len);
 
 /**
  * The ok bytes of an `IngressResponse`; no bytes when it is an error or
@@ -919,7 +1028,7 @@ struct DsmBytes dsm_ffi_router_query_request(const char *method,
  * # Safety
  * `response` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_ingress_ok_bytes(const uint8_t *response, uintptr_t len);
+struct DsmBytes dsm_ffi_ingress_ok_bytes(const uint8_t *response, size_t len);
 
 /**
  * Why an `IngressResponse` is not an answer, as UTF-8: its error's message,
@@ -928,7 +1037,7 @@ struct DsmBytes dsm_ffi_ingress_ok_bytes(const uint8_t *response, uintptr_t len)
  * # Safety
  * `response` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_ingress_error_message(const uint8_t *response, uintptr_t len);
+struct DsmBytes dsm_ffi_ingress_error_message(const uint8_t *response, size_t len);
 
 /**
  * The ok bytes of a `StartupResponse`, as [`dsm_ffi_ingress_ok_bytes`].
@@ -936,7 +1045,7 @@ struct DsmBytes dsm_ffi_ingress_error_message(const uint8_t *response, uintptr_t
  * # Safety
  * `response` must point to `len` readable bytes.
  */
-struct DsmBytes dsm_ffi_startup_error_message(const uint8_t *response, uintptr_t len);
+struct DsmBytes dsm_ffi_startup_error_message(const uint8_t *response, size_t len);
 
 /**
  * Install Swift as this process's host, then route Rust's log to it.

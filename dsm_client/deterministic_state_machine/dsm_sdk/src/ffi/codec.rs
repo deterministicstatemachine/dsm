@@ -87,7 +87,10 @@ pub unsafe extern "C" fn dsm_ffi_bridge_request_method(request: *const u8, len: 
 /// # Safety
 /// `request` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_bridge_request_refusal(request: *const u8, len: usize) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_bridge_request_refusal(
+    request: *const u8,
+    len: usize,
+) -> DsmBytes {
     DsmBytes::outcome(bridge_request(bytes_from(request, len)).map(|_| ()))
 }
 
@@ -96,7 +99,10 @@ pub unsafe extern "C" fn dsm_ffi_bridge_request_refusal(request: *const u8, len:
 /// # Safety
 /// `request` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_bridge_request_payload(request: *const u8, len: usize) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_bridge_request_payload(
+    request: *const u8,
+    len: usize,
+) -> DsmBytes {
     match bridge_request(bytes_from(request, len)) {
         Ok(request) => DsmBytes::from_vec(bridge_request_payload(&request)),
         Err(_refused) => DsmBytes::none(),
@@ -207,7 +213,6 @@ pub unsafe extern "C" fn dsm_ffi_phone_contact_picked_event(
             email: field(email, "the contact's email")?,
             phone: field(phone, "the contact's phone")?,
             phone_lookup_key: field(phone_lookup_key, "the contact's lookup key")?,
-            ..Default::default()
         })
     })();
     match profile {
@@ -217,6 +222,104 @@ pub unsafe extern "C" fn dsm_ffi_phone_contact_picked_event(
             DsmBytes::none()
         }
     }
+}
+
+/// A radio state event for the page, as the Android host's
+/// `createBleScanStartedEnvelope` and its three siblings frame one: `kind` 1
+/// the scan, 2 advertising; `on` not 0 when it started, 0 when it stopped.
+/// The host reports what the stack confirmed, never what it requested.
+#[no_mangle]
+pub extern "C" fn dsm_ffi_ble_radio_event(kind: i32, on: i32) -> DsmBytes {
+    use pb::ble_event::Ev;
+    let started = on != 0;
+    let ev = match (kind, started) {
+        (1, started) if started => Ev::ScanStarted(started),
+        (1, started) => Ev::ScanStopped(!started),
+        (2, started) if started => Ev::AdvertisingStarted(started),
+        (2, started) => Ev::AdvertisingStopped(!started),
+        (other, _) => {
+            log::warn!("[ffi] no radio event of kind {other}");
+            return DsmBytes::none();
+        }
+    };
+    DsmBytes::from_vec(crate::host::ble_event_envelope(pb::BleEvent {
+        ev: Some(ev),
+    }))
+}
+
+/// A device event for the page: `kind` 1 found (with its advertised `name`
+/// and `rssi`), 2 connected, 3 disconnected, at `address`.
+///
+/// # Safety
+/// `address` must be a NUL-terminated string; `name` null or NUL-terminated.
+#[no_mangle]
+pub unsafe extern "C" fn dsm_ffi_ble_device_event(
+    kind: i32,
+    address: *const c_char,
+    name: *const c_char,
+    rssi: i32,
+) -> DsmBytes {
+    use pb::ble_event::Ev;
+    let address = match str_from(address, "the device's address") {
+        Ok(address) => address.to_string(),
+        Err(why) => {
+            log::warn!("[ffi] a device event was not framed: {why}");
+            return DsmBytes::none();
+        }
+    };
+    let name = if name.is_null() {
+        String::new()
+    } else {
+        match str_from(name, "the device's name") {
+            Ok(name) => name.to_string(),
+            Err(why) => {
+                log::warn!("[ffi] a device event was not framed: {why}");
+                return DsmBytes::none();
+            }
+        }
+    };
+    let info = pb::BleDeviceInfo {
+        address,
+        name,
+        rssi,
+    };
+    let ev = match kind {
+        1 => Ev::DeviceFound(info),
+        2 => Ev::DeviceConnected(pb::BleDeviceInfo { rssi: 0, ..info }),
+        3 => Ev::DeviceDisconnected(pb::BleDeviceInfo {
+            name: String::new(),
+            rssi: 0,
+            ..info
+        }),
+        other => {
+            log::warn!("[ffi] no device event of kind {other}");
+            return DsmBytes::none();
+        }
+    };
+    DsmBytes::from_vec(crate::host::ble_event_envelope(pb::BleEvent {
+        ev: Some(ev),
+    }))
+}
+
+/// The page's `ble.permission.error`: the system refused `operation`
+/// ("scan" or "advertise") to the radio.
+///
+/// # Safety
+/// `operation` must be a NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn dsm_ffi_ble_permission_denied_event(operation: *const c_char) -> DsmBytes {
+    let operation = match str_from(operation, "the refused operation") {
+        Ok(operation) => operation.to_string(),
+        Err(why) => {
+            log::warn!("[ffi] a permission event was not framed: {why}");
+            return DsmBytes::none();
+        }
+    };
+    DsmBytes::from_vec(crate::host::ble_event_envelope(pb::BleEvent {
+        ev: Some(pb::ble_event::Ev::BlePermission(pb::BlePermissionEvent {
+            operation,
+        })),
+    }))
 }
 
 /// The kind of a `NativeHostRequest` the page sent on the private host
@@ -243,14 +346,13 @@ pub unsafe extern "C" fn dsm_ffi_native_host_request_kind(request: *const u8, le
 /// # Safety
 /// `message` must be null (with code 0) or a NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_native_host_response(code: u32, message: *const c_char) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_native_host_response(
+    code: u32,
+    message: *const c_char,
+) -> DsmBytes {
     let result = if code == 0 {
         pb::native_host_response::Result::OkBytes(
-            pb::NativeHostAck {
-                success: code == 0,
-                ..Default::default()
-            }
-            .encode_to_vec(),
+            pb::NativeHostAck { success: code == 0 }.encode_to_vec(),
         )
     } else {
         let message = match str_from(message, "the refusal") {
@@ -303,9 +405,9 @@ const CROCKFORD: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Whether `key` is a preference the page keeps.
 pub fn page_keeps(key: &str) -> bool {
     PAGE_KEYS.contains(&key)
-        || key
-            .strip_prefix(CONTACT_PHOTO_PREFIX)
-            .is_some_and(|id| id.len() == DEVICE_ID_B32_LEN && id.chars().all(|c| CROCKFORD.contains(c)))
+        || key.strip_prefix(CONTACT_PHOTO_PREFIX).is_some_and(|id| {
+            id.len() == DEVICE_ID_B32_LEN && id.chars().all(|c| CROCKFORD.contains(c))
+        })
 }
 
 /// The key of a `PreferencePayload` when it is one the page keeps, as UTF-8;
@@ -354,8 +456,7 @@ pub unsafe extern "C" fn dsm_ffi_preference_has_value(payload: *const u8, len: u
 pub unsafe extern "C" fn dsm_ffi_preference_value(payload: *const u8, len: usize) -> DsmBytes {
     match pb::PreferencePayload::decode(bytes_from(payload, len)) {
         Ok(pb::PreferencePayload {
-            value: Some(value),
-            ..
+            value: Some(value), ..
         }) => DsmBytes::from_vec(value.into_bytes()),
         Ok(_) => DsmBytes::none(),
         Err(_undecodable) => DsmBytes::none(),
@@ -410,7 +511,10 @@ pub unsafe extern "C" fn dsm_ffi_bilateral_reason(payload: *const u8, len: usize
 /// # Safety
 /// `envelope` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_genesis_created_identity(envelope: *const u8, len: usize) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_genesis_created_identity(
+    envelope: *const u8,
+    len: usize,
+) -> DsmBytes {
     let bytes = bytes_from(envelope, len);
     let raw = match bytes.first() {
         Some(0x03) if bytes.len() > 1 => &bytes[1..],
@@ -510,28 +614,6 @@ pub unsafe extern "C" fn dsm_ffi_arg_pack(body: *const u8, len: usize) -> DsmByt
     )
 }
 
-/// A `WalletCreateGenesisV2Request` around `mnemonic`.
-///
-/// # Safety
-/// `mnemonic` must be a NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_create_genesis_v2_request(mnemonic: *const c_char) -> DsmBytes {
-    match str_from(mnemonic, "the mnemonic") {
-        Ok(mnemonic) if !mnemonic.trim().is_empty() => DsmBytes::from_vec(
-            pb::WalletCreateGenesisV2Request {
-                mnemonic: mnemonic.to_string(),
-                ..Default::default()
-            }
-            .encode_to_vec(),
-        ),
-        Ok(_) => DsmBytes::none(),
-        Err(why) => {
-            log::warn!("[ffi] a genesis request was not framed: {why}");
-            DsmBytes::none()
-        }
-    }
-}
-
 /// An `IngressRequest` for a router invoke of `method` with `args`.
 ///
 /// # Safety
@@ -608,7 +690,10 @@ pub unsafe extern "C" fn dsm_ffi_ingress_ok_bytes(response: *const u8, len: usiz
 /// # Safety
 /// `response` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_ingress_error_message(response: *const u8, len: usize) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_ingress_error_message(
+    response: *const u8,
+    len: usize,
+) -> DsmBytes {
     match pb::IngressResponse::decode(bytes_from(response, len)) {
         Ok(pb::IngressResponse {
             result: Some(pb::ingress_response::Result::OkBytes(_)),
@@ -626,7 +711,10 @@ pub unsafe extern "C" fn dsm_ffi_ingress_error_message(response: *const u8, len:
 /// # Safety
 /// `response` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn dsm_ffi_startup_error_message(response: *const u8, len: usize) -> DsmBytes {
+pub unsafe extern "C" fn dsm_ffi_startup_error_message(
+    response: *const u8,
+    len: usize,
+) -> DsmBytes {
     match pb::StartupResponse::decode(bytes_from(response, len)) {
         Ok(pb::StartupResponse {
             result: Some(pb::startup_response::Result::OkBytes(_)),
@@ -664,42 +752,54 @@ mod tests {
             })),
         }
         .encode_to_vec();
-        let method = taken(unsafe { dsm_ffi_bridge_request_method(request.as_ptr(), request.len()) });
+        let method =
+            taken(unsafe { dsm_ffi_bridge_request_method(request.as_ptr(), request.len()) });
         assert_eq!(method, b"nativeBoundaryIngress");
         let payload =
             taken(unsafe { dsm_ffi_bridge_request_payload(request.as_ptr(), request.len()) });
         assert_eq!(payload, [9, 8, 7]);
-        assert!(taken(unsafe {
-            dsm_ffi_bridge_request_refusal(request.as_ptr(), request.len())
-        })
-        .is_empty());
+        assert!(
+            taken(unsafe { dsm_ffi_bridge_request_refusal(request.as_ptr(), request.len()) })
+                .is_empty()
+        );
 
         let bad = pb::BridgeRpcRequest {
             method: "../etc".to_string(),
             payload: None,
         }
         .encode_to_vec();
-        assert!(taken(unsafe { dsm_ffi_bridge_request_method(bad.as_ptr(), bad.len()) }).is_empty());
+        assert!(
+            taken(unsafe { dsm_ffi_bridge_request_method(bad.as_ptr(), bad.len()) }).is_empty()
+        );
         let why = taken(unsafe { dsm_ffi_bridge_request_refusal(bad.as_ptr(), bad.len()) });
-        assert!(String::from_utf8(why).expect("utf-8").contains("invalid characters"));
+        assert!(String::from_utf8(why)
+            .expect("utf-8")
+            .contains("invalid characters"));
     }
 
     #[test]
     fn responses_carry_success_or_a_coded_error() {
         let ok = taken(unsafe { dsm_ffi_bridge_success([1u8, 2].as_ptr(), 2) });
-        match pb::BridgeRpcResponse::decode(ok.as_slice()).expect("decodes").result {
+        match pb::BridgeRpcResponse::decode(ok.as_slice())
+            .expect("decodes")
+            .result
+        {
             Some(pb::bridge_rpc_response::Result::Success(s)) => assert_eq!(s.data, [1, 2]),
             other => panic!("not a success: {other:?}"),
         }
         let msg = c("Unknown binary RPC method: foo");
         let err = taken(unsafe { dsm_ffi_bridge_error(8, msg.as_ptr()) });
-        match pb::BridgeRpcResponse::decode(err.as_slice()).expect("decodes").result {
+        match pb::BridgeRpcResponse::decode(err.as_slice())
+            .expect("decodes")
+            .result
+        {
             Some(pb::bridge_rpc_response::Result::Error(e)) => {
                 assert_eq!(e.error_code, 8);
                 assert_eq!(e.message, "Unknown binary RPC method: foo");
-                let preimage = base32::decode(base32::Alphabet::Crockford, &e.debug_b32)
-                    .expect("decodes");
-                let inner = pb::ErrorResponse::decode(preimage.as_slice()).expect("an ErrorResponse");
+                let preimage =
+                    base32::decode(base32::Alphabet::Crockford, &e.debug_b32).expect("decodes");
+                let inner =
+                    pb::ErrorResponse::decode(preimage.as_slice()).expect("an ErrorResponse");
                 assert_eq!(inner.error_code, 8);
                 assert!(inner.debug_b32.is_empty());
             }
@@ -712,8 +812,12 @@ mod tests {
         let text = c("dsm:contact/v3:ABC");
         let qr = taken(unsafe { dsm_ffi_qr_scan_result_event(text.as_ptr()) });
         let host_event = pb::NativeHostEvent::decode(qr.as_slice()).expect("decodes");
-        assert_eq!(host_event.kind, pb::NativeHostEventKind::QrScanResult as i32);
-        let payload = pb::QrScanResultPayload::decode(host_event.payload.as_slice()).expect("decodes");
+        assert_eq!(
+            host_event.kind,
+            pb::NativeHostEventKind::QrScanResult as i32
+        );
+        let payload =
+            pb::QrScanResultPayload::decode(host_event.payload.as_slice()).expect("decodes");
         assert_eq!(payload.text_utf8, "dsm:contact/v3:ABC");
 
         let none = taken(unsafe {
@@ -725,8 +829,58 @@ mod tests {
             )
         });
         let picked = pb::NativeHostEvent::decode(none.as_slice()).expect("decodes");
-        assert_eq!(picked.kind, pb::NativeHostEventKind::PhoneContactPicked as i32);
+        assert_eq!(
+            picked.kind,
+            pb::NativeHostEventKind::PhoneContactPicked as i32
+        );
         assert!(picked.payload.is_empty());
+    }
+
+    /// Radio and device events frame as the BleEvent variants the page reads.
+    #[test]
+    fn radio_and_device_events_frame_as_ble_events() {
+        let started = taken(dsm_ffi_ble_radio_event(1, 1));
+        let envelope = pb::Envelope::decode(&started[1..]).expect("decodes");
+        assert!(matches!(
+            envelope.payload,
+            Some(pb::envelope::Payload::BleEvent(pb::BleEvent {
+                ev: Some(pb::ble_event::Ev::ScanStarted(scanning))
+            })) if scanning
+        ));
+        let stopped = taken(dsm_ffi_ble_radio_event(2, 0));
+        let envelope = pb::Envelope::decode(&stopped[1..]).expect("decodes");
+        assert!(matches!(
+            envelope.payload,
+            Some(pb::envelope::Payload::BleEvent(pb::BleEvent {
+                ev: Some(pb::ble_event::Ev::AdvertisingStopped(stopped))
+            })) if stopped
+        ));
+        assert!(taken(dsm_ffi_ble_radio_event(9, 1)).is_empty());
+
+        let address = c("6B2C7F1E-9A3D-4E08-B5C1-2D7A9F0E4C61");
+        let name = c("DSM");
+        let found =
+            taken(unsafe { dsm_ffi_ble_device_event(1, address.as_ptr(), name.as_ptr(), -40) });
+        let envelope = pb::Envelope::decode(&found[1..]).expect("decodes");
+        match envelope.payload {
+            Some(pb::envelope::Payload::BleEvent(pb::BleEvent {
+                ev: Some(pb::ble_event::Ev::DeviceFound(info)),
+            })) => {
+                assert_eq!(info.address, "6B2C7F1E-9A3D-4E08-B5C1-2D7A9F0E4C61");
+                assert_eq!(info.name, "DSM");
+                assert_eq!(info.rssi, -40);
+            }
+            other => panic!("not a device found: {other:?}"),
+        }
+        let gone =
+            taken(unsafe { dsm_ffi_ble_device_event(3, address.as_ptr(), std::ptr::null(), 0) });
+        let envelope = pb::Envelope::decode(&gone[1..]).expect("decodes");
+        assert!(matches!(
+            envelope.payload,
+            Some(pb::envelope::Payload::BleEvent(pb::BleEvent {
+                ev: Some(pb::ble_event::Ev::DeviceDisconnected(_))
+            }))
+        ));
     }
 
     #[test]
@@ -736,15 +890,27 @@ mod tests {
             value: Some("modern".to_string()),
         }
         .encode_to_vec();
-        assert_eq!(taken(unsafe { dsm_ffi_preference_key(set.as_ptr(), set.len()) }), b"ui_skin");
-        assert_eq!(unsafe { dsm_ffi_preference_has_value(set.as_ptr(), set.len()) }, 1);
-        assert_eq!(taken(unsafe { dsm_ffi_preference_value(set.as_ptr(), set.len()) }), b"modern");
+        assert_eq!(
+            taken(unsafe { dsm_ffi_preference_key(set.as_ptr(), set.len()) }),
+            b"ui_skin"
+        );
+        assert_eq!(
+            unsafe { dsm_ffi_preference_has_value(set.as_ptr(), set.len()) },
+            1
+        );
+        assert_eq!(
+            taken(unsafe { dsm_ffi_preference_value(set.as_ptr(), set.len()) }),
+            b"modern"
+        );
         let get = pb::PreferencePayload {
             key: "ui_skin".to_string(),
             value: None,
         }
         .encode_to_vec();
-        assert_eq!(unsafe { dsm_ffi_preference_has_value(get.as_ptr(), get.len()) }, 0);
+        assert_eq!(
+            unsafe { dsm_ffi_preference_has_value(get.as_ptr(), get.len()) },
+            0
+        );
 
         // A key the page does not keep names nothing: the identity pointers
         // the host stores beside the page's keys stay out of a page's reach.
@@ -779,7 +945,9 @@ mod tests {
             reason: None,
         }
         .encode_to_vec();
-        assert!(taken(unsafe { dsm_ffi_bilateral_commitment(short.as_ptr(), short.len()) }).is_empty());
+        assert!(
+            taken(unsafe { dsm_ffi_bilateral_commitment(short.as_ptr(), short.len()) }).is_empty()
+        );
     }
 
     #[test]
@@ -792,7 +960,8 @@ mod tests {
         let framed = crate::host::framed_local_answer(
             pb::envelope::Payload::GenesisCreatedResponse(created),
         );
-        let identity = taken(unsafe { dsm_ffi_genesis_created_identity(framed.as_ptr(), framed.len()) });
+        let identity =
+            taken(unsafe { dsm_ffi_genesis_created_identity(framed.as_ptr(), framed.len()) });
         assert_eq!(identity.len(), 64);
         assert!(identity[..32].iter().all(|b| *b == 0x11));
         assert!(identity[32..].iter().all(|b| *b == 0x22));
@@ -800,14 +969,21 @@ mod tests {
         let other = crate::host::framed_local_answer(pb::envelope::Payload::UniversalRx(
             pb::UniversalRx::default(),
         ));
-        assert!(taken(unsafe { dsm_ffi_genesis_created_identity(other.as_ptr(), other.len()) }).is_empty());
+        assert!(
+            taken(unsafe { dsm_ffi_genesis_created_identity(other.as_ptr(), other.len()) })
+                .is_empty()
+        );
     }
 
     #[test]
     fn router_requests_and_their_answers_round_trip() {
         let method = c("system.generateMnemonic");
-        let request = taken(unsafe { dsm_ffi_router_query_request(method.as_ptr(), std::ptr::null(), 0) });
-        match pb::IngressRequest::decode(request.as_slice()).expect("decodes").operation {
+        let request =
+            taken(unsafe { dsm_ffi_router_query_request(method.as_ptr(), std::ptr::null(), 0) });
+        match pb::IngressRequest::decode(request.as_slice())
+            .expect("decodes")
+            .operation
+        {
             Some(pb::ingress_request::Operation::RouterQuery(op)) => {
                 assert_eq!(op.method, "system.generateMnemonic");
                 assert!(op.args.is_empty());
@@ -819,7 +995,10 @@ mod tests {
             result: Some(pb::ingress_response::Result::OkBytes(vec![4, 2])),
         }
         .encode_to_vec();
-        assert_eq!(taken(unsafe { dsm_ffi_ingress_ok_bytes(ok.as_ptr(), ok.len()) }), [4, 2]);
+        assert_eq!(
+            taken(unsafe { dsm_ffi_ingress_ok_bytes(ok.as_ptr(), ok.len()) }),
+            [4, 2]
+        );
         assert!(taken(unsafe { dsm_ffi_ingress_error_message(ok.as_ptr(), ok.len()) }).is_empty());
 
         let refused = pb::IngressResponse {
@@ -830,7 +1009,9 @@ mod tests {
             })),
         }
         .encode_to_vec();
-        assert!(taken(unsafe { dsm_ffi_ingress_ok_bytes(refused.as_ptr(), refused.len()) }).is_empty());
+        assert!(
+            taken(unsafe { dsm_ffi_ingress_ok_bytes(refused.as_ptr(), refused.len()) }).is_empty()
+        );
         assert_eq!(
             taken(unsafe { dsm_ffi_ingress_error_message(refused.as_ptr(), refused.len()) }),
             b"the wallet is locked"

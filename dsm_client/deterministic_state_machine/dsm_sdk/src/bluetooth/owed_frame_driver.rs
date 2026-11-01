@@ -75,7 +75,7 @@ impl Deliveries {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 mod runner {
     use std::sync::{Condvar, Mutex};
 
@@ -181,19 +181,10 @@ mod runner {
                     .filter(|(owed_to, _)| *owed_to == counterparty)
                     .map(|(_, frame)| (frame.commitment_hash, frame.kind))
                     .collect();
-                let delivered = crate::jni::jni_common::with_env(|env| {
-                    let mut env = unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _) }
-                        .map_err(|e| format!("clone JNIEnv failed: {e}"))?;
-                    Ok(crate::jni::unified_protobuf_bridge::deliver_owed_frames(
-                        &mut env,
-                        &counterparty,
-                        hint.as_deref(),
-                    ))
-                })
-                .unwrap_or_else(|e| {
-                    log::warn!("[owed frames] no JNI environment for delivery: {e}");
-                    Vec::new()
-                });
+                let delivered = crate::bluetooth::radio_link::deliver_owed_frames(
+                    &counterparty,
+                    hint.as_deref(),
+                );
                 if owed_to.iter().any(|frame| !delivered.contains(frame)) {
                     left_undelivered = true;
                 }
@@ -228,7 +219,7 @@ mod runner {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub use runner::{delivered, kick, link_down, start};
 
 #[cfg(test)]
