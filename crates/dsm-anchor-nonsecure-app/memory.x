@@ -17,6 +17,10 @@ MEMORY {
 __nsc_start     = 0x20060000;
 __ns_sram_start = 0x20061000;
 __ns_sram_end   = 0x20080000;
+/* The end of the window the monitor measures, [__ns_sram_start, __ns_rx_end): the same constant as
+ * the monitor's memory.x. This image fills it exactly with code, read-only data and a fixed fill,
+ * and starts its writable data at its end (dsm-ns-sram.x, SA-171). */
+__ns_rx_end     = __ns_sram_start + 0x10000;
 
 /* The single NSC Secure Gateway entry, at the fixed NSC region base (the monitor places the veneer
  * there). The `sg` in the veneer performs the NS->S transition. */

@@ -33,7 +33,7 @@ __ns_sram_end       = 0x20080000;
 /* §3 Non-secure sub-layout: RX (measured, immutable) | RW (data/heap/stack) | fixed mailbox slot.
  * Only the RX range is hashed to mu_enrolled — never data/heap/stack/mailbox. */
 __ns_rx_start = __ns_sram_start;
-__ns_rx_end   = __ns_sram_start + 0x10000;      /* up to 64 KiB measured RX */
+__ns_rx_end   = __ns_sram_start + 0x10000;      /* 64 KiB: NS code + rodata + fixed fill (SA-171) */
 /* One fixed mailbox slot (data plane behind the SG); NS RW + S RW, DMA denied. */
 PROVIDE(DSM_SG_MAILBOX = __ns_sram_end - 0x2000);
 

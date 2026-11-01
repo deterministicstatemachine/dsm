@@ -85,7 +85,18 @@ SECTIONS
     __erodata = .;
   } > NS AT> NS
 
-  .data : ALIGN(4)
+  /* ### The rest of the measured window. The monitor hashes exactly [ORIGIN(NS), __ns_rx_end) before
+   * every authority op, so the window holds code, read-only data and then this fixed fill, and no
+   * byte the app writes (SA-171). The fill is UDF #0xDE in every halfword: a jump into it faults. */
+  .ns_rx_fill : ALIGN(4)
+  {
+    FILL(0xDEDEDEDE);
+    . += __ns_rx_end - 4 - (ADDR(.rodata) + SIZEOF(.rodata));
+    LONG(0xDEDEDEDE);
+  } > NS AT> NS
+
+  /* Writable data starts at the measured window's end, never inside it. */
+  .data __ns_rx_end : ALIGN(4)
   {
     . = ALIGN(4);
     __sdata = .;
@@ -139,6 +150,14 @@ ASSERT(ORIGIN(NS) % 8 == 0, "the NS region base must be 8-byte aligned");
 ASSERT(__exceptions == ADDR(.vector_table) + 0x8, "BUG: the reset vector is missing");
 ASSERT(__eexceptions == ADDR(.vector_table) + 0x40, "BUG: the exception vectors are missing");
 ASSERT(SIZEOF(.vector_table) > 0x40, "ERROR: the interrupt vectors are missing");
+
+/* The measured window is code, read-only data and the fixed fill, exactly; writable data begins at
+ * its end (SA-171). */
+ASSERT(__erodata <= __ns_rx_end - 4,
+  "ERROR: NS code + read-only data overrun the measured window (raise __ns_rx_end in both memory.x).");
+ASSERT(ADDR(.ns_rx_fill) == __erodata, "BUG: a gap between the read-only data and the window fill");
+ASSERT(ADDR(.ns_rx_fill) + SIZEOF(.ns_rx_fill) == __ns_rx_end, "BUG: the window fill misses the window end");
+ASSERT(ADDR(.data) == __ns_rx_end, "BUG: NS writable data does not start at the measured window end");
 
 /* The whole NS TCB must be SRAM-resident (VMA inside the NS region), never flash. */
 ASSERT(_stext >= ORIGIN(NS) && _stext < ORIGIN(NS) + LENGTH(NS),

@@ -102,7 +102,7 @@ SECTIONS
     LONG(LOADADDR(.gnu.sgstubs) - __dsm_load_map);
     LONG(ADDR(.gnu.sgstubs));
     LONG(SIZEOF(.gnu.sgstubs));
-    /* entry 3 — Non-secure app image (bring-up stub) FLASH -> NS SRAM 0x20061000 */
+    /* entry 3 — Non-secure app image FLASH -> NS SRAM 0x20061000 */
     LONG(LOADADDR(.ns_app) - __dsm_load_map);
     LONG(ADDR(.ns_app));
     LONG(SIZEOF(.ns_app));
@@ -207,9 +207,9 @@ SECTIONS
   . = ALIGN(32);
   __veneer_limit = .;
 
-  /* ### .ns_app — the Non-secure bring-up stub, VMA at the NS SRAM base (0x20061000), FLASH LMA.
-   * A LOAD_MAP entry copies it to NS SRAM; the monitor launches it Non-secure after SAU. Replaced
-   * by the real dsm-anchor-nonsecure-app image once cross-crate NS packaging lands. */
+  /* ### .ns_app — the dsm-anchor-nonsecure-app image (build.rs), VMA at the NS SRAM base
+   * (0x20061000), FLASH LMA. A LOAD_MAP entry copies it to NS SRAM; the monitor launches it
+   * Non-secure after SAU. */
   .ns_app ORIGIN(NS) : ALIGN(8)
   {
     __ns_app_start = .;
@@ -317,3 +317,9 @@ ASSERT(LOADADDR(.data) - LOADADDR(.vector_table) == ADDR(.data) - ADDR(.vector_t
 
 /* §6 Secure code+rodata size ceiling (SRAM-resident budget from MEMORY_MAP.md). */
 ASSERT((__etext - _stext) <= 224K, "Secure monitor code+rodata exceeds the 224 KiB budget (MEMORY_MAP.md)");
+
+/* SA-171: the measured Non-secure window is loaded image bytes, all of them: the image starts at the
+ * window and runs past its end (the NS script fills the window with code, rodata and a fixed fill,
+ * and starts writable data at its end), so no byte measured is left from an earlier boot. */
+ASSERT(__ns_app_start == __ns_rx_start, "ERROR: the Non-secure image does not start at the measured window");
+ASSERT(__ns_app_end >= __ns_rx_end, "ERROR: the Non-secure image does not fill the measured window");
