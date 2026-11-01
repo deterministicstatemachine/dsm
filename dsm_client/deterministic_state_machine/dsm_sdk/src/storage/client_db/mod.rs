@@ -595,7 +595,10 @@ fn get_database_path() -> Result<PathBuf> {
 /// v42: `anchor_enrollments.uncompromised` is gone. It was set on every pin and
 /// read by an acceptance step that checked nothing; the anchor is pinned on
 /// first use, and a compromise found elsewhere is answered online (SA-175, DSM
-/// Amendment A24). A database made at 41 is refused at open.
+/// Amendment A24). `native_reserve_checkpoint` keeps the sealed checkpoint of
+/// the reserve lineage this device established, and the memo below it keeps
+/// only this device's own releases (SA-75). A database made at 41 is refused
+/// at open.
 pub const CLIENT_DB_SCHEMA_VERSION: i64 = 42;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
@@ -857,9 +860,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
         );
 
         -- v15: the reserve lineage memo — every FINAL release a walk
-        -- established, with the state it succeeded. Finality is permanent,
-        -- so a memoised state is a sound start for the next walk. A cache of
-        -- Core's conclusions, never authority over a cell.
+        -- established after the sealed checkpoint, and this device's own
+        -- releases below it (v42, SA-75), with the state it succeeded. A
+        -- cache of Core's conclusions, never authority over a cell.
         CREATE TABLE IF NOT EXISTS native_reserve_lineage_memo(
             reserve_id         BLOB NOT NULL CHECK (length(reserve_id) = 32),
             generation         INTEGER NOT NULL CHECK (generation > 0),
@@ -875,6 +878,17 @@ fn create_schema(conn: &Connection) -> Result<()> {
             cell_reads         BLOB NOT NULL,
             PRIMARY KEY (reserve_id, generation)
         );
+
+        -- v42: the sealed checkpoint of the reserve lineage this device's
+        -- walks established (SA-75): each generation's step, in order, and a
+        -- seal under a key only this device holds. Bytes until Core resumes
+        -- them; a load verifies only the releases after it.
+        CREATE TABLE IF NOT EXISTS native_reserve_checkpoint(
+            reserve_id BLOB PRIMARY KEY CHECK (length(reserve_id) = 32),
+            generation INTEGER NOT NULL CHECK (generation >= 0),
+            steps      BLOB NOT NULL CHECK (length(steps) = 32 * generation),
+            seal       BLOB NOT NULL CHECK (length(seal) = 32)
+        ) WITHOUT ROWID;
 
         -- Every value this device wrote along a cell's route (storage spec
         -- §9), with the slot each route position produced, so a write whose

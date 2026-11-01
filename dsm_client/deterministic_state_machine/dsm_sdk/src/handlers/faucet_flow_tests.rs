@@ -574,13 +574,24 @@ fn forget_the_reserve() {
         conn.execute("DELETE FROM native_reserve_lineage_memo", [])
             .expect("forget the walked lineage");
     }
+    forget_the_checkpoint();
     crate::sdk::final_reads::forget_everything();
+}
+
+/// Forget this device's reserve checkpoint (SA-75): the next load
+/// establishes every memoised release again.
+fn forget_the_checkpoint() {
+    let binding = client_db::get_connection().expect("the store");
+    let conn = binding.lock().expect("the store is not poisoned");
+    conn.execute("DELETE FROM native_reserve_checkpoint", [])
+        .expect("forget the checkpoint");
 }
 
 /// The memoised lineage, generation by generation: what a walk established.
 fn walked_lineage() -> Vec<(u64, [u8; 32])> {
     let mut walked = Vec::new();
-    client_db::native_reserve::fold_memoised_lineage(&reserve_genesis(), |_, state, _, _| {
+    let genesis = reserve_genesis();
+    client_db::native_reserve::fold_memoised_lineage(&genesis, &genesis, |_, state, _, _| {
         walked.push((state.generation(), state.root()));
         Ok(std::ops::ControlFlow::Continue(()))
     })
@@ -1545,6 +1556,9 @@ async fn a_memoised_release_past_a_gap_is_not_an_established_release() {
         )
         .expect("generation 4's row is gone");
     }
+    // Without the checkpoint the claims kept, the load establishes from the
+    // memo, and stops at the gap.
+    forget_the_checkpoint();
     assert_eq!(
         established_release_at(&set, &genesis, 3).expect("the memo loads"),
         Some(whole),
@@ -1559,6 +1573,112 @@ async fn a_memoised_release_past_a_gap_is_not_an_established_release() {
         established_release_at(&set, &genesis, 4).expect("the memo loads"),
         None
     );
+}
+
+/// SA-75 (the owner's choice, 2026-11-01: "Keep verified head"): the head
+/// this device's walks established is kept as a checkpoint sealed under its
+/// own key, bound to the reserve, its history and its generation, and a load
+/// verifies only the releases after it.
+/// - After one claim the checkpoint reaches generation 1; after two more,
+///   generation 3.
+/// - Below it nothing is read again: with generation 2's kept reads gone,
+///   the load answers as before.
+/// - A checkpoint with a step bent under its old seal is refused, and every
+///   release is established from the memo again, which refuses at
+///   generation 2 while its reads are gone. Restored, the load answers as
+///   before and keeps the same checkpoint at generation 3.
+/// - Generation 1's checkpoint, written back over it, resumes, and the load
+///   establishes generations 2 and 3 after it.
+/// - A release whose memo row the checkpoint let go is read back from its
+///   cell for a verifier.
+///
+/// MUTATION CONTROL: resuming a checkpoint without its seal comparison takes
+/// the bent one, and the load answers another lineage: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn the_reserve_head_is_a_sealed_checkpoint_and_a_load_verifies_only_after_it() {
+    use crate::sdk::native_reserve::established_release_at;
+    use client_db::native_reserve::{get_checkpoint, let_go_through, put_checkpoint};
+    use dsm::economic::native_reserve::ReserveCheckpoint;
+    let d = Device::start(0xAD).await;
+    claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    reserve_head().await;
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let genesis = reserve_genesis();
+    let reserve_id = *genesis.reserve_id();
+    let first = get_checkpoint(&reserve_id)
+        .expect("the store")
+        .expect("a checkpoint after the first claim");
+    assert_eq!(first.generation(), 1);
+    for _ in 0..2 {
+        claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    }
+    assert_eq!(reserve_head().await.generation(), 3);
+    let kept = get_checkpoint(&reserve_id)
+        .expect("the store")
+        .expect("a checkpoint after three claims");
+    assert_eq!(kept.generation(), 3);
+    let honest = established_release_at(&set, &genesis, 3)
+        .expect("the checkpoint resumes")
+        .expect("generation 3 is established");
+
+    // Below the checkpoint nothing is read again.
+    let (_, reads) = memo_row(2);
+    set_memo_column(2, "cell_reads", &[]);
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the checkpoint resumes"),
+        Some(honest.clone()),
+        "generation 2 is below the checkpoint, so its reads are not read"
+    );
+
+    // A bent checkpoint is refused, and every release is established again.
+    let mut steps = kept.steps().to_vec();
+    steps[1][0] ^= 0x01;
+    put_checkpoint(
+        &reserve_id,
+        &ReserveCheckpoint::from_parts(steps, *kept.seal()),
+    )
+    .expect("a bent checkpoint written into the store");
+    match established_release_at(&set, &genesis, 3) {
+        Err(refused) => assert!(
+            refused.to_string().contains("generation 2"),
+            "the memo below the refused checkpoint is established again: {refused}"
+        ),
+        Ok(answer) => panic!("a bent checkpoint was resumed: {answer:?}"),
+    }
+    set_memo_column(2, "cell_reads", &reads);
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the memo loads"),
+        Some(honest.clone())
+    );
+    assert_eq!(
+        get_checkpoint(&reserve_id).expect("the store"),
+        Some(kept.clone()),
+        "the load keeps the checkpoint of what it established"
+    );
+
+    // Rolled back to generation 1's checkpoint, the load resumes it and
+    // establishes the releases after it.
+    put_checkpoint(&reserve_id, &first).expect("rolled back");
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the memo loads"),
+        Some(honest.clone())
+    );
+    assert_eq!(get_checkpoint(&reserve_id).expect("the store"), Some(kept));
+
+    // A release the checkpoint let go is read back from its cell.
+    let another = [0xEE; 32];
+    assert_eq!(
+        let_go_through(&reserve_id, 3, &another, &another).expect("the memo"),
+        3,
+        "every release let go, as if each were another device's"
+    );
+    assert_eq!(
+        established_release_at(&set, &genesis, 3).expect("the checkpoint resumes"),
+        None,
+        "no row is kept for it"
+    );
+    assert_eq!(release_at(3).await, honest);
 }
 
 /// How one memo row is made something Core does not establish.
@@ -1640,6 +1760,9 @@ async fn a_forged_memo_row_is_refused_on_load_and_enters_no_chain() {
         ("no reads", Corruption::Reads(Vec::new())),
         ("no completion proof", Corruption::NoProof),
     ] {
+        // Each case is loaded from the memo, not from the checkpoint a load
+        // before it kept.
+        forget_the_checkpoint();
         match &corruption {
             Corruption::Envelope(bytes) => set_memo_column(2, "envelope", bytes),
             Corruption::Reads(bytes) => set_memo_column(2, "cell_reads", bytes),

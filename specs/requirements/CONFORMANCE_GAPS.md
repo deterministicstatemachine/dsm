@@ -3398,7 +3398,7 @@ Found while fixing §6.87.
 |---|---|---|---|---|
 | SA-73 | `dsm_sdk/src/sdk/recovery_sdk.rs` · `handle_prepare_request`, `verify_incoming_recovery_reestablish` | BLE prepare handler runs the recovery-establish accept-guard (storage fan-out plus SPHINCS+ checks) before the contact lookup and signature verification, keyed on the unsigned headers.device_id. | confirmed (2 of 2) | Fixed (`1485b158`) |
 | SA-74 | `crates/dsm-anchor-pico/src/main.rs` · `main`, `chip_sign` | TROPIC01 opened with the public PROD0 pairing key, so anyone on the SPI bus can get σ^chip over any message, and the birth cage makes the key permanent. | confirmed (3 of 3) | Fixed (`1c3e812f9`: the board's own key in slot 1, slot 0 invalidated at birth; built for the RP2350, not run on silicon) |
-| SA-75 | `dsm_sdk/src/sdk/native_reserve.rs` · `walk_reserve`, `owe_after_walk` | Every reserve walk loads all memoised release envelopes since R_0 into memory under the DB lock, and the memo grows without bound. | confirmed (2 of 2) | Fixed in part (`d2e0f448`, round five): a walk holds one memoised release at a time; the memo still keeps every release (retention is the owner's call) |
+| SA-75 | `dsm_sdk/src/sdk/native_reserve.rs` · `walk_reserve`, `owe_after_walk` | Every reserve walk loads all memoised release envelopes since R_0 into memory under the DB lock, and the memo grows without bound. | confirmed (2 of 2) | Fixed (`d2e0f448`, §6.136): a walk holds one memoised release at a time; the established head persists as a sealed checkpoint (DSM Amendment A26), a load verifies only the releases after it, and the memo below it keeps only this device's own releases |
 | SA-76 | `dsm_sdk/src/sdk/native_reserve.rs` · `read_ahead`, `locate_ahead` | Reserve read_ahead buffers 16 successor cells x 5 seats x 8 MiB at once, with cells chosen by throwaway-release writers. | confirmed (2 of 2) | Fixed (`d2e0f448`) |
 | SA-77 | `dsm_sdk/src/handlers/connect_routes.rs` · `match_of_session`, `duel_belongs_to` | A computed-match (duel) stake can be withdrawn only through the staking app's DuelWithdraw request, so app silence or a disconnect strands it. | confirmed (3 of 3) | Fixed (§6.127; owner's choice 2026-10-31): the player withdraws an unstarted match, settles a started one from the wallet's own kept transcript, and collects each stake, all from the wallet with no application (`connect.duelWithdraw`, `connect.duelSettle`, `connect.duelCollect`); Core decides each from the match's own cells and transcript. Tests: `handlers::connect_duel_e2e_tests::a_player_withdraws_and_collects_a_stake_without_the_game`, and B's own settle in `a_match_decided_by_the_program_is_played_and_paid_through_the_grant` |
 | SA-78 | `dsm_sdk/src/handlers/connect_routes.rs` · `decide`, `process` | A connected app can make unlimited zero-spend in-grant requests, each costing a SPHINCS+ verify and sign plus a ~50 KB connect_log row kept forever. | confirmed (2 of 2) | Fixed (§6.124; owner's choice 2026-10-31, both): the signed accept names how many requests that move nothing the grant runs over the session's life (`free_requests`, at most the offer's); past them every request waits for the player, and holds every later one behind it. A free request's answer is dropped once delivered; its log row keeps the outcome and the answer's digest. Test: `handlers::connect_e2e_tests::a_grant_runs_only_its_free_requests` |
@@ -6980,16 +6980,32 @@ SA-92 named two memos that could make a verdict permanent while Core later ruled
 - **The persisted vault-chain rows** are never a walk's start: a walk starts at the baseline it adopted, authenticated again, or at the genesis, and the record follows what Core establishes (§6.106, second follow-up; `a_forged_vault_record_changes_nothing_a_walk_establishes_and_gives_way_by_name`).
 - **Peer frontiers**, which A19 added after the finding, are what the receiver validated itself. DSM Amendment A25 states that they stand: evidence off the validated chain does not withdraw them, a contradiction at one cell fails closed where a walk reads it (`PeerLineageFailure::Quarantined`), and nothing accepted is rolled back. A verifier that first reads the lineage after such a contradiction stops at it; that difference is A19's monotonicity, stated in the amendment. No same-cell finality contradiction has been observed; one would be investigated on its own.
 
+### 6.136 The reserve head persists as a sealed checkpoint (SA-75; DSM Amendment A26; `fix/beta-requirements-completion`, 2026-11-01)
+
+*The owner's choice (2026-11-01): "Keep verified head", with: "the persisted head must be treated as an authenticated checkpoint, not an arbitrary database value. It must be bound to the correct reserve identity, history, and generation, and rollback or corruption must not let an unverified state become trusted."*
+
+**Before.** Every load re-established each memoised release since `R_0`: about four SPHINCS+ verifies a generation (the release and the claimant's entry, §6.128), and the memo kept every release with the reads that showed it final.
+
+**Core.** `ReserveLineage::checkpoint(key)` keeps each generation's step and a seal `KH_key(DSM/native-reserve-checkpoint/v1 ‖ reserve_id ‖ n ‖ d_n ‖ R_n)` (tag count 431). `ReserveLineage::resume(genesis, checkpoint, key)` rebuilds the lineage from the steps alone, deriving each state with `NativeReserveState::at_generation` and recomputing every root and digest through the same chain pushes an established release makes, and compares the seal in constant time. `CheckpointRefusal` names a step that gives no state, a chain refusal, or a seal that does not hold.
+
+**SDK.**
+- The key is derived under the at-rest key (`DSM/native-reserve-checkpoint-key/v1`), so it needs the wallet seed; a load or walk fails closed while the wallet is locked.
+- `established_lineage` starts from the checkpoint when Core resumes it, else from the genesis with the reason logged, and folds only the memo rows after its start (`fold_memoised_lineage(genesis, from, …)`). A release asked for at or below the start is the memo row whose evidence address is the sealed step, or an error. A load or walk that reaches past its start keeps the checkpoint again (`native_reserve_checkpoint`, client DB schema 42).
+- Keeping a checkpoint lets go of the memo rows it covers that do not name this device as recipient (`let_go_through`); this device's own releases stay for a claim resumed after a crash. `release_at` reads a let-go release back from its cell (`read_back_release`): Core resolves the cell from fresh reads, and the release final there must carry the sealed step.
+- Completion proofs stay kept for every release this device relied on (storage specification §9 rule 11).
+
+**Tests.** `dsm::economic::native_reserve::tests::a_checkpoint_resumes_only_the_lineage_its_reader_sealed`; `dsm_sdk::handlers::faucet_flow_tests::the_reserve_head_is_a_sealed_checkpoint_and_a_load_verifies_only_after_it`. The two memo tests that corrupt rows now forget the checkpoint first, so they still exercise the load from the memo.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 339 | 214 | 47 | 16 | 0 | 35 | 27 |
+| DSM high-level (MR-DSM) | 340 | 215 | 47 | 16 | 0 | 35 | 27 |
 | SoFi (MR-SOFI) | 425 | 381 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 77 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1068** | **683** | **73** | **66** | **1** | **70** | **175** |
+| **All** | **1069** | **684** | **73** | **66** | **1** | **70** | **175** |
 
 ## 8 Per-requirement results
 
@@ -7336,6 +7352,7 @@ SA-92 named two memos that could make a verdict permanent while Core later ruled
 | MR-DSM-0337 | Met | `dsm::crypto::anchor_enrollment::pin_admit_decision`; `dsm::crypto::anchor_enrollment::require_bundle_of` | `dsm::crypto::anchor_enrollment::tests::pin_admit_decision_first_transfer_admits_under_disclosed_policy`; `dsm::crypto::anchor_enrollment::tests::pin_admit_decision_rejects_every_conflicting_disclosure`; `dsm::crypto::anchor_enrollment::tests::pin_admit_decision_no_change_when_disclosure_matches` | DSM Amendment A24 (§6.132). |
 | MR-DSM-0338 | Met | `dsm_sdk::bluetooth::anchor_accept::accept_offline_release`; `dsm::bilateral::offline::decide_confirm` | `dsm_sdk::bluetooth::offline_step_tests::an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online` | DSM Amendment A24 (§6.132). Acceptance takes the `VerifiedConfirm` Core decided; nothing offline reads a compromise state. |
 | MR-DSM-0339 | Met | `dsm::economic::peer_lineage::Verifier::validate_peer_prefix`; `dsm_sdk::sdk::economic_registers::record_established` | `dsm_sdk::handlers::frontier_verification_tests::a_claim_off_the_validated_chain_changes_nothing` | DSM Amendment A25 (§6.135). A second claim final along the cell routed from a root the receiver never validated does not change the step it validated, asked again as a first-time verifier would be. |
+| MR-DSM-0340 | Met | `dsm::economic::native_reserve::ReserveLineage::checkpoint`; `dsm::economic::native_reserve::ReserveLineage::resume`; `dsm_sdk::sdk::native_reserve::walk_reserve`; `dsm_sdk::sdk::native_reserve::release_at` | `dsm::economic::native_reserve::tests::a_checkpoint_resumes_only_the_lineage_its_reader_sealed`; `dsm_sdk::handlers::faucet_flow_tests::the_reserve_head_is_a_sealed_checkpoint_and_a_load_verifies_only_after_it` | DSM Amendment A26 (§6.136). A bent, short, other-key or other-reserve checkpoint is refused; a load below the checkpoint reads nothing again; a refused one is verified again from the memo; a rolled-back one resumes and the suffix is established; a let-go release is read back from its cell. |
 
 ### 8.2 SoFi settlement specification
 

@@ -148,6 +148,11 @@ pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =
 /// `s = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`; the leader is `FisherYates(s, S)[0]`.
 pub const TAG_DSM_NATIVE_RESERVE_SEED: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/native-reserve-seed/v1");
+/// The seal over a reader's checkpoint of the reserve lineage it established
+/// (SA-75): `KH_k(tag ‖ 0x00 ‖ reserve_id ‖ u64_be(n) ‖ d_n ‖ R_n)` under a key
+/// only that reader holds.
+pub const TAG_DSM_NATIVE_RESERVE_CHECKPOINT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-checkpoint/v1");
 /// The signed preimage of a reserve release:
 /// `m = H(tag ‖ 0x00 ‖ canonical NativeReserveReleaseBodyV1 bytes)`.
 pub const TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN: TaggedHashDomain<'static> =

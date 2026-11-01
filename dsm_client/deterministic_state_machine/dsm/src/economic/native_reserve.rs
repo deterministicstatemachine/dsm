@@ -62,10 +62,12 @@ use std::collections::BTreeMap;
 use crate::ccb::decode::DecodeError;
 use crate::common::domain_tags::{
     TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE, TAG_DSM_NATIVE_RESERVE_CELL,
-    TAG_DSM_NATIVE_RESERVE_ID, TAG_DSM_NATIVE_RESERVE_RELEASE, TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN,
-    TAG_DSM_NATIVE_RESERVE_GENESIS_STEP, TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
+    TAG_DSM_NATIVE_RESERVE_CHECKPOINT, TAG_DSM_NATIVE_RESERVE_ID, TAG_DSM_NATIVE_RESERVE_RELEASE,
+    TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN, TAG_DSM_NATIVE_RESERVE_GENESIS_STEP,
+    TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
 };
-use crate::crypto::blake3::dsm_domain_hasher;
+use crate::crypto::blake3::{dsm_domain_hasher, dsm_domain_hasher_keyed};
+use subtle::ConstantTimeEq;
 use crate::route_chain::{
     check_completion_proof, completion_proof, evaluate, CellError, CellEvidence, CellReading,
     ChainState, CompletionProof, Missing, ProofRefusal, RoutedCell,
@@ -587,6 +589,143 @@ impl ReserveLineage {
     /// address.
     pub fn steps(&self) -> &BTreeMap<u64, D32> {
         &self.steps
+    }
+
+    /// This lineage's checkpoint, sealed under `key`, a key only this reader
+    /// holds (SA-75).
+    pub fn checkpoint(&self, key: &D32) -> ReserveCheckpoint {
+        ReserveCheckpoint {
+            steps: self.steps.values().copied().collect(),
+            seal: checkpoint_seal(key, self.head.head()),
+        }
+    }
+
+    /// The lineage `checkpoint` rebuilds from `genesis`, when its seal under
+    /// `key` holds over the chain its steps rebuild (SA-75).
+    ///
+    /// Nothing in the checkpoint is read as a state: each generation's state
+    /// is Core's derivation from the genesis, the generation and its step,
+    /// and each enters the chain as an established release enters it, so the
+    /// head, every root and every generation digest are recomputed. The seal
+    /// is what the steps cannot supply alone: that this reader established
+    /// them, from releases its walks proved final and Core checked as
+    /// successors. A checkpoint of another reserve, under another key, or
+    /// whose steps were bent, rebuilt short or rolled forward is refused, and
+    /// the reader re-establishes from the releases it kept.
+    pub fn resume(
+        genesis: &NativeReserveState,
+        checkpoint: &ReserveCheckpoint,
+        key: &D32,
+    ) -> Result<Self, CheckpointRefusal> {
+        let mut lineage = Self::from_genesis(genesis)
+            .map_err(|why| CheckpointRefusal::Lineage { generation: 0, why })?;
+        for (generation, step) in (1u64..).zip(checkpoint.steps.iter()) {
+            let state = genesis.at_generation(generation, *step).map_err(|e| {
+                CheckpointRefusal::NoSuchGeneration {
+                    generation,
+                    why: e.to_string(),
+                }
+            })?;
+            let refused = |e| CheckpointRefusal::Lineage {
+                generation,
+                why: ReserveHeadError::Lineage(e),
+            };
+            let head = lineage
+                .head
+                .head
+                .extended(state.root(), *step)
+                .map_err(refused)?;
+            lineage.chain.push(state.root(), *step).map_err(refused)?;
+            lineage.steps.insert(generation, *step);
+            lineage.head = EstablishedReserve { head, state };
+        }
+        let sealed = checkpoint_seal(key, lineage.head.head()).ct_eq(&checkpoint.seal);
+        if bool::from(sealed) {
+            Ok(lineage)
+        } else {
+            Err(CheckpointRefusal::NotSealed)
+        }
+    }
+}
+
+/// A reader's checkpoint of the reserve lineage its walks established
+/// (SA-75): each generation's step, in order, and a seal under a key only
+/// that reader holds. The steps rebuild the chain, since a reserve state is a
+/// function of the genesis, its generation and the release that installed it
+/// ([`NativeReserveState::at_generation`]); the seal makes the rebuilt chain
+/// this reader's own conclusion rather than bytes anyone could write into its
+/// store. Never a fact about the network, and never another reader's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReserveCheckpoint {
+    steps: Vec<D32>,
+    seal: D32,
+}
+
+impl ReserveCheckpoint {
+    /// A checkpoint as a store keeps it: the steps of generations 1 to `n`,
+    /// in order, and the seal. Nothing is checked until
+    /// [`ReserveLineage::resume`].
+    pub fn from_parts(steps: Vec<D32>, seal: D32) -> Self {
+        Self { steps, seal }
+    }
+
+    /// `n`: the generation the checkpoint reaches.
+    pub fn generation(&self) -> u64 {
+        self.steps.len() as u64
+    }
+
+    /// The steps of generations 1 to `n`, in order.
+    pub fn steps(&self) -> &[D32] {
+        &self.steps
+    }
+
+    pub fn seal(&self) -> &D32 {
+        &self.seal
+    }
+}
+
+/// The seal over the head a reader's chain reached:
+/// `KH_key(tag ‖ reserve_id ‖ u64_be(n) ‖ d_n ‖ R_n)`. `d_n` binds the
+/// lineage, its kind and every generation's root and step before it.
+fn checkpoint_seal(key: &D32, head: &EstablishedSharedHead) -> D32 {
+    let mut h = dsm_domain_hasher_keyed(TAG_DSM_NATIVE_RESERVE_CHECKPOINT, key);
+    h.update(head.lineage_id());
+    h.update(&head.generation().to_be_bytes());
+    h.update(head.generation_digest());
+    h.update(head.state_root());
+    *h.finalize().as_bytes()
+}
+
+/// Why a checkpoint is not resumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckpointRefusal {
+    /// A step gives no state of this reserve at its generation.
+    NoSuchGeneration { generation: u64, why: String },
+    /// The chain the steps rebuild refused a generation.
+    Lineage {
+        generation: u64,
+        why: ReserveHeadError,
+    },
+    /// The seal is not this reader's over the chain the steps rebuild.
+    NotSealed,
+}
+
+impl core::fmt::Display for CheckpointRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoSuchGeneration { generation, why } => write!(
+                f,
+                "the checkpoint's step for generation {generation} gives no reserve state: {why}"
+            ),
+            Self::Lineage { generation, why } => write!(
+                f,
+                "the checkpoint's chain refused generation {generation}: {why}"
+            ),
+            Self::NotSealed => write!(
+                f,
+                "the checkpoint is not sealed by this reader over the chain its steps rebuild"
+            ),
+        }
     }
 }
 
@@ -2261,6 +2400,59 @@ mod tests {
         ));
         assert_eq!(kept.chain(), &before, "a refused release enters nothing");
         assert_eq!(kept.head().head().generation(), 1);
+    }
+
+    /// SA-75. A checkpoint resumes exactly the lineage its reader sealed: the
+    /// chain, the head and the steps come back as established. A bent step,
+    /// a chain cut short, another key and another reserve's genesis are each
+    /// refused.
+    /// MUTATION CONTROL: resuming without the seal comparison takes the bent,
+    /// short and other-key checkpoints: red.
+    #[test]
+    fn a_checkpoint_resumes_only_the_lineage_its_reader_sealed() {
+        let r0 = genesis();
+        let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
+        let r1 = release_constructible(&r0, &rel1).unwrap();
+        let rel2 = signed(&r1, ERA_FAUCET_PAYOUT);
+        let mut lineage = ReserveLineage::from_genesis(&r0).expect("R_0");
+        lineage
+            .establish(&rel1.envelope_bytes)
+            .expect("generation 1");
+        lineage
+            .establish(&rel2.envelope_bytes)
+            .expect("generation 2");
+        let key = [0x5A; 32];
+        let checkpoint = lineage.checkpoint(&key);
+        assert_eq!(checkpoint.generation(), 2);
+
+        let resumed = ReserveLineage::resume(&r0, &checkpoint, &key).expect("its own checkpoint");
+        assert_eq!(resumed.chain(), lineage.chain());
+        assert_eq!(resumed.head(), lineage.head());
+        assert_eq!(resumed.steps(), lineage.steps());
+
+        let refused = |checkpoint: &ReserveCheckpoint, genesis: &NativeReserveState, key: &D32| {
+            ReserveLineage::resume(genesis, checkpoint, key).map(|resumed| *resumed.head())
+        };
+        let mut bent_steps = checkpoint.steps().to_vec();
+        bent_steps[0][0] ^= 0x01;
+        let bent = ReserveCheckpoint::from_parts(bent_steps, *checkpoint.seal());
+        assert_eq!(refused(&bent, &r0, &key), Err(CheckpointRefusal::NotSealed));
+        let short =
+            ReserveCheckpoint::from_parts(checkpoint.steps()[..1].to_vec(), *checkpoint.seal());
+        assert_eq!(
+            refused(&short, &r0, &key),
+            Err(CheckpointRefusal::NotSealed)
+        );
+        assert_eq!(
+            refused(&checkpoint, &r0, &[0xA5; 32]),
+            Err(CheckpointRefusal::NotSealed)
+        );
+        let other = NativeReserveState::genesis(b"another-network", committed_set_id())
+            .expect("another reserve's R_0");
+        assert_eq!(
+            refused(&checkpoint, &other, &key),
+            Err(CheckpointRefusal::NotSealed)
+        );
     }
 
     /// A head extends only by a release that succeeds its state, and the head
