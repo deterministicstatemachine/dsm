@@ -78,6 +78,8 @@ fn genesis() -> NativeReserveState {
 struct Fixture {
     envelope: Vec<u8>,
     parent_head: EstablishedSharedHead,
+    /// The step of the release that installed the parent state (SA-63).
+    parent_step: [u8; 32],
     child_head: EstablishedSharedHead,
     witness: EconomicTransitionWitness,
     descriptor: CreditSourceNativeReserveRelease,
@@ -107,8 +109,14 @@ fn fixture_at(
     position: u64,
     amount: u64,
 ) -> Fixture {
+    // The parent state names the release that installed it, or the genesis
+    // step for an empty history (SA-63).
+    let parent_step = match history.last() {
+        Some(envelope) => dsm::economic::native_reserve::release_evidence_addr(envelope),
+        None => *genesis.predecessor(),
+    };
     let parent = genesis
-        .at_generation(history.len() as u64)
+        .at_generation(history.len() as u64, parent_step)
         .expect("the state the history ends at");
     let (pk, sk) = trader().clone();
     let reserve_id = *parent.reserve_id();
@@ -183,6 +191,7 @@ fn fixture_at(
     Fixture {
         envelope,
         parent_head,
+        parent_step,
         child_head,
         witness,
         descriptor,
@@ -201,6 +210,7 @@ struct OneRelease {
     generation: u64,
     envelope: Vec<u8>,
     parent: EstablishedSharedHead,
+    parent_step: [u8; 32],
     child: EstablishedSharedHead,
 }
 
@@ -211,6 +221,7 @@ impl OneRelease {
             generation: fx.descriptor.generation,
             envelope: fx.envelope.clone(),
             parent: fx.parent_head,
+            parent_step: fx.parent_step,
             child: fx.child_head,
         }
     }
@@ -254,6 +265,7 @@ impl ProvenanceResolver for OneRelease {
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
             parent: self.parent,
+            parent_step: self.parent_step,
             child: self.child,
         })
     }
@@ -481,6 +493,9 @@ fn a_release_that_is_not_its_parents_successor_funds_nothing() {
     let fx = fixture(1);
     let resolver = OneRelease {
         parent: later,
+        // The later head as an honest reader presents it: with the step of
+        // the release that installed its state (SA-63).
+        parent_step: release_evidence_addr(&history[4]),
         ..OneRelease::of(&fx)
     };
     assert!(matches!(

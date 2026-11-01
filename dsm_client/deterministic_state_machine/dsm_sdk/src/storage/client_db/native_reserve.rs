@@ -108,17 +108,19 @@ pub fn record_final_release(
     Ok(())
 }
 
-/// The state at `generation` of the lineage `genesis` starts, as Core derives
-/// it, when the memo's `remaining` for that generation agrees. A row that
-/// disagrees is corrupt storage, never a state: the memo names generations,
-/// and only Core makes reserve states.
+/// The state at `generation` of the lineage `genesis` starts, installed by the
+/// release whose step digest is `predecessor`, as Core derives it, when the
+/// memo's `remaining` for that generation agrees. A row that disagrees is
+/// corrupt storage, never a state: the memo names generations, and only Core
+/// makes reserve states.
 fn memoised(
     genesis: &NativeReserveState,
     generation: u64,
+    predecessor: [u8; 32],
     remaining: u64,
 ) -> Result<NativeReserveState> {
     let state = genesis
-        .at_generation(generation)
+        .at_generation(generation, predecessor)
         .map_err(|e| anyhow!("native_reserve_lineage_memo: generation {generation}: {e}"))?;
     if state.remaining_supply() != remaining {
         return Err(anyhow!(
@@ -160,11 +162,17 @@ pub fn fold_memoised_lineage(
           WHERE reserve_id = ?1 ORDER BY generation ASC",
     )?;
     let mut rows = stmt.query(params![genesis.reserve_id().as_slice()])?;
+    // The step that installed the state before each row's: the genesis step,
+    // then each row's own release (SA-63).
+    let mut parent_step = *genesis.predecessor();
     while let Some(row) = rows.next()? {
         let generation = u64_of(row.get::<_, i64>(0)?, "generation")?;
+        let envelope = row.get_ref(3)?.as_blob()?;
+        let cell_reads = row.get_ref(4)?.as_blob()?;
         let state = memoised(
             genesis,
             generation,
+            dsm::economic::native_reserve::release_evidence_addr(envelope),
             u64_of(row.get::<_, i64>(1)?, "remaining")?,
         )?;
         // The row's parent supply is the lineage's one generation before;
@@ -175,10 +183,10 @@ pub fn fold_memoised_lineage(
         memoised(
             genesis,
             parent_generation,
+            parent_step,
             u64_of(row.get::<_, i64>(2)?, "parent remaining")?,
         )?;
-        let envelope = row.get_ref(3)?.as_blob()?;
-        let cell_reads = row.get_ref(4)?.as_blob()?;
+        parent_step = *state.predecessor();
         if step(&conn, state, envelope, cell_reads)?.is_break() {
             break;
         }
@@ -269,22 +277,17 @@ mod tests {
             Ok(seen)
         };
 
-        let parent = genesis.at_generation(2).expect("generation 2");
-        let state = genesis.at_generation(3).expect("generation 3");
-        memo_row(
-            &genesis,
-            3,
-            i64::try_from(parent.remaining_supply()).expect("fits"),
-            i64::try_from(state.remaining_supply()).expect("fits"),
-        );
+        // What the lineage holds after `g` releases of the payout.
+        let remaining_at = |g: u64| {
+            i64::try_from(
+                genesis.remaining_supply() - g * dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
+            )
+            .expect("fits")
+        };
+        memo_row(&genesis, 3, remaining_at(2), remaining_at(3));
         assert_eq!(folded(&genesis).expect("read"), vec![3]);
 
-        memo_row(
-            &genesis,
-            4,
-            -1,
-            i64::try_from(genesis.at_generation(4).expect("4").remaining_supply()).expect("fits"),
-        );
+        memo_row(&genesis, 4, -1, remaining_at(4));
         match folded(&genesis) {
             Err(e) => assert!(
                 e.to_string().contains("parent remaining is negative"),
@@ -295,12 +298,7 @@ mod tests {
 
         super::super::reset_database_for_tests();
         super::super::init_database().expect("init");
-        memo_row(
-            &genesis,
-            5,
-            900,
-            i64::try_from(genesis.at_generation(5).expect("5").remaining_supply()).expect("fits"),
-        );
+        memo_row(&genesis, 5, 900, remaining_at(5));
         match folded(&genesis) {
             Err(e) => assert!(
                 e.to_string().contains("where the lineage holds"),

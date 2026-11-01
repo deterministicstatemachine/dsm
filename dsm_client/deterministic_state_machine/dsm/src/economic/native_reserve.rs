@@ -63,7 +63,7 @@ use crate::ccb::decode::DecodeError;
 use crate::common::domain_tags::{
     TAG_DSM_ECON_SOURCE_NATIVE_RESERVE_RELEASE, TAG_DSM_NATIVE_RESERVE_CELL,
     TAG_DSM_NATIVE_RESERVE_ID, TAG_DSM_NATIVE_RESERVE_RELEASE, TAG_DSM_NATIVE_RESERVE_RELEASE_SIGN,
-    TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
+    TAG_DSM_NATIVE_RESERVE_GENESIS_STEP, TAG_DSM_NATIVE_RESERVE_SEED, TAG_DSM_NATIVE_RESERVE_STATE,
 };
 use crate::crypto::blake3::dsm_domain_hasher;
 use crate::route_chain::{
@@ -165,6 +165,19 @@ pub struct NativeReserveState {
     generation: u64,
     /// The committed set every release must name (Part II §6).
     storage_set_id: D32,
+    /// The step digest of the release that installed this state, or for
+    /// `R_0` the reserve's genesis step. The root commits it, so the cell
+    /// where this state's successor is decided exists only once this state's
+    /// own release has won its cell: no later cell can be computed, and taken,
+    /// in advance (SA-63).
+    predecessor: D32,
+}
+
+/// The step `R_0` of the reserve `reserve_id` names as its predecessor.
+pub fn genesis_step(reserve_id: &D32) -> D32 {
+    let mut h = dsm_domain_hasher(TAG_DSM_NATIVE_RESERVE_GENESIS_STEP);
+    h.update(reserve_id);
+    *h.finalize().as_bytes()
 }
 
 impl NativeReserveState {
@@ -174,25 +187,37 @@ impl NativeReserveState {
         network_id: &[u8],
         storage_set_id: D32,
     ) -> Result<Self, crate::types::error::DsmError> {
+        let reserve_id = era_reserve_id(network_id);
         Ok(Self {
-            reserve_id: era_reserve_id(network_id),
+            reserve_id,
             policy_commit: crate::core::token::token_state_manager::era_policy_commit(),
             remaining_supply: reserve_genesis_supply()?,
             generation: 0,
             storage_set_id,
+            predecessor: genesis_step(&reserve_id),
         })
     }
 
-    /// The state at `generation` of the lineage this genesis starts. Every
-    /// release releases exactly the claim policy's payout — the construction
-    /// predicate admits no other amount ([`release_constructible`]) — so the
-    /// state at `g` is a function of the genesis and `g`, and a device's memo
-    /// of a generation it walked past names `g` and nothing else. Refused
-    /// from a state that is not a genesis, and past exhaustion.
-    pub fn at_generation(&self, generation: u64) -> Result<Self, crate::types::error::DsmError> {
+    /// The state at `generation` of the lineage this genesis starts, which the
+    /// release whose step digest is `predecessor` installed. Every release
+    /// releases exactly the claim policy's payout — the construction predicate
+    /// admits no other amount ([`release_constructible`]) — so the state at
+    /// `g` is a function of the genesis, `g` and the release that installed
+    /// it. At generation 0 the predecessor is the genesis's own. Refused from
+    /// a state that is not a genesis, and past exhaustion.
+    pub fn at_generation(
+        &self,
+        generation: u64,
+        predecessor: D32,
+    ) -> Result<Self, crate::types::error::DsmError> {
         if self.generation != 0 {
             return Err(crate::types::error::DsmError::invalid_operation(
                 "a reserve state is derived from its lineage's genesis",
+            ));
+        }
+        if generation == 0 && predecessor != self.predecessor {
+            return Err(crate::types::error::DsmError::invalid_operation(
+                "the reserve's genesis names its own genesis step as its predecessor",
             ));
         }
         let released = generation.checked_mul(ERA_FAUCET_PAYOUT).ok_or_else(|| {
@@ -208,8 +233,15 @@ impl NativeReserveState {
         Ok(Self {
             remaining_supply,
             generation,
+            predecessor,
             ..*self
         })
+    }
+
+    /// The step this state names as its predecessor: the release that
+    /// installed it, or the genesis step.
+    pub fn predecessor(&self) -> &D32 {
+        &self.predecessor
     }
 
     /// The reserve this is a state of.
@@ -245,6 +277,7 @@ impl NativeReserveState {
         h.update(&self.remaining_supply.to_be_bytes());
         h.update(&self.generation.to_be_bytes());
         h.update(&self.storage_set_id);
+        h.update(&self.predecessor);
         *h.finalize().as_bytes()
     }
 
@@ -341,24 +374,26 @@ pub struct EstablishedReserve {
 
 impl EstablishedReserve {
     /// The reserve's state at `head`, when `head` is of the reserve whose
-    /// genesis is `genesis` and its root is the state at its generation. At
-    /// generation 0 its digest must also be the genesis's.
+    /// genesis is `genesis` and its root is the state at its generation that
+    /// the release with step digest `predecessor` installed (the genesis step
+    /// at generation 0). At generation 0 its digest must also be the
+    /// genesis's.
     pub fn of(
         genesis: &NativeReserveState,
         head: &EstablishedSharedHead,
+        predecessor: &D32,
     ) -> Result<Self, ReserveHeadError> {
         let lineage = reserve_lineage_genesis(genesis)?;
         if head.kind() != LineageKind::Reserve || head.lineage_id() != &genesis.reserve_id {
             return Err(ReserveHeadError::NotThisReserve);
         }
         let generation = head.generation();
-        let state =
-            genesis
-                .at_generation(generation)
-                .map_err(|e| ReserveHeadError::NoSuchGeneration {
-                    generation,
-                    why: e.to_string(),
-                })?;
+        let state = genesis
+            .at_generation(generation, *predecessor)
+            .map_err(|e| ReserveHeadError::NoSuchGeneration {
+                generation,
+                why: e.to_string(),
+            })?;
         if &state.root() != head.state_root() {
             return Err(ReserveHeadError::RootIsNotTheState { generation });
         }
@@ -371,7 +406,11 @@ impl EstablishedReserve {
     /// The reserve's genesis as an established head.
     pub fn genesis(genesis: &NativeReserveState) -> Result<Self, ReserveHeadError> {
         let lineage = reserve_lineage_genesis(genesis)?;
-        Self::of(genesis, &GenerationChain::from_genesis(&lineage).head())
+        Self::of(
+            genesis,
+            &GenerationChain::from_genesis(&lineage).head(),
+            &genesis.predecessor,
+        )
     }
 
     pub fn head(&self) -> &EstablishedSharedHead {
@@ -466,7 +505,7 @@ impl ReserveLineage {
     /// The lineage of the reserve whose genesis is `genesis`, at its genesis.
     pub fn from_genesis(genesis: &NativeReserveState) -> Result<Self, ReserveHeadError> {
         let chain = GenerationChain::from_genesis(&reserve_lineage_genesis(genesis)?);
-        let head = EstablishedReserve::of(genesis, &chain.head())?;
+        let head = EstablishedReserve::of(genesis, &chain.head(), &genesis.predecessor)?;
         Ok(Self {
             chain,
             head,
@@ -920,6 +959,7 @@ pub fn release_constructible(
         remaining_supply: parent.remaining_supply - body.amount,
         generation: body.generation,
         storage_set_id: parent.storage_set_id,
+        predecessor: release_evidence_addr(&release.envelope_bytes),
     })
 }
 
@@ -1810,8 +1850,12 @@ mod tests {
         );
         // The head the walk stops at is the generation chain's over the same
         // releases: one digest of the history, whoever builds it.
-        let head = EstablishedReserve::of(&r0, &chain_head(&r0, &[(&rel1, &r1), (&rel2, &r2)]))
-            .expect("the chain's head is a head of the reserve");
+        let head = EstablishedReserve::of(
+            &r0,
+            &chain_head(&r0, &[(&rel1, &r1), (&rel2, &r2)]),
+            &release_evidence_addr(&rel2.envelope_bytes),
+        )
+        .expect("the chain's head is a head of the reserve");
         assert_eq!(stop, Ok(WalkStop::Head(head)));
         assert_eq!(*head.state(), r2);
         assert_eq!(visited, vec![(0, 1, 1), (1, 2, 2)]);
@@ -1865,7 +1909,12 @@ mod tests {
                 Ok(())
             },
         );
-        let h1 = EstablishedReserve::of(&r0, &chain_head(&r0, &[(&rel1, &r1)])).expect("a head");
+        let h1 = EstablishedReserve::of(
+            &r0,
+            &chain_head(&r0, &[(&rel1, &r1)]),
+            &release_evidence_addr(&rel1.envelope_bytes),
+        )
+        .expect("a head");
         assert_eq!(stop, Ok(WalkStop::BudgetExhausted(h1)));
 
         // A reader that could not read stops the walk with its error.
@@ -1899,21 +1948,28 @@ mod tests {
         let rel1 = signed(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &rel1).unwrap();
         let honest = chain_head(&r0, &[(&rel1, &r1)]);
+        let step1 = release_evidence_addr(&rel1.envelope_bytes);
         assert_eq!(
-            *EstablishedReserve::of(&r0, &honest)
+            *EstablishedReserve::of(&r0, &honest, &step1)
                 .expect("an honest head")
                 .state(),
             r1
         );
+        // The state names the release that installed it: the same head with
+        // another release's step is not this reserve's state there (SA-63).
+        assert_eq!(
+            EstablishedReserve::of(&r0, &honest, &[0x6A; 32]),
+            Err(ReserveHeadError::RootIsNotTheState { generation: 1 })
+        );
 
         // The same history with generation 1 claiming the root of generation 2.
-        let r2 = r0.at_generation(2).expect("generation 2");
+        let r2 = r0.at_generation(2, step1).expect("generation 2");
         let mut chain = GenerationChain::from_genesis(&reserve_lineage_genesis(&r0).unwrap());
         chain
             .push(r2.root(), release_evidence_addr(&rel1.envelope_bytes))
             .unwrap();
         assert_eq!(
-            EstablishedReserve::of(&r0, &chain.head()),
+            EstablishedReserve::of(&r0, &chain.head(), &step1),
             Err(ReserveHeadError::RootIsNotTheState { generation: 1 })
         );
 
@@ -1925,12 +1981,12 @@ mod tests {
             r0.policy_commit,
         ));
         assert_eq!(
-            EstablishedReserve::of(&r0, &vault.head()),
+            EstablishedReserve::of(&r0, &vault.head(), r0.predecessor()),
             Err(ReserveHeadError::NotThisReserve)
         );
         let other = NativeReserveState::genesis(b"othernet", committed_set_id()).expect("R_0");
         assert_eq!(
-            EstablishedReserve::of(&other, &honest),
+            EstablishedReserve::of(&other, &honest, &step1),
             Err(ReserveHeadError::NotThisReserve)
         );
 
@@ -1942,14 +1998,45 @@ mod tests {
             [0x5A; 32],
         ));
         assert_eq!(
-            EstablishedReserve::of(&r0, &forged.head()),
+            EstablishedReserve::of(&r0, &forged.head(), r0.predecessor()),
             Err(ReserveHeadError::NotTheGenesisDigest)
         );
 
         // A state after the genesis is never taken as the genesis.
         assert_eq!(
-            EstablishedReserve::of(&r1, &honest),
+            EstablishedReserve::of(&r1, &honest, &step1),
             Err(ReserveHeadError::NotTheGenesis { generation: 1 })
+        );
+    }
+
+    /// SA-63. A reserve state commits the release that installed it, so the
+    /// cell where its successor is decided exists only once that release has
+    /// won its own cell. Two releases that could each win generation 1 install
+    /// two different states, with two different successor cells: no cell of
+    /// generation 2 can be computed from the genesis, and taken, before
+    /// generation 1 is decided.
+    /// MUTATION CONTROL: the predecessor dropped from the root gives both
+    /// releases' states one root and one successor cell: red.
+    #[test]
+    fn a_successor_cell_exists_only_once_its_predecessor_is_won() {
+        let r0 = genesis();
+        let first = signed(&r0, ERA_FAUCET_PAYOUT);
+        let second = signed(&r0, ERA_FAUCET_PAYOUT);
+        let after_first = release_constructible(&r0, &first).expect("a successor");
+        let after_second = release_constructible(&r0, &second).expect("a successor");
+        assert_eq!(after_first.generation(), after_second.generation());
+        assert_eq!(
+            after_first.remaining_supply(),
+            after_second.remaining_supply()
+        );
+        assert_ne!(
+            after_first.successor_cell(),
+            after_second.successor_cell(),
+            "each generation-1 release installs its own state, with its own successor cell"
+        );
+        assert_eq!(
+            after_first.predecessor(),
+            &release_evidence_addr(&first.envelope_bytes)
         );
     }
 

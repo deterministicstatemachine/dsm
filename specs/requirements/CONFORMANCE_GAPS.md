@@ -3381,7 +3381,7 @@ Found while fixing §6.87.
 |---|---|---|---|---|
 | SA-61 | `dsm/src/bilateral/offline.rs` · `decide_confirm`, `verify_receipt_state` | Offline-bearer receiver credits a sender-asserted allocation: nothing binds the sender's parent_root/R_i, so a modified sender app (with or without a genuine anchor) mints or re-spends value offline. | confirmed (3 of 3) | Fixed (Phase 4, §6.103): the receiver takes a spend only from the account it recorded from the payer's online history, carried forward by the chip-signed chain of the payer's unexposed spends and forward of the last spend it accepted (`spend_starts_at_the_record`, `verify_spend_chain`), and credits nothing until settlement. Tests: `dsm::bilateral::offline::tests::a_spend_whose_chain_does_not_carry_the_record_to_it_is_refused`, `::a_spend_before_the_one_last_accepted_is_refused`, `dsm_sdk::bluetooth::offline_step_tests::an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online` |
 | SA-62 | `dsm_sdk/src/sdk/native_reserve.rs` · `read_successor`, `read_successor_cell` | Junk at the shared reserve's next cell halts ERA issuance for every wallet on the network, for good. | confirmed (3 of 3) | Fixed (round 3) |
-| SA-63 | `dsm/src/economic/native_reserve.rs` · `release_constructible`, `root` | Any throwaway key can sign a valid reserve release at any generation, so leader-only releases block every faucet claim on the network. | confirmed (3 of 3) | Open |
+| SA-63 | `dsm/src/economic/native_reserve.rs` · `release_constructible`, `root` | Any throwaway key can sign a valid reserve release at any generation, so leader-only releases block every faucet claim on the network. | confirmed (3 of 3) | Partial (§6.128; owner's choice 2026-10-31, both bindings): each reserve state commits the step digest of the release that installed it (the genesis step for `R_0`), so a successor cell exists only once its predecessor release has won; the claimant's directory entry in the release is the second half, next. Test: `dsm::economic::native_reserve::tests::a_successor_cell_exists_only_once_its_predecessor_is_won` |
 | SA-64 | `dsm_sdk/src/handlers/recovery_routes.rs` · `handle_recovery_invoke`, `derive_and_cache_key` | recovery.enable / recovery.cacheMnemonic replace the wallet's root seed (in memory and Keystore-sealed) with the seed of any 24-word phrase. | confirmed (3 of 3) | Fixed (`8574f4f0`) |
 | SA-65 | `dsm_sdk/src/handlers/recovery_routes.rs` · `handle_recovery_invoke`, `clear_cached_key` | recovery.disable calls the full logout wipe and deletes the only sealed copy of the wallet seed. | confirmed (3 of 3) | Fixed (`8574f4f0`) |
 | SA-66 | `dsm_sdk/src/handlers/storage_routes.rs` · `process_finality_checkpoints`, `apply_relationship_finalized` | An unauthenticated NoJournal finality certificate consumes an honest spool message id, so one storage member (or anyone who knows the route) permanently hides an incoming transfer. | confirmed (3 of 3) | Fixed (`8574f4f0`) |
@@ -6835,6 +6835,29 @@ The routes answer with the new reply variants `duel` (11) and `released` (12) of
 - `dsm_sdk::handlers::connect_duel_e2e_tests::a_player_withdraws_and_collects_a_stake_without_the_game`. Both sides stake; the game goes silent; A withdraws from its own wallet; each player collects its own stake back.
 
 **SA-140, the tiebreak seed:** still to build here, as the owner chose it. Each wallet commits `H(r)` at lock and reveals `r` at ready, and the seed is derived from both reveals.
+
+
+### 6.128 A reserve cell exists only once its predecessor is won (SA-63, first half; `fix/beta-requirements-completion`, 2026-10-31)
+
+*The owner's choice (2026-10-31), the 10-22 plan's Q1 and Q2: "Both bindings".*
+- Each reserve root commits the previous release's step digest, so a cell exists only after its predecessor is won.
+- Each release carries the claimant's directory entry, so its bytes decide entitlement.
+- The ERA reserve lineage restarts, which is a beta node wipe.
+
+**The finding.** A reserve root depended only on its generation: remaining supply, the generation number and the fixed reserve fields. So every future successor cell could be computed from the genesis. Any key could write a release into a future cell's leader before that generation was reached, and a release at the leader holds the cell.
+
+**The predecessor binding, built.**
+- `NativeReserveState` carries `predecessor`: the step digest of the release that installed it (`release_evidence_addr`), or for `R_0` the reserve's genesis step (`genesis_step`, `DSM/native-reserve-genesis-step/v1`).
+- The root commits it; the root's tag is now `DSM/native-reserve-state/v2`.
+- `release_constructible` sets it from the release it takes. `at_generation` and `EstablishedReserve::of` take it explicitly, and a head presented with the wrong step is refused as not this reserve's state.
+- Readers carry it: a reserve release win names its parent's step (`ReserveReleaseWin.parent_step`), and the memo fold derives each state's step from the release it kept.
+- Two releases that could each win a generation install two different states, with two different successor cells. So no cell after the current one can be computed, or taken, in advance.
+
+**Test.** `dsm::economic::native_reserve::tests::a_successor_cell_exists_only_once_its_predecessor_is_won`. Also `a_reserve_state_is_taken_only_from_a_head_of_this_reserve`, now refusing an honest head presented with another release's step.
+
+**The model.** `tla/DSM_NativeReserveRelease.tla` models one cell, `K(reserve, R_n)`. Its scope now states that `R_n` commits its predecessor release; its actions are unchanged.
+
+**The second half, next.** The release carries the claimant's directory entry, which recognition verifies before the release can hold a cell.
 
 ## 7 Totals
 

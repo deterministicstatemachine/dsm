@@ -342,6 +342,10 @@ pub struct ReserveReleaseWin {
     pub envelope_bytes: Vec<u8>,
     /// The reader's established head at `generation − 1`.
     pub parent: crate::shared_lineage::EstablishedSharedHead,
+    /// The step digest of the release that installed the parent state (the
+    /// reserve's genesis step at generation 0): the parent's root commits it
+    /// (SA-63).
+    pub parent_step: [u8; 32],
     /// The reader's established head at `generation`.
     pub child: crate::shared_lineage::EstablishedSharedHead,
 }
@@ -1227,8 +1231,9 @@ pub fn verify_credit_source(
                 generation: d.generation,
                 failure: PeerLineageFailure::Incomplete(format!("the reserve's genesis: {e}")),
             })?;
-            let parent = native_reserve::EstablishedReserve::of(&genesis, &win.parent)
-                .map_err(ProvenanceError::ReleaseParentNotOnTheReserve)?;
+            let parent =
+                native_reserve::EstablishedReserve::of(&genesis, &win.parent, &win.parent_step)
+                    .map_err(ProvenanceError::ReleaseParentNotOnTheReserve)?;
             let release = native_reserve::decode_and_verify_release(&win.envelope_bytes)
                 .map_err(|_| ProvenanceError::ReleaseInvalid("does not verify"))?;
             let child = parent

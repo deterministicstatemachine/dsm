@@ -393,6 +393,7 @@ impl ProvenanceResolver for OneTicket {
         Ok(ReserveReleaseWin {
             envelope_bytes: self.envelope.clone(),
             parent: before,
+            parent_step: *parent.predecessor(),
             child: lineage.chain().head(),
         })
     }

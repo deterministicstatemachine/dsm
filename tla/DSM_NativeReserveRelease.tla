@@ -6,8 +6,12 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \* EVERYWHERE (Part IX §51; rebuild step R4; owner ruling 2026-09-20).
 \*
 \* SCOPE. One network's native reserve at its head state R_n (remaining units,
-\* generation n) and the ONE cell where its successor is decided,
-\* K(reserve, R_n), replicated across the frozen five-member set. Claimants
+\* generation n, and the step of the release that installed it) and the ONE
+\* cell where its successor is decided, K(reserve, R_n), replicated across the
+\* frozen five-member set. R_n commits the release that installed it (SA-63),
+\* so K(reserve, R_n) is defined only once that release has won its own cell:
+\* the cell modelled here exists only after its predecessor is decided, and no
+\* later cell can be written before it is. Claimants
 \* write releases naming themselves as recipient; anyone writes garbage; a
 \* member keeps whatever it is given and decides nothing. Core recognizes,
 \* resolves leader first, and advances the reserve by exactly the amount the

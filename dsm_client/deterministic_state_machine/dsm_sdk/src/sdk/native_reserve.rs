@@ -530,9 +530,20 @@ pub(crate) fn established_release_at(
     else {
         return Ok(None);
     };
+    // The parent state names the release that installed it, or the genesis
+    // step at generation 0 (SA-63).
+    let parent_step = match before {
+        0 => *genesis.predecessor(),
+        _ => *lineage.steps().get(&before).ok_or_else(|| {
+            DsmError::invalid_operation(format!(
+                "the established lineage holds no step for generation {before}"
+            ))
+        })?,
+    };
     Ok(Some(ReserveReleaseWin {
         envelope_bytes,
         parent,
+        parent_step,
         child,
     }))
 }

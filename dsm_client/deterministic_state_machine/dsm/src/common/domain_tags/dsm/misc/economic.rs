@@ -129,10 +129,17 @@ pub const TAG_DSM_ECON_SOURCE_VALIDATED_PEER_DEBIT: TaggedHashDomain<'static> =
 /// `network_id` from the AUTHENTICATED Genesis v3, never from the claimant.
 pub const TAG_DSM_NATIVE_RESERVE_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/native-reserve-id/v1");
+/// The step a native reserve's genesis state `R_0` names as its predecessor:
+/// `H(tag ‖ 0x00 ‖ reserve_id)`. Every later state names the release that
+/// installed it, and the root commits it (SA-63).
+pub const TAG_DSM_NATIVE_RESERVE_GENESIS_STEP: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/native-reserve-genesis-step/v1");
 /// The root of a native reserve state:
-/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖ storage_set_id)`.
+/// `R_n = H(tag ‖ 0x00 ‖ reserve_id ‖ policy_commit ‖ u64_be(remaining) ‖ u64_be(generation) ‖
+/// storage_set_id ‖ predecessor)`, where `predecessor` is the step digest of
+/// the release that installed it (SA-63; v1 committed no predecessor).
 pub const TAG_DSM_NATIVE_RESERVE_STATE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/native-reserve-state/v1");
+    crate::tagged_domain!(b"DSM/native-reserve-state/v2");
 /// The successor cell of a reserve state: `K = H(tag ‖ 0x00 ‖ reserve_id ‖ R_n)`.
 /// Its source bytes are also the cell namespace at a member.
 pub const TAG_DSM_NATIVE_RESERVE_CELL: TaggedHashDomain<'static> =

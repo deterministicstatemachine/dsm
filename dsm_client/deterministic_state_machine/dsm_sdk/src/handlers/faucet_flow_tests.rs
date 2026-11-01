@@ -1538,8 +1538,12 @@ async fn a_forged_memo_row_is_refused_on_load_and_enters_no_chain() {
     let last = bent.len() - 1;
     bent[last] ^= 0x01;
     let members = as_ccb_members(&set).expect("the set's members");
-    let cell = SuccessorCell::of(&genesis.at_generation(1).expect("generation 1"), &members)
-        .expect("generation 2's cell");
+    let first_step = dsm::economic::native_reserve::release_evidence_addr(&other_parents);
+    let cell = SuccessorCell::of(
+        &genesis.at_generation(1, first_step).expect("generation 1"),
+        &members,
+    )
+    .expect("generation 2's cell");
     let mut unread = CellEvidence::decode_kept(cell.routed(), &reads, &cell.keeps())
         .expect("the kept reads decode");
     for seat in unread.seats.iter_mut().skip(1) {

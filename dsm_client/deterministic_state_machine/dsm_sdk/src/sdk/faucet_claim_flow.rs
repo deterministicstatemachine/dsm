@@ -147,7 +147,7 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                     ),
                 )
             })?;
-            let parent = EstablishedReserve::of(&reserve_genesis, &win.parent)
+            let parent = EstablishedReserve::of(&reserve_genesis, &win.parent, &win.parent_step)
                 .map_err(|e| storage_err("reserve head", e))?;
             if !memoise_release_completion(&set, parent.state(), &envelope).await? {
                 return Err(storage_err(
