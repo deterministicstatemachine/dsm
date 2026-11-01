@@ -152,8 +152,9 @@ fn an_online_transfer_request_is_the_same_bytes_from_an_independent_encoder() {
     assert_eq!(request.encode_to_vec(), independent);
 }
 
-/// `Operation::Transfer`'s canonical bytes: tag 37, then each field as a
-/// little-endian u32 length and its bytes — the recipient, the balance's 16
+/// `Operation::Transfer`'s canonical bytes: tag 39, then each field as a
+/// little-endian u32 length and its bytes — the recipient, its genesis
+/// (SA-133), the balance's 16
 /// canonical bytes (value then locked, little-endian u64s), the policy
 /// commitment, the terms commitment, the token's committed policy bytes, the
 /// signature — and no authority-policy tail when there is none.
@@ -165,6 +166,7 @@ fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
     };
     let operation = dsm::types::operations::Operation::Transfer {
         to_device_id: vec![0x61; 32],
+        to_genesis: [0x6E; 32],
         amount: dsm::types::token_types::Balance::amount(1_234),
         policy_commit: [0x62; 32],
         token_policy: vec![0x65; 7],
@@ -174,8 +176,9 @@ fn a_transfers_canonical_bytes_are_the_same_from_an_independent_encoder() {
     };
     let mut balance = [0u8; 16];
     balance[..8].copy_from_slice(&1_234u64.to_le_bytes());
-    let mut independent = vec![37u8];
+    let mut independent = vec![39u8];
     put(&[0x61; 32], &mut independent);
+    put(&[0x6E; 32], &mut independent);
     put(&balance, &mut independent);
     put(&[0x62; 32], &mut independent);
     put(&[0x63; 32], &mut independent);

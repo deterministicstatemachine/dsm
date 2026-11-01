@@ -36,6 +36,7 @@ fn era() -> [u8; 32] {
 fn transfer_to(recipient: [u8; 32], amount: u64) -> Operation {
     Operation::Transfer {
         to_device_id: recipient.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(amount),
         policy_commit: era(),
         token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),

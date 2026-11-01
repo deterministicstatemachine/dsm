@@ -294,6 +294,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: vec![0xAAu8; 32],
+            to_genesis: [0x6E; 32],
             amount: balance,
             signature: vec![0xEEu8; 64],
             authority_policy: None,

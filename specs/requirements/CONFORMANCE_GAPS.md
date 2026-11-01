@@ -1412,7 +1412,7 @@ The State column says what this branch did; "Open" rows are holes left visible, 
 | E-S21 | `SDK/lib.rs` (non-Android or non-Bluetooth builds) | `initialize_bilateral_sdk` answers `Ok(())` and `is_bilateral_ready` is `true` on builds that have no bilateral stack (A27 residual). The shipped Android path reads a real flag. | Resolved: on a build without the stack `initialize_bilateral_sdk` is an error naming the missing stack and `is_bilateral_ready` is false. |
 | E-S23 | `SDK/platform/ios/transport.rs` | Builds a deleted field; cannot compile; no build compiles it. | Resolved: the `platform` module (iOS transport and bluetooth) is deleted with its `lib.rs` re-export; nothing in the repository builds for iOS. |
 | E-S24 | `SDK/sdk/kv.rs` | No caller. | Resolved: deleted. |
-| E-S25 | `SDK/sdk/token_sdk.rs` (`Create` arm) | Unreachable, with a made-up fee counterparty (`system.fee.device_id`). | Open |
+| E-S25 | `SDK/sdk/token_sdk.rs` (`Create` arm) | Unreachable, with a made-up fee counterparty (`system.fee.device_id`). | Resolved (§6.126): the fee transfer to `system.fee.device_id` and its relationship are deleted with the domain tag behind them; a token creation that names a fee is refused, since no fee recipient exists (S-FEE) |
 | E-S26–27 | `SDK/wire/mod.rs` (`author_contact_add`, `author_contact_accept`, `make_state_transition_proto`, `canonical_operation_name`) | Reached only by a test that checked the helper against itself. | Resolved: deleted with that test and the "types exist" test beside it; `dlv_open_is_bytes_only` stays. |
 | E-S28 | `SDK/sdk/bootstrap.rs` (`SdkBootstrap`, `CanonicalSdkContext`) | No caller; its tests asserted struct-field assignment, and the one that called `load` accepted every outcome including a panic. | Resolved: deleted. |
 | E-S29–31 | `SdkConfig` fields nothing reads; `sdk/recovery_sdk.rs` wrappers; some thirty uncalled functions | No caller. | Open |
@@ -3461,7 +3461,7 @@ Found while fixing §6.87.
 | SA-130 | `dsm/src/sofi/storage.rs` · `merge_index_reads`, `keep_all_verifying` | An index read that only one member answered is treated as complete, so 'not published' is concluded from a partial read. | confirmed (1 of 1) | Fixed (round 4) |
 | SA-131 | `dsm/src/sofi/validation.rs` · `dlv_fold_entries`, `vault_leaves_from_core` | The V° relationship advance is not bound to the trader's relationship base (unconstrained on a first operation, identity unchecked on Close/Release). | confirmed (1 of 1) | Fixed (`45384fc7`) |
 | SA-132 | `dsm_sdk/src/sdk/vault_baseline.rs` · `adopt_one`, `publish` | vault_baseline_locator is predictable, so 8 earlier appends push the owner's baseline past the scan budget. | confirmed (1 of 1) | Fixed (round 4) |
-| SA-133 | `dsm/src/economic/provenance.rs` · `prevalidate_sender_debit`, `verify_credit_source` | A peer debit is bound only to the recipient's DevID, so one debit can fund credits in two lineages that share a DevID. | confirmed (1 of 1) | Open |
+| SA-133 | `dsm/src/economic/provenance.rs` · `prevalidate_sender_debit`, `verify_credit_source` | A peer debit is bound only to the recipient's DevID, so one debit can fund credits in two lineages that share a DevID. | confirmed (1 of 1) | Fixed for the online transfer (§6.126; owner's choice 2026-10-31, Transfer names genesis): `Operation::Transfer` signs `to_genesis` beside `to_device_id` (canonical tag 39; tag 37 retired), every producer takes it from the contact's pinned genesis, and `prevalidate_sender_debit` requires both to be the consumer's. Test: `dsm_sdk::handlers::counterfeit_acceptance_tests::a_debit_naming_another_lineage_is_never_accepted_by_its_device`. Open: the offline settlement's exposure names its recipient by device id alone (§6.126) |
 | SA-134 | `dsm_sdk/src/sdk/economic_admission_flow.rs` · `finish_locked`, `list_unpublished_artifacts` | Admission finish is gated on the device's whole unpublished-artifact table, so unrelated SoFi lineage debt or unresolvable rows hold every admission. | confirmed (1 of 1) | Fixed (round 3) |
 | SA-135 | `dsm/src/economic/peer_lineage.rs` · `located`, `probed` | located() treats undetermined candidates as absent and accepts a lone survivor, and discovery accepts a one-member probe (A14 fork refusal). | confirmed (2 of 2) | Fixed (round 3); the probe and the rival weighing are gone with A14 (§6.90) |
 | SA-136 | `dsm/src/economic/provenance.rs` · `prevalidate_sender_debit`, `verify_credit_source` | transferable=false is not in the Core transfer rule that foreign verifiers check; only the endpoint SDKs enforce it. | confirmed (1 of 1) | Fixed (round 3) |
@@ -6784,6 +6784,24 @@ A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to
 - `dsm_sdk::storage::client_db::economic_lineage::tests::a_step_a_walk_verified_is_held_once_recorded`. A step recorded with a walk is held, in its signer's chain only.
 
 **Not covered by a test.** The walker carrying the steps of a passing step into `Checked`, and the SDK passing `Checked::ek_steps` to `record_validated`, have no walk-level test. The tests above cover what is recorded and how a recorded step shortens a walk.
+
+
+### 6.126 A transfer names its recipient's lineage (SA-133; `fix/beta-requirements-completion`, 2026-10-31)
+
+*The owner's choice (2026-10-31): "Transfer names genesis". The online Transfer operation also signs the recipient's genesis, and the credit checks (genesis, DevID). Wire and Operation encoding change, so beta redeploys.*
+
+**The finding.** A peer debit was bound only to the recipient's DevID. `DevID = H(DSM/devid ‖ AK ‖ AttA)`, and AttA is derived from the wallet's secret root, so a verifier cannot check it against a genesis. An identity can therefore present one AK and AttA under two geneses, and so one DevID in two lineages. One debit could then fund a credit in each.
+
+**The fix.**
+- `Operation::Transfer` carries `to_genesis: [u8; 32]` beside `to_device_id`, under the signature. Its canonical tag is now 39; tag 37, which named the recipient by device id alone, is retired (tag 38 was already the escrow vault's).
+- Every producer takes the genesis from the recipient's contact record, the genesis it pinned: `wallet.send`, `wallet.sendOffline` (through `encode_offline_transfer_operation_canonical`) and the token SDK's transfer. A recipient that is not a contact names no genesis, and the send is refused.
+- `prevalidate_sender_debit` requires the operation to name the consumer's genesis as well as its device id. The recipient's prevalidation and every verifier's credit arm run it.
+
+**Removed with it (E-S25).** The token SDK charged a creation fee by a transfer to a made-up device (`system.fee.device_id`), over a relationship with a hash of that string. It could name no genesis, because none exists. The transfer, its relationship and the domain tag behind it (`DSM/system-fee-device`) are deleted. A token creation that names a fee is now refused, since no fee recipient exists (S-FEE). The one creation built in the SDK names none.
+
+**Test.** `dsm_sdk::handlers::counterfeit_acceptance_tests::a_debit_naming_another_lineage_is_never_accepted_by_its_device`. A funded source registers a real debit to C's device id that names another device's genesis. C's own acceptance refuses it, "addressed to a different identity than the consumer", and nothing is written.
+
+**Still open: the offline settlement.** A receiver settles an offline payment from the exposure the payer's online history recorded. That exposure names its recipient by device id, taken from the anchor transition's `recipient_device_id`. A lineage sharing a device id with the payee could therefore settle the same exposure. Closing it means binding the recipient's genesis into the anchor transition, in anchor-core and the firmware image, and into the exposure. That work is next in this round.
 
 ## 7 Totals
 

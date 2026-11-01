@@ -3100,6 +3100,7 @@ mod tests {
             recipient_genesis_hash: crate::util::text_id::encode_base32_crockford(&[0x55u8; 32]),
             transaction: dsm::types::operations::Operation::Transfer {
                 to_device_id: vec![0x44; 32],
+                to_genesis: [0x6E; 32],
                 amount: dsm::types::token_types::Balance::amount(100),
                 policy_commit: [0x0F; 32],
                 token_policy: Vec::new(),

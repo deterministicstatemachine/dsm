@@ -575,6 +575,7 @@ pub(crate) fn wallet_amount(
 /// item 4).
 pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
+    to_genesis: &[u8; 32],
     amount: u64,
     token_id: &str,
     memo: &str,
@@ -598,6 +599,7 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
     );
     let operation = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.to_vec(),
+        to_genesis: *to_genesis,
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit: *policy_commit,
         terms_commitment: terms.commitment(),
@@ -860,6 +862,31 @@ impl AppRouterImpl {
                         )
                     }
                 };
+                // The payment names its recipient's genesis beside its device id,
+                // under the signature (SA-133): the genesis the contact pinned.
+                let counterparty_genesis: [u8; 32] =
+                    match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(contact)) => match contact.genesis_hash.as_slice().try_into() {
+                            Ok(genesis) => genesis,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.sendOffline: the contact's genesis: {e}"
+                                ))
+                            }
+                        },
+                        Ok(None) => {
+                            return err(
+                                "wallet.sendOffline: the counterparty is not a contact".into()
+                            )
+                        }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the counterparty's contact: {e}"
+                            ))
+                        }
+                    };
                 // The counterparty's device id routes the prepare. Where its
                 // appliance was last seen over BLE — the address its contact
                 // holds, else the one its identity was seen at this session — is
@@ -916,6 +943,7 @@ impl AppRouterImpl {
                     };
                 let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
+                    &counterparty_genesis,
                     transfer_amount,
                     &token_id,
                     req.memo.trim(),
@@ -1790,6 +1818,7 @@ mod tests {
         let to_device_id = [0xabu8; 32];
         let (bytes, terms) = encode_offline_transfer_operation_canonical(
             &to_device_id,
+            &[0x6E; 32],
             42,
             "DBTC",
             "memo",
@@ -2178,6 +2207,7 @@ mod history_tests {
         );
         let unsigned = Operation::Transfer {
             to_device_id: device.router.device_id_bytes.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: dsm::types::token_types::Balance::amount(100),
             policy_commit: era,
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),

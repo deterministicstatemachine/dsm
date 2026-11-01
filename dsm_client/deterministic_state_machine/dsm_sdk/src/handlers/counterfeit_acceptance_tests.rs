@@ -411,6 +411,19 @@ fn signed_token_transfer(
     ticker: &str,
     amount: u64,
 ) -> Operation {
+    signed_transfer_naming(from, to, to.genesis, policy_commit, ticker, amount)
+}
+
+/// [`signed_token_transfer`] naming `to_genesis` as the recipient's lineage
+/// beside `to`'s device id: what a sender's software chooses to sign.
+fn signed_transfer_naming(
+    from: &TestDevice,
+    to: &TestDevice,
+    to_genesis: [u8; 32],
+    policy_commit: [u8; 32],
+    ticker: &str,
+    amount: u64,
+) -> Operation {
     from.enter();
     let contact = client_db::get_contact_by_device_id(&to.device_id)
         .expect("contacts")
@@ -425,6 +438,7 @@ fn signed_token_transfer(
     );
     let unsigned = Operation::Transfer {
         to_device_id: to.device_id.to_vec(),
+        to_genesis,
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit,
         token_policy: crate::sdk::economic_registers::carried_token_policy(&policy_commit)
@@ -617,6 +631,90 @@ async fn a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited() 
             .expect("read")
             .is_none(),
         "no admitted credit"
+    );
+    assert_eq!(c.era_balance(), 0, "no balance");
+}
+
+/// SA-133. A payment names its recipient's lineage, not its device id alone:
+/// two geneses can share a device id (its AK and AttA are the identity's own
+/// choice), and one debit must not fund a credit in each. The source's
+/// honest, funded and registered debit to C's device id, naming another
+/// lineage's genesis, is refused by C's own acceptance before anything is
+/// written.
+///
+/// MUTATION CONTROL: the recipient-genesis conjunct dropped from
+/// `prevalidate_sender_debit` lets the acceptance go past it: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_debit_naming_another_lineage_is_never_accepted_by_its_device() {
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let (p, c) = three_parties().await;
+    let (source, twin) = (&p.a, &p.b);
+    let debit = signed_transfer_naming(
+        source,
+        &c,
+        twin.genesis,
+        dsm::core::token::era_policy::era_policy_commit(),
+        "ERA",
+        payout() / 10,
+    );
+    let state = chain_state(source, &c, &debit, 0x41);
+    let embedded_parent = state.embedded_parent;
+    let child_tip = state.compute_chain_tip();
+    let registered = next_step(source, state, &debit).await;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        source.genesis,
+        source.device_id,
+        c.device_id,
+        embedded_parent,
+        child_tip,
+        [0x51; 32],
+        [0x52; 32],
+        [0x41; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &debit else {
+        panic!("the debit is a transfer")
+    };
+
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &source.genesis,
+        &source.device_id,
+        &source.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &debit.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: registered.position,
+                debit_mutation_index: registered.debit_mutation_index,
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(source),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("a debit naming another lineage funds nothing here");
+    assert!(
+        format!("{refusal}").contains("addressed to a different identity than the consumer"),
+        "refused for the lineage it names: {refusal}"
+    );
+    assert!(
+        c.router()
+            .core_sdk
+            .device_head()
+            .expect("a head")
+            .pending_economic_admission()
+            .is_none(),
+        "no pending admission"
     );
     assert_eq!(c.era_balance(), 0, "no balance");
 }

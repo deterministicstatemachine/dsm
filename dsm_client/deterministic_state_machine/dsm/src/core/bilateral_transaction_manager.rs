@@ -1095,6 +1095,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: vec![9u8; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             signature: Vec::new(),
             authority_policy: None,

@@ -775,6 +775,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: vec![0xA1; 32],
+            to_genesis: [0x6E; 32],
             amount: TokenBalance::amount(amount),
             signature: vec![0xEE; 64],
             authority_policy: None,

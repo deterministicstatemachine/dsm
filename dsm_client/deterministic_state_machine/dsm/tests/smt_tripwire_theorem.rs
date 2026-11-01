@@ -109,6 +109,7 @@ fn make_transfer_op(recipient: &[u8; 32], amount: u64) -> (Operation, Vec<u8>) {
         }
         .commitment(),
         to_device_id: recipient.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(amount),
         signature: vec![],
         authority_policy: None,

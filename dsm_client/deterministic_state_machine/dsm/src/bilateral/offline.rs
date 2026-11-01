@@ -902,6 +902,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: to.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(3),
             signature: Vec::new(),
             authority_policy: Some(crate::types::operations::canonical_offline_bearer_policy()),

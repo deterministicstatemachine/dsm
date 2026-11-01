@@ -2527,6 +2527,7 @@ pub(crate) mod tests {
     fn credit_transfer_op(amount: u64, policy_commit: [u8; 32]) -> Operation {
         Operation::Transfer {
             to_device_id: devid(0xAA).to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amount),
             policy_commit,
             token_policy: Vec::new(),
@@ -2678,6 +2679,7 @@ pub(crate) mod tests {
         let pcx = pc(0xCC);
         let xfer = |to: [u8; 32], amt: u64, pcv: [u8; 32]| Operation::Transfer {
             to_device_id: to.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amt),
             policy_commit: pcv,
             token_policy: Vec::new(),
@@ -2783,6 +2785,7 @@ pub(crate) mod tests {
                     ..
                 } => Operation::Transfer {
                     to_device_id,
+                    to_genesis: [0x6E; 32],
                     amount,
                     policy_commit: moving_token().0,
                     token_policy: moving_token().1,
@@ -2840,6 +2843,7 @@ pub(crate) mod tests {
     fn custom_credit_op(to: &DeviceState, policy_commit: [u8; 32], amount: u64) -> Operation {
         Operation::Transfer {
             to_device_id: to.devid.to_vec(),
+            to_genesis: to.genesis,
             amount: bal(amount),
             policy_commit,
             token_policy: Vec::new(),
@@ -3142,6 +3146,7 @@ pub(crate) mod tests {
         use crate::types::operations::{AuthorityMode, AuthorityPolicy, TransactionMode};
         Operation::Transfer {
             to_device_id: cp.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: bal(amt),
             policy_commit: token,
             token_policy: moving_token().1,

@@ -484,8 +484,23 @@ impl TokenSDK {
                     TransactionMode::Bilateral,
                     "Transfer operation via TokenSDK".to_string(),
                 );
+                // The recipient is a contact, and the transfer names the genesis
+                // it pinned beside its device id (SA-133).
+                let contact = crate::storage::client_db::get_contact_by_device_id(recipient)
+                    .map_err(|e| {
+                        DsmError::storage(
+                            format!("the recipient's contact: {e}"),
+                            None::<std::io::Error>,
+                        )
+                    })?
+                    .ok_or_else(|| DsmError::invalid_operation("the recipient is not a contact"))?;
+                let to_genesis: [u8; 32] =
+                    contact.genesis_hash.as_slice().try_into().map_err(|e| {
+                        DsmError::invalid_operation(format!("the recipient contact's genesis: {e}"))
+                    })?;
                 let mut op = Operation::Transfer {
                     to_device_id: recipient.to_vec(),
+                    to_genesis,
                     amount: Balance::amount(*amount),
                     policy_commit,
                     terms_commitment: terms.commitment(),
@@ -605,8 +620,13 @@ impl TokenSDK {
                     )));
                 }
 
+                // A creation fee has no recipient: the fee transfer this SDK
+                // made paid a made-up device (S-FEE), and it is removed. The
+                // one creation built here names no fee.
                 if *fee > 0 {
-                    self.validate_and_charge_fee(&creator_id, *fee).await?;
+                    return Err(DsmError::invalid_operation(
+                        "a token creation names a fee, and no fee recipient exists (S-FEE)",
+                    ));
                 }
 
                 let token_metadata = TokenMetadata {
@@ -949,66 +969,6 @@ impl TokenSDK {
         Ok(self.find_token_metadata_operation(token_id)?.is_some())
     }
 
-    async fn validate_and_charge_fee(
-        &self,
-        _creator_id: &[u8; 32],
-        fee: u64,
-    ) -> Result<(), DsmError> {
-        if fee == 0 {
-            return Ok(());
-        }
-
-        let current_state = self.core_sdk.get_current_state()?;
-        let fee_policy_commit = crate::policy::resolve_policy_commit_strict(b"ERA")?;
-        // No nonce: nothing spends one for this transfer, and its fresh terms
-        // salt already makes each fee transfer's operation bytes its own.
-        let fee_terms = dsm::types::operations::TransferTerms::new(
-            b"ERA".to_vec(),
-            Vec::new(),
-            TransactionMode::Bilateral,
-            "Fee payment".to_string(),
-        );
-        let mut fee_transfer_op = Operation::Transfer {
-            to_device_id: b"system.fee.device_id".to_vec(),
-            amount: Balance::amount(fee),
-            policy_commit: fee_policy_commit,
-            terms_commitment: fee_terms.commitment(),
-            token_policy: crate::sdk::economic_registers::carried_token_policy(&fee_policy_commit)?,
-            signature: Vec::new(),
-            authority_policy: None,
-        };
-
-        let signature = self.sign_transfer_operation(&fee_transfer_op)?;
-        if let Operation::Transfer { signature: sig, .. } = &mut fee_transfer_op {
-            *sig = signature;
-        }
-
-        // Fee: relationship is device↔system.fee (deterministic system counterparty)
-        let fee_counterparty = *dsm::crypto::blake3::domain_hash(
-            dsm::common::domain_tags::TAG_DSM_SYSTEM_FEE_DEVICE,
-            b"system.fee.device_id",
-        )
-        .as_bytes();
-        let fee_rel_key = dsm::core::bilateral_transaction_manager::compute_smt_key(
-            &current_state.device_info.device_id,
-            &fee_counterparty,
-        );
-        let era_pc = dsm::core::token::token_state_manager::resolve_policy_commit("ERA")?;
-        let fee_deltas = [dsm::types::device_state::BalanceDelta {
-            policy_commit: era_pc,
-            direction: dsm::types::device_state::BalanceDirection::Debit,
-            amount: fee,
-        }];
-        let (new_state, _) = self.core_sdk.execute_on_relationship(
-            fee_rel_key,
-            fee_counterparty,
-            fee_transfer_op,
-            &fee_deltas,
-        )?;
-        self.project_balance_cache_from_state(current_state.device_info.device_id, &new_state)?;
-        Ok(())
-    }
-
     /// The amount of `token_id` locked in this device's balance cache. Locks
     /// are not kept per purpose: this is the token's whole lock.
     fn locked_amount(&self, device_id: &[u8; 32], token_id: &str) -> u64 {
@@ -1184,6 +1144,7 @@ mod tests {
         );
         let op = Operation::Transfer {
             to_device_id: recipient.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             policy_commit: era,
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),

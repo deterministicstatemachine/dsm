@@ -1704,6 +1704,7 @@ mod tests {
         let ticker = std::str::from_utf8(token_id).expect("a builtin ticker");
         Operation::Transfer {
             to_device_id: vec![0xCC; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(amount),
             policy_commit: dsm::core::token::token_state_manager::builtin_policy_commit_for_token(
                 ticker,
@@ -1747,6 +1748,7 @@ mod tests {
                 ..
             } => Operation::Transfer {
                 to_device_id,
+                to_genesis: [0x6E; 32],
                 amount,
                 policy_commit: [0x77; 32],
                 token_policy: Vec::new(),

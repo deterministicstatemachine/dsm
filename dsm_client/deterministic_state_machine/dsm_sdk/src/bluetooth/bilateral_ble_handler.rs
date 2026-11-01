@@ -5111,6 +5111,7 @@ mod tests {
         let (bytes, terms) =
             crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
                 &to,
+                &[0x6E; 32],
                 7,
                 "ERA",
                 "",
@@ -5138,6 +5139,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: counterparty.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             signature: Vec::new(),
             authority_policy: None,
@@ -5654,6 +5656,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: counterparty_device_id.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             signature: Vec::new(),
             authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
@@ -5670,6 +5673,7 @@ mod tests {
             }
             .commitment(),
             to_device_id: counterparty_device_id.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(1),
             signature: Vec::new(),
             authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),
@@ -5769,6 +5773,7 @@ mod tests {
                 }
                 .commitment(),
                 to_device_id: counterparty.to_vec(),
+                to_genesis: [0x6E; 32],
                 amount: Balance::amount(1),
                 signature: Vec::new(),
                 authority_policy: Some(dsm::types::operations::canonical_offline_bearer_policy()),

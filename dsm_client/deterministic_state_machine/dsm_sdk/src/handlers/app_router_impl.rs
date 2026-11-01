@@ -824,6 +824,16 @@ impl AppRouterImpl {
                 "wallet.send: recipient contact is missing a canonical public key".to_string(),
             ));
         }
+        // The transfer names its recipient's genesis beside its device id, under
+        // the signature (SA-133): the genesis the contact pinned.
+        let to_genesis: [u8; 32] = match contact_record.genesis_hash.as_slice().try_into() {
+            Ok(genesis) => genesis,
+            Err(e) => {
+                return OnlineSent::NotDebited(err(format!(
+                    "wallet.send: the recipient contact's genesis: {e}"
+                )))
+            }
+        };
 
         let nonce = transfer_nonce(&chain_tip_arr, intent.amount, &token_id, &to_device_id);
         // The transfer's terms, under a fresh secret salt. The signed operation
@@ -847,6 +857,7 @@ impl AppRouterImpl {
             };
         let signing_op = dsm::types::operations::Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
+            to_genesis,
             amount: dsm::types::token_types::Balance::amount(intent.amount),
             policy_commit,
             terms_commitment: transfer_terms.commitment(),

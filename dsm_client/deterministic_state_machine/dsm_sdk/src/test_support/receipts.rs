@@ -123,6 +123,7 @@ impl Party {
         };
         let unsigned = |signature: Vec<u8>| Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
+            to_genesis: receiver.genesis(),
             amount: Balance::amount(amount),
             policy_commit: era_policy_commit(),
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),

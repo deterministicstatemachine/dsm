@@ -40,6 +40,7 @@ fn econ_op_id() -> [u8; 32] {
 fn transfer(to: [u8; 32], amount: u64, policy_commit: [u8; 32]) -> Operation {
     Operation::Transfer {
         to_device_id: to.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(amount),
         policy_commit,
         token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
@@ -69,6 +70,7 @@ fn transfer_carrying(to: [u8; 32], amount: u64, token: [u8; 32], carried: &[u8])
             ..
         } => Operation::Transfer {
             to_device_id,
+            to_genesis: [0x6E; 32],
             amount,
             policy_commit,
             terms_commitment,

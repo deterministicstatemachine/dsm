@@ -1187,6 +1187,7 @@ mod tests {
         let (bytes, terms) =
             crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
                 &to,
+                &[0x6E; 32],
                 7,
                 "ERA",
                 "",

@@ -1190,6 +1190,7 @@ fn bearer_transfer(to: &OfflineDevice, amount: u64) -> Proposal {
     let (bytes, terms) =
         crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
             &to.device.device_id,
+            &to.device.genesis,
             amount,
             "ERA",
             "",

@@ -442,6 +442,7 @@ pub(crate) mod fixture {
         };
         Operation::Transfer {
             to_device_id: to.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: crate::types::token_types::Balance::amount(amount),
             policy_commit: token,
             terms_commitment: TransferTerms {

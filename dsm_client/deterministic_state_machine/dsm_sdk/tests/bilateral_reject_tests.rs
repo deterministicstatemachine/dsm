@@ -29,6 +29,7 @@ fn bearer_transfer(to: [u8; 32]) -> (Operation, dsm::types::operations::Transfer
     );
     let operation = Operation::Transfer {
         to_device_id: to.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: dsm::types::token_types::Balance::amount(7),
         policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
         terms_commitment: terms.commitment(),

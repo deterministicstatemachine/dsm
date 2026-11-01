@@ -315,11 +315,17 @@ pub enum Operation {
     ///
     /// Only what an admission needs is public; the ticker, nonce, mode and
     /// memo are the [`TransferTerms`] the operation commits to (pre-audit
-    /// item 4). Canonical tag 37; tag 3, the shape that carried them in the
-    /// clear, is retired and never reassigned.
+    /// item 4). Canonical tag 39. Tag 3, the shape that carried them in the
+    /// clear, and tag 37, which named the recipient by device id alone
+    /// (SA-133), are retired and never reassigned.
     Transfer {
         /// Raw 32-byte recipient device identifier (canonical bytes; no text encodings on op path).
         to_device_id: Vec<u8>,
+        /// The recipient's genesis, under the signature beside its device id:
+        /// a device id alone does not name one lineage (two geneses can share a
+        /// key and so a device id), and the credit this transfer funds is
+        /// checked against both (SA-133).
+        to_genesis: [u8; 32],
         /// Token amount to transfer (must be > 0 for validity).
         amount: Balance,
         /// CPTA policy commitment (32B) binding this transfer to the token's
@@ -1159,6 +1165,7 @@ impl Operation {
             }
             Transfer {
                 to_device_id,
+                to_genesis,
                 amount,
                 policy_commit,
                 terms_commitment,
@@ -1167,9 +1174,12 @@ impl Operation {
                 authority_policy,
             } => {
                 // Tag 3 carried the ticker, nonce, mode, memo and recipient
-                // key in the clear; it is retired (pre-audit item 4).
-                put_u8(&mut out, 37);
+                // key in the clear; it is retired (pre-audit item 4). Tag 37
+                // named the recipient by device id alone; it is retired too
+                // (SA-133).
+                put_u8(&mut out, 39);
                 put_bytes(&mut out, to_device_id);
+                put_bytes(&mut out, to_genesis);
                 // Balance canonical
                 let bal = amount.canonical_amount_bytes();
                 put_bytes(&mut out, &bal);
@@ -1683,11 +1693,18 @@ impl Operation {
             // Retired: the transfer shape that carried its terms in the clear.
             3 => {
                 return Err(DsmError::invalid_operation(
-                    "op tag 3 is retired: a transfer carries its terms by commitment (tag 37)",
+                    "op tag 3 is retired: a transfer carries its terms by commitment (tag 39)",
                 ))
             }
             37 => {
+                return Err(DsmError::invalid_operation(
+                    "op tag 37 is retired: a transfer names its recipient's genesis beside its \
+                     device id (tag 39)",
+                ))
+            }
+            39 => {
                 let to_device_id = get_bytes(&mut input)?;
+                let to_genesis = get_arr32(&mut input)?;
                 let amount = dec_balance(&mut input)?;
                 // CPTA policy commitment (§9.5) — required, exactly 32 bytes.
                 let policy_commit: [u8; 32] =
@@ -1735,6 +1752,7 @@ impl Operation {
                 };
                 Transfer {
                     to_device_id,
+                    to_genesis,
                     amount,
                     policy_commit,
                     terms_commitment,
@@ -2481,6 +2499,7 @@ mod tests {
     fn transfer_authority_policy_is_append_only_and_round_trips() {
         let make = |ap: Option<AuthorityPolicy>| Operation::Transfer {
             to_device_id: b"rcpt".to_vec(),
+            to_genesis: [0x6E; 32],
             amount: test_balance(100),
             policy_commit: [7u8; 32],
             token_policy: Vec::new(),
@@ -2559,6 +2578,7 @@ mod tests {
         fn committing(terms: &TransferTerms) -> Operation {
             Operation::Transfer {
                 to_device_id: vec![0x11; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(42),
                 policy_commit: [0x0F; 32],
                 token_policy: Vec::new(),
@@ -2642,7 +2662,7 @@ mod tests {
         fn a_transfer_operation_carries_no_term_in_the_clear() {
             let t = terms();
             let bytes = committing(&t).to_bytes();
-            assert_eq!(bytes[0], 37, "a transfer is tag 37");
+            assert_eq!(bytes[0], 39, "a transfer is tag 39");
             let holds = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
             assert!(!holds(t.memo.as_bytes()), "the memo");
             assert!(!holds(&t.nonce), "the nonce");
@@ -2742,6 +2762,7 @@ mod tests {
                 }
                 .commitment(),
                 to_device_id: vec![0x01; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(500),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
@@ -3320,6 +3341,7 @@ mod tests {
                 }
                 .commitment(),
                 to_device_id: vec![],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(1),
                 signature: vec![],
                 authority_policy: None,
@@ -3417,6 +3439,7 @@ mod tests {
                 }
                 .commitment(),
                 to_device_id: vec![0x01; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(100),
                 signature: vec![0xAA; 64],
                 authority_policy: None,
@@ -3533,6 +3556,7 @@ mod tests {
         fn trailing_bytes_after_transfer_rejected() {
             let mut bytes = Operation::Transfer {
                 to_device_id: vec![0x01; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(100),
                 policy_commit: [0u8; 32],
                 token_policy: Vec::new(),
@@ -3598,6 +3622,7 @@ mod tests {
                 generate_keypair_from_seed(SphincsVariant::SPX256f, &[7u8; 32]).expect("keypair");
             let signing_op = Operation::Transfer {
                 to_device_id: vec![0x11; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(42),
                 policy_commit: [0u8; 32],
                 token_policy: Vec::new(),
@@ -3778,6 +3803,7 @@ mod tests {
                 }
                 .commitment(),
                 to_device_id: vec![0x01; 32],
+                to_genesis: [0x6E; 32],
                 amount: test_balance(42),
                 signature: vec![0xBB; 64],
                 authority_policy: None,

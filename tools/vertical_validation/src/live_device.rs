@@ -104,6 +104,7 @@ impl LiveDevice {
     ) -> Result<Operation, DsmError> {
         let op = Operation::Transfer {
             to_device_id: to.devid.to_vec(),
+            to_genesis: to.head.genesis(),
             amount: Balance::amount(amount),
             policy_commit: era_policy_commit(),
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),

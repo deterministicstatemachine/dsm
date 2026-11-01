@@ -1564,6 +1564,7 @@ fn build_signed_bilateral_transfer(
         }
         .commitment(),
         to_device_id: remote_device_id.to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(TRACE_BILATERAL_AMOUNT),
         signature: Vec::new(),
         authority_policy: None,

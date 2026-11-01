@@ -2844,6 +2844,7 @@ mod creation_fee_and_bearer_tests {
     fn transfer(authority_policy: Option<AuthorityPolicy>) -> Operation {
         Operation::Transfer {
             to_device_id: vec![0x33; 32],
+            to_genesis: [0x6E; 32],
             amount: crate::types::token_types::Balance::amount(5),
             policy_commit: crate::core::token::era_policy::era_policy_commit(),
             token_policy: crate::core::token::era_policy::era_policy_bytes().to_vec(),

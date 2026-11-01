@@ -146,6 +146,7 @@ fn test_operation_serialization() {
         }
         .commitment(),
         to_device_id: b"recipient_123".to_vec(),
+        to_genesis: [0x6E; 32],
         amount: Balance::amount(100),
         signature: vec![],
         authority_policy: None,

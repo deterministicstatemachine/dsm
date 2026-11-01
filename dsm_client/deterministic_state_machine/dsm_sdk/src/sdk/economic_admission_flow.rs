@@ -2098,6 +2098,7 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         peer_genesis,
         peer_devid,
         sender_debit_mutation_index,
+        &genesis,
         &devid,
     )
     .map_err(|e| terminal(format!("sender debit prevalidation: {e}")))?;

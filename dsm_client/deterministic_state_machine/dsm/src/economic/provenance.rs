@@ -911,6 +911,7 @@ pub fn prevalidate_sender_debit(
     expected_peer_genesis: &[u8; 32],
     expected_peer_devid: &[u8; 32],
     peer_debit_mutation_index: u32,
+    consumer_genesis: &[u8; 32],
     consumer_devid: &[u8; 32],
 ) -> Result<EligiblePeerDebit, ProvenanceError> {
     // ── P15-9, BEFORE any other conjunct ──────────────────────────────────
@@ -953,17 +954,28 @@ pub fn prevalidate_sender_debit(
     // "Some peer had a validated debit" is not the semantics. The debit must
     // be the sender's ONLINE Transfer, addressed to THIS consumer, and the
     // named mutation must be THE debit that operation performed.
-    let (op_recipient, op_amount, op_asset) = match peer.verified_operation() {
+    let (op_recipient, op_recipient_genesis, op_amount, op_asset) = match peer.verified_operation()
+    {
         Some(crate::types::operations::Operation::Transfer {
             to_device_id,
+            to_genesis,
             amount,
             policy_commit,
             authority_policy: Option::None,
             ..
-        }) => (to_device_id.clone(), amount.value(), *policy_commit),
+        }) => (
+            to_device_id.clone(),
+            *to_genesis,
+            amount.value(),
+            *policy_commit,
+        ),
         _ => return Err(ProvenanceError::PeerDebitIsNotAnOnlineTransfer),
     };
-    if op_recipient.as_slice() != consumer_devid.as_slice() {
+    // Addressed to this lineage, not to its device id alone: two geneses can
+    // share a device id, and one debit must not fund a credit in each (SA-133).
+    if op_recipient.as_slice() != consumer_devid.as_slice()
+        || op_recipient_genesis != *consumer_genesis
+    {
         return Err(ProvenanceError::PeerDebitNotAddressedToConsumer);
     }
     if op_asset != debit_asset || op_amount != debit_amount {
@@ -1106,6 +1118,7 @@ pub fn verify_credit_source(
                 &p.peer_genesis,
                 &p.peer_devid,
                 p.peer_debit_mutation_index,
+                ctx.genesis,
                 ctx.device_id,
             )?;
             let (debit_asset, debit_amount) =

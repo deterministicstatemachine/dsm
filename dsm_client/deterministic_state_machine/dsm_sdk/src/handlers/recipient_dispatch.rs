@@ -1065,6 +1065,7 @@ mod tests {
         );
         let canonical = Operation::Transfer {
             to_device_id: p.b.device_id.to_vec(),
+            to_genesis: p.b.genesis,
             amount: dsm::types::token_types::Balance::amount(7),
             policy_commit: dsm::core::token::token_state_manager::era_policy_commit(),
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
@@ -1653,6 +1654,11 @@ mod tests {
         p.a.enter();
         let op = Operation::Transfer {
             to_device_id: to_device_id.to_vec(),
+            to_genesis: if to_device_id == p.b.device_id {
+                p.b.genesis
+            } else {
+                [0x6E; 32]
+            },
             amount: dsm::types::token_types::Balance::amount(amount),
             policy_commit: dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA"),
             token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
