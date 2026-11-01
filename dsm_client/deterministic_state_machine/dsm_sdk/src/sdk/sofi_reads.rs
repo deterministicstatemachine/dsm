@@ -13,8 +13,8 @@ use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
-    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
 };
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
@@ -508,6 +508,28 @@ impl SofiReads for LiveSofiReads<'_> {
                             bytes.to_vec(),
                         )
                     })
+                },
+            ),
+        )
+    }
+
+    fn baseline_contradiction_candidates(
+        &self,
+        vault_id: &D32,
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure> {
+        self.read(
+            "baseline contradiction candidates",
+            resolve_locator_all(
+                self.set,
+                TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR.source_bytes(),
+                &dsm::sofi::derive::vault_contradiction_locator(vault_id),
+                LOCATOR_BUDGET,
+                |bytes| match dsm::sofi::wire::VaultBaselineContradictionV1::decode(bytes) {
+                    Ok(claim) => Some((
+                        dsm::sofi::derive::vault_contradiction_locator(&claim.vault_id),
+                        bytes.to_vec(),
+                    )),
+                    Err(..) => None,
                 },
             ),
         )

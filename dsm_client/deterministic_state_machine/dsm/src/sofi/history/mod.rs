@@ -190,17 +190,16 @@ pub enum NotProven {
     Contradicted,
 }
 
-/// Prove that `vault_id`'s history under `head` holds `root` at
+/// The hash of the leaf `vault_id`'s history under `head` holds at
 /// `generation`, reading each node on the path from its peak down by its
 /// hash through `node`. Every node read is checked against the hash it was
 /// asked for, so `node` vouches for nothing.
-pub fn prove<E>(
+fn leaf_hash_at<E>(
     head: &VaultHistoryHeadV1,
     vault_id: &D32,
     generation: u64,
-    root: &D32,
-    mut node: impl FnMut(&D32) -> Result<Option<Vec<u8>>, E>,
-) -> Result<Result<ProvenRoot, NotProven>, E> {
+    node: &mut impl FnMut(&D32) -> Result<Option<Vec<u8>>, E>,
+) -> Result<Result<D32, NotProven>, E> {
     if head.vault_id != *vault_id || generation > head.generation {
         return Ok(Err(NotProven::OutsideTheHead));
     }
@@ -239,6 +238,24 @@ pub fn prove<E>(
             _ => right,
         };
     }
+    Ok(Ok(at))
+}
+
+/// Prove that `vault_id`'s history under `head` holds `root` at
+/// `generation`, reading each node on the path from its peak down by its
+/// hash through `node`. Every node read is checked against the hash it was
+/// asked for, so `node` vouches for nothing.
+pub fn prove<E>(
+    head: &VaultHistoryHeadV1,
+    vault_id: &D32,
+    generation: u64,
+    root: &D32,
+    mut node: impl FnMut(&D32) -> Result<Option<Vec<u8>>, E>,
+) -> Result<Result<ProvenRoot, NotProven>, E> {
+    let at = match leaf_hash_at(head, vault_id, generation, &mut node)? {
+        Ok(at) => at,
+        Err(why) => return Ok(Err(why)),
+    };
     if at != leaf_hash(vault_id, generation, root) {
         return Ok(Err(NotProven::Contradicted));
     }
@@ -247,4 +264,34 @@ pub fn prove<E>(
         generation,
         root: *root,
     }))
+}
+
+/// The root `vault_id`'s history under `head` holds at `generation` (SoFi
+/// Amendment S34): the leaf at the end of the path from its peak, read by
+/// its hash through `leaf`, which must decode as the leaf of exactly that
+/// vault and generation. Nothing read is taken on trust: every node and the
+/// leaf are checked against the hashes they were asked for. A root read
+/// this way says what the owner's history holds; it is admitted to no
+/// chain (only [`prove`] builds a [`ProvenRoot`]).
+pub fn leaf_root_at<E>(
+    head: &VaultHistoryHeadV1,
+    vault_id: &D32,
+    generation: u64,
+    mut node: impl FnMut(&D32) -> Result<Option<Vec<u8>>, E>,
+    mut leaf: impl FnMut(&D32) -> Result<Option<Vec<u8>>, E>,
+) -> Result<Result<D32, NotProven>, E> {
+    let at = match leaf_hash_at(head, vault_id, generation, &mut node)? {
+        Ok(at) => at,
+        Err(why) => return Ok(Err(why)),
+    };
+    let Some((named, named_generation, root)) = leaf(&at)?.as_deref().and_then(decode_leaf) else {
+        return Ok(Err(NotProven::NodeUnavailable(at)));
+    };
+    if leaf_hash(&named, named_generation, &root) != at {
+        return Ok(Err(NotProven::NodeUnavailable(at)));
+    }
+    if named != *vault_id || named_generation != generation {
+        return Ok(Err(NotProven::Contradicted));
+    }
+    Ok(Ok(root))
 }

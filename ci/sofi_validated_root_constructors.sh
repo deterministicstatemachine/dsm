@@ -377,7 +377,7 @@ frontier="$core/dsm/src/sofi/frontier/mod.rs"
 check_no_pub_field VerifiedFrontier "$frontier"
 check_no_pub_field VaultWitness "$frontier"
 prod=$(python3 ci/production_text.py "$frontier")
-literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) ' | wc -l | tr -d ' ')
+literals=$(grep -E 'VerifiedFrontier \{' <<<"$prod" | grep -vE '^(pub struct|impl) |-> &?VerifiedFrontier \{' | wc -l | tr -d ' ')
 if [[ "$literals" -ne 1 ]]; then
   echo "[FAIL] VerifiedFrontier is stated $literals times in $frontier; exactly one construction earns it"
   exit 1
@@ -392,6 +392,29 @@ if [[ -n "$others" ]]; then
   echo "$others"
   exit 1
 fi
+# A baseline is adopted only once Core tied it to its vault's history (SoFi
+# Amendment S34): `TiedBaseline` has no public field, one literal, inside
+# its crate-visible constructor, and that constructor one caller, the
+# verifier's `tie_baseline`.
+check_no_pub_field TiedBaseline "$frontier"
+prod=$(python3 ci/production_text.py "$frontier")
+tied_literals=$(grep -E 'TiedBaseline \{' <<<"$prod" | grep -vE '^(pub struct|impl) |-> &?TiedBaseline \{' | wc -l | tr -d ' ')
+if [[ "$tied_literals" -ne 1 ]]; then
+  echo "[FAIL] TiedBaseline is stated $tied_literals times in $frontier; exactly one construction earns it"
+  exit 1
+fi
+tied_callers=""
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  p=$(python3 ci/production_text.py "$f")
+  grep -q 'TiedBaseline::tied(' <<<"$p" && tied_callers="$tied_callers$f"$'\n'
+done < <(grep -rln 'TiedBaseline::tied(' "$core/dsm/src" "$core/dsm_sdk/src" dsm_storage_node/src 2>/dev/null | sort)
+tied_callers=${tied_callers%$'\n'}
+if [[ "$tied_callers" != "$core/dsm/src/sofi/resolve.rs" ]]; then
+  echo "[FAIL] TiedBaseline::tied must be called only from $core/dsm/src/sofi/resolve.rs"
+  echo "       production callers found: ${tied_callers:-none}"
+  exit 1
+fi
 baseline_callers=""
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -404,7 +427,7 @@ if [[ "$baseline_callers" != "$expected_memo" ]]; then
   echo "       production callers found: ${baseline_callers:-none}"
   exit 1
 fi
-echo "  ✓ one authentication builds a verified frontier; one chain walk starts from it"
+echo "  ✓ one authentication builds a verified frontier; one tie adopts it; one chain walk starts from it"
 
 # [8] A vault's history (SoFi Amendment S26). A root below a chain's
 #     baseline enters the chain only as a `ProvenRoot`, which only the

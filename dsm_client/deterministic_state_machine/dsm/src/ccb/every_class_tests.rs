@@ -69,8 +69,9 @@ use crate::sofi::wire::{
     StartReveals, SofiExercise, SofiResolutionClaim, SofiSetupBody, StartBody, SwapHop, TraderCore,
     TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf,
     TranscriptEntry, TranscriptOutcome, ValidationRef, VaultCreation, VaultFrontierV1,
-    VaultFrontierWitnessV1, VaultGenesisPreimage, VaultHistoryHeadV1, VaultRelationshipLeaf,
-    VaultStateLeaf, VerdictSignature, COMPUTED_LABELS, SCHEMA_V1, VAULT_STATUS_ACTIVE,
+    VaultBaselineContradictionV1, BaselineContradiction, VaultFrontierWitnessV1,
+    VaultGenesisPreimage, VaultHistoryHeadV1, VaultRelationshipLeaf, VaultStateLeaf,
+    VerdictSignature, COMPUTED_LABELS, SCHEMA_V1, VAULT_STATUS_ACTIVE,
 };
 use crate::types::device_state::OfflineBoundaryKind;
 
@@ -1307,6 +1308,21 @@ fn every_class() -> Vec<Shown> {
         SCHEMA_V1,
         ok(history.encode(), "history head"),
         Read::Parsed(|b| re(VaultHistoryHeadV1::decode(b).map_err(text)?.encode())),
+    ));
+    all.push(shown(
+        class::SOFI_VAULT_BASELINE_CONTRADICTION,
+        SCHEMA_V1,
+        VaultBaselineContradictionV1 {
+            vault_id: b(0x31),
+            frontier_commitment: b(0xA0),
+            kind: BaselineContradiction::Step { generation: 3 },
+        }
+        .encode(),
+        Read::Parsed(|b| {
+            Ok(VaultBaselineContradictionV1::decode(b)
+                .map_err(text)?
+                .encode())
+        }),
     ));
 
     all

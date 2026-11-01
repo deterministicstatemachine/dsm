@@ -5832,9 +5832,17 @@ async fn a_fresh_reader_reads_the_same_at_any_vault_age() {
     assert_eq!(measured[0].0, Some(2));
     assert_eq!(measured[1].0, Some(4));
     assert_eq!(
-        (measured[0].1, measured[0].2),
-        (measured[1].1, measured[1].2),
-        "reads and witness size at generation 2 and at generation 4: {measured:?}"
+        measured[0].2, measured[1].2,
+        "the witness is the same size at generation 2 and at generation 4: {measured:?}"
+    );
+    // Tying the baseline to the vault's history (SoFi Amendment S34) reads
+    // the paths to leaves 0 and g − 1 of the history, which are one level
+    // deeper at generation 4 than at 2: at most one more node each, from any
+    // member. Nothing else grows with the vault.
+    let members = p.nodes.nodes.len();
+    assert!(
+        measured[1].1 <= measured[0].1 + 2 * members,
+        "reads at generation 4 grow only by the history paths' extra level: {measured:?}"
     );
 }
 
@@ -5903,6 +5911,249 @@ async fn an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined() {
                 .is_some_and(|e| e.contains("quarantined")),
         "a trade on a quarantined vault is refused, never walked from the genesis: {traded:?}"
     );
+}
+
+/// Publish `roots` as a history of `vault_id`, sign a frontier at the
+/// history's last generation whose root is `root`, and publish it as A's
+/// baseline: what an owner that lies about its vault can publish.
+async fn publish_lying_baseline(
+    p: &Pair,
+    vault_id: &[u8; 32],
+    roots: &[[u8; 32]],
+    root: [u8; 32],
+) -> [u8; 32] {
+    use dsm::common::domain_tags::{
+        TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
+        TAG_DSM_SOFI_VAULT_HISTORY_NODE,
+    };
+    p.a.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let mut history = dsm::sofi::history::HistoryBuilder::new(*vault_id);
+    for at in roots {
+        let appended = history.append(at);
+        crate::sdk::storage_io::put_immutable(
+            &set,
+            TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
+            &appended.leaf,
+        )
+        .await
+        .expect("the leaf is put");
+        for (.., node) in appended.nodes {
+            crate::sdk::storage_io::put_immutable(&set, TAG_DSM_SOFI_VAULT_HISTORY_NODE, &node)
+                .await
+                .expect("the node is put");
+        }
+    }
+    let head = history.head().expect("a history head");
+    crate::sdk::storage_io::put_immutable(
+        &set,
+        TAG_DSM_SOFI_VAULT_HISTORY_HEAD,
+        &head.encode().expect("the head encodes"),
+    )
+    .await
+    .expect("the head is put");
+    let frontier = dsm::sofi::wire::VaultFrontierV1 {
+        vault_id: *vault_id,
+        generation: head.generation,
+        root,
+        history_root: dsm::sofi::history::history_root(&head).expect("the history root"),
+    };
+    let bundle = crate::sdk::vault_baseline::sign(NETWORK, &p.a.genesis, &frontier)
+        .expect("A signs the frontier");
+    crate::sdk::vault_baseline::publish(&set, &frontier, &bundle)
+        .await
+        .expect("A publishes the baseline");
+    dsm::sofi::frontier::frontier_commitment(&frontier)
+}
+
+/// The contradictions published for `vault_id`, as B reads its locator.
+async fn contradictions_of(
+    p: &Pair,
+    vault_id: &[u8; 32],
+) -> Vec<dsm::sofi::wire::VaultBaselineContradictionV1> {
+    p.b.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let found = crate::sdk::storage_io::resolve_locator_all(
+        &set,
+        dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR.source_bytes(),
+        &dsm::sofi::derive::vault_contradiction_locator(vault_id),
+        64,
+        |bytes| match dsm::sofi::wire::VaultBaselineContradictionV1::decode(bytes) {
+            Ok(claim) => Some((
+                dsm::sofi::derive::vault_contradiction_locator(&claim.vault_id),
+                claim,
+            )),
+            Err(..) => None,
+        },
+    )
+    .await
+    .expect("the contradiction locator read");
+    match found {
+        dsm::sofi::storage::Discovered::Complete(found)
+        | dsm::sofi::storage::Discovered::Partial(found) => found,
+    }
+}
+
+/// SoFi Amendment S34 (SA-03; the owner's choice of 2026-11-01, "Tie to
+/// history"): an owner baseline is adopted only once it matches its vault's
+/// history, and a reader checks the vault's public contradiction locator
+/// before adopting it. After four trades, A signs baselines that lie, one at
+/// each generation, and B, holding nothing of the vault, is offered each:
+/// - at 4, a history whose leaf 1 is invented and whose tail is genuine:
+///   every check B runs itself holds, so B adopts it (the limitation S34
+///   states). A genesis walker then publishes that the exercise final at
+///   `R_0` does not build that leaf (a step contradiction at 1); offered
+///   the baseline again, B reads it, checks it, and refuses;
+/// - at 3, an invented root on a genuine history to 2: the exercise final
+///   at `R_2` does not build it, so B refuses, quarantines the vault and
+///   publishes the step contradiction at 3;
+/// - at 2, the genuine history with an invented frontier root: B refuses as
+///   Top and publishes it;
+/// - at 1, a history whose leaf 0 is not the accepted genesis root: B
+///   refuses as Genesis and publishes it.
+///
+/// MUTATION CONTROLS: the step check left out of `tie_baseline` takes the
+/// generation 3 baseline; the contradiction locator not read takes the
+/// generation 4 baseline the second time; each turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_owner_that_signs_an_invented_root_is_refused_and_named() {
+    use crate::storage::client_db::sofi_vault_head;
+    use dsm::sofi::wire::{BaselineContradiction, VaultBaselineContradictionV1};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..4 {
+        realized_trade(&p, &m, 5).await;
+    }
+    let (own, parents) = standing_of(&p.b);
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let genesis = {
+        let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+        match ctx
+            .verifier()
+            .vault_genesis(&m.vault_id)
+            .expect("the genesis read")
+        {
+            dsm::sofi::resolve::VaultGenesis::Accepted(genesis) => *genesis,
+            _ => panic!("B accepts the vault's genesis"),
+        }
+    };
+    p.a.enter();
+    let mut roots = vec![*genesis.genesis_root()];
+    for g in 1..=4 {
+        roots.push(
+            sofi_vault_head::root_at(&m.vault_id, g)
+                .expect("A's record")
+                .expect("A's root"),
+        );
+    }
+    let invented = |what: &[u8]| {
+        dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, what)
+    };
+    // B's witness at generation 4 under the genuine root, from A's whole
+    // tree: what the middle lie at 4 is adopted with. The other lies are
+    // refused when they are tied, before any witness is checked.
+    let whole = crate::sdk::vault_baseline::tree_at(&m.vault_id, 4, &roots[4])
+        .expect("A's record")
+        .expect("A's whole tree at generation 4");
+    let rel_key = dsm::sofi::derive::relationship_key(&p.b.genesis, &p.b.device_id, &m.vault_id);
+    let witness = dsm::sofi::frontier::witness_from_tree(
+        &whole.tree,
+        &m.vault_id,
+        &whole.state,
+        whole.relationships.get(&rel_key).copied(),
+        &p.b.genesis,
+        &p.b.device_id,
+    )
+    .encode()
+    .expect("the witness encodes");
+    let offer = |generation: u64| {
+        vec![generated::ConnectVaultWitnessV1 {
+            vault_id: m.vault_id.to_vec(),
+            generation,
+            witness_ccb: witness.clone(),
+        }]
+    };
+    let refused_as = |refused: dsm::types::error::DsmError| {
+        let why = refused.to_string();
+        assert!(why.contains("STORAGE_SAFETY_VIOLATION"), "{why}");
+        p.b.enter();
+        assert!(
+            sofi_vault_head::quarantined(&m.vault_id)
+                .expect("B's store")
+                .is_some(),
+            "the vault is quarantined for B"
+        );
+    };
+
+    // At 4: a middle leaf invented. B's own checks hold.
+    let mut middle = roots.clone();
+    middle[1] = invented(b"an invented root at generation 1");
+    let lying_at_4 = publish_lying_baseline(&p, &m.vault_id, &middle, roots[4]).await;
+    forget_the_vault(&p.b, &m.vault_id);
+    adopt_at_b(&p, &offer(4))
+        .await
+        .expect("every check B runs itself holds on a lie in the middle");
+    // A genesis walker names it, and B, offered the baseline again, refuses.
+    p.b.enter();
+    crate::sdk::vault_baseline::publish_contradiction(
+        &set,
+        &VaultBaselineContradictionV1 {
+            vault_id: m.vault_id,
+            frontier_commitment: lying_at_4,
+            kind: BaselineContradiction::Step { generation: 1 },
+        },
+    )
+    .await
+    .expect("the contradiction is published");
+    forget_the_vault(&p.b, &m.vault_id);
+    refused_as(
+        adopt_at_b(&p, &offer(4))
+            .await
+            .expect_err("a contradiction published for the baseline is checked and holds"),
+    );
+
+    // At 3, 2 and 1: B's own checks find each lie and B publishes it.
+    let mut step = roots[..3].to_vec();
+    step.push(invented(b"an invented root at generation 3"));
+    let lying_at_3 = publish_lying_baseline(
+        &p,
+        &m.vault_id,
+        &step,
+        invented(b"an invented root at generation 3"),
+    )
+    .await;
+    let lying_at_2 = publish_lying_baseline(
+        &p,
+        &m.vault_id,
+        &roots[..3],
+        invented(b"an invented root at generation 2"),
+    )
+    .await;
+    let mut bent_genesis = roots[..2].to_vec();
+    bent_genesis[0] = invented(b"an invented genesis root");
+    let lying_at_1 = publish_lying_baseline(&p, &m.vault_id, &bent_genesis, roots[1]).await;
+    for generation in [3, 2, 1] {
+        forget_the_vault(&p.b, &m.vault_id);
+        refused_as(
+            adopt_at_b(&p, &offer(generation))
+                .await
+                .expect_err("a baseline that contradicts its history is refused"),
+        );
+    }
+    let named = contradictions_of(&p, &m.vault_id).await;
+    for (commitment, kind) in [
+        (lying_at_3, BaselineContradiction::Step { generation: 3 }),
+        (lying_at_2, BaselineContradiction::Top),
+        (lying_at_1, BaselineContradiction::Genesis),
+    ] {
+        assert!(
+            named
+                .iter()
+                .any(|claim| claim.frontier_commitment == commitment && claim.kind == kind),
+            "B published {kind:?} for the baseline it refused: {named:?}"
+        );
+    }
 }
 
 /// A witness its authenticated baseline contradicts is refused, and nothing
@@ -7007,6 +7258,12 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         root: &[u8; 32],
     ) -> Result<dsm::sofi::storage::Discovered<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
         self.live.history_leaf_candidates(vault_id, root)
+    }
+    fn baseline_contradiction_candidates(
+        &self,
+        vault_id: &[u8; 32],
+    ) -> Result<dsm::sofi::storage::Discovered<Vec<u8>>, dsm::sofi::resolve::ReadFailure> {
+        self.live.baseline_contradiction_candidates(vault_id)
     }
     fn token_policy_bytes(
         &self,

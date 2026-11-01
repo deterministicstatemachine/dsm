@@ -290,6 +290,21 @@ impl VaultChain {
         }
     }
 
+    /// A chain at `root`, the root an owner baseline's history holds at
+    /// `generation`, for checking the one step from it (SoFi Amendment S34).
+    /// Never a walk's start and never recorded: what it establishes is only
+    /// whether the exercise final at `root` builds the root the history
+    /// holds next.
+    pub(crate) fn at_history_root(generation: u64, root: [u8; 32]) -> Self {
+        Self {
+            base: generation,
+            roots: vec![root],
+            steps: Vec::new(),
+            proven: BTreeMap::new(),
+            not_complete: None,
+        }
+    }
+
     /// Extend the chain by the consumption `post` recomputes: `R*_{g+1}` is
     /// the post root of the exercise that consumed `R*_g`, and only a post
     /// state built on the chain's head extends it.

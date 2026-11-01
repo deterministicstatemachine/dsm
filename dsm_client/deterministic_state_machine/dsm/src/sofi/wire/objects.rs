@@ -1549,6 +1549,92 @@ impl VaultHistoryHeadV1 {
     }
 }
 
+// ── 0x0076 VaultBaselineContradictionV1 ────────────────────────────────────
+
+/// `kind`: leaf 0 of the history is not the vault's accepted genesis root.
+const BASELINE_CONTRADICTION_GENESIS: u16 = 1;
+/// `kind`: the history does not hold the frontier's root at its generation.
+const BASELINE_CONTRADICTION_TOP: u16 = 2;
+/// `kind`: one step of the history does not follow from the exercise final
+/// at the root before it.
+const BASELINE_CONTRADICTION_STEP: u16 = 3;
+
+/// What an owner baseline's history contradicts (SoFi Amendment S34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaselineContradiction {
+    /// Leaf 0 is not the vault's accepted genesis root `R_0`.
+    Genesis,
+    /// The history the frontier commits does not hold the frontier's root at
+    /// the frontier's generation.
+    Top,
+    /// The exercise final at the root the history holds at
+    /// `generation − 1` builds a post root other than the one the history
+    /// holds at `generation`.
+    Step { generation: u64 },
+}
+
+/// A reader's finding that an owner baseline contradicts its vault's
+/// history (SoFi Amendment S34), published under the vault's contradiction
+/// locator. It names the baseline by its frontier's commitment `c_f` and
+/// says what to check; it carries nothing a reader takes on trust; each
+/// reader runs the check again against the baseline's own history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaultBaselineContradictionV1 {
+    pub vault_id: D32,
+    pub frontier_commitment: D32,
+    pub kind: BaselineContradiction,
+}
+
+impl VaultBaselineContradictionV1 {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        push_env(&mut out, class::SOFI_VAULT_BASELINE_CONTRADICTION);
+        push_digest32(&mut out, &self.vault_id);
+        push_digest32(&mut out, &self.frontier_commitment);
+        match self.kind {
+            BaselineContradiction::Genesis => push_u16(&mut out, BASELINE_CONTRADICTION_GENESIS),
+            BaselineContradiction::Top => push_u16(&mut out, BASELINE_CONTRADICTION_TOP),
+            BaselineContradiction::Step { generation } => {
+                push_u16(&mut out, BASELINE_CONTRADICTION_STEP);
+                push_u64(&mut out, generation);
+            }
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut c = Cursor { b: bytes, i: 0 };
+        c.envelope(class::SOFI_VAULT_BASELINE_CONTRADICTION, SCHEMA_V1)?;
+        let vault_id = c.digest32()?;
+        let frontier_commitment = c.digest32()?;
+        let kind = match c.u16()? {
+            BASELINE_CONTRADICTION_GENESIS => BaselineContradiction::Genesis,
+            BASELINE_CONTRADICTION_TOP => BaselineContradiction::Top,
+            BASELINE_CONTRADICTION_STEP => match c.u64()? {
+                0 => {
+                    return Err(wire_invalid(SofiWireError::UnknownBaselineContradiction {
+                        kind: BASELINE_CONTRADICTION_STEP,
+                    }))
+                }
+                generation => BaselineContradiction::Step { generation },
+            },
+            kind => {
+                return Err(wire_invalid(SofiWireError::UnknownBaselineContradiction {
+                    kind,
+                }))
+            }
+        };
+        finish(
+            &c,
+            Self {
+                vault_id,
+                frontier_commitment,
+                kind,
+            },
+        )
+    }
+}
+
 // ── 0x0073 OwnerBaselineAuthV1 ─────────────────────────────────────────────
 
 /// What an owner baseline's anchor signs: a frontier's commitment, and the

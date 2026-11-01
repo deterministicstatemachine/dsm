@@ -326,6 +326,10 @@ pub mod class {
     /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
     /// Amendment S26).
     pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
+    /// `0x0076` — what a reader found an owner baseline to contradict in its
+    /// vault's history: the genesis leaf, the frontier's own root, or one
+    /// step (SoFi Amendment S34).
+    pub const SOFI_VAULT_BASELINE_CONTRADICTION: u16 = 0x0076;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones

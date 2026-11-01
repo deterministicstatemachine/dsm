@@ -179,6 +179,18 @@ pub const TAG_DSM_SOFI_VAULT_HISTORY_HEAD: TaggedHashDomain<'static> =
 pub const TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sofi/vault-history-locator/v1");
 
+// ── Contradictions of an owner baseline (SoFi Amendment S34) ───────────────
+
+/// `H(tag ‖ v)` — where contradictions of vault `v`'s owner baselines are
+/// indexed: one locator per vault, so one read covers every generation.
+/// Discovery only: a candidate stands only once the reader's own checks
+/// bear it out.
+pub const TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-contradiction-locator/v1");
+/// The immutable-store namespace of a `VaultBaselineContradictionV1`.
+pub const TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/sofi/vault-contradiction-object/v1");
+
 // ── Immutable-store namespaces of the published protocol objects (Part II
 //    §10, rebuild step R8). One per kind: the namespace is part of the
 //    address, so bytes of one kind can never be fetched as another. ────────
@@ -272,6 +284,8 @@ pub(crate) const SOFI_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_SOFI_VAULT_HISTORY_NODE,
     TAG_DSM_SOFI_VAULT_HISTORY_HEAD,
     TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT,
     TAG_DSM_SOFI_SETUP_OBJECT,
     TAG_DSM_SOFI_PRECOMMIT_OBJECT,
     TAG_DSM_SOFI_PREIMAGE_OBJECT,

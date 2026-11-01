@@ -679,6 +679,7 @@ is Unavailable, never Invalid.
 | `lineage_epoch_locator(k, id, e)` | the generation hints and checkpoints of epoch `e` of shared lineage `(k, id)` (Amendment S23) |
 | `vault_baseline_locator(v, g)` | the owner baselines of vault `v` at generation `g`: each its presentation, `OwnerBaselineAuthV1` and `VaultFrontierV1` (Amendment S24) |
 | `history_locator(v, R)` | the history leaf `v ‖ u64be(g) ‖ R` of vault `v` naming root `R`, a candidate generation; it stands only as a proof under an authenticated history root (Amendment S26) |
+| `vault_contradiction_locator(v)` | each `VaultBaselineContradictionV1` published for an owner baseline of vault `v`; it stands only once the reader's own check bears it out (Amendment S34) |
 | ρ | the setup body |
 | PolicyFulfillmentIdj | Gj |
 | the auxiliary reference | auxiliary evidence candidates |
@@ -820,6 +821,8 @@ TAG_DSM_SOFI_VAULT_HISTORY_LEAF             DSM/sofi/vault-history-leaf/v1      
 TAG_DSM_SOFI_VAULT_HISTORY_NODE             DSM/sofi/vault-history-node/v1            a history node's hash, and the namespace of its 64 bytes (Amendment S26)
 TAG_DSM_SOFI_VAULT_HISTORY_HEAD             DSM/sofi/vault-history-head/v1            H_n of a VaultHistoryHeadV1, and its namespace (Amendment S26)
 TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR          DSM/sofi/vault-history-locator/v1         locator of the history leaf naming a root (Amendment S26)
+TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR    DSM/sofi/vault-contradiction-locator/v1   locator of the contradictions of a vault's owner baselines (Amendment S34)
+TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT     DSM/sofi/vault-contradiction-object/v1    address of a VaultBaselineContradictionV1 (Amendment S34)
 TAG_DSM_ESCROW_COMPUTED_MATCH_SEED          DSM/escrow/computed-match-seed/v1         s_match, the seed of the match cell
 TAG_DSM_ESCROW_COMPUTED_START               DSM/escrow/computed-start/v1              K_start
 TAG_DSM_ESCROW_COMPUTED_START_SEED          DSM/escrow/computed-start-seed/v1         s_start, the seed of the start cell
@@ -895,6 +898,7 @@ pre
 0x0072           SOFI_VAULT_FRONTIER_WITNESS                   the state leaf and a relationship proof under a frontier root (Amendment S24)
 0x0073           SOFI_OWNER_BASELINE_AUTH                      a frontier commitment and the owner-authority position its signer is proven at (Amendment S24)
 0x0074           SOFI_VAULT_HISTORY_HEAD                       a vault's history at one generation: its peaks (Amendment S26)
+0x0076           SOFI_VAULT_BASELINE_CONTRADICTION             what an owner baseline contradicts in its vault's history (Amendment S34)
 
 
 <!-- Source PDF page 19 -->
@@ -2153,6 +2157,14 @@ to the next. An unresolved attempt ends the walk: the head is Rn and that attemp
 > - **The state at that root.** An operation built on a proven root reads the vault's state leaf there by the value its own core states at the state key, whose path validation folds to that root; the bytes must re-derive that value.
 > - **Records made before.** A baseline signed before this amendment carries the old frontier, which no longer decodes. A reader drops a record it started at one, whole, and adopts a current baseline; an owner drops what it signed and signs again. No other record changes.
 > - **What it costs.** A root below a reader's baseline costs one head, the candidates under one locator and one path of nodes; nothing grows with the vault's age except a path's `log2`. No conforming verifier walks from the genesis to reach it.
+>
+> **Amendment S34 (owner, 2026-11-01) — an owner baseline is tied to its vault's history.** From the security audit of 2026-10-18 (finding SA-03): a reader adopted an owner baseline once its signature, its owner and its frontier's hash held, and nothing checked the frontier's root, its generation or its history against the vault. An owner could sign a root no trade ever built and a reader would start from it. Owner's words, 2026-11-01: "Tie to history (Recommended)": the baseline must match the vault's history, leaf 0 of the history is the accepted `R_0`, the frontier's root is the post root of the exercise final at `g − 1`, and readers check a public contradiction locator before adopting. This amends Amendments S24 and S26.
+>
+> - **What a reader checks before it adopts a baseline at `g`,** after S24's checks (1) to (4): the history head the frontier commits, read by `history_root`, is the vault's at generation `g`; the history holds the accepted genesis root `R_0` at 0; it holds the frontier's root at `g`; for `g ≥ 1`, Core recomputes the exercise final at `R_{g−1}`, the root the history holds at `g − 1` (read from its leaf by the path), as a walk recomputes a generation (§30 step 3), and its post root is the frontier's root at generation `g`; and every contradiction published for the baseline (below) that it checks does not hold, from a complete read of the locator.
+> - **Failure classes.** A check that fails on what the owner signed is a contradiction. The reader publishes it, does not adopt the baseline, and quarantines the vault, as for two frontiers at one generation (S24); neither falls back to the genesis walk. Anything not in hand, an exercise not final yet at `R_{g−1}`, or a locator read not complete, is not yet: the reader does not adopt and walks as it would have. It is never a refusal.
+> - **The contradiction.** `VaultBaselineContradictionV1` (CCB class `0x0076`): `vault_id`, the baseline's `frontier_commitment` `c_f`, and a kind: `Genesis` (leaf 0 is not `R_0`), `Top` (the history does not hold the frontier's root at `g`, or the head it commits is not the vault's at `g`), or `Step{g′}`, `g′ ≥ 1` (the exercise final at the root the history holds at `g′ − 1` builds a post root other than the one it holds at `g′`). It is stored under `DSM/sofi/vault-contradiction-object/v1` and indexed under `vault_contradiction_locator(v) = H(DSM/sofi/vault-contradiction-locator/v1; v)`, one locator per vault. It asserts nothing a reader takes on trust: each reader runs the check it names again against the baseline's own history, and one that holds is decisive.
+> - **The middle of the history.** A reader checks the history at 0, `g − 1` and `g`, not every step between. An owner that invents roots between them, keeping leaf 0, leaf `g − 1` and leaf `g` consistent with the vault, passes a reader's own checks. Such a lie is detectable and attributable given one honest walker: a party holding the vault's chain from the genesis MAY check a published baseline's history against it and publish a `Step` contradiction at the lowest generation where they differ, and every later reader then refuses the baseline. Checking every step on adoption would put back the history-linear cost S24 removed.
+> - **What it costs.** On top of S24's constant: one head, three paths of `log2(g)` nodes and one leaf, one generation's exercise and evidence at `R_{g−1}`, and one locator read. Nothing grows with the vault's age except the paths. A walk from an adopted baseline reads nothing more.
 <!-- spec-section: SOFI-031 -->
 ### 31 A trade and a multihop route
 A single vault trade is a route with one hop. A multihop route is one operation whose hops run through distinct vaults,

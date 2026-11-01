@@ -307,6 +307,9 @@ pub enum SofiWireError {
     UnknownVaultStatus { status: u16 },
     /// A frontier witness's relationship kind is neither Absent nor Present.
     UnknownFrontierRelationship { kind: u16 },
+    /// A baseline contradiction of a kind this version does not define, or a
+    /// step contradiction at generation 0, which has no step.
+    UnknownBaselineContradiction { kind: u16 },
     /// An object exceeds the frozen byte bound for its class, so it has no
     /// canonical representation.
     ObjectTooLarge {
@@ -395,6 +398,11 @@ impl core::fmt::Display for SofiWireError {
             Self::UnknownVaultStatus { status } => write!(
                 f,
                 "vault status {status:#06x} is neither Active nor Retired"
+            ),
+            Self::UnknownBaselineContradiction { kind } => write!(
+                f,
+                "baseline contradiction kind {kind:#06x} is not Genesis, Top or a Step past \
+                 generation 0"
             ),
             Self::UnknownFrontierRelationship { kind } => write!(
                 f,

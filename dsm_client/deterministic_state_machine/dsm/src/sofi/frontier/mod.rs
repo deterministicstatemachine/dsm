@@ -84,6 +84,28 @@ impl VerifiedFrontier {
     }
 }
 
+/// An owner baseline Core tied to its vault's history (SoFi Amendment S34):
+/// its history starts at the accepted genesis, holds the frontier's root at
+/// its generation, that root is the post root of the exercise final at the
+/// root before it, and no contradiction published for it held. Private field
+/// and one constructor, which only `Verifier::tie_baseline` calls; a reader
+/// adopts a baseline only as one of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TiedBaseline {
+    baseline: VerifiedFrontier,
+}
+
+impl TiedBaseline {
+    pub(crate) fn tied(baseline: VerifiedFrontier) -> Self {
+        TiedBaseline { baseline }
+    }
+
+    /// The authenticated baseline this tie holds.
+    pub fn baseline(&self) -> &VerifiedFrontier {
+        &self.baseline
+    }
+}
+
 fn invalid(msg: impl Into<String>) -> ResolveFailure {
     ResolveFailure::Invalid(msg.into())
 }
@@ -329,14 +351,16 @@ impl VaultWitness {
         )
     }
 
-    /// The witness at an owner baseline: `wire` checked against the root
-    /// the owner signed, its state leaf naming that owner.
+    /// The witness at an owner baseline Core tied to its vault's history
+    /// (SoFi Amendments S24, S34): `wire` checked against the root the owner
+    /// signed, its state leaf naming that owner.
     pub fn from_baseline(
-        baseline: &VerifiedFrontier,
+        tied: &TiedBaseline,
         wire: &VaultFrontierWitnessV1,
         trader_genesis: D32,
         trader_device_id: D32,
     ) -> Result<Self, WitnessRefused> {
+        let baseline = tied.baseline();
         if wire.state_leaf.owner_genesis != baseline.owner_genesis
             || wire.state_leaf.owner_device_id != baseline.owner.device_id
         {

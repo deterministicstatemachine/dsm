@@ -23,7 +23,8 @@ use std::collections::BTreeMap;
 use prost::Message;
 
 use dsm::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
+    TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR, TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT, TAG_DSM_SOFI_VAULT_FRONTIER_OBJECT,
     TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
     TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_NODE,
     TAG_DSM_SOFI_VAULT_LEAF_STATE,
@@ -37,9 +38,11 @@ use dsm::sofi::frontier::{
     witness_from_tree, VaultTree, VaultTreeError, VaultWitness, VerifiedFrontier,
 };
 use dsm::sofi::lineage::AcceptedVaultGenesis;
-use dsm::sofi::resolve::{VaultGenesis, Verifier};
+use dsm::sofi::resolve::{Tie, VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
-use dsm::sofi::wire::{OwnerBaselineAuthV1, VaultFrontierV1, VaultFrontierWitnessV1};
+use dsm::sofi::wire::{
+    OwnerBaselineAuthV1, VaultBaselineContradictionV1, VaultFrontierV1, VaultFrontierWitnessV1,
+};
 use dsm::types::error::DsmError;
 
 use crate::generated;
@@ -559,6 +562,38 @@ pub(crate) async fn publish(
     Ok(())
 }
 
+/// Store a baseline contradiction at every member and append it under its
+/// vault's contradiction locator (SoFi Amendment S34), so a later reader
+/// checks it before adopting the baseline. Both must reach a member.
+pub(crate) async fn publish_contradiction(
+    set: &StorageSet,
+    contradiction: &VaultBaselineContradictionV1,
+) -> Result<(), DsmError> {
+    let (addr, took) = crate::sdk::storage_io::put_immutable(
+        set,
+        TAG_DSM_SOFI_VAULT_CONTRADICTION_OBJECT,
+        &contradiction.encode(),
+    )
+    .await?;
+    if took == 0 {
+        return Err(failure("contradiction", "no member took the contradiction"));
+    }
+    let appended = crate::sdk::storage_io::append_to_index(
+        set,
+        TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR.source_bytes(),
+        &derive::vault_contradiction_locator(&contradiction.vault_id),
+        &addr,
+    )
+    .await?;
+    if appended == 0 {
+        return Err(failure(
+            "contradiction",
+            "no member took the contradiction locator append",
+        ));
+    }
+    Ok(())
+}
+
 // ── The reader ─────────────────────────────────────────────────────────────
 
 /// An owner baseline Core authenticated whose root is not the one this
@@ -747,7 +782,22 @@ async fn adopt_one(
         Ok(wire) => wire,
         Err(e) => return Adoption::Refused(format!("the witness does not decode: {e}")),
     };
-    let witness = match VaultWitness::from_baseline(&verified, &wire, own.0, own.1) {
+    // SoFi Amendment S34: the baseline is adopted only once Core ties it to
+    // the vault's history, and no published contradiction of it holds.
+    let tied = match tokio::task::block_in_place(|| verifier.tie_baseline(&genesis, verified)) {
+        Ok(Tie::Tied(tied)) => tied,
+        Ok(Tie::NotYet(why)) => {
+            return Adoption::NotAdopted(format!(
+                "the baseline at generation {} is not tied to the vault's history yet: {why}",
+                offered.generation
+            ))
+        }
+        Ok(Tie::Contradicted(contradiction)) => {
+            return contradicted_baseline(set, &contradiction).await
+        }
+        Err(e) => return unavailable("tying the baseline to the vault's history", e),
+    };
+    let witness = match VaultWitness::from_baseline(&tied, &wire, own.0, own.1) {
         Ok(witness) => witness,
         Err(e) => {
             return Adoption::Refused(format!(
@@ -771,5 +821,28 @@ async fn adopt_one(
             })
         }
         Err(e) => unavailable("recording the baseline", e),
+    }
+}
+
+/// A baseline Core found to contradict its vault's history (SoFi Amendment
+/// S34): the contradiction is published for every later reader, and the
+/// vault is quarantined, as an owner that signed two frontiers at one
+/// generation is (SoFi Amendment S24). Neither falls back to a walk from the
+/// genesis.
+async fn contradicted_baseline(
+    set: &StorageSet,
+    contradiction: &VaultBaselineContradictionV1,
+) -> Adoption {
+    let why = format!(
+        "STORAGE_SAFETY_VIOLATION: the owner's baseline contradicts the vault's history: {:?}",
+        contradiction.kind
+    );
+    let published = match publish_contradiction(set, contradiction).await {
+        Ok(()) => String::new(),
+        Err(e) => format!(" (the contradiction is not published: {e})"),
+    };
+    match sofi_vault_head::quarantine(&contradiction.vault_id, &why) {
+        Ok(()) => Adoption::Quarantined(format!("{why}{published}")),
+        Err(e) => Adoption::Quarantined(format!("{why}{published} (not recorded: {e})")),
     }
 }

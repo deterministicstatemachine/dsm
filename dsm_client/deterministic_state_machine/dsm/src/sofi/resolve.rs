@@ -78,14 +78,47 @@ use super::validation::{
 use super::wire::{
     CoreEntry, DlvCore, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim,
     TraderCore, TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, ValidationRef,
-    VaultGenesisPreimage, VaultHistoryHeadV1, VaultStateLeaf,
+    BaselineContradiction, VaultBaselineContradictionV1, VaultFrontierV1, VaultGenesisPreimage,
+    VaultHistoryHeadV1, VaultStateLeaf,
 };
 use crate::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_NODE, TAG_DSM_SOFI_VAULT_LEAF_STATE,
+    TAG_DSM_SOFI_VAULT_HISTORY_HEAD, TAG_DSM_SOFI_VAULT_HISTORY_LEAF,
+    TAG_DSM_SOFI_VAULT_HISTORY_NODE, TAG_DSM_SOFI_VAULT_LEAF_STATE,
 };
+use super::frontier::{TiedBaseline, VerifiedFrontier};
 use crate::crypto::domain::TaggedHashDomain;
 
 type D32 = [u8; 32];
+
+/// What tying an owner baseline to its vault's history came to (SoFi
+/// Amendment S34).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Tie {
+    /// Every check held: the baseline may be adopted.
+    Tied(TiedBaseline),
+    /// The baseline contradicts its history as the contradiction says,
+    /// which anyone can check again. It is not adopted.
+    Contradicted(VaultBaselineContradictionV1),
+    /// What was read does not decide it yet, and why: a network status,
+    /// never a verdict. The baseline is not adopted and the reader walks as
+    /// it would have.
+    NotYet(String),
+}
+
+/// The history head a frontier commits, as read.
+enum CommittedHead {
+    Head(VaultHistoryHeadV1),
+    NotInHand,
+    /// Bytes at the commitment that are not a head re-hashing to it.
+    NotAHead(String),
+}
+
+/// Whether one check of a baseline against its history holds.
+enum Check {
+    Holds,
+    Fails,
+    Undecided(String),
+}
 
 /// The pre values of one vault's leaves, by `(vault_id, key)`.
 pub type VaultLeaves = BTreeMap<(D32, D32), VaultLeafPre>;
@@ -408,6 +441,14 @@ pub trait SofiReads {
         &self,
         vault_id: &D32,
         root: &D32,
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure>;
+    /// The bytes of every baseline contradiction indexed under
+    /// `vault_contradiction_locator(vault_id)` (SoFi Amendment S34).
+    /// Discovery only: a candidate stands only once this reader's own checks
+    /// bear it out.
+    fn baseline_contradiction_candidates(
+        &self,
+        vault_id: &D32,
     ) -> Result<Discovered<Vec<u8>>, ReadFailure>;
     /// The owner baseline this device adopted for `genesis`'s vault, as Core
     /// authenticates it from this device's record now (SoFi Amendment
@@ -2234,27 +2275,16 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             return Ok(BelowBaseline::NoBaseline);
         };
         let frontier = baseline.frontier();
-        let Some(bytes) = self
-            .reads
-            .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_HEAD, &frontier.history_root)?
-        else {
-            return Ok(BelowBaseline::HeadNotInHand);
-        };
-        let head = VaultHistoryHeadV1::decode(&bytes).map_err(|e| {
-            VerifierFailure::Refused(format!(
-                "vault {}: the history head the baseline commits does not decode: {e}",
-                short_id(vault_id)
-            ))
-        })?;
-        match history::history_root(&head) {
-            Ok(committed) if committed == frontier.history_root => {}
-            Ok(..) | Err(..) => {
+        let head = match self.committed_head(frontier)? {
+            CommittedHead::Head(head) => head,
+            CommittedHead::NotInHand => return Ok(BelowBaseline::HeadNotInHand),
+            CommittedHead::NotAHead(why) => {
                 return Err(VerifierFailure::Refused(format!(
-                    "vault {}: the history head read is not the one the baseline commits",
+                    "vault {}: {why}",
                     short_id(vault_id)
                 )))
             }
-        }
+        };
         if head.generation != frontier.generation {
             return Err(VerifierFailure::Refused(format!(
                 "vault {}: the baseline at generation {} commits a history to generation {}",
@@ -2292,6 +2322,244 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         } else {
             BelowBaseline::LeavesNotEstablished(unproven)
         })
+    }
+
+    /// The history head `frontier` commits, read by that commitment.
+    fn committed_head(&self, frontier: &VaultFrontierV1) -> Result<CommittedHead, VerifierFailure> {
+        let Some(bytes) = self
+            .reads
+            .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_HEAD, &frontier.history_root)?
+        else {
+            return Ok(CommittedHead::NotInHand);
+        };
+        let head = match VaultHistoryHeadV1::decode(&bytes) {
+            Ok(head) => head,
+            Err(e) => {
+                return Ok(CommittedHead::NotAHead(format!(
+                    "the history head the baseline commits does not decode: {e}"
+                )))
+            }
+        };
+        Ok(match history::history_root(&head) {
+            Ok(committed) if committed == frontier.history_root => CommittedHead::Head(head),
+            Ok(..) | Err(..) => CommittedHead::NotAHead(
+                "the history head read is not the one the baseline commits".into(),
+            ),
+        })
+    }
+
+    /// Tie `baseline`, an owner baseline of `genesis`'s vault that Core
+    /// authenticated, to the vault's history (SoFi Amendment S34), before a
+    /// reader adopts it:
+    /// - the history head the frontier commits, read by that commitment, is
+    ///   the vault's, at the frontier's generation `g`;
+    /// - the history holds the accepted genesis root `R_0` at 0;
+    /// - it holds the frontier's root at `g`;
+    /// - for `g ≥ 1`, the frontier's root is the post root of the exercise
+    ///   final at `R_{g−1}`, the root the history holds at `g − 1`;
+    /// - no contradiction published under the vault's locator for this
+    ///   baseline holds when this reader checks it again, and the read of
+    ///   the locator is complete.
+    ///
+    /// A check that fails on what the owner signed is `Contradicted`, which
+    /// anyone can check again; anything not in hand is `NotYet`. The history
+    /// between the genesis and `g − 1` is the owner's: a step there that does
+    /// not hold is found by a reader that checks it and published, and every
+    /// later reader then refuses the baseline (the last check).
+    pub fn tie_baseline(
+        &self,
+        genesis: &AcceptedVaultGenesis,
+        baseline: VerifiedFrontier,
+    ) -> Result<Tie, VerifierFailure> {
+        let frontier = *baseline.frontier();
+        let vault_id = frontier.vault_id;
+        let frontier_commitment = *baseline.commitment();
+        let contradicted = move |kind: BaselineContradiction| -> Result<Tie, VerifierFailure> {
+            Ok(Tie::Contradicted(VaultBaselineContradictionV1 {
+                vault_id,
+                frontier_commitment,
+                kind,
+            }))
+        };
+        let head = match self.committed_head(&frontier)? {
+            CommittedHead::Head(head) => head,
+            CommittedHead::NotInHand => {
+                return Ok(Tie::NotYet(
+                    "the history head the baseline commits is not in hand".into(),
+                ))
+            }
+            CommittedHead::NotAHead(..) => return contradicted(BaselineContradiction::Top),
+        };
+        if head.vault_id != vault_id || head.generation != frontier.generation {
+            return contradicted(BaselineContradiction::Top);
+        }
+        match self.history_holds(&head, &vault_id, 0, genesis.genesis_root())? {
+            Check::Holds => {}
+            Check::Fails => return contradicted(BaselineContradiction::Genesis),
+            Check::Undecided(why) => return Ok(Tie::NotYet(why)),
+        }
+        match self.history_holds(&head, &vault_id, frontier.generation, &frontier.root)? {
+            Check::Holds => {}
+            Check::Fails => return contradicted(BaselineContradiction::Top),
+            Check::Undecided(why) => return Ok(Tie::NotYet(why)),
+        }
+        if frontier.generation > 0 {
+            match self.step_holds(
+                &head,
+                genesis,
+                &vault_id,
+                frontier.generation,
+                &frontier.root,
+            )? {
+                Check::Holds => {}
+                Check::Fails => {
+                    return contradicted(BaselineContradiction::Step {
+                        generation: frontier.generation,
+                    })
+                }
+                Check::Undecided(why) => return Ok(Tie::NotYet(why)),
+            }
+        }
+        let found = self.reads.baseline_contradiction_candidates(&vault_id)?;
+        let complete = matches!(found, Discovered::Complete(..));
+        let candidates = match found {
+            Discovered::Complete(candidates) | Discovered::Partial(candidates) => candidates,
+        };
+        for bytes in candidates {
+            let Ok(claim) = VaultBaselineContradictionV1::decode(&bytes) else {
+                continue;
+            };
+            if claim.vault_id != vault_id || claim.frontier_commitment != frontier_commitment {
+                continue;
+            }
+            // Genesis and Top were checked above, and the step at the
+            // frontier's own generation: only a lower step can still hold.
+            let BaselineContradiction::Step { generation } = claim.kind else {
+                continue;
+            };
+            if generation >= frontier.generation {
+                continue;
+            }
+            let claimed = match history::leaf_root_at(
+                &head,
+                &vault_id,
+                generation,
+                |node| {
+                    self.reads
+                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+                },
+                |leaf| {
+                    self.reads
+                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, leaf)
+                },
+            )? {
+                Ok(root) => root,
+                Err(why) => {
+                    return Ok(Tie::NotYet(format!(
+                        "a contradiction at generation {generation} is not checkable yet: {why:?}"
+                    )))
+                }
+            };
+            match self.step_holds(&head, genesis, &vault_id, generation, &claimed)? {
+                Check::Holds => {}
+                Check::Fails => return contradicted(claim.kind),
+                Check::Undecided(why) => {
+                    return Ok(Tie::NotYet(format!(
+                        "a contradiction at generation {generation} is not checkable yet: {why}"
+                    )))
+                }
+            }
+        }
+        if !complete {
+            return Ok(Tie::NotYet(
+                "the contradictions published for the vault are not all read yet".into(),
+            ));
+        }
+        Ok(Tie::Tied(TiedBaseline::tied(baseline)))
+    }
+
+    /// Whether `head`, a vault's history, holds `root` at `generation`.
+    fn history_holds(
+        &self,
+        head: &VaultHistoryHeadV1,
+        vault_id: &D32,
+        generation: u64,
+        root: &D32,
+    ) -> Result<Check, VerifierFailure> {
+        Ok(
+            match history::prove(head, vault_id, generation, root, |node| {
+                self.reads
+                    .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+            })? {
+                Ok(..) => Check::Holds,
+                Err(history::NotProven::Contradicted | history::NotProven::OutsideTheHead) => {
+                    Check::Fails
+                }
+                Err(history::NotProven::NodeUnavailable(node)) => Check::Undecided(format!(
+                    "the history node {} is not in hand",
+                    short_id(&node)
+                )),
+            },
+        )
+    }
+
+    /// Whether `root`, which `head` holds at `generation ≥ 1`, is the post
+    /// root of the exercise final at the root `head` holds at
+    /// `generation − 1` (the accepted genesis root at 0): the one step,
+    /// recomputed by Core from the exercise and its evidence as a walk
+    /// recomputes it.
+    fn step_holds(
+        &self,
+        head: &VaultHistoryHeadV1,
+        genesis: &AcceptedVaultGenesis,
+        vault_id: &D32,
+        generation: u64,
+        root: &D32,
+    ) -> Result<Check, VerifierFailure> {
+        let before = generation - 1;
+        let parent = match before {
+            0 => *genesis.genesis_root(),
+            _ => match history::leaf_root_at(
+                head,
+                vault_id,
+                before,
+                |node| {
+                    self.reads
+                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+                },
+                |leaf| {
+                    self.reads
+                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, leaf)
+                },
+            )? {
+                Ok(parent) => parent,
+                Err(why) => {
+                    return Ok(Check::Undecided(format!(
+                        "the history's root at generation {before} is not read: {why:?}"
+                    )))
+                }
+            },
+        };
+        let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
+        chains.insert(*vault_id, VaultChain::at_history_root(before, parent));
+        Ok(
+            match self.next_generation(vault_id, &parent, &mut chains, SIBLING_DEPTH)? {
+                Next::Generation(post) => {
+                    if post.pre_generation() == before
+                        && post.generation() == generation
+                        && post.root() == root
+                    {
+                        Check::Holds
+                    } else {
+                        Check::Fails
+                    }
+                }
+                Next::Head => Check::Undecided(format!(
+                    "nothing final consumed the history's root at generation {before}"
+                )),
+                Next::NotYet(why) => Check::Undecided(why),
+            },
+        )
     }
 
     /// Where a walk of a vault starts: the owner baseline this device
