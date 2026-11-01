@@ -269,6 +269,47 @@ android-libs: ## Build native .so libs for all Android ABIs (requires NDK)
 	@cp $(NDK_DIR)/target/x86_64-linux-android/release/libdsm_sdk.so $(REPO_JNILIBS_DIR)/x86_64/
 	@echo "==> Native libs built."
 
+# ---------------------------------------------------------------------------
+# iOS: the Rust SDK as an XCFramework the Xcode project links (dsm_client/ios).
+# IOS_TARGETS and IOS_PROFILE narrow a developer build (the simulator alone, debug);
+# the default is both slices in release.
+# ---------------------------------------------------------------------------
+IOS_DIR := $(REPO_ROOT)/dsm_client/ios
+IOS_NATIVE := $(IOS_DIR)/Native
+IOS_TARGETS ?= aarch64-apple-ios aarch64-apple-ios-sim
+IOS_PROFILE ?= release
+IOS_PROFILE_FLAG := $(if $(filter release,$(IOS_PROFILE)),--release,)
+
+.PHONY: ios-libs
+ios-libs: ## Build the Rust SDK for iOS (device + simulator) into Native/DsmSdk.xcframework
+	@echo "==> Building the Rust SDK for iOS ($(IOS_PROFILE): $(IOS_TARGETS))..."
+	cd $(NDK_DIR) && \
+		DSM_PROTO_ROOT=$(REPO_ROOT)/proto \
+		cargo build $(IOS_PROFILE_FLAG) --locked --package dsm_sdk --lib --features ffi,bluetooth \
+			$(foreach t,$(IOS_TARGETS),--target $(t))
+	cd $(NDK_DIR)/dsm_sdk && cbindgen --config cbindgen.toml --crate dsm_sdk --output include/dsm_sdk.h
+	@rm -rf $(IOS_NATIVE)/DsmSdk.xcframework $(IOS_NATIVE)/headers
+	@mkdir -p $(IOS_NATIVE)/headers
+	@cp $(NDK_DIR)/dsm_sdk/include/dsm_sdk.h $(IOS_NATIVE)/module.modulemap $(IOS_NATIVE)/headers/
+	xcodebuild -create-xcframework \
+		$(foreach t,$(IOS_TARGETS),-library $(NDK_DIR)/target/$(t)/$(IOS_PROFILE)/libdsm_sdk.a -headers $(IOS_NATIVE)/headers) \
+		-output $(IOS_NATIVE)/DsmSdk.xcframework
+	@echo "==> $(IOS_NATIVE)/DsmSdk.xcframework built."
+
+.PHONY: ios-frontend
+ios-frontend: ## Build the React frontend for iOS (copies the bundle into DsmWallet/www)
+	cd $(FRONTEND_DIR) && npm run build:ios
+
+.PHONY: ios-project
+ios-project: ## Regenerate DsmWallet.xcodeproj from the files on disk
+	python3 $(IOS_DIR)/scripts/generate_xcodeproj.py
+
+.PHONY: ios-simulator
+ios-simulator: ios-project ## Build the app for the arm64 iOS Simulator (needs ios-libs and ios-frontend)
+	cd $(IOS_DIR) && xcodebuild -project DsmWallet.xcodeproj -scheme DsmWallet -configuration Debug \
+		-destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData \
+		ARCHS=arm64 build
+
 .PHONY: frontend
 frontend: ## Build the React frontend (copies assets into Android)
 	@echo "==> Building fresh frontend bundle and deploying assets into Android..."
