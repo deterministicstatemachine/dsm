@@ -734,6 +734,7 @@ mod tests {
             accept_body: Vec::new(),
             last_seq: 0,
             connected: SessionStatus::Connected,
+            read_secret: crate::storage::client_db::connect::ReadSecret([0x57; 32]),
         };
         insert_session(&session).expect("a session stored");
         assert_eq!(

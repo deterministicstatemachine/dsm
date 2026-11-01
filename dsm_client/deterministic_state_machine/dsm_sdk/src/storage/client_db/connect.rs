@@ -81,6 +81,18 @@ pub fn preview(offer_digest: &[u8; 32]) -> Result<Option<PreviewRow>> {
         .optional()?)
 }
 
+/// The secret a wallet's accept commits, which it alone presents to read its
+/// session's requests (SA-128). Its `Debug` never shows it, so no log of a
+/// session carries it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ReadSecret(pub [u8; 32]);
+
+impl core::fmt::Debug for ReadSecret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("ReadSecret(..)")
+    }
+}
+
 /// A connected (or once connected) application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletSession {
@@ -96,6 +108,8 @@ pub struct WalletSession {
     pub accept_body: Vec<u8>,
     pub last_seq: u64,
     pub connected: SessionStatus,
+    /// The secret its accept commits: what reads its requests.
+    pub read_secret: ReadSecret,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,7 +149,7 @@ fn i64_of(v: u64) -> Result<i64> {
 }
 
 const SESSION_COLUMNS: &str = "session_id, app_device_id, app_genesis, app_ak, display_name, \
-     endpoint, cert_pin, offer_digest, accept_body, last_seq, status";
+     endpoint, cert_pin, offer_digest, accept_body, last_seq, status, read_secret";
 
 fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WalletSession> {
     let status: String = r.get(10)?;
@@ -151,6 +165,7 @@ fn session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<WalletSession> {
         accept_body: r.get(8)?,
         last_seq: u64_of(r, 9)?,
         connected: status_of(&status)?,
+        read_secret: ReadSecret(column_32(r, 11)?),
     })
 }
 
@@ -185,7 +200,7 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT OR REPLACE INTO connect_sessions({SESSION_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
         ),
         params![
             s.session_id.as_slice(),
@@ -199,6 +214,7 @@ pub fn insert_session(s: &WalletSession) -> Result<()> {
             s.accept_body,
             last_seq,
             status_text(s.connected),
+            s.read_secret.0.as_slice(),
         ],
     )?;
     tx.execute(
@@ -591,6 +607,7 @@ pub fn record_processed(
     spend: Option<([u8; 32], u64)>,
     log: &LogRow,
     response: &[u8],
+    grant_use: GrantUse,
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
@@ -624,8 +641,8 @@ pub fn record_processed(
         params![session_id.as_slice(), seq],
     )?;
     tx.execute(
-        "INSERT INTO connect_log(session_id, seq, summary, outcome, detail, response, delivery) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO connect_log(session_id, seq, summary, outcome, detail, response, \
+         response_digest, delivery, grant_use) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             session_id.as_slice(),
             seq,
@@ -633,11 +650,51 @@ pub fn record_processed(
             log.outcome,
             log.detail,
             response,
-            UNSENT
+            dsm::connect::response_digest(response).as_slice(),
+            UNSENT,
+            grant_use.text(),
         ],
     )?;
     tx.commit()?;
     Ok(())
+}
+
+/// What a processed request was to its grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantUse {
+    /// Run under the grant, and it moved nothing: counted against the
+    /// grant's `free_requests` (SA-78).
+    Free,
+    /// Run under the grant, and it spent, or committed operations whose
+    /// spend was counted with them.
+    Counted,
+    /// Decided by the player.
+    Player,
+}
+
+impl GrantUse {
+    fn text(self) -> &'static str {
+        match self {
+            GrantUse::Free => "free",
+            GrantUse::Counted => "counted",
+            GrantUse::Player => "player",
+        }
+    }
+}
+
+/// How many requests that moved nothing the grant of `session_id` has run:
+/// read from its own log, which keeps a row of each for the session's life.
+pub fn free_requests_used(session_id: &[u8; 32]) -> Result<u64> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let used: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM connect_log WHERE session_id = ?1 AND grant_use = 'free'",
+        params![session_id.as_slice()],
+        |r| r.get(0),
+    )?;
+    u64::try_from(used).map_err(|e| anyhow!("a negative count: {e}"))
 }
 
 pub fn log(session_id: &[u8; 32]) -> Result<Vec<LogRow>> {
@@ -671,13 +728,14 @@ pub fn keep_disconnect_notice(session_id: &[u8; 32], notice: &[u8]) -> Result<()
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     conn.execute(
-        "INSERT OR REPLACE INTO connect_log(session_id, seq, summary, outcome, detail, response, delivery) \
-         VALUES (?1, 0, ?2, 0, ?3, ?4, ?5)",
+        "INSERT OR REPLACE INTO connect_log(session_id, seq, summary, outcome, detail, response, \
+         response_digest, delivery, grant_use) VALUES (?1, 0, ?2, 0, ?3, ?4, ?5, ?6, 'notice')",
         params![
             session_id.as_slice(),
             "Disconnected",
             "the player disconnected this application; it is told at the next sync",
             notice,
+            dsm::connect::response_digest(notice).as_slice(),
             UNSENT
         ],
     )?;
@@ -706,8 +764,12 @@ pub fn mark_delivered(session_id: &[u8; 32], seq: u64) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    // A free request's answer is dropped once the application holds it: the
+    // row keeps its digest, its summary and its outcome (SA-78).
     conn.execute(
-        "UPDATE connect_log SET delivery = ?3 WHERE session_id = ?1 AND seq = ?2",
+        "UPDATE connect_log SET delivery = ?3, \
+         response = CASE WHEN grant_use = 'free' THEN NULL ELSE response END \
+         WHERE session_id = ?1 AND seq = ?2",
         params![session_id.as_slice(), i64_of(seq)?, SENT],
     )?;
     Ok(())
@@ -724,6 +786,27 @@ pub fn app_put_offer(offer_digest: &[u8; 32], code: &str, offer: &[u8]) -> Resul
         "INSERT OR IGNORE INTO connect_app_offers(offer_digest, code, offer) VALUES (?1, ?2, ?3)",
         params![offer_digest.as_slice(), code, offer],
     )?;
+    Ok(())
+}
+
+/// Claim the offer `offer_digest` for `session_id`, its first verified accept:
+/// an offer connects one wallet (SA-79). The same session claiming it again is
+/// that accept retried; any other session is refused.
+pub fn app_claim_offer(offer_digest: &[u8; 32], session_id: &[u8; 32]) -> Result<()> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let claimed = conn.execute(
+        "UPDATE connect_app_offers SET accepted_session = ?2 WHERE offer_digest = ?1 \
+         AND (accepted_session IS NULL OR accepted_session = ?2)",
+        params![offer_digest.as_slice(), session_id.as_slice()],
+    )?;
+    if claimed != 1 {
+        return Err(anyhow!(
+            "this offer connected another wallet already: an offer connects one wallet"
+        ));
+    }
     Ok(())
 }
 
@@ -756,10 +839,12 @@ pub struct AppSession {
     /// Connected until the wallet's signed disconnect arrives (DSM Amendment
     /// A11: a grant ends when the player disconnects the application).
     pub connected: SessionStatus,
+    /// What the wallet's accept committed for its read secret (SA-128).
+    pub read_commitment: [u8; 32],
 }
 
-const APP_SESSION_COLUMNS: &str =
-    "session_id, offer_digest, wallet_device_id, wallet_genesis, wallet_ak, accept, next_seq, status";
+const APP_SESSION_COLUMNS: &str = "session_id, offer_digest, wallet_device_id, wallet_genesis, \
+     wallet_ak, accept, next_seq, status, read_commitment";
 
 fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
     Ok(AppSession {
@@ -771,6 +856,7 @@ fn app_session_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<AppSession> {
         accept: r.get(5)?,
         next_seq: u64_of(r, 6)?,
         connected: status_of(&r.get::<_, String>(7)?)?,
+        read_commitment: column_32(r, 8)?,
     })
 }
 
@@ -797,7 +883,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
     tx.execute(
         &format!(
             "INSERT INTO connect_app_sessions({APP_SESSION_COLUMNS}) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
         ),
         params![
             s.session_id.as_slice(),
@@ -808,6 +894,7 @@ pub fn app_insert_session(s: &AppSession) -> Result<()> {
             s.accept,
             i64_of(s.next_seq)?,
             status_text(s.connected),
+            s.read_commitment.as_slice(),
         ],
     )?;
     tx.commit()?;
@@ -1052,6 +1139,7 @@ mod tests {
             accept_body: vec![0x57; 16],
             last_seq,
             connected,
+            read_secret: ReadSecret([0x58; 32]),
         }
     }
 

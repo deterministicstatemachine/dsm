@@ -729,6 +729,7 @@ async fn connect(game: &Host, wallet: &Host, wild: &[u8; 32]) -> [u8; 32] {
         cert_pin: Vec::new(),
         scopes: game_scopes(wild),
         token_anchors: vec![wild.to_vec()],
+        free_requests: 512,
     };
     let offer = match game
         .connect(Route::Invoke, "connect.app.offer", request.encode_to_vec())

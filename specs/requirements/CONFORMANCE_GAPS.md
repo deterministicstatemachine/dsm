@@ -3401,8 +3401,8 @@ Found while fixing §6.87.
 | SA-75 | `dsm_sdk/src/sdk/native_reserve.rs` · `walk_reserve`, `owe_after_walk` | Every reserve walk loads all memoised release envelopes since R_0 into memory under the DB lock, and the memo grows without bound. | confirmed (2 of 2) | Fixed in part (`d2e0f448`, round five): a walk holds one memoised release at a time; the memo still keeps every release (retention is the owner's call) |
 | SA-76 | `dsm_sdk/src/sdk/native_reserve.rs` · `read_ahead`, `locate_ahead` | Reserve read_ahead buffers 16 successor cells x 5 seats x 8 MiB at once, with cells chosen by throwaway-release writers. | confirmed (2 of 2) | Fixed (`d2e0f448`) |
 | SA-77 | `dsm_sdk/src/handlers/connect_routes.rs` · `match_of_session`, `duel_belongs_to` | A computed-match (duel) stake can be withdrawn only through the staking app's DuelWithdraw request, so app silence or a disconnect strands it. | confirmed (3 of 3) | Open |
-| SA-78 | `dsm_sdk/src/handlers/connect_routes.rs` · `decide`, `process` | A connected app can make unlimited zero-spend in-grant requests, each costing a SPHINCS+ verify and sign plus a ~50 KB connect_log row kept forever. | confirmed (2 of 2) | Open |
-| SA-79 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_app_accept`, `add_contact_from_resolved` | Connect offers never expire and are not single-use, so one connect code adds unlimited contacts, relationships and sessions to the app account. | confirmed (2 of 2) | Open |
+| SA-78 | `dsm_sdk/src/handlers/connect_routes.rs` · `decide`, `process` | A connected app can make unlimited zero-spend in-grant requests, each costing a SPHINCS+ verify and sign plus a ~50 KB connect_log row kept forever. | confirmed (2 of 2) | Fixed (§6.124; owner's choice 2026-10-31, both): the signed accept names how many requests that move nothing the grant runs over the session's life (`free_requests`, at most the offer's); past them every request waits for the player, and holds every later one behind it. A free request's answer is dropped once delivered; its log row keeps the outcome and the answer's digest. Test: `handlers::connect_e2e_tests::a_grant_runs_only_its_free_requests` |
+| SA-79 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_app_accept`, `add_contact_from_resolved` | Connect offers never expire and are not single-use, so one connect code adds unlimited contacts, relationships and sessions to the app account. | confirmed (2 of 2) | Fixed (§6.124; owner's choice 2026-10-31, single-use): an offer's first verified accept claims it (`connect_app_offers.accepted_session`) before anything is added for the wallet; any other wallet's accept is refused. Test: `handlers::connect_e2e_tests::an_offer_connects_one_wallet` |
 | SA-80 | `dsm_sdk/src/sdk/connect/holdings.rs` · `prove`, `issued_by_app` | Holdings proofs carry unsalted SMT siblings, revealing balances of tokens outside the granted Holdings scope. | plausible (1 of 2) | Open |
 | SA-81 | `dsm_sdk/src/handlers/connect_routes.rs` · `accept`, `connect_app_accept` | Replayed Connect accept on the public relay forces a SPHINCS+ verify and a full storage-set directory read on the app host each time, saturating the shared SDK queue. | confirmed (2 of 2) | Fixed (round 4) |
 | SA-82 | `dsm_sdk/src/sdk/connect/wallet.rs` · `listen`, `sync_session` | The Connect listener has no minimum interval and relies on relay long-poll for pacing, so it busy-loops when a request waits for the player or the relay answers at once or is down. | confirmed (2 of 2) | Fixed (round 3) |
@@ -3456,7 +3456,7 @@ Found while fixing §6.87.
 | SA-125 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_approve`, `insert_session` | Re-approving the same connect code resets last_seq to 0, so the relay's historical signed requests are processed again. | confirmed (1 of 1) | Fixed (`87be85ba`) |
 | SA-126 | `dsm_sdk/src/sdk/connect/operations.rs` · `bind_in_tx`, `bind_operation_with_conn` | SA-60 operation binding attaches unrelated advances (incoming transfers applied during the send's own syncs) to the connect request. | confirmed (1 of 1) | Fixed (`4895662b`) |
 | SA-127 | `dsm_sdk/src/handlers/connect_routes.rs` · `sync_session`, `process` | The process-wide Connect PROCESSING mutex is held across app-controlled network work, so one app stalls all apps and the player's actions. | confirmed (1 of 1) | Fixed (round 3) |
-| SA-128 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_app_requests`, `app_requests_after` | connect.app.requests serves a session's signed requests to any caller who names a computable session id. | confirmed (1 of 1) | Open |
+| SA-128 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_app_requests`, `app_requests_after` | connect.app.requests serves a session's signed requests to any caller who names a computable session id. | confirmed (1 of 1) | Fixed (§6.124; owner's choice 2026-10-31, read secret): the wallet draws a secret from the system CSPRNG, commits `H(DSM/connect/read ‖ session_id ‖ secret)` in its signed accept and keeps the secret in its own store; a read is a POST carrying it over the pinned TLS connection, checked in constant time, and a session its wallet ended reads nothing more. Test: `handlers::connect_e2e_tests::only_the_sessions_wallet_reads_its_requests` |
 | SA-129 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_respond`, `carry_out_approved` | connect.respond Decline ignores operations that a crashed hand-approved run already committed. | confirmed (1 of 1) | Fixed (`cd72f1d1`) |
 | SA-130 | `dsm/src/sofi/storage.rs` · `merge_index_reads`, `keep_all_verifying` | An index read that only one member answered is treated as complete, so 'not published' is concluded from a partial read. | confirmed (1 of 1) | Fixed (round 4) |
 | SA-131 | `dsm/src/sofi/validation.rs` · `dlv_fold_entries`, `vault_leaves_from_core` | The V° relationship advance is not bound to the trader's relationship base (unconstrained on a first operation, identity unchecked on Close/Release). | confirmed (1 of 1) | Fixed (`45384fc7`) |
@@ -6709,6 +6709,57 @@ A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to
   - the route's check removed: the unload moves the account under the payment.
 
 **Rows Phase 4 had already closed.** SA-61, SA-91 and SA-116 still read Open after the Phase 4 change (above, "Phase 4: the receiver's door opened"), which built each of them. S-BEARER described a stage-time leaf rewrite that no longer exists. Each row now names the code and the tests that close it. The SDK Bluetooth suite, which runs those tests, passed 165/0 at `bcfd259de`.
+
+
+### 6.124 DSM Connect's bounds: a single-use offer, a count of free requests, and a read only the wallet makes (SA-78, SA-79, SA-128; `fix/beta-requirements-completion`, 2026-10-31)
+
+**The owner's choices (2026-10-31)**, put as the 10-22 plan's Q3, Q4 and Q5:
+- SA-79: "Single-use".
+- SA-78: "Both". The grant names a lifetime count, and the log keeps only the digest and outcome of a free request.
+- SA-128: "Read secret", with six safeguards:
+  1. the secret comes from a cryptographically secure generator;
+  2. the commitment is bound to the wallet and the session;
+  3. the secret is held by the wallet only;
+  4. it travels over authenticated, encrypted transport;
+  5. it is never logged, and it expires and can be revoked;
+  6. reads are limited.
+
+  DSM reads no clock, so the secret expires with its session, when the wallet disconnects or revokes it, and never by time. The owner was told so.
+
+**SA-79, the offer.**
+- An application's offer row records the one session it connected (`connect_app_offers.accepted_session`).
+- `connect.app.accept` claims the offer for the accept's session (`app_claim_offer`) once the accept verifies. This happens before the wallet is resolved or added as a contact.
+- The same session claiming again is the accept retried. Any other session is refused: "an offer connects one wallet".
+- Test: `dsm_sdk::handlers::connect_e2e_tests::an_offer_connects_one_wallet`. A second wallet approves the same code and its accept is refused. The application then holds no contact for it, and one session.
+
+**SA-78, the free requests.**
+- An offer asks for a number of requests that move nothing (`AppConnectOfferBodyV1.free_requests`). The wallet's signed accept grants it, never more than the offer asked (`verify_accept`).
+- The approval screen names the count. The connected application's view shows how many are used.
+- The count of free requests used is read from the session's own log. Each request that ran under the grant and moved nothing leaves a row marked `free`. That includes a payment that failed and spent nothing.
+- Once the count is reached, a request the grant would run waits for the player instead (`free_requests_left`), and holds every later request behind it. A request that spends is held to the count too, since it can fail and move nothing. So nothing more is signed or logged under the grant until the player acts.
+- A free request's signed answer is dropped once delivered. Its row keeps the summary, the outcome and the answer's digest (`connect_log.response_digest`, `DSM/connect/response-digest`).
+- Test: `dsm_sdk::handlers::connect_e2e_tests::a_grant_runs_only_its_free_requests`. With a grant of 2, two requests run, the third waits for the player, and the two delivered answers are no longer held.
+
+**SA-128, the read.**
+- At approval the wallet draws a 32-byte secret from the system CSPRNG (`dsm::crypto::rng::generate_secure_random`).
+- It commits `H(DSM/connect/read ‖ session_id ‖ secret)` (`dsm::connect::read_commitment`) in its signed accept. The session id binds the offer and the wallet's device.
+- The wallet keeps the secret in its own store (`connect_sessions.read_secret`). Its type's `Debug` never prints it.
+- A read is `POST /connect/requests` with a `ConnectAppRequestsQueryV1` carrying the secret, over the TLS connection pinned to the code's certificate. The secret is never in a path, and the relay records only the session and the position.
+- The application's account checks the secret against the commitment in constant time (`dsm::connect::check_read_secret`). It refuses any other secret, and refuses every read once the wallet has ended the session.
+- Reads stay held to the relay's per-peer bounds, and the requests they serve are held to the free count above.
+- Test: `dsm_sdk::handlers::connect_e2e_tests::only_the_sessions_wallet_reads_its_requests`. The wallet's secret reads the request; another secret is refused; after the wallet's signed disconnect, its own secret reads nothing.
+
+**Wire and storage.**
+- New fields:
+  - `AppConnectOfferBodyV1.free_requests` (8);
+  - `AppConnectAcceptBodyV1.free_requests` (5) and `read_commitment` (6);
+  - `ConnectAppOfferRequestV1.free_requests` (6);
+  - `ConnectAppRequestsQueryV1.read_secret` (3).
+- The relay's read changed from `GET /connect/requests/{session}/{after}` to `POST /connect/requests`.
+- Client database schema 38. Beta does not migrate.
+- An application must now set `free_requests` in its offer. The Wildstate game's offer does so in its own repository.
+
+
 
 ## 7 Totals
 

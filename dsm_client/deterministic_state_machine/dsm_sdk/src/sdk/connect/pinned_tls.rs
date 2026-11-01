@@ -208,6 +208,27 @@ impl Relay {
             .map_err(|e| format!("GET {path}: reading the answer: {e}"))
     }
 
+    /// Deliver `body` at `path` and read the endpoint's answer within
+    /// `bound`. A refusal is its status, as for [`Self::get`].
+    async fn post_read(&self, path: &str, body: Vec<u8>, bound: Bound) -> Result<Vec<u8>, String> {
+        let url = format!("{}{path}", self.endpoint);
+        let response = self
+            .client
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, PROTOBUF)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| format!("POST {path}: {e}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("POST {path}: the endpoint answered {status}"));
+        }
+        bounded_read::read(response, bound)
+            .await
+            .map_err(|e| format!("POST {path}: reading the answer: {e}"))
+    }
+
     /// Deliver `body` at `path`. What the endpoint answers beside its status
     /// is not read: nothing here uses it.
     async fn post(&self, path: &str, body: Vec<u8>) -> Result<(), String> {
@@ -248,18 +269,24 @@ impl Relay {
     }
 
     /// Every request of `session` above `after`, as served: the endpoint may
-    /// hold the read until one arrives or its own bound passes.
+    /// hold the read until one arrives or its own bound passes. The read
+    /// carries the session's read secret in its body, never in its path, over
+    /// the pinned TLS connection (SA-128).
     pub async fn requests(
         &self,
         session_id: &[u8; 32],
         after: u64,
+        read_secret: &[u8; 32],
     ) -> Result<generated::AppRequestBatchV1, String> {
+        let query = generated::ConnectAppRequestsQueryV1 {
+            session_id: session_id.to_vec(),
+            after,
+            read_secret: read_secret.to_vec(),
+        };
         let bytes = self
-            .get(
-                &format!(
-                    "/connect/requests/{}/{after}",
-                    encode_base32_crockford(session_id)
-                ),
+            .post_read(
+                "/connect/requests",
+                query.encode_to_vec(),
                 Bound::Budget(REQUESTS_BUDGET),
             )
             .await?;
@@ -313,10 +340,7 @@ mod tests {
         .expect("the endpoint's TLS config");
         let peers: Peers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let app = axum::Router::new()
-            .route(
-                "/connect/requests/{session}/{after}",
-                axum::routing::get(empty_batch),
-            )
+            .route("/connect/requests", axum::routing::post(empty_batch))
             .with_state(peers.clone());
         let handle: axum_server::Handle<SocketAddr> = axum_server::Handle::new();
         let server = axum_server::bind_rustls("127.0.0.1:0".parse().expect("an address"), config)
@@ -345,7 +369,7 @@ mod tests {
         for after in 0..3u64 {
             let relay = Relay::new(&origin, pin).expect("a relay");
             let batch = relay
-                .requests(&[7; 32], after)
+                .requests(&[7; 32], after, &[9; 32])
                 .await
                 .expect("the endpoint answers");
             assert_eq!(batch.requests.len(), 0);
@@ -364,11 +388,11 @@ mod tests {
         other[0] ^= 1;
         let refused = Relay::new(&origin, other)
             .expect("a relay")
-            .requests(&[7; 32], 0)
+            .requests(&[7; 32], 0, &[9; 32])
             .await;
         match refused {
             Ok(batch) => panic!("a relay under another pin was answered: {batch:?}"),
-            Err(why) => assert!(why.starts_with("GET /connect/requests/"), "{why}"),
+            Err(why) => assert!(why.starts_with("POST /connect/requests"), "{why}"),
         }
     }
 
@@ -414,15 +438,15 @@ mod tests {
                 axum::routing::get(|| async { axum::body::Body::from_stream(endless_chunks()) }),
             )
             .route(
-                "/connect/requests/{session}/{after}",
-                axum::routing::get(
-                    |axum::extract::Path((_, after)): axum::extract::Path<(String, u64)>| async move {
-                        match after {
-                            0 => vec![0x0a; REQUESTS_BUDGET.bytes + 1],
-                            _ => empty_requests(REQUESTS_BUDGET.bytes / 4),
-                        }
-                    },
-                ),
+                "/connect/requests",
+                axum::routing::post(|body: axum::body::Bytes| async move {
+                    let query = generated::ConnectAppRequestsQueryV1::decode(body)
+                        .map_err(|e| (axum::http::StatusCode::BAD_REQUEST, e.to_string()))?;
+                    Ok::<_, (axum::http::StatusCode, String)>(match query.after {
+                        0 => vec![0x0a; REQUESTS_BUDGET.bytes + 1],
+                        _ => empty_requests(REQUESTS_BUDGET.bytes / 4),
+                    })
+                }),
             );
         let (origin, pin, _handle) = serving(app).await;
         let relay = Relay::new(&origin, pin).expect("a relay");
@@ -435,14 +459,14 @@ mod tests {
                 .is_err_and(|why| why.contains("longer than")),
             "{refused:?}"
         );
-        let refused = relay.requests(&[7; 32], 0).await;
+        let refused = relay.requests(&[7; 32], 0, &[9; 32]).await;
         assert!(
             refused
                 .as_ref()
                 .is_err_and(|why| why.contains("byte budget")),
             "{refused:?}"
         );
-        let refused = relay.requests(&[7; 32], 1).await;
+        let refused = relay.requests(&[7; 32], 1, &[9; 32]).await;
         assert!(
             refused
                 .as_ref()
@@ -498,10 +522,7 @@ mod tests {
     async fn a_relay_redirect_is_not_followed() {
         let reached: Peers = Arc::new(std::sync::Mutex::new(Vec::new()));
         let plain = axum::Router::new()
-            .route(
-                "/connect/requests/{session}/{after}",
-                axum::routing::get(empty_batch),
-            )
+            .route("/connect/requests", axum::routing::post(empty_batch))
             .with_state(reached.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -514,24 +535,18 @@ mod tests {
             )
             .await
         });
-        let app =
-            axum::Router::new().route(
-                "/connect/requests/{session}/{after}",
-                axum::routing::get(
-                    move |axum::extract::Path((session, after)): axum::extract::Path<(
-                        String,
-                        u64,
-                    )>| async move {
-                        axum::response::Redirect::temporary(&format!(
-                            "http://127.0.0.1:{port}/connect/requests/{session}/{after}"
-                        ))
-                    },
-                ),
-            );
+        let app = axum::Router::new().route(
+            "/connect/requests",
+            axum::routing::post(move || async move {
+                axum::response::Redirect::temporary(&format!(
+                    "http://127.0.0.1:{port}/connect/requests"
+                ))
+            }),
+        );
         let (origin, pin, _handle) = serving(app).await;
         let refused = Relay::new(&origin, pin)
             .expect("a relay")
-            .requests(&[7; 32], 0)
+            .requests(&[7; 32], 0, &[9; 32])
             .await;
         assert!(
             refused.as_ref().is_err_and(|why| why.contains("307")),
@@ -549,8 +564,8 @@ mod tests {
     #[tokio::test]
     async fn a_relay_refusal_is_its_status_alone() {
         let app = axum::Router::new().route(
-            "/connect/requests/{session}/{after}",
-            axum::routing::get(|| async {
+            "/connect/requests",
+            axum::routing::post(|| async {
                 (
                     axum::http::StatusCode::FORBIDDEN,
                     "the endpoint's own words".repeat(1000),
@@ -560,7 +575,7 @@ mod tests {
         let (origin, pin, _handle) = serving(app).await;
         let refused = Relay::new(&origin, pin)
             .expect("a relay")
-            .requests(&[7; 32], 0)
+            .requests(&[7; 32], 0, &[9; 32])
             .await;
         let why = match refused {
             Err(why) => why,

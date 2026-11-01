@@ -4914,6 +4914,9 @@ message AppConnectOfferBodyV1 {
   repeated ConnectScopeV1 scopes        = 5;
   repeated bytes          token_anchors = 6 [(dsm_fixed_len)=32]; // rooted at pairing
   bytes                   nonce         = 7 [(dsm_fixed_len)=32];
+  // How many requests that spend nothing the application asks to make over the
+  // session's whole life (SA-78). The player's grant names at most this many.
+  uint32                  free_requests = 8;
 }
 message AppConnectOfferV1 {
   bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectOfferBodyV1
@@ -4925,6 +4928,12 @@ message AppConnectAcceptBodyV1 {
   ContactQrV3             wallet_card  = 2;
   bytes                   wallet_att_a = 3 [(dsm_fixed_len)=32];
   repeated ConnectScopeV1 granted      = 4; // never wider than the offer asked
+  // Requests that spend nothing the grant takes over the session's life, at most
+  // the offer's free_requests; past it each is refused (SA-78).
+  uint32                  free_requests   = 5;
+  // H(DSM/connect/read ‖ session_id ‖ secret): the wallet's secret, which it
+  // alone presents to read the session's requests (SA-128).
+  bytes                   read_commitment = 6 [(dsm_fixed_len)=32];
 }
 message AppConnectAcceptV1 {
   bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectAcceptBodyV1
@@ -5356,6 +5365,7 @@ message ConnectAppOfferRequestV1 {
   bytes                   cert_pin      = 3 [(dsm_fixed_len)=32];
   repeated ConnectScopeV1 scopes        = 4;
   repeated bytes          token_anchors = 5 [(dsm_fixed_len)=32];
+  uint32                  free_requests = 6; // asked for in the offer (SA-78)
 }
 message ConnectAppOfferV1 {
   string code         = 1; // the `dsm:connect/v1:` text the application shows
@@ -5384,8 +5394,11 @@ message ConnectAppRequestIntentV1 {
   }
 }
 message ConnectAppRequestsQueryV1 {
-  bytes  session_id = 1 [(dsm_fixed_len)=32];
-  uint64 after      = 2;
+  bytes  session_id  = 1 [(dsm_fixed_len)=32];
+  uint64 after       = 2;
+  // The secret the session's accept commits (read_commitment): only its
+  // wallet reads the session's requests (SA-128).
+  bytes  read_secret = 3 [(dsm_fixed_len)=32];
 }
 message ConnectRequestRefV1 {
   bytes  session_id = 1 [(dsm_fixed_len)=32];

@@ -568,7 +568,15 @@ fn get_database_path() -> Result<PathBuf> {
 /// proves it final again on load (`ReserveLineage::establish_final`). A
 /// database made at 35 holds releases without their reads, and is refused
 /// at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 37;
+///
+/// v38: DSM Connect's bounds. A wallet session keeps its read secret
+/// (`connect_sessions.read_secret`, SA-128); a log row says what it was to its
+/// grant (`connect_log.grant_use`) and keeps its answer's digest, the answer
+/// itself only while owed for a free request (SA-78); an application's offer
+/// records the one session it connected (`connect_app_offers.accepted_session`,
+/// SA-79) and its sessions their read commitment. A database made at 37 holds
+/// none of these and is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 38;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1143,7 +1151,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             offer_digest   BLOB NOT NULL,
             accept_body    BLOB NOT NULL,
             last_seq       INTEGER NOT NULL,
-            status         TEXT NOT NULL CHECK (status IN ('connected', 'disconnected'))
+            status         TEXT NOT NULL CHECK (status IN ('connected', 'disconnected')),
+            -- The secret the accept commits: the wallet alone reads the
+            -- session's requests with it (SA-128). Never logged.
+            read_secret    BLOB NOT NULL CHECK (length(read_secret) = 32)
         );
         -- What each grant has spent of each token: the wallet's own count.
         CREATE TABLE IF NOT EXISTS connect_spent(
@@ -1169,8 +1180,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
             summary     TEXT NOT NULL,
             outcome     INTEGER NOT NULL,
             detail      TEXT NOT NULL,
-            response    BLOB NOT NULL,
+            -- The signed answer while it is owed. A free request's is dropped
+            -- once delivered, and its digest kept (SA-78).
+            response    BLOB,
+            response_digest BLOB NOT NULL CHECK (length(response_digest) = 32),
             delivery    TEXT NOT NULL CHECK (delivery IN ('unsent', 'sent')),
+            -- What the request was to its grant: one that ran under it and
+            -- moved nothing ('free', counted against the grant's
+            -- free_requests), one that ran under it and spent ('counted'),
+            -- one the player decided ('player'), or the disconnect notice.
+            grant_use   TEXT NOT NULL CHECK (grant_use IN ('free', 'counted', 'player', 'notice')),
             PRIMARY KEY (session_id, seq)
         );
         -- Each advance a request committed, recorded in the advance's own
@@ -1194,7 +1213,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS connect_app_offers(
             offer_digest  BLOB PRIMARY KEY,
             code          TEXT NOT NULL,
-            offer         BLOB NOT NULL
+            offer         BLOB NOT NULL,
+            -- The one session the offer connected: an offer is single-use
+            -- (SA-79), claimed by its first verified accept.
+            accepted_session BLOB CHECK (accepted_session IS NULL OR length(accepted_session) = 32)
         );
         CREATE TABLE IF NOT EXISTS connect_app_sessions(
             session_id        BLOB PRIMARY KEY,
@@ -1204,7 +1226,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             wallet_ak         BLOB NOT NULL,
             accept            BLOB NOT NULL,
             next_seq          INTEGER NOT NULL,
-            status            TEXT NOT NULL CHECK (status IN ('connected', 'disconnected'))
+            status            TEXT NOT NULL CHECK (status IN ('connected', 'disconnected')),
+            -- What the wallet's accept committed for its read secret (SA-128).
+            read_commitment   BLOB NOT NULL CHECK (length(read_commitment) = 32)
         );
         -- Every request the application signed, and the wallet's signed
         -- answer once it posts one: a notification, never evidence.

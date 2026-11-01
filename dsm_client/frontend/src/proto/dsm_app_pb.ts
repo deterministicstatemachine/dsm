@@ -29809,6 +29809,14 @@ export class AppConnectOfferBodyV1 extends Message<AppConnectOfferBodyV1> {
    */
   nonce = new Uint8Array(0);
 
+  /**
+   * How many requests that spend nothing the application asks to make over the
+   * session's whole life (SA-78). The player's grant names at most this many.
+   *
+   * @generated from field: uint32 free_requests = 8;
+   */
+  freeRequests = 0;
+
   constructor(data?: PartialMessage<AppConnectOfferBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29824,6 +29832,7 @@ export class AppConnectOfferBodyV1 extends Message<AppConnectOfferBodyV1> {
     { no: 5, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
     { no: 6, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 7, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectOfferBodyV1 {
@@ -29914,6 +29923,22 @@ export class AppConnectAcceptBodyV1 extends Message<AppConnectAcceptBodyV1> {
    */
   granted: ConnectScopeV1[] = [];
 
+  /**
+   * Requests that spend nothing the grant takes over the session's life, at most
+   * the offer's free_requests; past it each is refused (SA-78).
+   *
+   * @generated from field: uint32 free_requests = 5;
+   */
+  freeRequests = 0;
+
+  /**
+   * H(DSM/connect/read ‖ session_id ‖ secret): the wallet's secret, which it
+   * alone presents to read the session's requests (SA-128).
+   *
+   * @generated from field: bytes read_commitment = 6;
+   */
+  readCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AppConnectAcceptBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29926,6 +29951,8 @@ export class AppConnectAcceptBodyV1 extends Message<AppConnectAcceptBodyV1> {
     { no: 2, name: "wallet_card", kind: "message", T: ContactQrV3 },
     { no: 3, name: "wallet_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "granted", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 5, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "read_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectAcceptBodyV1 {
@@ -33131,6 +33158,13 @@ export class ConnectAppOfferRequestV1 extends Message<ConnectAppOfferRequestV1> 
    */
   tokenAnchors: Uint8Array[] = [];
 
+  /**
+   * asked for in the offer (SA-78)
+   *
+   * @generated from field: uint32 free_requests = 6;
+   */
+  freeRequests = 0;
+
   constructor(data?: PartialMessage<ConnectAppOfferRequestV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -33144,6 +33178,7 @@ export class ConnectAppOfferRequestV1 extends Message<ConnectAppOfferRequestV1> 
     { no: 3, name: "cert_pin", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
     { no: 5, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 6, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppOfferRequestV1 {
@@ -33379,6 +33414,14 @@ export class ConnectAppRequestsQueryV1 extends Message<ConnectAppRequestsQueryV1
    */
   after = protoInt64.zero;
 
+  /**
+   * The secret the session's accept commits (read_commitment): only its
+   * wallet reads the session's requests (SA-128).
+   *
+   * @generated from field: bytes read_secret = 3;
+   */
+  readSecret = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppRequestsQueryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -33389,6 +33432,7 @@ export class ConnectAppRequestsQueryV1 extends Message<ConnectAppRequestsQueryV1
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "after", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "read_secret", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestsQueryV1 {

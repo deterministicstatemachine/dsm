@@ -7,8 +7,11 @@
 //!
 //! - `GET /connect/offer/{digest}`: the signed offer a code names.
 //! - `POST /connect/accept`: a wallet's signed accept.
-//! - `GET /connect/requests/{session}/{after}`: the session's requests above
-//!   `after`, held a while when there are none yet.
+//! - `POST /connect/requests`: the session's requests above `after`, held a
+//!   while when there are none yet. The body is a `ConnectAppRequestsQueryV1`
+//!   carrying the session's read secret, which only its wallet holds
+//!   (SA-128); the secret travels in the body over the pinned TLS
+//!   connection, never in a path, and is never recorded.
 //! - `POST /connect/responses`: a wallet's signed answer.
 
 use std::collections::HashMap;
@@ -343,7 +346,7 @@ pub fn router(state: State, bounds: Bounds) -> Router {
     Router::new()
         .route("/connect/offer/{digest}", get(offer))
         .route("/connect/accept", post(accept))
-        .route("/connect/requests/{session}/{after}", get(requests))
+        .route("/connect/requests", post(requests))
         .route("/connect/responses", post(respond))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -465,21 +468,23 @@ async fn accept(Extract(state): Extract<State>, body: Bytes) -> Response {
     }
 }
 
-async fn requests(
-    Extract(state): Extract<State>,
-    Path((session, after)): Path<(String, u64)>,
-) -> Response {
-    let session = match id32(&session, "the session") {
-        Ok(s) => s,
-        Err(e) => return refused(StatusCode::BAD_REQUEST, e),
-    };
-    let args = arg_pack(
-        pb::ConnectAppRequestsQueryV1 {
-            session_id: session.to_vec(),
-            after,
+async fn requests(Extract(state): Extract<State>, body: Bytes) -> Response {
+    let query = match pb::ConnectAppRequestsQueryV1::decode(body.as_ref()) {
+        Ok(q) => q,
+        Err(e) => {
+            return refused(
+                StatusCode::BAD_REQUEST,
+                format!("not a ConnectAppRequestsQueryV1: {e}"),
+            )
         }
-        .encode_to_vec(),
-    );
+    };
+    let session = match <[u8; 32]>::try_from(query.session_id.as_slice()) {
+        Ok(s) => s,
+        Err(e) => return refused(StatusCode::BAD_REQUEST, format!("the session: {e}")),
+    };
+    let after = query.after;
+    // The account checks the read secret; the relay passes it on unread.
+    let args = arg_pack(query.encode_to_vec());
     for _round in 0..HOLD_ROUNDS {
         // Registered before the read, so a request signed after it wakes us.
         let changed = state.requests_changed.notified();

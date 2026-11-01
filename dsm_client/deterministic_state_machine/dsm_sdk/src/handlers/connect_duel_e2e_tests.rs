@@ -24,7 +24,7 @@ use serial_test::serial;
 
 use super::computed_escrow_e2e_tests::{frozen, issue_team, salt, setup_with_keys};
 use super::connect_e2e_tests::{
-    args_raw, carried_out, fact, reply, request, status, wallet_log, ForwardRelay,
+    args_raw, carried_out, fact, reply, request, status, wallet_log, ForwardRelay, FREE_REQUESTS,
 };
 use super::node_e2e_tests::{args, balance, era, invoke};
 use crate::economic_fixtures::whole_era;
@@ -68,6 +68,7 @@ async fn offer(r: &TestDevice, relay: &ForwardRelay, creatures: &[D32]) -> Strin
                 },
             ],
             token_anchors: Vec::new(),
+            free_requests: FREE_REQUESTS,
         }),
     )
     .await;
@@ -91,8 +92,14 @@ async fn connect(r: &TestDevice, wallet: &TestDevice, relay: &ForwardRelay, code
     };
     assert_eq!(
         preview.scope_lines.len(),
-        2,
-        "the duel scope and the creatures' holdings"
+        3,
+        "the duel scope, the creatures' holdings and the requests that spend nothing"
+    );
+    assert_eq!(
+        preview.scope_lines[2],
+        format!(
+            "Up to {FREE_REQUESTS} requests that spend nothing; after them, each waits for you"
+        )
     );
     assert!(
         preview.scope_lines[0].starts_with(
@@ -214,9 +221,12 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         team.iter().map(|c| *c.anchor()).collect()
     };
     let creatures = [anchors(&team_a), anchors(&team_b)].concat();
-    let code = offer(&r, &relay, &creatures).await;
-    let sid_a = connect(&r, &p.a, &relay, &code).await;
-    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(&r, &relay, &creatures).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay, &creatures).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let stake = whole_era(25);
     let nonce = [0x41; 32];
 
@@ -479,9 +489,12 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
         team.iter().map(|c| *c.anchor()).collect()
     };
     let creatures = [anchors(&team_a), anchors(&team_b)].concat();
-    let code = offer(&r, &relay, &creatures).await;
-    let sid_a = connect(&r, &p.a, &relay, &code).await;
-    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(&r, &relay, &creatures).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay, &creatures).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let nonce: [u8; 32] = rand::random();
     let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
         Answer::DuelSessionKey(k) => k.session_public_key,

@@ -17,8 +17,8 @@ use prost::Message;
 
 use crate::common::domain_tags::{
     TAG_DSM_CONNECT_ACCEPT, TAG_DSM_CONNECT_OFFER, TAG_DSM_CONNECT_OFFER_DIGEST,
-    TAG_DSM_CONNECT_REQUEST, TAG_DSM_CONNECT_RESPONSE, TAG_DSM_CONNECT_SESSION,
-    TAG_DSM_TLS_CERT_HASH,
+    TAG_DSM_CONNECT_READ, TAG_DSM_CONNECT_REQUEST, TAG_DSM_CONNECT_RESPONSE,
+    TAG_DSM_CONNECT_RESPONSE_DIGEST, TAG_DSM_CONNECT_SESSION, TAG_DSM_TLS_CERT_HASH,
 };
 use crate::core::identity::genesis_v2::derive_devid;
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
@@ -152,6 +152,46 @@ pub fn session_id(offer_digest: &[u8; 32], wallet_device_id: &[u8; 32]) -> [u8; 
     h.update(offer_digest);
     h.update(wallet_device_id);
     *h.finalize().as_bytes()
+}
+
+/// The commitment a wallet's accept makes to its session's read secret:
+/// `H(DSM/connect/read ‖ session_id ‖ secret)`. Bound to the session, and so
+/// to the offer and the wallet that answered it; whoever presents a secret
+/// that recomputes it reads that session's requests, and no one else does
+/// (SA-128).
+pub fn read_commitment(session_id: &[u8; 32], secret: &[u8; 32]) -> [u8; 32] {
+    let mut h = dsm_domain_hasher(TAG_DSM_CONNECT_READ);
+    h.update(session_id);
+    h.update(secret);
+    *h.finalize().as_bytes()
+}
+
+/// The digest of a signed answer (`AppResponseV1` bytes), kept in place of
+/// an answer the wallet no longer holds once delivered (SA-78).
+pub fn response_digest(response: &[u8]) -> [u8; 32] {
+    *domain_hash(TAG_DSM_CONNECT_RESPONSE_DIGEST, response).as_bytes()
+}
+
+/// A read whose secret does not open its session's read commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotTheSessionsReader;
+
+impl core::fmt::Display for NotTheSessionsReader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("the read secret does not open the session's read commitment")
+    }
+}
+
+/// Check that `secret` opens the read commitment `committed` of
+/// `session_id`, compared in constant time.
+pub fn check_read_secret(
+    session_id: &[u8; 32],
+    secret: &[u8; 32],
+    committed: &[u8; 32],
+) -> Result<(), NotTheSessionsReader> {
+    use subtle::ConstantTimeEq;
+    let opens = read_commitment(session_id, secret).ct_eq(committed);
+    Option::<()>::from(subtle::CtOption::new((), opens)).ok_or(NotTheSessionsReader)
 }
 
 /// The pin of a TLS leaf certificate: the TLS certificate hash of its DER.

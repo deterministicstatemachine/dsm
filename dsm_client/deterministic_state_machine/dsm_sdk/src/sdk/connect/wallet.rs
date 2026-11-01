@@ -89,6 +89,13 @@ pub fn granted_scopes(accept_body: &[u8]) -> Result<Vec<Scope>, String> {
     scopes_from_wire(&body.granted)
 }
 
+/// How many requests that move nothing the signed grant allows over the
+/// session's life (SA-78).
+pub fn granted_free_requests(accept_body: &[u8]) -> Result<u32, String> {
+    let body: generated::AppConnectAcceptBodyV1 = canonical(accept_body, "the stored accept")?;
+    Ok(body.free_requests)
+}
+
 /// A token as the player reads it: its symbol and an amount in its decimals,
 /// or its anchor's first characters while this device has not rooted it.
 /// An amount as the player reads it, by what this device has rooted.

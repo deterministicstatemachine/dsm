@@ -35,6 +35,10 @@ use crate::bridge::{AppQuery, AppRouter as _};
 use crate::test_support::two_device::{Pair, TestDevice};
 use crate::util::text_id::{decode_base32_crockford, encode_base32_crockford};
 
+/// The requests that move nothing a test's offer asks for: enough for every
+/// request these suites make, a whole match included.
+pub(super) const FREE_REQUESTS: u32 = 512;
+
 /// What the relay serves for the requests read.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Serve {
@@ -95,11 +99,9 @@ async fn keep_accept(State(held): State<Shared>, body: Bytes) -> StatusCode {
     StatusCode::OK
 }
 
-async fn serve_requests(
-    State(held): State<Shared>,
-    Path((session, after)): Path<(String, u64)>,
-) -> Vec<u8> {
-    let session = id32(&session);
+async fn serve_requests(State(held): State<Shared>, body: Bytes) -> Vec<u8> {
+    let query = generated::ConnectAppRequestsQueryV1::decode(body.as_ref()).expect("a read");
+    let (session, after) = (query.session_id, query.after);
     let held = held.lock().expect("the relay");
     let requests = held
         .requests
@@ -160,7 +162,7 @@ impl ForwardRelay {
         let app = axum::Router::new()
             .route("/connect/offer/{digest}", get(serve_offer))
             .route("/connect/accept", post(keep_accept))
-            .route("/connect/requests/{session}/{after}", get(serve_requests))
+            .route("/connect/requests", post(serve_requests))
             .route("/connect/responses", post(keep_response))
             .with_state(held.clone());
         let handle: axum_server::Handle<std::net::SocketAddr> = axum_server::Handle::new();
@@ -264,6 +266,7 @@ async fn offer(
             cert_pin: relay.pin.to_vec(),
             scopes: game_scopes(wild),
             token_anchors: vec![wild.to_vec()],
+            free_requests: FREE_REQUESTS,
         }),
     )
     .await;
@@ -363,24 +366,32 @@ pub(super) async fn request(
     let Reply::Request(made) = reply(&signed) else {
         panic!("connect.app.request answered another reply");
     };
-    let served = query(
-        a,
-        "connect.app.requests",
-        args(&generated::ConnectAppRequestsQueryV1 {
-            session_id: session.to_vec(),
-            after: made.seq - 1,
-        }),
-    )
-    .await;
-    let Reply::Requests(batch) = reply(&served) else {
-        panic!("connect.app.requests answered another reply");
-    };
-    assert_eq!(batch.requests.len(), 1);
-    relay
-        .held()
-        .requests
-        .push(batch.requests[0].encode_to_vec());
+    // The test is the relay here: it takes the signed request as A holds it.
+    a.enter();
+    let held = crate::storage::client_db::connect::app_requests_after(session, made.seq - 1)
+        .expect("A's requests");
+    assert_eq!(held.len(), 1);
+    relay.held().requests.extend(held);
     made.seq
+}
+
+/// The read secret `wallet`'s store holds for `session`: the wallet's alone.
+fn wallet_read_secret(wallet: &TestDevice, session: &[u8; 32]) -> [u8; 32] {
+    wallet.enter();
+    crate::storage::client_db::connect::session(session)
+        .expect("the wallet's store")
+        .expect("the wallet's session")
+        .read_secret
+        .0
+}
+
+/// A read of `session`'s requests above 0, presenting `secret`.
+fn read_with(session: &[u8; 32], secret: &[u8; 32]) -> Vec<u8> {
+    args(&generated::ConnectAppRequestsQueryV1 {
+        session_id: session.to_vec(),
+        after: 0,
+        read_secret: secret.to_vec(),
+    })
 }
 
 /// B's `connect.sync`; then A takes every answer the relay kept.
@@ -787,6 +798,7 @@ async fn a_wallet_refuses_an_offer_the_code_does_not_vouch_for() {
             cert_pin: relay.pin.to_vec(),
             scopes: game_scopes(&wild),
             token_anchors: vec![wild.to_vec()],
+            free_requests: FREE_REQUESTS,
         }),
     )
     .await;
@@ -1843,20 +1855,21 @@ async fn a_read_of_requests_for_no_session_is_refused() {
     let relay = ForwardRelay::start().await;
     let made = offer(&p.a, &relay, &wild).await;
     let session = connect(&p, &relay, &made.code).await;
-    let read = |session_id: [u8; 32]| {
-        args(&generated::ConnectAppRequestsQueryV1 {
-            session_id: session_id.to_vec(),
-            after: 0,
-        })
-    };
+    let secret = wallet_read_secret(&p.b, &session);
 
-    let Reply::Requests(batch) = reply(&query(&p.a, "connect.app.requests", read(session)).await)
+    let Reply::Requests(batch) =
+        reply(&query(&p.a, "connect.app.requests", read_with(&session, &secret)).await)
     else {
         panic!("connect.app.requests answered another reply");
     };
     assert!(batch.requests.is_empty(), "{batch:?}");
 
-    let unknown = query(&p.a, "connect.app.requests", read([0x5E; 32])).await;
+    let unknown = query(
+        &p.a,
+        "connect.app.requests",
+        read_with(&[0x5E; 32], &secret),
+    )
+    .await;
     assert!(
         !unknown.success,
         "a read for no session was answered: {:?}",
@@ -2012,4 +2025,224 @@ async fn declining_a_request_its_crashed_run_carried_out_records_it_carried_out(
         entry.detail
     );
     assert_eq!(balance(&p.b, &era()), era_held - 1, "nothing more was paid");
+}
+
+/// SA-128. Only the session's wallet reads its requests. A read presents the
+/// secret the wallet's signed accept committed, which the wallet drew and keeps
+/// in its own store. A read with any other secret is refused, the wallet's is
+/// answered, and once the wallet has ended the session its secret reads
+/// nothing more.
+/// MUTATION CONTROL: the account answering a read without checking its
+/// secret, as it did, answers the other secret and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn only_the_sessions_wallet_reads_its_requests() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let secret = wallet_read_secret(&p.b, &session);
+    request(
+        &p.a,
+        &relay,
+        &session,
+        generated::connect_app_request_intent_v1::Kind::Contacts(generated::ConnectContactsV1 {}),
+    )
+    .await;
+
+    let Reply::Requests(batch) =
+        reply(&query(&p.a, "connect.app.requests", read_with(&session, &secret)).await)
+    else {
+        panic!("connect.app.requests answered another reply");
+    };
+    assert_eq!(batch.requests.len(), 1, "the wallet reads its request");
+
+    let mut other = secret;
+    other[0] ^= 1;
+    let refused = query(&p.a, "connect.app.requests", read_with(&session, &other)).await;
+    assert!(
+        refused
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("does not open the session's read commitment")),
+        "a read with another secret: {:?}",
+        refused.error_message
+    );
+
+    let ended = invoke(
+        &p.b,
+        "connect.disconnect",
+        args(&generated::ConnectSessionRefV1 {
+            session_id: session.to_vec(),
+        }),
+    )
+    .await;
+    reply(&ended);
+    let notices = std::mem::take(&mut relay.held().responses);
+    assert_eq!(notices.len(), 1, "one signed disconnect notice");
+    reply(&invoke(&p.a, "connect.app.respond", args_raw(notices[0].clone())).await);
+    let after_end = query(&p.a, "connect.app.requests", read_with(&session, &secret)).await;
+    assert!(
+        after_end
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("the session's wallet ended it")),
+        "a read after the wallet ended the session: {:?}",
+        after_end.error_message
+    );
+}
+
+/// SA-79. An offer connects one wallet. A second wallet's accept of the same
+/// offer is refused by the application's account before anything is added
+/// for it: no contact, no session.
+/// MUTATION CONTROL: the account taking an accept without claiming its
+/// offer, as it did, connects the second wallet and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offer_connects_one_wallet() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    connect(&p, &relay, &made.code).await;
+
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    let previewed = query(
+        &c,
+        "connect.preview",
+        args(&generated::ConnectPreviewRequestV1 {
+            code: made.code.clone(),
+        }),
+    )
+    .await;
+    let Reply::Preview(preview) = reply(&previewed) else {
+        panic!("connect.preview answered another reply");
+    };
+    reply(
+        &invoke(
+            &c,
+            "connect.approve",
+            args(&generated::ConnectApproveRequestV1 {
+                offer_digest: preview.offer_digest.clone(),
+                granted: Vec::new(),
+            }),
+        )
+        .await,
+    );
+    let accept = relay
+        .held()
+        .accepts
+        .pop()
+        .expect("the second wallet posted its accept");
+    let refused = invoke(&p.a, "connect.app.accept", args_raw(accept)).await;
+    assert!(
+        refused
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("an offer connects one wallet")),
+        "a second wallet's accept of one offer: {:?}",
+        refused.error_message
+    );
+    p.a.enter();
+    assert!(
+        crate::storage::client_db::get_all_contacts()
+            .expect("A's contacts")
+            .iter()
+            .all(|contact| contact.device_id != c.device_id.to_vec()),
+        "A added the second wallet as a contact"
+    );
+    let Reply::Sessions(sessions) = reply(&query(&p.a, "connect.app.sessions", Vec::new()).await)
+    else {
+        panic!("connect.app.sessions answered another reply");
+    };
+    assert_eq!(sessions.sessions.len(), 1, "one session for one offer");
+}
+
+/// The answer the entered wallet still holds for request `seq` of `session`.
+fn answer_held(session: &[u8; 32], seq: u64) -> Option<Vec<u8>> {
+    let binding = crate::storage::client_db::get_connection().expect("the wallet's store");
+    let conn = binding.lock().expect("the store's lock");
+    conn.query_row(
+        "SELECT response FROM connect_log WHERE session_id = ?1 AND seq = ?2",
+        rusqlite::params![session.as_slice(), seq as i64],
+        |r| r.get(0),
+    )
+    .expect("the request's log row")
+}
+
+/// SA-78. A grant runs as many requests that move nothing as its signed
+/// accept allows over the session's life, the most the offer asked for. Past
+/// them a request waits for the player, and holds every later one behind it.
+/// A free request's answer is dropped once it is delivered: its log row keeps
+/// the outcome and the answer's digest.
+/// MUTATION CONTROL: the count not consulted, as before, runs the third
+/// request under the grant and turns this red; the answer not dropped on
+/// delivery keeps it and turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_grant_runs_only_its_free_requests() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = invoke(
+        &p.a,
+        "connect.app.offer",
+        args(&generated::ConnectAppOfferRequestV1 {
+            display_name: "Wildstate".into(),
+            endpoint: relay.endpoint.clone(),
+            cert_pin: relay.pin.to_vec(),
+            scopes: game_scopes(&wild),
+            token_anchors: vec![wild.to_vec()],
+            free_requests: 2,
+        }),
+    )
+    .await;
+    let Reply::Offer(made) = reply(&made) else {
+        panic!("connect.app.offer answered another reply");
+    };
+    let digest: [u8; 32] = made.offer_digest.as_slice().try_into().expect("a digest");
+    relay.held().offer = Some((digest, made.offer.clone()));
+    let session = connect(&p, &relay, &made.code).await;
+
+    let contacts = || {
+        generated::connect_app_request_intent_v1::Kind::Contacts(generated::ConnectContactsV1 {})
+    };
+    let first = request(&p.a, &relay, &session, contacts()).await;
+    let second = request(&p.a, &relay, &session, contacts()).await;
+    let third = request(&p.a, &relay, &session, contacts()).await;
+    sync_and_deliver(&p, &relay).await;
+
+    for seq in [first, second] {
+        let done = status(&p.a, &session, seq).await;
+        assert_eq!(
+            outcome(&done),
+            generated::ConnectOutcome::CarriedOut,
+            "request {seq}: {}",
+            done.reason
+        );
+    }
+    let waits = status(&p.a, &session, third).await;
+    assert_eq!(
+        outcome(&waits),
+        generated::ConnectOutcome::AwaitingApproval,
+        "the third request: {}",
+        waits.reason
+    );
+    assert!(
+        waits.reason.contains("requests that move nothing"),
+        "{}",
+        waits.reason
+    );
+    assert_eq!(waiting_for_the_player(&p.b).await, 1);
+
+    p.b.enter();
+    for seq in [first, second] {
+        assert_eq!(
+            answer_held(&session, seq),
+            None,
+            "request {seq}'s delivered answer is still kept"
+        );
+    }
 }
