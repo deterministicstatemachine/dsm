@@ -76,7 +76,18 @@ pub fn economic_root_register_key(
 /// An object naming `K_root`: a registered economic claim — a trader's
 /// signed root claim, or a conditional SoFi claim — whose own coordinates
 /// derive `k_root`. Anything else at the cell counts as nothing.
+///
+/// The cell the claim names is compared first, from its bytes alone: a claim
+/// for another cell is dropped for the cost of a decode, before any signature
+/// is checked (SA-25).
 pub fn root_claim_naming(bytes: &[u8], k_root: &[u8; 32]) -> Option<RegisteredEconomicClaim> {
+    let names_this_cell = crate::economic::claim_envelope::registered_claim_coordinates(bytes)
+        .is_ok_and(|(genesis, device_id, position)| {
+            economic_root_register_key(&genesis, &device_id, position) == *k_root
+        });
+    if !names_this_cell {
+        return None;
+    }
     let claim = crate::economic::claim_envelope::decode_registered_economic_claim(bytes).ok()?;
     let (genesis, device_id) = claim.trader();
     (economic_root_register_key(&genesis, &device_id, claim.economic_position()) == *k_root)

@@ -99,6 +99,8 @@ pub enum ClaimEnvelopeError {
     SignFailed(String),
     /// The body could not be re-encoded to check the signing digest.
     Encode(CcbError),
+    /// The envelope's protobuf did not decode.
+    Envelope(String),
 }
 
 impl core::fmt::Display for ClaimEnvelopeError {
@@ -119,6 +121,7 @@ impl core::fmt::Display for ClaimEnvelopeError {
             Self::ConditionalClaim(e) => write!(f, "conditional claim: {e}"),
             Self::SignFailed(e) => write!(f, "economic root claim sign failed: {e}"),
             Self::Encode(e) => write!(f, "economic root claim body not encodable: {e}"),
+            Self::Envelope(e) => write!(f, "economic root claim envelope: {e}"),
         }
     }
 }
@@ -350,6 +353,32 @@ impl RegisteredEconomicClaim {
             }),
         }
     }
+}
+
+/// The trader and economic position a registered claim names, read from its
+/// bytes before any signature is verified: what lets a reader drop a claim
+/// naming another cell for the cost of a decode (SA-25). Bytes that decode as
+/// neither kind of claim are refused with why. It establishes nothing about
+/// the claim.
+pub fn registered_claim_coordinates(
+    cell_bytes: &[u8],
+) -> Result<([u8; 32], [u8; 32], u64), ClaimEnvelopeError> {
+    let leading_class =
+        (cell_bytes.len() >= 2).then(|| u16::from_be_bytes([cell_bytes[0], cell_bytes[1]]));
+    if leading_class == Some(class::SOFI_SIGNED_RESOLUTION_CLAIM) {
+        let signed = crate::sofi::wire::SignedSofiResolutionClaim::decode(cell_bytes)
+            .map_err(ClaimEnvelopeError::Body)?;
+        let claim = signed.claim();
+        return Ok((claim.genesis, claim.device_id, claim.position));
+    }
+    let env = generated::EconomicRootClaimV1::decode(cell_bytes)
+        .map_err(|e| ClaimEnvelopeError::Envelope(e.to_string()))?;
+    let body = decode_economic_root_claim_body(&env.body_ccb).map_err(ClaimEnvelopeError::Body)?;
+    Ok((
+        body.trader_genesis,
+        body.trader_devid,
+        body.economic_position,
+    ))
 }
 
 /// Decode a register cell into whichever claim it holds, **by class**.

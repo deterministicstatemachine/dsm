@@ -752,6 +752,8 @@ pub enum ReleaseError {
     SignatureInvalid,
     /// SPHINCS+ signing failed.
     SignFailed(String),
+    /// The envelope's protobuf did not decode.
+    Envelope(String),
 }
 
 impl core::fmt::Display for ReleaseError {
@@ -760,6 +762,7 @@ impl core::fmt::Display for ReleaseError {
             Self::Malformed(why) => write!(f, "native reserve release malformed: {why}"),
             Self::SignatureInvalid => write!(f, "native reserve release signature invalid"),
             Self::SignFailed(e) => write!(f, "native reserve release sign failed: {e}"),
+            Self::Envelope(e) => write!(f, "native reserve release envelope: {e}"),
         }
     }
 }
@@ -1034,10 +1037,33 @@ fn entry_refused(e: crate::core::identity::directory::DirectoryError) -> Release
 /// Core's recognition at the parent's successor cell: the bytes rebuild into
 /// a release that verifies AND is the parent's successor. Anything else
 /// counts as nothing at the cell.
+///
+/// The parent the release names is compared first, from its bytes alone: a
+/// release for another cell is dropped before any signature is checked
+/// (SA-25).
 pub fn recognize_release(parent: &NativeReserveState, bytes: &[u8]) -> Option<VerifiedRelease> {
+    let names_this_parent = release_parent(bytes).is_ok_and(|(reserve_id, parent_root)| {
+        reserve_id == parent.reserve_id && parent_root == parent.root()
+    });
+    if !names_this_parent {
+        return None;
+    }
     let release = decode_and_verify_release(bytes).ok()?;
     release_constructible(parent, &release).ok()?;
     Some(release)
+}
+
+/// The reserve and parent root a release names, read from its bytes before
+/// its signature is verified. It establishes nothing about the release.
+fn release_parent(bytes: &[u8]) -> Result<(D32, D32), ReleaseError> {
+    let env = generated::NativeReserveReleaseV1::decode(bytes)
+        .map_err(|e| ReleaseError::Envelope(e.to_string()))?;
+    let body = NativeReserveReleaseBody::from_proto(
+        env.body
+            .as_ref()
+            .ok_or(ReleaseError::Malformed("envelope has no body"))?,
+    )?;
+    Ok((body.reserve_id, body.parent_root))
 }
 
 /// What a reader keeps of a seat's log at `cell`, the successor cell of the
@@ -1053,9 +1079,10 @@ pub fn named_successor_keeps<'c>(
     parent_root: &'c [u8; 32],
 ) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + 'c {
     crate::route_chain::recognized_copies(cell, move |bytes| {
-        decode_and_verify_release(bytes).is_ok_and(|release| {
-            release.body.reserve_id == *reserve_id && release.body.parent_root == *parent_root
-        })
+        release_parent(bytes).is_ok_and(|named| named == (*reserve_id, *parent_root))
+            && decode_and_verify_release(bytes).is_ok_and(|release| {
+                release.body.reserve_id == *reserve_id && release.body.parent_root == *parent_root
+            })
     })
 }
 

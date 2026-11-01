@@ -871,11 +871,45 @@ impl CellEvidence {
 /// value holds the cell only from the leader's first recognized copy, and a
 /// later link only carries that same value (§9 route chains, rules 3 and 4),
 /// so no other entry can count.
+///
+/// Each distinct value is recognized once per keeper: the same bytes copied at
+/// every seat, or written many times at one, cost one recognition and then a
+/// lookup, never a signature check per copy (SA-25). The verdict is the
+/// recognizer's own on those exact bytes; nothing outlives the keeper.
 pub fn recognized_copies<'c>(
     cell: &'c RoutedCell,
     recognized: impl Fn(&[u8]) -> bool + Sync + 'c,
 ) -> impl Fn(&RouteEntry) -> bool + Sync + 'c {
-    move |entry| is_cell_copy_at(entry, cell, entry.position) && recognized(&entry.value)
+    let verdicts: Verdicts = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    move |entry| {
+        is_cell_copy_at(entry, cell, entry.position)
+            && recognized_once(&verdicts, &recognized, &entry.value)
+    }
+}
+
+/// The verdicts one keeper reached, by the exact value bytes.
+type Verdicts = std::sync::Mutex<std::collections::BTreeMap<Vec<u8>, bool>>;
+
+/// `recognized`'s verdict on `value`, reached once per keeper. The lock is not
+/// held while the recognizer runs, so seats folded in parallel recognize
+/// different values in parallel.
+fn recognized_once(verdicts: &Verdicts, recognized: &impl Fn(&[u8]) -> bool, value: &[u8]) -> bool {
+    let held = match verdicts.lock() {
+        Ok(verdicts) => verdicts.get(value).copied(),
+        Err(poisoned) => poisoned.into_inner().get(value).copied(),
+    };
+    match held {
+        Some(verdict) => verdict,
+        None => {
+            let verdict = recognized(value);
+            let mut verdicts = match verdicts.lock() {
+                Ok(verdicts) => verdicts,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            verdicts.insert(value.to_vec(), verdict);
+            verdict
+        }
+    }
 }
 
 /// What a writer keeps of a seat's log: the copies that are `copy`, whose
@@ -2332,6 +2366,38 @@ mod tests {
         assert_eq!(
             first_recognized_at_leader(&routed, &none, &recognized),
             None
+        );
+    }
+
+    /// SA-25. A keeper recognizes each distinct value once: one value written
+    /// a dozen times at the leader costs one recognition, another value costs
+    /// its own, and the verdicts are the recognizer's.
+    /// MUTATION CONTROL: recognizing every copy (the verdicts bypassed) calls
+    /// the recognizer once per copy: red.
+    #[test]
+    fn a_keeper_recognizes_each_distinct_value_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut c = cell();
+        for _ in 0..12 {
+            c.write(b"ok-flood", 0, &[]);
+        }
+        c.write(b"ok-other", 0, &[]);
+        c.write(b"junk", 0, &[]);
+        let routed = c.routed();
+        let calls = AtomicUsize::new(0);
+        let keep = recognized_copies(&routed, |value: &[u8]| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            recognize_ok(value).is_some()
+        });
+        let log = HeldLog::of(&routed, &c.logs[0], &keep);
+        assert_eq!(
+            first_recognized_at_leader(&routed, &log, &keep).map(|(value, _)| value),
+            Some(b"ok-flood".to_vec())
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "one recognition per distinct value, however many copies"
         );
     }
 
