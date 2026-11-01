@@ -5459,6 +5459,8 @@ message ConnectReplyV1 {
     ConnectAppStatusV1   status   = 8;
     ConnectRequestRefV1  request  = 9;
     ConnectDecidedV1     decided  = 10;
+    ConnectDuelCellsV1   duel     = 11; // connect.duelWithdraw / connect.duelSettle: the match's cells after
+    ConnectEscrowReleaseResultV1 released = 12; // connect.duelCollect: each stake released to this wallet
   }
 }
 

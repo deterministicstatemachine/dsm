@@ -508,6 +508,9 @@ impl AppRouterImpl {
             "connect.app.request" => Box::pin(self.connect_app_request(&i.args)).await,
             "connect.app.respond" => connect_app_respond(&i.args),
             "connect.app.status" => Box::pin(self.connect_app_status(&i.args)).await,
+            "connect.duelWithdraw" => Box::pin(self.connect_duel_withdraw(&i.args)).await,
+            "connect.duelSettle" => Box::pin(self.connect_duel_settle(&i.args)).await,
+            "connect.duelCollect" => Box::pin(self.connect_duel_collect(&i.args)).await,
             other => Err(format!("unknown connect invoke: {other}")),
         };
         match result {
@@ -517,6 +520,81 @@ impl AppRouterImpl {
     }
 
     // ------------------------------ the wallet ------------------------------
+
+    /// The player withdraws from a match no Start holds yet, from their own
+    /// wallet and with no application involved: their side's Withdraw, or a
+    /// Start, is first at the start cell's leader, and a Withdraw voids the
+    /// match and refunds both stakes (SA-77). The match is one this wallet
+    /// locked; its kept state names it.
+    async fn connect_duel_withdraw(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelWithdraw";
+        let req: generated::ConnectDuelWithdrawV1 = body(args, ROUTE)?;
+        let cell = d32(&req.match_cell, "the match cell")?;
+        let set = own_set()?;
+        let view = crate::sdk::computed_flow::withdraw(&self.core_sdk, &set, &cell)
+            .await
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        Ok(Reply::Duel(duel_cells(&view)))
+    }
+
+    /// The player collects a computed match's result from their own wallet,
+    /// with no application involved: each vault released to this wallet as its
+    /// predicate decides from the match's cells (SA-77). Each is a stake in a
+    /// match this wallet locked.
+    async fn connect_duel_collect(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelCollect";
+        let req: generated::ConnectDuelCollectV1 = body(args, ROUTE)?;
+        let set = own_set()?;
+        let mut released = Vec::with_capacity(req.vault_ids.len());
+        for vault in &req.vault_ids {
+            let vault_id = d32(vault, "a vault")?;
+            let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, &vault_id)
+                .await
+                .map_err(|e| format!("{ROUTE}: vault {}: {e}", short(&vault_id)))?;
+            let kept = crate::storage::client_db::duel_matches::get_match(&held.verdict_cell)
+                .map_err(|e| format!("{ROUTE}: the kept matches: {e}"))?;
+            if held.program.is_none() || kept.is_none() {
+                return Err(format!(
+                    "{ROUTE}: vault {} is not a stake in a computed match this wallet staked in",
+                    short(&vault_id)
+                ));
+            }
+            let outcome = crate::sdk::computed_flow::release(&self.core_sdk, &set, &vault_id)
+                .await
+                .map_err(|e| format!("{ROUTE}: releasing {}: {e}", short(&vault_id)))?;
+            released.push(generated::ConnectEscrowReleasedV1 {
+                vault_id: vault_id.to_vec(),
+                position: outcome.position,
+                state: position_state(outcome.state) as i32,
+            });
+        }
+        Ok(Reply::Released(generated::ConnectEscrowReleaseResultV1 {
+            released,
+        }))
+    }
+
+    /// The player settles a started match from their own wallet, with no
+    /// application involved: from the transcript the wallet kept, and any of
+    /// the other side's last signed entries the player holds. Core decides the
+    /// outcome from the transcript's own bytes before anything is written
+    /// (SA-77).
+    async fn connect_duel_settle(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelSettle";
+        let req: generated::ConnectDuelSettleV1 = body(args, ROUTE)?;
+        let cell = d32(&req.match_cell, "the match cell")?;
+        let entries = crate::sdk::connect::grant::duel_entries(&req.entries)
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        let set = own_set()?;
+        let view = crate::sdk::computed_flow::settle(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &signed_entries(&entries),
+        )
+        .await
+        .map_err(|e| format!("{ROUTE}: {e}"))?;
+        Ok(Reply::Duel(duel_cells(&view)))
+    }
 
     async fn connect_preview(&self, params: &[u8]) -> Result<Reply, String> {
         const ROUTE: &str = "connect.preview";

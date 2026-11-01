@@ -3400,7 +3400,7 @@ Found while fixing §6.87.
 | SA-74 | `crates/dsm-anchor-pico/src/main.rs` · `main`, `chip_sign` | TROPIC01 opened with the public PROD0 pairing key, so anyone on the SPI bus can get σ^chip over any message, and the birth cage makes the key permanent. | confirmed (3 of 3) | Fixed (`1c3e812f9`: the board's own key in slot 1, slot 0 invalidated at birth; built for the RP2350, not run on silicon) |
 | SA-75 | `dsm_sdk/src/sdk/native_reserve.rs` · `walk_reserve`, `owe_after_walk` | Every reserve walk loads all memoised release envelopes since R_0 into memory under the DB lock, and the memo grows without bound. | confirmed (2 of 2) | Fixed in part (`d2e0f448`, round five): a walk holds one memoised release at a time; the memo still keeps every release (retention is the owner's call) |
 | SA-76 | `dsm_sdk/src/sdk/native_reserve.rs` · `read_ahead`, `locate_ahead` | Reserve read_ahead buffers 16 successor cells x 5 seats x 8 MiB at once, with cells chosen by throwaway-release writers. | confirmed (2 of 2) | Fixed (`d2e0f448`) |
-| SA-77 | `dsm_sdk/src/handlers/connect_routes.rs` · `match_of_session`, `duel_belongs_to` | A computed-match (duel) stake can be withdrawn only through the staking app's DuelWithdraw request, so app silence or a disconnect strands it. | confirmed (3 of 3) | Open |
+| SA-77 | `dsm_sdk/src/handlers/connect_routes.rs` · `match_of_session`, `duel_belongs_to` | A computed-match (duel) stake can be withdrawn only through the staking app's DuelWithdraw request, so app silence or a disconnect strands it. | confirmed (3 of 3) | Fixed (§6.127; owner's choice 2026-10-31): the player withdraws an unstarted match, settles a started one from the wallet's own kept transcript, and collects each stake, all from the wallet with no application (`connect.duelWithdraw`, `connect.duelSettle`, `connect.duelCollect`); Core decides each from the match's own cells and transcript. Tests: `handlers::connect_duel_e2e_tests::a_player_withdraws_and_collects_a_stake_without_the_game`, and B's own settle in `a_match_decided_by_the_program_is_played_and_paid_through_the_grant` |
 | SA-78 | `dsm_sdk/src/handlers/connect_routes.rs` · `decide`, `process` | A connected app can make unlimited zero-spend in-grant requests, each costing a SPHINCS+ verify and sign plus a ~50 KB connect_log row kept forever. | confirmed (2 of 2) | Fixed (§6.124; owner's choice 2026-10-31, both): the signed accept names how many requests that move nothing the grant runs over the session's life (`free_requests`, at most the offer's); past them every request waits for the player, and holds every later one behind it. A free request's answer is dropped once delivered; its log row keeps the outcome and the answer's digest. Test: `handlers::connect_e2e_tests::a_grant_runs_only_its_free_requests` |
 | SA-79 | `dsm_sdk/src/handlers/connect_routes.rs` · `connect_app_accept`, `add_contact_from_resolved` | Connect offers never expire and are not single-use, so one connect code adds unlimited contacts, relationships and sessions to the app account. | confirmed (2 of 2) | Fixed (§6.124; owner's choice 2026-10-31, single-use): an offer's first verified accept claims it (`connect_app_offers.accepted_session`) before anything is added for the wallet; any other wallet's accept is refused. Test: `handlers::connect_e2e_tests::an_offer_connects_one_wallet` |
 | SA-80 | `dsm_sdk/src/sdk/connect/holdings.rs` · `prove`, `issued_by_app` | Holdings proofs carry unsalted SMT siblings, revealing balances of tokens outside the granted Holdings scope. | plausible (1 of 2) | Open |
@@ -3425,7 +3425,7 @@ Found while fixing §6.87.
 | SA-99 | `dsm_sdk/src/sdk/route_seats.rs` · `read_cell`, `gather` | read_cell reads values before closing the cycle, so a trickle of junk writes keeps any cell undecided. | confirmed (2 of 2) | Fixed (round 3) |
 | SA-100 | `dsm_sdk/src/handlers/recipient_dispatch.rs` · `ingest_evidence_half`, `ingest_transfer_half` | A hostile contact can stage unlimited verified-but-never-executable transfers and receipts: unbounded disk growth plus repeated SPHINCS+ re-verification on every sync. | confirmed (2 of 2) | Fixed (`0b91b682`) |
 | SA-101 | `dsm_sdk/src/handlers/storage_routes.rs` · `pull_and_process_inbox`, `retrieve_from` | The first storage member in set order starves every inbox route by filling the per-route take(limit) budget with fresh junk. | confirmed (2 of 2) | Fixed (`0b91b682`) |
-| SA-102 | `dsm_sdk/src/sdk/connect/grant.rs` · `decide`, `DuelSign)` | Under a Duel grant the app writes the victim's transcript entries (including Resign) and the session key signs them, so the app can forge moves and take the stake. | confirmed (2 of 3) | Open |
+| SA-102 | `dsm_sdk/src/sdk/connect/grant.rs` · `decide`, `DuelSign)` | Under a Duel grant the app writes the victim's transcript entries (including Resign) and the session key signs them, so the app can forge moves and take the stake. | confirmed (2 of 3) | Fixed (§6.127; owner's choice 2026-10-31, rules-checked): a DuelSign of a Resign is outside every grant and waits for the player (`grant::decide`, `resigns`); every other entry is signed only once the match's program accepts it after the transcript so far (`computed_flow::sign_entry` applies it through the program's progress). Tests: `sdk::connect::grant::tests::a_resignation_waits_for_the_player`, `handlers::connect_duel_e2e_tests::a_match_decided_by_the_program_is_played_and_paid_through_the_grant` (B approves its own resignation) |
 | SA-103 | `dsm_sdk/src/handlers/wallet_routes.rs` · `handle_wallet_query`, `canonicalize_token_id` | A held token whose committed ticker is non-ASCII, a control character or space-padded makes balance.list fail on every call. | confirmed (2 of 2) | Fixed (`95779279`, `74c7533e`): `balance.list` shows any ticker §47 allows, and Core counts a ticker in characters |
 | SA-104 | `dsm_sdk/src/storage/client_db/tokens.rs` · `upsert_balance_projection_with_conn`, `validate_projection_identity` | Balance projections keyed by (device, ticker) with a first-writer commit lock let a foreign coin named exactly "ERA" take the ERA row for good. | confirmed (2 of 2) | Fixed (`ea1e2d17`): no created or adopted token carries a built-in ticker in any letter case, so none takes the ERA row |
 | SA-105 | `dsm_storage_node/src/api/transport/b0x.rs` · `wait_for_spools`, `ready_spools` | The b0x wait route is merged outside the concurrency limit yet runs DB queries, so up to 4096 waits contend for a 32-connection pool. | plausible (1 of 2) | Fixed (`ac72615f`) |
@@ -6808,6 +6808,33 @@ A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to
 - *One hash, once.* `bearer_payload_hash` is Core's (`DSM/bearer-payload/v1`, now a registered domain tag), and the sender's stage uses it.
 - *Schema.* Client database schema 40.
 - *Test.* `dsm::economic::offline_boundary::tests::a_settlement_pays_only_the_lineage_its_payment_named`. The payee's lineage settles; a lineage with the same device id and another genesis is refused; a settlement carrying a transfer the anchor did not sign is refused. The end-to-end offline payment (`an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online`) settles through the new body.
+
+
+### 6.127 A duel's resignation is the player's, and a stake never waits on the game (SA-102, SA-77; `fix/beta-requirements-completion`, 2026-10-31)
+
+*The owner's choice (2026-10-31): "Rules-checked + commit-reveal".*
+- The wallet signs only an entry the duel rules accept after the transcript so far, and asks the player in the wallet before signing a Resign.
+- Each wallet commits H(r) at lock and reveals at ready, and the seed is H(nonce, r_a, r_b, keys).
+- An unstarted match's stake is withdrawn by its owner's own signed withdraw, with no app needed. A started one settles from the both-signed transcript either wallet presents.
+
+**SA-102, the moves.** Under a duel grant the application writes the entries it asks the wallet to sign.
+- *Rules.* `computed_flow::sign_entry` applies an entry through the match program's progress before signing it, so the wallet signs only what the program accepts after the transcript it kept. That was already so, and nothing changed there.
+- *A Resign.* A Resign ends the match against the player, and the application chose it. A `DuelSign` of a Resign is now outside every grant (`grant::decide`, `resigns`): it waits for the player and holds every later request behind it, and the player approves or declines it in the wallet.
+- *Other entries.* A move still runs without the player.
+
+**SA-77, the stake.** Withdrawing, settling and collecting were reachable only through the application's requests, so an application that went silent stranded both stakes. Each is now also a route of the player's own wallet. The match must be one the wallet staked in (its kept state), and Core decides from the match's cells and transcript:
+- `connect.duelWithdraw`: the side's signed Withdraw, while no Start holds the start cell; a Withdraw holding it voids the match.
+- `connect.duelSettle`: the wallet's own kept transcript, with any of the other side's last signed entries the player holds.
+- `connect.duelCollect`: each of the wallet's stakes, released as its vault's predicate decides.
+
+The routes answer with the new reply variants `duel` (11) and `released` (12) of `ConnectReplyV1`.
+
+**Tests.**
+- `dsm_sdk::sdk::connect::grant::tests::a_resignation_waits_for_the_player`. A Resign is outside the grant, and a Commit is in it.
+- `dsm_sdk::handlers::connect_duel_e2e_tests::a_match_decided_by_the_program_is_played_and_paid_through_the_grant`. B's resignation waits for B, who approves it. After the game's settle, B settles from its own wallet and the cell holds `a-wins`.
+- `dsm_sdk::handlers::connect_duel_e2e_tests::a_player_withdraws_and_collects_a_stake_without_the_game`. Both sides stake; the game goes silent; A withdraws from its own wallet; each player collects its own stake back.
+
+**SA-140, the tiebreak seed:** still to build here, as the owner chose it. Each wallet commits `H(r)` at lock and reveals `r` at ready, and the seed is derived from both reveals.
 
 ## 7 Totals
 

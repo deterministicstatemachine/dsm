@@ -2782,7 +2782,10 @@ impl AppRouter for AppRouterImpl {
             | "connect.app.accept"
             | "connect.app.request"
             | "connect.app.respond"
-            | "connect.app.status" => Box::pin(self.handle_connect_invoke(i)).await,
+            | "connect.app.status"
+            | "connect.duelWithdraw"
+            | "connect.duelSettle"
+            | "connect.duelCollect" => Box::pin(self.handle_connect_invoke(i)).await,
             // Token
             "token.create" | "token.burn" | "tokens.publishPolicy" | "tokens.addByAnchor" => {
                 Box::pin(self.handle_token_invoke(i)).await

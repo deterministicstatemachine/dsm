@@ -495,7 +495,9 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
     })
 }
 
-fn duel_entries(given: &[generated::ConnectDuelSignedEntryV1]) -> Result<Vec<DuelSigned>, String> {
+pub(crate) fn duel_entries(
+    given: &[generated::ConnectDuelSignedEntryV1],
+) -> Result<Vec<DuelSigned>, String> {
     if given.len() > MAX_DUEL_ENTRIES {
         return Err(format!(
             "a duel request carries at most {MAX_DUEL_ENTRIES} entries, not {}",
@@ -799,10 +801,21 @@ pub fn decide(
             ),
             None => Decision::Outside("the grant does not let it stake in matches".into()),
         },
+        // A Resign ends the match against this side: the application writes
+        // the entries it asks this wallet to sign, so a resignation is the
+        // player's to make, never the grant's (SA-102). It waits for them.
+        Request::DuelSign { entry, .. } if resigns(entry) => {
+            match of_kind(ScopeKind::Duel).next() {
+                Some(..) => Decision::Outside(
+                    "resigning the match is yours to decide, not the game's".into(),
+                ),
+                None => Decision::Outside("the grant does not let it play matches".into()),
+            }
+        }
         // Every other step of a match spends nothing and acts only on a match
         // this wallet locked under the grant: it runs without the player, so
-        // a move never waits on a screen. The wallet's own checks still
-        // decide what it signs and writes.
+        // a move never waits on a screen. The wallet signs only an entry the
+        // match's program accepts after the transcript so far.
         Request::DuelSessionKey { .. }
         | Request::DuelReady { .. }
         | Request::DuelWithdraw { .. }
@@ -813,6 +826,15 @@ pub fn decide(
             None => Decision::Outside("the grant does not let it play matches".into()),
         },
     }
+}
+
+/// Whether `entry` is a Resign. Bytes that are no entry are not: the wallet
+/// refuses them when it would sign.
+fn resigns(entry: &[u8]) -> bool {
+    matches!(
+        dsm::sofi::wire::TranscriptEntry::decode(entry).map(|e| e.kind().clone()),
+        Ok(dsm::sofi::wire::EntryKind::Resign)
+    )
 }
 
 #[cfg(test)]
@@ -1254,6 +1276,45 @@ mod tests {
                 },
             )),
         }
+    }
+
+    /// SA-102. Under a duel grant the application writes the entries it asks
+    /// this wallet to sign. A move runs without the player; a Resign, which
+    /// ends the match against this side, waits for the player.
+    /// MUTATION CONTROL: the Resign arm removed lets the grant run it: red.
+    #[test]
+    fn a_resignation_waits_for_the_player() {
+        use dsm::sofi::wire::{EntryKind, MatchSide, TranscriptEntry};
+        let sign = |kind: EntryKind| Request::DuelSign {
+            match_cell: [0x31; 32],
+            preceding: Vec::new(),
+            entry: TranscriptEntry::new(3, MatchSide::A, kind)
+                .expect("an entry")
+                .encode(),
+        };
+        let none = |_token: &[u8; 32]| 0;
+        let resign = decide(
+            &duel_grant(),
+            &sign(EntryKind::Resign),
+            &none,
+            &BTreeSet::new(),
+        );
+        assert!(
+            matches!(&resign, Decision::Outside(why) if why.contains("yours to decide")),
+            "{resign:?}"
+        );
+        let commit = decide(
+            &duel_grant(),
+            &sign(EntryKind::Commit {
+                commitment: [0x32; 32],
+            }),
+            &none,
+            &BTreeSet::new(),
+        );
+        assert!(
+            matches!(commit, Decision::InScope { spend: None }),
+            "{commit:?}"
+        );
     }
 
     #[test]

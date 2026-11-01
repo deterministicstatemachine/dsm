@@ -33765,6 +33765,22 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
      */
     value: ConnectDecidedV1;
     case: "decided";
+  } | {
+    /**
+     * connect.duelWithdraw / connect.duelSettle: the match's cells after
+     *
+     * @generated from field: dsm.ConnectDuelCellsV1 duel = 11;
+     */
+    value: ConnectDuelCellsV1;
+    case: "duel";
+  } | {
+    /**
+     * connect.duelCollect: each stake released to this wallet
+     *
+     * @generated from field: dsm.ConnectEscrowReleaseResultV1 released = 12;
+     */
+    value: ConnectEscrowReleaseResultV1;
+    case: "released";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectReplyV1>) {
@@ -33785,6 +33801,8 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
     { no: 8, name: "status", kind: "message", T: ConnectAppStatusV1, oneof: "reply" },
     { no: 9, name: "request", kind: "message", T: ConnectRequestRefV1, oneof: "reply" },
     { no: 10, name: "decided", kind: "message", T: ConnectDecidedV1, oneof: "reply" },
+    { no: 11, name: "duel", kind: "message", T: ConnectDuelCellsV1, oneof: "reply" },
+    { no: 12, name: "released", kind: "message", T: ConnectEscrowReleaseResultV1, oneof: "reply" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectReplyV1 {

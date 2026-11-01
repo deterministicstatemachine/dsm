@@ -192,6 +192,64 @@ async fn play(
 }
 
 /// The result the wallet answered with, read from its signed answer body.
+/// R asks `wallet` to sign `entry`, an entry its grant does not cover: the
+/// request waits for the player, who approves it, and the wallet answers with
+/// the signed entry.
+async fn approved_by_the_player(
+    r: &TestDevice,
+    wallet: &TestDevice,
+    relay: &ForwardRelay,
+    sid: &D32,
+    cell: &D32,
+    entry: Vec<u8>,
+) -> generated::ConnectDuelSignedEntryV1 {
+    let seq = request(
+        r,
+        relay,
+        sid,
+        Kind::DuelSign(generated::ConnectDuelSignV1 {
+            match_cell: cell.to_vec(),
+            preceding: Vec::new(),
+            entry: entry.clone(),
+        }),
+    )
+    .await;
+    let deliver = || async {
+        reply(&invoke(wallet, "connect.sync", Vec::new()).await);
+        let answers = std::mem::take(&mut relay.held().responses);
+        for answer in answers {
+            reply(&invoke(r, "connect.app.respond", args_raw(answer)).await);
+        }
+    };
+    deliver().await;
+    let Reply::Pending(waiting) =
+        reply(&super::connect_e2e_tests::query(wallet, "connect.pending", Vec::new()).await)
+    else {
+        panic!("connect.pending answered another reply");
+    };
+    assert_eq!(waiting.pending.len(), 1, "the entry waits for the player");
+    reply(
+        &invoke(
+            wallet,
+            "connect.respond",
+            args(&generated::ConnectRespondRequestV1 {
+                session_id: sid.to_vec(),
+                seq,
+                decision: generated::ConnectDecision::Approve as i32,
+            }),
+        )
+        .await,
+    );
+    deliver().await;
+    let Answer::DuelSign(signed) = answered(&status(r, sid, seq).await) else {
+        panic!("the wallet answered another result");
+    };
+    generated::ConnectDuelSignedEntryV1 {
+        entry,
+        signature: signed.signature,
+    }
+}
+
 fn answered(s: &generated::ConnectAppStatusV1) -> Answer {
     generated::AppResponseBodyV1::decode(s.answer_body.as_slice())
         .expect("the wallet's answer")
@@ -393,16 +451,10 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         reveal(4, MatchSide::B, &move_b),
     )
     .await;
-    let e5 = play(
-        &r,
-        &p.b,
-        &relay,
-        &sid_b,
-        &cell,
-        &[],
-        entry(5, MatchSide::B, EntryKind::Resign),
-    )
-    .await;
+    // B's resignation ends the match against B, so it is B's to make: the
+    // game's request for it waits for B, who approves it (SA-102).
+    let resign = entry(5, MatchSide::B, EntryKind::Resign);
+    let e5 = approved_by_the_player(&r, &p.b, &relay, &sid_b, &cell, resign).await;
 
     // A settles with B's last entries; R reads a-wins from the match cell.
     let settled = ask(
@@ -428,6 +480,22 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         cells.outcome_state,
         generated::EscrowVerdictState::Final as i32
     );
+    // B settles from its own wallet too, with nothing from the game: the match
+    // cell holds the outcome B's own kept transcript decides (SA-77).
+    let Reply::Duel(b_view) = reply(
+        &invoke(
+            &p.b,
+            "connect.duelSettle",
+            args(&generated::ConnectDuelSettleV1 {
+                match_cell: cell.to_vec(),
+                entries: Vec::new(),
+            }),
+        )
+        .await,
+    ) else {
+        panic!("connect.duelSettle answered another reply");
+    };
+    assert_eq!(b_view.outcome, b"a-wins".to_vec());
 
     // A collects both stakes; R establishes the release from the vaults.
     let collected = ask(
@@ -606,4 +674,123 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
 
     // The game that staked it still plays it: A signs its first move for R.
     play(&r, &p.a, &relay, &sid_a, &cell, &[], commit).await;
+}
+
+/// SA-77. A stake does not wait on the game that took it. Both players stake
+/// through the game, which then goes silent: no Ready, no request. Each player
+/// withdraws and collects from their own wallet. A's Withdraw holds the start
+/// cell, voiding the match, and each stake returns to its owner, with nothing
+/// asked of the game.
+/// MUTATION CONTROL: the player routes removed leave a stake reachable only
+/// through the game's requests: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_player_withdraws_and_collects_a_stake_without_the_game() {
+    let p = Pair::boot(100, 100).await;
+    let r = game(&p).await;
+    let relay = ForwardRelay::start().await;
+    let (body, _) = frozen();
+    let team_a = issue_team(&p.a, body.a(), "CRA").await;
+    let team_b = issue_team(&p.b, body.b(), "CRB").await;
+    let anchors = |team: &[wildstate_duel::CreatureStateV1]| -> Vec<D32> {
+        team.iter().map(|c| *c.anchor()).collect()
+    };
+    let creatures = [anchors(&team_a), anchors(&team_b)].concat();
+    let code_a = offer(&r, &relay, &creatures).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay, &creatures).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
+    let nonce = [0x43; 32];
+    let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
+        Answer::DuelSessionKey(k) => k.session_public_key,
+        other => panic!("the wallet answered {other:?}"),
+    };
+    let session_key = Kind::DuelSessionKey(generated::ConnectDuelSessionKeyV1 {
+        match_nonce: nonce.to_vec(),
+    });
+    let key_a = key(ask(&r, &p.a, &relay, &sid_a, session_key.clone()).await);
+    let key_b = key(ask(&r, &p.b, &relay, &sid_b, session_key).await);
+    let (a_start, b_start) = (balance(&p.a, &era()), balance(&p.b, &era()));
+    let proof = |s: generated::ConnectAppStatusV1| match answered(&s) {
+        Answer::Holdings(proof) => proof,
+        other => panic!("the wallet answered {other:?}"),
+    };
+    let holdings = |team: Vec<D32>| {
+        Kind::Holdings(generated::ConnectHoldingsV1 {
+            policy_commits: team.iter().map(|c| c.to_vec()).collect(),
+        })
+    };
+    let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
+    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    let lock = |side: u32,
+                opponent: &TestDevice,
+                counterpart: Vec<u8>,
+                opponent_holdings: generated::HoldingsProofV1| {
+        Kind::DuelLock(generated::ConnectDuelLockV1 {
+            setup: setup.clone(),
+            side,
+            policy_commit: era().to_vec(),
+            amount: whole_era(25),
+            opponent_genesis: opponent.genesis.to_vec(),
+            opponent_device_id: opponent.device_id.to_vec(),
+            counterpart_vault_id: counterpart,
+            memo: "arena".into(),
+            opponent_holdings: Some(opponent_holdings),
+        })
+    };
+    let locked_a = ask(&r, &p.a, &relay, &sid_a, lock(1, &p.b, Vec::new(), proof_b)).await;
+    let a_vault = locked_a.escrow_vault_ids[0].clone();
+    let cell: D32 = locked_a
+        .escrow_verdict_cell
+        .as_slice()
+        .try_into()
+        .expect("the match cell");
+    let proof_a = proof(ask(&r, &p.a, &relay, &sid_a, holdings(anchors(&team_a))).await);
+    let locked_b = ask(
+        &r,
+        &p.b,
+        &relay,
+        &sid_b,
+        lock(2, &p.a, a_vault.clone(), proof_a),
+    )
+    .await;
+    let b_vault = locked_b.escrow_vault_ids[0].clone();
+    assert_eq!(balance(&p.a, &era()), a_start - whole_era(25));
+
+    // The game goes silent. A withdraws from its own wallet.
+    let Reply::Duel(withdrawn) = reply(
+        &invoke(
+            &p.a,
+            "connect.duelWithdraw",
+            args(&generated::ConnectDuelWithdrawV1 {
+                match_cell: cell.to_vec(),
+            }),
+        )
+        .await,
+    ) else {
+        panic!("connect.duelWithdraw answered another reply");
+    };
+    assert_eq!(
+        withdrawn.start,
+        generated::ConnectDuelStart::Withdrawn as i32,
+        "A's Withdraw holds the start cell"
+    );
+    // Each player collects its own stake from its own wallet.
+    for (wallet, vault) in [(&p.a, &a_vault), (&p.b, &b_vault)] {
+        let Reply::Released(released) = reply(
+            &invoke(
+                wallet,
+                "connect.duelCollect",
+                args(&generated::ConnectDuelCollectV1 {
+                    vault_ids: vec![vault.clone()],
+                }),
+            )
+            .await,
+        ) else {
+            panic!("connect.duelCollect answered another reply");
+        };
+        assert_eq!(released.released.len(), 1);
+    }
+    assert_eq!(balance(&p.a, &era()), a_start, "A's stake returned");
+    assert_eq!(balance(&p.b, &era()), b_start, "B's stake returned");
 }
