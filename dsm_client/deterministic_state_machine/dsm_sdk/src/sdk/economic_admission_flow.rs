@@ -1311,6 +1311,11 @@ async fn finish_locked(
         .ok_or_else(|| DsmError::storage("no device head".to_string(), None::<std::io::Error>))?;
     let genesis = head.genesis_digest();
     let devid = head.devid();
+    // How far this admission got is the stored row's, never the head's copy:
+    // the head carries the admission as it was when the fence engaged, and
+    // only the row moves forward (`update_pending_admission_state`). A resume
+    // in the same process must see `Validated` as one after a restart does.
+    pending.state = stored_admission_state(&devid, &pending)?;
     let (public_key, secret_key) = crate::sdk::signing_authority::current_keypair()
         .map_err(|e| storage_err("signing authority", e))?;
 
@@ -1348,8 +1353,10 @@ async fn finish_locked(
             ),
         ));
     }
-    pending.state = EconomicAdmissionState::EvidencePublished;
-    core.update_pending_admission_state(&pending)?;
+    if pending.state < EconomicAdmissionState::EvidencePublished {
+        pending.state = EconomicAdmissionState::EvidencePublished;
+        core.update_pending_admission_state(&pending)?;
+    }
 
     // The root claim: frozen-or-sign-once BEFORE the first member write.
     let manifest_addr = coords.admission_manifest_addr;
@@ -1402,6 +1409,113 @@ async fn finish_locked(
                 })?
         }
     };
+    // The VERIFIER's answer — the same predicate any foreign device runs, from
+    // the same object — BEFORE anything is registered (SA-94). This device
+    // decodes and verifies the EXACT envelope it is about to register rather
+    // than re-assembling the fields from locals: a disagreement between what
+    // is registered and what is validated would otherwise be unobservable,
+    // and a corrupted frozen row would pass. Registration is irreversible, so
+    // nothing that reads the network may come after it: once the verifier
+    // accepts, the admission is `Validated` and is finished from what it froze,
+    // and a resume never reads the credit's source again.
+    let registered = RegisteredEconomicRoot::from_verified_single_root(
+        dsm::economic::claim_envelope::decode_registered_economic_claim(&frozen_root)
+            .map_err(|e| DsmError::invalid_operation(format!("registered claim: {e}")))?
+            .single_root()
+            .map_err(|conditional| {
+                DsmError::invalid_operation(format!("registered claim: {conditional}"))
+            })?,
+    );
+    if pending.state < EconomicAdmissionState::Validated {
+        let accepted = match substrate {
+            AdmittedSubstrate::Dsm(operation) => {
+                let operation = *operation;
+                let (embedded_parent, c_dsm_plus) =
+                    coords.substrate.successor().ok_or_else(|| {
+                        DsmError::invalid_operation(
+                            "a DSM admission whose coordinates are not a successor's",
+                        )
+                    })?;
+                AcceptedSubstrate::from_verified_dsm_successor(
+                    operation,
+                    c_dsm_plus,
+                    embedded_parent,
+                    coords.accepted_substrate_addr,
+                )
+            }
+            AdmittedSubstrate::OfflineBoundary(body) => {
+                if dsm::economic::offline_boundary::offline_boundary_evidence_addr(&body)
+                    != coords.accepted_substrate_addr
+                {
+                    return Err(DsmError::invalid_operation(
+                        "the boundary body is not the one the admission names",
+                    ));
+                }
+                let verified = match dsm::economic::offline_boundary::offline_body_kind(&body)? {
+                    dsm::economic::offline_boundary::OfflineBodyKind::Boundary => {
+                        dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
+                            &body,
+                            &genesis,
+                            &devid,
+                            head.public_key(),
+                        )
+                        .map(|(verified, ..)| verified)?
+                    }
+                    // A settlement is held to the exposure this device's own walk of
+                    // the payer recorded.
+                    dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
+                        let named =
+                            dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
+                                .map_err(|e| {
+                                DsmError::invalid_operation(format!(
+                                    "an offline settlement body: {e}"
+                                ))
+                            })?;
+                        let exposure =
+                            client_db::economic_lineage::offline_exposure(&named.release_message)
+                                .map_err(|e| storage_err("the exposure the settlement names", e))?
+                                .ok_or_else(|| {
+                                    DsmError::invalid_operation(
+                                "the settlement names an exposure this device never recorded",
+                            )
+                                })?;
+                        dsm::economic::offline_boundary::OfflineSettlementBody::verify(
+                            &body, &genesis, &devid, &exposure,
+                        )?
+                    }
+                };
+                AcceptedSubstrate::from_verified_offline_boundary(
+                    verified,
+                    coords.accepted_substrate_addr,
+                )
+            }
+        };
+        let resolver = LiveRegisterResolver {
+            set,
+            runtime: tokio::runtime::Handle::current(),
+            expected_network_id: network_id.to_vec(),
+        };
+        let advanced = advance_validated(
+            validated,
+            &registered,
+            &manifest,
+            &witness,
+            &accepted,
+            &resolver,
+            &genesis,
+            &devid,
+            network_id,
+            &public_key,
+        )
+        .map_err(|e| DsmError::invalid_operation(format!("economic validation: {e}")))?;
+        log::debug!(
+            "[economic admission] position {} funds {} credit(s)",
+            advanced.root.economic_position(),
+            advanced.funded.len()
+        );
+        pending.state = EconomicAdmissionState::Validated;
+        core.update_pending_admission_state(&pending)?;
+    }
     // The claim goes along the root cell's route, leader first. The route's
     // seed takes the root this device validated at `q - 1`, so nothing about
     // where the race is decided is chosen here.
@@ -1417,8 +1531,10 @@ async fn finish_locked(
     let at_leader = write.leader();
     match at_leader {
         crate::sdk::route_seats::AtLeader::Link => {
-            pending.state = EconomicAdmissionState::Registered;
-            core.update_pending_admission_state(&pending)?;
+            if pending.state < EconomicAdmissionState::Registered {
+                pending.state = EconomicAdmissionState::Registered;
+                core.update_pending_admission_state(&pending)?;
+            }
         }
         // Another claim is first at the root cell's leader: the position is
         // decided for it, and nothing of this claim was put there. Which
@@ -1468,100 +1584,6 @@ async fn finish_locked(
             ));
         }
     }
-
-    // The VERIFIER's answer — the same predicate any foreign device runs, from
-    // the same object. This device decodes and verifies the EXACT envelope it
-    // registered rather than re-assembling the fields from locals: a
-    // disagreement between what was registered and what is validated here
-    // would otherwise be unobservable, and a corrupted frozen row would pass.
-    let registered = RegisteredEconomicRoot::from_verified_single_root(
-        dsm::economic::claim_envelope::decode_registered_economic_claim(&frozen_root)
-            .map_err(|e| DsmError::invalid_operation(format!("registered claim: {e}")))?
-            .single_root()
-            .map_err(|conditional| {
-                DsmError::invalid_operation(format!("registered claim: {conditional}"))
-            })?,
-    );
-    let accepted = match substrate {
-        AdmittedSubstrate::Dsm(operation) => {
-            let operation = *operation;
-            let (embedded_parent, c_dsm_plus) = coords.substrate.successor().ok_or_else(|| {
-                DsmError::invalid_operation(
-                    "a DSM admission whose coordinates are not a successor's",
-                )
-            })?;
-            AcceptedSubstrate::from_verified_dsm_successor(
-                operation,
-                c_dsm_plus,
-                embedded_parent,
-                coords.accepted_substrate_addr,
-            )
-        }
-        AdmittedSubstrate::OfflineBoundary(body) => {
-            if dsm::economic::offline_boundary::offline_boundary_evidence_addr(&body)
-                != coords.accepted_substrate_addr
-            {
-                return Err(DsmError::invalid_operation(
-                    "the boundary body is not the one the admission names",
-                ));
-            }
-            let verified = match dsm::economic::offline_boundary::offline_body_kind(&body)? {
-                dsm::economic::offline_boundary::OfflineBodyKind::Boundary => {
-                    dsm::economic::offline_boundary::OfflineBoundaryBody::verify(
-                        &body,
-                        &genesis,
-                        &devid,
-                        head.public_key(),
-                    )
-                    .map(|(verified, ..)| verified)?
-                }
-                // A settlement is held to the exposure this device's own walk of
-                // the payer recorded.
-                dsm::economic::offline_boundary::OfflineBodyKind::Settlement => {
-                    let named =
-                        dsm::economic::offline_boundary::OfflineSettlementBody::decode(&body)
-                            .map_err(|e| {
-                                DsmError::invalid_operation(format!(
-                                    "an offline settlement body: {e}"
-                                ))
-                            })?;
-                    let exposure =
-                        client_db::economic_lineage::offline_exposure(&named.release_message)
-                            .map_err(|e| storage_err("the exposure the settlement names", e))?
-                            .ok_or_else(|| {
-                                DsmError::invalid_operation(
-                                    "the settlement names an exposure this device never recorded",
-                                )
-                            })?;
-                    dsm::economic::offline_boundary::OfflineSettlementBody::verify(
-                        &body, &genesis, &devid, &exposure,
-                    )?
-                }
-            };
-            AcceptedSubstrate::from_verified_offline_boundary(
-                verified,
-                coords.accepted_substrate_addr,
-            )
-        }
-    };
-    let resolver = LiveRegisterResolver {
-        set,
-        runtime: tokio::runtime::Handle::current(),
-        expected_network_id: network_id.to_vec(),
-    };
-    let advanced = advance_validated(
-        validated,
-        &registered,
-        &manifest,
-        &witness,
-        &accepted,
-        &resolver,
-        &genesis,
-        &devid,
-        network_id,
-        &public_key,
-    )
-    .map_err(|e| DsmError::invalid_operation(format!("economic validation: {e}")))?;
 
     // ── ONE TX: admitted coordinate + leaf cache + clear pending + head ───
     // The cache is the FULL post-transition leaf set with exact state CCBs:
@@ -1618,16 +1640,13 @@ async fn finish_locked(
     // that same root before the bytes exist.
 
     let had_post_admit = !post_admit_artifacts.is_empty();
-    log::debug!(
-        "[economic admission] position {} funds {} credit(s)",
-        advanced.root.economic_position(),
-        advanced.funded.len()
-    );
+    // The position and root are the registered claim's, which the verifier
+    // accepted before it was registered and which is final at its cell.
     core.admit_economic_position(
         dsm::economic::lineage::AdmittedEconomicPosition::SingleRoot {
-            economic_position: advanced.root.economic_position(),
-            economic_root: advanced.root.economic_root(),
-            claim_ref: advanced.claim.claim_ref(),
+            economic_position: registered.economic_position(),
+            economic_root: registered.post_economic_root(),
+            claim_ref: registered.claim_ref(),
         },
         &operation_digest,
         &leaves,
@@ -1648,8 +1667,42 @@ async fn finish_locked(
     }
 
     Ok(AdmittedOutcome {
-        economic_position: advanced.root.economic_position(),
+        economic_position: registered.economic_position(),
     })
+}
+
+/// The stored lifecycle state of `pending`, which is this device's one pending
+/// admission: never behind the state `pending` carries. A stored row naming
+/// another admission means the local store is incoherent, a stop.
+fn stored_admission_state(
+    devid: &[u8; 32],
+    pending: &PendingEconomicAdmission,
+) -> Result<EconomicAdmissionState, DsmError> {
+    let binding = client_db::get_connection().map_err(|e| storage_err("the store", e))?;
+    let conn = binding
+        .lock()
+        .map_err(|e| storage_err("the store lock", e))?;
+    let stored = client_db::economic_admission::load_pending_admission_with_conn(&conn, devid)
+        .map_err(|e| storage_err("the pending admission", e))?
+        .ok_or_else(|| {
+            DsmError::storage(
+                "the pending admission is not stored — local store incoherent; refusing to \
+                     guess"
+                    .to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    if stored.economic_position != pending.economic_position
+        || stored.operation_digest != pending.operation_digest
+    {
+        return Err(DsmError::storage(
+            "the stored pending admission is another one — local store incoherent; refusing to \
+             guess"
+                .to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+    Ok(stored.state.max(pending.state))
 }
 
 /// Finish an admission a previous run left pending. Everything needed is in

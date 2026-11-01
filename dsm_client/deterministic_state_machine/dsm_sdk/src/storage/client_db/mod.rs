@@ -1770,7 +1770,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             device_id               BLOB PRIMARY KEY,   -- 32B
             kind                    INTEGER NOT NULL,   -- 0 dsm, 1 load, 2 unload, 3 sofi fulfillment
             fenced_asset            BLOB,               -- 32B, NULL for kind 0
-            lifecycle_state         INTEGER NOT NULL,   -- 0..4, forward only
+            lifecycle_state         INTEGER NOT NULL,   -- 0..5 (5 is Validated, between 2 and 3), forward only
             economic_position       INTEGER NOT NULL,
             pre_economic_root       BLOB NOT NULL,      -- 32B
             post_economic_root      BLOB NOT NULL,      -- 32B

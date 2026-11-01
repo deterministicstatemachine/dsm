@@ -823,6 +823,23 @@ impl NodeSet {
         }
     }
 
+    /// Every member loses every entry of the cell `key`: what a set whose
+    /// stores all lost the cell holds. Nothing else is touched.
+    pub async fn erase_cell(&self, key: &[u8; 32]) {
+        for node in &self.nodes {
+            let client = match node.state.db_pool.get().await {
+                Ok(client) => client,
+                Err(e) => panic!("node db connection: {e}"),
+            };
+            if let Err(e) = client
+                .execute("DELETE FROM cells WHERE cell_key = $1", &[&key.to_vec()])
+                .await
+            {
+                panic!("{}: erase a cell: {e}", node.member_id);
+            }
+        }
+    }
+
     /// Refuse every immutable object write at each named member: its store
     /// raises on the insert and the member answers an error — a member whose
     /// object storage failed. Every read, and every cell write, serves as

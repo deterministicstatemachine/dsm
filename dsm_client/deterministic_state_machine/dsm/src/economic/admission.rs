@@ -189,6 +189,11 @@ pub enum EconomicAdmissionState {
     LocalAcceptedPendingEcon,
     /// The evidence DAG is durably present on a quorum.
     EvidencePublished,
+    /// The full verifier accepted this exact transition, its credits' live
+    /// reads included, before anything was registered (SA-94). From here the
+    /// admission is finished from what it froze: nothing the credit's source
+    /// does afterwards is read again.
+    Validated,
     /// The claim occupies its register cell.
     Registered,
     /// Local terminal state.
@@ -201,7 +206,10 @@ impl EconomicAdmissionState {
     pub fn is_fencing(&self) -> bool {
         matches!(
             self,
-            Self::LocalAcceptedPendingEcon | Self::EvidencePublished | Self::Registered
+            Self::LocalAcceptedPendingEcon
+                | Self::EvidencePublished
+                | Self::Validated
+                | Self::Registered
         )
     }
 }

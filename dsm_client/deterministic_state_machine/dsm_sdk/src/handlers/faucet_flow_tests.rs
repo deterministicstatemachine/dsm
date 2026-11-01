@@ -1190,6 +1190,85 @@ async fn hold_the_first_claim(d: &Device) -> dsm::economic::admission::PendingEc
     pending
 }
 
+/// The leader of `d`'s first root cell, `K_root(1)`, and the cell's key.
+fn leader_of_the_first_root_cell(d: &Device) -> (String, [u8; 32]) {
+    let set = canonical_set(NETWORK).expect("canonical set");
+    let cell = crate::sdk::economic_registers::root_cell(
+        &set,
+        NETWORK,
+        &d.identity.genesis,
+        &d.identity.device_id,
+        1,
+        &dsm::economic::tree::empty_economic_root(),
+    )
+    .expect("K_root(1)");
+    let leader =
+        String::from_utf8(cell.routed().route().seats()[0].clone()).expect("member ids are UTF-8");
+    (leader, *cell.routed().key())
+}
+
+/// SA-94. The verifier accepts an admission before its root claim is
+/// registered, and the admission is finished from what it froze: a resume
+/// never reads the credit's source again. Here the claim is held because the
+/// root cell's leader refused it; then the release it consumes is lost from
+/// every member and this device forgets the lineage it walked. The resume
+/// still registers the claim and admits it.
+/// MUTATION CONTROL: validating again on resume (the `Validated` skip in
+/// `finish_locked` removed) reads the lost release and holds the admission:
+/// red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_admission_the_verifier_accepted_lands_without_reading_its_source_again() {
+    use dsm::economic::admission::EconomicAdmissionState;
+    let d = Device::start(0xAD).await;
+    let (leader, key) = leader_of_the_first_root_cell(&d);
+    d.nodes.refuse_cell_writes(&leader, &[key]).await;
+    let held = match claim_era_faucet(d.core(), NETWORK).await {
+        Ok(outcome) => panic!(
+            "the leader refused the root claim, yet position {} was admitted",
+            outcome.economic_position
+        ),
+        Err(e) => e.to_string(),
+    };
+    assert!(held.contains("leader did not answer"), "{held}");
+    let pending = d
+        .core()
+        .device_head()
+        .expect("head")
+        .pending_economic_admission()
+        .cloned()
+        .expect("the claim is held for resume");
+    let stored = {
+        let binding = client_db::get_connection().expect("the store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        client_db::economic_admission::load_pending_admission_with_conn(
+            &conn,
+            &d.identity.device_id,
+        )
+        .expect("read the pending row")
+        .expect("the pending row")
+    };
+    assert_eq!(
+        stored.state,
+        EconomicAdmissionState::Validated,
+        "the verifier accepted it before anything was registered"
+    );
+
+    let members = as_ccb_members(&canonical_set(NETWORK).expect("canonical set")).expect("members");
+    let first_release = SuccessorCell::of(&reserve_genesis(), &members).expect("successor cell");
+    d.nodes.erase_cell(first_release.routed().key()).await;
+    forget_the_reserve();
+    d.nodes.accept_cell_writes(&leader).await;
+
+    let admitted =
+        crate::sdk::economic_admission_flow::resume_pending_admission(d.core(), NETWORK, pending)
+            .await
+            .expect("the validated admission lands from what it froze");
+    assert_eq!(admitted.economic_position, 1);
+    admitted_at(d.core(), 1);
+    assert_eq!(d.era_balance(), whole_era(100), "credited once");
+}
+
 /// `core`'s lineage is admitted at `position` and nothing is pending.
 fn admitted_at(core: &crate::sdk::core_sdk::CoreSDK, position: u64) {
     assert!(

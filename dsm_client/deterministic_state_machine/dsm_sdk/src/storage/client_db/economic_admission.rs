@@ -48,6 +48,7 @@ fn state_code(state: &EconomicAdmissionState) -> i64 {
         EconomicAdmissionState::EvidencePublished => 2,
         EconomicAdmissionState::Registered => 3,
         EconomicAdmissionState::Admitted => 4,
+        EconomicAdmissionState::Validated => 5,
     }
 }
 
@@ -58,6 +59,7 @@ fn state_from_code(code: i64) -> Result<EconomicAdmissionState> {
         2 => EconomicAdmissionState::EvidencePublished,
         3 => EconomicAdmissionState::Registered,
         4 => EconomicAdmissionState::Admitted,
+        5 => EconomicAdmissionState::Validated,
         other => return Err(anyhow!("unknown admission lifecycle state {other}")),
     })
 }
