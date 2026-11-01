@@ -40,8 +40,14 @@ pub const TAG_DSM_BILATERAL_STATE: TaggedHashDomain<'static> =
 pub const TAG_DSM_BLE_FRAME: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/ble-frame");
 pub const TAG_DSM_BLE_FRAME_CHECKSUM: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/ble-frame-checksum");
-pub const TAG_DSM_BLE_SESSION_KEY: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/ble-session-key");
+/// `H(tag ‖ label ‖ transcript ‖ secret)` — each key of a BLE link session's
+/// handshake and of its two directions (DSM Amendment A27).
+pub const TAG_DSM_BLE_LINK_KEY: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ble-link/key/v1");
+/// `H(tag ‖ label ‖ parts…)` — a BLE link handshake's transcript at each of
+/// its three messages (DSM Amendment A27).
+pub const TAG_DSM_BLE_LINK_TRANSCRIPT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/ble-link/transcript/v1");
 pub const TAG_DSM_CHAIN_TIP: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/CHAIN_TIP");
 pub const TAG_DSM_CHAIN_TIP_ID: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/chain-tip-id");
@@ -80,7 +86,8 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_BILATERAL_STATE,
     TAG_DSM_BLE_FRAME,
     TAG_DSM_BLE_FRAME_CHECKSUM,
-    TAG_DSM_BLE_SESSION_KEY,
+    TAG_DSM_BLE_LINK_KEY,
+    TAG_DSM_BLE_LINK_TRANSCRIPT,
     TAG_DSM_CHAIN_TIP,
     TAG_DSM_CHAIN_TIP_ID,
     TAG_DSM_ENVELOPE_ID,

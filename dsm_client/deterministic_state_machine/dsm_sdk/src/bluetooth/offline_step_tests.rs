@@ -16,6 +16,7 @@ use crate::bluetooth::bilateral_transport_adapter::{
     BilateralTransportAdapter, BleTransportDelegate, TransportInboundMessage, TransportOutbound,
 };
 use crate::bluetooth::ble_frame_coordinator::{BleFrameCoordinator, BleFrameType};
+use crate::bluetooth::link_session::{GattRole, Link, Links, WalletKeys};
 use crate::test_support::two_device::{Pair, TestDevice};
 use dsm::core::bilateral_transaction_manager::BilateralTransactionManager;
 use dsm::core::contact_manager::DsmContactManager;
@@ -25,11 +26,17 @@ use dsm::types::operations::Operation;
 /// transaction manager signs with the device's AK and keeps tips in the
 /// device's SQLite store, and holds the device's persisted contacts, loaded
 /// before any frame arrives. Beside it, the device's BLE frame coordinator,
-/// which chunks the frames it writes and reassembles the frames it reads.
+/// which chunks the frames it writes and reassembles the frames it reads, and
+/// its link sessions (DSM Amendment A27), which seal every byte it writes on
+/// the radio and open every byte it reads. `heard` is every byte the radio
+/// brought it; `opened` every radio unit its links opened.
 struct OfflineDevice {
     device: TestDevice,
     handler: Arc<BilateralBleHandler>,
     ble: BleFrameCoordinator,
+    links: Links,
+    heard: std::sync::Mutex<Vec<Vec<u8>>>,
+    opened: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 impl OfflineDevice {
@@ -61,7 +68,31 @@ impl OfflineDevice {
             device: device.clone(),
             handler: Arc::new(handler),
             ble: BleFrameCoordinator::new(device.device_id),
+            links: Links::default(),
+            heard: std::sync::Mutex::new(Vec::new()),
+            opened: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    /// Take `bytes` from the radio on `link`, as the BLE bridge does: through
+    /// this device's links, with the device entered.
+    fn hear(&self, link: &Link, bytes: &[u8]) -> crate::bluetooth::link_session::Inbound {
+        self.device.enter();
+        self.heard
+            .lock()
+            .expect("the radio log")
+            .push(bytes.to_vec());
+        let inbound = self
+            .links
+            .inbound(link, bytes, &WalletKeys)
+            .expect("the link takes the bytes");
+        if let Some(unit) = &inbound.unit {
+            self.opened
+                .lock()
+                .expect("the opened log")
+                .push(unit.clone());
+        }
+        inbound
     }
 
     /// `proposal`, proposed to `to` through this device's sender door.
@@ -1069,9 +1100,76 @@ async fn the_senders_door_refuses_every_class_the_offline_rulings_do_not_name() 
     assert_eq!(chip(&appliance), before, "A's anchor spent nothing");
 }
 
+/// The links between `from` and `to`, `from`'s first: the device in the
+/// lower slot connects, as the GATT client, and the two run the link
+/// handshake (DSM Amendment A27) when they hold no paired session yet.
+fn linked(from: &OfflineDevice, to: &OfflineDevice) -> (Link, Link) {
+    let (client, server) = if from.device.slot < to.device.slot {
+        (from, to)
+    } else {
+        (to, from)
+    };
+    let at_client = Link {
+        address: server.device.slot.to_string(),
+        role: GattRole::Client,
+    };
+    let at_server = Link {
+        address: client.device.slot.to_string(),
+        role: GattRole::Server,
+    };
+    if client.links.link_of(&server.device.device_id).is_none() {
+        handshake(client, server, &at_client, &at_server);
+    }
+    if std::ptr::eq(from, client) {
+        (at_client, at_server)
+    } else {
+        (at_server, at_client)
+    }
+}
+
+/// The link handshake between `client` and `server`, every byte carried by
+/// the radio until both are paired.
+fn handshake(client: &OfflineDevice, server: &OfflineDevice, at_client: &Link, at_server: &Link) {
+    client.device.enter();
+    let mut to_server = client
+        .links
+        .opened(
+            at_client.clone(),
+            Some(server.device.device_id),
+            &WalletKeys,
+        )
+        .expect("the client says Hello");
+    server.device.enter();
+    server
+        .links
+        .opened(at_server.clone(), None, &WalletKeys)
+        .expect("the server listens");
+    for _ in 0..8 {
+        let mut to_client = Vec::new();
+        for bytes in to_server.drain(..) {
+            to_client.extend(server.hear(at_server, &bytes).reply);
+        }
+        for bytes in to_client {
+            to_server.extend(client.hear(at_client, &bytes).reply);
+        }
+        if to_server.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        (
+            client.links.link_of(&server.device.device_id),
+            server.links.link_of(&client.device.device_id)
+        ),
+        (Some(at_client.clone()), Some(at_server.clone())),
+        "both sides are paired once the handshake is done"
+    );
+}
+
 /// `payload`, a frame of `frame_type`, written from `from` to `to` over BLE:
-/// chunked by the sender's frame coordinator as the radio writes it, every
-/// chunk taken in by the receiver's on the link from the sender, and the frame
+/// chunked by the sender's frame coordinator as the radio writes it, each
+/// chunk sealed on the sender's link and opened on the receiver's, taken in
+/// by the receiver's coordinator on the link from the sender, and the frame
 /// reassembled whole. Returns the frame as the receiver's radio hands it on.
 async fn over_ble(
     from: &OfflineDevice,
@@ -1080,18 +1178,26 @@ async fn over_ble(
     payload: &[u8],
 ) -> TransportInboundMessage {
     use crate::bluetooth::ble_frame_coordinator::FrameIngressResult;
+    let (from_link, to_link) = linked(from, to);
     from.device.enter();
     let chunks = from
         .ble
         .encode_message(frame_type, payload)
         .expect("the frame is chunked");
-    to.device.enter();
+    let sealed = from
+        .links
+        .seal_on(&from_link, &chunks)
+        .expect("the chunks are sealed on the link");
     let link = from.device.slot.to_string();
     let mut reassembled = None;
-    for chunk in &chunks {
+    for bytes in &sealed {
+        let chunk = to
+            .hear(&to_link, bytes)
+            .unit
+            .expect("a sealed record opens to the chunk it carries");
         match to
             .ble
-            .ingest_chunk(&link, chunk)
+            .ingest_chunk(&link, &chunk)
             .await
             .expect("the chunk is taken in")
         {
@@ -4739,3 +4845,161 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
 
 /// The bilateral models, refined by this protocol run between real devices.
 mod model_correspondence;
+
+/// DSM Amendment A27 (SA-35; the owner's requirement of 2026-11-01: "a
+/// passive BLE observer must not learn permanent identifiers, transfer
+/// amounts, salts, or other private transfer data"). A's bearer payment to B,
+/// every frame over BLE: the two pair by the link handshake, and every byte
+/// either took from the radio is a handshake fragment or a 512-byte sealed
+/// record. Neither device's id nor genesis appears in any of them, while the
+/// units the links opened carry them: what an observer would have read before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_payment_over_ble_carries_no_identity_on_the_radio() {
+    use crate::bluetooth::link_session::{HANDSHAKE, RECORD};
+    let (_pair, a, b, _appliance, operation) = bearer_pair().await;
+    let commitment = bearer_payment_over_ble(&a, &b, &operation).await;
+    assert_committed_on_both(&a, &b, &commitment);
+    let identities = [
+        a.device.device_id,
+        a.device.genesis,
+        b.device.device_id,
+        b.device.genesis,
+    ];
+    let carries = |bytes: &[u8], id: &[u8; 32]| bytes.windows(32).any(|w| w == &id[..]);
+    for device in [&a, &b] {
+        let heard = device.heard.lock().expect("the radio log");
+        assert!(!heard.is_empty(), "the radio carried the payment");
+        for bytes in heard.iter() {
+            match bytes.first() {
+                Some(&HANDSHAKE) => {}
+                Some(&RECORD) => assert_eq!(
+                    bytes.len(),
+                    1 + dsm::crypto::ble_link::RECORD_LEN,
+                    "every record is one length"
+                ),
+                other => panic!("the radio carried bytes beginning {other:?}"),
+            }
+            for id in &identities {
+                assert!(!carries(bytes, id), "an identity on the radio");
+            }
+        }
+    }
+    let opened_by_b = b.opened.lock().expect("the opened log");
+    assert!(
+        opened_by_b
+            .iter()
+            .any(|unit| carries(unit, &a.device.device_id)),
+        "the units B's link opened carry A's device id, as the radio did before"
+    );
+}
+
+/// A record opens once, on the link it was sealed for: replayed on the same
+/// link it is refused, and after the link closes and the two pair again, a
+/// record of the old link opens on nothing.
+/// MUTATION CONTROL: dropping the counter check in `LinkSession::open` takes
+/// the replay: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
+    let (_pair, a, b, _appliance, _operation) = bearer_pair().await;
+    let (at_a, at_b) = linked(&a, &b);
+    a.device.enter();
+    let sealed = a
+        .links
+        .seal_on(&at_a, &[b"a unit".to_vec()])
+        .expect("sealed");
+    b.device.enter();
+    assert_eq!(
+        b.links
+            .inbound(&at_b, &sealed[0], &WalletKeys)
+            .expect("opens")
+            .unit,
+        Some(b"a unit".to_vec())
+    );
+    assert!(
+        matches!(b.links.inbound(&at_b, &sealed[0], &WalletKeys), Err(..)),
+        "a replayed record is refused"
+    );
+    a.links.closed(&at_a);
+    b.links.closed(&at_b);
+    let (again_a, again_b) = linked(&a, &b);
+    assert_eq!(
+        (&again_a, &again_b),
+        (&at_a, &at_b),
+        "the same link, paired again"
+    );
+    b.device.enter();
+    assert!(
+        matches!(b.links.inbound(&again_b, &sealed[0], &WalletKeys), Err(..)),
+        "a record of the closed link does not open on the new one"
+    );
+}
+
+/// A Hello is answered only for a contact: once B no longer holds A, B
+/// declines A's Hello, and A, with no other contact to try, is refused on
+/// the link and pairs with nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_hello_from_a_device_that_is_not_a_contact_is_declined() {
+    let (_pair, a, b, _appliance, _operation) = bearer_pair().await;
+    b.device.enter();
+    {
+        let binding = crate::storage::client_db::get_connection().expect("B's store");
+        let conn = binding.lock().expect("the store is not poisoned");
+        conn.execute(
+            "DELETE FROM contacts WHERE device_id = ?1",
+            [a.device.device_id.as_slice()],
+        )
+        .expect("B forgets A");
+    }
+    let (client, server) = if a.device.slot < b.device.slot {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    let at_client = Link {
+        address: server.device.slot.to_string(),
+        role: GattRole::Client,
+    };
+    let at_server = Link {
+        address: client.device.slot.to_string(),
+        role: GattRole::Server,
+    };
+    client.device.enter();
+    let hello = client
+        .links
+        .opened(
+            at_client.clone(),
+            Some(server.device.device_id),
+            &WalletKeys,
+        )
+        .expect("the Hello");
+    server.device.enter();
+    server
+        .links
+        .opened(at_server.clone(), None, &WalletKeys)
+        .expect("the server listens");
+    let mut answer = Vec::new();
+    for bytes in &hello {
+        answer.extend(server.hear(&at_server, bytes).reply);
+    }
+    assert!(!answer.is_empty(), "the server answers the Hello");
+    client.device.enter();
+    let mut refused = None;
+    for bytes in &answer {
+        if let Err(e) = client.links.inbound(&at_client, bytes, &WalletKeys) {
+            refused = Some(e.to_string());
+        }
+    }
+    let refused = refused.expect("the client is refused once no contact answered");
+    assert!(refused.contains("no contact"), "{refused}");
+    assert_eq!(
+        (
+            client.links.link_of(&server.device.device_id),
+            server.links.link_of(&client.device.device_id)
+        ),
+        (None, None),
+        "nothing is paired"
+    );
+}

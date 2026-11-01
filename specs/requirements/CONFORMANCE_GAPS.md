@@ -3183,7 +3183,7 @@ Every gate above has a mutation control: each was removed or weakened in turn an
 | SA-32 | `.github/workflows/release.yml`; terraform `variables.tf` | Every release job has `contents: write`. SSH defaults to 0.0.0.0/0; IMDSv1 stays on; EBS is unencrypted. | reported | Fixed (`b419cb4c`, `60c1e556`) |
 | SA-33 | `MainActivity.kt`; `NfcRecoveryScreen.tsx`; phrase inputs | There is no `FLAG_SECURE` anywhere, Copy puts the 24 words on the clipboard, and phrase fields are learning inputs. | reported | Fixed (`c2da6b80`) |
 | SA-34 | `MainActivity.kt`; `AppsScreen.tsx` | There is no tapjacking protection on approvals, and a `dsm:connect` link's approval shows no referrer. | reported | Fixed (`c2da6b80`) |
-| SA-35 | `GattServerHost.kt` identity characteristic; BLE frames | The open identity read gives any scanner the permanent device id. Frames have no confidentiality, so a transfer's terms, including the salt meant to keep them out of public objects, travel in the clear. Extends C2. | reported | Open; design |
+| SA-35 | `GattServerHost.kt` identity characteristic; BLE frames | The open identity read gives any scanner the permanent device id. Frames have no confidentiality, so a transfer's terms, including the salt meant to keep them out of public objects, travel in the clear. Extends C2. | reported | Fixed (§6.138, DSM Amendment A27): no identity characteristic; every radio byte is a link handshake fragment or a fixed-length sealed record; proven in the two-device harness, not yet on phones |
 
 **Low.**
 
@@ -7014,16 +7014,32 @@ SA-92 named two memos that could make a verdict permanent while Core later ruled
 
 **Tests.** `dsm_sdk::handlers::node_e2e_tests::an_owner_that_signs_an_invented_root_is_refused_and_named` (a middle lie adopted, then refused once its step is published; Step, Top and Genesis lies refused, quarantined and published); `dsm::sofi::history::tests::a_leaf_root_is_read_at_the_end_of_its_path`. `a_fresh_reader_reads_the_same_at_any_vault_age` now bounds the growth between generations 2 and 4 by the history paths' extra level instead of asserting equal reads.
 
+### 6.138 A BLE link between contacts is an authenticated session; the radio carries nothing in the clear (SA-35; DSM Amendment A27; `fix/beta-requirements-completion`, 2026-11-01)
+
+*The owner's choices (2026-11-01): the per-link session, "provided the session is properly authenticated, uses unique nonces, and handles reconnection safely", after verifying "whether DSM already establishes an authenticated encrypted channel that can be reused"; the requirement: "a passive BLE observer must not learn permanent identifiers, transfer amounts, salts, or other private transfer data." Then, on the design: "Try each contact"; "Handshake replaces it", keeping "the old pairing protocol's completion guarantees, not its messages"; "Rust chooses the link".*
+
+**What existed.** No encryption anywhere on the link: plain GATT permissions, no bonding; the spool seal (A7) is one-way and authenticates no sender; per-step EK material travels in receipts. The identity characteristic answered any scanner with the device id and genesis, and the three pairing frames carried them again. Prepares carried both devices' keys, the terms and the salt in the clear.
+
+**Core** (`dsm::crypto::ble_link`). `initiate`, `respond`, `complete`, `finish`: the KK handshake of A27 over ML-KEM-768 (`kyber_encapsulate` / `kyber_decapsulate`, fresh randomness), keys and transcripts under `DSM/ble-link/key/v1` and `DSM/ble-link/transcript/v1` (the unused `DSM/ble-session-key` tag removed; tag count 434). `LinkSession::seal` / `open`: 500-byte records, counters strictly increasing per direction, gaps taken.
+
+**SDK** (`bluetooth::link_session`). Radio bytes are `0x05` handshake fragments or `0x06` records; nothing else is taken. Links are keyed by address and GATT role. The client tries its target contact first, then every contact with a pinned ML-KEM key; a Decline moves it on. The server answers a Confirm with a sealed ready record; each side's pairing completes at the point MR-DSM-0343 states, through `PairingOrchestrator::link_paired`, which stores the address, records the sighting and tells the frontend (an authenticated `identity_observed`). JNI: `processIncomingBleData(address, role, bytes)` opens through the link first and seals every answer, chunked, on the same link; `bleLinkOpened` / `bleLinkClosed`; `send_ble_chunks_via_unified` seals on the link Rust holds for the contact or asks Kotlin to connect (`requestGattConnect`) and reports not delivered; owed frames are sealed behind the answer that pairs a link.
+
+**Deleted.** The identity characteristic and the PAIRING / PAIRING_ACK characteristics (service UUID bumped to `8e7f1002…`); the identity read, `processGattIdentityRead`, `processBleIdentityEnvelope`, `finalizeScannerPairing`, `encodeIdentityCharValue`, `notifyBleIdentityObserved`, `bleNotifyLink`, the identity-result exports and the raw chunking exports `chunkEnvelopeForBle` / `…WithCounterparty`; `gatt_identity.rs`, `awaited_contacts.rs`, the orchestrator's identity / propose / confirm / ack / finalize phases; the bridge's fallback that marked a contact BLE-paired from an unauthenticated identity observation; the protos `BlePairingAccept`, `BlePairingConfirm`, `BleIdentityCharValue`, `BleGattIdentityReadResult` (BleEvent 12 and 15 reserved). Kotlin: the coordinator's reach and identity-anchor routing, `PeerIdentity`, and the events `IdentityReadCompleted`, `PairingAckReceived`, `PairingConfirmWritten`; `BleCoordinatorTest` (its tests were of that routing).
+
+**Tests.** Core: `two_contacts_complete_the_handshake_and_exchange_records`, `a_record_opens_once_in_order_and_only_for_the_other_side`, `the_handshake_refuses_every_side_that_does_not_hold_its_pinned_key`. SDK, real two-device harness: `a_payment_over_ble_carries_no_identity_on_the_radio`, `a_record_replayed_or_from_a_closed_link_opens_on_nothing`, `a_hello_from_a_device_that_is_not_a_contact_is_declined`; the harness's `over_ble` now seals every chunk, so every offline step test runs over link sessions. `pairing_orchestrator::tests::a_paired_link_completes_only_once_the_address_is_stored`.
+
+**Not yet proven.** BLE between two phones (the hardware stage). Prepares still carry the pinned keys (decision (d), not asked); they are sealed now.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 340 | 215 | 47 | 16 | 0 | 35 | 27 |
+| DSM high-level (MR-DSM) | 343 | 218 | 47 | 16 | 0 | 35 | 27 |
 | SoFi (MR-SOFI) | 428 | 384 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 77 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1072** | **687** | **73** | **66** | **1** | **70** | **175** |
+| **All** | **1075** | **690** | **73** | **66** | **1** | **70** | **175** |
 
 ## 8 Per-requirement results
 
@@ -7371,6 +7387,9 @@ SA-92 named two memos that could make a verdict permanent while Core later ruled
 | MR-DSM-0338 | Met | `dsm_sdk::bluetooth::anchor_accept::accept_offline_release`; `dsm::bilateral::offline::decide_confirm` | `dsm_sdk::bluetooth::offline_step_tests::an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and_spend_online` | DSM Amendment A24 (§6.132). Acceptance takes the `VerifiedConfirm` Core decided; nothing offline reads a compromise state. |
 | MR-DSM-0339 | Met | `dsm::economic::peer_lineage::Verifier::validate_peer_prefix`; `dsm_sdk::sdk::economic_registers::record_established` | `dsm_sdk::handlers::frontier_verification_tests::a_claim_off_the_validated_chain_changes_nothing` | DSM Amendment A25 (§6.135). A second claim final along the cell routed from a root the receiver never validated does not change the step it validated, asked again as a first-time verifier would be. |
 | MR-DSM-0340 | Met | `dsm::economic::native_reserve::ReserveLineage::checkpoint`; `dsm::economic::native_reserve::ReserveLineage::resume`; `dsm_sdk::sdk::native_reserve::walk_reserve`; `dsm_sdk::sdk::native_reserve::release_at` | `dsm::economic::native_reserve::tests::a_checkpoint_resumes_only_the_lineage_its_reader_sealed`; `dsm_sdk::handlers::faucet_flow_tests::the_reserve_head_is_a_sealed_checkpoint_and_a_load_verifies_only_after_it` | DSM Amendment A26 (§6.136). A bent, short, other-key or other-reserve checkpoint is refused; a load below the checkpoint reads nothing again; a refused one is verified again from the memo; a rolled-back one resumes and the suffix is established; a let-go release is read back from its cell. |
+| MR-DSM-0341 | Met | `dsm::crypto::ble_link::initiate`; `dsm::crypto::ble_link::respond`; `dsm::crypto::ble_link::complete`; `dsm::crypto::ble_link::finish`; `dsm_sdk::bluetooth::link_session::Links` | `dsm::crypto::ble_link::tests::two_contacts_complete_the_handshake_and_exchange_records`; `dsm::crypto::ble_link::tests::the_handshake_refuses_every_side_that_does_not_hold_its_pinned_key`; `dsm_sdk::bluetooth::offline_step_tests::a_hello_from_a_device_that_is_not_a_contact_is_declined` | DSM Amendment A27 (§6.138). |
+| MR-DSM-0342 | Met | `dsm::crypto::ble_link::LinkSession::seal`; `dsm::crypto::ble_link::LinkSession::open`; `dsm_sdk::bluetooth::link_session::Links::inbound` | `dsm::crypto::ble_link::tests::a_record_opens_once_in_order_and_only_for_the_other_side`; `dsm_sdk::bluetooth::offline_step_tests::a_payment_over_ble_carries_no_identity_on_the_radio`; `dsm_sdk::bluetooth::offline_step_tests::a_record_replayed_or_from_a_closed_link_opens_on_nothing` | DSM Amendment A27 (§6.138). Every offline test over BLE now runs through link sessions. |
+| MR-DSM-0343 | Met | `dsm_sdk::bluetooth::link_session::Links::inbound`; `dsm_sdk::bluetooth::pairing_orchestrator::PairingOrchestrator::link_paired` | `dsm_sdk::bluetooth::pairing_orchestrator::tests::a_paired_link_completes_only_once_the_address_is_stored`; `dsm_sdk::bluetooth::offline_step_tests::a_record_replayed_or_from_a_closed_link_opens_on_nothing` | DSM Amendment A27 (§6.138). Not run on phones: BLE between devices is the hardware stage. |
 
 ### 8.2 SoFi settlement specification
 

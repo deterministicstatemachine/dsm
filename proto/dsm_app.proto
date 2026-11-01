@@ -2196,31 +2196,9 @@ message BilateralTransactionReceived {
 message BleDeviceInfo         { string address = 1; string name = 2; int32 rssi = 3; }
 message BleCharacteristicData { string address = 1; bytes  data = 2 [(dsm_max_len)=1024]; }
 message BlePairingRequest     { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; string alias = 4; }
-message BlePairingAccept      { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
-// Phase 3 confirmation: scanner → advertiser after receiving BlePairingAccept.
-// Neither side persists ble_address until this round-trip completes (atomic pairing).
-message BlePairingConfirm     { string address = 1; bytes device_id = 2 [(dsm_fixed_len)=32]; }
-// Identity observed implicitly via GATT identity characteristic read (not an explicit pairing handshake)
+// A contact the link handshake authenticated and paired at this BLE address
+// (DSM Amendment A27): a local event for the frontend, never radio bytes.
 message BleIdentityObserved   { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
-
-// Protobuf-encoded identity value carried on the BLE GATT identity characteristic
-// (UUID 8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01). Replaces raw 64-byte concatenation.
-// Kotlin MUST NOT parse or split identity bytes — all encoding/decoding is Rust-side.
-message BleIdentityCharValue {
-  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
-  bytes device_id    = 2 [(dsm_fixed_len)=32];
-}
-
-// Response from processGattIdentityRead JNI call.
-// Rust decodes the BleIdentityCharValue from GATT, dispatches identity events, and
-// returns the write-back envelope for the peer's PAIRING characteristic.
-message BleGattIdentityReadResult {
-  bool   success             = 1;
-  bytes  write_back_envelope = 2 [(dsm_max_len)=4096]; // Framed Envelope to write to PAIRING char
-  string error_message       = 3;
-  bytes  peer_device_id      = 4 [(dsm_fixed_len)=32]; // Peer's deviceId (for Kotlin identity anchoring)
-  bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
-}
 
 // Response from processIncomingBleData JNI call.
 // Rust decides internally whether to route as chunk or Envelope v3, runs any
@@ -2314,6 +2292,9 @@ message NfcRecoveryCapsule {
 }
 
 message BleEvent {
+  // 12 BlePairingAccept and 15 BlePairingConfirm: the three-phase plaintext
+  // pairing, replaced by the link handshake (DSM Amendment A27).
+  reserved 12, 15;
   oneof ev {
     BleDeviceInfo device_found            = 1;
     BleDeviceInfo device_connected        = 2;
@@ -2326,10 +2307,8 @@ message BleEvent {
     bool   advertising_stopped = 9;
     BleConnectionFailed connection_failed = 10; // human text (transport only)
     BlePairingRequest pairing_request = 11;
-    BlePairingAccept  pairing_accept  = 12;
     BleIdentityObserved identity_observed = 13;
     PairingStatusUpdate pairing_status    = 14;
-    BlePairingConfirm   pairing_confirm  = 15;
     BlePermissionEvent    ble_permission     = 17;
   }
 }

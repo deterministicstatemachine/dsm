@@ -27,77 +27,6 @@ import java.util.UUID
 class PeerSessionTest {
 
     // ═══════════════════════════════════════════════════════════════════════
-    //  PeerIdentity
-    // ═══════════════════════════════════════════════════════════════════════
-
-    @Test
-    fun peerIdentity_keyIsLowercaseHex() {
-        val id = PeerIdentity(
-            deviceId = byteArrayOf(0x0A, 0xFF.toByte(), 0x00),
-            genesisHash = byteArrayOf()
-        )
-        assertEquals("0aff00", id.key)
-    }
-
-    @Test
-    fun peerIdentity_keyOf32Bytes_has64HexChars() {
-        val id = PeerIdentity(
-            deviceId = ByteArray(32) { it.toByte() },
-            genesisHash = byteArrayOf()
-        )
-        assertEquals(64, id.key.length)
-    }
-
-    @Test
-    fun peerIdentity_keyOfEmptyDeviceId_isEmpty() {
-        val id = PeerIdentity(deviceId = byteArrayOf(), genesisHash = byteArrayOf())
-        assertEquals("", id.key)
-    }
-
-    @Test
-    fun peerIdentity_equalityBasedOnDeviceIdOnly() {
-        val a = PeerIdentity(byteArrayOf(1, 2, 3), byteArrayOf(10))
-        val b = PeerIdentity(byteArrayOf(1, 2, 3), byteArrayOf(99))
-        assertEquals(a, b)
-    }
-
-    @Test
-    fun peerIdentity_differentDeviceIds_notEqual() {
-        val a = PeerIdentity(byteArrayOf(1, 2, 3), byteArrayOf(10))
-        val b = PeerIdentity(byteArrayOf(1, 2, 4), byteArrayOf(10))
-        assertNotEquals(a, b)
-    }
-
-    @Test
-    fun peerIdentity_hashCodeConsistentWithEquals() {
-        val a = PeerIdentity(byteArrayOf(1, 2, 3), byteArrayOf(10))
-        val b = PeerIdentity(byteArrayOf(1, 2, 3), byteArrayOf(99))
-        assertEquals(a.hashCode(), b.hashCode())
-    }
-
-    @Test
-    fun peerIdentity_notEqualToNull() {
-        val id = PeerIdentity(byteArrayOf(1), byteArrayOf())
-        assertFalse(id.equals(null))
-    }
-
-    @Test
-    fun peerIdentity_notEqualToDifferentType() {
-        val id = PeerIdentity(byteArrayOf(1), byteArrayOf())
-        assertFalse(id.equals("not a PeerIdentity"))
-    }
-
-    @Test
-    fun peerIdentity_usableAsMapKey() {
-        val a = PeerIdentity(byteArrayOf(1, 2), byteArrayOf())
-        val b = PeerIdentity(byteArrayOf(1, 2), byteArrayOf(99))
-        val map = mutableMapOf(a to "first")
-        map[b] = "second"
-        assertEquals(1, map.size)
-        assertEquals("second", map[a])
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
     //  PeerSession – default values
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -196,8 +125,6 @@ class PeerSessionTest {
             isConnected = true
             negotiatedMtu = 512
             serviceDiscoveryCompleted = true
-            identityExchangeInProgress = true
-            pairingInProgress = true
         }
         s.clearClientState()
 
@@ -205,8 +132,7 @@ class PeerSessionTest {
         assertEquals(23, s.negotiatedMtu)
         assertFalse(s.serviceDiscoveryCompleted)
         assertNull(s.lastError)
-        assertFalse(s.identityExchangeInProgress)
-        assertFalse(s.pairingInProgress)
+        assertFalse(s.clientRouteReady)
         assertNull(s.connectResult)
     }
 

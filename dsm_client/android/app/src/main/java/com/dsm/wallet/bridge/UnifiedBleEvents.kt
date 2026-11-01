@@ -26,27 +26,6 @@ internal object UnifiedBleEvents {
         android.util.Log.i("Unified", "onDeviceDisconnected: $address (bridged via binary path)")
     }
 
-    /**
-     * The link at [address] carries the appliance [deviceId]: its identity is
-     * anchored there. Rust delivers what it owes that appliance.
-     */
-    fun onLinkUp(deviceId: ByteArray, address: String) {
-        try {
-            Unified.bleNotifyLink(deviceId, address, true)
-        } catch (t: Throwable) {
-            android.util.Log.e("Unified", "bleNotifyLink(up) failed", t)
-        }
-    }
-
-    /** The link that carried the appliance [deviceId] ended. */
-    fun onLinkDown(deviceId: ByteArray, address: String) {
-        try {
-            Unified.bleNotifyLink(deviceId, address, false)
-        } catch (t: Throwable) {
-            android.util.Log.e("Unified", "bleNotifyLink(down) failed", t)
-        }
-    }
-
     fun onScanStarted() {
         android.util.Log.i("Unified", "onScanStarted")
         try {

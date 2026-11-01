@@ -8,14 +8,13 @@
 
 pub mod anchor_accept;
 pub mod android_ble_bridge;
-pub mod awaited_contacts;
 pub mod bilateral_ble_handler;
 pub mod bilateral_envelope;
 pub mod bilateral_session;
 pub mod bilateral_transport_adapter;
 pub mod ble_frame_coordinator;
 pub mod frame_classify;
-pub mod gatt_identity;
+pub mod link_session;
 #[cfg(test)]
 mod offline_step_tests;
 pub mod owed_frame_driver;

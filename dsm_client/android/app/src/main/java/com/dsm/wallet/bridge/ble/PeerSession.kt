@@ -9,23 +9,6 @@ import kotlinx.coroutines.sync.Mutex
 import java.util.UUID
 
 /**
- * Identity anchor for a DSM peer. Keyed by deviceId (32 bytes) which is
- * stable across BLE address rotations. The genesisHash is carried for
- * display/verification but identity equality is based on deviceId alone.
- */
-data class PeerIdentity(
-    val deviceId: ByteArray,
-    val genesisHash: ByteArray,
-) {
-    /** Hex key for map lookups. */
-    val key: String get() = deviceId.joinToString("") { "%02x".format(it) }
-
-    override fun equals(other: Any?): Boolean =
-        other is PeerIdentity && deviceId.contentEquals(other.deviceId)
-    override fun hashCode(): Int = deviceId.contentHashCode()
-}
-
-/**
  * Unified per-peer state object. Replaces the address-keyed maps that were
  * previously spread across BleCoordinator (sessionStates, activeSessions,
  * pendingConnectionAddresses) and GattServerHost
@@ -47,11 +30,9 @@ data class PeerSession(
     var negotiatedMtu: Int = 23,
     var serviceDiscoveryCompleted: Boolean = false,
     var lastError: BleSessionEvent.ErrorOccurred? = null,
-    var identityExchangeInProgress: Boolean = false,
-    var pairingInProgress: Boolean = false,
     /**
-     * True once the identity read on this client link is anchored, after its
-     * CCCD chain completed: the link carries that appliance and is a route to it.
+     * True once Rust opened this client link (DSM Amendment A27): its handshake
+     * and every sealed record after it travel on it.
      */
     var clientRouteReady: Boolean = false,
 
@@ -67,9 +48,6 @@ data class PeerSession(
     var chunkAckChannel: Channel<Int>? = null,
     var notificationSendLock: Mutex = Mutex(),
     var writeBudget: BleWriteBudget = BleWriteBudget(),
-
-    // ── Identity anchor (stable across RPA rotations) ──────────────────
-    @Transient var identity: PeerIdentity? = null,
 
     // ── Transfer nonce ───────────────────────────────────────────────────
     var serverTransferNonce: Byte = 0,
@@ -104,8 +82,6 @@ data class PeerSession(
         negotiatedMtu = 23
         serviceDiscoveryCompleted = false
         lastError = null
-        identityExchangeInProgress = false
-        pairingInProgress = false
         clientRouteReady = false
         connectResult?.complete(false)
         connectResult = null

@@ -950,7 +950,7 @@ mod tests {
     }
 
     /// After a paired peer's BLE address rotates, the re-persist on a later
-    /// identity read (`update_contact_ble_status(device_id, None, Some(new))`)
+    /// paired link (`update_contact_ble_status(device_id, None, Some(new))`)
     /// re-points the contact: it holds the fresh address, not the stale one.
     #[test]
     #[serial]

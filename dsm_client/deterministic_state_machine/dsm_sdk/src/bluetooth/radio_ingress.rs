@@ -9,7 +9,9 @@
 //! v3 (`0x03`-framed) whose payload is a bilateral frame — and both go to the
 //! bilateral transport, whose handlers check the frame against its session and
 //! the counterparty's keys. Nothing a peer wrote is ever sent back to it as it
-//! came. Pairing frames have their own entry (`processBleIdentityEnvelope`).
+//! came. These are the units a link session opened
+//! (`crate::bluetooth::link_session`, DSM Amendment A27): nothing reaches
+//! here that was not sealed for this device on an authenticated link.
 //!
 //! Nothing here reaches the local entry (`crate::ingress`), the Core bridge or
 //! the app router. Those run the wallet owner's requests, from the WebView and

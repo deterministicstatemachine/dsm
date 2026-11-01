@@ -14235,102 +14235,8 @@ export class BlePairingRequest extends Message<BlePairingRequest> {
 }
 
 /**
- * @generated from message dsm.BlePairingAccept
- */
-export class BlePairingAccept extends Message<BlePairingAccept> {
-  /**
-   * @generated from field: string address = 1;
-   */
-  address = "";
-
-  /**
-   * @generated from field: bytes genesis_hash = 2;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 3;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BlePairingAccept>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BlePairingAccept";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BlePairingAccept | PlainMessage<BlePairingAccept> | undefined, b: BlePairingAccept | PlainMessage<BlePairingAccept> | undefined): boolean {
-    return proto3.util.equals(BlePairingAccept, a, b);
-  }
-}
-
-/**
- * Phase 3 confirmation: scanner → advertiser after receiving BlePairingAccept.
- * Neither side persists ble_address until this round-trip completes (atomic pairing).
- *
- * @generated from message dsm.BlePairingConfirm
- */
-export class BlePairingConfirm extends Message<BlePairingConfirm> {
-  /**
-   * @generated from field: string address = 1;
-   */
-  address = "";
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BlePairingConfirm>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BlePairingConfirm";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BlePairingConfirm | PlainMessage<BlePairingConfirm> | undefined, b: BlePairingConfirm | PlainMessage<BlePairingConfirm> | undefined): boolean {
-    return proto3.util.equals(BlePairingConfirm, a, b);
-  }
-}
-
-/**
- * Identity observed implicitly via GATT identity characteristic read (not an explicit pairing handshake)
+ * A contact the link handshake authenticated and paired at this BLE address
+ * (DSM Amendment A27): a local event for the frontend, never radio bytes.
  *
  * @generated from message dsm.BleIdentityObserved
  */
@@ -14377,124 +14283,6 @@ export class BleIdentityObserved extends Message<BleIdentityObserved> {
 
   static equals(a: BleIdentityObserved | PlainMessage<BleIdentityObserved> | undefined, b: BleIdentityObserved | PlainMessage<BleIdentityObserved> | undefined): boolean {
     return proto3.util.equals(BleIdentityObserved, a, b);
-  }
-}
-
-/**
- * Protobuf-encoded identity value carried on the BLE GATT identity characteristic
- * (UUID 8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01). Replaces raw 64-byte concatenation.
- * Kotlin MUST NOT parse or split identity bytes — all encoding/decoding is Rust-side.
- *
- * @generated from message dsm.BleIdentityCharValue
- */
-export class BleIdentityCharValue extends Message<BleIdentityCharValue> {
-  /**
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleIdentityCharValue>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleIdentityCharValue";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleIdentityCharValue | PlainMessage<BleIdentityCharValue> | undefined, b: BleIdentityCharValue | PlainMessage<BleIdentityCharValue> | undefined): boolean {
-    return proto3.util.equals(BleIdentityCharValue, a, b);
-  }
-}
-
-/**
- * Response from processGattIdentityRead JNI call.
- * Rust decodes the BleIdentityCharValue from GATT, dispatches identity events, and
- * returns the write-back envelope for the peer's PAIRING characteristic.
- *
- * @generated from message dsm.BleGattIdentityReadResult
- */
-export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * Framed Envelope to write to PAIRING char
-   *
-   * @generated from field: bytes write_back_envelope = 2;
-   */
-  writeBackEnvelope = new Uint8Array(0);
-
-  /**
-   * @generated from field: string error_message = 3;
-   */
-  errorMessage = "";
-
-  /**
-   * Peer's deviceId (for Kotlin identity anchoring)
-   *
-   * @generated from field: bytes peer_device_id = 4;
-   */
-  peerDeviceId = new Uint8Array(0);
-
-  /**
-   * Peer's genesisHash
-   *
-   * @generated from field: bytes peer_genesis_hash = 5;
-   */
-  peerGenesisHash = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleGattIdentityReadResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleGattIdentityReadResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "write_back_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "peer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "peer_genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleGattIdentityReadResult | PlainMessage<BleGattIdentityReadResult> | undefined, b: BleGattIdentityReadResult | PlainMessage<BleGattIdentityReadResult> | undefined): boolean {
-    return proto3.util.equals(BleGattIdentityReadResult, a, b);
   }
 }
 
@@ -15139,12 +14927,6 @@ export class BleEvent extends Message<BleEvent> {
     case: "pairingRequest";
   } | {
     /**
-     * @generated from field: dsm.BlePairingAccept pairing_accept = 12;
-     */
-    value: BlePairingAccept;
-    case: "pairingAccept";
-  } | {
-    /**
      * @generated from field: dsm.BleIdentityObserved identity_observed = 13;
      */
     value: BleIdentityObserved;
@@ -15155,12 +14937,6 @@ export class BleEvent extends Message<BleEvent> {
      */
     value: PairingStatusUpdate;
     case: "pairingStatus";
-  } | {
-    /**
-     * @generated from field: dsm.BlePairingConfirm pairing_confirm = 15;
-     */
-    value: BlePairingConfirm;
-    case: "pairingConfirm";
   } | {
     /**
      * @generated from field: dsm.BlePermissionEvent ble_permission = 17;
@@ -15188,10 +14964,8 @@ export class BleEvent extends Message<BleEvent> {
     { no: 9, name: "advertising_stopped", kind: "scalar", T: 8 /* ScalarType.BOOL */, oneof: "ev" },
     { no: 10, name: "connection_failed", kind: "message", T: BleConnectionFailed, oneof: "ev" },
     { no: 11, name: "pairing_request", kind: "message", T: BlePairingRequest, oneof: "ev" },
-    { no: 12, name: "pairing_accept", kind: "message", T: BlePairingAccept, oneof: "ev" },
     { no: 13, name: "identity_observed", kind: "message", T: BleIdentityObserved, oneof: "ev" },
     { no: 14, name: "pairing_status", kind: "message", T: PairingStatusUpdate, oneof: "ev" },
-    { no: 15, name: "pairing_confirm", kind: "message", T: BlePairingConfirm, oneof: "ev" },
     { no: 17, name: "ble_permission", kind: "message", T: BlePermissionEvent, oneof: "ev" },
   ]);
 
