@@ -278,13 +278,17 @@ IOS_DIR := $(REPO_ROOT)/dsm_client/ios
 IOS_NATIVE := $(IOS_DIR)/Native
 IOS_TARGETS ?= aarch64-apple-ios aarch64-apple-ios-sim
 IOS_PROFILE ?= release
+# The app's deployment target (DsmWallet.xcodeproj sets the same): the Rust
+# objects and the link agree on it, or the C objects built for the SDK's own
+# iOS version reference stack probes the 10.0 default link has no library for.
+IOS_DEPLOYMENT_TARGET ?= 17.0
 IOS_PROFILE_FLAG := $(if $(filter release,$(IOS_PROFILE)),--release,)
 
 .PHONY: ios-libs
 ios-libs: ## Build the Rust SDK for iOS (device + simulator) into Native/DsmSdk.xcframework
 	@echo "==> Building the Rust SDK for iOS ($(IOS_PROFILE): $(IOS_TARGETS))..."
 	cd $(NDK_DIR) && \
-		DSM_PROTO_ROOT=$(REPO_ROOT)/proto \
+		DSM_PROTO_ROOT=$(REPO_ROOT)/proto IPHONEOS_DEPLOYMENT_TARGET=$(IOS_DEPLOYMENT_TARGET) \
 		cargo build $(IOS_PROFILE_FLAG) --locked --package dsm_sdk --lib --features ffi,bluetooth \
 			$(foreach t,$(IOS_TARGETS),--target $(t))
 	cd $(NDK_DIR)/dsm_sdk && cbindgen --config cbindgen.toml --crate dsm_sdk --output include/dsm_sdk.h
@@ -309,6 +313,12 @@ ios-simulator: ios-project ## Build the app for the arm64 iOS Simulator (needs i
 	cd $(IOS_DIR) && xcodebuild -project DsmWallet.xcodeproj -scheme DsmWallet -configuration Debug \
 		-destination 'generic/platform=iOS Simulator' -derivedDataPath DerivedData \
 		ARCHS=arm64 build
+
+.PHONY: ios-device
+ios-device: ios-project ## Build the app for a connected iPhone/iPad, signed by Xcode's automatic provisioning (IOS_TEAM=<Apple team id>)
+	cd $(IOS_DIR) && xcodebuild -project DsmWallet.xcodeproj -scheme DsmWallet -configuration Debug \
+		-destination 'generic/platform=iOS' -derivedDataPath DerivedData \
+		DEVELOPMENT_TEAM=$(IOS_TEAM) -allowProvisioningUpdates build
 
 .PHONY: frontend
 frontend: ## Build the React frontend (copies assets into Android)
