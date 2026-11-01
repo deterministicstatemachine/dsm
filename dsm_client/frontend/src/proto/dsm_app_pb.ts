@@ -9364,6 +9364,15 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
    */
   claimantAttA = new Uint8Array(0);
 
+  /**
+   * The claimant's own signed directory entry (DeviceDirectoryEntryV1 bytes):
+   * its bytes prove the AK, under the recipient genesis, by P0-P6, and so
+   * decide the claimant's entitlement at the cell (SA-63).
+   *
+   * @generated from field: bytes claimant_directory_entry = 3;
+   */
+  claimantDirectoryEntry = new Uint8Array(0);
+
   constructor(data?: PartialMessage<FaucetClaimantRecipientV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -9374,6 +9383,7 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "claimant_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "claimant_directory_entry", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetClaimantRecipientV1 {

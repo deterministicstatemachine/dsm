@@ -1311,8 +1311,12 @@ message EconomicRootClaimV1 {
 // canonical_body_bytes)). Strict: decode -> re-encode equality; the client
 // signs ONCE per parent root and replays the exact bytes on every retry.
 message FaucetClaimantRecipientV1 {
-  bytes claimant_public_key = 1 [(dsm_max_len)=65535];
-  bytes claimant_att_a      = 2 [(dsm_fixed_len)=32];
+  bytes claimant_public_key      = 1 [(dsm_max_len)=65535];
+  bytes claimant_att_a           = 2 [(dsm_fixed_len)=32];
+  // The claimant's own signed directory entry (DeviceDirectoryEntryV1 bytes):
+  // its bytes prove the AK, under the recipient genesis, by P0-P6, and so
+  // decide the claimant's entitlement at the cell (SA-63).
+  bytes claimant_directory_entry = 3 [(dsm_max_len)=262144];
 }
 
 message NativeReserveReleaseBodyV1 {

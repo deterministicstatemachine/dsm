@@ -33,7 +33,8 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::shared_lineage::{EstablishedSharedHead, GenerationChain, LineageKind, SharedGenesisV1};
 use dsm::types::operations::Operation;
 
-const G: [u8; 32] = [0x11; 32];
+#[path = "common/identity.rs"]
+mod identity;
 const NETWORK: &[u8] = b"dsm-testnet";
 const SET_ID: [u8; 32] = [0xB1; 32];
 
@@ -50,15 +51,34 @@ fn keypair() -> (Vec<u8>, Vec<u8>) {
 /// cell recognizes a release only when its signer is the device it credits.
 fn trader() -> &'static (Vec<u8>, Vec<u8>) {
     static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+    KEYS.get_or_init(|| {
+        (
+            holder().ak_public_key.clone(),
+            holder().ak_secret_key.clone(),
+        )
+    })
 }
 
-const ATTA: [u8; 32] = [0x4A; 32];
+/// The trader: a real identity, with its own signed directory entry (SA-63).
+fn holder() -> &'static identity::Identity {
+    static HOLDER: std::sync::OnceLock<identity::Identity> = std::sync::OnceLock::new();
+    HOLDER.get_or_init(|| identity::identity(0x71))
+}
+
+/// The trader's genesis.
+fn g() -> [u8; 32] {
+    holder().genesis
+}
+
+/// The trader's `AttA`.
+fn atta() -> [u8; 32] {
+    holder().att_a
+}
 
 /// The trader's device id, derived from its key and `AttA`.
 fn dev() -> &'static [u8; 32] {
     static DEVID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    DEVID.get_or_init(|| dsm::core::identity::genesis_v2::derive_devid(&trader().0, &ATTA))
+    DEVID.get_or_init(|| holder().devid)
 }
 
 fn claim_op(reserve_id: [u8; 32], generation: u64) -> Operation {
@@ -130,14 +150,15 @@ fn fixture_at(
                 parent_root: parent.root(),
                 generation,
                 amount,
-                recipient_genesis: G,
+                recipient_genesis: g(),
                 recipient_devid: *dev(),
                 recipient_economic_position: position,
                 recipient_operation_digest: op_digest,
                 storage_set_id: SET_ID,
                 source: ReleaseSource::FaucetClaimant {
                     claimant_public_key: pk.clone(),
-                    claimant_att_a: ATTA,
+                    claimant_att_a: atta(),
+                    claimant_directory_entry: holder().directory_entry.clone(),
                 },
             },
             &sk,
@@ -152,7 +173,7 @@ fn fixture_at(
     let credit = EconomicLeafState::Balance(
         EconomicBalanceState::new(era_commit(), amount).expect("nonzero"),
     );
-    let key = credit.leaf_key(&G, dev());
+    let key = credit.leaf_key(&g(), dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
@@ -371,7 +392,7 @@ impl ProvenanceResolver for Nothing {
 
 fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
     ProvenanceContext {
-        genesis: &G,
+        genesis: &holder().genesis,
         device_id: dev(),
         economic_position: position,
         network_id: NETWORK,
@@ -609,7 +630,7 @@ fn faucet_claim_names_its_claimant_as_recipient() {
         Err(ProvenanceError::ReleaseRecipientMismatch)
     ));
     // The release names another recipient than the identity under validation.
-    let (pk, sk) = keypair();
+    let someone = identity::identity(0x73);
     let parent = genesis();
     let op = claim_op(*parent.reserve_id(), 1);
     let paid_to_someone_else = sign_release(
@@ -618,17 +639,18 @@ fn faucet_claim_names_its_claimant_as_recipient() {
             parent_root: parent.root(),
             generation: 1,
             amount: ERA_FAUCET_PAYOUT,
-            recipient_genesis: [0x66; 32],
-            recipient_devid: dsm::core::identity::genesis_v2::derive_devid(&pk, &ATTA),
+            recipient_genesis: someone.genesis,
+            recipient_devid: someone.devid,
             recipient_economic_position: 1,
             recipient_operation_digest: dsm_operation_digest(&op.to_bytes()),
             storage_set_id: SET_ID,
             source: ReleaseSource::FaucetClaimant {
-                claimant_public_key: pk.clone(),
-                claimant_att_a: ATTA,
+                claimant_public_key: someone.ak_public_key.clone(),
+                claimant_att_a: someone.att_a,
+                claimant_directory_entry: someone.directory_entry.clone(),
             },
         },
-        &sk,
+        &someone.ak_secret_key,
     )
     .expect("signable");
     // The reader's chain holds that release at generation 1.
@@ -642,7 +664,12 @@ fn faucet_claim_names_its_claimant_as_recipient() {
     descriptor.release_evidence_addr = release_evidence_addr(&paid_to_someone_else);
     let src = CreditSource::NativeReserveRelease(descriptor);
     assert!(matches!(
-        verify_credit_source(&src, &fx.witness, &resolver, &ctx(1, &pk)),
+        verify_credit_source(
+            &src,
+            &fx.witness,
+            &resolver,
+            &ctx(1, &someone.ak_public_key)
+        ),
         Err(ProvenanceError::ReleaseRecipientMismatch)
     ));
 }
@@ -696,14 +723,15 @@ fn a_foreign_register_set_is_refused() {
             parent_root: r0.root(),
             generation: 1,
             amount: ERA_FAUCET_PAYOUT,
-            recipient_genesis: G,
+            recipient_genesis: g(),
             recipient_devid: *dev(),
             recipient_economic_position: 1,
             recipient_operation_digest: dsm_operation_digest(&op.to_bytes()),
             storage_set_id: [0x77; 32],
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk,
-                claimant_att_a: ATTA,
+                claimant_att_a: atta(),
+                claimant_directory_entry: holder().directory_entry.clone(),
             },
         },
         &sk,

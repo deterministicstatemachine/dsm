@@ -100,6 +100,9 @@ pub const ERA_FAUCET_PAYOUT: u64 = 10_000;
 /// module does.
 const MAX_KEY_OR_SIG_BYTES: usize = 65_535;
 
+/// The longest directory entry a release carries (the proto's `dsm_max_len`).
+const MAX_DIRECTORY_ENTRY_BYTES: usize = 262_144;
+
 /// The canonical reserve identity for one network:
 /// `H_dom(DSM/native-reserve-id/v1, network_id ‖ ERA_POLICY_COMMIT)`.
 ///
@@ -601,6 +604,11 @@ pub enum ReleaseSource {
         claimant_public_key: Vec<u8>,
         /// The recipient device's `AttA` (`DevID = H(AK ‖ AttA)`).
         claimant_att_a: D32,
+        /// The claimant's own signed directory entry: it names the recipient
+        /// genesis, device, AK and AttA, and its P0–P6 evidence proves the AK
+        /// as the device's owner authority under that genesis. Its bytes
+        /// decide the claimant's entitlement at the cell (SA-63).
+        claimant_directory_entry: Vec<u8>,
     },
 }
 
@@ -632,10 +640,12 @@ impl NativeReserveReleaseBody {
             ReleaseSource::FaucetClaimant {
                 claimant_public_key,
                 claimant_att_a,
+                claimant_directory_entry,
             } => generated::native_reserve_release_body_v1::Source::FaucetClaimant(
                 generated::FaucetClaimantRecipientV1 {
                     claimant_public_key: claimant_public_key.clone(),
                     claimant_att_a: claimant_att_a.to_vec(),
+                    claimant_directory_entry: claimant_directory_entry.clone(),
                 },
             ),
         };
@@ -669,9 +679,15 @@ impl NativeReserveReleaseBody {
                 {
                     return Err(ReleaseError::Malformed("claimant_public_key length"));
                 }
+                if c.claimant_directory_entry.is_empty()
+                    || c.claimant_directory_entry.len() > MAX_DIRECTORY_ENTRY_BYTES
+                {
+                    return Err(ReleaseError::Malformed("claimant_directory_entry length"));
+                }
                 ReleaseSource::FaucetClaimant {
                     claimant_public_key: c.claimant_public_key.clone(),
                     claimant_att_a: fixed(&c.claimant_att_a, "claimant_att_a")?,
+                    claimant_directory_entry: c.claimant_directory_entry.clone(),
                 }
             }
             None => return Err(ReleaseError::Malformed("release has no source")),
@@ -843,6 +859,10 @@ pub enum ReleaseRefusal {
     /// policy fixes it, and a release the policy does not allow cannot exist
     /// (SoFi §51), so it is not an object naming the cell.
     NotTheReleaseRulesAmount { amount: u64, rule: u64 },
+    /// The claimant's directory entry does not name the release's recipient
+    /// and key, or does not prove itself: its signature, or its P0–P6
+    /// evidence of the AK under the recipient genesis (SA-63).
+    ClaimantNotInTheDirectory(&'static str),
 }
 
 impl core::fmt::Display for ReleaseRefusal {
@@ -872,6 +892,9 @@ impl core::fmt::Display for ReleaseRefusal {
                 f,
                 "release of {amount}; its source's release rule releases exactly {rule}"
             ),
+            Self::ClaimantNotInTheDirectory(why) => {
+                write!(f, "the release's claimant directory entry {why}")
+            }
         }
     }
 }
@@ -938,12 +961,19 @@ pub fn release_constructible(
         ReleaseSource::FaucetClaimant {
             claimant_public_key,
             claimant_att_a,
+            claimant_directory_entry,
         } => {
             if crate::core::identity::genesis_v2::derive_devid(claimant_public_key, claimant_att_a)
                 != body.recipient_devid
             {
                 return Err(ReleaseRefusal::SignerIsNotTheRecipient);
             }
+            claimant_entitled(
+                body,
+                claimant_public_key,
+                claimant_att_a,
+                claimant_directory_entry,
+            )?;
             ERA_FAUCET_PAYOUT
         }
     };
@@ -960,6 +990,44 @@ pub fn release_constructible(
         generation: body.generation,
         storage_set_id: parent.storage_set_id,
         predecessor: release_evidence_addr(&release.envelope_bytes),
+    })
+}
+
+/// The claimant's entitlement, decided from the bytes the release carries: its
+/// directory entry names the release's recipient genesis and device, the
+/// signing key and its AttA, and proves itself (its signature, and its P0–P6
+/// evidence of that key as the device's owner authority under the genesis).
+/// The cheap comparisons run first; nothing is fetched (SA-63).
+fn claimant_entitled(
+    body: &NativeReserveReleaseBody,
+    claimant_public_key: &[u8],
+    claimant_att_a: &D32,
+    entry_bytes: &[u8],
+) -> Result<(), ReleaseRefusal> {
+    use crate::core::identity::directory::DirectoryEntry;
+    let entry = DirectoryEntry::decode(entry_bytes).map_err(entry_refused)?;
+    let named = &entry.body;
+    if named.genesis != body.recipient_genesis
+        || named.device_id != body.recipient_devid
+        || named.ak_public_key.as_slice() != claimant_public_key
+        || named.att_a != *claimant_att_a
+    {
+        return Err(ReleaseRefusal::ClaimantNotInTheDirectory(
+            "does not name the release's recipient and key",
+        ));
+    }
+    entry.verify().map_err(entry_refused)
+}
+
+/// Why a claimant's directory entry refused, as the release's refusal.
+fn entry_refused(e: crate::core::identity::directory::DirectoryError) -> ReleaseRefusal {
+    use crate::core::identity::directory::DirectoryError;
+    ReleaseRefusal::ClaimantNotInTheDirectory(match e {
+        DirectoryError::Malformed(..) => "is malformed",
+        DirectoryError::KeyLength => "carries a key of the wrong length",
+        DirectoryError::NotThisDevicesKey => "names an AK its device id does not commit",
+        DirectoryError::SignatureDoesNotVerify => "is not signed by its AK",
+        DirectoryError::GenesisNotProven(..) => "does not prove its AK under the recipient genesis",
     })
 }
 
@@ -1213,11 +1281,28 @@ mod tests {
     use crate::route_chain::ROUTE_LEN;
 
     const NETWORK: &[u8] = b"dsm-testnet";
-    const G: D32 = [0x11; 32];
-    const ATTA: D32 = [0x4A; 32];
+    /// A claimant: a real identity, its own signed directory entry and its AK
+    /// secret key.
+    struct Claimant {
+        entry: crate::core::identity::directory::DirectoryEntry,
+        sk: Vec<u8>,
+    }
 
-    fn keypair() -> (Vec<u8>, Vec<u8>) {
-        crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair")
+    impl Claimant {
+        fn pk(&self) -> &[u8] {
+            &self.entry.body.ak_public_key
+        }
+    }
+
+    /// A fresh claimant per call: identities from successive wallet seeds.
+    fn claimant() -> Claimant {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut wallet_seed = [0x5E; 64];
+        wallet_seed[..8].copy_from_slice(&n.to_be_bytes());
+        let (entry, sk) =
+            crate::core::identity::directory::test_identities::signed_entry_of(&wallet_seed);
+        Claimant { entry, sk }
     }
 
     fn genesis() -> NativeReserveState {
@@ -1229,30 +1314,39 @@ mod tests {
         reserve_genesis_supply().expect("ERA's genesis supply")
     }
 
-    fn body(parent: &NativeReserveState, amount: u64, pk: &[u8]) -> NativeReserveReleaseBody {
+    fn body(
+        parent: &NativeReserveState,
+        amount: u64,
+        claimant: &Claimant,
+    ) -> NativeReserveReleaseBody {
+        let named = &claimant.entry.body;
         NativeReserveReleaseBody {
             reserve_id: parent.reserve_id,
             parent_root: parent.root(),
             generation: parent.generation + 1,
             amount,
-            recipient_genesis: G,
+            recipient_genesis: named.genesis,
             // The signer is the device the release credits.
-            recipient_devid: crate::core::identity::genesis_v2::derive_devid(pk, &ATTA),
+            recipient_devid: named.device_id,
             recipient_economic_position: 1,
             recipient_operation_digest: [0x33; 32],
             storage_set_id: committed_set_id(),
             source: ReleaseSource::FaucetClaimant {
-                claimant_public_key: pk.to_vec(),
-                claimant_att_a: ATTA,
+                claimant_public_key: claimant.pk().to_vec(),
+                claimant_att_a: named.att_a,
+                claimant_directory_entry: claimant.entry.encode(),
             },
         }
     }
 
-    /// A release of `parent`, signed by a fresh claimant key, and that key.
-    fn signed_with_key(parent: &NativeReserveState, amount: u64) -> (VerifiedRelease, Vec<u8>) {
-        let (pk, sk) = keypair();
-        let bytes = sign_release(&body(parent, amount, &pk), &sk).expect("signable");
-        (decode_and_verify_release(&bytes).expect("verifies"), pk)
+    /// A release of `parent`, signed by a fresh claimant, and that claimant.
+    fn signed_with_key(parent: &NativeReserveState, amount: u64) -> (VerifiedRelease, Claimant) {
+        let claimant = claimant();
+        let bytes = sign_release(&body(parent, amount, &claimant), &claimant.sk).expect("signable");
+        (
+            decode_and_verify_release(&bytes).expect("verifies"),
+            claimant,
+        )
     }
 
     fn signed(parent: &NativeReserveState, amount: u64) -> VerifiedRelease {
@@ -1441,18 +1535,20 @@ mod tests {
     #[test]
     fn a_release_signed_by_any_key_but_the_recipient_devices_never_holds_the_cell() {
         let r0 = genesis();
-        let (pk, sk) = keypair();
-        let (thief_pk, thief_sk) = keypair();
-        let honest_body = body(&r0, ERA_FAUCET_PAYOUT, &pk);
-        // The recipient's own body, signed by another key under that key's
-        // own name and AttA: it verifies, and it names a device the key does
-        // not derive.
+        let owner = claimant();
+        let thief = claimant();
+        let (pk, sk) = (owner.pk().to_vec(), owner.sk.clone());
+        let honest_body = body(&r0, ERA_FAUCET_PAYOUT, &owner);
+        // The recipient's own body, signed by another key under the
+        // recipient's AttA and entry: it verifies, and it names a device the
+        // key does not derive.
         let mut foreign_body = honest_body.clone();
         foreign_body.source = ReleaseSource::FaucetClaimant {
-            claimant_public_key: thief_pk.clone(),
-            claimant_att_a: ATTA,
+            claimant_public_key: thief.pk().to_vec(),
+            claimant_att_a: owner.entry.body.att_a,
+            claimant_directory_entry: owner.entry.encode(),
         };
-        let foreign = decode_and_verify_release(&sign_release(&foreign_body, &thief_sk).unwrap())
+        let foreign = decode_and_verify_release(&sign_release(&foreign_body, &thief.sk).unwrap())
             .expect("the signature verifies under the key it carries");
         assert_eq!(
             release_constructible(&r0, &foreign),
@@ -1463,6 +1559,7 @@ mod tests {
         wrong_atta.source = ReleaseSource::FaucetClaimant {
             claimant_public_key: pk.clone(),
             claimant_att_a: [0x4B; 32],
+            claimant_directory_entry: owner.entry.encode(),
         };
         let wrong_atta =
             decode_and_verify_release(&sign_release(&wrong_atta, &sk).unwrap()).expect("verifies");
@@ -1557,7 +1654,7 @@ mod tests {
             release_constructible(&r0, &zero),
             Err(ReleaseRefusal::ZeroRelease)
         );
-        let (release, pk) = signed_with_key(&r0, ERA_FAUCET_PAYOUT);
+        let (release, claimant) = signed_with_key(&r0, ERA_FAUCET_PAYOUT);
         let r1 = release_constructible(&r0, &release).expect("constructible");
         // Every unit that left the reserve is accounted to the recipient the
         // body names, and that recipient is the signer.
@@ -1565,15 +1662,16 @@ mod tests {
             r0.remaining_supply - r1.remaining_supply,
             release.body.amount
         );
-        assert_eq!(release.body.recipient_genesis, G);
-        assert_eq!(release.body.signer(), pk.as_slice());
+        assert_eq!(release.body.recipient_genesis, claimant.entry.body.genesis);
+        assert_eq!(release.body.signer(), claimant.pk());
     }
 
     #[test]
     fn a_release_must_succeed_exactly_its_parent() {
         let r0 = genesis();
-        let (pk, sk) = keypair();
-        let mut wrong_root = body(&r0, ERA_FAUCET_PAYOUT, &pk);
+        let c = claimant();
+        let (pk, sk) = (&c, c.sk.clone());
+        let mut wrong_root = body(&r0, ERA_FAUCET_PAYOUT, pk);
         wrong_root.parent_root = [0xEE; 32];
         let wrong_root =
             decode_and_verify_release(&sign_release(&wrong_root, &sk).unwrap()).unwrap();
@@ -1581,21 +1679,21 @@ mod tests {
             release_constructible(&r0, &wrong_root),
             Err(ReleaseRefusal::ParentRootMismatch)
         );
-        let mut wrong_gen = body(&r0, ERA_FAUCET_PAYOUT, &pk);
+        let mut wrong_gen = body(&r0, ERA_FAUCET_PAYOUT, pk);
         wrong_gen.generation = 2;
         let wrong_gen = decode_and_verify_release(&sign_release(&wrong_gen, &sk).unwrap()).unwrap();
         assert_eq!(
             release_constructible(&r0, &wrong_gen),
             Err(ReleaseRefusal::GenerationIsNotSuccessor)
         );
-        let mut other = body(&r0, ERA_FAUCET_PAYOUT, &pk);
+        let mut other = body(&r0, ERA_FAUCET_PAYOUT, pk);
         other.reserve_id = era_reserve_id(b"othernet");
         let other = decode_and_verify_release(&sign_release(&other, &sk).unwrap()).unwrap();
         assert_eq!(
             release_constructible(&r0, &other),
             Err(ReleaseRefusal::NamesAnotherReserve)
         );
-        let mut foreign = body(&r0, ERA_FAUCET_PAYOUT, &pk);
+        let mut foreign = body(&r0, ERA_FAUCET_PAYOUT, pk);
         foreign.storage_set_id = [0x77; 32];
         let foreign = decode_and_verify_release(&sign_release(&foreign, &sk).unwrap()).unwrap();
         assert_eq!(
@@ -2006,6 +2104,56 @@ mod tests {
         assert_eq!(
             EstablishedReserve::of(&r1, &honest, &step1),
             Err(ReserveHeadError::NotTheGenesis { generation: 1 })
+        );
+    }
+
+    /// SA-63. A release's bytes decide its claimant's entitlement: the
+    /// directory entry it carries must name the release's recipient genesis,
+    /// device, key and AttA, and prove itself. A release carrying another
+    /// device's entry, or an entry whose signature does not verify, is not an
+    /// object naming the cell; the claimant's own entry is.
+    /// MUTATION CONTROL: the entry check dropped lets both foreign releases
+    /// succeed the parent: red.
+    #[test]
+    fn a_release_holds_a_cell_only_with_its_claimants_own_directory_entry() {
+        let r0 = genesis();
+        let owner = claimant();
+        let other = claimant();
+        let honest = decode_and_verify_release(
+            &sign_release(&body(&r0, ERA_FAUCET_PAYOUT, &owner), &owner.sk).unwrap(),
+        )
+        .expect("verifies");
+        release_constructible(&r0, &honest).expect("the claimant's own entry entitles it");
+
+        let mut borrowed = body(&r0, ERA_FAUCET_PAYOUT, &owner);
+        borrowed.source = ReleaseSource::FaucetClaimant {
+            claimant_public_key: owner.pk().to_vec(),
+            claimant_att_a: owner.entry.body.att_a,
+            claimant_directory_entry: other.entry.encode(),
+        };
+        let borrowed =
+            decode_and_verify_release(&sign_release(&borrowed, &owner.sk).unwrap()).unwrap();
+        assert_eq!(
+            release_constructible(&r0, &borrowed),
+            Err(ReleaseRefusal::ClaimantNotInTheDirectory(
+                "does not name the release's recipient and key"
+            ))
+        );
+
+        let mut unsigned = owner.entry.clone();
+        unsigned.signature[0] ^= 0x01;
+        let mut forged = body(&r0, ERA_FAUCET_PAYOUT, &owner);
+        forged.source = ReleaseSource::FaucetClaimant {
+            claimant_public_key: owner.pk().to_vec(),
+            claimant_att_a: owner.entry.body.att_a,
+            claimant_directory_entry: unsigned.encode(),
+        };
+        let forged = decode_and_verify_release(&sign_release(&forged, &owner.sk).unwrap()).unwrap();
+        assert_eq!(
+            release_constructible(&r0, &forged),
+            Err(ReleaseRefusal::ClaimantNotInTheDirectory(
+                "is not signed by its AK"
+            ))
         );
     }
 
@@ -2430,6 +2578,7 @@ mod tests {
                     let ReleaseSource::FaucetClaimant {
                         claimant_public_key,
                         claimant_att_a,
+                        ..
                     } = &release.body.source;
                     assert_eq!(
                         release.body.recipient_devid,

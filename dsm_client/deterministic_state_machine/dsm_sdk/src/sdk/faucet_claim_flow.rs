@@ -241,6 +241,18 @@ pub async fn claim_era_faucet(core: &CoreSDK, network_id: &[u8]) -> Result<Claim
                     source: ReleaseSource::FaucetClaimant {
                         claimant_public_key: public_key.clone(),
                         claimant_att_a: att_a,
+                        // This device's own signed directory entry, which it
+                        // published at boot: its bytes decide its entitlement
+                        // at the cell (SA-63).
+                        claimant_directory_entry:
+                            crate::storage::client_db::own_directory_entry::load()
+                                .map_err(|e| storage_err("own directory entry", e))?
+                                .ok_or_else(|| {
+                                    DsmError::invalid_operation(
+                                    "faucet claim: this device has no directory entry of its own \
+                                     yet; it publishes one when it starts",
+                                )
+                                })?,
                     },
                 };
                 let bytes =

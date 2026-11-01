@@ -180,27 +180,24 @@ async fn a_release_of_the_whole_supply_holds_nothing_and_the_claim_lands() {
     let d = Device::start(0xA1).await;
     let set = canonical_set(NETWORK).expect("canonical set");
     let r0 = reserve_genesis();
-    // A key of its own, and the device id it derives: the release's signer
-    // IS the device it names, so only the release rule's amount refuses it.
-    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
-    let att_a = [0x5D; 32];
+    // An identity of its own, with its own directory entry: the release's
+    // signer IS the device it names and is entitled to claim, so only the
+    // release rule's amount refuses it.
+    let drainer = crate::test_support::reserve::claimant(0x5D);
     let drain = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
             reserve_id: *r0.reserve_id(),
             parent_root: r0.root(),
             generation: 1,
             amount: r0.remaining_supply(),
-            recipient_genesis: [0x5A; 32],
-            recipient_devid: dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a),
+            recipient_genesis: drainer.genesis,
+            recipient_devid: drainer.devid,
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
             storage_set_id: *r0.storage_set_id(),
-            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
-                claimant_public_key: pk,
-                claimant_att_a: att_a,
-            },
+            source: drainer.source(),
         },
-        &sk,
+        &drainer.ak_secret_key,
     )
     .expect("signed");
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &drain)
@@ -236,7 +233,9 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     let d = Device::start(0xA1).await;
     let set = canonical_set(NETWORK).expect("canonical set");
     let r0 = reserve_genesis();
-    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
+    // An impostor with an identity and directory entry of its own, writing
+    // under the claimant's device id.
+    let other = crate::test_support::reserve::claimant(0x5E);
     let impostor = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
             reserve_id: *r0.reserve_id(),
@@ -248,12 +247,9 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
             storage_set_id: *r0.storage_set_id(),
-            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
-                claimant_public_key: pk,
-                claimant_att_a: [0x5D; 32],
-            },
+            source: other.source(),
         },
-        &sk,
+        &other.ak_secret_key,
     )
     .expect("signed");
     let write = crate::sdk::native_reserve::write_release(&set, &r0, &impostor)
@@ -273,32 +269,28 @@ async fn a_release_naming_a_device_its_key_does_not_derive_holds_nothing() {
     assert_eq!(recipient_of(&won), d.identity.device_id);
 }
 
-/// A payout release of generation 1 from `r0`, signed by a fresh key for the
-/// device that key derives with `att_a`: one the claim policy allows. The
-/// release and the device it credits.
-fn payout_release(r0: &NativeReserveState, att_a: [u8; 32]) -> (Vec<u8>, [u8; 32]) {
-    let (pk, sk) = dsm::crypto::sphincs::generate_sphincs_keypair().expect("a key");
-    let devid = dsm::core::identity::genesis_v2::derive_devid(&pk, &att_a);
+/// A payout release of generation 1 from `r0`, by the claimant of wallet seed
+/// `[seed; 64]` for its own device: one the claim policy allows. The release
+/// and the device it credits.
+fn payout_release(r0: &NativeReserveState, seed: u8) -> (Vec<u8>, [u8; 32]) {
+    let claimant = crate::test_support::reserve::claimant(seed);
     let release = dsm::economic::native_reserve::sign_release(
         &dsm::economic::native_reserve::NativeReserveReleaseBody {
             reserve_id: *r0.reserve_id(),
             parent_root: r0.root(),
             generation: 1,
             amount: dsm::economic::native_reserve::ERA_FAUCET_PAYOUT,
-            recipient_genesis: [0x5A; 32],
-            recipient_devid: devid,
+            recipient_genesis: claimant.genesis,
+            recipient_devid: claimant.devid,
             recipient_economic_position: 1,
             recipient_operation_digest: [0x5C; 32],
             storage_set_id: *r0.storage_set_id(),
-            source: dsm::economic::native_reserve::ReleaseSource::FaucetClaimant {
-                claimant_public_key: pk,
-                claimant_att_a: att_a,
-            },
+            source: claimant.source(),
         },
-        &sk,
+        &claimant.ak_secret_key,
     )
     .expect("signed");
-    (release, devid)
+    (release, claimant.devid)
 }
 
 /// MR-STOR-0134, the faucet's race at a reserve cell. Two claimants release
@@ -318,8 +310,8 @@ async fn a_release_beaten_to_the_reserve_leader_is_recorded_taken() {
     let d = Device::start(0xA9).await;
     let set = canonical_set(NETWORK).expect("canonical set");
     let r0 = reserve_genesis();
-    let (winner, winner_devid) = payout_release(&r0, [0x5D; 32]);
-    let (loser, _) = payout_release(&r0, [0x5E; 32]);
+    let (winner, winner_devid) = payout_release(&r0, 0x5D);
+    let (loser, _) = payout_release(&r0, 0x5E);
 
     let won = crate::sdk::native_reserve::write_release(&set, &r0, &winner)
         .await
@@ -377,7 +369,7 @@ async fn a_release_landing_between_the_walk_and_the_write_moves_the_claim_on() {
         SuccessorCell::of(&r0, &as_ccb_members(&set).expect("members")).expect("successor cell");
     let route = cell.routed().route();
     let leader = String::from_utf8(route.leader().to_vec()).expect("member ids are UTF-8");
-    let (rival, rival_devid) = payout_release(&r0, [0x5F; 32]);
+    let (rival, rival_devid) = payout_release(&r0, 0x5F);
     let entry = dsm::route_chain::leader_copy(cell.routed(), &rival);
     d.nodes.race_next_put(
         &leader,
@@ -1357,6 +1349,9 @@ async fn a_release_frozen_for_an_earlier_position_is_not_reused_at_a_later_one()
         source: ReleaseSource::FaucetClaimant {
             claimant_public_key: public_key,
             claimant_att_a: att_a,
+            claimant_directory_entry: client_db::own_directory_entry::load()
+                .expect("A's store")
+                .expect("A's own directory entry, published when it started"),
         },
     };
     let frozen = sign_release(&earlier, &secret_key).expect("sign the earlier release");

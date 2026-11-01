@@ -290,8 +290,10 @@ fn select_proven<'a, E>(
     (None, refused)
 }
 
+/// Real identities for tests across the crate: each derived from a wallet
+/// seed, with the P0–P6 evidence a wallet publishes in its directory entry.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_identities {
     use super::*;
     use crate::ccb::{
         delegation_genesis_sentinel, role, sigalg, transition_genesis_sentinel,
@@ -308,8 +310,16 @@ mod tests {
     /// delegates root progression to the AK (`D_0`), the AK installs the
     /// single-device tree (`T_0`), and the device's leaf is proved under it.
     /// Returns the body and the AK secret key.
-    fn identity(seed: u8, counter: u64) -> (DirectoryEntryBody, Vec<u8>) {
-        let wallet_seed = [seed; 64];
+    pub(crate) fn identity(seed: u8, counter: u64) -> (DirectoryEntryBody, Vec<u8>) {
+        identity_of(&[seed; 64], counter)
+    }
+
+    /// [`identity`] from the wallet seed `wallet_seed`.
+    pub(crate) fn identity_of(
+        wallet_seed: &[u8; 64],
+        counter: u64,
+    ) -> (DirectoryEntryBody, Vec<u8>) {
+        let wallet_seed = *wallet_seed;
         let genesis = derive_genesis_v3_self_attested(
             &wallet_seed,
             NETWORK,
@@ -379,6 +389,20 @@ mod tests {
         };
         (body, genesis.ak_secret.clone())
     }
+
+    /// The identity of the wallet seed `wallet_seed` with its directory entry
+    /// signed by its AK: the entry, and the AK secret key.
+    pub(crate) fn signed_entry_of(wallet_seed: &[u8; 64]) -> (DirectoryEntry, Vec<u8>) {
+        let (body, sk) = identity_of(wallet_seed, 1);
+        let entry = DirectoryEntry::sign(body, &sk).expect("the AK signs its entry");
+        (entry, sk)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::test_identities::identity;
 
     #[test]
     fn the_devices_own_entry_is_chosen_and_a_squatters_is_ignored() {

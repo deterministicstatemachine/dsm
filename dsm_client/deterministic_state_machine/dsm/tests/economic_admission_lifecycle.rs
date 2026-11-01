@@ -31,7 +31,8 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
-const G: [u8; 32] = [0x11; 32];
+#[path = "common/identity.rs"]
+mod identity;
 const ERA: [u8; 32] = [0xAA; 32];
 
 const SOFI: [u8; 32] = [0xBB; 32];
@@ -41,15 +42,34 @@ const SOFI: [u8; 32] = [0xBB; 32];
 /// cell recognizes a release only when its signer is the device it credits.
 fn trader() -> &'static (Vec<u8>, Vec<u8>) {
     static KEYS: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
-    KEYS.get_or_init(|| dsm::crypto::sphincs::generate_sphincs_keypair().expect("keypair"))
+    KEYS.get_or_init(|| {
+        (
+            holder().ak_public_key.clone(),
+            holder().ak_secret_key.clone(),
+        )
+    })
 }
 
-const ATTA: [u8; 32] = [0x4A; 32];
+/// The trader: a real identity, with its own signed directory entry (SA-63).
+fn holder() -> &'static identity::Identity {
+    static HOLDER: std::sync::OnceLock<identity::Identity> = std::sync::OnceLock::new();
+    HOLDER.get_or_init(|| identity::identity(0x72))
+}
+
+/// The trader's genesis.
+fn g() -> [u8; 32] {
+    holder().genesis
+}
+
+/// The trader's `AttA`.
+fn atta() -> [u8; 32] {
+    holder().att_a
+}
 
 /// The trader's device id, derived from its key and `AttA`.
 fn dev() -> &'static [u8; 32] {
     static DEVID: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    DEVID.get_or_init(|| dsm::core::identity::genesis_v2::derive_devid(&trader().0, &ATTA))
+    DEVID.get_or_init(|| holder().devid)
 }
 
 fn pending(kind: PendingAdmissionKind, state: EconomicAdmissionState) -> PendingEconomicAdmission {
@@ -293,14 +313,15 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
             parent_root: parent.root(),
             generation,
             amount: ERA_FAUCET_PAYOUT,
-            recipient_genesis: G,
+            recipient_genesis: g(),
             recipient_devid: *dev(),
             recipient_economic_position: position,
             recipient_operation_digest: op_digest,
             storage_set_id: canonical_set_id(),
             source: ReleaseSource::FaucetClaimant {
                 claimant_public_key: pk.clone(),
-                claimant_att_a: ATTA,
+                claimant_att_a: atta(),
+                claimant_directory_entry: holder().directory_entry.clone(),
             },
         },
         &sk,
@@ -311,7 +332,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let mut tree = EconomicSmt::new();
     let pre_root = tree.root();
     let credit = bal(era, ERA_FAUCET_PAYOUT);
-    let key = credit.leaf_key(&G, dev());
+    let key = credit.leaf_key(&g(), dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(credit.clone()), siblings).expect("well-formed");
@@ -321,7 +342,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let witness = EconomicTransitionWitness::new(
         pre_root,
         post_root,
-        dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+        dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
         op_digest,
         vec![mutation],
         vec![CreditSource::NativeReserveRelease(
@@ -521,7 +542,7 @@ fn registered_naming(
     post_root: [u8; 32],
     manifest_addr: [u8; 32],
 ) -> RegisteredEconomicRoot {
-    registered_for_trader(G, trader(), ATTA, position, post_root, manifest_addr)
+    registered_for_trader(g(), trader(), atta(), position, post_root, manifest_addr)
 }
 
 /// A registered root of the trader `(genesis, derive_devid(pk, att_a))`,
@@ -575,7 +596,7 @@ fn run(
         &OneTicket {
             envelope: fx.envelope.clone(),
         },
-        &G,
+        &g(),
         dev(),
         b"dsm-testnet",
         &fx.pk,
@@ -600,7 +621,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
             advanced.claim.economic_position(),
             advanced.claim.claim_ref()
         ),
-        (G, *dev(), 1, registered.claim_ref())
+        (g(), *dev(), 1, registered.claim_ref())
     );
 }
 
@@ -624,7 +645,7 @@ fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
         &NoRegisterSet(OneTicket {
             envelope: fx.envelope.clone(),
         }),
-        &G,
+        &g(),
         dev(),
         b"dsm-testnet",
         &fx.pk,
@@ -655,7 +676,7 @@ fn a_registered_claim_of_another_trader_is_refused() {
     let other = OTHER.get_or_init(|| {
         dsm::crypto::sphincs::generate_sphincs_keypair().expect("another trader's keypair")
     });
-    for (genesis, signer, att_a) in [([0x99; 32], trader(), ATTA), (G, other, [0x98; 32])] {
+    for (genesis, signer, att_a) in [([0x99; 32], trader(), atta()), (g(), other, [0x98; 32])] {
         let foreign = registered_for_trader(genesis, signer, att_a, 1, fx.post_root, addr);
         assert!(matches!(
             run(&fx, &foreign, &manifest, &fx.witness, &accepted),
@@ -679,7 +700,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
         source_id: [0x5C; 32],
         consumer_economic_operation_id: [0x0E; 32],
     });
-    let key = record.leaf_key(&G, dev());
+    let key = record.leaf_key(&g(), dev());
     let siblings = tree.siblings(&key).to_vec();
     let mutation =
         EconomicLeafMutation::new(None, Some(record.clone()), siblings).expect("well-formed");
@@ -687,7 +708,7 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     let forged = EconomicTransitionWitness::new(
         pre_root,
         tree.root(),
-        dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+        dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
         fx.witness.operation_digest,
         vec![mutation],
         Vec::new(),
@@ -845,7 +866,7 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 /// THE TWO SETUP CONJUNCTS ARE REACHABLE, and they refuse.
 ///
 /// `R_T^setup` had zero readers before this: a correctly signed first setup
-/// could put ANY 32 bytes there, and the `(G, DevID, v)` index would then pin
+/// could put ANY 32 bytes there, and the `(g(), DevID, v)` index would then pin
 /// a `ρ` committing them forever — the uniqueness rule holding over a field
 /// nothing had checked. `p` was equally unbound.
 ///
@@ -862,7 +883,7 @@ fn beta_candidate_set() -> dsm::ccb::StorageSetMembers {
 fn a_setup_transition_binds_its_position_and_its_derived_root() {
     use dsm::economic::tree::EconomicSmt;
 
-    let vault_id = dsm::sofi::derive::vault_id(&G, dev(), 7);
+    let vault_id = dsm::sofi::derive::vault_id(&g(), dev(), 7);
     // The predecessor is the activation root at position 0, so `p` is 0.
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
     let pre_tree = EconomicSmt::new();
@@ -871,7 +892,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         &zero,
         &pre_tree,
         &dsm::sofi::lineage::SetupNames {
-            genesis: G,
+            genesis: g(),
             device_id: *dev(),
             vault_id,
             claim_ref: [0x66; 32],
@@ -885,7 +906,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
     // The producer's body, and two that are wrong in exactly one way each.
     let body = |position: u64, setup_root: [u8; 32]| {
         dsm::sofi::wire::SofiSetupBody::new(
-            G,
+            g(),
             *dev(),
             position,
             vault_id,
@@ -911,9 +932,9 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let mut build_tree = EconomicSmt::new();
         let built = dsm::economic::write_set::build_write_set(
             &op,
-            &G,
+            &g(),
             dev(),
-            &dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+            &dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
             &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new(), 0),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
@@ -927,7 +948,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let witness = EconomicTransitionWitness::new(
             pre_root,
             built.post_root,
-            dsm::economic::admission::dsm_economic_operation_id(&G, dev(), &C_DSM_PLUS),
+            dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
             dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             built.mutations,
             built.credit_sources,
@@ -944,7 +965,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
             &OneTicket {
                 envelope: fx.envelope.clone(),
             },
-            &G,
+            &g(),
             dev(),
             b"dsm-testnet",
             &fx.pk,
@@ -1102,7 +1123,7 @@ fn era_payout() -> ([u8; 32], u64) {
 fn a_held_first_admission_resumes_on_the_activation_root() {
     let fx = faucet_fixture(1);
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
-    let head = head_of(G, &fx, &[era_payout()], &[], Some(pending));
+    let head = head_of(g(), &fx, &[era_payout()], &[], Some(pending));
 
     let as_it_stands = EconomicActivationSnapshot {
         online_balances_empty: head.balances_snapshot().is_empty(),
@@ -1149,7 +1170,7 @@ fn value_the_first_admission_did_not_credit_still_blocks_activation() {
     ];
     for (name, balances, allocations) in cases {
         let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
-        let head = head_of(G, &fx, &balances, &allocations, Some(pending));
+        let head = head_of(g(), &fx, &balances, &allocations, Some(pending));
         let snapshot = match EconomicActivationSnapshot::before_first_admission(&head, &fx.witness)
         {
             Ok(snapshot) => snapshot,
@@ -1179,7 +1200,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
 
     // Nothing pending: the head is its own activation point.
     assert_eq!(
-        read(&head_of(G, &fx, &[era_payout()], &[], None)),
+        read(&head_of(g(), &fx, &[era_payout()], &[], None)),
         Err(ActivationPointUnreadable::NothingPending)
     );
 
@@ -1195,7 +1216,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
     ] {
         let pending = held_first_claim(&fx, kind, position, &fx.op);
         assert_eq!(
-            read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+            read(&head_of(g(), &fx, &[era_payout()], &[], Some(pending))),
             Err(ActivationPointUnreadable::NotAFirstAdmission {
                 economic_position: position
             })
@@ -1209,7 +1230,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
     };
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &other);
     assert_eq!(
-        read(&head_of(G, &fx, &[era_payout()], &[], Some(pending))),
+        read(&head_of(g(), &fx, &[era_payout()], &[], Some(pending))),
         Err(ActivationPointUnreadable::WitnessOfAnotherTransition)
     );
 
@@ -1230,7 +1251,7 @@ fn the_activation_point_is_read_only_through_the_first_admissions_own_witness() 
     // A head that does not hold the credit its pending admission made.
     let pending = held_first_claim(&fx, PendingAdmissionKind::DsmBacked, 1, &fx.op);
     assert_eq!(
-        read(&head_of(G, &fx, &[], &[], Some(pending))),
+        read(&head_of(g(), &fx, &[], &[], Some(pending))),
         Err(ActivationPointUnreadable::CreditNotOnHead { policy_commit: era })
     );
 }
@@ -1317,7 +1338,7 @@ fn boundary(
     .encode()
     .expect("encode");
     let (verified, exposed) =
-        OfflineBoundaryBody::verify(&bytes, &G, dev(), &trader().0).expect("the body verifies");
+        OfflineBoundaryBody::verify(&bytes, &g(), dev(), &trader().0).expect("the body verifies");
     assert!(exposed.is_empty(), "no spends, no exposure");
     let built = dsm::economic::write_set::build_boundary_write_set(
         &dsm::economic::write_set::BoundaryEffect {
@@ -1326,7 +1347,7 @@ fn boundary(
             amount,
             boundary_id: outcome.operation_id,
         },
-        &G,
+        &g(),
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(balances, position),
         tree,
@@ -1376,7 +1397,7 @@ fn validate_boundary(
         &OneTicket {
             envelope: fx.envelope.clone(),
         },
-        &G,
+        &g(),
         dev(),
         b"dsm-testnet",
         &fx.pk,
@@ -1407,11 +1428,11 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     let mut tree = EconomicSmt::new();
     let credit = bal(era, ERA_FAUCET_PAYOUT);
     tree.insert(
-        credit.leaf_key(&G, dev()),
+        credit.leaf_key(&g(), dev()),
         credit.leaf_value().expect("encodable"),
     );
     assert_eq!(tree.root(), at_one.economic_root());
-    let head = head_of(G, &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
+    let head = head_of(g(), &fx, &[(era, ERA_FAUCET_PAYOUT)], &[], None)
         .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
 
@@ -1461,7 +1482,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
             amount: 100,
             boundary_id: unload.outcome.operation_id,
         },
-        &G,
+        &g(),
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(
             &std::collections::BTreeMap::from([(era, ERA_FAUCET_PAYOUT - 200)]),
@@ -1483,7 +1504,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
             amount: 101,
             boundary_id: unload.outcome.operation_id,
         },
-        &G,
+        &g(),
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(&online, 3),
         &mut after_load.clone(),
@@ -1560,13 +1581,13 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let fx = faucet_fixture(1);
     let online = std::collections::BTreeMap::from([(era, 500)]);
-    let head = head_of(G, &fx, &[(era, 500)], &[], None)
+    let head = head_of(g(), &fx, &[(era, 500)], &[], None)
         .open_offline_account(&bundle(), [0x01; 32], 0)
         .expect("the account opens");
     let mut tree = EconomicSmt::new();
     let held = bal(era, 500);
     tree.insert(
-        held.leaf_key(&G, dev()),
+        held.leaf_key(&g(), dev()),
         held.leaf_value().expect("encodable"),
     );
     let pre_root = tree.root();
@@ -1580,7 +1601,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
             amount: 300,
             boundary_id: load.outcome.operation_id,
         },
-        &G,
+        &g(),
         dev(),
         &dsm::economic::write_set::EconomicPreState::new(&online, 2),
         &mut loaded_tree,
@@ -1597,7 +1618,7 @@ fn an_offline_debit_funds_only_an_unload_and_only_once_recorded() {
         3,
     );
     let ctx = |offline_boundary| ProvenanceContext {
-        genesis: &G,
+        genesis: &holder().genesis,
         device_id: dev(),
         economic_position: 3,
         network_id: b"dsm-testnet",
