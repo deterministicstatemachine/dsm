@@ -7,31 +7,943 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-uint8_t *dsm_process_envelope_protobuf(const uint8_t *envelope_bytes,
-                                       uintptr_t envelope_len,
-                                       uintptr_t *out_len);
+/**
+ * `write_on_link` answered that every record was written.
+ */
+#define WRITE_SENT 1
 
-uint8_t *dsm_dispatch_startup_request(const uint8_t *request_bytes,
-                                      uintptr_t request_len,
-                                      uintptr_t *out_len);
+/**
+ * `write_on_link` answered that the link is gone or refused a write.
+ */
+#define WRITE_NOT_NOW 0
 
-uint8_t *dsm_dispatch_ingress_request(const uint8_t *request_bytes,
-                                      uintptr_t request_len,
-                                      uintptr_t *out_len);
+/**
+ * Candidates one read examines before it is Partial.
+ */
+#define READ_BUDGET 256
 
-void dsm_free_envelope_bytes(uint8_t *bytes, uintptr_t len);
+/**
+ * Successor cells one walk may read before it is `BudgetExhausted` — never
+ * a verdict about the lineage, only about this walk.
+ */
+#define RESERVE_WALK_BUDGET 4096
 
-bool dsm_set_storage_base_dir(const char *path_utf8);
+/**
+ * Successor cells a walk locates ahead of the state it stands on, and
+ * reads together.
+ */
+#define RESERVE_LOOKAHEAD 16
 
-bool dsm_configure_env(const char *config_path_utf8);
+/**
+ * Wrong tries before only the recovery phrase opens the lock.
+ */
+#define MISSES_BEFORE_PHRASE 3
 
-bool dsm_initialize_sdk(void);
+/**
+ * The longest endpoint a code may name.
+ */
+#define MAX_ENDPOINT_LEN 512
 
-bool dsm_init_dsm_sdk(const char *config_path_utf8);
+/**
+ * The longest match bytes `X` a lock may name.
+ */
+#define MAX_MATCH_BYTES 256
 
-bool dsm_initialize_sdk_context(const uint8_t *device_id,
-                                uintptr_t device_id_len,
-                                const uint8_t *genesis_hash,
-                                uintptr_t genesis_hash_len,
-                                const uint8_t *binding_key,
-                                uintptr_t binding_key_len);
+/**
+ * How many vaults one collect may name: a match has two stakes.
+ */
+#define MAX_COLLECTED_VAULTS 2
+
+/**
+ * The longest display name an offer may carry.
+ */
+#define MAX_DISPLAY_NAME 64
+
+/**
+ * The most contacts one answer shares.
+ */
+#define MAX_SHARED_CONTACTS 1024
+
+/**
+ * Candidates one locator scan may examine before it is `Unavailable`.
+ */
+#define LOCATOR_BUDGET 64
+
+/**
+ * How many times one route reads its position's resolution before it
+ * reports `RetriesExhausted`: the network status, not a verdict.
+ */
+#define RESOLVE_ROUNDS 3
+
+/**
+ * How many attempt keys past the walk's first unresolved one a leg may
+ * advance while earlier keys are held by exercises still in flight.
+ */
+#define ATTEMPT_ADVANCE 8
+
+/**
+ * dBTC uses 8 decimal places (same as Bitcoin's satoshi precision)
+ */
+#define DBTC_DECIMALS 8
+
+/**
+ * Maximum dBTC supply in satoshis (21 million BTC)
+ */
+#define DBTC_MAX_SUPPLY_SATS (21000000 * 100000000)
+
+/**
+ * Canonical minimum confirmation depth for entry and exit anchors.
+ * dBTC paper §6.4.1, §6.4.3, Definition 12.3, Remark 12.3:
+ * "min_entry_confirmations = min_exit_confirmations = 100 is recommended."
+ */
+#define DBTC_MIN_CONFIRMATIONS 100
+
+/**
+ * Canonical successor lineage depth bound for dBTC fractional exits.
+ * dBTC paper §12.1.1 recommends a small bounded integer (example: 5).
+ */
+#define DBTC_MAX_SUCCESSOR_DEPTH 5
+
+/**
+ * Canonical minimum vault remainder after fractional exit (satoshis).
+ * dBTC paper §12.1.2 worked example uses 100,000 sats.
+ */
+#define DBTC_MIN_VAULT_BALANCE_SATS 100000
+
+/**
+ * Maximum settlement poll iterations before the resolver starts warning loudly.
+ * Committed withdrawals remain pending until they are explicitly finalized or refunded.
+ */
+#define DBTC_MAX_SETTLEMENT_POLLS 200
+
+/**
+ * Conservative on-chain dust floor used by SDK guard rails.
+ * (P2PKH ~546 sats, P2WSH ~330 sats)
+ */
+#define DBTC_DUST_FLOOR_SATS 546
+
+/**
+ * Conservative estimate of P2WSH sweep tx fee (vbytes * sat/vbyte).
+ * dBTC paper §11.2: exit_amount >= dust_threshold + fee_sweep
+ * A P2WSH HTLC claim tx is ~170 vbytes; at 10 sat/vbyte = 1700 sats.
+ */
+#define DBTC_ESTIMATED_SWEEP_FEE_SATS 2000
+
+/**
+ * Production floor for the withdrawal fee rate (sat/vbyte). No withdrawal may use a lower rate.
+ */
+#define WITHDRAWAL_FEE_RATE_SAT_VB 10
+
+/**
+ * Minimum exit amount: must cover dust + sweep fees.
+ * dBTC paper §11.2, Invariant 11.2.
+ */
+#define DBTC_MIN_EXIT_SATS (DBTC_DUST_FLOOR_SATS + DBTC_ESTIMATED_SWEEP_FEE_SATS)
+
+/**
+ * Estimated virtual size (vbytes) for a P2WSH HTLC claim transaction.
+ *
+ * Breakdown:
+ * - TX overhead: ~10 vbytes
+ * - Input (P2WSH with witness): ~160 vbytes (depends on script + witness size)
+ * - Output (P2WPKH): ~31 vbytes
+ *
+ * Total: ~201 vbytes (conservative estimate)
+ */
+#define ESTIMATED_CLAIM_VSIZE 210
+
+/**
+ * Estimated virtual size for a 2-output claim (sweep + change to successor HTLC).
+ */
+#define ESTIMATED_SWEEP_VSIZE 260
+
+/**
+ * Estimated virtual size for an HTLC refund transaction.
+ *
+ * Refund spends use the same witness size as fulfill spends: signature, preimage,
+ * branch selector, redeem script.
+ */
+#define ESTIMATED_REFUND_VSIZE ESTIMATED_CLAIM_VSIZE
+
+/**
+ * The number of words of a DSM wallet mnemonic: 24, i.e. 256 bits of entropy.
+ */
+#define WALLET_MNEMONIC_WORDS 24
+
+/**
+ * Current client-database schema generation.
+ *
+ * DSM beta carries NO migrations: incompatible schemas are reset, never
+ * upgraded in place. Bump this whenever a change would make an older database
+ * structurally invalid (a new NOT NULL column, a renamed/removed table, an
+ * altered key). See [`enforce_schema_version`].
+ *
+ * 3: bilateral finality barrier — B's canonical pair on
+ * `canonical_apply_identity` / `acceptance_fold_journal` /
+ * `accepted_transition_marker` (NOT NULL), plus the tables and columns the
+ * barrier's later commits add on the same generation.
+ *
+ * 4: DLV consume-once claim — `vault_generation_consumption`
+ * (`UNIQUE(vault_id, parent_sequence)` + `source_commitment`). This is durable
+ * protocol state that decides settlement replay-vs-conflict identity, so v3 and
+ * v4 do NOT mean the same durable contract even though the DDL is additive — the
+ * version, not the happenstance that `CREATE TABLE IF NOT EXISTS` can run on a v3
+ * file, is the authority on what the schema means. Reset-and-reprovision, no
+ * migration, per the beta policy.
+ *
+ * 5: publication durability + canonical storage set — `frozen_publication_artifact`
+ * (exact bytes a canonical advance froze, keyed `(object_key, content_digest)`,
+ * bound to the `storage_set_id` they were frozen for) and
+ * `frozen_publication_artifact_members` (one current acceptance observation per
+ * member); `amm_vault_records.storage_set_id BLOB NOT NULL` (the set a vault was
+ * born under — a local copy of the value the vault's signed anchor binds);
+ * `settlement_slot_claim_local` (this device's frozen settlement-slot claim
+ * envelopes, replayed byte-identically — the register compares exact bytes);
+ * `dlv_close_intent` (the exact bytes a close will publish/claim/advance,
+ * written before any external step so recovery resumes instead of re-signing).
+ * Also durable protocol state that decides what "published", "which set" and
+ * "which claim" mean; same rule as v4 — the version is the authority, no shim.
+ * 8: ERA faucet claim flow — `economic_root_claim_local` (the frozen economic-root claim envelope per
+ * position, signed ONCE and durably retained BEFORE the first
+ * register-member write); `economic_admitted_v2` (the device's admitted
+ * economic position + root — the durable coordinate 3.4 deferred, written in
+ * the same tx that clears the pending admission); `economic_leaf_cache`
+ * (producer-side R_econ leaves, strategy A: a CACHE whose recomputed root
+ * must equal the admitted root on load, with witness replay as recovery
+ * truth — never an authority). Durable protocol state; same rule, no shim.
+ *
+ * v9 (3.5b PR1): `economic_pending_admissions` gains `c_dsm_plus` — the v2
+ * economic operation id binds the accepted successor's chain-state
+ * commitment, and recovery cannot re-derive it from the head, so it is
+ * durable admission state. A stored admission is post-acceptance by
+ * construction (`Prepared` is never durable).
+ *
+ * v10 (3.5b PR2): `peer_economic_lineage` — the device-local memo of peer
+ * economic coordinates THIS verifier validated (its own conclusions, never
+ * authority over a live register read).
+ *
+ * v11 (3.5b PR3): `sender_outbox` gains the HELD status
+ * `economic_admission_pending` — committed but non-deliverable until the
+ * terminal admission transaction promotes it (ECON_ADMITTED atomically
+ * releases the outbox to delivery).
+ *
+ * v12 (3.5b PR4): recipient-side admission. `economic_pending_admissions`
+ * gains `embedded_parent` (with `c_dsm_plus` it is the accepted successor's
+ * `(parent, tip)` pair, which acceptance evidence binds its B-side pair to);
+ * new `ek_cert_step_chain` (the device's per-relationship per-SIGNER
+ * content-addressed EK step ancestry — what makes acceptance bundles
+ * foreign-walkable); new `immutable_stored_memo` (exact immutable
+ * addresses proven Stored on the canonical set — EK/evidence closure
+ * durability is per exact address, NEVER inferred from an economic-position
+ * watermark); `peer_economic_lineage` gains `closure_stored` (economic
+ * DAG only); `recipient_outbound_reply` gains `held` (the B→A release is
+ * frozen at accept and promoted to deliverable in the terminal admission
+ * transaction — ECON_ADMITTED releases it atomically).
+ *
+ * v16: `economic_admitted_v2.claim_ref` — the digest of the claim this
+ * device's lineage accepted at its admitted position (SoFi Amendment S9),
+ * which a setup's ClaimRef must equal; `route_chain_write` and
+ * `route_chain_write_slot` — every route-chain write with the slot each
+ * position produced (storage spec §9), replacing the reserve carry queue;
+ * `completion_proof` and `completion_proof_slot` — the completion proofs
+ * this device relies on (storage spec §9 rule 11);
+ * `frozen_publication_artifact` keyed by content address alone, published
+ * once read back `Stored`, and its member-acceptance table removed;
+ * `immutable_stored_memo` replaces the quorum memo.
+ *
+ * v17: `economic_admitted_history` — every position this device's lineage
+ * admitted, in the admitted row's shape, so the claim it accepted at a
+ * setup's position is still in hand once later positions are admitted
+ * (SoFi Amendment S9); `own_directory_entry`, the device directory entry
+ * this device last signed, replacing the per-node registry verification
+ * table; `token_registry` keeps `genesis_supply` and `creator_device_id`;
+ * `recipient_staging` has no rejection column; `storage_sync_runs` counts
+ * the storage syncs that completed.
+ *
+ * v18: no time and no counters. Every created/updated/spent/attempted column
+ * is gone (they held a clock that never advanced); insertion order is the
+ * rowid. `transactions.chain_height`/`step_index`,
+ * `balance_projections.source_state_number` and `pending_transactions` are
+ * gone.
+ *
+ * 19: `sofi_vault_leaf` is keyed by generation — every generation this
+ * device established keeps its whole tree, not the head only, because the
+ * device's own position resolves after its walk recorded the generation its
+ * exercise produced, and the resolution needs the leaves of the generation
+ * the exercise was built on.
+ *
+ * 20: `genesis_records` holds what the mnemonic-rooted genesis produces and
+ * nothing else: no participant or contribution columns.
+ *
+ * 21: `cert_chain_resync_audit` records the cosigned `agreed_tip` in place of
+ * an accepted parent/child pair the responder does not hold, and is keyed by
+ * epoch, one row per resync. `system_peers` and `system_peer_events` are gone:
+ * they held a chain tip the device computed for a protocol actor by itself.
+ *
+ * 22: operations are stored in their canonical encoding (`Operation::to_bytes`)
+ * and the transfer carries no `verification` or `pre_commit`; the storage
+ * codec that wrote a second encoding (and every non-transfer as one byte)
+ * is gone.
+ *
+ * 23: `contacts.chain_tip_commitment` records the step commitment that moved
+ * an offline relationship's tip, so a replayed step is recognised as already
+ * applied; `bilateral_sender_settlements` is gone (a step's settlement
+ * commits in its advance's transaction, so it cannot be applied twice), and
+ * so is `pending_confirm_delivery` (a confirm envelope kept "for re-delivery"
+ * that nothing ever read back or re-delivered); `bilateral_sessions` keeps
+ * the receiver's counter-signed receipt beside the sender's own, and each
+ * session's commit inputs (the step's parent tip, the receiver challenge, the
+ * sent root, a bearer step's anchor leaf and allocation spend) and the frame
+ * it owes its counterparty, so a restart continues a session instead of
+ * failing it and a returning link delivers what is owed.
+ *
+ * 24: `sofi_vault_root` — the vault's root chain, one row per generation.
+ *
+ * 25: `history_repair_queue` — a history row the process failed to write
+ * after its transaction committed, kept until the startup sweep writes it.
+ *
+ * 26: the recipient stages recognized objects, not received bytes.
+ * `recipient_staging` is gone; `recipient_staged_transfer` (keyed by the
+ * signed operation), `recipient_staged_receipt` (keyed by the commitment),
+ * `recipient_pair` and the two observation tables replace it, and the
+ * sender of each object is the contact whose key verified it.
+ *
+ * 27: `peer_frontier` replaces `peer_economic_lineage` (DSM Amendment A8).
+ * A row is this receiver's frontier for a peer: a coordinate it
+ * authenticated on the way to a step it accepted, with the claim it
+ * accepted there. It is written only in the transaction that accepts the
+ * step, and nothing behind it is read again, so there is no Invalid
+ * re-walk and no `closure_stored` watermark.
+ *
+ * 28: a transfer's terms — its ticker, nonce, mode and memo, under a secret
+ * salt — are kept beside its signed operation, which carries only their
+ * commitment (pre-audit item 4): `recipient_staged_transfer.terms_bytes`
+ * and `bilateral_sessions.terms_bytes`.
+ *
+ * 29: DSM Connect (DSM Amendment A11) — the wallet's connected applications
+ * (`connect_sessions`, `connect_spent`, `connect_pending`, `connect_log`,
+ * `connect_previews`) and an application account's side
+ * (`connect_app_offers`, `connect_app_sessions`, `connect_app_requests`,
+ * `connect_app_facts`).
+ *
+ * 29: a peer's step is validated one hop, from its own parent (DSM
+ * Amendment A14), so no frontier is kept and `peer_frontier` is no longer
+ * created, read or written. A database made before keeps the table, unused.
+ *
+ * 29: the owner baseline (SoFi Amendment S24) adds
+ * `sofi_vault_witness`, `sofi_vault_baseline`, `sofi_vault_owner_baseline`
+ * and `sofi_vault_quarantine`, created on open; no existing table changes.
+ * The same for `sofi_vault_label`, an account's own names for its vaults,
+ * and for `sofi_vault_history_published`, how far an owner published a
+ * vault's history (SoFi Amendment S26). A baseline record whose frontier
+ * predates S26 is dropped when the database opens, and adopted or signed
+ * again (`sofi_vault_head::drop_superseded_baselines`).
+ *
+ * 30: key schedule KS1 (Extract-then-Expand). Every identity secret, and so
+ * every key, DevID and genesis this store records, comes from a new
+ * derivation of the same mnemonic; a store written under the earlier
+ * schedule describes keys this build no longer derives.
+ *
+ * 31: an application account's session carries the wallet's status
+ * (`connect_app_sessions.status` NOT NULL): the wallet's signed disconnect
+ * ends it on the application's side too (DSM Amendment A11, MR-DSM-0292).
+ *
+ * 32, unchanged: a receiver keeps its frontier for each peer again (DSM
+ * Amendment A19), `peer_frontier`, created on open; no existing table
+ * changes. A row is a coordinate this receiver validated itself, written in
+ * the transaction that accepts a step or by a contact add's validation, and
+ * nothing behind it is read again. A database made at 27 or 28 keeps the
+ * rows A8 recorded: each is a coordinate the receiver validated itself, in
+ * the same shape and encoding. `peer_offline_account` is created on open
+ * the same way: a peer's offline account as a boundary the receiver
+ * validated left it (the owner's receive rule, 2026-10-22); and
+ * `own_offline_spend`, this device's spends no boundary exposed yet (SA-116).
+ *
+ * v33: `completion_proof` and `completion_proof_slot` keyed by the cell's
+ * whole route — namespace, key, seed and committed set — and the value, and
+ * `completion_proof_refuted`: a kept proof fresh reads refuted, never relied
+ * on again (SoFi Amendment S10; owner ruling 2026-10-24). The same reset
+ * drops rows no current build writes, such as a contact under this device's
+ * own id (SA-141) or an own directory entry without an authority position
+ * (SA-143): beta keeps no legacy, so such a database is refused at open and
+ * the wallet is reprovisioned, never read with those rows in place.
+ *
+ * v34: a receiver records a frontier at every position a passing walk
+ * validates, each with the digest of the claim it accepted there
+ * (`peer_frontier.claim_ref`), so a setup's claim behind the frontier is
+ * answered from the receiver's own record and never read again (DSM
+ * Amendment A19, MR-SOFI-0346); and `sofi_vault_step`, each recorded vault
+ * generation's bundle step (SoFi Amendment S23). A database made at 33
+ * holds frontiers without the digest and generations without their steps,
+ * and is refused at open.
+ *
+ * v35: a frozen artifact may be `withheld`, kept and owed to no set until
+ * the check that withheld it releases it: a trader's fulfillment, frozen
+ * before its conformance is Valid (SoFi L1738). A database made at 34
+ * refuses that state, and is refused at open.
+ *
+ * v36: every memoised reserve release keeps the reads of its cell that
+ * showed it final (`native_reserve_lineage_memo.cell_reads`), so Core
+ * proves it final again on load (`ReserveLineage::establish_final`). A
+ * database made at 35 holds releases without their reads, and is refused
+ * at open.
+ *
+ * v38: DSM Connect's bounds. A wallet session keeps its read secret
+ * (`connect_sessions.read_secret`, SA-128); a log row says what it was to its
+ * grant (`connect_log.grant_use`) and keeps its answer's digest, the answer
+ * itself only while owed for a free request (SA-78); an application's offer
+ * records the one session it connected (`connect_app_offers.accepted_session`,
+ * SA-79) and its sessions their read commitment. A database made at 37 holds
+ * none of these and is refused at open.
+ *
+ * v39: `peer_ek_step`, the EK steps a walk verified, recorded with its
+ * frontiers so a later walk of the signer fetches only the rotations since
+ * (SA-93). A database made at 38 has none, and is refused at open.
+ *
+ * v40: an exposed offline payment keeps the spend's payload hash
+ * (`peer_offline_exposure.payload_hash`), and a payment received offline
+ * keeps the transfer it was (`pending_offline_receipt.operation`), so a
+ * settlement names the lineage it pays (SA-133). A database made at 39 has
+ * neither, and is refused at open.
+ *
+ * v41: a kept duel match has no outcome-program progress until its Start is
+ * final (`duel_match.progress` may be NULL): the tiebreak seed exists only
+ * once the Start opened both sides' start entropy (SoFi Amendment S33,
+ * SA-140). A database made at 40 is refused at open.
+ *
+ * v42: `anchor_enrollments.uncompromised` is gone. It was set on every pin and
+ * read by an acceptance step that checked nothing; the anchor is pinned on
+ * first use, and a compromise found elsewhere is answered online (SA-175, DSM
+ * Amendment A24). `native_reserve_checkpoint` keeps the sealed checkpoint of
+ * the reserve lineage this device established, and the memo below it keeps
+ * only this device's own releases (SA-75). A database made at 41 is refused
+ * at open.
+ */
+#define CLIENT_DB_SCHEMA_VERSION 42
+
+/**
+ * The most frames whose chunks a startup keeps from a previous process.
+ */
+#define MAX_PERSISTED_FRAMES 16
+
+/**
+ * Ordinary sending is allowed on this relationship.
+ */
+#define RESYNC_CLEAR 0
+
+/**
+ * A head-loss was detected; sending is blocked until a resync finalizes.
+ */
+#define RESYNC_REQUIRED 1
+
+/**
+ * A resync is in flight; sending stays blocked.
+ */
+#define RESYNC_PENDING 2
+
+/**
+ * The most staged transfers, and separately the most staged receipts, one
+ * contact can hold here that no pair holds yet (SA-100). An honest contact
+ * has at most one unresolved transfer toward this device at a time (the
+ * finality barrier allows one unresolved semantic predecessor per
+ * originator), so it never comes near this. A contact that signs more cannot
+ * grow this store past it, nor the signature checks every sync repeats over
+ * what is staged. The bound is per contact: one contact's backlog never holds
+ * another's objects back.
+ */
+#define MAX_UNBOUND_PER_SENDER 4
+
+/**
+ * The longest name an account keeps for one of its vaults.
+ */
+#define LABEL_MAX 128
+
+/**
+ * Maximum terminal sessions (Committed/Rejected/Failed) to keep per counterparty.
+ */
+#define MAX_TERMINAL_SESSIONS_PER_COUNTERPARTY 25
+
+/**
+ * The largest frame this coordinator reassembles: a client-side budget for
+ * one frame's bytes, not a protocol count. The largest frame the bilateral
+ * protocol sends over BLE — a bearer confirm, with its stitched receipt (at
+ * most 128 KiB, `dsm::bilateral::offline::MAX_STITCHED_RECEIPT_BYTES`), its
+ * SPHINCS+ signatures and its offline release — is well inside it.
+ */
+#define MAX_BLE_FRAME_BYTES (1024 * 1024)
+
+#define BLE_TRANSPORT_VERSION 1
+
+#define DEFAULT_TRANSPORT_WINDOW_SIZE 4
+
+#define DEFAULT_TRANSPORT_MAX_COMPLETED_CACHE 256
+
+/**
+ * The first byte of a handshake fragment.
+ */
+#define HANDSHAKE 5
+
+/**
+ * The first byte of a sealed record.
+ */
+#define RECORD 6
+
+/**
+ * Bytes Rust allocated for the host. Freed once with [`dsm_bytes_free`].
+ */
+typedef struct DsmBytes {
+  uint8_t *ptr;
+  uintptr_t len;
+  uintptr_t cap;
+} DsmBytes;
+
+/**
+ * What the host measured of the phone, each flag 0 or not: the fields of
+ * `SessionHardwareFactsProto`, which Rust builds from them.
+ */
+typedef struct DsmHardwareFacts {
+  int32_t app_foreground;
+  int32_t ble_enabled;
+  int32_t ble_permissions;
+  int32_t ble_scanning;
+  int32_t ble_advertising;
+  int32_t qr_available;
+  int32_t qr_active;
+  int32_t camera_permission;
+  int32_t battery_charging;
+  uint32_t battery_level_percent;
+} DsmHardwareFacts;
+
+/**
+ * What the host does for Rust, as C function pointers. Every pointer is
+ * called from Rust's own threads; the host hops to its queues itself.
+ */
+typedef struct DsmHostCallbacks {
+  /**
+   * Hand the page `payload` under the NUL-terminated `topic`.
+   */
+  int32_t (*post_event)(const char *topic, const uint8_t *payload, uintptr_t len);
+  /**
+   * The count on the app icon; zero takes it down.
+   */
+  int32_t (*show_money_received)(int32_t count);
+  /**
+   * Write the records on exactly the link at `address` where this device
+   * is `role` (1 client, 2 server). `records` is each record behind its
+   * big-endian u32 length, back to back. Answers [`WRITE_SENT`],
+   * [`WRITE_NOT_NOW`], or a negative code for a failure to try.
+   */
+  int32_t (*write_on_link)(const char *address, int32_t role, const uint8_t *records, uintptr_t len);
+  /**
+   * Connect for the contact `device_id` (32 bytes), reaching for `hint`
+   * first when it is not empty.
+   */
+  int32_t (*request_connect)(const uint8_t *device_id, const char *hint);
+  int32_t (*start_advertising)(void);
+  int32_t (*start_scan)(void);
+  int32_t (*stop_scan)(void);
+  /**
+   * Seal `input` under the device's sealing key into `out`, a buffer the
+   * host takes from `dsm_bytes_alloc`; Rust owns `out` afterwards.
+   */
+  int32_t (*seal_seed)(const uint8_t *input, uintptr_t len, struct DsmBytes *out);
+  /**
+   * Open a blob `seal_seed` made on this device, into `out` as above.
+   */
+  int32_t (*open_seed)(const uint8_t *input, uintptr_t len, struct DsmBytes *out);
+  /**
+   * One line of Rust's log: `level` 1 error, 2 warn, 3 info, 4 debug,
+   * 5 trace; `target` the module that wrote it. The host keeps it where its
+   * own log goes, so a diagnostics report reads both back together.
+   */
+  void (*log_line)(int32_t level, const char *target, const char *message);
+} DsmHostCallbacks;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/**
+ * Free bytes a `dsm_ffi_*` function answered. Freeing a `DsmBytes` with a
+ * null pointer does nothing.
+ *
+ * # Safety
+ * `bytes` must be exactly what a `dsm_ffi_*` function answered, freed once.
+ */
+void dsm_bytes_free(struct DsmBytes bytes);
+
+/**
+ * Allocate `len` zeroed bytes for the host to fill and hand back to Rust
+ * through a callback's out-parameter (`host_bridge`): Rust owns them.
+ */
+struct DsmBytes dsm_bytes_alloc(uintptr_t len);
+
+/**
+ * `dispatchStartup`: a `StartupRequest`, answered with `StartupResponse` bytes.
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_startup(const uint8_t *request, uintptr_t len);
+
+/**
+ * `dispatchIngress`: an `IngressRequest`, answered with `IngressResponse` bytes.
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_ingress(const uint8_t *request, uintptr_t len);
+
+/**
+ * `initStorageBaseDir`: where the SDK keeps its files. Nothing, or why not.
+ *
+ * # Safety
+ * `path` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_init_storage_base_dir(const char *path);
+
+/**
+ * `initDsmSdk`: the environment config, then shared startup. Nothing, or why not.
+ *
+ * # Safety
+ * `config_path` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_init_dsm_sdk(const char *config_path);
+
+/**
+ * `initSdk`: the storage base dir, then shared startup. Nothing, or why not.
+ *
+ * # Safety
+ * `base_dir` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_init_sdk(const char *base_dir);
+
+/**
+ * `getTransportHeadersV3Status`: 0 no identity, 1 identity but the runtime
+ * is not ready, 3 ready.
+ */
+int32_t dsm_ffi_transport_headers_status(void);
+
+/**
+ * `getTransportHeadersV3`: the headers' bytes, or an error envelope.
+ */
+struct DsmBytes dsm_ffi_transport_headers(void);
+
+/**
+ * `getDeviceIdBin`: this device's 32-byte id, or no bytes before there is one.
+ */
+struct DsmBytes dsm_ffi_device_id(void);
+
+/**
+ * `getGenesisHashBin`: this device's 32-byte genesis, or no bytes before there is one.
+ */
+struct DsmBytes dsm_ffi_genesis_hash(void);
+
+/**
+ * `isErrorEnvelope`: the code of a framed or bare Error envelope, else 0.
+ *
+ * # Safety
+ * `envelope` must point to `len` readable bytes.
+ */
+uint32_t dsm_ffi_error_code_of(const uint8_t *envelope, uintptr_t len);
+
+/**
+ * `processEnvelopeV3`: an Envelope v3 this device's own app built (never a
+ * peer's bytes), answered framed, or an error envelope.
+ *
+ * # Safety
+ * `envelope` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_process_envelope_v3(const uint8_t *envelope, uintptr_t len);
+
+/**
+ * `getAllBalancesStrict`: `0x03 ‖ Envelope(BalancesListResponse)`, or an error envelope.
+ */
+struct DsmBytes dsm_ffi_balances_strict(void);
+
+/**
+ * `onAppBackgrounded`: Rust stops the inbox poller unless something is still
+ * owed or listening. Answers 1 when the host must keep running for it, 0
+ * when it may stop.
+ */
+int32_t dsm_ffi_on_app_backgrounded(void);
+
+/**
+ * `ensureAppRouterInstalled`: 1 when the full AppRouter is ready, else 0.
+ */
+int32_t dsm_ffi_ensure_app_router_installed(void);
+
+/**
+ * `getAppRouterStatus`: 0 no genesis, 1 router not ready (or locked), 2 installed.
+ */
+int32_t dsm_ffi_app_router_status(void);
+
+/**
+ * `getSessionSnapshot`: `0x03 ‖ Envelope(SessionStateResponse)`, or an error envelope.
+ */
+struct DsmBytes dsm_ffi_session_snapshot(void);
+
+/**
+ * `updateSessionHardwareFacts`: the host's facts applied; answers the
+ * session snapshot as above. The host measures; Rust decides.
+ */
+struct DsmBytes dsm_ffi_update_session_hardware_facts(struct DsmHardwareFacts facts);
+
+/**
+ * `setSessionFatalError`: the reason startup cannot go on, and the snapshot after it.
+ *
+ * # Safety
+ * `message` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_set_session_fatal_error(const char *message);
+
+/**
+ * `clearSessionFatalError`: the snapshot after the fatal error is cleared.
+ */
+struct DsmBytes dsm_ffi_clear_session_fatal_error(void);
+
+/**
+ * `restore_identity_context`, as the Kotlin identity handler crosses it on a
+ * cold start: the persisted 32-byte device id and genesis. Nothing, or why
+ * the identity is not restorable (the wallet is locked, most often).
+ *
+ * # Safety
+ * `device_id` and `genesis_hash` must each point to 32 readable bytes.
+ */
+struct DsmBytes dsm_ffi_restore_identity_context(const uint8_t *device_id,
+                                                 const uint8_t *genesis_hash);
+
+/**
+ * The method of a `BridgeRpcRequest`, as UTF-8; no bytes when the request
+ * does not decode or its method is not valid (the host answers an error).
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bridge_request_method(const uint8_t *request, uintptr_t len);
+
+/**
+ * Why a `BridgeRpcRequest` is refused, as UTF-8; no bytes when it is valid.
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bridge_request_refusal(const uint8_t *request, uintptr_t len);
+
+/**
+ * The payload of a valid `BridgeRpcRequest` (see [`bridge_request_payload`]).
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bridge_request_payload(const uint8_t *request, uintptr_t len);
+
+/**
+ * A `BridgeRpcResponse` carrying `data` as its success.
+ *
+ * # Safety
+ * `data` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bridge_success(const uint8_t *data, uintptr_t len);
+
+/**
+ * A `BridgeRpcResponse` carrying an error. The debug string is the Base32
+ * Crockford of the error without itself, as Kotlin's `createErrorResponse`.
+ *
+ * # Safety
+ * `message` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_bridge_error(uint32_t error_code, const char *message);
+
+/**
+ * The QR scanner's result for the page: a `NativeHostEvent` of kind
+ * QR_SCAN_RESULT carrying `QrScanResultPayload { text }`; an empty text is
+ * a cancelled scan.
+ *
+ * # Safety
+ * `text` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_qr_scan_result_event(const char *text);
+
+/**
+ * The phone contact the user picked (DSM Amendment A17), for the page: a
+ * `NativeHostEvent` of kind PHONE_CONTACT_PICKED carrying a
+ * `ContactProfileV1`, or carrying no bytes when `display_name` is null (the
+ * user picked none, or did not allow the read).
+ *
+ * # Safety
+ * Each string must be null or NUL-terminated.
+ */
+struct DsmBytes dsm_ffi_phone_contact_picked_event(const char *display_name,
+                                                   const char *email,
+                                                   const char *phone,
+                                                   const char *phone_lookup_key);
+
+/**
+ * The kind of a `NativeHostRequest` the page sent on the private host
+ * boundary, as its enum number; 0 when the bytes do not decode.
+ *
+ * # Safety
+ * `request` must point to `len` readable bytes.
+ */
+int32_t dsm_ffi_native_host_request_kind(const uint8_t *request, uintptr_t len);
+
+/**
+ * The `NativeHostResponse` to a host request, from what the host did: with
+ * `code` 0 the request was carried out and the response is an acknowledging
+ * `NativeHostAck`; with any other code it is the refusal `message` under
+ * that code, recoverable, as `NativeHostBridge.errorResponse` answers one.
+ *
+ * # Safety
+ * `message` must be null (with code 0) or a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_native_host_response(uint32_t code, const char *message);
+
+/**
+ * The key of a `PreferencePayload` when it is one the page keeps, as UTF-8;
+ * no bytes when it does not decode, names no key, or names a key the page
+ * does not keep (the host answers that the key is not the page's).
+ *
+ * # Safety
+ * `payload` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_preference_key(const uint8_t *payload, uintptr_t len);
+
+/**
+ * Whether a `PreferencePayload` carries a value (a set), 1, or none (a get), 0.
+ *
+ * # Safety
+ * `payload` must point to `len` readable bytes.
+ */
+int32_t dsm_ffi_preference_has_value(const uint8_t *payload, uintptr_t len);
+
+/**
+ * The value of a `PreferencePayload`, as UTF-8; no bytes when it carries none.
+ *
+ * # Safety
+ * `payload` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_preference_value(const uint8_t *payload, uintptr_t len);
+
+/**
+ * The 32-byte commitment of a `BilateralPayload`; no bytes when it does not
+ * decode or the commitment is not 32 bytes.
+ *
+ * # Safety
+ * `payload` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bilateral_commitment(const uint8_t *payload, uintptr_t len);
+
+/**
+ * The reason of a `BilateralPayload`, as UTF-8; no bytes when it carries none.
+ *
+ * # Safety
+ * `payload` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_bilateral_reason(const uint8_t *payload, uintptr_t len);
+
+/**
+ * The identity a framed `GenesisCreatedResponse` envelope installs: its
+ * 32-byte device id then its 32-byte genesis hash, 64 bytes; no bytes when
+ * the envelope is not that, or either part is not 32 bytes.
+ *
+ * # Safety
+ * `envelope` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_genesis_created_identity(const uint8_t *envelope, uintptr_t len);
+
+/**
+ * An `ArchitectureInfoProto`, the diagnostics screen's picture of the device
+ * the host measured: its status word, architecture, the ABIs it runs, and
+ * the host's message and recommendation.
+ *
+ * # Safety
+ * Each string must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_architecture_info(const char *status,
+                                          const char *device_arch,
+                                          const char *supported_abis,
+                                          const char *message,
+                                          const char *recommendation);
+
+/**
+ * A `ResultPack`'s body, for a router query's answer (`system.generateMnemonic`
+ * answers the mnemonic's UTF-8 there); no bytes when it does not decode.
+ *
+ * # Safety
+ * `pack` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_result_pack_body(const uint8_t *pack, uintptr_t len);
+
+/**
+ * An `ArgPack` of codec PROTO around `body`, the argument shape router
+ * routes take.
+ *
+ * # Safety
+ * `body` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_arg_pack(const uint8_t *body, uintptr_t len);
+
+/**
+ * A `WalletCreateGenesisV2Request` around `mnemonic`.
+ *
+ * # Safety
+ * `mnemonic` must be a NUL-terminated string.
+ */
+struct DsmBytes dsm_ffi_create_genesis_v2_request(const char *mnemonic);
+
+/**
+ * An `IngressRequest` for a router invoke of `method` with `args`.
+ *
+ * # Safety
+ * `method` must be a NUL-terminated string; `args` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_router_invoke_request(const char *method,
+                                              const uint8_t *args,
+                                              uintptr_t len);
+
+/**
+ * An `IngressRequest` for a router query of `method` with `args`.
+ *
+ * # Safety
+ * `method` must be a NUL-terminated string; `args` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_router_query_request(const char *method,
+                                             const uint8_t *args,
+                                             uintptr_t len);
+
+/**
+ * The ok bytes of an `IngressResponse`; no bytes when it is an error or
+ * does not decode (ask [`dsm_ffi_ingress_error_message`] why).
+ *
+ * # Safety
+ * `response` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_ingress_ok_bytes(const uint8_t *response, uintptr_t len);
+
+/**
+ * Why an `IngressResponse` is not an answer, as UTF-8: its error's message,
+ * "returned no result", or why it does not decode. No bytes when it is ok.
+ *
+ * # Safety
+ * `response` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_ingress_error_message(const uint8_t *response, uintptr_t len);
+
+/**
+ * The ok bytes of a `StartupResponse`, as [`dsm_ffi_ingress_ok_bytes`].
+ *
+ * # Safety
+ * `response` must point to `len` readable bytes.
+ */
+struct DsmBytes dsm_ffi_startup_error_message(const uint8_t *response, uintptr_t len);
+
+/**
+ * Install Swift as this process's host, then route Rust's log to it.
+ * Answers nothing, or why it was not installed (a host already is).
+ */
+struct DsmBytes dsm_ffi_install_host(struct DsmHostCallbacks callbacks);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus

@@ -104,6 +104,13 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
+/// The app that hosts the SDK: what Rust asks of the platform, and who answers.
+pub mod host;
+
+/// The C ABI the iOS host calls.
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 pub mod bridge;
 pub mod envelope;
 pub mod handlers;

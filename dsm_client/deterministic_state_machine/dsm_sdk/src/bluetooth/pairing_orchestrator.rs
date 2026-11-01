@@ -51,7 +51,7 @@ const PAIRING_LOOP_WAKE_TIMEOUT: std::time::Duration = std::time::Duration::from
 
 /// After a scan the radio refused, how long before the attempt is retried:
 /// past the coordinator's 6 s gap between scans (`BleCoordinator.MIN_SCAN_GAP_MS`).
-#[cfg(any(all(target_os = "android", feature = "jni"), test))]
+#[cfg(any(feature = "bluetooth", test))]
 const DISCOVERY_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(7);
 
 /// How many seconds a session may sit in `state` before the pairing loop
@@ -193,7 +193,7 @@ impl PairingOrchestrator {
         // This complements the Kotlin WebView bridge which also starts the role-specific op.
         // Duplicate starts are harmless due to idempotent guards in DsmBluetoothService
         // (they will log "already scanning/advertising").
-        #[cfg(all(target_os = "android", feature = "jni"))]
+        #[cfg(feature = "bluetooth")]
         {
             let contact = contact_device_id;
             // Spawn without awaiting to avoid blocking the JNI caller path
@@ -214,7 +214,7 @@ impl PairingOrchestrator {
     /// it started; when it was refused, after `retry_after` (past the radio's
     /// gap between scans) the attempt waiting on it is freed for the next pass
     /// ([`Self::discovery_refused`]).
-    #[cfg(any(all(target_os = "android", feature = "jni"), test))]
+    #[cfg(any(feature = "bluetooth", test))]
     pub(crate) async fn after_discovery_start(
         &self,
         contact: [u8; 32],
@@ -246,7 +246,7 @@ impl PairingOrchestrator {
     /// loop woken, so the next pass starts it again instead of leaving it
     /// waiting on a scan that never ran. An attempt already past that is left
     /// alone.
-    #[cfg(any(all(target_os = "android", feature = "jni"), test))]
+    #[cfg(any(feature = "bluetooth", test))]
     pub(crate) async fn discovery_refused(&self, contact: [u8; 32]) {
         let mut sessions = self.sessions.write().await;
         let Some(session) = sessions.get_mut(&contact) else {
@@ -319,29 +319,19 @@ impl PairingOrchestrator {
                     peer[0],
                     peer[1]
                 );
-                #[cfg(all(target_os = "android", feature = "jni"))]
-                {
-                    // The frontend maps the contact to the link's address, as
-                    // it did on an identity read, now from an authenticated
-                    // handshake.
-                    self.emit_ble_event(crate::generated::BleEvent {
-                        ev: Some(crate::generated::ble_event::Ev::IdentityObserved(
-                            crate::generated::BleIdentityObserved {
-                                address: ble_address.to_string(),
-                                genesis_hash: paired.genesis.to_vec(),
-                                device_id: peer.to_vec(),
-                            },
-                        )),
-                    });
-                    if let Err(e) = self.notify_pairing_complete(&peer).await {
-                        log::warn!(
-                            "[PairingOrchestrator] notify_pairing_complete (link) failed for {:02x}{:02x}...: {}",
-                            peer[0],
-                            peer[1],
-                            e
-                        );
-                    }
-                }
+                // The frontend maps the contact to the link's address, as
+                // it did on an identity read, now from an authenticated
+                // handshake.
+                self.emit_ble_event(crate::generated::BleEvent {
+                    ev: Some(crate::generated::ble_event::Ev::IdentityObserved(
+                        crate::generated::BleIdentityObserved {
+                            address: ble_address.to_string(),
+                            genesis_hash: paired.genesis.to_vec(),
+                            device_id: peer.to_vec(),
+                        },
+                    )),
+                });
+                self.notify_pairing_complete(&peer);
             }
             Err(reason) => {
                 self.emit_pairing_status(&peer, "failed", reason, Some(ble_address))
@@ -587,7 +577,6 @@ impl PairingOrchestrator {
     }
 
     /// Emit a PairingStatusUpdate event to the frontend via BleEvent envelope.
-    #[cfg(all(target_os = "android", feature = "jni"))]
     async fn emit_pairing_status(
         &self,
         device_id: &[u8; 32],
@@ -611,61 +600,13 @@ impl PairingOrchestrator {
         self.emit_ble_event(ble_event);
     }
 
-    /// Hand `ble_event` to the frontend through the BleEvent envelope.
-    #[cfg(all(target_os = "android", feature = "jni"))]
+    /// Hand `ble_event` to the frontend through the host, on the BLE
+    /// envelope topic the page reads radio events from.
     fn emit_ble_event(&self, ble_event: crate::generated::BleEvent) {
-        match crate::jni::ble_events::build_ble_event_envelope(ble_event) {
-            Ok(envelope_bytes) => {
-                // Dispatch via existing BleEventRelay path
-                use crate::jni::jni_common::{get_java_vm_borrowed, find_class_with_app_loader};
-                use jni::objects::JValue;
-
-                if let Some(vm) = get_java_vm_borrowed() {
-                    if let Ok(mut env) = vm.attach_current_thread() {
-                        let res = (|| -> Result<(), String> {
-                            let cls = find_class_with_app_loader(
-                                &mut env,
-                                "com/dsm/wallet/bridge/Unified",
-                            )?;
-                            let j_bytes = env
-                                .byte_array_from_slice(&envelope_bytes)
-                                .map_err(|e| format!("byte_array_from_slice: {e}"))?;
-                            env.call_static_method(
-                                cls,
-                                "dispatchToWebView",
-                                "([B)V",
-                                &[JValue::Object(&j_bytes)],
-                            )
-                            .map_err(|e| format!("dispatchToWebView: {e}"))?;
-                            Ok(())
-                        })();
-                        if let Err(e) = res {
-                            log::warn!(
-                                "[PairingOrchestrator] BleEvent dispatch to the frontend failed: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!(
-                    "[PairingOrchestrator] BleEvent envelope build failed: {}",
-                    e
-                );
-            }
-        }
-    }
-
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn emit_pairing_status(
-        &self,
-        _device_id: &[u8; 32],
-        _status: &str,
-        _message: &str,
-        _ble_address: Option<&str>,
-    ) {
-        // No-op on non-Android
+        crate::host::post_event(
+            "ble.envelope.bin",
+            &crate::host::ble_event_envelope(ble_event),
+        );
     }
 
     /// Get pairing session status
@@ -698,7 +639,7 @@ impl PairingOrchestrator {
     /// This prevents the race condition where both devices discover each other
     /// simultaneously, both call connectGatt(), and the crossing GATT connections
     /// cause error 133 or timeout on Samsung/Qualcomm stacks.
-    #[cfg(all(target_os = "android", feature = "jni"))]
+    #[cfg(feature = "bluetooth")]
     async fn start_ble_discovery(&self, contact_device_id: [u8; 32]) -> Result<(), String> {
         let self_device_id = crate::sdk::app_state::AppState::get_device_id()
             .ok_or_else(|| "Self device ID not available".to_string())?;
@@ -719,51 +660,31 @@ impl PairingOrchestrator {
             },
         );
 
-        use crate::jni::jni_common::{get_java_vm_borrowed, find_class_with_app_loader};
+        let host = crate::host::host()?;
 
-        let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
-
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
-
-        let class_name = "com/dsm/wallet/bridge/Unified";
-        let class = find_class_with_app_loader(&mut env, class_name)
-            .map_err(|e| format!("Failed to find class {}: {:?}", class_name, e))?;
-
-        // GATT server must always be up so the scanner can read our identity
-        let adv_result = env.call_static_method(&class, "startBlePairingAdvertise", "()Z", &[]);
-        let adv_ok = adv_result.map(|r| r.z().unwrap_or(false)).unwrap_or(false);
+        // The GATT server is always up, so the peer that scans can connect
+        // and run the link handshake.
+        let advertising = host.start_advertising();
 
         if should_advertise {
             // Advertiser role: GATT server only, no scanning. The peer will scan and connect.
             log::info!(
-                "[PairingOrchestrator] BLE discovery started (advertiser-only): advertise={}",
-                adv_ok,
+                "[PairingOrchestrator] BLE discovery started (advertiser-only): advertise={:?}",
+                advertising,
             );
-            if !adv_ok {
-                return Err("startBlePairingAdvertise failed".to_string());
-            }
-        } else {
-            // Scanner role: also start scanning to discover the peer's advertisement.
-            let scan_result = env.call_static_method(&class, "startBlePairingScan", "()Z", &[]);
-            let scan_ok = scan_result.map(|r| r.z().unwrap_or(false)).unwrap_or(false);
-
-            log::info!(
-                "[PairingOrchestrator] BLE discovery started (scanner): advertise={} scan={}",
-                adv_ok,
-                scan_ok,
-            );
-            // The scanner finds the peer: without its scan the attempt would
-            // wait on a scan that never ran.
-            if !scan_ok {
-                return Err(format!(
-                    "startBlePairingScan was refused (advertise={adv_ok})"
-                ));
-            }
+            return advertising.map_err(|e| format!("advertising was refused: {e}"));
         }
 
-        Ok(())
+        // Scanner role: also start scanning to discover the peer's advertisement.
+        let scanning = host.start_scan();
+        log::info!(
+            "[PairingOrchestrator] BLE discovery started (scanner): advertise={:?} scan={:?}",
+            advertising,
+            scanning,
+        );
+        // The scanner finds the peer: without its scan the attempt would
+        // wait on a scan that never ran.
+        scanning.map_err(|e| format!("the scan was refused ({e}); advertise={advertising:?}"))
     }
 
     /// Stop the scan pairing started, via JNI.
@@ -772,42 +693,18 @@ impl PairingOrchestrator {
     /// pairing's to stop: it follows the appliance's identity (the Android BLE
     /// service owns it), and an appliance that stopped advertising here could not
     /// be found for an offline transfer by the contact it had just paired with.
-    #[cfg(all(target_os = "android", feature = "jni"))]
     async fn stop_ble_discovery(&self) -> Result<(), String> {
-        use crate::jni::jni_common::{find_class_with_app_loader, get_java_vm_borrowed};
-
-        let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
-
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
-
-        let class = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/Unified")
-            .map_err(|e| format!("Failed to find Unified class: {e:?}"))?;
-
-        let stopped = env
-            .call_static_method(&class, "stopBlePairingScan", "()Z", &[])
-            .and_then(|v| v.z())
-            .map_err(|e| format!("Unified.stopBlePairingScan failed: {e:?}"))?;
-        if !stopped {
-            return Err(
-                "Unified.stopBlePairingScan answered false: the scan was not stopped".to_string(),
-            );
-        }
-
+        crate::host::host()?
+            .stop_scan()
+            .map_err(|e| format!("the scan was not stopped: {e}"))?;
         log::info!("[PairingOrchestrator] stop_ble_discovery: scan stopped");
         Ok(())
     }
 
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    async fn stop_ble_discovery(&self) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// Notify frontend that pairing completed
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    async fn notify_pairing_complete(&self, device_id: &[u8; 32]) -> Result<(), String> {
-        // Log for debugging
+    /// Tell the page the contact's pairing completed, so it refreshes the
+    /// contact. A page that did not hear of it fails no pairing: the pairing
+    /// is the stored address, which the page reads back.
+    fn notify_pairing_complete(&self, device_id: &[u8; 32]) {
         log::info!(
             "[PairingOrchestrator] PAIRING_COMPLETE: device_id={:02x}{:02x}{:02x}{:02x}...",
             device_id[0],
@@ -815,49 +712,7 @@ impl PairingOrchestrator {
             device_id[2],
             device_id[3]
         );
-
-        // Emit event to frontend to refresh contact status
-        use crate::jni::jni_common::{get_java_vm_borrowed, find_class_with_app_loader};
-        use jni::objects::JValue;
-
-        const TOPIC: &str = "dsm-contact-ble-updated";
-
-        let vm = get_java_vm_borrowed().ok_or_else(|| "JavaVM not initialized".to_string())?;
-
-        let mut env = vm
-            .attach_current_thread()
-            .map_err(|e| format!("Failed to attach JNI thread: {e}"))?;
-
-        let res = (|| -> Result<(), String> {
-            // Call BleEventRelay.dispatchEvent(topic, payloadBytes)
-            let cls = find_class_with_app_loader(&mut env, "com/dsm/wallet/bridge/BleEventRelay")?;
-            let j_topic = env
-                .new_string(TOPIC)
-                .map_err(|e| format!("new_string(topic) failed: {e}"))?;
-
-            // Create byte array for device_id
-            let j_payload = env
-                .byte_array_from_slice(device_id)
-                .map_err(|e| format!("byte_array_from_slice failed: {e}"))?;
-
-            // Signature: (Ljava/lang/String;[B)V
-            env.call_static_method(
-                cls,
-                "dispatchEvent",
-                "(Ljava/lang/String;[B)V",
-                &[JValue::Object(&j_topic), JValue::Object(&j_payload)],
-            )
-            .map_err(|e| format!("call_static_method dispatchEvent failed: {e}"))?;
-
-            Ok(())
-        })();
-
-        if let Err(err) = res {
-            log::warn!("Failed to emit pairing completion event: {err}");
-            // Don't fail the pairing just because event emission failed
-        }
-
-        Ok(())
+        crate::host::post_event("dsm-contact-ble-updated", device_id);
     }
 }
 

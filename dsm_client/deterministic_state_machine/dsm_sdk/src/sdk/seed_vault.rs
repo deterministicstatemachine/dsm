@@ -30,7 +30,9 @@
 //!   `com.dsm.wallet.security.KeystoreVault` (hardware-backed, with no user-authentication
 //!   requirement: the app lock is Rust's, `sdk::app_lock`). Rust hands plaintext across
 //!   JNI and gets ciphertext back — the sealing key never enters Rust memory.
-//! - **Host / desktop** (non-Android, tests): a software XChaCha20-Poly1305 fallback so
+//! - **iOS** (the `ffi` feature): the key the Swift host holds for Rust, reached through
+//!   the same `crate::host::HostBridge` calls; the key never enters Rust.
+//! - **Host / desktop** (no device host, tests): a software XChaCha20-Poly1305 fallback so
 //!   the persistence logic is exercisable off-device. This path is **not** hardware-backed
 //!   and is never the production anti-clone boundary; it exists only where no Keystore does.
 
@@ -48,53 +50,29 @@ pub fn open(blob: &[u8]) -> Result<Vec<u8>, DsmError> {
 }
 
 // ---------------------------------------------------------------------------
-// Android (with the `jni` feature): seal/open via the AndroidKeyStore-backed
-// Kotlin helper through a JNI upcall.
+// A device build (Android over JNI, iOS over the C ABI): seal/open under the
+// host's own sealing key, which never enters Rust (`crate::host`).
 // ---------------------------------------------------------------------------
 
-#[cfg(all(target_os = "android", feature = "jni"))]
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 fn platform_seal(plaintext: &[u8]) -> Result<Vec<u8>, DsmError> {
-    keystore_upcall("seal", plaintext)
+    crate::host::host()
+        .and_then(|host| host.seal_seed(plaintext))
+        .map_err(DsmError::invalid_operation)
 }
 
-#[cfg(all(target_os = "android", feature = "jni"))]
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 fn platform_open(blob: &[u8]) -> Result<Vec<u8>, DsmError> {
-    keystore_upcall("open", blob)
-}
-
-/// Call `KeystoreVault.seal([B):[B` / `.open([B):[B` on the JVM and return the bytes.
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn keystore_upcall(method: &str, input: &[u8]) -> Result<Vec<u8>, DsmError> {
-    use jni::objects::{JByteArray, JValue};
-
-    crate::jni::jni_common::with_env(|env| {
-        let mut env =
-            unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _).map_err(|e| e.to_string())? };
-        let class = crate::jni::jni_common::find_class_with_app_loader(
-            &mut env,
-            "com/dsm/wallet/security/KeystoreVault",
-        )?;
-        let j_in = env
-            .byte_array_from_slice(input)
-            .map_err(|e| e.to_string())?;
-        let ret = env
-            .call_static_method(class, method, "([B)[B", &[JValue::Object(&j_in.into())])
-            .map_err(|e| format!("KeystoreVault.{method} upcall failed: {e}"))?;
-        let obj = ret.l().map_err(|e| e.to_string())?;
-        if obj.is_null() {
-            return Err(format!("KeystoreVault.{method} returned null"));
-        }
-        let arr = JByteArray::from(obj);
-        env.convert_byte_array(arr).map_err(|e| e.to_string())
-    })
-    .map_err(DsmError::invalid_operation)
+    crate::host::host()
+        .and_then(|host| host.open_seed(blob))
+        .map_err(DsmError::invalid_operation)
 }
 
 // ---------------------------------------------------------------------------
 // Host / desktop / tests: software XChaCha20-Poly1305 fallback (NOT hardware-backed).
 // ---------------------------------------------------------------------------
 
-#[cfg(not(all(target_os = "android", feature = "jni")))]
+#[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
 fn platform_seal(plaintext: &[u8]) -> Result<Vec<u8>, DsmError> {
     use chacha20poly1305::aead::Aead;
     use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -120,7 +98,7 @@ fn platform_seal(plaintext: &[u8]) -> Result<Vec<u8>, DsmError> {
     Ok(blob)
 }
 
-#[cfg(not(all(target_os = "android", feature = "jni")))]
+#[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
 fn platform_open(blob: &[u8]) -> Result<Vec<u8>, DsmError> {
     use chacha20poly1305::aead::Aead;
     use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -145,7 +123,7 @@ fn platform_open(blob: &[u8]) -> Result<Vec<u8>, DsmError> {
 /// runs only on non-Android builds (desktop/dev/tests), where there is no Keystore and
 /// no anti-clone boundary to uphold. A fixed domain-derived key keeps the persistence
 /// logic exercisable without depending on app-state/storage initialization.
-#[cfg(not(all(target_os = "android", feature = "jni")))]
+#[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
 fn host_software_key() -> [u8; 32] {
     *dsm::crypto::blake3::Hasher::new_derive_key("DSM/seed-vault-host-key/v1\0")
         .update(b"non-android software fallback")
@@ -153,7 +131,7 @@ fn host_software_key() -> [u8; 32] {
         .as_bytes()
 }
 
-#[cfg(all(test, not(target_os = "android")))]
+#[cfg(all(test, not(any(target_os = "android", feature = "ffi"))))]
 mod tests {
     use super::*;
 
