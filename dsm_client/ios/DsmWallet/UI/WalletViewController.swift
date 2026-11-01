@@ -66,6 +66,7 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
         EventRelay.shared.attach { [weak web] event in
             // A page that is gone takes nothing; the relay keeps the event.
             let taken = web?.deliver(event) ?? (web != nil)
+            BridgeLogger.logEventDelivery(event, taken: taken)
             // As Android's dispatcher: a wallet-refresh hint from Rust (publication
             // completed, the inbox moved) also refreshes the session snapshot the
             // page renders its phase from.

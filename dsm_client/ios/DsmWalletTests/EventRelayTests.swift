@@ -42,4 +42,26 @@ final class EventRelayTests: XCTestCase {
         XCTAssertEqual(taken, ["first", "second", "third"])
         XCTAssertEqual(relay.pendingCount, 1)
     }
+
+    /// An event the page did not take is handed over again when the next one
+    /// arrives, and the one that arrived follows it: nothing waits for a
+    /// second markReady.
+    func testAnEventKeptIsRetriedOnTheNextPost() {
+        let relay = EventRelay()
+        var taken: [String] = []
+        var refuse = Set<String>()
+        relay.attach { event in
+            guard case .topic(let topic, _) = event, !refuse.contains(topic) else { return taken.count < 0 }
+            taken.append(topic)
+            return taken.count > 0
+        }
+        relay.markReady()
+        refuse.insert("held")
+        relay.post(topic: "held", payload: Data([1]))
+        XCTAssertEqual(relay.pendingCount, 1)
+        refuse.remove("held")
+        relay.post(topic: "after", payload: Data([2]))
+        XCTAssertEqual(taken, ["held", "after"])
+        XCTAssertEqual(relay.pendingCount, 0)
+    }
 }

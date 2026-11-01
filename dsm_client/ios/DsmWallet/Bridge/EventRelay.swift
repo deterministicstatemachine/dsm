@@ -69,7 +69,12 @@ final class EventRelay {
             enqueueLocked(event)
         }
         lock.unlock()
-        guard deliverNow, let deliverer else { return }
+        guard deliverNow, let deliverer else {
+            // Events wait behind one the page did not take; each arrival is
+            // the next chance to hand that one over, in order.
+            flush()
+            return
+        }
         if !deliverer(event) {
             lock.lock()
             // The page did not take it: it waits at the front, in order.

@@ -39,6 +39,18 @@ enum BridgeLogger {
         appendLine("DIAGNOSTICS: payload=\(payload.count)b b32=\(preview)")
     }
 
+    /// One event handed to the page: its topic or kind and size, and whether
+    /// the page took it; never its bytes. Android writes the same to logcat,
+    /// which iOS has no way to read off a device without root.
+    static func logEventDelivery(_ event: EventRelay.Event, taken: Bool) {
+        let what: String
+        switch event {
+        case .topic(let topic, let payload): what = "\(topic) \(payload.count)b"
+        case .nativeHost(let bytes): what = "nativeHost \(bytes.count)b"
+        }
+        appendLine("EVENT: \(what) -> \(taken ? "taken" : "kept")")
+    }
+
     static func logBridgeCall(method: String, payloadBytes: Int, outcome: Result<Int, Error>) {
         let result: String
         switch outcome {
