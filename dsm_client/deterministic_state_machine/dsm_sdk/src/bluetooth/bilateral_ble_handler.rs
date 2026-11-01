@@ -304,10 +304,7 @@ pub(crate) fn stage_bearer_spend(
         dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/bearer-object/v1"),
         &terms.token_id,
     );
-    let payload_hash = dsm::crypto::blake3::domain_hash_bytes(
-        dsm::crypto::domain::TaggedHashDomain::from_static(b"DSM/bearer-payload/v1"),
-        &operation.to_bytes(),
-    );
+    let payload_hash = dsm::types::operations::bearer_payload_hash(&operation.to_bytes());
     let authority_policy_hash = authority_policy.policy_id;
     // Policy-binding trace (sender → chip PREPARE): the value the chip commits as
     // `authority_policy_hash` MUST equal the receiver's canonical policy_id, or the proof is
@@ -4394,6 +4391,7 @@ impl BilateralBleHandler {
             asset: policy_commit,
             amount: amount.value(),
             commitment_hash,
+            operation: session.operation.to_bytes(),
         };
 
         let router = crate::bridge::app_router().ok_or_else(|| {

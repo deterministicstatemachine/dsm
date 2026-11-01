@@ -231,6 +231,9 @@ pub struct ChainPayment {
     pub asset: [u8; 32],
     pub amount: u64,
     pub release_message: [u8; 32],
+    /// The transition's `payload_hash`: the hash of the bearer transfer's
+    /// operation bytes, which the anchor signed (SA-133).
+    pub payload_hash: [u8; 32],
     pub before: AccountPoint,
     pub after: AccountPoint,
 }
@@ -324,6 +327,7 @@ pub fn verify_spend_chain(
             asset: hop.asset,
             amount: hop.amount,
             release_message: cert.root_advance_message,
+            payload_hash: t.payload_hash,
             before: AccountPoint {
                 root: at,
                 counter: cert.anchor_counter,

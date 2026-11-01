@@ -334,8 +334,8 @@ fn record_offline_exposure_in_tx(
         "INSERT OR IGNORE INTO peer_offline_exposure(
              release_message, peer_genesis, peer_devid, economic_position, bundle, recipient,
              asset, amount, before_root, before_counter, before_frontier, after_root,
-             after_counter, after_frontier)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             after_counter, after_frontier, payload_hash)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             payment.release_message.as_slice(),
             exposure.genesis().as_slice(),
@@ -352,6 +352,7 @@ fn record_offline_exposure_in_tx(
             payment.after.root.as_slice(),
             i64::try_from(payment.after.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
             payment.after.frontier.as_slice(),
+            payment.payload_hash.as_slice(),
         ],
     )?;
     Ok(())
@@ -381,12 +382,13 @@ pub fn offline_exposure(
         Vec<u8>,
         i64,
         Vec<u8>,
+        Vec<u8>,
     );
     let row: Option<Row> = conn
         .query_row(
             "SELECT peer_genesis, peer_devid, economic_position, bundle, recipient, asset, amount,
                     before_root, before_counter, before_frontier, after_root, after_counter,
-                    after_frontier
+                    after_frontier, payload_hash
              FROM peer_offline_exposure WHERE release_message = ?1",
             params![release_message.as_slice()],
             |r| {
@@ -404,6 +406,7 @@ pub fn offline_exposure(
                     r.get(10)?,
                     r.get(11)?,
                     r.get(12)?,
+                    r.get(13)?,
                 ))
             },
         )
@@ -422,6 +425,7 @@ pub fn offline_exposure(
                     asset: digest32(r.5, "exposure asset")?,
                     amount: unsigned(r.6, "amount")?,
                     release_message: *release_message,
+                    payload_hash: digest32(r.13, "exposure payload hash")?,
                     before: dsm::types::offline_chain::AccountPoint {
                         root: digest32(r.7, "exposure before root")?,
                         counter: unsigned(r.8, "before counter")?,

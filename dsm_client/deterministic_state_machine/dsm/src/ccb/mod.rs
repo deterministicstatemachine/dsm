@@ -542,6 +542,10 @@ pub mod schema {
         // carries both, and the spends since the last boundary.
         (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 1),
         (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 1),
+        // Schema 1 of the offline settlement did not carry the transfer its
+        // payment was, so it named its recipient by device id alone. Schema 2
+        // carries it, re-hashed to the payload the anchor signed (SA-133).
+        (super::class::OFFLINE_SETTLEMENT_BODY, 1),
         // Schema 1 had no arm for an offline unload's credit, so an unload
         // could not be witnessed at all. Schema 2 adds `0x0075`; the source
         // sequence of schema 1 bytes is not that of schema 2.

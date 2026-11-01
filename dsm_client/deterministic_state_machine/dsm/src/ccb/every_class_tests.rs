@@ -711,13 +711,14 @@ fn every_class() -> Vec<Shown> {
         bundle: b(0xC4),
         asset: b(0x0A),
         amount: 12,
+        payment_operation: vec![0x39; 40],
     };
     all.push(shown(
         class::OFFLINE_SETTLEMENT_BODY,
-        SCHEMA_V1,
-        offline_settlement.encode(),
+        2,
+        ok(offline_settlement.encode(), "offline settlement"),
         Read::Parsed(|b| {
-            Ok(
+            re(
                 crate::economic::offline_boundary::OfflineSettlementBody::decode(b)
                     .map_err(text)?
                     .encode(),

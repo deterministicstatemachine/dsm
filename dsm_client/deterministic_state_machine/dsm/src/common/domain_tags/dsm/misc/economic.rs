@@ -183,6 +183,12 @@ pub const TAG_DSM_ECONOMIC_OPERATION_ID_DSM: TaggedHashDomain<'static> =
 /// its preimage holds no root the boundary produces.
 pub const TAG_DSM_ECONOMIC_OPERATION_ID_OFFLINE_BOUNDARY: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/economic-operation-id/offline-boundary/v1");
+/// The hash of a bearer transfer's operation bytes that an anchor transition
+/// carries as its `payload_hash`: `H(tag ‖ 0x00 ‖ operation bytes)`. The
+/// anchor signs it within the transition digest, so a spend's payment names
+/// the operation that made it, the recipient's lineage included (SA-133).
+pub const TAG_DSM_BEARER_PAYLOAD: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/bearer-payload/v1");
 /// Economic operation id of an offline settlement: `H(tag ‖ 0x00 ‖ G ‖ DevID
 /// ‖ G_payer ‖ DevID_payer ‖ M)`, the receiver's one settlement of the payer's
 /// spend the anchor signed as `M`.

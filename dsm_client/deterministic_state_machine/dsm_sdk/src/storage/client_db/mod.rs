@@ -580,7 +580,13 @@ fn get_database_path() -> Result<PathBuf> {
 /// v39: `peer_ek_step`, the EK steps a walk verified, recorded with its
 /// frontiers so a later walk of the signer fetches only the rotations since
 /// (SA-93). A database made at 38 has none, and is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 39;
+///
+/// v40: an exposed offline payment keeps the spend's payload hash
+/// (`peer_offline_exposure.payload_hash`), and a payment received offline
+/// keeps the transfer it was (`pending_offline_receipt.operation`), so a
+/// settlement names the lineage it pays (SA-133). A database made at 39 has
+/// neither, and is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 40;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1008,7 +1014,10 @@ fn create_schema(conn: &Connection) -> Result<()> {
             before_frontier     BLOB NOT NULL,
             after_root          BLOB NOT NULL,
             after_counter       INTEGER NOT NULL,
-            after_frontier      BLOB NOT NULL
+            after_frontier      BLOB NOT NULL,
+            -- The spend's payload hash, the transfer the anchor signed
+            -- (SA-133).
+            payload_hash        BLOB NOT NULL CHECK (length(payload_hash) = 32)
         );
 
         -- Value this device received offline, pending until it is settled
@@ -1022,6 +1031,9 @@ fn create_schema(conn: &Connection) -> Result<()> {
             asset               BLOB NOT NULL,      -- 32B
             amount              INTEGER NOT NULL,
             commitment_hash     BLOB NOT NULL,      -- 32B
+            -- The bearer transfer as this device accepted it, which its
+            -- settlement carries (SA-133).
+            operation           BLOB NOT NULL,
             settled_position    INTEGER
         );
 

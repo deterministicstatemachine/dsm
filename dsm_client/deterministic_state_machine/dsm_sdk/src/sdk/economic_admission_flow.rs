@@ -1010,7 +1010,9 @@ pub(crate) async fn admitted_offline_settlement(
     let validated = validated_root_or_activate(core)?;
     let (mut tree, pre_state) = producer_tree_and_pre_state(&validated)?;
     let authority = authority_material(&network_id, &genesis)?;
-    let body = OfflineSettlementBody::of(&exposure).encode();
+    let body = OfflineSettlementBody::of(&exposure, receipt.operation.clone())
+        .encode()
+        .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e:?}")))?;
     let verified = OfflineSettlementBody::verify(&body, &genesis, &devid, &exposure)?;
     let mut built: Option<(EconomicTransitionWitness, EconomicAdmissionManifest)> = None;
     let pending = core.admitted_settlement(

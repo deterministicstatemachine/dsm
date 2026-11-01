@@ -31,6 +31,9 @@ pub struct PendingOfflineReceipt {
     pub amount: u64,
     /// The bilateral step that received it.
     pub commitment_hash: [u8; 32],
+    /// The bearer transfer the payment was, as this device accepted it: what
+    /// its settlement carries (SA-133).
+    pub operation: Vec<u8>,
 }
 
 fn digest32(v: Vec<u8>, what: &str) -> Result<[u8; 32]> {
@@ -45,8 +48,8 @@ pub fn record_pending_offline_receipt_in_tx(
     tx.execute(
         "INSERT INTO pending_offline_receipt(
              release_message, payer_genesis, payer_devid, bundle, asset, amount,
-             commitment_hash, settled_position)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+             commitment_hash, operation, settled_position)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL)",
         params![
             receipt.release_message.as_slice(),
             receipt.payer_genesis.as_slice(),
@@ -55,12 +58,22 @@ pub fn record_pending_offline_receipt_in_tx(
             receipt.asset.as_slice(),
             i64::try_from(receipt.amount).map_err(|e| anyhow!("amount overflow: {e}"))?,
             receipt.commitment_hash.as_slice(),
+            receipt.operation,
         ],
     )?;
     Ok(())
 }
 
-type Row = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, i64, Vec<u8>);
+type Row = (
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+);
 
 fn receipt_of(r: Row) -> Result<PendingOfflineReceipt> {
     Ok(PendingOfflineReceipt {
@@ -71,6 +84,7 @@ fn receipt_of(r: Row) -> Result<PendingOfflineReceipt> {
         asset: digest32(r.4, "a pending receipt's asset")?,
         amount: u64::try_from(r.5).map_err(|e| anyhow!("a pending receipt's amount: {e}"))?,
         commitment_hash: digest32(r.6, "a pending receipt's step")?,
+        operation: r.7,
     })
 }
 
@@ -83,11 +97,12 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         r.get(4)?,
         r.get(5)?,
         r.get(6)?,
+        r.get(7)?,
     ))
 }
 
 const COLUMNS: &str =
-    "release_message, payer_genesis, payer_devid, bundle, asset, amount, commitment_hash";
+    "release_message, payer_genesis, payer_devid, bundle, asset, amount, commitment_hash, operation";
 
 /// Every payment received offline and not yet settled, oldest step first.
 pub fn pending_offline_receipts() -> Result<Vec<PendingOfflineReceipt>> {
@@ -121,7 +136,7 @@ pub fn offline_receipt(
                  WHERE release_message = ?1"
             ),
             params![release_message.as_slice()],
-            |r| Ok((row(r)?, r.get::<_, Option<i64>>(7)?)),
+            |r| Ok((row(r)?, r.get::<_, Option<i64>>(8)?)),
         )
         .optional()?;
     found
@@ -189,6 +204,7 @@ mod tests {
             asset: [0x14; 32],
             amount,
             commitment_hash: [mark ^ 0x80; 32],
+            operation: vec![mark; 40],
         }
     }
 

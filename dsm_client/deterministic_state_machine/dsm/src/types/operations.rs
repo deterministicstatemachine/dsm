@@ -263,6 +263,15 @@ impl TransferTerms {
     }
 }
 
+/// The `payload_hash` an anchor transition carries for the bearer transfer
+/// whose canonical bytes are `operation_bytes` (SA-133).
+pub fn bearer_payload_hash(operation_bytes: &[u8]) -> [u8; 32] {
+    crate::crypto::blake3::domain_hash_bytes(
+        crate::common::domain_tags::TAG_DSM_BEARER_PAYLOAD,
+        operation_bytes,
+    )
+}
+
 /// Primary state transition operation enum (no Serde in canonical path).
 ///
 /// Each variant represents a distinct kind of state transition in the DSM

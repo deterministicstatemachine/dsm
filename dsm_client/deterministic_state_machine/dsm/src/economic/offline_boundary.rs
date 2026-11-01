@@ -588,7 +588,7 @@ impl OfflineBoundaryBody {
 struct SettlementBody;
 impl CcbObject for SettlementBody {
     const CLASS: u16 = class::OFFLINE_SETTLEMENT_BODY;
-    const SCHEMA: u16 = 1;
+    const SCHEMA: u16 = 2;
 }
 
 /// The body of an offline settlement (SA-91): a receiver's admission of value
@@ -610,11 +610,19 @@ pub struct OfflineSettlementBody {
     pub bundle: [u8; 32],
     pub asset: [u8; 32],
     pub amount: u64,
+    /// The bearer transfer the payment was, as the receiver accepted it: its
+    /// canonical bytes, which re-hash to the `payload_hash` the payer's anchor
+    /// signed. They name the recipient's lineage (SA-133).
+    pub payment_operation: Vec<u8>,
 }
 
 impl OfflineSettlementBody {
-    /// The settlement of the payment `exposure` records.
-    pub fn of(exposure: &crate::economic::peer_lineage::PeerOfflineExposure) -> Self {
+    /// The settlement of the payment `exposure` records, which was the
+    /// bearer transfer `payment_operation`.
+    pub fn of(
+        exposure: &crate::economic::peer_lineage::PeerOfflineExposure,
+        payment_operation: Vec<u8>,
+    ) -> Self {
         let payment = exposure.payment();
         Self {
             payer_genesis: *exposure.genesis(),
@@ -624,11 +632,12 @@ impl OfflineSettlementBody {
             bundle: *exposure.bundle(),
             asset: payment.asset,
             amount: payment.amount,
+            payment_operation,
         }
     }
 
     /// The body's canonical bytes, fields in registry order.
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, CcbError> {
         let mut out = Vec::new();
         push_envelope::<SettlementBody>(&mut out);
         push_digest32(&mut out, &self.payer_genesis); // 1
@@ -638,7 +647,8 @@ impl OfflineSettlementBody {
         push_digest32(&mut out, &self.bundle); // 5
         push_digest32(&mut out, &self.asset); // 6
         push_u64(&mut out, self.amount); // 7
-        out
+        push_bytes(&mut out, &self.payment_operation)?; // 8
+        Ok(out)
     }
 
     /// Decode a body, strictly: its class, schema 1, every field, nothing after.
@@ -653,6 +663,7 @@ impl OfflineSettlementBody {
             bundle: c.digest32()?,
             asset: c.digest32()?,
             amount: c.u64()?,
+            payment_operation: read_bytes(&mut c)?,
         };
         if c.i != bytes.len() {
             return Err(DecodeError::TrailingBytes {
@@ -687,7 +698,7 @@ impl OfflineSettlementBody {
     ) -> Result<VerifiedOfflineBoundary, DsmError> {
         let body = Self::decode(body_bytes)
             .map_err(|e| DsmError::invalid_operation(format!("an offline settlement body: {e}")))?;
-        if body != Self::of(exposure) {
+        if body != Self::of(exposure, body.payment_operation.clone()) {
             return Err(DsmError::invalid_operation(
                 "the settlement does not name the payment the payer's boundary exposed",
             ));
@@ -696,6 +707,41 @@ impl OfflineSettlementBody {
             return Err(DsmError::invalid_operation(
                 "the exposed payment is not to the device that settles it",
             ));
+        }
+        // The payment was the bearer transfer the anchor signed, to this
+        // lineage: its bytes re-hash to the spend's payload hash, and it names
+        // this device and this genesis, the asset and the amount. A device id
+        // alone names no one lineage (SA-133).
+        if crate::types::operations::bearer_payload_hash(&body.payment_operation)
+            != exposure.payment().payload_hash
+        {
+            return Err(DsmError::invalid_operation(
+                "the settlement's payment is not the transfer the payer's anchor signed",
+            ));
+        }
+        match crate::types::operations::Operation::from_bytes(&body.payment_operation) {
+            Ok(crate::types::operations::Operation::Transfer {
+                to_device_id,
+                to_genesis,
+                amount,
+                policy_commit,
+                authority_policy: Some(..),
+                ..
+            }) if to_device_id.as_slice() == device_id.as_slice()
+                && to_genesis == *genesis
+                && amount.value() == body.amount
+                && policy_commit == body.asset => {}
+            Ok(..) => {
+                return Err(DsmError::invalid_operation(
+                    "the payment the anchor signed is not a bearer transfer to this lineage of \
+                     this asset and amount",
+                ))
+            }
+            Err(e) => {
+                return Err(DsmError::invalid_operation(format!(
+                    "the settlement's payment does not decode: {e}"
+                )))
+            }
         }
         Ok(VerifiedOfflineBoundary {
             kind: OfflineBoundaryKind::Settle,
@@ -1214,22 +1260,35 @@ mod tests {
         );
     }
 
-    /// SA-91. A settlement names exactly the payment a boundary of the
-    /// payer's online history exposed, to the device that settles it; its
-    /// identity is that device's one settlement of that spend.
-    /// MUTATION CONTROL: dropping the check that the body is the exposed
-    /// payment, or that the payment is to this device, turns this red.
-    #[test]
-    fn a_settlement_is_held_to_the_payment_exposed_to_its_device() {
-        use crate::economic::peer_lineage::PeerOfflineExposure;
+    /// The bearer transfer of `amount` of `ASSET` to the lineage
+    /// `(genesis, to)`, as its canonical bytes.
+    fn bearer_payment(to: [u8; 32], genesis: [u8; 32], amount: u64) -> Vec<u8> {
+        crate::types::operations::Operation::Transfer {
+            to_device_id: to.to_vec(),
+            to_genesis: genesis,
+            amount: crate::types::token_types::Balance::amount(amount),
+            policy_commit: ASSET,
+            terms_commitment: [0x5C; 32],
+            token_policy: Vec::new(),
+            signature: Vec::new(),
+            authority_policy: Some(crate::types::operations::canonical_offline_bearer_policy()),
+        }
+        .to_bytes()
+    }
+
+    /// The exposure of a spend of 7 of `ASSET` to `receiver`, whose anchor
+    /// transition carried `payment`'s payload hash.
+    fn exposed(
+        receiver: [u8; 32],
+        payment: &[u8],
+    ) -> crate::economic::peer_lineage::PeerOfflineExposure {
         use crate::types::offline_chain::{AccountPoint, ChainPayment};
-        let receiver = [0xB0; 32];
         let point = |b: u8, counter: u64| AccountPoint {
             root: [b; 32],
             counter,
             frontier: [b ^ 0x0F; 32],
         };
-        let exposure = PeerOfflineExposure::rehydrate_recorded(
+        crate::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
             [0x31; 32],
             [0x32; 32],
             4,
@@ -1239,12 +1298,25 @@ mod tests {
                 asset: ASSET,
                 amount: 7,
                 release_message: [0x34; 32],
+                payload_hash: crate::types::operations::bearer_payload_hash(payment),
                 before: point(0x41, 0),
                 after: point(0x42, 1),
             },
-        );
-        let honest = OfflineSettlementBody::of(&exposure);
-        let bytes = honest.encode();
+        )
+    }
+
+    /// SA-91. A settlement names exactly the payment a boundary of the
+    /// payer's online history exposed, to the device that settles it; its
+    /// identity is that device's one settlement of that spend.
+    /// MUTATION CONTROL: dropping the check that the body is the exposed
+    /// payment, or that the payment is to this device, turns this red.
+    #[test]
+    fn a_settlement_is_held_to_the_payment_exposed_to_its_device() {
+        let receiver = [0xB0; 32];
+        let payment = bearer_payment(receiver, [0x0B; 32], 7);
+        let exposure = exposed(receiver, &payment);
+        let honest = OfflineSettlementBody::of(&exposure, payment);
+        let bytes = honest.encode().expect("encodes");
         assert_eq!(
             OfflineSettlementBody::decode(&bytes).expect("decode"),
             honest,
@@ -1283,7 +1355,7 @@ mod tests {
         ] {
             refused(
                 OfflineSettlementBody::verify(
-                    &misstated.encode(),
+                    &misstated.encode().expect("encodes"),
                     &[0x0B; 32],
                     &receiver,
                     &exposure,
@@ -1298,6 +1370,37 @@ mod tests {
         assert_eq!(
             offline_body_kind(&bytes).expect("a body"),
             OfflineBodyKind::Settlement
+        );
+    }
+
+    /// SA-133. A settlement pays the lineage its payment named: the transfer
+    /// it carries must re-hash to the payload the payer's anchor signed, and
+    /// that transfer must name the settling device's genesis as well as its
+    /// device id. A lineage sharing the payee's device id cannot settle the
+    /// payee's payment, and a settlement cannot carry some other transfer.
+    /// MUTATION CONTROL: the payload re-hash dropped, or the genesis check
+    /// dropped, each turns this red.
+    #[test]
+    fn a_settlement_pays_only_the_lineage_its_payment_named() {
+        let receiver = [0xB0; 32];
+        let payment = bearer_payment(receiver, [0x0B; 32], 7);
+        let exposure = exposed(receiver, &payment);
+        let body = OfflineSettlementBody::of(&exposure, payment.clone())
+            .encode()
+            .expect("encodes");
+        OfflineSettlementBody::verify(&body, &[0x0B; 32], &receiver, &exposure)
+            .expect("the payee's lineage settles its payment");
+        refused(
+            OfflineSettlementBody::verify(&body, &[0x0C; 32], &receiver, &exposure),
+            "is not a bearer transfer to this lineage",
+        );
+        let other = bearer_payment(receiver, [0x0C; 32], 7);
+        let carried = OfflineSettlementBody::of(&exposure, other)
+            .encode()
+            .expect("encodes");
+        refused(
+            OfflineSettlementBody::verify(&carried, &[0x0C; 32], &receiver, &exposure),
+            "is not the transfer the payer's anchor signed",
         );
     }
 }
