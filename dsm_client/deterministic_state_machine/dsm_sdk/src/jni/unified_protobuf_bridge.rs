@@ -62,9 +62,7 @@ use crate::jni::bilateral_poll::{
 // these `use`s restore the android+bluetooth build, which had not been recompiled since).
 use crate::bluetooth::frame_classify::detect_ble_frame_type_from_bytes;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-use jni::objects::{JObject, JValue};
+use jni::objects::JObject;
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
 use tokio::runtime::Handle;
 
@@ -1070,20 +1068,9 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleLinkOpened
                 Some(<[u8; 32]>::try_from(bytes).map_err(|e| format!("the link's target: {e}"))?)
             }
         };
-        if let Some(contact) = target {
-            crate::runtime::get_runtime().block_on(
-                crate::bluetooth::get_pairing_orchestrator().link_opened(contact, &address),
-            );
-        }
-        crate::bluetooth::link_session::links()
-            .opened(
-                crate::bluetooth::link_session::Link { address, role },
-                target,
-                &crate::bluetooth::link_session::WalletKeys,
-            )
-            .map_err(|e| e.to_string())
+        crate::bluetooth::radio_link::link_opened(&address, role, target)
     })();
-    match opened.and_then(|frames| build_chunk_array(&mut env, &frames)) {
+    match opened.and_then(|frames| crate::jni::host_bridge::chunk_array(&mut env, &frames)) {
         Ok(array) => array.into_raw(),
         Err(why) => {
             throw_link_error(&mut env, &why);
@@ -1129,128 +1116,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleLinkClosed
             return;
         }
     };
-    let paired =
-        crate::bluetooth::link_session::links().closed(&crate::bluetooth::link_session::Link {
-            address: address.clone(),
-            role,
-        });
-    if let Some(peer) = paired {
-        crate::bluetooth::owed_frame_driver::link_down(&peer.device_id);
-    }
-    crate::runtime::get_runtime()
-        .block_on(crate::bluetooth::get_pairing_orchestrator().handle_peer_disconnected(&address));
-}
-
-/// Deliver every frame this device owes `counterparty`, reaching for it at
-/// `address_hint` first; returns the frames delivered. A frame that cannot be
-/// sent now stays owed; the next link-up, or the owed-frame driver, delivers
-/// it again.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub(crate) fn deliver_owed_frames(
-    env: &mut jni::JNIEnv,
-    counterparty: &[u8; 32],
-    address_hint: Option<&str>,
-) -> Vec<crate::bluetooth::owed_frame_driver::FrameKey> {
-    let rt = crate::runtime::get_runtime();
-    let (coord, adapter) = match (
-        rt.block_on(crate::bridge::get_ble_coordinator()),
-        rt.block_on(crate::bridge::get_ble_transport_adapter()),
-    ) {
-        (Ok(coord), Ok(adapter)) => (coord, adapter),
-        _ => {
-            log::warn!("[BLE link] owed frames not delivered: the BLE transport is not ready");
-            return Vec::new();
-        }
-    };
-    let owed = rt.block_on(adapter.bilateral_handler().frames_owed_to(counterparty));
-    let counterparty_b32 = crate::util::text_id::encode_base32_crockford(counterparty);
-    let counterparty_short = counterparty_b32.get(..8).unwrap_or("?");
-    let mut delivered = Vec::new();
-    for frame in owed {
-        let sent = coord
-            .encode_message(owed_frame_type(frame.kind), &frame.bytes)
-            .map_err(|e| e.to_string())
-            .and_then(|chunks| {
-                send_ble_chunks_via_unified(env, counterparty, address_hint, &chunks)
-            });
-        let step = crate::util::text_id::encode_base32_crockford(&frame.commitment_hash[..8]);
-        match sent {
-            Ok(true) => {
-                log::info!(
-                    "[BLE link] delivered owed {:?} for step {step} to {counterparty_short}",
-                    frame.kind
-                );
-                delivered.push((frame.commitment_hash, frame.kind));
-            }
-            Ok(false) | Err(_) => {
-                log::warn!(
-                    "[BLE link] owed {:?} for step {step} not delivered to {counterparty_short}; it stays owed",
-                    frame.kind
-                );
-            }
-        }
-    }
-    delivered
-}
-
-/// The BLE frame type an owed offline frame travels as.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn owed_frame_type(
-    kind: crate::bluetooth::bilateral_session::OfflineFrameKind,
-) -> pb::BleFrameType {
-    match kind {
-        crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare => {
-            pb::BleFrameType::BilateralPrepare
-        }
-        crate::bluetooth::bilateral_session::OfflineFrameKind::PrepareResponse => {
-            pb::BleFrameType::BilateralPrepareResponse
-        }
-        crate::bluetooth::bilateral_session::OfflineFrameKind::Confirm => {
-            pb::BleFrameType::BilateralConfirm
-        }
-    }
-}
-
-/// Every frame this device owes `counterparty`, chunked and sealed on
-/// `link`, the link that just paired with it (DSM Amendment A27), to be
-/// written behind the answer that paired it. Each is marked delivered; one
-/// the link drops before it is written goes again on the next link.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn owed_frames_on(
-    link: &crate::bluetooth::link_session::Link,
-    counterparty: &[u8; 32],
-) -> Vec<Vec<u8>> {
-    let rt = crate::runtime::get_runtime();
-    let (coord, adapter) = match (
-        rt.block_on(crate::bridge::get_ble_coordinator()),
-        rt.block_on(crate::bridge::get_ble_transport_adapter()),
-    ) {
-        (Ok(coord), Ok(adapter)) => (coord, adapter),
-        _ => {
-            log::warn!("[BLE link] owed frames not delivered: the BLE transport is not ready");
-            return Vec::new();
-        }
-    };
-    let owed = rt.block_on(adapter.bilateral_handler().frames_owed_to(counterparty));
-    let mut sealed = Vec::new();
-    let mut delivered = Vec::new();
-    for frame in owed {
-        let on_link = coord
-            .encode_message(owed_frame_type(frame.kind), &frame.bytes)
-            .and_then(|chunks| crate::bluetooth::link_session::links().seal_on(link, &chunks));
-        match on_link {
-            Ok(records) => {
-                sealed.extend(records);
-                delivered.push((frame.commitment_hash, frame.kind));
-            }
-            Err(e) => log::error!(
-                "[BLE link] an owed {:?} was not sealed on the link: {e}; it stays owed",
-                frame.kind
-            ),
-        }
-    }
-    crate::bluetooth::owed_frame_driver::delivered(*counterparty, &delivered);
-    sealed
+    crate::bluetooth::radio_link::link_closed(&address, role);
 }
 
 // BLE coordinator helpers: availability checks and late-initialization attempt.
@@ -1294,28 +1160,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_isBleCoordina
 // ----------------------------------------------------------------------------
 
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn build_chunk_array<'a>(
-    env: &mut JNIEnv<'a>,
-    chunks: &[Vec<u8>],
-) -> Result<jni::objects::JObjectArray<'a>, String> {
-    let byte_array_class = env
-        .find_class("[B")
-        .map_err(|e| format!("find_class([B) failed: {e}"))?;
-    let arr = env
-        .new_object_array(chunks.len() as i32, &byte_array_class, JObject::null())
-        .map_err(|e| format!("new_object_array failed: {e}"))?;
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let jba = env
-            .byte_array_from_slice(chunk)
-            .map_err(|e| format!("byte_array_from_slice failed for chunk {i}: {e}"))?;
-        env.set_object_array_element(&arr, i as i32, jba)
-            .map_err(|e| format!("set_object_array_element failed for chunk {i}: {e}"))?;
-    }
-    Ok(arr)
-}
-
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
 fn empty_byte_array_2d<'a>(env: &mut JNIEnv<'a>) -> jni::objects::JObjectArray<'a> {
     let byte_array_class = env.find_class("[B").ok();
     match byte_array_class {
@@ -1326,135 +1170,6 @@ fn empty_byte_array_2d<'a>(env: &mut JNIEnv<'a>) -> jni::objects::JObjectArray<'
             }),
         None => unsafe { jni::objects::JObjectArray::from_raw(std::ptr::null_mut()) },
     }
-}
-
-/// What sending on a link came to.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Delivery {
-    /// Kotlin wrote every chunk on the link.
-    Sent,
-    /// Not delivered now: no paired link, or the link is gone or refused a
-    /// write. The caller's frame stays owed.
-    NotNow,
-}
-
-/// Send one message's chunks to the contact `device_id` over BLE (DSM
-/// Amendment A27, the owner's choice of 2026-11-01: "Rust chooses the link"):
-/// sealed on the link this device is paired with it on, and handed to Kotlin
-/// to write on exactly that link. With no paired link, Kotlin is asked to
-/// connect, reaching for `address_hint` first, and the frame is not delivered
-/// now: the link's handshake delivers what is owed once it pairs. Whether it
-/// was sent; the frame of one not sent stays owed.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub(crate) fn send_ble_chunks_via_unified<'a>(
-    env: &mut JNIEnv<'a>,
-    device_id: &[u8; 32],
-    address_hint: Option<&str>,
-    chunks: &[Vec<u8>],
-) -> Result<bool, String> {
-    let links = crate::bluetooth::link_session::links();
-    let delivery = match links.link_of(device_id) {
-        Some(link) => {
-            let sealed = links.seal_on(&link, chunks).map_err(|e| e.to_string())?;
-            dispatch_on_link(env, &link, &sealed)?
-        }
-        None => {
-            request_gatt_connect(env, device_id, address_hint)?;
-            Delivery::NotNow
-        }
-    };
-    Ok(delivery == Delivery::Sent)
-}
-
-/// Send a reply on the link at `address` the frame it answers arrived on,
-/// sealed for that link's session. Nothing reconnects for it: a reply whose
-/// link is gone is answered again when the counterparty sends its frame
-/// again. Whether it was sent.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-pub(crate) fn send_ble_reply_on_link<'a>(
-    env: &mut JNIEnv<'a>,
-    address: &str,
-    chunks: &[Vec<u8>],
-) -> Result<bool, String> {
-    let links = crate::bluetooth::link_session::links();
-    let delivery = match links.at_address(address).into_iter().next() {
-        Some(link) => {
-            let sealed = links.seal_on(&link, chunks).map_err(|e| e.to_string())?;
-            dispatch_on_link(env, &link, &sealed)?
-        }
-        None => Delivery::NotNow,
-    };
-    Ok(delivery == Delivery::Sent)
-}
-
-/// Hand `sealed` to Kotlin to write on exactly `link`: not delivered now when
-/// that link is gone or refused a write, and nothing switches to another
-/// link.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn dispatch_on_link<'a>(
-    env: &mut JNIEnv<'a>,
-    link: &crate::bluetooth::link_session::Link,
-    sealed: &[Vec<u8>],
-) -> Result<Delivery, String> {
-    let addr_j = env
-        .new_string(&link.address)
-        .map_err(|e| format!("new_string failed: {e}"))?;
-    let chunks_arr = build_chunk_array(env, sealed)?;
-    let unified_cls =
-        crate::jni::jni_common::find_class_with_app_loader(env, "com/dsm/wallet/bridge/Unified")?;
-    let addr_obj = JObject::from(addr_j);
-    let chunks_obj = JObject::from(chunks_arr);
-    let args = [
-        JValue::Object(&addr_obj),
-        JValue::Int(link.role.to_wire()),
-        JValue::Object(&chunks_obj),
-    ];
-    let result = env
-        .call_static_method(
-            &unified_cls,
-            "dispatchRustBleFollowUp",
-            "(Ljava/lang/String;I[[B)Z",
-            &args,
-        )
-        .map_err(|e| format!("call_static_method dispatchRustBleFollowUp failed: {e}"))?;
-    let written = result
-        .z()
-        .map_err(|e| format!("dispatchRustBleFollowUp answered no boolean: {e}"))?;
-    Ok(if written {
-        Delivery::Sent
-    } else {
-        Delivery::NotNow
-    })
-}
-
-/// Ask Kotlin to connect for the contact `device_id`, reaching for
-/// `address_hint` first: the link it opens names that contact as its target,
-/// so the handshake says Hello to it first.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn request_gatt_connect<'a>(
-    env: &mut JNIEnv<'a>,
-    device_id: &[u8; 32],
-    address_hint: Option<&str>,
-) -> Result<(), String> {
-    let device_id_j = env
-        .byte_array_from_slice(device_id)
-        .map_err(|e| format!("byte_array_from_slice failed: {e}"))?;
-    let hint_j = env
-        .new_string(address_hint.unwrap_or(""))
-        .map_err(|e| format!("new_string failed: {e}"))?;
-    let unified_cls =
-        crate::jni::jni_common::find_class_with_app_loader(env, "com/dsm/wallet/bridge/Unified")?;
-    let device_id_obj = JObject::from(device_id_j);
-    let hint_obj = JObject::from(hint_j);
-    env.call_static_method(
-        &unified_cls,
-        "requestGattConnect",
-        "([BLjava/lang/String;)V",
-        &[JValue::Object(&device_id_obj), JValue::Object(&hint_obj)],
-    )
-    .map_err(|e| format!("call_static_method requestGattConnect failed: {e}"))?;
-    Ok(())
 }
 
 // BLE frame-type classification (`detect_ble_frame_type_from_bytes`) lives in the
@@ -1541,25 +1256,29 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
                 .into_raw();
             }
         };
-        match radio_write(&addr, role, &bytes) {
+        let role = match crate::bluetooth::link_session::GattRole::from_wire(role) {
+            Ok(role) => role,
+            Err(e) => {
+                return error_byte_array(
+                    &mut env,
+                    helpers::JniErrorCode::InvalidInput as u32,
+                    &format!("processIncomingBleData: {e}"),
+                )
+                .into_raw();
+            }
+        };
+        match crate::bluetooth::radio_link::radio_write(&addr, role, &bytes) {
             Ok(response_chunks) => {
                 let out = crate::generated::BleIncomingDataResponse {
                     use_reliable_write: response_chunks.iter().any(|chunk| chunk.len() > 20),
                     response_chunks,
                 };
-                let encoded = prost::Message::encode_to_vec(&out);
-                env.byte_array_from_slice(&encoded)
-                    .map(|a| a.into_raw())
-                    .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
+                answer_bytes(&mut env, &prost::Message::encode_to_vec(&out))
             }
-            Err((code, why)) => {
-                log::error!("processIncomingBleData: refused bytes from {addr}: {why}");
-                error_byte_array(
-                    &mut env,
-                    code as u32,
-                    &format!("processIncomingBleData: {why}"),
-                )
-                .into_raw()
+            Err(e) => {
+                log::error!("processIncomingBleData: refused bytes from {addr}: {e}");
+                error_byte_array(&mut env, e.code(), &format!("processIncomingBleData: {e}"))
+                    .into_raw()
             }
         }
     })) {
@@ -1583,77 +1302,17 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_processIncomi
     }
 }
 
-/// One write from the radio on the link at `address`, as `role`: the radio
-/// bytes to write back on that link.
+/// `bytes` as a `byte[]` for Kotlin; an empty one, logged, when the array
+/// could not be made.
 #[cfg(all(target_os = "android", feature = "bluetooth"))]
-fn radio_write(
-    address: &str,
-    role: jni::sys::jint,
-    bytes: &[u8],
-) -> Result<Vec<Vec<u8>>, (helpers::JniErrorCode, String)> {
-    use crate::bluetooth::link_session::{links, GattRole, Link, WalletKeys};
-    let refused = |e: &dyn core::fmt::Display| (helpers::JniErrorCode::InvalidInput, e.to_string());
-    let link = Link {
-        address: address.to_string(),
-        role: GattRole::from_wire(role).map_err(|e| refused(&e))?,
-    };
-    let inbound = links()
-        .inbound(&link, bytes, &WalletKeys)
-        .map_err(|e| refused(&e))?;
-    let mut response_chunks = inbound.reply;
-    let rt = crate::runtime::get_runtime();
-    if let Some(peer) = inbound.paired {
-        if let Err(why) =
-            rt.block_on(crate::bluetooth::get_pairing_orchestrator().link_paired(&peer, address))
-        {
-            return Err((helpers::JniErrorCode::ProcessingFailed, why));
+fn answer_bytes(env: &mut JNIEnv<'_>, bytes: &[u8]) -> jni::sys::jbyteArray {
+    match env.byte_array_from_slice(bytes) {
+        Ok(array) => array.into_raw(),
+        Err(e) => {
+            log::error!("[BLE] the answer's byte array was not made: {e}");
+            empty_byte_array_or_empty(env).into_raw()
         }
-        crate::bluetooth::peer_address::record_sighting(&peer.device_id, address);
-        response_chunks.extend(owed_frames_on(&link, &peer.device_id));
     }
-    let Some(unit) = inbound.unit else {
-        return Ok(response_chunks);
-    };
-    let not_ready = |e: &dyn core::fmt::Display| (helpers::JniErrorCode::NotReady, e.to_string());
-    let coord = rt
-        .block_on(crate::bridge::get_ble_coordinator())
-        .map_err(|e| not_ready(&e))?;
-    let adapter = rt
-        .block_on(crate::bridge::get_ble_transport_adapter())
-        .map_err(|e| not_ready(&e))?;
-    let received = rt.block_on(crate::bluetooth::radio_ingress::receive_from_radio(
-        &coord,
-        adapter.as_ref(),
-        address,
-        &unit,
-    ));
-    let outbounds = match received {
-        Ok(outbound) => outbound,
-        Err(crate::bluetooth::radio_ingress::RadioError::Refused(refusal)) => {
-            return Err(refused(&refusal))
-        }
-        Err(crate::bluetooth::radio_ingress::RadioError::Bilateral(e)) => {
-            return Err((helpers::JniErrorCode::ProcessingFailed, e.to_string()))
-        }
-    };
-    // Every answer is chunked, so each chunk fits one sealed record.
-    let mut units = Vec::new();
-    for outbound in outbounds.into_iter().flatten() {
-        if outbound.payload.is_empty() {
-            continue;
-        }
-        units.extend(
-            coord
-                .encode_message(outbound.frame_type, &outbound.payload)
-                .map_err(|e| (helpers::JniErrorCode::ProcessingFailed, e.to_string()))?,
-        );
-    }
-    response_chunks.extend(
-        links()
-            .seal_on(&link, &units)
-            .map_err(|e| (helpers::JniErrorCode::ProcessingFailed, e.to_string()))?,
-    );
-    Ok(response_chunks)
 }
 
 /// Extract `response_chunks` from a `BleIncomingDataResponse` proto.
@@ -1906,150 +1565,28 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_acceptBilater
             Some(e) => e,
             None => return std::ptr::null_mut(),
         };
-        // Nothing the app asks runs while the wallet is locked (S-LOCK).
-        if let Err(locked) =
-            crate::sdk::session_manager::refuse_while_locked("acceptBilateralByCommitment")
-        {
-            return error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::ProcessingFailed as u32,
-                &locked,
-            )
-            .into_raw();
-        }
         let jba = unsafe { jba_from(commitment_hash_raw) };
-        let bytes = match env.convert_byte_array(&jba) {
-            Ok(v) => v,
-            Err(e) => {
+        let commitment = match env
+            .convert_byte_array(&jba)
+            .map_err(|e| format!("invalid commitment_hash: {e}"))
+            .and_then(|bytes| {
+                <[u8; 32]>::try_from(bytes.as_slice())
+                    .map_err(|e| format!("commitment_hash must be 32 bytes: {e}"))
+            }) {
+            Ok(commitment) => commitment,
+            Err(why) => {
                 return error_byte_array(
                     &mut env,
                     helpers::JniErrorCode::InvalidInput as u32,
-                    &format!("invalid commitment_hash: {e}"),
+                    &why,
                 )
                 .into_raw();
             }
         };
-        if bytes.len() != 32 {
-            return error_byte_array(
-                &mut env,
-                helpers::JniErrorCode::InvalidInput as u32,
-                "commitment_hash must be 32 bytes",
-            )
-            .into_raw();
+        match crate::bluetooth::radio_link::accept_proposal(commitment) {
+            Ok(framed) => answer_bytes(&mut env, &framed),
+            Err(e) => error_byte_array(&mut env, e.code(), e.message()).into_raw(),
         }
-
-        let mut ch = [0u8; 32];
-        ch.copy_from_slice(&bytes);
-
-        let coord =
-            match crate::runtime::get_runtime().block_on(crate::bridge::get_ble_coordinator()) {
-                Ok(c) => c,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::NotReady as u32,
-                        &format!("BLE coordinator not ready: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-
-        let transport_adapter = match crate::runtime::get_runtime()
-            .block_on(crate::bridge::get_ble_transport_adapter())
-        {
-            Ok(adapter) => adapter,
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::NotReady as u32,
-                    &format!("BLE transport adapter not ready: {e}"),
-                )
-                .into_raw();
-            }
-        };
-
-        let (envelope_bytes, counterparty_device_id) = match crate::runtime::get_runtime()
-            .block_on(transport_adapter.create_prepare_accept_envelope_with_counterparty(ch))
-        {
-            Ok(v) => v,
-            // Nothing was accepted: the proposal still awaits its user.
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("acceptBilateralByCommitment failed: {e}"),
-                )
-                .into_raw();
-            }
-        };
-
-        // Where to look for the sender first: the link its prepare arrived
-        // on, else where its appliance was last seen.
-        let address_hint = crate::runtime::get_runtime()
-            .block_on(transport_adapter.sender_ble_address_for_commitment(ch))
-            .or_else(|| {
-                crate::bluetooth::peer_address::counterparty_address(&counterparty_device_id)
-                    .ok()
-                    .flatten()
-            });
-
-        let chunks = match coord
-            .encode_message(pb::BleFrameType::BilateralPrepareResponse, &envelope_bytes)
-        {
-            Ok(c) => c,
-            // The acceptance is kept, and its response is owed: it is sent
-            // again when the link returns.
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("chunking accept envelope failed: {e}"),
-                )
-                .into_raw();
-            }
-        };
-
-        match send_ble_chunks_via_unified(
-            &mut env,
-            &counterparty_device_id,
-            address_hint.as_deref(),
-            &chunks,
-        ) {
-            Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
-                counterparty_device_id,
-                &[(
-                    ch,
-                    crate::bluetooth::bilateral_session::OfflineFrameKind::PrepareResponse,
-                )],
-            ),
-            // A send that did not complete fails nothing: the acceptance is
-            // kept and its response is sent again when the link returns.
-            Ok(false) => {
-                crate::bluetooth::owed_frame_driver::kick();
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    "the response was not delivered now; it is sent again when the link returns",
-                )
-                .into_raw();
-            }
-            Err(e) => {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &format!("BLE send failed: {e}"),
-                )
-                .into_raw();
-            }
-        }
-
-        let mut framed_bytes = Vec::with_capacity(1 + envelope_bytes.len());
-        framed_bytes.push(0x03);
-        framed_bytes.extend_from_slice(&envelope_bytes);
-
-        env.byte_array_from_slice(&framed_bytes)
-            .map(|a| a.into_raw())
-            .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
     })) {
         Ok(result) => result,
         Err(panic) => {
@@ -2086,155 +1623,40 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_rejectBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
-            // Nothing the app asks runs while the wallet is locked (S-LOCK).
-            if let Err(locked) =
-                crate::sdk::session_manager::refuse_while_locked("rejectBilateralByCommitment")
-            {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &locked,
-                )
-                .into_raw();
-            }
             let jba = unsafe { jba_from(commitment_hash) };
-            let bytes = match env.convert_byte_array(&jba) {
-                Ok(v) => v,
+            let commitment = match env
+                .convert_byte_array(&jba)
+                .map_err(|e| format!("invalid commitment_hash: {e}"))
+                .and_then(|bytes| {
+                    <[u8; 32]>::try_from(bytes.as_slice())
+                        .map_err(|e| format!("commitment_hash must be 32 bytes: {e}"))
+                }) {
+                Ok(commitment) => commitment,
+                Err(why) => {
+                    return error_byte_array(
+                        &mut env,
+                        helpers::JniErrorCode::InvalidInput as u32,
+                        &why,
+                    )
+                    .into_raw();
+                }
+            };
+            let jreason = unsafe { jstr_from(reason) };
+            let reason: String = match env.get_string(&jreason) {
+                Ok(s) => s.into(),
                 Err(e) => {
                     return error_byte_array(
                         &mut env,
                         helpers::JniErrorCode::InvalidInput as u32,
-                        &format!("invalid commitment_hash: {e}"),
+                        &format!("invalid reason: {e}"),
                     )
                     .into_raw();
                 }
             };
-            if bytes.len() != 32 {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::InvalidInput as u32,
-                    "commitment_hash must be 32 bytes",
-                )
-                .into_raw();
+            match crate::bluetooth::radio_link::reject_proposal(commitment, reason) {
+                Ok(framed) => answer_bytes(&mut env, &framed),
+                Err(e) => error_byte_array(&mut env, e.code(), e.message()).into_raw(),
             }
-            let jreason = unsafe { jstr_from(reason) };
-            let reason_str: String = match env.get_string(&jreason) {
-                Ok(s) => s.into(),
-                Err(_) => String::new(),
-            };
-
-            let mut ch = [0u8; 32];
-            ch.copy_from_slice(&bytes);
-
-            let coord = match crate::runtime::get_runtime()
-                .block_on(crate::bridge::get_ble_coordinator())
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::NotReady as u32,
-                        &format!("BLE coordinator not ready: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-
-            let transport_adapter = match crate::runtime::get_runtime()
-                .block_on(crate::bridge::get_ble_transport_adapter())
-            {
-                Ok(adapter) => adapter,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::NotReady as u32,
-                        &format!("BLE transport adapter not ready: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-
-            let envelope_bytes = match crate::runtime::get_runtime().block_on(
-                transport_adapter
-                    .create_prepare_reject_envelope_with_cleanup(ch, reason_str.clone()),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        &format!("rejectBilateralByCommitment failed: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-
-            let Some(counterparty) = crate::runtime::get_runtime()
-                .block_on(transport_adapter.counterparty_for_commitment(ch))
-            else {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    "rejectBilateralByCommitment: the step names no counterparty",
-                )
-                .into_raw();
-            };
-            // Where to look for the sender first: the link its prepare arrived
-            // on, else where its appliance was last seen.
-            let address_hint = crate::runtime::get_runtime()
-                .block_on(transport_adapter.sender_ble_address_for_commitment(ch))
-                .or_else(|| {
-                    crate::bluetooth::peer_address::counterparty_address(&counterparty)
-                        .ok()
-                        .flatten()
-                });
-
-            let chunks = match coord
-                .chunk_message(pb::BleFrameType::BilateralPrepareReject, &envelope_bytes)
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        &format!("chunking reject envelope failed: {e}"),
-                    )
-                    .into_raw();
-                }
-            };
-
-            match send_ble_chunks_via_unified(
-                &mut env,
-                &counterparty,
-                address_hint.as_deref(),
-                &chunks,
-            ) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        "the frame was not delivered now",
-                    )
-                    .into_raw();
-                }
-                Err(e) => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::ProcessingFailed as u32,
-                        &format!("BLE send failed: {e}"),
-                    )
-                    .into_raw();
-                }
-            }
-
-            let mut framed_bytes = Vec::with_capacity(1 + envelope_bytes.len());
-            framed_bytes.push(0x03);
-            framed_bytes.extend_from_slice(&envelope_bytes);
-
-            env.byte_array_from_slice(&framed_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
         }),
     )
 }
@@ -2259,29 +1681,20 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
                 Some(e) => e,
                 None => return std::ptr::null_mut(),
             };
-            // Nothing the app asks runs while the wallet is locked (S-LOCK).
-            if let Err(locked) =
-                crate::sdk::session_manager::refuse_while_locked("cancelBilateralByCommitment")
-            {
-                return error_byte_array(
-                    &mut env,
-                    helpers::JniErrorCode::ProcessingFailed as u32,
-                    &locked,
-                )
-                .into_raw();
-            }
             let jba = unsafe { jba_from(commitment_hash) };
-            let ch: [u8; 32] = match env
+            let commitment = match env
                 .convert_byte_array(&jba)
-                .ok()
-                .and_then(|bytes| <[u8; 32]>::try_from(bytes.as_slice()).ok())
-            {
-                Some(ch) => ch,
-                None => {
+                .map_err(|e| format!("invalid commitment_hash: {e}"))
+                .and_then(|bytes| {
+                    <[u8; 32]>::try_from(bytes.as_slice())
+                        .map_err(|e| format!("commitment_hash must be 32 bytes: {e}"))
+                }) {
+                Ok(commitment) => commitment,
+                Err(why) => {
                     return error_byte_array(
                         &mut env,
                         helpers::JniErrorCode::InvalidInput as u32,
-                        "commitment_hash must be 32 bytes",
+                        &why,
                     )
                     .into_raw();
                 }
@@ -2298,62 +1711,10 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_cancelBilater
                     .into_raw();
                 }
             };
-            let rt = crate::runtime::get_runtime();
-            let (coord, adapter) = match (
-                rt.block_on(crate::bridge::get_ble_coordinator()),
-                rt.block_on(crate::bridge::get_ble_transport_adapter()),
-            ) {
-                (Ok(coord), Ok(adapter)) => (coord, adapter),
-                _ => {
-                    return error_byte_array(
-                        &mut env,
-                        helpers::JniErrorCode::NotReady as u32,
-                        "BLE transport not ready",
-                    )
-                    .into_raw();
-                }
-            };
-            let counterparty = rt.block_on(adapter.counterparty_for_commitment(ch));
-            let cancellation =
-                match rt.block_on(adapter.bilateral_handler().cancel_proposal(ch, reason)) {
-                    Ok(bytes) => bytes,
-                    Err(e) => {
-                        return error_byte_array(
-                            &mut env,
-                            helpers::JniErrorCode::ProcessingFailed as u32,
-                            &format!("cancelBilateralByCommitment failed: {e}"),
-                        )
-                        .into_raw();
-                    }
-                };
-            if let Some(counterparty) = counterparty {
-                let address_hint =
-                    crate::bluetooth::peer_address::counterparty_address(&counterparty)
-                        .ok()
-                        .flatten();
-                let sent = coord
-                    .chunk_message(pb::BleFrameType::BilateralPrepareReject, &cancellation)
-                    .map_err(|e| e.to_string())
-                    .and_then(|chunks| {
-                        send_ble_chunks_via_unified(
-                            &mut env,
-                            &counterparty,
-                            address_hint.as_deref(),
-                            &chunks,
-                        )
-                    });
-                if !matches!(sent, Ok(true)) {
-                    log::warn!(
-                        "[BLE] cancellation not delivered now; it answers the counterparty's next frame"
-                    );
-                }
+            match crate::bluetooth::radio_link::cancel_proposal(commitment, reason) {
+                Ok(framed) => answer_bytes(&mut env, &framed),
+                Err(e) => error_byte_array(&mut env, e.code(), e.message()).into_raw(),
             }
-            let mut framed_bytes = Vec::with_capacity(1 + cancellation.len());
-            framed_bytes.push(0x03);
-            framed_bytes.extend_from_slice(&cancellation);
-            env.byte_array_from_slice(&framed_bytes)
-                .map(|a| a.into_raw())
-                .unwrap_or_else(|_| empty_byte_array_or_empty(&mut env).into_raw())
         }),
     )
 }
