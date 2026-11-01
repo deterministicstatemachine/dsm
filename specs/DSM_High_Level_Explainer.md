@@ -3803,6 +3803,12 @@ offline-only protocol distinguishes a perfect clone, and DSM does not claim to.
 > - **Core's checks stay mandatory.** Acceptance runs only on a confirm Core has decided. State continuity, the sender's authorization and the replay guards are Core's, and nothing here weakens them. Delivery to this receiver is the receipt's.
 > - **What offline acceptance cannot know.** An offline receiver checks the evidence it is handed. It cannot learn of a compromise or revocation of an anchor discovered elsewhere. A compromised anchor is answered online: the holder unloads its offline account.
 > - **What pinning does not prove.** The anchor's identity rests on the holder's online provisioning, through `B`. The chip vendor's certificate chain certifies the chip's pairing key, not its signing key `pk_chip`, so no certificate check attests `pk_chip`. Removing the flags does not change that, and this amendment does not claim it.
+>
+> **Amendment A25 (owner, 2026-11-01) — a validated frontier stands.** From the security audit of 2026-10-18 (finding SA-92): a receiver keeps the frontier it validated for each peer and walks on from it, so a contradiction that appears later below that frontier is never read again by that receiver. Owner's words, 2026-11-01: "Keep the frontier, state it", because "a frontier represents state the receiver has already independently validated. It isn't merely a cached guess."
+>
+> - **A frontier is not withdrawn.** A frontier is a coordinate the receiver validated itself (A19): each step from the root it validated at the position before, at the cell routed from that root. Later evidence off that chain, such as a second claim final at a cell routed from another root, does not invalidate it, and the receiver does not walk that history again.
+> - **A same-cell contradiction fails closed where it is read.** Two claims holding one cell a walk reads is not an economic verdict but a storage equivocation: at most one value holds a cell's leader link. The walk that reads such a cell stops there with the lineage quarantined at that position. Nothing the receiver accepted before is rolled back.
+> - **What this means for two verifiers.** A receiver that validated a lineage before such a contradiction became readable keeps its frontier; a verifier first reading the lineage afterwards stops at the contradicted cell. That is A19's monotonicity, stated, not a gap this amendment closes.
 
 
 <!-- spec-section: DSM-HL-073 -->
