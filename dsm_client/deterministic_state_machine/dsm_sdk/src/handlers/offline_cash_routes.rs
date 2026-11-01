@@ -82,6 +82,22 @@ impl AppRouterImpl {
             return err(format!("wallet.{verb}: {e}"));
         }
 
+        // The account holds one offline payment in flight (SA-10): a boundary beside one would
+        // move the allocation that payment was checked against, between its proposal and its
+        // acknowledgment. Decided from the durable rows under the step door, held through the
+        // boundary, so no payment is proposed between the check and the boundary's commit.
+        let _door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+        match crate::storage::client_db::offline_spend_in_flight(&self.device_id_bytes) {
+            Ok(None) => {}
+            Ok(Some((_, phase))) => {
+                return err(format!(
+                    "wallet.{verb}: an offline payment from this device is in progress \
+                     (phase={phase}); it completes or is resolved before offline cash moves"
+                ))
+            }
+            Err(e) => return err(format!("wallet.{verb}: the offline payment in flight: {e}")),
+        }
+
         // The boundary is an admitted economic transition: taken by Core, made durable with its
         // admission, registered and validated before this route reports success.
         let kind = if is_load {

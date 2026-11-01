@@ -1882,6 +1882,148 @@ async fn an_offline_payment_runs_end_to_end_load_spend_receive_unload_settle_and
     );
 }
 
+/// `method` (`wallet.loadOffline` or `wallet.unloadOffline`) of `amount` ERA on
+/// `device`.
+async fn offline_cash(
+    device: &OfflineDevice,
+    method: &str,
+    amount: &str,
+) -> crate::bridge::AppResult {
+    device
+        .device
+        .invoke(
+            method,
+            &crate::generated::OfflineCashRequest {
+                token_id: "ERA".to_string(),
+                amount: amount.to_string(),
+            },
+        )
+        .await
+}
+
+/// With a payment of A's in flight (at `stage`): A's payment to `c` is refused
+/// at A's door, with no session written and A's anchor untouched, and A's
+/// unload and load are refused.
+async fn account_held(
+    stage: &str,
+    a: &OfflineDevice,
+    c: &OfflineDevice,
+    appliance: &crate::test_support::appliance::InstalledAppliance,
+) {
+    let before = chip(appliance);
+    a.device.enter();
+    let refused = a
+        .propose(
+            c,
+            bearer_transfer(c, crate::economic_fixtures::whole_era(3)),
+        )
+        .await
+        .expect_err("the account holds the payment in flight");
+    assert!(
+        refused
+            .to_string()
+            .contains("An offline payment from this device is in progress"),
+        "{stage}: {refused}"
+    );
+    assert_eq!(
+        crate::storage::client_db::get_all_bilateral_sessions()
+            .expect("A's sessions")
+            .iter()
+            .filter(|s| s.counterparty_device_id == c.device.device_id.to_vec())
+            .count(),
+        0,
+        "{stage}: A holds no session with C"
+    );
+    assert_eq!(chip(appliance), before, "{stage}: A's anchor spent nothing");
+    for method in ["wallet.unloadOffline", "wallet.loadOffline"] {
+        let moved = offline_cash(a, method, "1.00").await;
+        match moved.error_message.as_deref() {
+            Some(m) if m.contains("an offline payment from this device is in progress") => {}
+            other => {
+                panic!("{stage}: {method} moved the account under the payment in flight: {other:?}")
+            }
+        }
+    }
+}
+
+/// SA-10: the offline account holds one payment in flight. While A's payment
+/// to B is proposed, and again once its confirm is sent and its acknowledgment
+/// not yet in, A's payment to C is refused at A's door — no session with C,
+/// A's anchor untouched — and A's load and unload are refused. Once B's
+/// acknowledgment is in, A pays C, and the unload carries both spends online.
+/// MUTATION CONTROL: the sender's check removed lets the payment to C be
+/// proposed beside the one to B, and the route's check removed lets the
+/// unload move the account under it; each turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_offline_payment_in_flight_holds_the_account_until_it_is_acknowledged() {
+    use crate::economic_fixtures::whole_era;
+
+    let (pair, a, b, appliance, _) = bearer_pair().await;
+    a.device.enter();
+    let (genesis, devid) = {
+        let head = a.device.router().core_sdk.device_head().expect("A's head");
+        (head.genesis_digest(), head.devid())
+    };
+    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
+    let mut c_device = TestDevice::create("C", 0x0C);
+    c_device.boot(&pair.fleet).await;
+    c_device.add_contact(&pair.a).await;
+    pair.a.add_contact(&c_device).await;
+    c_device.enter();
+    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    let c = OfflineDevice::new(&c_device);
+
+    a.device.enter();
+    let (prepare, commitment) = a
+        .propose(&b, bearer_transfer(&b, whole_era(7)))
+        .await
+        .expect("A proposes the payment to B");
+    account_held("proposed", &a, &c, &appliance).await;
+
+    b.device.enter();
+    let (answer, _meta) = b
+        .handler
+        .handle_prepare_request(&prepare, None)
+        .await
+        .expect("B takes the proposal");
+    assert!(answer.is_empty(), "the proposal waits for B's user");
+    let response = b
+        .handler
+        .create_prepare_accept_envelope(commitment)
+        .await
+        .expect("B's user accepts");
+    a.device.enter();
+    let (confirm, _meta) = a
+        .handler
+        .handle_prepare_response(&response)
+        .await
+        .expect("A takes the acceptance and confirms");
+    account_held("confirmed, not acknowledged", &a, &c, &appliance).await;
+
+    b.device.enter();
+    let ack = b
+        .handler
+        .handle_confirm_request(&confirm)
+        .await
+        .expect("B commits and acknowledges");
+    a.device.enter();
+    a.handler
+        .handle_commit_response(&ack)
+        .await
+        .expect("A files the acknowledgment");
+
+    offline_step(&a, &c, bearer_transfer(&c, whole_era(3))).await;
+    assert_eq!(unexposed_spends(&a, &appliance), 2, "A's two spends wait");
+    let unloaded = offline_cash(&a, "wallet.unloadOffline", "10.00").await;
+    assert!(unloaded.success, "the unload: {:?}", unloaded.error_message);
+    assert_eq!(
+        unexposed_spends(&a, &appliance),
+        0,
+        "the unload carried both spends online"
+    );
+}
+
 /// The history rows the entered device holds for the step.
 fn history_rows(commitment: &[u8; 32]) -> usize {
     let tx_id = crate::util::text_id::encode_base32_crockford(commitment);

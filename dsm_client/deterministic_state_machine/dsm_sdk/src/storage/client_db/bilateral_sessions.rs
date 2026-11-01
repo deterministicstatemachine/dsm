@@ -286,6 +286,47 @@ pub fn bilateral_step_in_flight_with(
     .map_err(Into::into)
 }
 
+/// The offline payment this device is making, in flight with any counterparty,
+/// as its commitment hash and phase tag: a step in an in-flight phase whose
+/// transfer is addressed to another device. Every offline step is an
+/// offline-bearer transfer (the offline door admits nothing else), and every
+/// one this device makes spends its one offline account, so the account holds
+/// one such step at a time (SA-10). A stored operation that does not decode is
+/// an error, never passed over.
+pub fn offline_spend_in_flight(own_device_id: &[u8]) -> Result<Option<(Vec<u8>, String)>> {
+    let binding = get_db_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the offline payment in flight: db lock poisoned: {e}"))?;
+    let phases = IN_FLIGHT_PHASE_TAGS
+        .iter()
+        .map(|tag| format!("'{tag}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT commitment_hash, operation_bytes, phase FROM bilateral_sessions
+         WHERE phase IN ({phases})
+         ORDER BY rowid"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (commitment_hash, operation_bytes, phase) = row?;
+        let operation = super::deserialize_operation(&operation_bytes)?;
+        if let dsm::types::operations::Operation::Transfer { to_device_id, .. } = &operation {
+            if to_device_id.as_slice() != own_device_id {
+                return Ok(Some((commitment_hash, phase)));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Delete a bilateral session by commitment hash
 pub fn delete_bilateral_session(commitment_hash: &[u8]) -> Result<()> {
     let binding = get_db_connection()?;

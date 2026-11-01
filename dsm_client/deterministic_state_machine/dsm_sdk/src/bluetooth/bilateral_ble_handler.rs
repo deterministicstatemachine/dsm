@@ -1157,6 +1157,29 @@ impl BilateralBleHandler {
         Ok(())
     }
 
+    /// The offline account holds one payment in flight (SA-10). Every step this
+    /// device proposes offline spends its one offline account, so a payment in
+    /// flight with any contact holds it: a second proposed beside it would be
+    /// checked against an allocation the first may already have spent. Read
+    /// from the durable rows under the step door, like the relationship's own.
+    fn ensure_offline_account_free(own_device_id: &[u8; 32]) -> Result<(), DsmError> {
+        let in_flight =
+            crate::storage::client_db::offline_spend_in_flight(own_device_id).map_err(|e| {
+                DsmError::storage(
+                    format!("the offline payment in flight: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
+        if let Some((commitment_hash, phase)) = in_flight {
+            return Err(DsmError::invalid_operation(format!(
+                "An offline payment from this device is in progress (phase={phase}, \
+                 commitment={}). It completes or is resolved before another is made.",
+                bytes_to_base32(&commitment_hash),
+            )));
+        }
+        Ok(())
+    }
+
     pub async fn prepare_bilateral_transaction(
         &self,
         counterparty_device_id: [u8; 32],
@@ -1202,6 +1225,7 @@ impl BilateralBleHandler {
         // step's row written under the one door (the peer's door is the other).
         let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
         Self::ensure_counterparty_ready_for_prepare(&counterparty_device_id)?;
+        Self::ensure_offline_account_free(&self.device_id)?;
         // An online send on the relationship holds it from its reservation,
         // taken under the same door.
         if crate::security::modal_sync_lock::is_pending_online(
