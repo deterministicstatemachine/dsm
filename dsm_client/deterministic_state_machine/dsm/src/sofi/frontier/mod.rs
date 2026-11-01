@@ -360,7 +360,18 @@ impl VaultWitness {
         trader_genesis: D32,
         trader_device_id: D32,
     ) -> Result<Self, WitnessRefused> {
-        let baseline = tied.baseline();
+        Self::under_frontier(tied.baseline(), wire, trader_genesis, trader_device_id)
+    }
+
+    /// `wire` checked against the root of `baseline`, a frontier Core
+    /// authenticated, its state leaf naming that frontier's owner: the
+    /// witness checks a tied baseline's witness goes through.
+    fn under_frontier(
+        baseline: &VerifiedFrontier,
+        wire: &VaultFrontierWitnessV1,
+        trader_genesis: D32,
+        trader_device_id: D32,
+    ) -> Result<Self, WitnessRefused> {
         if wire.state_leaf.owner_genesis != baseline.owner_genesis
             || wire.state_leaf.owner_device_id != baseline.owner.device_id
         {

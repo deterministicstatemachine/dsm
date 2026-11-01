@@ -480,13 +480,14 @@ fn a_witness_is_accepted_only_under_the_authenticated_root() {
 
     // Controls: a trader with a leaf, and one without.
     for who in [present, absent] {
-        let witness = VaultWitness::from_baseline(&verified, &vault.witness_for(who), who.0, who.1)
-            .expect("the owner's witness");
+        let witness =
+            VaultWitness::under_frontier(&verified, &vault.witness_for(who), who.0, who.1)
+                .expect("the owner's witness");
         vault.agrees(&witness);
     }
 
     let from = |wire: &VaultFrontierWitnessV1, who: (D32, D32)| {
-        VaultWitness::from_baseline(&verified, wire, who.0, who.1).expect_err("refused")
+        VaultWitness::under_frontier(&verified, wire, who.0, who.1).expect_err("refused")
     };
 
     let mut bent_state = vault.witness_for(present);
@@ -553,7 +554,7 @@ fn a_witness_advances_through_ten_other_traders_trades() {
         let verified = authenticate(owner(), &owner().baseline(&vault.frontier()), &genesis)
             .expect("the owner's baseline");
         let mut witness =
-            VaultWitness::from_baseline(&verified, &vault.witness_for(reader), reader.0, reader.1)
+            VaultWitness::under_frontier(&verified, &vault.witness_for(reader), reader.0, reader.1)
                 .expect("the owner's witness");
         for step in 0..10u8 {
             // Old traders and new ones, never the reader.
@@ -598,7 +599,7 @@ fn an_advance_the_write_set_does_not_prove_is_refused() {
     let verified = authenticate(owner(), &owner().baseline(&vault.frontier()), &genesis)
         .expect("the owner's baseline");
     let witness =
-        VaultWitness::from_baseline(&verified, &vault.witness_for(reader), reader.0, reader.1)
+        VaultWitness::under_frontier(&verified, &vault.witness_for(reader), reader.0, reader.1)
             .expect("the owner's witness");
     let before = vault.clone();
     let post = vault.trade(trader(3), 1);

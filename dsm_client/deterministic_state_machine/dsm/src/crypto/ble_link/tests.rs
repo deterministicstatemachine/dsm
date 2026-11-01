@@ -25,7 +25,7 @@ fn wallet(tag: u8) -> Wallet {
 
 /// `pinned` as a contact book: each wallet's genesis and ML-KEM public key
 /// by device id.
-fn book(pinned: &[&Wallet]) -> impl Fn(&D32) -> Option<(D32, Vec<u8>)> + '_ {
+fn book<'a>(pinned: &'a [&'a Wallet]) -> impl Fn(&D32) -> Option<(D32, Vec<u8>)> + 'a {
     move |device_id| {
         pinned
             .iter()
