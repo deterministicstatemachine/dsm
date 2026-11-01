@@ -51,6 +51,18 @@ enum BridgeLogger {
         appendLine("EVENT: \(what) -> \(taken ? "taken" : "kept")")
     }
 
+    /// One radio outcome: a link's step and why it ended, never a byte that
+    /// crossed the radio. Android's logcat has these; a device's unified log
+    /// cannot be read from the Mac without root.
+    static func logRadio(_ line: String) {
+        appendLine("RADIO: \(line)")
+    }
+
+    /// A Rust log line about the radio or the session, under its target.
+    static func logRust(_ target: String, _ text: String) {
+        appendLine("RUST: \(target): \(text)")
+    }
+
     static func logBridgeCall(method: String, payloadBytes: Int, outcome: Result<Int, Error>) {
         let result: String
         switch outcome {

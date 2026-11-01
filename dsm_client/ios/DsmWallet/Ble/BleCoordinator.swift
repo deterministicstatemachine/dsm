@@ -181,6 +181,7 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
         }
         guard central.state == .poweredOn else {
             DsmLog.warn(tag, "startScanning: the radio is not on (\(central.state.rawValue))")
+            BridgeLogger.logRadio("startScanning: the radio is not on (\(central.state.rawValue))")
             return 1
         }
         if central.isScanning { return 0 }
@@ -215,10 +216,15 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
     /// The client link is ready for its handshake: Rust opens it and hands
     /// back its first Hello, which is written on the link. Who answered is
     /// learned by the handshake.
+    ///
+    /// Called on `queue` by the client session's delegate: the peer's target
+    /// is read here directly. A `queue.sync` from `queue` never returns, and
+    /// the whole radio stalled on it (2026-11-01, the iPad's first client
+    /// link: subscribed, then nothing, while the link dropped).
     func openClientLink(_ peer: PeerSession) {
+        dispatchPrecondition(condition: .onQueue(queue))
         let address = peer.address
-        var target: Data?
-        queue.sync { target = peer.target }
+        let target = peer.target
         peer.inbound.async { [self] in
             switch DsmSdk.bleLinkOpened(address: address, role: BleConstants.linkRoleClient, target: target) {
             case .reply(let hello):
@@ -226,8 +232,10 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
                 postPageEvent(DsmSdk.bleDeviceEvent(kind: 2, address: address, name: nil, rssi: 0))
                 let written = write(peer, hello)
                 DsmLog.info(tag, "link Hello to \(address) written=\(written)")
+                BridgeLogger.logRadio("client link \(address) opened; Hello \(hello.count) records, write code \(written)")
             case .refused(let why):
                 DsmLog.warn(tag, "the link to \(address) was not opened: \(why)")
+                BridgeLogger.logRadio("client link \(address) not opened by Rust: \(why)")
                 queue.async { self.clientLinkFailed(peer, why) }
             }
         }
@@ -241,12 +249,14 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
             switch DsmSdk.bleLinkOpened(address: address, role: BleConstants.linkRoleServer, target: nil) {
             case .reply(let records):
                 queue.sync { peer.serverLink = .opened }
+                BridgeLogger.logRadio("server link \(address) opened; \(records.count) records to write")
                 if !records.isEmpty {
                     let code = server.notify(peer, records: records)
                     DsmLog.info(tag, "the server link \(address) opened with \(records.count) records to write (code \(code))")
                 }
             case .refused(let why):
                 DsmLog.error(tag, "the link from \(address) was not opened: \(why)")
+                BridgeLogger.logRadio("server link \(address) not opened by Rust: \(why)")
             }
         }
     }
@@ -277,8 +287,10 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
                 guard !records.isEmpty else { return }
                 let code = role == BleConstants.linkRoleClient ? write(peer, records) : server.notify(peer, records: records)
                 DsmLog.info(tag, "answer to \(address) (role \(role)): \(records.count) records, code \(code)")
+                BridgeLogger.logRadio("answer on \(address) (role \(role)): \(records.count) records, code \(code)")
             case .refused(let why):
                 DsmLog.warn(tag, "the link at \(address) (role \(role)) refused its bytes: \(why)")
+                BridgeLogger.logRadio("link \(address) (role \(role)) refused bytes: \(why)")
                 queue.async {
                     if role == BleConstants.linkRoleClient {
                         self.clientLinkFailed(peer, why)
@@ -297,6 +309,7 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
     /// and the disconnect closes the link.
     func clientLinkFailed(_ peer: PeerSession, _ why: String) {
         DsmLog.warn(tag, "the link to \(peer.address) failed: \(why)")
+        BridgeLogger.logRadio("client link \(peer.address) failed: \(why)")
         guard let peripheral = peer.peripheral else {
             peer.clearClientState()
             forget(peer)
@@ -398,6 +411,7 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         DsmLog.info(tag, "central manager state \(central.state.rawValue)")
+        BridgeLogger.logRadio("central state \(central.state.rawValue) authorization \(CBManager.authorization.rawValue)")
         if central.state != .poweredOn {
             radioOff()
         }
@@ -419,6 +433,7 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
         }
         let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? ""
         DsmLog.info(tag, "discovered DSM peer \(address) (rssi \(RSSI))")
+        BridgeLogger.logRadio("discovered \(address) rssi \(RSSI) services \(services.count) overflow \(overflow.count) manufacturer \(manufacturer.count)b")
         postPageEvent(DsmSdk.bleDeviceEvent(kind: 1, address: address, name: name, rssi: RSSI.int32Value))
         let peer = peer(address)
         // A contact Rust asked to reach with no address: this link's
@@ -433,12 +448,14 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         let address = peripheral.identifier.uuidString
         DsmLog.info(tag, "connected to \(address)")
+        BridgeLogger.logRadio("connected to \(address)")
         clients[address]?.discover(peripheral)
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         let address = peripheral.identifier.uuidString
         DsmLog.warn(tag, "connection to \(address) failed: \(error.map { "\($0)" } ?? "no reason")")
+        BridgeLogger.logRadio("connection to \(address) failed: \(error.map { "\($0)" } ?? "no reason")")
         if let peer = peers[address] {
             peer.clearClientState()
             forget(peer)
@@ -449,6 +466,7 @@ final class BleCoordinator: NSObject, CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let address = peripheral.identifier.uuidString
         DsmLog.info(tag, "disconnected from \(address): \(error.map { "\($0)" } ?? "closed")")
+        BridgeLogger.logRadio("disconnected from \(address): \(error.map { "\($0)" } ?? "closed")")
         guard let peer = peers[address] else { return }
         if peer.clientLink == .opened {
             // A link Rust opened is closed in Rust too: its session is dropped,

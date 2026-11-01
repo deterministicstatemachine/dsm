@@ -243,9 +243,12 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
 
     // MARK: Lifecycle, from the scene
 
-    func sceneDidBecomeActive() {
+    /// The scene's own state is the fact: in this callback
+    /// `UIApplication.applicationState` can still read inactive (2026-11-01,
+    /// on the iPad: every publish said foreground 0 and pairing never ran).
+    func sceneDidBecomeActive(_ scene: UIScene) {
         WalletViewController.active = self
-        SessionFacts.shared.appForeground = UIApplication.shared.applicationState == .active
+        SessionFacts.shared.appForeground = scene.activationState == .foregroundActive
         SessionFacts.shared.publish("resume")
         if SessionFacts.shared.qrRoundTrip == .resumePending {
             SessionFacts.shared.qrRoundTrip = SessionFacts.shared.qrRoundTrip.resumeSettled()
@@ -259,8 +262,12 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
         }
     }
 
-    func sceneWillResignActive() {
-        SessionFacts.shared.appForeground = UIApplication.shared.applicationState == .active
+    func sceneWillResignActive(_ scene: UIScene) {
+        // This scene is leaving the active state, and in this callback it still
+        // reads foregroundActive (the iPad's pause published `foreground 1`,
+        // 2026-11-01). The app is in front only through another scene.
+        SessionFacts.shared.appForeground = UIApplication.shared.connectedScenes
+            .contains { $0 !== scene && $0.activationState == .foregroundActive }
         // Rust receives the app as not in the foreground and decides the lock policy.
         SessionFacts.shared.publish("pause")
     }

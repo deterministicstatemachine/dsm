@@ -63,6 +63,7 @@ final class GattClientSession: NSObject, CBPeripheralDelegate {
             return
         }
         DsmLog.info(tag, "\(peer.address): TX_RESPONSE subscribed, write capacity \(capacity) bytes")
+        BridgeLogger.logRadio("\(peer.address): TX_RESPONSE subscribed, write capacity \(capacity) bytes")
         coordinator.openClientLink(peer)
     }
 

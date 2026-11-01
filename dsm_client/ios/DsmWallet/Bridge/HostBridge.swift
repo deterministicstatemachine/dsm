@@ -44,11 +44,25 @@ enum HostBridge {
                 guard let deviceId else { return 2 }
                 let id = Data(bytes: deviceId, count: 32)
                 let hintText = hint.map { String(cString: $0) } ?? ""
-                return BleCoordinator.shared.requestConnect(deviceId: id, addressHint: hintText)
+                let code = BleCoordinator.shared.requestConnect(deviceId: id, addressHint: hintText)
+                BridgeLogger.logRadio("host request_connect hint '\(hintText)' -> \(code)")
+                return code
             },
-            start_advertising: { BleCoordinator.shared.startAdvertising() },
-            start_scan: { BleCoordinator.shared.startScanning() },
-            stop_scan: { BleCoordinator.shared.stopScanning() },
+            start_advertising: {
+                let code = BleCoordinator.shared.startAdvertising()
+                BridgeLogger.logRadio("host start_advertising -> \(code)")
+                return code
+            },
+            start_scan: {
+                let code = BleCoordinator.shared.startScanning()
+                BridgeLogger.logRadio("host start_scan -> \(code)")
+                return code
+            },
+            stop_scan: {
+                let code = BleCoordinator.shared.stopScanning()
+                BridgeLogger.logRadio("host stop_scan -> \(code)")
+                return code
+            },
             seal_seed: { input, len, out in
                 HostBridge.transform(input, len, out, "seal") { try SeedVault.seal($0) }
             },
@@ -62,6 +76,13 @@ enum HostBridge {
                 case 1: DsmLog.error(category, text)
                 case 2: DsmLog.warn(category, text)
                 default: DsmLog.info(category, text)
+                }
+                // The radio's and the session's Rust lines also reach the
+                // bridge log, as Android's diagnostics report carries them
+                // from logcat: a device's unified log is not readable from
+                // the Mac. Never a payload: Rust logs none.
+                if level == 1 || category.hasPrefix("dsm_sdk::bluetooth") || category.hasPrefix("dsm_sdk::sdk::session_manager") {
+                    BridgeLogger.logRust(category, text)
                 }
             }
         )

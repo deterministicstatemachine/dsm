@@ -34,11 +34,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     }
 
     func sceneDidBecomeActive(_ scene: UIScene) {
-        wallet?.sceneDidBecomeActive()
+        wallet?.sceneDidBecomeActive(scene)
     }
 
     func sceneWillResignActive(_ scene: UIScene) {
-        wallet?.sceneWillResignActive()
+        wallet?.sceneWillResignActive(scene)
     }
 
     func sceneDidEnterBackground(_ scene: UIScene) {

@@ -36,7 +36,7 @@ final class SessionFacts {
     private var lastBatteryLevelPercent: UInt32
 
     private init() {
-        appForeground = UIApplication.shared.applicationState == .active
+        appForeground = UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
         let device = UIDevice.current
         // Monitoring is turned on while the state is still unknown, which is
         // the state before monitoring; a device already monitored stays so.
@@ -79,7 +79,9 @@ final class SessionFacts {
 
     /// Collect, hand to Rust, relay Rust's snapshot to the page.
     func publish(_ reason: String) {
-        let snapshot = DsmSdk.updateSessionHardwareFacts(collect())
+        let facts = collect()
+        BridgeLogger.logRadio("facts (\(reason)): foreground \(facts.app_foreground) ble \(facts.ble_enabled) permitted \(facts.ble_permissions) scanning \(facts.ble_scanning) advertising \(facts.ble_advertising)")
+        let snapshot = DsmSdk.updateSessionHardwareFacts(facts)
         let bytes: Data
         if DsmSdk.errorCode(of: snapshot) != 0 {
             DsmLog.error("SessionFacts", "updateSessionHardwareFacts refused the facts (\(reason)); publishing the snapshot as it stands")

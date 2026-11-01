@@ -51,6 +51,10 @@ pub fn pairing_follows(may_run: bool) {
     #[cfg(feature = "bluetooth")]
     {
         let orchestrator = get_pairing_orchestrator();
+        log::info!(
+            "[pairing] follows the session: may_run={may_run} loop_running={}",
+            orchestrator.is_loop_running()
+        );
         if may_run {
             if !orchestrator.is_loop_running() {
                 crate::runtime::get_runtime().spawn(async move {
