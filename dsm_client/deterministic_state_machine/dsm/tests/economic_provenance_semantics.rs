@@ -184,6 +184,7 @@ fn a_transition_with_no_credits_needs_no_provenance() {
     assert!(
         verify_transition_provenance(&w, &NoPeers, &ctx(1, &[0xAB; 64]))
             .expect("a pure debit is funded by nothing")
+            .0
             .is_empty()
     );
 }
@@ -350,6 +351,7 @@ fn verify_release(
         ..ctx(4, &ak)
     };
     verify_credit_source(&witness.credit_sources[0], witness, anchors, &context)
+        .map(|(funded, _ek_steps)| funded)
 }
 
 #[test]

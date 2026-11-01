@@ -436,6 +436,7 @@ fn record_established<T>(
         checked.reached(),
         checked.offline_accounts(),
         checked.offline_exposures(),
+        checked.ek_steps(),
     )
     .map_err(|e| {
         PeerLineageFailure::Incomplete(format!("recording what this walk validated: {e}"))

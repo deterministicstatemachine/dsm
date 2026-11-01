@@ -109,7 +109,8 @@ pub trait PeerEvidenceFetcher {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
     /// The certified key of the EK step at `addr` in `signer`'s chain, when
-    /// this verifier is a party to that relationship and holds the step.
+    /// this verifier holds the step: it is a party to that relationship, or
+    /// one of its walks verified the step and recorded it (SA-93).
     fn held_ek_step(
         &self,
         signer: &[u8; 32],
@@ -542,6 +543,7 @@ pub struct Checked<T> {
     reached: Vec<PeerFrontier>,
     offline_accounts: Vec<PeerOfflineAccount>,
     offline_exposures: Vec<PeerOfflineExposure>,
+    ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
 }
 
 impl<T> Checked<T> {
@@ -557,6 +559,13 @@ impl<T> Checked<T> {
     /// them.
     pub fn reached(&self) -> &[PeerFrontier] {
         &self.reached
+    }
+
+    /// Every EK step this walk fetched and verified, each in a step that
+    /// passed whole: the verifier records them with the frontiers, and a later
+    /// walk starts from them (SA-93).
+    pub fn ek_steps(&self) -> &[crate::economic::peer_acceptance::VerifiedEkStep] {
+        &self.ek_steps
     }
 
     /// Every offline account this walk validated: what each offline boundary
@@ -949,6 +958,9 @@ struct Verifier<'a> {
     offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
     /// Every payment those boundaries exposed.
     offline_exposures: std::cell::RefCell<Vec<PeerOfflineExposure>>,
+    /// Every EK step a step this walk validated fetched and verified; a later
+    /// step of the same walk holds them.
+    ek_steps: std::cell::RefCell<Vec<crate::economic::peer_acceptance::VerifiedEkStep>>,
 }
 
 impl<'a> Verifier<'a> {
@@ -972,6 +984,7 @@ impl<'a> Verifier<'a> {
             established: std::cell::RefCell::new(Vec::new()),
             offline_accounts: std::cell::RefCell::new(Vec::new()),
             offline_exposures: std::cell::RefCell::new(Vec::new()),
+            ek_steps: std::cell::RefCell::new(Vec::new()),
         })
     }
 }
@@ -991,6 +1004,27 @@ impl Verifier<'_> {
             reached,
             offline_accounts: self.offline_accounts.into_inner(),
             offline_exposures: self.offline_exposures.into_inner(),
+            ek_steps: self.ek_steps.into_inner(),
+        }
+    }
+
+    /// The key of the EK step at `addr` in `signer`'s chain, when this verifier
+    /// holds it: one an earlier step of this walk verified, or one the
+    /// fetcher holds (its own relationships', and those its walks recorded).
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let walked = self
+            .ek_steps
+            .borrow()
+            .iter()
+            .find(|step| step.signer == *signer && step.addr == *addr)
+            .map(|step| step.ek_pk.clone());
+        match walked {
+            Some(key) => Ok(Some(key)),
+            None => self.fetcher.held_ek_step(signer, addr),
         }
     }
 
@@ -1301,6 +1335,11 @@ impl Verifier<'_> {
             &facts.proven_ak,
         )
         .map_err(|e| step_failure(position, e))?;
+        // The step passed whole: the EK steps its credits' acceptances verified
+        // are this verifier's from here on.
+        self.ek_steps
+            .borrow_mut()
+            .extend(advanced.ek_steps.iter().cloned());
         // The step passed whole: the offline account its boundary left is one
         // this receiver validated.
         if let PeerSubstrate::OfflineBoundary(boundary) = &substrate {
@@ -1760,7 +1799,7 @@ impl ProvenanceResolver for SourceAncestry<'_, '_> {
         signer: &[u8; 32],
         addr: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        self.verifier.fetcher.held_ek_step(signer, addr)
+        self.verifier.held_ek_step(signer, addr)
     }
 
     fn anchored_policy_bytes(
@@ -1820,7 +1859,7 @@ impl ProvenanceResolver for DebitHasNoSources<'_, '_> {
         signer: &[u8; 32],
         addr: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        self.verifier.fetcher.held_ek_step(signer, addr)
+        self.verifier.held_ek_step(signer, addr)
     }
 
     fn anchored_policy_bytes(

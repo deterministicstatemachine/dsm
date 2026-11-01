@@ -468,6 +468,9 @@ pub struct ValidatedAdvance {
     pub root: ValidatedEconomicRoot,
     pub funded: Vec<FundedCredit>,
     pub claim: AcceptedClaim,
+    /// The EK steps the credits' acceptance checks fetched and verified: a
+    /// walker records them with the frontier it reaches (SA-93).
+    pub ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
 }
 
 /// The device's own admitted position, as the durable store records it.
@@ -1269,7 +1272,7 @@ pub fn advance_validated(
         verified_operation: accepted.dsm_verified_operation(),
         offline_boundary: accepted.offline_boundary(),
     };
-    let funded = verify_transition_provenance(witness, resolver, &ctx)
+    let (funded, ek_steps) = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
     // The transfer and burn conjuncts (SoFi §49, DSM §61) are the write
@@ -1303,6 +1306,7 @@ pub fn advance_validated(
             economic_position: registered.economic_position(),
             claim_ref: registered.claim_ref(),
         },
+        ek_steps,
     })
 }
 

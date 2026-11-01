@@ -748,4 +748,123 @@ fn a_second_restart_chains_only_past_the_first_epoch() {
     assert!(fetched.is_empty(), "fetched {} EK steps", fetched.len());
 }
 
+// ── A walk starts from the steps it recorded (SA-93) ─────────────────────
+
+/// One step of `signer`'s chain after `prior`: `pk` certified by `prior_sk`
+/// over `h_n`. Its bytes and address.
+fn step_after(
+    prior: Option<[u8; 32]>,
+    prior_sk: &[u8],
+    pk: &[u8],
+    h_n: [u8; 32],
+) -> (Vec<u8>, [u8; 32]) {
+    let step = generated::EkCertStepV1 {
+        ek_pk: pk.to_vec(),
+        authority: Some(generated::ek_cert_step_v1::Authority::EkCert(
+            sign_ek_cert(prior_sk, pk, &h_n).unwrap(),
+        )),
+        h_n: h_n.to_vec(),
+        prior_step_addr: prior.map(|p| p.to_vec()),
+    };
+    let bytes = step.encode_to_vec();
+    let addr = ek_cert_step_addr(&bytes);
+    (bytes, addr)
+}
+
+/// SA-93. A third party holds none of the recipient's steps, so its first
+/// check walks the recipient's whole chain back to the AK, and returns each
+/// step it verified. Recorded (as the SDK records them with its frontier),
+/// they are held: the next acceptance, one rotation further on, is checked
+/// from the newest recorded step, and only the rotation since is fetched.
+/// MUTATION CONTROL: the check not returning what it verified leaves nothing
+/// to record, and the second check walks the whole chain again: red.
+#[test]
+fn a_walk_holds_the_steps_it_verified_and_fetches_only_the_rotations_since() {
+    let fx = acceptance_fixture();
+    let (recipient_ak_pk, recipient_ak_sk) = generate_sphincs_keypair().unwrap();
+    let keys: Vec<(Vec<u8>, Vec<u8>)> = (0..4)
+        .map(|_| generate_sphincs_keypair().unwrap())
+        .collect();
+    let (one, one_addr) = step_after(None, &recipient_ak_sk, &keys[0].0, [0x31; 32]);
+    let (two, two_addr) = step_after(Some(one_addr), &keys[0].1, &keys[1].0, [0x32; 32]);
+    let (three, three_addr) = step_after(Some(two_addr), &keys[1].1, &keys[2].0, [0x33; 32]);
+
+    let mut first = countersigned_after(&fx, three_addr, &keys[2].1);
+    first.recipient_ak_pk = recipient_ak_pk.clone();
+    for (addr, bytes) in [(one_addr, &one), (two_addr, &two), (three_addr, &three)] {
+        first.steps.insert(addr, bytes.clone());
+    }
+    let (verdict, fetched) =
+        verify_fixture_counting(&first, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    let accepted = verdict.expect("the whole chain verifies from the AK");
+    assert_eq!(fetched, vec![three_addr, two_addr, one_addr]);
+    let recipients: Vec<([u8; 32], Vec<u8>)> = accepted
+        .ek_steps
+        .iter()
+        .filter(|step| step.signer == DEV_RECIP)
+        .map(|step| (step.addr, step.ek_pk.clone()))
+        .collect();
+    assert_eq!(
+        recipients,
+        vec![
+            (one_addr, keys[0].0.clone()),
+            (two_addr, keys[1].0.clone()),
+            (three_addr, keys[2].0.clone()),
+        ],
+        "the check returns each step it verified, oldest first"
+    );
+
+    let (four, four_addr) = step_after(Some(three_addr), &keys[2].1, &keys[3].0, [0x34; 32]);
+    let mut next = countersigned_after(&fx, four_addr, &keys[3].1);
+    next.recipient_ak_pk = recipient_ak_pk;
+    next.steps.insert(four_addr, four);
+    for step in &accepted.ek_steps {
+        next.held
+            .insert((step.signer, step.addr), step.ek_pk.clone());
+    }
+    let (verdict, fetched) =
+        verify_fixture_counting(&next, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    verdict.expect("the next rotation verifies from the recorded step");
+    assert_eq!(
+        fetched,
+        vec![four_addr],
+        "only the rotation since is fetched"
+    );
+}
+
+/// SA-93. The identity being checked does not choose how far a check walks:
+/// a chain deeper than the 512 steps a walk takes is Incomplete, before any
+/// certificate in it is checked, never a verdict about it.
+#[test]
+fn a_chain_deeper_than_the_walk_budget_is_incomplete() {
+    let fx = acceptance_fixture();
+    let mut deep = acceptance_clone(&fx);
+    let mut prior: Option<[u8; 32]> = None;
+    for n in 0u32..513 {
+        let step = generated::EkCertStepV1 {
+            ek_pk: n.to_be_bytes().repeat(8),
+            authority: Some(generated::ek_cert_step_v1::Authority::EkCert(
+                n.to_le_bytes().repeat(8),
+            )),
+            h_n: [0x77; 32].to_vec(),
+            prior_step_addr: prior.map(|p| p.to_vec()),
+        };
+        let bytes = step.encode_to_vec();
+        let addr = ek_cert_step_addr(&bytes);
+        deep.steps.insert(addr, bytes);
+        prior = Some(addr);
+    }
+    let newest = prior.expect("a chain of 513 steps");
+    let (_, sk) = generate_sphincs_keypair().unwrap();
+    let mut asked = countersigned_after(&deep, newest, &sk);
+    asked.steps = deep.steps.clone();
+    let (verdict, fetched) =
+        verify_fixture_counting(&asked, DEV_RECIP, &fx.transfer_bytes, &fx.child_tip);
+    assert!(
+        matches!(&verdict, Err(PeerLineageFailure::Incomplete(m)) if m.contains("walk budget")),
+        "{verdict:?}"
+    );
+    assert_eq!(fetched.len(), 512, "the walk stops at its budget");
+}
+
 // ── The exact peer-debit predicate's refusal clauses ───────────────────────

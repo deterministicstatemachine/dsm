@@ -1016,13 +1016,21 @@ fn debit_delta(m: &EconomicLeafMutation) -> Option<([u8; 32], u64)> {
     Some((asset, before - after))
 }
 
-/// Verify one credit source against the transition it appears in.
+/// Verify one credit source against the transition it appears in. Beside
+/// the credit, the EK steps its acceptance check fetched and verified, for
+/// the verifier to record with its frontier (SA-93).
 pub fn verify_credit_source(
     source: &CreditSource,
     witness: &EconomicTransitionWitness,
     resolver: &dyn ProvenanceResolver,
     ctx: &ProvenanceContext<'_>,
-) -> Result<FundedCredit, ProvenanceError> {
+) -> Result<
+    (
+        FundedCredit,
+        Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
+    ),
+    ProvenanceError,
+> {
     let credit_index = source.credit_mutation_index();
     let credit =
         witness
@@ -1036,6 +1044,7 @@ pub fn verify_credit_source(
             index: credit_index,
         })?;
 
+    let mut ek_steps = Vec::new();
     let funded = match source {
         // ── 0x005F: GENESIS RELEASE (SoFi §51) ───────────────────────────
         //
@@ -1129,7 +1138,7 @@ pub fn verify_credit_source(
                     "a peer-debit credit requires a DSM-successor substrate".to_string(),
                 ))
             })?;
-            crate::economic::peer_acceptance::verify_peer_transfer_acceptance(
+            let accepted = crate::economic::peer_acceptance::verify_peer_transfer_acceptance(
                 &bundle_bytes,
                 &crate::economic::peer_acceptance::AcceptanceParty {
                     devid: p.peer_devid,
@@ -1153,6 +1162,7 @@ pub fn verify_credit_source(
                 &ResolverEkSteps(resolver),
             )
             .map_err(ProvenanceError::AcceptanceEvidence)?;
+            ek_steps = accepted.ek_steps;
             FundedCredit {
                 source_id: validated_peer_debit_source_id(
                     &p.peer_genesis,
@@ -1279,7 +1289,7 @@ pub fn verify_credit_source(
             credit: credit_amount,
         });
     }
-    Ok(funded)
+    Ok((funded, ek_steps))
 }
 
 /// How a funded source is kept from funding a second credit.
@@ -1314,7 +1324,8 @@ fn non_reuse(source: &CreditSource) -> NonReuse {
 
 /// Verify provenance for an entire transition.
 ///
-/// Returns the funded credits in source order. Checks, beyond each source
+/// Returns the funded credits in source order, and every EK step their
+/// acceptance checks fetched and verified. Checks, beyond each source
 /// individually: all derived `SourceId`s distinct, and every source that must
 /// be recorded as consumed has a consumed-source leaf written **from ZERO** in
 /// this same transition, naming this operation as the consumer.
@@ -1322,12 +1333,20 @@ pub fn verify_transition_provenance(
     witness: &EconomicTransitionWitness,
     resolver: &dyn ProvenanceResolver,
     ctx: &ProvenanceContext<'_>,
-) -> Result<Vec<FundedCredit>, ProvenanceError> {
+) -> Result<
+    (
+        Vec<FundedCredit>,
+        Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
+    ),
+    ProvenanceError,
+> {
     let mut funded = Vec::with_capacity(witness.credit_sources.len());
+    let mut ek_steps = Vec::new();
     let mut seen: Vec<[u8; 32]> = Vec::with_capacity(witness.credit_sources.len());
 
     for source in &witness.credit_sources {
-        let f = verify_credit_source(source, witness, resolver, ctx)?;
+        let (f, verified) = verify_credit_source(source, witness, resolver, ctx)?;
+        ek_steps.extend(verified);
         if seen.contains(&f.source_id) {
             return Err(ProvenanceError::DuplicateSourceId);
         }
@@ -1358,5 +1377,5 @@ pub fn verify_transition_provenance(
         }
         funded.push(f);
     }
-    Ok(funded)
+    Ok((funded, ek_steps))
 }

@@ -64,10 +64,24 @@ pub trait EkSteps {
     fn fetch(&self, addr: &[u8; 32]) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
-/// Iteration budget for one EK ancestry walk. Exhausting it is `Incomplete`
-/// — an adversarially deep (but acyclic) chain must never look like a
-/// forgery, and must never recurse the stack.
-const EK_CHAIN_BUDGET: usize = 4096;
+/// Iteration budget for one EK ancestry walk: the steps fetched behind the
+/// first one this verifier holds, the same 512 a lineage walk takes (SA-93).
+/// A walk starts from the steps this verifier recorded with its frontier for
+/// the signer, so it fetches only the rotations since. Exhausting it is
+/// `Incomplete` — an adversarially deep (but acyclic) chain must never look
+/// like a forgery, and must never recurse the stack.
+const EK_CHAIN_BUDGET: usize = 512;
+
+/// One EK step a walk fetched and verified forward from a key this verifier
+/// already held: the signer, the step's address and the key it certifies. A
+/// verifier records these with the frontier the walk reached, and holds them
+/// from then on (SA-93).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedEkStep {
+    pub signer: [u8; 32],
+    pub addr: [u8; 32],
+    pub ek_pk: Vec<u8>,
+}
 
 /// The immutable-store inner digest of exact acceptance-bundle bytes.
 pub fn acceptance_evidence_addr(bundle_bytes: &[u8]) -> [u8; 32] {
@@ -99,6 +113,8 @@ pub struct VerifiedAcceptance {
     /// The recipient's own canonical pair for the applied step.
     pub b_parent_tip: [u8; 32],
     pub b_child_tip: [u8; 32],
+    /// The EK steps the check fetched and verified on both sides.
+    pub ek_steps: Vec<VerifiedEkStep>,
 }
 
 fn malformed(what: &str, e: impl core::fmt::Display) -> PeerLineageFailure {
@@ -124,9 +140,9 @@ fn resolve_expected_prev_pk(
     signer: &AcceptanceParty<'_>,
     counterparty: &AcceptanceParty<'_>,
     steps: &dyn EkSteps,
-) -> Result<Vec<u8>, PeerLineageFailure> {
+) -> Result<(Vec<u8>, Vec<VerifiedEkStep>), PeerLineageFailure> {
     // Phase 1: collect the unheld steps (worklist, no recursion).
-    let mut chain: Vec<generated::EkCertStepV1> = Vec::new();
+    let mut chain: Vec<([u8; 32], generated::EkCertStepV1)> = Vec::new();
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut base: Vec<u8> = signer.proven_ak.to_vec();
     let mut cursor = prior_step_addr;
@@ -160,12 +176,13 @@ fn resolve_expected_prev_pk(
             ),
             None => None,
         };
-        chain.push(step);
+        chain.push((addr, step));
     }
     // Phase 2: verify forward from the held step, or from the AK.
     let mut expected = base;
     let mut last_restart: Option<u64> = None;
-    for step in chain.iter().rev() {
+    let mut verified = Vec::with_capacity(chain.len());
+    for (addr, step) in chain.iter().rev() {
         match &step.authority {
             Some(generated::ek_cert_step_v1::Authority::EkCert(cert)) => {
                 let h_n: [u8; 32] = step
@@ -199,8 +216,13 @@ fn resolve_expected_prev_pk(
             None => return Err(invalid("EK step carries no authority")),
         }
         expected = step.ek_pk.clone();
+        verified.push(VerifiedEkStep {
+            signer: signer.devid,
+            addr: *addr,
+            ek_pk: step.ek_pk.clone(),
+        });
     }
-    Ok(expected)
+    Ok((expected, verified))
 }
 
 /// The key the step at `addr` in `signer`'s chain certifies, verified as an
@@ -214,7 +236,7 @@ pub fn certified_key_at(
     counterparty: &AcceptanceParty<'_>,
     steps: &dyn EkSteps,
 ) -> Result<Vec<u8>, PeerLineageFailure> {
-    resolve_expected_prev_pk(Some(addr), signer, counterparty, steps)
+    resolve_expected_prev_pk(Some(addr), signer, counterparty, steps).map(|(key, _)| key)
 }
 
 /// Verify a portable acceptance bundle.
@@ -294,7 +316,8 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_a = resolve_expected_prev_pk(a_prior, sender, recipient, steps)?;
+    let (expected_prev_a, mut ek_steps) =
+        resolve_expected_prev_pk(a_prior, sender, recipient, steps)?;
     let cert_a_ok = verify_ek_cert(
         &expected_prev_a,
         &receipt.ek_pk_a,
@@ -346,7 +369,8 @@ pub fn verify_peer_transfer_acceptance(
         ),
         None => None,
     };
-    let expected_prev_b = resolve_expected_prev_pk(b_prior, recipient, sender, steps)?;
+    let (expected_prev_b, b_steps) = resolve_expected_prev_pk(b_prior, recipient, sender, steps)?;
+    ek_steps.extend(b_steps);
     let cert_b_ok = verify_ek_cert(
         &expected_prev_b,
         &countersign.ek_pk_b,
@@ -373,5 +397,6 @@ pub fn verify_peer_transfer_acceptance(
         sender_child_tip: receipt.child_tip,
         b_parent_tip,
         b_child_tip,
+        ek_steps,
     })
 }

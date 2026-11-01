@@ -3416,7 +3416,7 @@ Found while fixing §6.87.
 | SA-90 | `dsm_sdk/src/sdk/core_sdk.rs` · `execute_on_relationship_inner`, `attach_pending_economic_admission` | A failed advance on a path with no admission plan clears the head's pending-admission fence, allowing a second claim at the same economic position. | confirmed (2 of 2) | Fixed (`558af6d3`) |
 | SA-91 | `dsm/src/types/device_state.rs` · `validate_conservation`, `advance` | An offline-bearer receive credits the online balance outside economic admission (no R_econ write), so later activation / with_resolved_position refuses the wallet permanently. | confirmed (2 of 2) | Fixed (Phase 4, §6.103): `validate_conservation` refuses an online credit on a bearer transfer's receiving side; the payment is recorded pending in the step's transaction and settled by the receiver's own admitted `OfflineSettlementBody` once the payer's walk exposes it. Tests: `dsm::types::device_state::tests::conservation_guard_rules`, `dsm_sdk::bluetooth::offline_step_tests::an_offline_payment_over_ble_is_held_pending_and_credits_nothing_online` |
 | SA-92 | `dsm_sdk/src/sdk/economic_registers.rs` · `resolve_peer`, `resolve_peer_root` | SDK memos (ValidatedPeers, persisted vault-chain rows) make an A14 held verdict permanent while Core can later rule the position Invalid, splitting verifiers. | plausible (1 of 2) | Partial (`0b98dbff`) |
-| SA-93 | `dsm/src/economic/peer_acceptance.rs` · `resolve_expected_prev_pk`, `verify_peer_transfer_acceptance` | The identity being verified chooses its EK ancestry walk depth (up to 4096 sequential fetches plus SPHINCS+ checks) in every third-party verifier. | confirmed (1 of 1) | Open |
+| SA-93 | `dsm/src/economic/peer_acceptance.rs` · `resolve_expected_prev_pk`, `verify_peer_transfer_acceptance` | The identity being verified chooses its EK ancestry walk depth (up to 4096 sequential fetches plus SPHINCS+ checks) in every third-party verifier. | confirmed (1 of 1) | Fixed (§6.125; owner's choice 2026-10-31, from the A19 frontier): each EK step a walk verifies is returned with the credit it funds, carried by the walk's `Checked` and recorded with its frontiers (`peer_ek_step`); a held step is one of this device's relationships' or one its walks recorded, so a later check fetches only the rotations since. One walk fetches at most 512 steps behind the first it holds; past them it is Incomplete. Tests: `dsm::economic_peer_evidence::a_walk_holds_the_steps_it_verified_and_fetches_only_the_rotations_since`, `::a_chain_deeper_than_the_walk_budget_is_incomplete`, `dsm_sdk::storage::client_db::economic_lineage::tests::a_step_a_walk_verified_is_held_once_recorded` |
 | SA-94 | `dsm_sdk/src/sdk/economic_admission_flow.rs` · `finish_locked`, `resume_pending_admission` | finish_locked re-reads the sender live after an irreversible accept and register, so a sender that invalidates its paying position leaves the recipient fenced for good. | confirmed (2 of 2) | Open |
 | SA-95 | `dsm/src/economic/peer_lineage.rs` · `parents_of_conditional`, `located` | parents_of_conditional offers both realize and void roots as parents, so an honest back-to-back conditional position can be made, or can happen by chance, to look like a fork and be judged Invalid. | confirmed (2 of 2) | Fixed (§6.90: `parents_of_conditional` is gone with A14) |
 | SA-96 | `dsm_storage_node/src/api/objects/bytecommit.rs` · `sync_one`, `close_cycle` | Inflating cycles past MAX_SYNC_CYCLES (128) keeps mirrors behind the leader, since read_cell always asks for the latest cycle. | confirmed (1 of 1) | Fixed (`ac72615f`) |
@@ -6760,6 +6760,30 @@ A read-only sweep of the firmware and offline path on 2026-10-31 found SA-166 to
 - An application must now set `free_requests` in its offer. The Wildstate game's offer does so in its own repository.
 
 
+### 6.125 An EK ancestry walk starts from the steps this device recorded (SA-93; `fix/beta-requirements-completion`, 2026-10-31)
+
+*The owner's choice (2026-10-31), the 10-22 plan's Q7: "From the A19 frontier EK". The walk starts from the EK this device recorded with its A19 frontier for that identity, so only rotations since are walked. Past the 512-position budget the result is Incomplete, never a verdict.*
+
+**The finding.** A third-party verifier of a peer debit checks the acceptance of the transfer that funded it. That check walks each signer's EK chain back to a step it holds, or to the signer's AK. A third party is a party to neither relationship, so it holds none of their steps. Each check therefore walked the whole chain, up to 4096 sequential fetches and a SPHINCS+ verification for each, at a depth the identity being checked chose.
+
+**The fix.**
+- *The walk returns what it verified.* `resolve_expected_prev_pk` returns each step it fetched and verified forward from a held key (`VerifiedEkStep`: signer, address, certified key). `verify_peer_transfer_acceptance` returns them in `VerifiedAcceptance.ek_steps`.
+- *They travel up to the walker.* `verify_credit_source` and `verify_transition_provenance` return them beside the funded credits, and `advance_validated` carries them in `ValidatedAdvance.ek_steps`.
+- *The walker keeps them.* The lineage walker (`peer_lineage::Verifier`) keeps the steps of every step that passed whole, and holds them for the rest of the walk. Its result carries them (`Checked::ek_steps`).
+- *They are recorded with the frontier.* The SDK records them in the transaction that records the walk's frontiers, offline accounts and exposures (`record_validated`, table `peer_ek_step`, client database schema 39).
+- *Later lookups use them.* `held_ek_step` reads this device's own relationships' steps and the steps its walks recorded. A later check of the same signer stops at the newest recorded step and fetches only the rotations since.
+- *The budget.* One walk fetches at most 512 steps behind the first it holds, the same 512 a lineage walk takes (`EK_CHAIN_BUDGET`, was 4096). Past them the check is Incomplete before any certificate is checked.
+
+**What is recorded is what was verified.** A step is recorded only from a walk whose step passed whole. Its key was verified forward from the signer's AK or from a step this device already held. So a recorded step is as trusted as the walk that verified it, and no more.
+
+**Tests.**
+- `dsm::economic_peer_evidence::a_walk_holds_the_steps_it_verified_and_fetches_only_the_rotations_since`.
+  - A three-step recipient chain is verified from the AK; all three are fetched and returned, oldest first.
+  - The steps are recorded. The next acceptance, one rotation on, fetches that one step only.
+- `dsm::economic_peer_evidence::a_chain_deeper_than_the_walk_budget_is_incomplete`. A 513-step chain is Incomplete after 512 fetches.
+- `dsm_sdk::storage::client_db::economic_lineage::tests::a_step_a_walk_verified_is_held_once_recorded`. A step recorded with a walk is held, in its signer's chain only.
+
+**Not covered by a test.** The walker carrying the steps of a passing step into `Checked`, and the SDK passing `Checked::ek_steps` to `record_validated`, have no walk-level test. The tests above cover what is recorded and how a recorded step shortens a walk.
 
 ## 7 Totals
 

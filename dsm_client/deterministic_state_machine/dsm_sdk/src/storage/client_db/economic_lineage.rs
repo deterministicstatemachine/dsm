@@ -295,6 +295,7 @@ pub fn record_validated(
     frontiers: &[dsm::economic::peer_lineage::PeerFrontier],
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
     offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
+    ek_steps: &[dsm::economic::peer_acceptance::VerifiedEkStep],
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
@@ -309,6 +310,16 @@ pub fn record_validated(
     }
     for exposure in offline_exposures {
         record_offline_exposure_in_tx(&tx, exposure)?;
+    }
+    // The EK steps the walk verified, with the frontiers it reached: a later
+    // walk of these signers starts from them and fetches only the rotations
+    // since (SA-93).
+    for step in ek_steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO peer_ek_step(signer_devid, step_addr, ek_pk)
+             VALUES(?1, ?2, ?3)",
+            params![step.signer.as_slice(), step.addr.as_slice(), step.ek_pk],
+        )?;
     }
     tx.commit()?;
     Ok(())
@@ -793,9 +804,14 @@ pub fn latest_ek_step_with_conn(
 pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Option<Vec<u8>>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    // A step of one of this device's own relationships, or one a walk of this
+    // device's verified and recorded with its frontier (SA-93).
     Ok(conn
         .query_row(
             "SELECT ek_pk FROM ek_cert_step_chain
+             WHERE signer_devid = ?1 AND step_addr = ?2
+             UNION ALL
+             SELECT ek_pk FROM peer_ek_step
              WHERE signer_devid = ?1 AND step_addr = ?2
              LIMIT 1",
             params![signer_devid.as_slice(), step_addr.as_slice()],
@@ -1193,5 +1209,36 @@ mod admitted_row_tests {
         );
         assert_eq!(held_ek_step(&other, &second).expect("read"), None);
         assert_eq!(held_ek_step(&signer, &[0x43; 32]).expect("read"), None);
+    }
+
+    /// SA-93. A step a walk verified, recorded with the walk's frontiers, is
+    /// held from then on, in its signer's chain only: a later walk of that
+    /// signer starts from it.
+    /// MUTATION CONTROL: the held lookup not reading the recorded steps turns
+    /// this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_step_a_walk_verified_is_held_once_recorded() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let (signer, other, addr) = ([0x34; 32], [0x35; 32], [0x44; 32]);
+        assert_eq!(held_ek_step(&signer, &addr).expect("read"), None);
+        record_validated(
+            &[],
+            &[],
+            &[],
+            &[dsm::economic::peer_acceptance::VerifiedEkStep {
+                signer,
+                addr,
+                ek_pk: b"walked key".to_vec(),
+            }],
+        )
+        .expect("record the walk");
+        assert_eq!(
+            held_ek_step(&signer, &addr).expect("read"),
+            Some(b"walked key".to_vec())
+        );
+        assert_eq!(held_ek_step(&other, &addr).expect("read"), None);
     }
 }

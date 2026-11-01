@@ -576,7 +576,11 @@ fn get_database_path() -> Result<PathBuf> {
 /// records the one session it connected (`connect_app_offers.accepted_session`,
 /// SA-79) and its sessions their read commitment. A database made at 37 holds
 /// none of these and is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 38;
+///
+/// v39: `peer_ek_step`, the EK steps a walk verified, recorded with its
+/// frontiers so a later walk of the signer fetches only the rotations since
+/// (SA-93). A database made at 38 has none, and is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 39;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -961,6 +965,16 @@ fn create_schema(conn: &Connection) -> Result<()> {
             accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
             claim_ref           BLOB NOT NULL CHECK (length(claim_ref) = 32),
             PRIMARY KEY(peer_genesis, peer_devid, economic_position)
+        );
+
+        -- The EK steps this device's walks verified, each recorded with the
+        -- frontier the walk reached: a later walk of the signer holds them and
+        -- fetches only the rotations since (SA-93).
+        CREATE TABLE IF NOT EXISTS peer_ek_step(
+            signer_devid BLOB NOT NULL CHECK (length(signer_devid) = 32),
+            step_addr    BLOB NOT NULL CHECK (length(step_addr) = 32),
+            ek_pk        BLOB NOT NULL,
+            PRIMARY KEY(signer_devid, step_addr)
         );
 
         -- The owner's receive rule (2026-10-22): a peer's offline account as

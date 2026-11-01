@@ -378,13 +378,17 @@ fn ctx<'a>(position: u64, ak: &'a [u8]) -> ProvenanceContext<'a> {
 #[test]
 fn a_final_release_funds_exactly_what_it_released() {
     let fx = fixture(1);
-    let funded = verify_credit_source(
+    let (funded, ek_steps) = verify_credit_source(
         &fx.witness.credit_sources[0],
         &fx.witness,
         &OneRelease::of(&fx),
         &ctx(1, &fx.pk),
     )
     .expect("a final canonical release funds the credit");
+    assert!(
+        ek_steps.is_empty(),
+        "a reserve release checks no acceptance"
+    );
     assert_eq!(funded.amount(), ERA_FAUCET_PAYOUT);
     assert_eq!(*funded.policy_commit(), era_commit());
     assert_eq!(
@@ -404,13 +408,17 @@ fn credits_funded_along_a_lineage_sum_to_what_the_reserve_released() {
     let mut credited = 0u64;
     for position in 1u64..=3 {
         let fx = fixture_at(&r0, &history, position, ERA_FAUCET_PAYOUT);
-        let funded = verify_credit_source(
+        let (funded, ek_steps) = verify_credit_source(
             &fx.witness.credit_sources[0],
             &fx.witness,
             &OneRelease::of(&fx),
             &ctx(position, &fx.pk),
         )
         .expect("each release funds its credit");
+        assert!(
+            ek_steps.is_empty(),
+            "a reserve release checks no acceptance"
+        );
         credited += funded.amount();
         let release = dsm::economic::native_reserve::decode_and_verify_release(&fx.envelope)
             .expect("verifies");
@@ -810,13 +818,17 @@ fn a_descriptor_refused_in_hand_reads_nothing_of_the_reserve() {
     );
 
     let resolver = counting(&fx);
-    let funded = verify_credit_source(
+    let (funded, ek_steps) = verify_credit_source(
         &fx.witness.credit_sources[0],
         &fx.witness,
         &resolver,
         &ctx(1, &fx.pk),
     )
     .expect("the canonical release funds the credit");
+    assert!(
+        ek_steps.is_empty(),
+        "a reserve release checks no acceptance"
+    );
     assert_eq!(funded.amount(), ERA_FAUCET_PAYOUT);
     assert_eq!(
         resolver.reads.get(),
