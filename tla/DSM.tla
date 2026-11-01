@@ -147,7 +147,7 @@ VARIABLES
     phase,             \* deterministic regression phase harness (0..3)
     step,              \* monotone transition counter (clockless)
     \* Offline bilateral state
-    offlineSessions,   \* offlineSessions = active BLE/NFC sessions
+    offlineSessions,   \* offlineSessions = active BLE sessions
     \* Tripwire State
     ledger,            \* Set of accepted receipts: [rel: {d1,d2}, oldTip: Nat, newTip: Nat]
     \* Token balances (§8 conservation)
@@ -778,7 +778,7 @@ EncryptWithKyber(d1, d2, msg) ==
 \* OFFLINE BILATERAL TRANSFERS (ABSTRACTED)
 \*
 \* Precision note:
-\* BLE/NFC transport, chunking, precommitment, and co-signing are NOT modeled.
+\* BLE transport, chunking, precommitment, and co-signing are NOT modeled.
 \* We model only:
 \*  - a symmetric offlineSessions relation
 \*  - a tip increment on OfflineTransfer

@@ -31,8 +31,6 @@ export type BridgeEventMap = {
   'ble.pairingStatus': { deviceId: string; status: string; message: string; bleAddress?: string };
   'deposit.completed': { depositId: string; amount: string };
   'wallet.exitCompleted': { source: string };
-  // NFC ring backup domain
-  'nfc.backupWritten': void;
 };
 
 type Handler<T> = (payload: T) => void;

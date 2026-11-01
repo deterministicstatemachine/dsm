@@ -2286,11 +2286,6 @@ message BlePermissionEvent {
   string operation = 1; // "scan" | "advertise"
 }
 
-// NFC recovery capsule payload — raw NdefRecord bytes wrapped in Envelope v3.
-message NfcRecoveryCapsule {
-  bytes payload = 1 [(dsm_max_len)=65535];
-}
-
 message BleEvent {
   // 12 BlePairingAccept and 15 BlePairingConfirm: the three-phase plaintext
   // pairing, replaced by the link handshake (DSM Amendment A27).
@@ -2545,6 +2540,9 @@ message UniversalOp {
   reserved 3;
   reserved "genesis_hash";
   reserved 18, 19, 27, 28; // Bilateral ops removed
+  // 22 carried an encrypted ring-backup capsule to decrypt (removed 2026-11-01).
+  reserved 22;
+  reserved "recovery_capsule_decrypt";
   oneof kind {
     Invoke                  invoke                 = 10;
     PrecommitOneOf          precommit_oneof        = 11;
@@ -2554,7 +2552,6 @@ message UniversalOp {
     AttestedAction          attested_action        = 15;
     VaultOp                 vault                  = 16;
     QueryOp                 query                  = 17;
-    RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
     RecoveryTombstoneRequest     recovery_tombstone       = 23;
     RecoverySuccessionRequest    recovery_succession      = 24;
     RecoveryResumeRequest        recovery_resume          = 25;
@@ -2641,12 +2638,15 @@ message Envelope {
   uint32  version   = 1; // MUST be 3 (strict-fail if != 3)
   Headers headers   = 2;
   bytes   message_id= 3 [(dsm_fixed_len)=16]; // 16-byte opaque transport id (MUST NOT be derived from wall-clock)
+  // 15 answered a ring-backup capsule decrypt and 96 carried a capsule read
+  // from a ring (removed 2026-11-01).
+  reserved 15, 96;
+  reserved "recovery_capsule_decrypt_response", "nfc_recovery_capsule";
   oneof payload {
     UniversalTx  universal_tx    = 10;
     UniversalRx  universal_rx    = 11;
     BatchEnvelope batch_envelope = 12;
 
-    RecoveryCapsuleDecryptResponse   recovery_capsule_decrypt_response = 15;
     RecoveryTombstoneResponse        recovery_tombstone_response       = 16;
     RecoverySuccessionResponse       recovery_succession_response      = 17;
     RecoveryResumeResponse           recovery_resume_response          = 18;
@@ -2749,7 +2749,6 @@ message Envelope {
 
     // Session state snapshot (session.status query response)
     AppSessionStateProto              session_state_response           = 95;
-    NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
     TokenPolicyListResponse           token_policy_list_response       = 97;
 
     Error                             error                            = 99;
@@ -3208,14 +3207,6 @@ message ArchitectureInfoProto {
   string supported_abis = 3;
   string message = 4;
   string recommendation = 5;
-}
-message RecoveryCapsuleDecryptRequest { bytes encrypted_capsule = 1 [(dsm_max_len)=4096]; bytes mnemonic_key = 2 [(dsm_fixed_len)=32]; }
-message RecoveryCapsuleDecryptResponse{
-  bool   success          = 1;
-  Hash32 global_root      = 2;
-  repeated ChainTip chain_tips = 3;
-  Hash32 receipt_rollup   = 4;
-  bytes  meta_data        = 5 [(dsm_max_len)=256]; // version/flags/counters only
 }
 message SmtLeaf     { uint64 index = 1; Hash32 value = 2; }
 message SmtSnapshot { uint32 height = 1; uint64 leaf_count = 2; repeated SmtLeaf leaves = 3; }
@@ -4408,8 +4399,9 @@ enum SdkEventKind {
   SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
   SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
   SDK_EVENT_KIND_CONTACT_BLE_UPDATED = 12;
-  SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
-  SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
+  // 13 and 14 announced a ring-backup capsule read and written (removed 2026-11-01).
+  reserved 13, 14;
+  reserved "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE", "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN";
   SDK_EVENT_KIND_BRIDGE_READY = 15;
   SDK_EVENT_KIND_CANONICAL_ENVELOPE = 16;
 }
@@ -4513,16 +4505,19 @@ enum NativeHostRequestKind {
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP",
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START",
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP";
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
+  // 8 and 9 started and stopped the ring reader (removed 2026-11-01).
+  reserved 8, 9;
+  reserved "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START",
+           "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP";
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
-  // Declared host primitives no host implemented and no caller issued.
-  reserved 103, 104, 107 to 109;
-  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY",
+  // 105 and 106 read and wrote a ring tag (removed 2026-11-01). The rest are
+  // declared host primitives no host implemented and no caller issued.
+  reserved 103 to 109;
+  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS",
@@ -4553,8 +4548,9 @@ enum NativeHostEventKind {
   // the policy wants); the frontend had nothing listening for it.
   reserved 2;
   reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
-  NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
-  NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
+  // 4 and 5 reported a ring tag read and written (removed 2026-11-01).
+  reserved 4, 5;
+  reserved "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ", "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE";
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
   // The phone contact the user picked (DSM Amendment A17): a ContactProfileV1,
   // or no bytes when the user picked none or did not allow the read.
@@ -4577,23 +4573,6 @@ message HostPermissionsRequestPayload {
 message HostPermissionsResult {
   repeated string granted_permissions = 1;
   bool all_granted = 2;
-}
-
-message NfcTagReadPayload {
-  string mime_type = 1 [(dsm_max_len)=128];
-}
-
-message NfcTagReadResult {
-  bool reader_started = 1;
-}
-
-message NfcTagWritePayload {
-  string mime_type = 1 [(dsm_max_len)=128];
-  bytes payload = 2 [(dsm_max_len)=65535];
-}
-
-message NfcTagWriteResult {
-  bool launched = 1;
 }
 
 message QrScanResultPayload {

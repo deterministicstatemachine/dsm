@@ -86,7 +86,7 @@ pub const TAG_DSM_CHAIN_HEAD_AT_REST_V3: TaggedHashDomain<'static> =
 /// SDK context entropy: `Expand(PRK_w, "DSM/sdk-entropy/v3" ‖ 0x00 ‖ DevID ‖ G)`.
 pub const TAG_DSM_SDK_ENTROPY_V3: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/sdk-entropy/v3");
-/// The recovery ring's AEAD key: `Expand(PRK_w, "DSM/recovery-aead/v2" ‖ 0x00)`.
+/// The recovery AEAD key KS1 defines: `Expand(PRK_w, "DSM/recovery-aead/v2" ‖ 0x00)`.
 pub const TAG_DSM_RECOVERY_AEAD_V2: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-aead/v2");
 /// The recovery-authority SPHINCS+ seed: `Expand(PRK_w, "DSM/recovery-authority/v2" ‖ 0x00)`.

@@ -47,18 +47,6 @@ fn empty(env: &mut JNIEnv<'_>) -> jni::sys::jbyteArray {
     }
 }
 
-fn build_app_state_envelope(resp: pb::AppStateResponse) -> Result<Vec<u8>, String> {
-    let envelope = crate::jni::helpers::encode_payload_transport(
-        pb::envelope::Payload::AppStateResponse(resp),
-    );
-    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-    buf.push(0x03);
-    envelope
-        .encode(&mut buf)
-        .map_err(|e| format!("app state envelope encode failed: {e}"))?;
-    Ok(buf)
-}
-
 /// Create a BleEvent envelope for device_found (scanner discovered a DSM peer).
 #[no_mangle]
 pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createBleDeviceFoundEnvelope(
@@ -443,87 +431,6 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createBlePerm
                 },
                 Err(e) => {
                     log::error!("createBlePermissionDeniedEnvelope: {e}");
-                    empty(&mut env)
-                }
-            }
-        }),
-    )
-}
-
-/// NFC recovery capsule — wraps raw NdefRecord bytes in a framed Envelope v3.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createNfcRecoveryCapsuleEnvelope(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-    payload_jbytes: jni::sys::jbyteArray,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "createNfcRecoveryCapsuleEnvelope",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let payload = {
-                let jb = unsafe { jbytes_from(payload_jbytes) };
-                match env.convert_byte_array(jb) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("createNfcRecoveryCapsuleEnvelope: convert_byte_array: {e}");
-                        return empty(&mut env);
-                    }
-                }
-            };
-            let capsule = pb::NfcRecoveryCapsule { payload };
-            let envelope = crate::jni::helpers::encode_payload_transport(
-                pb::envelope::Payload::NfcRecoveryCapsule(capsule),
-            );
-            let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-            buf.push(0x03); // Canonical framing byte for FramedEnvelopeV3
-            if let Err(e) = envelope.encode(&mut buf) {
-                log::error!("createNfcRecoveryCapsuleEnvelope: encode failed: {e}");
-                return empty(&mut env);
-            }
-            match env.byte_array_from_slice(&buf) {
-                Ok(a) => a.into_raw(),
-                Err(e) => {
-                    log::error!("createNfcRecoveryCapsuleEnvelope: byte_array_from_slice: {e}");
-                    empty(&mut env)
-                }
-            }
-        }),
-    )
-}
-
-/// NFC write committed — Rust-authored envelope for the frontend event bridge.
-#[no_mangle]
-pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createNfcBackupWrittenEnvelope(
-    env: jni::sys::JNIEnv,
-    _clazz: jni::sys::jclass,
-) -> jni::sys::jbyteArray {
-    crate::jni::bridge_utils::jni_catch_unwind_jbytearray(
-        "createNfcBackupWrittenEnvelope",
-        std::panic::AssertUnwindSafe(|| {
-            let mut env = match unsafe { env_from(env) } {
-                Some(e) => e,
-                None => return std::ptr::null_mut(),
-            };
-            let resp = pb::AppStateResponse {
-                key: "nfc.backup_written".to_string(),
-                value: Some("committed=true".to_string()),
-            };
-            match build_app_state_envelope(resp) {
-                Ok(bytes) => match env.byte_array_from_slice(&bytes) {
-                    Ok(arr) => arr.into_raw(),
-                    Err(e) => {
-                        log::error!(
-                            "createNfcBackupWrittenEnvelope: byte_array_from_slice failed: {e}"
-                        );
-                        empty(&mut env)
-                    }
-                },
-                Err(e) => {
-                    log::error!("createNfcBackupWrittenEnvelope: {e}");
                     empty(&mut env)
                 }
             }

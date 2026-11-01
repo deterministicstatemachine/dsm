@@ -222,7 +222,7 @@ pub fn init_database() -> Result<()> {
         }
     }
 
-    // Recovery capsule + prefs tables (NFC ring backup)
+    // Recovery state + prefs tables
     if let Err(e) = recovery::ensure_recovery_tables() {
         warn!("Recovery table creation failed (non-fatal): {e:?}");
     }

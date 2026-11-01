@@ -332,12 +332,6 @@ export function initializeEventBridge(): void {
           const env = decodeFramedEnvelopeV3(bytes);
           const p: any = env?.payload ?? env;
 
-          if (p?.case === 'appStateResponse' && p.value?.key === 'nfc.backup_written') {
-            try { bridgeEvents.emit('nfc.backupWritten', undefined as any); } catch {}
-            emit('nfc.backup_written', bytes);
-            return;
-          }
-
           // BLE state events -> parse BleEvent oneof and emit to bridgeEvents
           const bleEvent: any = (p?.case === 'bleEvent' ? p.value : p?.bleEvent);
           if (bleEvent?.ev) {
@@ -400,13 +394,6 @@ export function initializeEventBridge(): void {
             }
           }
           
-          // NFC recovery capsule: Envelope payload field 96 dispatched via Rust JNI.
-          const nfcCapsule: any = (p?.case === 'nfcRecoveryCapsule' ? p.value : p?.nfcRecoveryCapsule);
-          if (nfcCapsule?.payload instanceof Uint8Array && nfcCapsule.payload.length > 0) {
-            emit('nfc-recovery-capsule', nfcCapsule.payload as Uint8Array);
-            return; // handled; do not fall through
-          }
-
           // A bilateral prepare response over BLE is not a wallet change and
           // announces none: the wallet changes at TRANSFER_COMPLETE, which
           // `bilateral.event` announces. This used to emit a `wallet.refresh`

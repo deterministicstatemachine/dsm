@@ -247,33 +247,6 @@ fn kat_dsm_recovery_roll() {
 }
 
 // =============================================================================
-// §13 — Recovery AEAD AAD (Phase 2 fix: now binds to r_t || u64le(c_t))
-// =============================================================================
-
-#[test]
-fn kat_recovery_capsule_aad_format() {
-    // Whitepaper §13/§16.10: AD := "DSM/recovery-capsule-v3\0" || r_t || u64le(c_t)
-    let smt_root = [0xAAu8; 32];
-    let counter: u64 = 7;
-
-    let mut expected = Vec::new();
-    expected.extend_from_slice(b"DSM/recovery-capsule-v3\0");
-    expected.extend_from_slice(&smt_root);
-    expected.extend_from_slice(&counter.to_le_bytes());
-
-    // The actual AAD construction is private to the recovery module. The
-    // observable property is that round-trip encrypt+decrypt with this exact
-    // smt_root and counter succeeds, and tampering with either fails. Both
-    // are covered by the recovery::capsule unit tests
-    // (test_smt_root_tamper_fails, test_counter_tamper_fails). This KAT
-    // pins the byte-exact format for cross-implementation parity.
-    assert_eq!(expected.len(), 24 + 32 + 8); // tag (24, including NUL) + r_t (32) + u64le (8)
-    assert_eq!(&expected[..24], b"DSM/recovery-capsule-v3\0");
-    assert_eq!(&expected[24..56], &smt_root);
-    assert_eq!(&expected[56..64], &counter.to_le_bytes());
-}
-
-// =============================================================================
 // §11.1 — Per-step EK derivation seed (anchors sign_receipt_with_per_step_ek)
 // =============================================================================
 

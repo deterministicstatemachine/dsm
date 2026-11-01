@@ -26,7 +26,7 @@
 use crate::crypto::domain::TaggedHashDomain;
 
 use crate::crypto::blake3::dsm_domain_hasher;
-use crate::recovery::capsule::contact_set_commit_from_device_ids;
+use crate::recovery::contact_set::contact_set_commit_from_device_ids;
 use crate::recovery::succession_binding::CrossRelationshipSuccessionEvidence;
 use crate::types::error::DsmError;
 use crate::types::proto::{Message as _, RecoveryActivationSealProto};

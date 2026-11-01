@@ -6,7 +6,7 @@ import { bridgeEvents } from '../bridge/bridgeEvents';
 import logger from '../utils/logger';
 import type { AndroidBridgeV3 } from './bridgeTypes';
 import { bridgeGate } from './BridgeGate';
-import { NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, NfcTagWritePayload, NfcTagWriteResult, QrScanResultPayload } from '../proto/dsm_app_pb';
+import { NativeHostEvent, NativeHostEventKind, NativeHostRequest, NativeHostRequestKind, NativeHostResponse, QrScanResultPayload } from '../proto/dsm_app_pb';
 
 function mustBridge(): AndroidBridgeV3 {
   const bridge = getBridgeInstance();
@@ -76,28 +76,6 @@ export async function startNativeQrScan(): Promise<void> {
   await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_QR_START_SCAN));
 }
 
-export async function startNfcReaderHost(): Promise<void> {
-  await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_NFC_READER_START));
-}
-
-export async function stopNfcReaderHost(): Promise<void> {
-  await hostRequestOk(buildHostRequest(NativeHostRequestKind.HOST_CONTROL_NFC_READER_STOP));
-}
-
-export async function writeNfcTagPayloadHost(payload?: Uint8Array, mimeType = 'application/vnd.dsm.recovery'): Promise<NfcTagWriteResult> {
-  const requestPayload = new NfcTagWritePayload({
-    mimeType,
-    payload: payload instanceof Uint8Array ? new Uint8Array(payload) : new Uint8Array(0),
-  });
-  const bytes = await hostRequestOk(
-    buildHostRequest(
-      NativeHostRequestKind.PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD,
-      requestPayload.toBinary(),
-    ),
-  );
-  return NfcTagWriteResult.fromBinary(bytes);
-}
-
 export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { topic: string; payload: Uint8Array } | null {
   const event = NativeHostEvent.fromBinary(eventBytes);
   switch (event.kind) {
@@ -110,10 +88,6 @@ export function decodeNativeHostEventToLegacyTopic(eventBytes: Uint8Array): { to
         return null;
       }
     }
-    case NativeHostEventKind.NFC_TAG_READ:
-      return { topic: 'nfc-recovery-capsule', payload: event.payload };
-    case NativeHostEventKind.NFC_TAG_WRITE:
-      return { topic: 'nfc.backup_written', payload: event.payload };
     case NativeHostEventKind.SESSION_STATE_HINT:
       return { topic: 'session.state.hint', payload: event.payload };
     case NativeHostEventKind.PHONE_CONTACT_PICKED:

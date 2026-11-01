@@ -188,8 +188,6 @@ export default function AppContent({
         appState={appState}
         error={error}
         securingProgress={securingProgress}
-        currentScreen={currentScreen}
-        navigate={navigate}
         handleGenerateGenesis={handleGenerateGenesis}
         cancelPhraseBackup={cancelPhraseBackup}
         answerPhraseCheck={answerPhraseCheck}
@@ -247,16 +245,14 @@ export default function AppContent({
             WALLET SETUP REQUIRED
           </div>
           <MenuRenderer
-            items={['INITIALIZE', 'DEVICE RECOVERY']}
+            items={['INITIALIZE']}
             currentMenuIndex={currentMenuIndex}
             setCurrentMenuIndex={setCurrentMenuIndex}
             options={{
               itemClassName: 'home-brick',
               actions: {
-                // New genesis (unchanged): creates a brand-new identity/device tree root.
+                // New genesis: creates a brand-new identity/device tree root.
                 INITIALIZE: () => void handleGenerateGenesis(),
-                // Recover a lost identity onto this device from the NFC-ring backup.
-                'DEVICE RECOVERY': () => navigate('recovery'),
               },
             }}
           />

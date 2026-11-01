@@ -337,7 +337,7 @@ pub struct RelChainTip {
     /// which is why it is retained explicitly instead of being recovered from
     /// a 50 KB state copy. Empty for a relationship established but not yet
     /// stepped (its tip is `h_0`, which no transition produced) and for a
-    /// digest-only tip restored from a recovery capsule; an advance on such a
+    /// digest-only tip restored by recovery; an advance on such a
     /// tip falls back to the SMT-root derivation.
     pub tip_entropy: Vec<u8>,
 
@@ -1170,7 +1170,7 @@ impl DeviceState {
     /// `prior_entropy` input to the next advance (§11 eq. 14).
     ///
     /// `None` when the relationship is unknown, or when its tip carries no
-    /// entropy (a digest-only tip restored from a recovery capsule). Both
+    /// entropy (a digest-only tip restored by recovery). Both
     /// cases mean the caller must fall back to the SMT-root derivation.
     pub fn tip_entropy(&self, rel_key: &[u8; 32]) -> Option<&[u8]> {
         self.tips

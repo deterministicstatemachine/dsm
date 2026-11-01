@@ -266,7 +266,7 @@ pub fn encode_device_state(head: &DeviceState) -> Vec<u8> {
         out.push(tip.value_capability.commit_tag());
 
         // v0x06: the tip's entropy, length-prefixed. Empty is legal and means a
-        // digest-only tip (recovery-capsule restore) whose next advance falls
+        // digest-only tip (a recovery restore) whose next advance falls
         // back to the SMT-root derivation.
         put_vec(&mut out, &tip.tip_entropy);
     }

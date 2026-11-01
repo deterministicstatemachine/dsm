@@ -755,27 +755,6 @@ export const TOUR_STEPS: ReadonlyArray<TourStep> = [
     body: 'Choose a PIN or a sequence of the shell buttons, and enter it twice. You can have it lock whenever you leave the app, and pick how long it waits before locking. Too many wrong tries wait out a cooldown. In practice, saving is switched off.',
   },
   {
-    id: 'ring',
-    screen: 'settings',
-    target: '[aria-labelledby="nfc-section-title"]',
-    title: 'Ring backup',
-    body: 'An NFC ring can carry your backup. If you lose this phone, the ring brings your wallet back on a new one.',
-  },
-  {
-    id: 'nfc-backup',
-    screen: 'nfc_recovery',
-    target: '.nfc-recovery-screen',
-    title: 'Backing up to a ring',
-    body: 'Manage backup shows whether your backup is on, writes your recovery capsule to the ring, and rebuilds it when your wallet changes. Turning it on shows a recovery phrase to write down. In practice, all of it is switched off.',
-  },
-  {
-    id: 'nfc-recover',
-    screen: 'recovery',
-    target: '.recovery-screen',
-    title: 'Getting it back',
-    body: 'Inspect or recover reads a ring and, with your recovery phrase, checks what it holds. On a new phone, that brings your wallet back.',
-  },
-  {
     id: 'replay',
     screen: 'settings',
     target: '[data-tour="tutorial-button"]',

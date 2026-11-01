@@ -101,7 +101,7 @@ mod tests {
             new_device_id: [0xA1; 32],
             recovery_intent_digest: [0x03; 32],
             tombstone_proposal_digest: [0x04; 32],
-            contact_set_commit: crate::recovery::capsule::contact_set_commit_from_device_ids(
+            contact_set_commit: crate::recovery::contact_set::contact_set_commit_from_device_ids(
                 &members,
             ),
             evidence_root: [0xEE; 32],

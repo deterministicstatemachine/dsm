@@ -7,7 +7,6 @@ import SettingsMainScreen from '../SettingsMainScreen';
 
 const mockGetPreference = jest.fn();
 const mockSetPreference = jest.fn();
-const mockGetNfcBackupStatus = jest.fn();
 
 jest.mock('../../../services/dsmClient', () => ({
   dsmClient: {
@@ -21,24 +20,10 @@ jest.mock('../../../dsm/EventBridge', () => ({
   on: jest.fn(() => jest.fn()),
 }));
 
-jest.mock('../../../services/recovery/nfcRecoveryService', () => ({
-  getNfcBackupStatus: (...args: unknown[]) => mockGetNfcBackupStatus(...args),
-  setAutoWriteEnabled: jest.fn().mockResolvedValue(undefined),
-}));
-
 describe('SettingsMainScreen developer unlock', () => {
   beforeEach(() => {
     mockGetPreference.mockReset();
     mockSetPreference.mockReset();
-    mockGetNfcBackupStatus.mockReset();
-    mockGetNfcBackupStatus.mockResolvedValue({
-      enabled: false,
-      configured: false,
-      pendingCapsule: false,
-      capsuleCount: 0,
-      lastCapsuleIndex: 0,
-      autoWriteEnabled: false,
-    });
   });
 
   it('keeps developer options unlocked across remounts while prefs reload', async () => {
@@ -81,46 +66,6 @@ describe('SettingsMainScreen developer unlock', () => {
 
     resolveDevPref?.('true');
     await waitFor(() => expect(mockGetPreference).toHaveBeenCalled());
-  });
-
-  it('shows the compact NFC summary with pending-aware state', async () => {
-    mockGetPreference.mockResolvedValueOnce('false');
-    mockGetNfcBackupStatus.mockResolvedValueOnce({
-      enabled: true,
-      configured: true,
-      pendingCapsule: false,
-      capsuleCount: 4,
-      lastCapsuleIndex: 9,
-      autoWriteEnabled: false,
-    });
-
-    render(<SettingsMainScreen />);
-
-    await waitFor(() =>
-      expect(screen.getByText('ON / WAITING')).toBeInTheDocument(),
-    );
-    expect(
-      screen.getByText(/Enabled, but nothing is armed right now\./i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole('button', { name: /INSPECT OR RECOVER/i }),
-    ).toBeInTheDocument();
-  });
-
-  // A failed status read is that failure; it used to render as "NOT SET" —
-  // the status of a device that has no backup at all.
-  it('shows a failed NFC status read as its failure, not as NOT SET', async () => {
-    mockGetPreference.mockResolvedValueOnce('false');
-    mockGetNfcBackupStatus.mockRejectedValueOnce(new Error('recovery.status: the recovery tables are not migrated'));
-
-    render(<SettingsMainScreen />);
-
-    await waitFor(() =>
-      expect(screen.getByText(/Status not read: recovery.status: the recovery tables are not migrated/)).toBeInTheDocument(),
-    );
-    expect(screen.getByText('NOT READ')).toBeInTheDocument();
-    expect(screen.queryByText('NOT SET')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Not configured/)).not.toBeInTheDocument();
   });
 
   it('dispatches diagnostics event from report-issue button (dev mode)', async () => {

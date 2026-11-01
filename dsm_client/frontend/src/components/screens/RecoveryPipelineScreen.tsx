@@ -15,7 +15,7 @@ import {
   type AckStatus,
   type PipelineResult,
   type SyncProgress,
-} from '../../services/recovery/nfcRecoveryService';
+} from '../../services/recovery/recoveryPipelineService';
 import { Notice, ScreenFrame } from '../common/ScreenFrame';
 import { InfoTip } from '../common/InfoTip';
 import { useScreenGuard } from '../../hooks/useScreenGuard';
@@ -103,13 +103,9 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
         const acks = await pollAcks();
         if (!mountedRef.current) return;
         setLastAckStatus(acks);
-        setSyncProgress({
-          synced: acks.synced,
-          total: acks.total,
-          pending: [],
-        });
+        setSyncProgress({ synced: acks.synced, total: acks.total, pending: acks.pending });
 
-        if (acks.allSynced) {
+        if (acks.pending.length === 0) {
           setPhase('complete');
           setStatusMsg('All counterparties have acknowledged the tombstone.');
           clearPollTimer();
@@ -233,11 +229,11 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
   return (
     <ScreenFrame
       title="Recovery Pipeline"
-      onBack={() => onNavigate?.('recovery')}
+      onBack={() => onNavigate?.('settings')}
       className="recovery-pipeline-screen"
       info={(
         <InfoTip title="Recovery pipeline">
-          <p>With a capsule staged, RECOVER creates a tombstone receipt for the old device, binds this device as its successor, and propagates that to the storage nodes.</p>
+          <p>With a recovery source staged, RECOVER creates a tombstone receipt for the old device, binds this device as its successor, and propagates that to the storage nodes.</p>
           <p>Counterparties acknowledge the tombstone in their own time; this screen polls for them every 30 seconds and when it comes back into view.</p>
           <p>Once all have, RESUME restores the bilateral relationships, assembles the succession and reconciles recovered assets.</p>
         </InfoTip>
@@ -269,16 +265,11 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
         </div>
       </section>
 
-      {/* Phase: none — no capsule staged */}
+      {/* Phase: none — no recovery source staged */}
       {phase === 'none' && (
         <>
           <div className="sb-empty">
-            No recovery capsule has been staged on this device. Go back and stage a capsule from the NFC ring first.
-          </div>
-          <div className="sb-actions">
-            <button type="button" className="sb-btn sb-btn--primary sb-btn--block" onClick={() => onNavigate?.('recovery')}>
-              Back to recovery
-            </button>
+            No recovery source is staged on this device, and nothing stages one yet.
           </div>
         </>
       )}
@@ -286,7 +277,7 @@ const RecoveryPipelineScreen: React.FC<RecoveryPipelineScreenProps> = ({ onNavig
       {/* Phase: staged — ready to execute */}
       {phase === 'staged' && (
         <section className="sb-card">
-          <div className="sb-card__title">Capsule staged</div>
+          <div className="sb-card__title">Recovery source staged</div>
           <p className="sb-hint">
             Tap RECOVER to execute the full pipeline: create a tombstone receipt for the old device, bind this device as the successor, and propagate to counterparties.
           </p>
