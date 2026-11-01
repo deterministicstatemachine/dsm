@@ -5,8 +5,8 @@
 use crate::support::{creature, duel, mv, side, turn, R};
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::{
-    class, program_hash, CreatureStateV1, DecodeError, DuelMatchV1, DuelMoveV1, DuelSetupV1,
-    DuelState, DuelTurnV1, VECTORS_V1,
+    class, program_hash, start_commitment, CreatureStateV1, DecodeError, DuelMatchV1, DuelMoveV1,
+    DuelSetupV2, DuelState, DuelTurnV1, VECTORS_V1,
 };
 
 fn sample_match() -> R<DuelMatchV1> {
@@ -57,15 +57,20 @@ fn every_object_round_trips_exactly() -> R {
     )?;
     let m = sample_match()?;
     round_trips(m.encode(), &m, DuelMatchV1::decode, DuelMatchV1::encode)?;
-    let setup = DuelSetupV1 {
-        program: program_hash(),
-        body: m.clone(),
-    };
+    let setup = DuelSetupV2::new(
+        program_hash(),
+        *m.match_nonce(),
+        m.turn_cap(),
+        start_commitment(&[0xA7; 32]),
+        start_commitment(&[0xB7; 32]),
+        m.a().clone(),
+        m.b().clone(),
+    )?;
     round_trips(
         setup.encode(),
         &setup,
-        DuelSetupV1::decode,
-        DuelSetupV1::encode,
+        DuelSetupV2::decode,
+        DuelSetupV2::encode,
     )?;
     for mvv in [
         mv(2),

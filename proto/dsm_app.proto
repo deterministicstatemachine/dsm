@@ -5045,8 +5045,11 @@ message ConnectDuelLockV1 {
 // its ready. With the other side's ready signature, it readies second and
 // writes the Start.
 message ConnectDuelReadyV1 {
-  bytes match_cell     = 1 [(dsm_fixed_len)=32];
-  bytes opponent_ready = 2 [(dsm_max_len)=65535]; // empty when this wallet readies first
+  bytes match_cell      = 1 [(dsm_fixed_len)=32];
+  bytes opponent_ready  = 2 [(dsm_max_len)=65535]; // empty when this wallet readies first
+  // The other side's start entropy, handed out with its ready (SoFi Amendment
+  // S33); empty exactly when opponent_ready is.
+  bytes opponent_reveal = 3 [(dsm_max_len)=32];
 }
 // Withdraw from the match while no Start holds its start cell: void, both refunded.
 message ConnectDuelWithdrawV1 {
@@ -5213,6 +5216,9 @@ message ConnectEscrowReleaseResultV1 {
 message ConnectDuelSessionKeyResultV1 {
   bytes  session_public_key = 1 [(dsm_max_len)=64];
   uint32 signature_alg      = 2;
+  // H(DSM/escrow/start-commit/v1 ‖ r): the wallet's commitment to its start
+  // entropy for the match, which the setup carries (SoFi Amendment S33).
+  bytes  start_commitment   = 3 [(dsm_fixed_len)=32];
 }
 // A stake the wallet locked in a computed match: a notification, never evidence.
 message ConnectDuelLockResultV1 {
@@ -5243,6 +5249,8 @@ message ConnectDuelCellsV1 {
 message ConnectDuelReadyResultV1 {
   bytes              ready_signature = 1 [(dsm_max_len)=65535];
   ConnectDuelCellsV1 cells           = 2;
+  // This wallet's start entropy, opened with its ready (SoFi Amendment S33).
+  bytes              reveal          = 3 [(dsm_fixed_len)=32];
 }
 message ConnectDuelSignResultV1 {
   uint32 index     = 1;

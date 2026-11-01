@@ -15,14 +15,22 @@ use super::{
 
 /// Every v8 object ships at schema 1.
 pub const SCHEMA_V1: u16 = 1;
+/// The computed-escrow objects that nest the computed table (SoFi Amendment
+/// S33): `ComputedEscrowTerms`, `TranscriptOutcome`, `EquivocationProof` and
+/// `MatchStart`. Their schema 1 is retired.
+pub const SCHEMA_V2: u16 = 2;
 
 type D32 = [u8; 32];
 
 // ── shared validation and primitive helpers ────────────────────────────────
 
 fn push_env(out: &mut Vec<u8>, object_class: u16) {
+    push_env_at(out, object_class, SCHEMA_V1);
+}
+
+fn push_env_at(out: &mut Vec<u8>, object_class: u16, schema: u16) {
     push_u16(out, object_class);
-    push_u16(out, SCHEMA_V1);
+    push_u16(out, schema);
 }
 
 fn wire_invalid(e: SofiWireError) -> DecodeError {
@@ -3180,6 +3188,8 @@ pub struct ComputedTable {
     setup_digest: D32,
     session_a: EscrowSigner,
     session_b: EscrowSigner,
+    start_commitment_a: D32,
+    start_commitment_b: D32,
 }
 
 impl ComputedTable {
@@ -3190,6 +3200,8 @@ impl ComputedTable {
         setup_digest: D32,
         session_a: EscrowSigner,
         session_b: EscrowSigner,
+        start_commitment_a: D32,
+        start_commitment_b: D32,
     ) -> Result<Self, SofiWireError> {
         if session_a == session_b {
             return Err(SofiWireError::SessionKeysNotDistinct);
@@ -3199,7 +3211,18 @@ impl ComputedTable {
             setup_digest,
             session_a,
             session_b,
+            start_commitment_a,
+            start_commitment_b,
         })
+    }
+
+    /// `H(DSM/escrow/start-commit/v1 ‖ r)`: the commitment `side`'s wallet
+    /// fixed at lock to its start entropy `r` (SoFi Amendment S33).
+    pub fn start_commitment(&self, side: MatchSide) -> &D32 {
+        match side {
+            MatchSide::A => &self.start_commitment_a,
+            MatchSide::B => &self.start_commitment_b,
+        }
     }
 
     /// `P`, the hash that pins the outcome program.
@@ -3220,8 +3243,9 @@ impl ComputedTable {
         }
     }
 
-    /// `P ‖ setup_digest ‖ key_a ‖ key_b`, each key `u16be(alg) ‖
-    /// u32be(|key|) ‖ key`: what `τ_c` hashes, and how the table nests.
+    /// `P ‖ setup_digest ‖ key_a ‖ key_b ‖ start_commitment_a ‖
+    /// start_commitment_b`, each key `u16be(alg) ‖ u32be(|key|) ‖ key`: what
+    /// `τ_c` hashes, and how the table nests.
     pub fn canonical(&self) -> Vec<u8> {
         let mut out = Vec::new();
         self.push(&mut out);
@@ -3241,6 +3265,8 @@ impl ComputedTable {
             self.session_b.signature_alg,
             &self.session_b.public_key,
         );
+        push_digest32(out, &self.start_commitment_a);
+        push_digest32(out, &self.start_commitment_b);
     }
 
     fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
@@ -3248,7 +3274,17 @@ impl ComputedTable {
         let setup_digest = c.digest32()?;
         let session_a = EscrowSigner::at(c)?;
         let session_b = EscrowSigner::at(c)?;
-        Self::new(program, setup_digest, session_a, session_b).map_err(wire_invalid)
+        let start_commitment_a = c.digest32()?;
+        let start_commitment_b = c.digest32()?;
+        Self::new(
+            program,
+            setup_digest,
+            session_a,
+            session_b,
+            start_commitment_a,
+            start_commitment_b,
+        )
+        .map_err(wire_invalid)
     }
 }
 
@@ -3340,7 +3376,7 @@ impl ComputedEscrowTerms {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_COMPUTED_TERMS);
+        push_env_at(&mut out, class::ESCROW_COMPUTED_TERMS, SCHEMA_V2);
         push_digest32(&mut out, &self.token);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
@@ -3355,7 +3391,7 @@ impl ComputedEscrowTerms {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_COMPUTED_TERMS, SCHEMA_V2)?;
         let token = c.digest32()?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
@@ -3520,6 +3556,7 @@ pub struct TranscriptOutcome {
     external_commitment: D32,
     table: ComputedTable,
     setup: Vec<u8>,
+    reveals: StartReveals,
     entries: Vec<Vec<u8>>,
     signatures: Vec<SideSignature>,
 }
@@ -3529,6 +3566,7 @@ impl TranscriptOutcome {
         external_commitment: D32,
         table: ComputedTable,
         setup: &[u8],
+        reveals: StartReveals,
         entries: Vec<Vec<u8>>,
         signatures: Vec<SideSignature>,
     ) -> Result<Self, SofiWireError> {
@@ -3549,6 +3587,7 @@ impl TranscriptOutcome {
             external_commitment,
             table,
             setup: setup.to_vec(),
+            reveals,
             entries,
             signatures,
         })
@@ -3566,6 +3605,11 @@ impl TranscriptOutcome {
         &self.setup
     }
 
+    /// Both sides' start entropy, as the Start opened it.
+    pub fn reveals(&self) -> &StartReveals {
+        &self.reveals
+    }
+
     /// The entries' bytes, in order, exactly as carried.
     pub fn entries(&self) -> &[Vec<u8>] {
         &self.entries
@@ -3577,10 +3621,11 @@ impl TranscriptOutcome {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME);
+        push_env_at(&mut out, class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         push_part(&mut out, &self.setup);
+        self.reveals.push(&mut out);
         push_u32(&mut out, self.entries.len() as u32);
         for entry in &self.entries {
             push_part(&mut out, entry);
@@ -3595,10 +3640,11 @@ impl TranscriptOutcome {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_TRANSCRIPT_OUTCOME, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let setup = read_var_bytes(&mut c, COMPUTED_MAX_SETUP_BYTES)?;
+        let reveals = StartReveals::at(&mut c)?;
         let n = read_count(&mut c, "transcript entries", 1, TRANSCRIPT_MAX_ENTRIES)?;
         let mut entries = Vec::with_capacity(n);
         for _ in 0..n {
@@ -3611,8 +3657,15 @@ impl TranscriptOutcome {
             let signature = read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?;
             signatures.push(SideSignature { side, signature });
         }
-        let v = Self::new(external_commitment, table, &setup, entries, signatures)
-            .map_err(wire_invalid)?;
+        let v = Self::new(
+            external_commitment,
+            table,
+            &setup,
+            reveals,
+            entries,
+            signatures,
+        )
+        .map_err(wire_invalid)?;
         finish(&c, v)
     }
 }
@@ -3719,7 +3772,7 @@ impl EquivocationProof {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_EQUIVOCATION_PROOF);
+        push_env_at(&mut out, class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         out.push(self.side.byte());
@@ -3731,7 +3784,7 @@ impl EquivocationProof {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_EQUIVOCATION_PROOF, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let side = MatchSide::at(&mut c)?;
@@ -3760,11 +3813,51 @@ impl StartKind {
     }
 }
 
+/// Both sides' start entropy `r`, side A's then side B's: what a Start opens
+/// and a transcript outcome carries (SoFi Amendment S33). Each `r` opens the
+/// commitment its side's wallet fixed in the table at lock; whether it does is
+/// recognition's, not this type's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartReveals {
+    a: D32,
+    b: D32,
+}
+
+impl StartReveals {
+    pub fn new(a: D32, b: D32) -> Self {
+        Self { a, b }
+    }
+
+    /// `side`'s start entropy.
+    pub fn side(&self, side: MatchSide) -> &D32 {
+        match side {
+            MatchSide::A => &self.a,
+            MatchSide::B => &self.b,
+        }
+    }
+
+    fn push(&self, out: &mut Vec<u8>) {
+        push_digest32(out, &self.a);
+        push_digest32(out, &self.b);
+    }
+
+    fn at(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let a = c.digest32()?;
+        let b = c.digest32()?;
+        Ok(Self { a, b })
+    }
+}
+
 /// The body of a `MatchStart` (SoFi §19.10, the ready handshake).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartBody {
-    /// Both sides' signatures over `m_ready`: side A's, then side B's.
-    Start { ready_a: Vec<u8>, ready_b: Vec<u8> },
+    /// Both sides' signatures over `m_ready`, side A's then side B's, and
+    /// both sides' start entropy (SoFi Amendment S33).
+    Start {
+        ready_a: Vec<u8>,
+        ready_b: Vec<u8>,
+        reveals: StartReveals,
+    },
     /// One side's signature over `m_withdraw`. Either side may withdraw.
     Withdraw { side: MatchSide, signature: Vec<u8> },
 }
@@ -3798,7 +3891,9 @@ impl MatchStart {
         body: StartBody,
     ) -> Result<Self, SofiWireError> {
         match &body {
-            StartBody::Start { ready_a, ready_b } => {
+            StartBody::Start {
+                ready_a, ready_b, ..
+            } => {
                 check_signature_bytes("ready signature", ready_a)?;
                 check_signature_bytes("ready signature", ready_b)?;
             }
@@ -3831,14 +3926,19 @@ impl MatchStart {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_env(&mut out, class::ESCROW_MATCH_START);
+        push_env_at(&mut out, class::ESCROW_MATCH_START, SCHEMA_V2);
         push_digest32(&mut out, &self.external_commitment);
         self.table.push(&mut out);
         out.push(self.kind().byte());
         match &self.body {
-            StartBody::Start { ready_a, ready_b } => {
+            StartBody::Start {
+                ready_a,
+                ready_b,
+                reveals,
+            } => {
                 push_part(&mut out, ready_a);
                 push_part(&mut out, ready_b);
+                reveals.push(&mut out);
             }
             StartBody::Withdraw { side, signature } => {
                 out.push(side.byte());
@@ -3850,13 +3950,14 @@ impl MatchStart {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut c = Cursor { b: bytes, i: 0 };
-        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V1)?;
+        c.envelope(class::ESCROW_MATCH_START, SCHEMA_V2)?;
         let external_commitment = c.digest32()?;
         let table = ComputedTable::at(&mut c)?;
         let body = match c.u8()? {
             1 => StartBody::Start {
                 ready_a: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
                 ready_b: read_var_bytes(&mut c, MAX_SIGNATURE_BYTES)?,
+                reveals: StartReveals::at(&mut c)?,
             },
             2 => StartBody::Withdraw {
                 side: MatchSide::at(&mut c)?,

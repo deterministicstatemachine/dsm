@@ -34,9 +34,11 @@ use dsm::sofi::computed::{
     OpenedKind, Opened, OutcomeProgram, ProgramFault, ProgramOutcome, ProgramRegistry,
     RegistryError,
 };
-use dsm::sofi::wire::{MatchSide, COMPUTED_LABEL_A_WINS, COMPUTED_LABEL_B_WINS};
+use dsm::sofi::wire::{MatchSide, StartReveals, COMPUTED_LABEL_A_WINS, COMPUTED_LABEL_B_WINS};
 use wildstate_duel::vectors::DuelVectorSetV1;
-use wildstate_duel::{DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1, DuelState, DuelTurnV1, Side};
+use wildstate_duel::{
+    DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV2, DuelState, DuelTurnV1, Side,
+};
 
 type D32 = [u8; 32];
 
@@ -85,18 +87,34 @@ pub struct DuelProgress {
 
 impl DuelProgress {
     /// The progress of a match before its first entry: `setup` decoded,
-    /// canonical, and pinning this program.
-    pub fn start(setup: &[u8]) -> Result<Self, ProgramFault> {
-        let decoded = DuelSetupV1::decode(setup).map_err(|e| fault(format!("the setup: {e}")))?;
+    /// canonical and pinning this program, started on both sides' start
+    /// entropy as the match's Start opened it (SoFi Amendment S33).
+    pub fn start(setup: &[u8], reveals: &StartReveals) -> Result<Self, ProgramFault> {
+        let decoded = DuelSetupV2::decode(setup).map_err(|e| fault(format!("the setup: {e}")))?;
         if decoded.encode() != setup {
             return Err(fault("the setup is not its canonical encoding"));
         }
-        let state = wildstate_duel::start(setup).map_err(|e| fault(format!("the setup: {e}")))?;
-        Ok(Self {
+        let state = wildstate_duel::start(
+            setup,
+            reveals.side(MatchSide::A),
+            reveals.side(MatchSide::B),
+        )
+        .map_err(|e| fault(format!("the setup: {e}")))?;
+        Ok(Self::of_state(state))
+    }
+
+    /// The progress of a match the rules play directly, before its first
+    /// entry.
+    pub fn of_match(m: &DuelMatchV1) -> Self {
+        Self::of_state(DuelState::start(m))
+    }
+
+    fn of_state(state: DuelState) -> Self {
+        Self {
             state,
             pending: [None, None],
             turn_floor: 0,
-        })
+        }
     }
 
     /// The verified duel state after the last whole turn.
@@ -303,12 +321,14 @@ fn take_part<'b>(bytes: &mut &'b [u8]) -> Result<&'b [u8], String> {
 }
 
 /// One side of a match setup, as a wallet locking a stake reads it: the
-/// identity its branch pays and the session key its table commits.
+/// identity its branch pays, and the session key and start commitment its
+/// table commits.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupSide {
     pub genesis: D32,
     pub device_id: D32,
     pub session_public_key: Vec<u8>,
+    pub start_commitment: D32,
 }
 
 /// What a wallet needs from a match setup to lock a stake in it: the program
@@ -331,11 +351,12 @@ impl MatchSetup {
 }
 
 /// `setup` read for a lock: the canonical setup of a program this process
-/// registered, whose tiebreak seed is the one its nonce and both session keys
-/// derive (`wildstate_duel::tiebreak_seed`), so the application relaying the
-/// setup could not have picked it.
+/// registered. It carries no tiebreak seed, only each side's start
+/// commitment; the seed is derived from both sides' start entropy once the
+/// Start opens it, so neither the application relaying the setup nor either
+/// side picks it (SoFi Amendment S33).
 pub fn read_setup(setup: &[u8]) -> Result<MatchSetup, String> {
-    let decoded = DuelSetupV1::decode(setup).map_err(|e| format!("the setup: {e}"))?;
+    let decoded = DuelSetupV2::decode(setup).map_err(|e| format!("the setup: {e}"))?;
     if decoded.encode() != setup {
         return Err("the setup is not its canonical encoding".into());
     }
@@ -345,26 +366,18 @@ pub fn read_setup(setup: &[u8]) -> Result<MatchSetup, String> {
             dsm::utils::text_id::encode_base32_crockford(&decoded.program)
         ));
     }
-    DuelProgress::start(setup).map_err(|e| e.reason)?;
-    let body = &decoded.body;
-    let seed = wildstate_duel::tiebreak_seed(
-        body.match_nonce(),
-        &body.a().session_public_key,
-        &body.b().session_public_key,
-    );
-    if *body.tiebreak_seed() != seed {
-        return Err("the setup's tiebreak seed is not the one its nonce and keys derive".into());
-    }
-    let side = |s: &wildstate_duel::DuelSide| SetupSide {
+    wildstate_duel::setup_of(setup).map_err(|e| format!("the setup: {e}"))?;
+    let side = |s: &wildstate_duel::DuelSide, of: Side| SetupSide {
         genesis: s.genesis,
         device_id: s.device_id,
         session_public_key: s.session_public_key.clone(),
+        start_commitment: *decoded.start_commitment(of),
     };
     Ok(MatchSetup {
         program: decoded.program,
-        match_nonce: *body.match_nonce(),
-        a: side(body.a()),
-        b: side(body.b()),
+        match_nonce: *decoded.match_nonce(),
+        a: side(decoded.a(), Side::A),
+        b: side(decoded.b(), Side::B),
     })
 }
 
@@ -449,11 +462,8 @@ pub async fn check_teams(
     own: MatchSide,
     their_holdings: &dsm::types::proto::HoldingsProofV1,
 ) -> Result<(), String> {
-    let decoded = DuelSetupV1::decode(setup).map_err(|e| format!("the setup: {e}"))?;
-    let sides = [
-        (MatchSide::A, decoded.body.a()),
-        (MatchSide::B, decoded.body.b()),
-    ];
+    let decoded = DuelSetupV2::decode(setup).map_err(|e| format!("the setup: {e}"))?;
+    let sides = [(MatchSide::A, decoded.a()), (MatchSide::B, decoded.b())];
     let checks = sides.iter().flat_map(|(side, s)| {
         s.team.iter().map(move |fielded| async move {
             let latest = latest_published_state(set, fielded.anchor()).await?;
@@ -471,8 +481,8 @@ pub async fn check_teams(
         checked?;
     }
     let (mine, theirs) = match own {
-        MatchSide::A => (decoded.body.a(), decoded.body.b()),
-        MatchSide::B => (decoded.body.b(), decoded.body.a()),
+        MatchSide::A => (decoded.a(), decoded.b()),
+        MatchSide::B => (decoded.b(), decoded.a()),
     };
     let anchors: Vec<D32> = mine.team.iter().map(|c| *c.anchor()).collect();
     let held = crate::sdk::connect::holdings::prove(core, &anchors)
@@ -527,8 +537,13 @@ impl OutcomeProgram for WildstateDuel {
         wildstate_duel::program_hash()
     }
 
-    fn outcome(&self, setup: &[u8], opened: &[Opened]) -> Result<ProgramOutcome, ProgramFault> {
-        let mut progress = DuelProgress::start(setup)?;
+    fn outcome(
+        &self,
+        setup: &[u8],
+        reveals: &StartReveals,
+        opened: &[Opened],
+    ) -> Result<ProgramOutcome, ProgramFault> {
+        let mut progress = DuelProgress::start(setup, reveals)?;
         for entry in opened {
             progress.apply(entry)?;
         }
@@ -590,14 +605,10 @@ pub fn opened_of_turns(turns: &[DuelOpenedTurnV1]) -> Vec<Opened> {
 pub fn adapter_conformance(program: &dyn OutcomeProgram, vectors: &[u8]) -> Result<usize, String> {
     let set = DuelVectorSetV1::decode(vectors).map_err(|e| format!("the vectors: {e}"))?;
     for (i, vector) in set.vectors.iter().enumerate() {
-        let setup = DuelSetupV1 {
-            program: program.id(),
-            body: vector.body.clone(),
-        }
-        .encode();
+        let (setup, reveals) = staked_setup(program.id(), vector)?;
         let opened = opened_of_turns(&vector.opened);
         let want = win_label(vector.winner);
-        match program.outcome(&setup, &opened) {
+        match program.outcome(&setup, &reveals, &opened) {
             Ok(ProgramOutcome::Done(label)) if label == want => {}
             other => {
                 return Err(format!(
@@ -607,7 +618,7 @@ pub fn adapter_conformance(program: &dyn OutcomeProgram, vectors: &[u8]) -> Resu
             }
         }
         let without_last = &opened[..opened.len() - 1];
-        match program.outcome(&setup, without_last) {
+        match program.outcome(&setup, &reveals, without_last) {
             Ok(ProgramOutcome::Incomplete) => {}
             other => {
                 return Err(format!(
@@ -618,6 +629,30 @@ pub fn adapter_conformance(program: &dyn OutcomeProgram, vectors: &[u8]) -> Resu
         }
     }
     Ok(set.vectors.len())
+}
+
+/// The setup a staked match of `vector`'s sides locks under `program`, each
+/// side committing the start entropy the vector carries, and that entropy:
+/// the program's whole input as Core gives it.
+pub fn staked_setup(
+    program: D32,
+    vector: &wildstate_duel::vectors::DuelVectorV1,
+) -> Result<(Vec<u8>, StartReveals), String> {
+    let body = &vector.body;
+    let setup = DuelSetupV2::new(
+        program,
+        *body.match_nonce(),
+        body.turn_cap(),
+        wildstate_duel::start_commitment(&vector.reveal_a),
+        wildstate_duel::start_commitment(&vector.reveal_b),
+        body.a().clone(),
+        body.b().clone(),
+    )
+    .map_err(|e| format!("the vector's setup: {e}"))?;
+    Ok((
+        setup.encode(),
+        StartReveals::new(vector.reveal_a, vector.reveal_b),
+    ))
 }
 
 /// A program the registry would not register, and why.
@@ -727,12 +762,8 @@ mod tests {
         DuelVectorSetV1::decode(wildstate_duel::VECTORS_V1).expect("the frozen vectors")
     }
 
-    fn setup_of(vector: &wildstate_duel::vectors::DuelVectorV1) -> Vec<u8> {
-        DuelSetupV1 {
-            program: wildstate_duel::program_hash(),
-            body: vector.body.clone(),
-        }
-        .encode()
+    fn setup_of(vector: &wildstate_duel::vectors::DuelVectorV1) -> (Vec<u8>, StartReveals) {
+        staked_setup(wildstate_duel::program_hash(), vector).expect("a staked setup")
     }
 
     #[test]
@@ -744,9 +775,9 @@ mod tests {
         assert_eq!(
             hex_free(&WildstateDuel.id()),
             hex_free(&[
-                0xa4, 0xcf, 0x70, 0xc6, 0xfc, 0xc1, 0x93, 0x6c, 0x60, 0xc0, 0x04, 0x61, 0x6d, 0xc4,
-                0x6b, 0xcd, 0xef, 0xc2, 0x00, 0x89, 0x28, 0x10, 0xcf, 0x6d, 0xa1, 0x90, 0x0a, 0xfe,
-                0x74, 0x19, 0x4d, 0xcd
+                0xa7, 0xa9, 0x54, 0x33, 0x03, 0x67, 0x8e, 0x69, 0x44, 0x65, 0x4c, 0x16, 0xa3, 0xb2,
+                0x0a, 0xad, 0x13, 0x03, 0x9a, 0x85, 0x0d, 0xdf, 0x63, 0x66, 0x2a, 0x9c, 0xbe, 0x35,
+                0xd7, 0x5f, 0x7f, 0xb2
             ]),
             "the program the computed vaults pin"
         );
@@ -762,15 +793,21 @@ mod tests {
     #[test]
     fn incremental_progress_through_the_durable_encoding_equals_full_replay() {
         for (i, vector) in vectors().vectors.iter().enumerate() {
-            let setup = setup_of(vector);
-            let mut progress = DuelProgress::start(&setup).expect("a setup");
+            let (setup, reveals) = setup_of(vector);
+            let mut progress = DuelProgress::start(&setup, &reveals).expect("a setup");
             for entry in opened_of_turns(&vector.opened) {
                 let kept = progress.encode();
                 progress = DuelProgress::decode(&kept).expect("the kept progress");
                 assert_eq!(progress.encode(), kept);
                 progress.apply(&entry).expect("an entry of a frozen match");
             }
-            let replayed = wildstate_duel::outcome(&setup, &vector.turns).expect("decided");
+            let replayed = wildstate_duel::outcome(
+                &setup,
+                reveals.side(MatchSide::A),
+                reveals.side(MatchSide::B),
+                &vector.turns,
+            )
+            .expect("decided");
             assert_eq!(progress.winner(), Some(replayed.side), "vector {i}");
             assert_eq!(progress.winner(), Some(vector.winner), "vector {i}");
             assert_eq!(progress.state().digest(), vector.final_state, "vector {i}");
@@ -785,17 +822,20 @@ mod tests {
             .iter()
             .find(|v| v.turns.len() > 1)
             .expect("a frozen match of more than one turn");
-        let setup = setup_of(vector);
+        let (setup, reveals) = setup_of(vector);
         // The first turn, which does not decide the match, then B resigns.
         let mut opened = opened_of_turns(&vector.opened[..1]);
-        assert_eq!(WildstateDuel.outcome(&setup, &opened), Ok(Incomplete));
+        assert_eq!(
+            WildstateDuel.outcome(&setup, &reveals, &opened),
+            Ok(Incomplete)
+        );
         opened.push(Opened {
             index: 5,
             side: MatchSide::B,
             kind: OpenedKind::Resign,
         });
         assert_eq!(
-            WildstateDuel.outcome(&setup, &opened),
+            WildstateDuel.outcome(&setup, &reveals, &opened),
             Ok(Done(COMPUTED_LABEL_A_WINS.to_vec()))
         );
         opened.push(Opened {
@@ -804,7 +844,7 @@ mod tests {
             kind: OpenedKind::Resign,
         });
         WildstateDuel
-            .outcome(&setup, &opened)
+            .outcome(&setup, &reveals, &opened)
             .expect_err("an entry after the end");
         // A resignation as the very first entry: the other side wins.
         let resign_a = [Opened {
@@ -813,16 +853,16 @@ mod tests {
             kind: OpenedKind::Resign,
         }];
         assert_eq!(
-            WildstateDuel.outcome(&setup, &resign_a),
+            WildstateDuel.outcome(&setup, &reveals, &resign_a),
             Ok(Done(COMPUTED_LABEL_B_WINS.to_vec()))
         );
-        assert_eq!(WildstateDuel.outcome(&setup, &[]), Ok(Incomplete));
+        assert_eq!(WildstateDuel.outcome(&setup, &reveals, &[]), Ok(Incomplete));
     }
 
     #[test]
     fn a_turn_out_of_order_is_a_fault() {
         let vector = &vectors().vectors[0];
-        let setup = setup_of(vector);
+        let (setup, reveals) = setup_of(vector);
         let turn = vector.turns[0];
         let mv = |index, side, committed_at, played: Vec<u8>| Opened {
             index,
@@ -838,7 +878,7 @@ mod tests {
             mv(4, MatchSide::B, 3, turn.b.encode()),
         ];
         WildstateDuel
-            .outcome(&setup, &late_commit)
+            .outcome(&setup, &reveals, &late_commit)
             .expect_err("a commitment after the other side's reveal");
         // A moves twice in one turn.
         let twice = [
@@ -846,16 +886,12 @@ mod tests {
             mv(5, MatchSide::A, 4, turn.a.encode()),
         ];
         WildstateDuel
-            .outcome(&setup, &twice)
+            .outcome(&setup, &reveals, &twice)
             .expect_err("a side's second move of one turn");
         // A setup pinning another program.
-        let other = DuelSetupV1 {
-            program: [0x5A; 32],
-            body: vector.body.clone(),
-        }
-        .encode();
+        let (other, _) = staked_setup([0x5A; 32], vector).expect("a setup");
         WildstateDuel
-            .outcome(&other, &[])
+            .outcome(&other, &reveals, &[])
             .expect_err("a setup pinning another program");
         // The next turn committed before the last turn's last reveal.
         let set = vectors();
@@ -864,11 +900,11 @@ mod tests {
             .iter()
             .find(|v| v.turns.len() > 1)
             .expect("a frozen match of more than one turn");
-        let long_setup = setup_of(long);
+        let (long_setup, long_reveals) = setup_of(long);
         let early = opened_of_turns(&long.opened[..1]);
         let mut pipelined = opened_of_turns(&long.opened[..2]);
         assert_eq!(
-            WildstateDuel.outcome(&long_setup, &pipelined),
+            WildstateDuel.outcome(&long_setup, &long_reveals, &pipelined),
             Ok(Incomplete)
         );
         if let Some(Opened {
@@ -879,9 +915,9 @@ mod tests {
             *committed_at = 4;
         }
         WildstateDuel
-            .outcome(&long_setup, &pipelined)
+            .outcome(&long_setup, &long_reveals, &pipelined)
             .expect_err("a commitment before the last turn's last reveal");
-        let progress = DuelProgress::start(&long_setup).expect("a setup");
+        let progress = DuelProgress::start(&long_setup, &long_reveals).expect("a setup");
         progress.may_commit().expect("a commitment between turns");
         let mut half = progress.clone();
         half.apply(&early[0]).expect("A's reveal");
@@ -901,7 +937,7 @@ mod tests {
             .iter()
             .find(|v| v.turns.len() > 1)
             .expect("a frozen match of more than one turn");
-        let setup = setup_of(vector);
+        let (setup, reveals) = setup_of(vector);
         let mut trailing = vector.turns[0].a.encode();
         trailing.push(7);
         let garbled: [Vec<u8>; 4] = [
@@ -914,9 +950,12 @@ mod tests {
             a: DuelMoveV1::Pass.encode(),
             b: vector.opened[0].b.clone(),
         };
-        let passed =
-            WildstateDuel.outcome(&setup, &opened_of_turns(std::slice::from_ref(&as_passed)));
-        let mut by_pass = DuelProgress::start(&setup).expect("a setup");
+        let passed = WildstateDuel.outcome(
+            &setup,
+            &reveals,
+            &opened_of_turns(std::slice::from_ref(&as_passed)),
+        );
+        let mut by_pass = DuelProgress::start(&setup, &reveals).expect("a setup");
         for entry in opened_of_turns(&[as_passed]) {
             by_pass.apply(&entry).expect("a pass");
         }
@@ -926,8 +965,8 @@ mod tests {
                 b: vector.opened[0].b.clone(),
             };
             let opened = opened_of_turns(&[turn]);
-            assert_eq!(WildstateDuel.outcome(&setup, &opened), passed);
-            let mut progress = DuelProgress::start(&setup).expect("a setup");
+            assert_eq!(WildstateDuel.outcome(&setup, &reveals, &opened), passed);
+            let mut progress = DuelProgress::start(&setup, &reveals).expect("a setup");
             for entry in &opened {
                 progress.apply(entry).expect("a garbled reveal is applied");
             }
@@ -942,7 +981,10 @@ mod tests {
             })
         }) {
             assert_eq!(
-                WildstateDuel.outcome(&setup_of(v), &opened_of_turns(&v.opened)),
+                {
+                    let (setup, reveals) = setup_of(v);
+                    WildstateDuel.outcome(&setup, &reveals, &opened_of_turns(&v.opened))
+                },
                 Ok(Done(win_label(v.winner).to_vec()))
             );
             decided += 1;
@@ -964,9 +1006,10 @@ mod tests {
             fn outcome(
                 &self,
                 setup: &[u8],
+                reveals: &StartReveals,
                 opened: &[Opened],
             ) -> Result<ProgramOutcome, ProgramFault> {
-                Ok(match WildstateDuel.outcome(setup, opened)? {
+                Ok(match WildstateDuel.outcome(setup, reveals, opened)? {
                     Done(label) if label == COMPUTED_LABEL_A_WINS => {
                         Done(COMPUTED_LABEL_B_WINS.to_vec())
                     }
@@ -1050,19 +1093,15 @@ mod tests {
     }
 
     #[test]
-    fn the_tiebreak_seed_commits_the_nonce_and_both_keys_in_order() {
-        let seed = wildstate_duel::tiebreak_seed(&[1; 32], &[2; 64], &[3; 64]);
-        assert_ne!(
-            seed,
-            wildstate_duel::tiebreak_seed(&[1; 32], &[3; 64], &[2; 64])
-        );
-        assert_ne!(
-            seed,
-            wildstate_duel::tiebreak_seed(&[4; 32], &[2; 64], &[3; 64])
-        );
-        assert_ne!(
-            seed,
-            wildstate_duel::tiebreak_seed(&[1; 32], &[2; 63], &[3; 64])
-        );
+    fn the_tiebreak_seed_commits_the_nonce_both_reveals_and_both_keys_in_order() {
+        let seed = |nonce: u8, ra: u8, rb: u8, ka: &[u8], kb: &[u8]| {
+            wildstate_duel::tiebreak_seed(&[nonce; 32], &[ra; 32], &[rb; 32], ka, kb)
+        };
+        let base = seed(1, 5, 6, &[2; 64], &[3; 64]);
+        assert_ne!(base, seed(1, 5, 6, &[3; 64], &[2; 64]));
+        assert_ne!(base, seed(4, 5, 6, &[2; 64], &[3; 64]));
+        assert_ne!(base, seed(1, 5, 6, &[2; 63], &[3; 64]));
+        assert_ne!(base, seed(1, 6, 5, &[2; 64], &[3; 64]));
+        assert_ne!(base, seed(1, 5, 7, &[2; 64], &[3; 64]));
     }
 }

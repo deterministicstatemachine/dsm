@@ -44,8 +44,10 @@ pub struct DuelMatchRow {
     pub head: D32,
     /// Side A's and side B's unopened commitments.
     pub open: [Option<OpenCommitment>; 2],
-    /// The outcome program's progress after the last entry.
-    pub progress: Vec<u8>,
+    /// The outcome program's progress after the last entry, from the Start
+    /// found final on: the match's tiebreak seed exists only once the Start
+    /// opened both sides' start entropy (SoFi Amendment S33).
+    pub progress: Option<Vec<u8>>,
     /// The `EquivocationProof` bytes, once the other side was caught signing
     /// two heads at one index.
     pub equivocation: Option<Vec<u8>>,
@@ -145,7 +147,7 @@ fn match_from(conn: &Connection, match_cell: &D32) -> Result<Option<DuelMatchRow
                     r.get::<_, Vec<u8>>(7)?,
                     r.get::<_, Option<Vec<u8>>>(8)?,
                     r.get::<_, Option<Vec<u8>>>(9)?,
-                    r.get::<_, Vec<u8>>(10)?,
+                    r.get::<_, Option<Vec<u8>>>(10)?,
                     r.get::<_, Option<Vec<u8>>>(11)?,
                 ))
             },
@@ -199,9 +201,23 @@ pub fn set_ready(match_cell: &D32, signature: &[u8]) -> Result<()> {
     set_column(match_cell, "ready", signature)
 }
 
-/// Keep the Start this wallet found final at the start cell.
-pub fn set_start_final(match_cell: &D32, start: &[u8]) -> Result<()> {
-    set_column(match_cell, "start_final", start)
+/// Keep the Start this wallet found final at the start cell and the outcome
+/// program's progress before the first entry, started on the start entropy
+/// that Start opened. Kept together, in one statement: a match is never
+/// started without its progress.
+pub fn set_started(match_cell: &D32, start: &[u8], progress: &[u8]) -> Result<()> {
+    let binding = connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the database lock: {e}"))?;
+    let changed = conn.execute(
+        "UPDATE duel_match SET start_final = ?1, progress = ?2 WHERE match_cell = ?3",
+        params![start, progress, match_cell.as_slice()],
+    )?;
+    if changed != 1 {
+        return Err(anyhow!("no kept match at that cell"));
+    }
+    Ok(())
 }
 
 /// Keep the proof that the other side equivocated.

@@ -18,7 +18,7 @@ use dsm::types::error::DsmError;
 use serial_test::serial;
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::creatures::CreatureRecordV1;
-use wildstate_duel::{CreatureStateV1, DuelMatchV1, DuelSetupV1, DuelSide, DuelTurnV1};
+use wildstate_duel::{CreatureStateV1, DuelMatchV1, DuelSetupV2, DuelSide, DuelTurnV1};
 
 use super::node_e2e_tests::{balance, era, pending_position};
 use crate::economic_fixtures::{whole_era, NETWORK};
@@ -48,6 +48,13 @@ pub(super) fn frozen() -> (DuelMatchV1, Vec<DuelTurnV1>) {
 fn session_key(d: &TestDevice, nonce: &D32) -> Vec<u8> {
     d.enter();
     computed_flow::session_public_key(nonce).expect("a session key")
+}
+
+/// `d`'s start commitment for the match, as its wallet answers it beside its
+/// session key (SoFi Amendment S33).
+fn start_commitment_of(d: &TestDevice, nonce: &D32) -> D32 {
+    d.enter();
+    computed_flow::start_commitment(nonce).expect("a start commitment")
 }
 
 /// `d` issues the creatures of its side of the frozen match, `of`, as its
@@ -123,14 +130,34 @@ pub(super) async fn issue_team(
 }
 
 /// The setup of a match between `a` and `b` fielding `team_a` and `team_b`
-/// in the frozen match, each side naming its wallet's identity and its
-/// session key, and the tiebreak seed both keys and the nonce derive.
+/// in the frozen match, each side naming its wallet's identity, its session
+/// key and its wallet's start commitment for the match.
 pub(super) fn setup_with_keys(
     a: &TestDevice,
     b: &TestDevice,
     nonce: D32,
     (key_a, team_a): (&[u8], &[CreatureStateV1]),
     (key_b, team_b): (&[u8], &[CreatureStateV1]),
+) -> Vec<u8> {
+    let commit_a = start_commitment_of(a, &nonce);
+    let commit_b = start_commitment_of(b, &nonce);
+    setup_with_answers(
+        a,
+        b,
+        nonce,
+        (key_a, &commit_a, team_a),
+        (key_b, &commit_b, team_b),
+    )
+}
+
+/// [`setup_with_keys`] with each side's session key and start commitment as
+/// its wallet answered them.
+pub(super) fn setup_with_answers(
+    a: &TestDevice,
+    b: &TestDevice,
+    nonce: D32,
+    (key_a, commit_a, team_a): (&[u8], &D32, &[CreatureStateV1]),
+    (key_b, commit_b, team_b): (&[u8], &D32, &[CreatureStateV1]),
 ) -> Vec<u8> {
     let (body, _) = frozen();
     let side = |of: &DuelSide, d: &TestDevice, key: &[u8], team: &[CreatureStateV1]| DuelSide {
@@ -142,12 +169,16 @@ pub(super) fn setup_with_keys(
     };
     let side_a = side(body.a(), a, key_a, team_a);
     let side_b = side(body.b(), b, key_b, team_b);
-    let seed = wildstate_duel::tiebreak_seed(&nonce, key_a, key_b);
-    let body = DuelMatchV1::new(nonce, body.turn_cap(), seed, side_a, side_b).expect("a match");
-    DuelSetupV1 {
-        program: wildstate_duel::program_hash(),
-        body,
-    }
+    DuelSetupV2::new(
+        wildstate_duel::program_hash(),
+        nonce,
+        body.turn_cap(),
+        *commit_a,
+        *commit_b,
+        side_a,
+        side_b,
+    )
+    .expect("a setup")
     .encode()
 }
 
@@ -176,7 +207,7 @@ pub(super) fn holdings_of(
     setup: &[u8],
     side: MatchSide,
 ) -> dsm::types::proto::HoldingsProofV1 {
-    let body = DuelSetupV1::decode(setup).expect("a setup").body;
+    let body = DuelSetupV2::decode(setup).expect("a setup");
     let team = match side {
         MatchSide::A => &body.a().team,
         MatchSide::B => &body.b().team,
@@ -212,7 +243,11 @@ async fn lock(
     .await
 }
 
-async fn ready(d: &TestDevice, cell: &D32, theirs: Option<&[u8]>) -> computed_flow::Readied {
+async fn ready(
+    d: &TestDevice,
+    cell: &D32,
+    theirs: Option<(&[u8], &D32)>,
+) -> computed_flow::Readied {
     d.enter();
     computed_flow::ready(&d.router().core_sdk, &set(), cell, theirs)
         .await
@@ -264,14 +299,17 @@ async fn open_match(p: &Pair, nonce: D32) -> (Match, Vec<u8>) {
 }
 
 /// A readies first; B readies second with A's ready and writes the Start.
-async fn start(p: &Pair, m: &Match) {
+/// Both wallets ready, B second, writing the Start; both sides' start
+/// entropy, as the Start opened it.
+async fn start(p: &Pair, m: &Match) -> ([u8; 32], [u8; 32]) {
     let a = ready(&p.a, &m.cell, None).await;
     assert_eq!(a.view.start, None, "one ready is no Start");
-    let b = ready(&p.b, &m.cell, Some(&a.ready_signature)).await;
+    let b = ready(&p.b, &m.cell, Some((&a.ready_signature, &a.reveal))).await;
     assert_eq!(
         b.view.start,
         Some((StartKind::Start, dsm::route_chain::ChainState::Final))
     );
+    (a.reveal, b.reveal)
 }
 
 /// The transcript as the test's relay carries it between the two wallets.
@@ -454,12 +492,12 @@ async fn the_winner_by_computation_takes_both_stakes() {
         refused.to_string().contains("no Start is final"),
         "{refused}"
     );
-    start(&p, &m).await;
+    let (reveal_a, reveal_b) = start(&p, &m).await;
 
     // Three turns, then B resigns: nothing is written to storage.
     forget_requests(&p);
     let (_, turns) = frozen();
-    let mut state = wildstate_duel::start(&setup).expect("the setup");
+    let mut state = wildstate_duel::start(&setup, &reveal_a, &reveal_b).expect("the setup");
     for turn in turns.iter().take(3) {
         play_turn(&p, &mut relay, turn);
         state = wildstate_duel::step(&state, turn).expect("a turn of a frozen match");
@@ -604,7 +642,7 @@ async fn tampered_entries_are_refused_and_an_equivocation_settles_for_the_honest
     // A's key signs a second head at index 1 outside its wallet, as a cheater
     // holding the key would. B's wallet catches it and keeps the proof.
     p.a.enter();
-    let nonce = DuelSetupV1::decode(&setup).expect("the setup").body;
+    let nonce = DuelSetupV2::decode(&setup).expect("the setup");
     let secret = computed_flow::session_keypair(nonce.match_nonce())
         .expect("A's session key")
         .secret_key()
@@ -707,7 +745,12 @@ async fn a_withdraw_before_the_start_voids_the_match_and_refunds_both() {
     assert_eq!(withdrawn.final_outcome(), Some(b"void".to_vec()));
 
     // B's ready no longer starts anything: the Withdraw holds the cell.
-    let late = ready(&p.b, &m.cell, Some(&a_ready.ready_signature)).await;
+    let late = ready(
+        &p.b,
+        &m.cell,
+        Some((&a_ready.ready_signature, &a_ready.reveal)),
+    )
+    .await;
     assert_eq!(
         late.view.start,
         Some((StartKind::Withdraw, dsm::route_chain::ChainState::Final))
@@ -983,6 +1026,21 @@ async fn a_lock_is_refused_for_a_foreign_session_key_or_a_counterpart_that_does_
     refused(
         lock(&p.b, &p.a, &foreign, MatchSide::B, stake, None).await,
         "session key for this side is not this wallet's",
+    );
+    // A setup naming B's key on B's side but A's start commitment: B never
+    // fixed that entropy, so it could be the one that picks the seed (SA-140).
+    let key_b = session_key(&p.b, &nonce);
+    let commit_a = start_commitment_of(&p.a, &nonce);
+    let borrowed = setup_with_answers(
+        &p.a,
+        &p.b,
+        nonce,
+        (&key_a, &commit_a, &teams.0),
+        (&key_b, &commit_a, &teams.1),
+    );
+    refused(
+        lock(&p.b, &p.a, &borrowed, MatchSide::B, stake, None).await,
+        "start commitment for this side is not this wallet's",
     );
 
     // A locks in one match; B's lock in another names A's vault.

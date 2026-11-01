@@ -1350,12 +1350,18 @@ impl AppRouterImpl {
                 Box::pin(self.collect(session, vault_ids)).await
             }
             Request::DuelSessionKey { match_nonce } => {
-                match crate::sdk::computed_flow::session_public_key(match_nonce) {
-                    Ok(key) => Executed::carried_out(Some(
+                let answered =
+                    crate::sdk::computed_flow::session_public_key(match_nonce).and_then(|key| {
+                        crate::sdk::computed_flow::start_commitment(match_nonce)
+                            .map(|commitment| (key, commitment))
+                    });
+                match answered {
+                    Ok((key, commitment)) => Executed::carried_out(Some(
                         generated::app_response_body_v1::Result::DuelSessionKey(
                             generated::ConnectDuelSessionKeyResultV1 {
                                 session_public_key: key,
                                 signature_alg: u32::from(crate::sdk::sofi_flow::SIGNATURE_ALG),
+                                start_commitment: commitment.to_vec(),
                             },
                         ),
                     )),
@@ -1370,7 +1376,7 @@ impl AppRouterImpl {
             },
             Request::DuelReady {
                 match_cell,
-                opponent_ready,
+                opponent,
             } => {
                 let readied = async {
                     let set = own_set()?;
@@ -1378,7 +1384,9 @@ impl AppRouterImpl {
                         &self.core_sdk,
                         &set,
                         match_cell,
-                        opponent_ready.as_deref(),
+                        opponent
+                            .as_ref()
+                            .map(|(ready, reveal)| (ready.as_slice(), reveal)),
                     )
                     .await
                     .map_err(|e| format!("readying: {e}"))
@@ -1389,6 +1397,7 @@ impl AppRouterImpl {
                             generated::ConnectDuelReadyResultV1 {
                                 ready_signature: r.ready_signature,
                                 cells: Some(duel_cells(&r.view)),
+                                reveal: r.reveal.to_vec(),
                             },
                         ),
                     )),

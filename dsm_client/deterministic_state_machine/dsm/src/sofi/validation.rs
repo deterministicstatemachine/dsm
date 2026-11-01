@@ -6522,6 +6522,8 @@ mod tests {
                 token(0x5E),
                 EscrowSigner::new(SIG_ALG, &[0x3A; 64]).unwrap(),
                 EscrowSigner::new(SIG_ALG, &[0x3B; 64]).unwrap(),
+                crate::sofi::computed::start_commitment(&[0x3C; 32]),
+                crate::sofi::computed::start_commitment(&[0x3D; 32]),
             )
             .unwrap(),
             vec![

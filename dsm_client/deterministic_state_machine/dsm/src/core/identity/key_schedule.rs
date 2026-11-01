@@ -19,6 +19,7 @@
 //!   recovery_aead   = Expand(PRK_w, "DSM/recovery-aead/v2"          0x00)
 //!   recovery_auth   = Expand(PRK_w, "DSM/recovery-authority/v2"     0x00)
 //!   session_seed    = Expand(PRK_w, "DSM/escrow/session-key/v2"     0x00 G match_nonce)
+//!   start_entropy   = Expand(PRK_w, "DSM/escrow/start-entropy/v1"   0x00 G match_nonce)
 //! PRK_d  = Extract("DSM/kdf/device-root/v1" 0x00, device_seed)
 //!   AK_seed         = Expand(PRK_d, "DSM/device-ak/v3"              0x00 aph)
 //! PRK_s0 = Extract("DSM/kdf/s0-root/v1" 0x00, s0)
@@ -52,10 +53,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::common::domain_tags::{
     TAG_DSM_ATTA_V3, TAG_DSM_CHAIN_HEAD_AT_REST_V3, TAG_DSM_DEVICE_AK_V3, TAG_DSM_DEVICE_SEED_V3,
-    TAG_DSM_ESCROW_SESSION_KEY_V2, TAG_DSM_GENESIS_NONCE_V3, TAG_DSM_GENESIS_ROOT_AUTHORITY_V2,
-    TAG_DSM_KDF_DEVICE_ROOT_V1, TAG_DSM_KDF_S0_ROOT_V1, TAG_DSM_KDF_WALLET_ROOT_V1,
-    TAG_DSM_ML_KEM_IDENTITY_V1, TAG_DSM_RECOVERY_AEAD_V2, TAG_DSM_RECOVERY_AUTHORITY_V2,
-    TAG_DSM_S0_V3, TAG_DSM_SDK_ENTROPY_V3, TAG_DSM_SMASTER_V3,
+    TAG_DSM_ESCROW_SESSION_KEY_V2, TAG_DSM_ESCROW_START_ENTROPY_V1, TAG_DSM_GENESIS_NONCE_V3,
+    TAG_DSM_GENESIS_ROOT_AUTHORITY_V2, TAG_DSM_KDF_DEVICE_ROOT_V1, TAG_DSM_KDF_S0_ROOT_V1,
+    TAG_DSM_KDF_WALLET_ROOT_V1, TAG_DSM_ML_KEM_IDENTITY_V1, TAG_DSM_RECOVERY_AEAD_V2,
+    TAG_DSM_RECOVERY_AUTHORITY_V2, TAG_DSM_S0_V3, TAG_DSM_SDK_ENTROPY_V3, TAG_DSM_SMASTER_V3,
 };
 use crate::crypto::domain::TaggedHashDomain;
 use crate::crypto::hkdf;
@@ -190,6 +191,14 @@ pub fn escrow_session_seed(prk_w: &Prk, g: &[u8; 32], match_nonce: &[u8; 32]) ->
     expand32(prk_w, TAG_DSM_ESCROW_SESSION_KEY_V2, &[g, match_nonce])
 }
 
+/// A side's start entropy for a match (SoFi §19.10, Amendment S33): an Expand
+/// under the wallet root beside the session seed, from the wallet's genesis
+/// and the match's nonce. The wallet answers only its commitment at lock and
+/// opens it with its ready.
+pub fn escrow_start_entropy(prk_w: &Prk, g: &[u8; 32], match_nonce: &[u8; 32]) -> [u8; 32] {
+    expand32(prk_w, TAG_DSM_ESCROW_START_ENTROPY_V1, &[g, match_nonce])
+}
+
 /// AK seed, under the device seed's Extract.
 pub fn ak_seed(device_seed: &[u8; 32], aph: &[u8; 32]) -> [u8; 32] {
     expand32(&device_prk(device_seed), TAG_DSM_DEVICE_AK_V3, &[aph])
@@ -246,6 +255,7 @@ mod tests {
             TAG_DSM_SMASTER_V3,
             TAG_DSM_CHAIN_HEAD_AT_REST_V3,
             TAG_DSM_ESCROW_SESSION_KEY_V2,
+            TAG_DSM_ESCROW_START_ENTROPY_V1,
         ];
         for (i, a) in labels.iter().enumerate() {
             assert!(!a.source_bytes().contains(&0u8));

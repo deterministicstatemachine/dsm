@@ -34,9 +34,9 @@ use dsm::sofi::resolve::{AcceptedGeneses, VaultGenesis, Verifier};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::wire::{
     next_position, ComputedBranch, ComputedEscrowTerms, ComputedTable, EntryKind, EscrowSigner,
-    EquivocationProof, MatchSide, SideSignature, SignedHead, StartKind, TranscriptEntry,
-    TranscriptOutcome, VaultGenesisPreimage, VaultStateLeaf, COMPUTED_LABEL_A_WINS,
-    COMPUTED_LABEL_B_WINS, COMPUTED_LABEL_VOID, VAULT_STATUS_ACTIVE,
+    EquivocationProof, MatchSide, SideSignature, SignedHead, StartKind, StartReveals,
+    TranscriptEntry, TranscriptOutcome, VaultGenesisPreimage, VaultStateLeaf,
+    COMPUTED_LABEL_A_WINS, COMPUTED_LABEL_B_WINS, COMPUTED_LABEL_VOID, VAULT_STATUS_ACTIVE,
 };
 use dsm::types::device_state::{BalanceDelta, BalanceDirection};
 use dsm::types::error::DsmError;
@@ -85,7 +85,19 @@ fn short(id: &D32) -> String {
 /// and the derived seed are wiped once the key pair is made; the wallet-root
 /// key wipes itself.
 pub(crate) fn session_keypair(match_nonce: &D32) -> Result<SignatureKeyPair, DsmError> {
-    use dsm::core::identity::key_schedule::{escrow_session_seed, wallet_prk};
+    use dsm::core::identity::key_schedule::escrow_session_seed;
+    use zeroize::Zeroizing;
+    let (root, genesis) = wallet_root()?;
+    let seed = Zeroizing::new(escrow_session_seed(&root, &genesis, match_nonce));
+    SignatureKeyPair::generate_from_entropy(seed.as_slice())
+}
+
+/// This wallet's root and genesis, from the seed it holds while unlocked: what
+/// a match's session key and start entropy are derived from. Fails closed when
+/// the wallet is locked; the copy of the seed is wiped once the root is made,
+/// and the root wipes itself.
+fn wallet_root() -> Result<(dsm::core::identity::key_schedule::Prk, D32), DsmError> {
+    use dsm::core::identity::key_schedule::wallet_prk;
     use zeroize::Zeroizing;
     let genesis = crate::sdk::app_state::AppState::get_genesis_hash()
         .ok_or_else(|| DsmError::InvalidState("no genesis for a session key".into()))?;
@@ -102,12 +114,25 @@ pub(crate) fn session_keypair(match_nonce: &D32) -> Result<SignatureKeyPair, Dsm
             )
         })?,
     );
-    let seed = Zeroizing::new(escrow_session_seed(
-        &wallet_prk(&wallet_seed),
-        &genesis,
-        match_nonce,
-    ));
-    SignatureKeyPair::generate_from_entropy(seed.as_slice())
+    Ok((wallet_prk(&wallet_seed), genesis))
+}
+
+/// This wallet's start entropy for the match whose setup carries
+/// `match_nonce` (SoFi §19.10, Amendment S33): `Expand(PRK_w,
+/// DSM/escrow/start-entropy/v1 ‖ 0x00 ‖ genesis ‖ match_nonce)`. It leaves the
+/// wallet only with its ready, once both vaults are checked; until then only
+/// its commitment does. Derived when used, never stored.
+fn start_entropy(match_nonce: &D32) -> Result<zeroize::Zeroizing<D32>, DsmError> {
+    let (root, genesis) = wallet_root()?;
+    Ok(zeroize::Zeroizing::new(
+        dsm::core::identity::key_schedule::escrow_start_entropy(&root, &genesis, match_nonce),
+    ))
+}
+
+/// This wallet's start commitment for the match: what it answers beside its
+/// session key, and what the setup carries for its side.
+pub fn start_commitment(match_nonce: &D32) -> Result<D32, DsmError> {
+    Ok(computed::start_commitment(&*start_entropy(match_nonce)?))
 }
 
 /// This wallet's session public key for the match nonce: what the setup
@@ -130,6 +155,8 @@ pub fn table_of(setup: &[u8], read: &MatchSetup) -> Result<ComputedTable, DsmErr
         computed::setup_digest(setup),
         session_signer(&read.a.session_public_key)?,
         session_signer(&read.b.session_public_key)?,
+        read.a.start_commitment,
+        read.b.start_commitment,
     )
     .map_err(refuse)
 }
@@ -309,6 +336,11 @@ pub async fn create(
             "the setup's session key for this side is not this wallet's for the match",
         ));
     }
+    if start_commitment(&read.match_nonce)? != mine.start_commitment {
+        return Err(refuse(
+            "the setup's start commitment for this side is not this wallet's for the match",
+        ));
+    }
     let relayed = intent
         .opponent_holdings
         .as_deref()
@@ -347,7 +379,6 @@ pub async fn create(
 
     let (vault_id, position) =
         create_vault(core, set, me, &terms, intent.token, intent.amount).await?;
-    let progress = DuelProgress::start(&intent.setup).map_err(|e| refuse(e.reason))?;
     store::insert_match(&DuelMatchRow {
         match_cell,
         side: side_byte(intent.side),
@@ -359,7 +390,7 @@ pub async fn create(
         last_index: 0,
         head: computed::genesis_head(&match_cell, terms.table().setup_digest()),
         open: [None, None],
-        progress: progress.encode(),
+        progress: None,
         equivocation: None,
     })
     .map_err(|e| storage("kept matches", e))?;
@@ -625,6 +656,9 @@ pub struct Readied {
     /// This wallet's signature over `m_ready`: what the other side's wallet
     /// assembles the Start from.
     pub ready_signature: Vec<u8>,
+    /// This wallet's start entropy, opened with its ready (SoFi Amendment
+    /// S33): the other side's wallet puts it in the Start.
+    pub reveal: D32,
     /// What the cells hold after this call: a Start this call wrote, when the
     /// other side's ready was in hand.
     pub view: MatchView,
@@ -634,16 +668,25 @@ pub struct Readied {
 /// players' vaults are verified first — this wallet's own and the other
 /// side's, found on the match cell — each accepted, Active, bound to this
 /// match, of one token and one amount, its owner one of the two players and
-/// its branches mirrored. Only then is the ready signed. When the other
-/// side's ready signature is supplied, this wallet readies second and writes
-/// the Start itself.
+/// its branches mirrored. Only then is the ready signed and this wallet's
+/// start entropy handed out with it. When the other side's ready and start
+/// entropy are supplied, this wallet readies second: the other side's entropy
+/// must open that side's start commitment before this wallet signs anything,
+/// and this wallet writes the Start itself (SoFi Amendment S33).
 pub async fn ready(
     core: &CoreSDK,
     set: &StorageSet,
     match_cell: &D32,
-    opponent_ready: Option<&[u8]>,
+    opponent_ready: Option<(&[u8], &D32)>,
 ) -> Result<Readied, DsmError> {
     let kept = Kept::load(match_cell)?;
+    if let Some((_, reveal)) = opponent_ready {
+        if computed::start_commitment(reveal) != *kept.table().start_commitment(kept.side.other()) {
+            return Err(refuse(
+                "the other side's start entropy does not open its start commitment",
+            ));
+        }
+    }
     let me = identity(core)?;
     let ctx = VerifierContext::new(set, Some(me), None)?;
     let verifier = ctx.verifier();
@@ -697,32 +740,37 @@ pub async fn ready(
             signature
         }
     };
-    if let Some(theirs) = opponent_ready {
-        write_start(set, &kept, &ready_signature, theirs).await?;
+    let reveal = *start_entropy(&kept.read.match_nonce)?;
+    if let Some(their_ready) = opponent_ready {
+        write_start(set, &kept, (&ready_signature, &reveal), their_ready).await?;
     }
     let view = MatchView::of(&read_cells(&verifier, &kept.terms)?);
     Ok(Readied {
         match_cell: *match_cell,
         ready_signature,
+        reveal,
         view,
     })
 }
 
-/// Write the Start of the match: both ready signatures, side A's then side
-/// B's, assembled by Core, which verifies each under its side's session key
-/// before the Start exists. Written to the start cell's leader; whichever of
-/// a Start and a Withdraw is first there holds the cell for good.
+/// Write the Start of the match: both ready signatures and both sides' start
+/// entropy, side A's then side B's, assembled by Core, which verifies each
+/// ready under its side's session key and each entropy against its side's
+/// commitment before the Start exists. Written to the start cell's leader;
+/// whichever of a Start and a Withdraw is first there holds the cell for
+/// good.
 async fn write_start(
     set: &StorageSet,
     kept: &Kept,
-    own_ready: &[u8],
-    opponent_ready: &[u8],
+    (own_ready, own_reveal): (&[u8], &D32),
+    (opponent_ready, opponent_reveal): (&[u8], &D32),
 ) -> Result<(), DsmError> {
-    let (ready_a, ready_b) = match kept.side {
-        MatchSide::A => (own_ready, opponent_ready),
-        MatchSide::B => (opponent_ready, own_ready),
+    let ((ready_a, reveal_a), (ready_b, reveal_b)) = match kept.side {
+        MatchSide::A => ((own_ready, own_reveal), (opponent_ready, opponent_reveal)),
+        MatchSide::B => ((opponent_ready, opponent_reveal), (own_ready, own_reveal)),
     };
-    let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b)
+    let reveals = StartReveals::new(*reveal_a, *reveal_b);
+    let start = computed::assemble_start(kept.y(), kept.table(), ready_a, ready_b, reveals)
         .map_err(|why| refuse(format!("the Start does not assemble: {why:?}")))?;
     let cells = kept.cells(set)?;
     let write = write_recorded(
@@ -811,9 +859,28 @@ fn require_started(core: &CoreSDK, set: &StorageSet, kept: &mut Kept) -> Result<
             ))
         }
     };
-    store::set_start_final(&kept.row.match_cell, &value).map_err(|e| storage("kept matches", e))?;
+    let reveals = start_reveals(&value)?;
+    let progress = DuelProgress::start(&kept.row.setup, &reveals)
+        .map_err(|e| refuse(e.reason))?
+        .encode();
+    store::set_started(&kept.row.match_cell, &value, &progress)
+        .map_err(|e| storage("kept matches", e))?;
     kept.row.start_final = Some(value);
+    kept.row.progress = Some(progress);
     Ok(())
+}
+
+/// Both sides' start entropy the Start `start` opened.
+fn start_reveals(start: &[u8]) -> Result<StartReveals, DsmError> {
+    let start = dsm::sofi::wire::MatchStart::decode(start)
+        .map_err(|e| storage("the kept Start", format!("{e:?}")))?;
+    match start.body() {
+        dsm::sofi::wire::StartBody::Start { reveals, .. } => Ok(*reveals),
+        dsm::sofi::wire::StartBody::Withdraw { .. } => Err(storage(
+            "the kept Start",
+            "a Withdraw holds the start cell, not a Start",
+        )),
+    }
 }
 
 // ── applying entries ────────────────────────────────────────────────────────
@@ -851,8 +918,10 @@ impl Applying {
             last_index: row.last_index,
             head: row.head,
             open: row.open,
-            progress: DuelProgress::decode(&row.progress)
-                .map_err(|e| storage("kept match progress", e))?,
+            progress: DuelProgress::decode(row.progress.as_deref().ok_or_else(|| {
+                refuse("the match has not started: no Start is final at its start cell")
+            })?)
+            .map_err(|e| storage("kept match progress", e))?,
             kept: Vec::new(),
         })
     }
@@ -1234,10 +1303,16 @@ fn transcript_outcome(kept: &Kept) -> Result<TranscriptOutcome, DsmError> {
             signatures.push(SideSignature::new(side, &last.signature).map_err(refuse)?);
         }
     }
+    let started = kept
+        .row
+        .start_final
+        .as_deref()
+        .ok_or_else(|| refuse("the match has not started"))?;
     TranscriptOutcome::new(
         *kept.y(),
         kept.table().clone(),
         &kept.row.setup,
+        start_reveals(started)?,
         entries.into_iter().map(|e| e.entry).collect(),
         signatures,
     )
@@ -1293,7 +1368,7 @@ pub async fn release(
 mod tests {
     use super::*;
     use crate::test_support::two_device::TestDevice;
-    use dsm::core::identity::key_schedule::{escrow_session_seed, wallet_prk};
+    use dsm::core::identity::key_schedule::{escrow_session_seed, escrow_start_entropy, wallet_prk};
     use serial_test::serial;
 
     /// SoFi Amendment S27: a wallet's session key for a match is the SPHINCS+
@@ -1323,6 +1398,38 @@ mod tests {
         assert_ne!(
             session_public_key(&[0x4f; 32]).expect("another match's key"),
             expected.public_key()
+        );
+    }
+
+    /// SoFi Amendment S33: a wallet's start commitment for a match is the
+    /// hash of the Expand under its wallet root, from its own genesis and the
+    /// match's nonce, beside its session key's. Another nonce is another
+    /// commitment, and the entropy is not the session key's seed.
+    ///
+    /// MUTATION CONTROL: derive the entropy under the session-key label and
+    /// this goes red.
+    #[test]
+    #[serial]
+    fn a_start_commitment_is_the_wallet_roots_expand_for_the_match() {
+        let device = TestDevice::create("start-entropy", 0x5F);
+        device.enter();
+        let nonce = [0x4e; 32];
+        let wallet_seed = crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed()
+            .expect("the unlocked wallet seed");
+        let root = wallet_prk(&wallet_seed);
+        let entropy = escrow_start_entropy(&root, &device.genesis, &nonce);
+        assert_eq!(
+            start_commitment(&nonce).expect("a start commitment"),
+            computed::start_commitment(&entropy)
+        );
+        assert_ne!(
+            entropy,
+            escrow_session_seed(&root, &device.genesis, &nonce),
+            "the start entropy is not the session key's seed"
+        );
+        assert_ne!(
+            start_commitment(&[0x4f; 32]).expect("another match's commitment"),
+            computed::start_commitment(&entropy)
         );
     }
 }

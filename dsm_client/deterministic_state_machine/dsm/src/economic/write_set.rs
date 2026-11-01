@@ -2635,7 +2635,15 @@ mod escrow_create_binding_tests {
         let computed = ComputedEscrowTerms::new(
             token().0,
             crate::sofi::escrow::external_commitment(b"a match"),
-            ComputedTable::new([0x9A; 32], [0x5E; 32], key(0x3A), key(0x3B)).expect("table"),
+            ComputedTable::new(
+                [0x9A; 32],
+                [0x5E; 32],
+                key(0x3A),
+                key(0x3B),
+                crate::sofi::computed::start_commitment(&[0x3C; 32]),
+                crate::sofi::computed::start_commitment(&[0x3D; 32]),
+            )
+            .expect("table"),
             vec![
                 ComputedBranch::new(b"a-wins", G, DEV),
                 ComputedBranch::new(b"b-wins", G, DEV),

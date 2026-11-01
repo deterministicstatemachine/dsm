@@ -546,6 +546,15 @@ pub mod schema {
         // payment was, so it named its recipient by device id alone. Schema 2
         // carries it, re-hashed to the payload the anchor signed (SA-133).
         (super::class::OFFLINE_SETTLEMENT_BODY, 1),
+        // Schema 1 of the computed-escrow objects nested a table with no start
+        // commitments, so nothing fixed either side's start entropy at lock and
+        // a program's randomness was chosen by whoever supplied a key second.
+        // Schema 2 commits both in the table, and the Start and the transcript
+        // outcome open them (SoFi Amendment S33, SA-140).
+        (super::class::ESCROW_COMPUTED_TERMS, 1),
+        (super::class::ESCROW_TRANSCRIPT_OUTCOME, 1),
+        (super::class::ESCROW_EQUIVOCATION_PROOF, 1),
+        (super::class::ESCROW_MATCH_START, 1),
         // Schema 1 had no arm for an offline unload's credit, so an unload
         // could not be witnessed at all. Schema 2 adds `0x0075`; the source
         // sequence of schema 1 bytes is not that of schema 2.

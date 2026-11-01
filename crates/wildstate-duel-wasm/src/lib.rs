@@ -13,7 +13,7 @@ use wasm_bindgen::prelude::*;
 use wildstate_duel::creatures::CreatureRecordV1;
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::{
-    Acted, ActionLog, CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV1,
+    Acted, ActionLog, CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelSetupV2,
     DuelSide, DuelState, DuelTurnV1, End, Event, EventKind, Fighter, Guard, Phase, Played, Side,
     SideState, TurnLog, Winner, TABLES,
 };
@@ -149,24 +149,31 @@ fn side_of(o: &JsValue, key: &str) -> Result<DuelSide, JsError> {
     })
 }
 
-/// The canonical setup bytes of `{ program, matchNonce, turnCap, tiebreakSeed,
-/// a, b }`; a side is `{ genesis, deviceId, sessionPublicKey, poultice, tonic,
-/// team }` and a creature `{ anchor, species, xp, hp, charges }`.
+/// The canonical setup bytes of `{ program, matchNonce, turnCap,
+/// startCommitmentA, startCommitmentB, a, b }`; a side is `{ genesis,
+/// deviceId, sessionPublicKey, poultice, tonic, team }` and a creature `{
+/// anchor, species, xp, hp, charges }`. Each start commitment is the one its
+/// side's wallet answered with its session key (SoFi Amendment S33).
 #[wasm_bindgen(js_name = encodeSetup)]
 pub fn encode_setup(setup: JsValue) -> Result<Uint8Array, JsError> {
-    let body = DuelMatchV1::new(
+    let s = DuelSetupV2::new(
+        digest(&setup, "program")?,
         digest(&setup, "matchNonce")?,
         int(&setup, "turnCap")?,
-        digest(&setup, "tiebreakSeed")?,
+        digest(&setup, "startCommitmentA")?,
+        digest(&setup, "startCommitmentB")?,
         side_of(&setup, "a")?,
         side_of(&setup, "b")?,
     )
     .map_err(fail)?;
-    let s = DuelSetupV1 {
-        program: digest(&setup, "program")?,
-        body,
-    };
     Ok(u8a(&s.encode()))
+}
+
+/// A side's 32-byte start entropy, as the match's Start opened it.
+fn reveal(bytes: &[u8], side: &str) -> Result<[u8; 32], JsError> {
+    bytes
+        .try_into()
+        .map_err(|e| JsError::new(&format!("side {side}'s start entropy is 32 bytes: {e}")))
 }
 
 /// The canonical bytes of one move: `{ kind: 'move', index }`, `{ kind:
@@ -219,10 +226,21 @@ pub fn encode_turn(a: &[u8], b: &[u8]) -> Result<Uint8Array, JsError> {
     Ok(u8a(&t.encode()))
 }
 
-/// The state before turn 0 of a setup that pins this program.
+/// The state before turn 0 of a setup that pins this program, started on
+/// both sides' start entropy as the match's Start opened it.
 #[wasm_bindgen(js_name = startState)]
-pub fn start_state(setup: &[u8]) -> Result<Uint8Array, JsError> {
-    Ok(u8a(&wildstate_duel::start(setup).map_err(fail)?.encode()))
+pub fn start_state(setup: &[u8], reveal_a: &[u8], reveal_b: &[u8]) -> Result<Uint8Array, JsError> {
+    let state = wildstate_duel::start(setup, &reveal(reveal_a, "a")?, &reveal(reveal_b, "b")?)
+        .map_err(fail)?;
+    Ok(u8a(&state.encode()))
+}
+
+/// The state before turn 0 of a match the rules play directly, as a
+/// conformance vector holds it.
+#[wasm_bindgen(js_name = startMatch)]
+pub fn start_match(m: &[u8]) -> Result<Uint8Array, JsError> {
+    let m = DuelMatchV1::decode(m).map_err(fail)?;
+    Ok(u8a(&DuelState::start(&m).encode()))
 }
 
 /// One turn on a kept state: `{ state, log }`.
@@ -247,8 +265,19 @@ fn turns_of(turns: &Array) -> Result<Vec<DuelTurnV1>, JsError> {
 
 /// Every turn's log of a transcript (which may stop before the match is decided).
 #[wasm_bindgen]
-pub fn replay(setup: &[u8], turns: Array) -> Result<Array, JsError> {
-    let logs = wildstate_duel::replay(setup, &turns_of(&turns)?).map_err(fail)?;
+pub fn replay(
+    setup: &[u8],
+    reveal_a: &[u8],
+    reveal_b: &[u8],
+    turns: Array,
+) -> Result<Array, JsError> {
+    let logs = wildstate_duel::replay(
+        setup,
+        &reveal(reveal_a, "a")?,
+        &reveal(reveal_b, "b")?,
+        &turns_of(&turns)?,
+    )
+    .map_err(fail)?;
     let out = Array::new();
     for l in &logs {
         out.push(&log_view(l)?.into());
@@ -258,8 +287,19 @@ pub fn replay(setup: &[u8], turns: Array) -> Result<Array, JsError> {
 
 /// The decided result of a complete transcript: `{ winner, end, turns }`.
 #[wasm_bindgen]
-pub fn outcome(setup: &[u8], turns: Array) -> Result<JsValue, JsError> {
-    let w = wildstate_duel::outcome(setup, &turns_of(&turns)?).map_err(fail)?;
+pub fn outcome(
+    setup: &[u8],
+    reveal_a: &[u8],
+    reveal_b: &[u8],
+    turns: Array,
+) -> Result<JsValue, JsError> {
+    let w = wildstate_duel::outcome(
+        setup,
+        &reveal(reveal_a, "a")?,
+        &reveal(reveal_b, "b")?,
+        &turns_of(&turns)?,
+    )
+    .map_err(fail)?;
     Ok(winner_view(&w)?.into())
 }
 
@@ -268,11 +308,25 @@ pub fn program_hash() -> Uint8Array {
     u8a(&wildstate_duel::program_hash())
 }
 
-/// The tiebreak seed a staked match's setup commits, from its nonce and both
-/// sides' session public keys (`wildstate_duel::tiebreak_seed`).
+/// The start commitment to a side's 32-byte start entropy
+/// (`wildstate_duel::start_commitment`): what a setup carries for a side whose
+/// entropy is not a wallet's, as in a match with no stake.
+#[wasm_bindgen(js_name = startCommitment)]
+pub fn start_commitment(reveal: &[u8]) -> Result<Uint8Array, JsError> {
+    let entropy: [u8; 32] = reveal
+        .try_into()
+        .map_err(|e| JsError::new(&format!("a start entropy is 32 bytes: {e}")))?;
+    Ok(u8a(&wildstate_duel::start_commitment(&entropy)))
+}
+
+/// A staked match's tiebreak seed, from its nonce, both sides' start entropy
+/// as the Start opened it and both sides' session public keys
+/// (`wildstate_duel::tiebreak_seed`).
 #[wasm_bindgen(js_name = tiebreakSeed)]
 pub fn tiebreak_seed(
     match_nonce: &[u8],
+    reveal_a: &[u8],
+    reveal_b: &[u8],
     session_a: &[u8],
     session_b: &[u8],
 ) -> Result<Uint8Array, JsError> {
@@ -280,7 +334,11 @@ pub fn tiebreak_seed(
         .try_into()
         .map_err(|e| JsError::new(&format!("a match nonce is 32 bytes: {e}")))?;
     Ok(u8a(&wildstate_duel::tiebreak_seed(
-        &nonce, session_a, session_b,
+        &nonce,
+        &reveal(reveal_a, "a")?,
+        &reveal(reveal_b, "b")?,
+        session_a,
+        session_b,
     )))
 }
 
@@ -308,8 +366,10 @@ pub fn verify_conformance() -> Result<u32, JsError> {
     u32::try_from(n).map_err(fail)
 }
 
-/// The frozen vectors as setups under this program:
-/// `[{ label, setup, turns, winner, end, finalState }]`.
+/// The frozen vectors: each as the setup a staked match locks under this
+/// program and both sides' start entropy (`startState`), and as the match the
+/// rules play (`startMatch`):
+/// `[{ label, setup, revealA, revealB, match, turns, opened, winner, end, finalState }]`.
 #[wasm_bindgen(js_name = conformanceVectors)]
 pub fn conformance_vectors() -> Result<Array, JsError> {
     let frozen = DuelVectorSetV1::decode(wildstate_duel::VECTORS_V1).map_err(fail)?;
@@ -318,11 +378,20 @@ pub fn conformance_vectors() -> Result<Array, JsError> {
     for v in &frozen.vectors {
         let o = Object::new();
         set(&o, "label", String::from_utf8_lossy(&v.label).into_owned())?;
-        let setup = DuelSetupV1 {
-            program: p,
-            body: v.body.clone(),
-        };
+        let setup = DuelSetupV2::new(
+            p,
+            *v.body.match_nonce(),
+            v.body.turn_cap(),
+            wildstate_duel::start_commitment(&v.reveal_a),
+            wildstate_duel::start_commitment(&v.reveal_b),
+            v.body.a().clone(),
+            v.body.b().clone(),
+        )
+        .map_err(fail)?;
         set(&o, "setup", u8a(&setup.encode()))?;
+        set(&o, "revealA", u8a(&v.reveal_a))?;
+        set(&o, "revealB", u8a(&v.reveal_b))?;
+        set(&o, "match", u8a(&v.body.encode()))?;
         let turns = Array::new();
         for t in &v.turns {
             turns.push(&u8a(&t.encode()));

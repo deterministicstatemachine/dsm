@@ -22,7 +22,7 @@ use generated::connect_reply_v1::Reply;
 use prost::Message;
 use serial_test::serial;
 
-use super::computed_escrow_e2e_tests::{frozen, issue_team, salt, setup_with_keys};
+use super::computed_escrow_e2e_tests::{frozen, issue_team, salt, setup_with_answers};
 use super::connect_e2e_tests::{
     args_raw, carried_out, fact, reply, request, status, wallet_log, ForwardRelay, FREE_REQUESTS,
 };
@@ -104,7 +104,7 @@ async fn connect(r: &TestDevice, wallet: &TestDevice, relay: &ForwardRelay, code
     assert!(
         preview.scope_lines[0].starts_with(
             "Stake up to 30.00 ERA a time, 60.00 ERA in all, in battles decided by program \
-             wildstate-duel v1 ("
+             wildstate-duel v2 ("
         ),
         "{}",
         preview.scope_lines[0]
@@ -289,7 +289,10 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     let nonce = [0x41; 32];
 
     let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
-        Answer::DuelSessionKey(k) => k.session_public_key,
+        Answer::DuelSessionKey(k) => (
+            k.session_public_key,
+            <D32>::try_from(k.start_commitment.as_slice()).expect("a start commitment"),
+        ),
         other => panic!("the wallet answered {other:?}"),
     };
     let session_key = Kind::DuelSessionKey(generated::ConnectDuelSessionKeyV1 {
@@ -310,7 +313,13 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
         })
     };
     let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
-    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    let setup = setup_with_answers(
+        &p.a,
+        &p.b,
+        nonce,
+        (&key_a.0, &key_a.1, &team_a),
+        (&key_b.0, &key_b.1, &team_b),
+    );
 
     let lock = |side: u32,
                 opponent: &TestDevice,
@@ -361,16 +370,17 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     assert!(wallet_log(&p.a, &sid_a, 2)
         .await
         .summary
-        .starts_with("Stake 25.00 ERA in a battle decided by program wildstate-duel v1 ("));
+        .starts_with("Stake 25.00 ERA in a battle decided by program wildstate-duel v2 ("));
 
     // A readies; B readies with A's ready and writes the Start.
-    let ready = |opponent_ready: Vec<u8>| {
+    let ready = |opponent_ready: Vec<u8>, opponent_reveal: Vec<u8>| {
         Kind::DuelReady(generated::ConnectDuelReadyV1 {
             match_cell: cell.to_vec(),
             opponent_ready,
+            opponent_reveal,
         })
     };
-    let ready_a = ask(&r, &p.a, &relay, &sid_a, ready(Vec::new())).await;
+    let ready_a = ask(&r, &p.a, &relay, &sid_a, ready(Vec::new(), Vec::new())).await;
     assert_eq!(
         fact(&ready_a),
         generated::ConnectFact::None,
@@ -380,8 +390,14 @@ async fn a_match_decided_by_the_program_is_played_and_paid_through_the_grant() {
     let Answer::DuelReady(ready_a) = answered(&ready_a) else {
         panic!("A answered another result");
     };
-    let ready_signature = ready_a.ready_signature;
-    let started = ask(&r, &p.b, &relay, &sid_b, ready(ready_signature)).await;
+    let started = ask(
+        &r,
+        &p.b,
+        &relay,
+        &sid_b,
+        ready(ready_a.ready_signature, ready_a.reveal),
+    )
+    .await;
     assert_eq!(
         fact(&started),
         generated::ConnectFact::DuelStarted,
@@ -565,7 +581,10 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
     let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let nonce: [u8; 32] = rand::random();
     let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
-        Answer::DuelSessionKey(k) => k.session_public_key,
+        Answer::DuelSessionKey(k) => (
+            k.session_public_key,
+            <D32>::try_from(k.start_commitment.as_slice()).expect("a start commitment"),
+        ),
         other => panic!("the wallet answered {other:?}"),
     };
     let session_key = Kind::DuelSessionKey(generated::ConnectDuelSessionKeyV1 {
@@ -583,7 +602,13 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
         })
     };
     let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
-    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    let setup = setup_with_answers(
+        &p.a,
+        &p.b,
+        nonce,
+        (&key_a.0, &key_a.1, &team_a),
+        (&key_b.0, &key_b.1, &team_b),
+    );
     let lock = |side: u32,
                 opponent: &TestDevice,
                 counterpart: Vec<u8>,
@@ -616,18 +641,26 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
         lock(2, &p.a, a_vault.clone(), proof_a),
     )
     .await;
-    let ready = |opponent_ready: Vec<u8>| {
+    let ready = |opponent_ready: Vec<u8>, opponent_reveal: Vec<u8>| {
         Kind::DuelReady(generated::ConnectDuelReadyV1 {
             match_cell: cell.to_vec(),
             opponent_ready,
+            opponent_reveal,
         })
     };
     let Answer::DuelReady(ready_a) =
-        answered(&ask(&r, &p.a, &relay, &sid_a, ready(Vec::new())).await)
+        answered(&ask(&r, &p.a, &relay, &sid_a, ready(Vec::new(), Vec::new())).await)
     else {
         panic!("A answered another result");
     };
-    ask(&r, &p.b, &relay, &sid_b, ready(ready_a.ready_signature)).await;
+    ask(
+        &r,
+        &p.b,
+        &relay,
+        &sid_b,
+        ready(ready_a.ready_signature, ready_a.reveal),
+    )
+    .await;
 
     // Q: another game, connected to wallet A under the same grant.
     let mut q = TestDevice::create("Q", 0x0D);
@@ -648,7 +681,7 @@ async fn another_application_cannot_drive_a_match_it_did_not_stake() {
         "{refused_key}"
     );
     for kind in [
-        ready(Vec::new()),
+        ready(Vec::new(), Vec::new()),
         Kind::DuelSign(generated::ConnectDuelSignV1 {
             match_cell: cell.to_vec(),
             preceding: Vec::new(),
@@ -702,7 +735,10 @@ async fn a_player_withdraws_and_collects_a_stake_without_the_game() {
     let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let nonce = [0x43; 32];
     let key = |s: generated::ConnectAppStatusV1| match answered(&s) {
-        Answer::DuelSessionKey(k) => k.session_public_key,
+        Answer::DuelSessionKey(k) => (
+            k.session_public_key,
+            <D32>::try_from(k.start_commitment.as_slice()).expect("a start commitment"),
+        ),
         other => panic!("the wallet answered {other:?}"),
     };
     let session_key = Kind::DuelSessionKey(generated::ConnectDuelSessionKeyV1 {
@@ -721,7 +757,13 @@ async fn a_player_withdraws_and_collects_a_stake_without_the_game() {
         })
     };
     let proof_b = proof(ask(&r, &p.b, &relay, &sid_b, holdings(anchors(&team_b))).await);
-    let setup = setup_with_keys(&p.a, &p.b, nonce, (&key_a, &team_a), (&key_b, &team_b));
+    let setup = setup_with_answers(
+        &p.a,
+        &p.b,
+        nonce,
+        (&key_a.0, &key_a.1, &team_a),
+        (&key_b.0, &key_b.1, &team_b),
+    );
     let lock = |side: u32,
                 opponent: &TestDevice,
                 counterpart: Vec<u8>,

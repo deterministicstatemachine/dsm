@@ -925,7 +925,15 @@ mod tests {
             ComputedEscrowTerms::new(
                 d(token),
                 escrow::external_commitment(b"a match"),
-                ComputedTable::new(d(0x9A), d(0x5E), key(0x3A), key(0x3B)).unwrap(),
+                ComputedTable::new(
+                    d(0x9A),
+                    d(0x5E),
+                    key(0x3A),
+                    key(0x3B),
+                    crate::sofi::computed::start_commitment(&[0x3C; 32]),
+                    crate::sofi::computed::start_commitment(&[0x3D; 32]),
+                )
+                .unwrap(),
                 vec![
                     ComputedBranch::new(b"a-wins", G, dev()),
                     ComputedBranch::new(b"b-wins", G, dev()),

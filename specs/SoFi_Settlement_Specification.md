@@ -831,8 +831,10 @@ TAG_DSM_ESCROW_TRANSCRIPT                   DSM/escrow/transcript/v1            
 TAG_DSM_ESCROW_TRANSCRIPT_STEP              DSM/escrow/transcript-step/v1             h_i
 TAG_DSM_ESCROW_TRANSCRIPT_HEAD              DSM/escrow/transcript-head/v1             m_head(i, h_i)
 TAG_DSM_ESCROW_MOVE_COMMIT                  DSM/escrow/move-commit/v1                 a Commit's commitment
+TAG_DSM_ESCROW_START_COMMIT                 DSM/escrow/start-commit/v1                a side's start commitment, H(r) (Amendment S33)
 The wallet's session-key derivation (§19.10, Amendment S27), constant in CORE/common/domain_tags.
 TAG_DSM_ESCROW_SESSION_KEY_V2               DSM/escrow/session-key/v2                 the Expand label of a match session key under the wallet root
+TAG_DSM_ESCROW_START_ENTROPY_V1             DSM/escrow/start-entropy/v1               the Expand label of a side's start entropy r under the wallet root (Amendment S33)
 
 
 <!-- spec-section: SOFI-014-2 -->
@@ -1555,7 +1557,7 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 - The three slots of an escrow vault name `A_T = immutable_addr(DSM/escrow/terms-object/v1, CCB bytes)` (§19.9). The class of those bytes decides the kind: `0x0063 EscrowTerms` is a signed escrow vault and `0x0067 ComputedEscrowTerms` a computed one. Bytes of any other class are no escrow terms, and the genesis is refused.
 - The signed kind is unchanged byte for byte: its terms, verdict, cell, statement and release are §19.9's.
 
-**`ComputedEscrowTerms`**, class `0x0067`, schema 1.
+**`ComputedEscrowTerms`**, class `0x0067`, schema 2 (Amendment S33; schema 1 is retired).
 
 | Field | Content |
 |---|---|
@@ -1569,9 +1571,10 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 | `program` | digest32: `P`, the hash that pins the outcome program |
 | `setup_digest` | digest32: `H(DSM/escrow/computed-setup/v1; setup)`, the program's input fixed at lock. DSM never interprets `setup`. |
 | `session_a`, `session_b` | `(signature_alg, public_key)` each: side A's and side B's session keys (SPHINCS+, §14.3). The two keys differ. |
+| `start_commitment_a`, `start_commitment_b` | digest32 each: `H(DSM/escrow/start-commit/v1; r)` over side A's and side B's start entropy `r` (Amendment S33). |
 
 - `a-wins` is side A's win, `b-wins` side B's, and `void` is the outcome a Withdraw gives (below). A program may also compute `void`.
-- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
+- The table's bytes are `P ∥ setup_digest ∥ u16be(alg_a) ∥ u32be(|key_a|) ∥ key_a ∥ u16be(alg_b) ∥ u32be(|key_b|) ∥ key_b ∥ start_commitment_a ∥ start_commitment_b`. Its digest is `τ_c = H(DSM/escrow/computed-table/v1; table bytes)`.
 
 **The cells**
 
@@ -1598,11 +1601,11 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
   4. `H(DSM/escrow/computed-setup/v1; setup)` is the table's `setup_digest`, and `h_0 … h_n` recompute.
 
   The order of the checks is fixed: decode, re-encode, require byte equality, recompute the chain, then verify signatures.
-- **What the program sees.** The opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
+- **What the program sees.** Both sides' start entropy, `r_a` and `r_b` (Amendment S33), and the opened entries, in order: each `Reveal`, with its side, its own index, the index of the `Commit` it opened and its move; and a `Resign`, with its side and index. An unopened commitment is not shown.
 
 **The program**
 
-- `P(setup, opened)` returns `Done(o)`, `Incomplete`, or a fault. It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
+- `P(setup, r_a, r_b, opened)` returns `Done(o)`, `Incomplete`, or a fault. `r_a` and `r_b` are the match's start entropy: each side fixed its own at lock, before it could know the other's, and both are opened only once the match starts. A program that needs randomness takes it from them; neither side, nor the application relaying the match, chooses their combination (Amendment S33). It is deterministic and total over the bounds above. It keeps no state, calls nothing, reads no clock and fetches nothing (Explainer Amendment A13).
 - A verifier evaluates `P` only when `P` is registered with it under the hash the table pins. An unregistered `P` leaves every fact of the match cell not established. It is never Invalid, and no other program is tried in its place.
 - Core keys its registry by the hash a registered program reports. The binding of code to that hash is the registrar's (owner, 2026-10-06): the SDK registers a program only after the program passes its own frozen conformance vectors, and refuses one that fails them.
 - Core does the canonical, chain and signature checks before `P` sees anything. `P`'s answer counts only when `o` is a label of the branches.
@@ -1611,15 +1614,15 @@ A computed escrow vault is an S21 escrow vault whose outcome is computed. Everyt
 
 The value that counts at `K_match` is the first object at its leader that is recognized there. Everything else at the cell counts as nothing. Two kinds of object are recognized, each from its own bytes alone (Amendment S20).
 
-- **`TranscriptOutcome`**, class `0x0069`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
-  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`;
+- **`TranscriptOutcome`**, class `0x0069`, schema 2 (Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `setup` (1 to 16384 bytes), `reveal_a` and `reveal_b` (digest32 each), `entries` (1 to 1024, each `u32be(|entry|) ∥ entry`), and `signatures`: 1 or 2 entries `(side, signature)`, strictly ascending by side. It is recognized at `K` when:
+  1. `H(DSM/escrow/computed-match/v1; Y ∥ τ_c(table)) = K`, and `H(DSM/escrow/start-commit/v1; reveal_a)` is the table's `start_commitment_a` and `H(DSM/escrow/start-commit/v1; reveal_b)` its `start_commitment_b`;
   2. the entries are a canonical transcript for the table and the setup;
   3. the sides holding a signature are exactly the sides that made an entry. Each side's signature verifies, under that side's session key, over `m_head(i, h_i)` for the last entry `i` that side made;
   4. the last entry is a `Reveal` or a `Resign`;
-  5. `P` is registered, `P(setup, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
+  5. `P` is registered, `P(setup, reveal_a, reveal_b, opened)` is `Done(o)` with `o` a label of the branches, and `P` over the opened entries without the last is `Incomplete`.
 
   Its outcome is `o`. A truncated transcript is never recognized: `P` gives it `Incomplete`. Condition 5 makes the occupant exactly the transcript at the entry that ended the match.
-- **`EquivocationProof`**, class `0x006A`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
+- **`EquivocationProof`**, class `0x006A`, schema 2 (its table, Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `side`, `index`, and two `(head, signature)` pairs with the heads strictly ascending. It is recognized at `K` when `Y` and the table derive `K`, and both signatures verify, under the session key of `side`, over `m_head(index, head)` for their own heads. Its outcome is the other side's win: `b-wins` when side A equivocated, `a-wins` when side B did.
   - A side signs one head per index of its own entries, ever. Two different heads signed at one index are proof that the key's holder cheated.
 - The first recognized occupant holds the cell for good (§8, consequences 2 and 3), whatever arrives after it.
 
@@ -1638,15 +1641,30 @@ A session key is the authority of everything its side does in a match: its ready
 > - **A new label.** The label is `DSM/escrow/session-key/v2`; nothing is ever derived under `DSM/escrow/session-key/v1` again. A session key from before this amendment is not carried over (DSM beta does not migrate).
 > - **Unchanged.** The key pair from `k`, one key per match, the secret staying in the wallet, and restoring from the seed are as above.
 
+**The start entropy: committed at lock, revealed at the Start** (Amendment S33)
+
+- **Derivation.** A wallet derives its side's start entropy for a match beside its session key, under the same wallet root: `r = Expand(PRK_w; info = DSM/escrow/start-entropy/v1 ∥ 0x00 ∥ genesis ∥ match_nonce)`, 32 bytes. Its commitment is `c = H(DSM/escrow/start-commit/v1; r)`.
+- **Committed at lock.** With its session public key the wallet answers `c`, never `r`. The table commits both sides' `c`. A wallet locks a stake only when the table's start commitment for its side is exactly the one it derives for the setup's nonce, as it does for its session key.
+- **Revealed at the ready.** A wallet hands out `r` only with its ready signature, once it has checked both vaults. The wallet that readies second checks that the other side's `r` opens that side's commitment before it signs its own ready, and assembles the Start from both readies and both reveals. `r` is derived when it is used and never stored; restoring from the seed derives the same `r`.
+- **What it decides.** Each side's `r` is fixed at lock, before that side could know the other's, so neither side can choose the combination the program reads. The side that readies second sees the other side's `r` before it writes the Start; it may decline to start. Then no Start holds the start cell, either side may withdraw, and both stakes are refunded (`void`). It cannot change what the match would have read.
+
+> **Amendment S33 (owner, 2026-10-31) — a match's start entropy is committed at lock and revealed at the Start.** From the security audit of 2026-10-18 (finding SA-140): the duel program's tiebreak seed was a hash of the match nonce and both sides' session public keys. The side supplying its key second knew the nonce and the other key, and could choose among keys until the seed favoured it. On 2026-10-31 the owner chose "Rules-checked + commit-reveal": each wallet commits `H(r)` at lock and reveals at ready, and the seed is derived from both reveals. On where the reveals go, the owner chose "Start carries reveals (Recommended)", on the stated trade: a side that dislikes the seed can only refuse to start, and both stakes are withdrawn.
+>
+> - **The table** gains `start_commitment_a` and `start_commitment_b`, so `ComputedEscrowTerms` (schema 2), `TranscriptOutcome` (schema 2), `EquivocationProof` (schema 2) and `MatchStart` (schema 2) change with it. Their schema-1 encodings are retired; DSM beta does not migrate.
+> - **The Start** carries both reveals, and is recognized only when each reveal opens its side's commitment.
+> - **The transcript outcome** carries both reveals under the same check, so the match cell is still recognized from its own bytes alone. A reveal that opens a commitment is that commitment's only opening, so the reveals a recognized outcome carries are the Start's.
+> - **The program** reads `P(setup, r_a, r_b, opened)`. Core never interprets `r_a` or `r_b`.
+> - **Unchanged.** `m_ready`, the Withdraw, the cells and the facts.
+
 **The start cell: a ready handshake, or a Withdraw** (owner ruling, 2026-10-06)
 
 - **Ready.** A side is ready when its session key signs `m_ready = H(DSM/escrow/computed-ready/v1; K_match)`. Both sides sign the same statement; the key tells them apart.
 - **What a wallet checks before it signs its ready.** Its own vault and the opponent's vault are both GenesisAccepted and Active, and both bind to this `K_match`. They hold the same token and the same amount. Each is owned by the side its terms say: the recipient of `a-wins` owns side A's vault, the recipient of `b-wins` owns side B's. The branches mirror: `a-wins` and `b-wins` pay the same identities in both vaults, and each vault's `void` pays its own owner. This is the check side B makes against side A's vault under DSM Amendment A12, made by both sides.
-- **`MatchStart`**, class `0x006B`, schema 1: `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
-  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`. Whichever side readies second assembles the Start from both signatures and writes it.
+- **`MatchStart`**, class `0x006B`, schema 2 (Amendment S33; schema 1 is retired): `external_commitment` (`Y`), `table` (`T_c`), `kind` (`u8`) and a body:
+  - **Start** (`kind` 1): `ready_a` and `ready_b`, each `u32be(|sig|) ∥ sig`: side A's and side B's signatures over `m_ready`; then `reveal_a` and `reveal_b`, digest32 each: side A's and side B's start entropy. Whichever side readies second assembles the Start from both signatures and both reveals and writes it.
   - **Withdraw** (`kind` 2): `side` (`u8`, 1 or 2) and a `signature`, `u32be(|sig|) ∥ sig`, by that side's session key over `m_withdraw = H(DSM/escrow/computed-start-statement/v1; K_start ∥ u8(2))`. Either side may withdraw.
 - **Recognition**, from the object's own bytes (Amendment S20). A `MatchStart` is recognized at `K` when `Y` and the table derive `K_start = K` and:
-  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives. A Start holding one side's ready is not a Start;
+  - for a Start, `ready_a` verifies under `session_a` and `ready_b` under `session_b`, both over `m_ready` for the `K_match` the object derives, and each reveal opens its side's start commitment: `H(DSM/escrow/start-commit/v1; reveal_a) = start_commitment_a` and likewise for B. A Start holding one side's ready, or a reveal that does not open its side's commitment, is not a Start;
   - for a Withdraw, its signature verifies under the session key of the side it names, over `m_withdraw`.
 - Whichever is first at the start cell's leader holds it for good. The match begins at once and for both sides when a Start holds the start cell. A Withdraw counts only if it reaches the leader before any Start, and a Withdraw that arrives after a Start counts for nothing. No clock is involved.
 - **The ready timeout is the application's, outside DSM.** DSM has no clock and no deadline. An application that wants a real-world limit on how long a ready may wait asks the waiting wallet to Withdraw. Nothing in DSM reads the time, and nothing in DSM withdraws on its own.

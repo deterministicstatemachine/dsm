@@ -2992,7 +2992,15 @@ pub(crate) mod genesis_acceptance {
         crate::sofi::wire::ComputedEscrowTerms::new(
             token,
             crate::sofi::escrow::external_commitment(b"a match"),
-            ComputedTable::new([0x9A; 32], [0x5E; 32], key(0x3A), key(0x3B)).unwrap(),
+            ComputedTable::new(
+                [0x9A; 32],
+                [0x5E; 32],
+                key(0x3A),
+                key(0x3B),
+                crate::sofi::computed::start_commitment(&[0x3C; 32]),
+                crate::sofi::computed::start_commitment(&[0x3D; 32]),
+            )
+            .unwrap(),
             vec![
                 ComputedBranch::new(b"a-wins", G, dev()),
                 ComputedBranch::new(b"b-wins", G, dev()),

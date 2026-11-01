@@ -586,7 +586,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// keeps the transfer it was (`pending_offline_receipt.operation`), so a
 /// settlement names the lineage it pays (SA-133). A database made at 39 has
 /// neither, and is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 40;
+///
+/// v41: a kept duel match has no outcome-program progress until its Start is
+/// final (`duel_match.progress` may be NULL): the tiebreak seed exists only
+/// once the Start opened both sides' start entropy (SoFi Amendment S33,
+/// SA-140). A database made at 40 is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 41;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -1140,7 +1145,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             head         BLOB NOT NULL CHECK (length(head) = 32),
             open_a       BLOB CHECK (open_a IS NULL OR length(open_a) = 36),
             open_b       BLOB CHECK (open_b IS NULL OR length(open_b) = 36),
-            progress     BLOB NOT NULL,
+            progress     BLOB,
             equivocation BLOB
         );
         -- Every entry applied to a match, with the head after it and its

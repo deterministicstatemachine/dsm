@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use syn::visit::Visit;
 
 use dsm::sofi::computed::{OutcomeProgram, ProgramOutcome};
-use dsm_sdk::sdk::outcome_programs::{opened_of_turns, WildstateDuel};
+use dsm_sdk::sdk::outcome_programs::{opened_of_turns, staked_setup, WildstateDuel};
 
 /// The `wildstate-duel` crate's sources.
 fn duel_src() -> PathBuf {
@@ -798,11 +798,10 @@ fn a_registered_program_decides_the_longest_match_its_rules_allow() {
     let Some(vector) = set.vectors.first() else {
         panic!("the frozen set holds a vector");
     };
-    let setup = wildstate_duel::DuelSetupV1 {
-        program: WildstateDuel.id(),
-        body: vector.body.clone(),
-    }
-    .encode();
+    let (setup, reveals) = match staked_setup(WildstateDuel.id(), vector) {
+        Ok(staked) => staked,
+        Err(e) => panic!("the vector's staked setup: {e}"),
+    };
     let longest_move = vec![0xFFu8; dsm::sofi::wire::TRANSCRIPT_MAX_MOVE_BYTES];
     let turns = dsm::sofi::wire::TRANSCRIPT_MAX_ENTRIES / 4;
     let opened = opened_of_turns(&vec![
@@ -814,7 +813,7 @@ fn a_registered_program_decides_the_longest_match_its_rules_allow() {
     ]);
     let decided = (1..=opened.len()).find(|&n| {
         matches!(
-            WildstateDuel.outcome(&setup, &opened[..n]),
+            WildstateDuel.outcome(&setup, &reveals, &opened[..n]),
             Ok(ProgramOutcome::Done(_))
         )
     });
@@ -826,13 +825,13 @@ fn a_registered_program_decides_the_longest_match_its_rules_allow() {
     for n in 1..ended {
         assert!(
             matches!(
-                WildstateDuel.outcome(&setup, &opened[..n]),
+                WildstateDuel.outcome(&setup, &reveals, &opened[..n]),
                 Ok(ProgramOutcome::Incomplete)
             ),
             "the match of passes is undecided before its last turn: {n}"
         );
     }
-    match WildstateDuel.outcome(&setup, &opened[..ended + 1]) {
+    match WildstateDuel.outcome(&setup, &reveals, &opened[..ended + 1]) {
         Err(fault) => assert!(
             fault.reason.contains("follows the end of the match"),
             "an entry after the end is refused as one: {}",

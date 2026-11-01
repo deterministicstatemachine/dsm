@@ -66,7 +66,7 @@ use crate::sofi::wire::{
     OutcomeTable, OwnerAuthority, OwnerBaselineAuthV1, ParentClaimRef, PrecommitLeg,
     PreEClosureIndex, RouteDigestPreimage, RouteLegEntry, RouteLegSet, SettlementBody,
     SettlementPreimage, SideSignature, SignedHead, SignedSofiObject, SignedSofiResolutionClaim,
-    SofiExercise, SofiResolutionClaim, SofiSetupBody, StartBody, SwapHop, TraderCore,
+    StartReveals, SofiExercise, SofiResolutionClaim, SofiSetupBody, StartBody, SwapHop, TraderCore,
     TraderFulfillmentBody, TraderPreBalance, TraderPrecommitBody, TraderRelationshipLeaf,
     TranscriptEntry, TranscriptOutcome, ValidationRef, VaultCreation, VaultFrontierV1,
     VaultFrontierWitnessV1, VaultGenesisPreimage, VaultHistoryHeadV1, VaultRelationshipLeaf,
@@ -363,7 +363,14 @@ fn signer(k: u8) -> EscrowSigner {
 
 fn computed_table() -> ComputedTable {
     ok(
-        ComputedTable::new(b(0xD1), b(0xD2), signer(0xA1), signer(0xB1)),
+        ComputedTable::new(
+            b(0xD1),
+            b(0xD2),
+            signer(0xA1),
+            signer(0xB1),
+            b(0xD6),
+            b(0xD7),
+        ),
         "computed table",
     )
 }
@@ -1103,7 +1110,7 @@ fn every_class() -> Vec<Shown> {
     );
     all.push(shown(
         class::ESCROW_COMPUTED_TERMS,
-        SCHEMA_V1,
+        2,
         computed.encode(),
         Read::Parsed(|b| Ok(ComputedEscrowTerms::decode(b).map_err(text)?.encode())),
     ));
@@ -1128,6 +1135,7 @@ fn every_class() -> Vec<Shown> {
             b(0xEE),
             computed_table(),
             b"setup",
+            StartReveals::new(b(0xD8), b(0xD9)),
             vec![entry.encode()],
             vec![
                 ok(
@@ -1144,7 +1152,7 @@ fn every_class() -> Vec<Shown> {
     );
     all.push(shown(
         class::ESCROW_TRANSCRIPT_OUTCOME,
-        SCHEMA_V1,
+        2,
         outcome.encode(),
         Read::Parsed(|b| Ok(TranscriptOutcome::decode(b).map_err(text)?.encode())),
     ));
@@ -1161,7 +1169,7 @@ fn every_class() -> Vec<Shown> {
     );
     all.push(shown(
         class::ESCROW_EQUIVOCATION_PROOF,
-        SCHEMA_V1,
+        2,
         equivocation.encode(),
         Read::Parsed(|b| Ok(EquivocationProof::decode(b).map_err(text)?.encode())),
     ));
@@ -1172,13 +1180,14 @@ fn every_class() -> Vec<Shown> {
             StartBody::Start {
                 ready_a: signature(),
                 ready_b: signature(),
+                reveals: StartReveals::new(b(0xD8), b(0xD9)),
             },
         ),
         "match start",
     );
     all.push(shown(
         class::ESCROW_MATCH_START,
-        SCHEMA_V1,
+        2,
         start.encode(),
         Read::Parsed(|b| Ok(MatchStart::decode(b).map_err(text)?.encode())),
     ));

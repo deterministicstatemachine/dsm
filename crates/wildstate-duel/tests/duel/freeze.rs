@@ -11,9 +11,12 @@
 //! (`dsm-creatures/test/duel-equivalence.test.ts`), which is the evidence
 //! that the frozen results are the game's rules and not only this crate's.
 
-use crate::support::{creature, duel, mv, random_match, random_move, side, turn, Play, Rng, R};
+use crate::support::{
+    creature, mv, random_move, random_staked, side, staked, staked_with_parity, turn, Play, Rng,
+    Staked, R,
+};
 use wildstate_duel::vectors::{DuelVectorSetV1, DuelVectorV1};
-use wildstate_duel::{DuelMatchV1, DuelMoveV1, DuelOpenedTurnV1, DuelState, DuelTurnV1, Side};
+use wildstate_duel::{DuelMoveV1, DuelOpenedTurnV1, DuelState, DuelTurnV1, Side};
 
 const EMBERCUB: u8 = 0;
 const MOSSLING: u8 = 1;
@@ -36,7 +39,7 @@ enum Fill {
 }
 
 /// Plays the script, then the fill, until the match is decided.
-fn scripted(label: &str, m: DuelMatchV1, script: &[DuelTurnV1], fill: Fill) -> R<DuelVectorV1> {
+fn scripted(label: &str, m: Staked, script: &[DuelTurnV1], fill: Fill) -> R<DuelVectorV1> {
     let opened: Vec<DuelOpenedTurnV1> = script.iter().map(DuelOpenedTurnV1::of).collect();
     opened_scripted(label, m, &opened, fill)
 }
@@ -44,11 +47,11 @@ fn scripted(label: &str, m: DuelMatchV1, script: &[DuelTurnV1], fill: Fill) -> R
 /// [`scripted`] over openings exactly as revealed, garbled ones included.
 fn opened_scripted(
     label: &str,
-    m: DuelMatchV1,
+    m: Staked,
     script: &[DuelOpenedTurnV1],
     fill: Fill,
 ) -> R<DuelVectorV1> {
-    let mut state = DuelState::start(&m);
+    let mut state = DuelState::start(&m.body);
     let mut turns = Vec::new();
     let mut rng = Rng::new(match fill {
         Fill::Random(seed, _) => seed,
@@ -72,7 +75,9 @@ fn opened_scripted(
         state = state.step(&t.turn())?;
         turns.push(t);
     }
-    Ok(DuelVectorV1::freeze(label, m, turns)?)
+    Ok(DuelVectorV1::freeze(
+        label, m.body, m.reveal_a, m.reveal_b, turns,
+    )?)
 }
 
 /// The vector set the rules build today.
@@ -81,7 +86,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     let mut vectors = vec![
         scripted(
             "rounding-half-up",
-            duel(
+            staked(
                 0x10,
                 side(1, 0, 0, vec![creature(1, EMBERCUB, 1, None)?]),
                 side(2, 0, 0, vec![creature(2, MOSSLING, 1, None)?]),
@@ -91,7 +96,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "guard-halves-and-clears",
-            duel(
+            staked(
                 0x11,
                 side(1, 0, 0, vec![creature(1, TIDEFIN, 2, None)?]),
                 side(2, 0, 0, vec![creature(2, EMBERCUB, 2, None)?]),
@@ -106,7 +111,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "soaked-weakens-attacker",
-            duel(
+            staked(
                 0x12,
                 side(1, 0, 0, vec![creature(1, BRINEBACK, 3, None)?]),
                 side(2, 0, 0, vec![creature(2, LEON, 3, None)?]),
@@ -116,7 +121,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "root-holds-the-same-turn",
-            duel(
+            staked(
                 0x13,
                 side(1, 0, 0, vec![creature(1, MOSSLING, 4, None)?]),
                 side(2, 0, 0, vec![creature(2, VOLTUSK, 2, None)?]),
@@ -131,7 +136,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "stun-lands-after-the-tick",
-            duel(
+            staked(
                 0x14,
                 side(1, 0, 0, vec![creature(1, EMBERCUB, 3, None)?]),
                 side(2, 0, 0, vec![creature(2, VOLTUSK, 1, None)?]),
@@ -141,7 +146,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "items-poultice-and-tonic",
-            duel(
+            staked(
                 0x15,
                 side(
                     1,
@@ -186,7 +191,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "faint-and-switch-teams-of-three",
-            duel(
+            staked(
                 0x16,
                 side(
                     1,
@@ -214,7 +219,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "resign-a",
-            duel(
+            staked(
                 0x17,
                 side(1, 0, 0, vec![creature(1, LEON, 2, None)?]),
                 side(2, 0, 0, vec![creature(2, RATTLEFIN, 2, None)?]),
@@ -228,7 +233,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "resign-b-first-turn",
-            duel(
+            staked(
                 0x18,
                 side(1, 0, 0, vec![creature(1, LEON, 2, None)?]),
                 side(2, 0, 0, vec![creature(2, RATTLEFIN, 2, None)?]),
@@ -238,7 +243,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "both-resign-hp-decides",
-            duel(
+            staked(
                 0x19,
                 side(1, 0, 0, vec![creature(1, MOSSLING, 3, None)?]),
                 side(2, 0, 0, vec![creature(2, EMBERCUB, 3, None)?]),
@@ -251,7 +256,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "cap-more-hp-wins",
-            duel(
+            staked(
                 0x1A,
                 side(1, 0, 0, vec![creature(1, VOLTUSK, 1, Some(30))?]),
                 side(2, 0, 0, vec![creature(2, VOLTUSK, 1, Some(31))?]),
@@ -261,8 +266,9 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "cap-equal-hp-even-seed",
-            duel(
+            staked_with_parity(
                 0x42,
+                0,
                 side(
                     1,
                     0,
@@ -287,8 +293,9 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "cap-equal-hp-odd-seed",
-            duel(
+            staked_with_parity(
                 0x43,
+                1,
                 side(1, 0, 0, vec![creature(1, BRINEBACK, 4, None)?]),
                 side(2, 0, 0, vec![creature(2, RATTLEFIN, 4, None)?]),
             )?,
@@ -297,7 +304,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "unusable-moves-play-as-passes",
-            duel(
+            staked(
                 0x1B,
                 side(
                     1,
@@ -348,7 +355,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
         )?,
         scripted(
             "level-tie-order-from-seed",
-            duel(
+            staked(
                 0x1C,
                 side(
                     1,
@@ -391,7 +398,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     ];
     vectors.push(opened_scripted(
         "garbled-openings-play-as-passes",
-        duel(
+        staked(
             0x1D,
             side(1, 0, 0, vec![creature(1, TIDEFIN, 3, None)?]),
             side(2, 0, 0, vec![creature(2, EMBERCUB, 3, None)?]),
@@ -407,7 +414,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     )?);
     vectors.push(opened_scripted(
         "garbled-openings-b-then-items",
-        duel(
+        staked(
             0x1E,
             side(1, 1, 0, vec![creature(1, LEON, 2, Some(15))?]),
             side(2, 0, 0, vec![creature(2, MOSSLING, 2, None)?]),
@@ -430,7 +437,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     )?);
     vectors.push(opened_scripted(
         "garbled-both-sides-cap-decides",
-        duel(
+        staked(
             0x1F,
             side(1, 0, 0, vec![creature(1, RATTLEFIN, 2, Some(21))?]),
             side(2, 0, 0, vec![creature(2, BRINEBACK, 2, Some(20))?]),
@@ -440,7 +447,7 @@ pub(crate) fn vector_set() -> R<DuelVectorSetV1> {
     )?);
     let mut rng = Rng::new(0x0057_1D57_A7E0_0001);
     for i in 0..48 {
-        let m = random_match(&mut rng)?;
+        let m = random_staked(&mut rng)?;
         let seed = rng.next();
         let play = if i % 2 == 0 { Play::Legal } else { Play::Loose };
         vectors.push(scripted(

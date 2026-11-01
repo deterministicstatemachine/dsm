@@ -91,6 +91,10 @@ pub const TAG_DSM_ESCROW_TRANSCRIPT_HEAD: TaggedHashDomain<'static> =
 /// `H(tag ‖ salt ‖ u32be(|move|) ‖ move)` — a Commit's commitment.
 pub const TAG_DSM_ESCROW_MOVE_COMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/escrow/move-commit/v1");
+/// `H(tag ‖ r)` — a side's start commitment, fixed in the computed table at
+/// lock and opened by the Start (SoFi Amendment S33).
+pub const TAG_DSM_ESCROW_START_COMMIT: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/escrow/start-commit/v1");
 
 #[cfg(test)]
 pub(crate) const ESCROW_TAGS: &[TaggedHashDomain<'static>] = &[
@@ -116,4 +120,5 @@ pub(crate) const ESCROW_TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_ESCROW_TRANSCRIPT_STEP,
     TAG_DSM_ESCROW_TRANSCRIPT_HEAD,
     TAG_DSM_ESCROW_MOVE_COMMIT,
+    TAG_DSM_ESCROW_START_COMMIT,
 ];

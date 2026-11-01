@@ -5,7 +5,8 @@
 //! matches.
 
 use wildstate_duel::{
-    CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelSide, DuelState, DuelTurnV1, Side, TABLES,
+    tiebreak_seed, CreatureStateV1, DuelMatchV1, DuelMoveV1, DuelSide, DuelState, DuelTurnV1, Side,
+    TABLES,
 };
 
 /// A test's result: any refusal fails it with its message.
@@ -88,6 +89,64 @@ pub fn duel(seed: u8, a: DuelSide, b: DuelSide) -> R<DuelMatchV1> {
         a,
         b,
     )?)
+}
+
+/// A staked match (SoFi Amendment S33): the sides under the tiebreak seed
+/// both sides' start entropy derives, and that entropy.
+pub struct Staked {
+    pub body: DuelMatchV1,
+    pub reveal_a: [u8; 32],
+    pub reveal_b: [u8; 32],
+}
+
+/// `m`'s sides staked on `reveal_a` and `reveal_b`: the seed is what they
+/// derive under `m`'s nonce and session keys.
+pub fn staked_on(m: DuelMatchV1, reveal_a: [u8; 32], reveal_b: [u8; 32]) -> R<Staked> {
+    let seed = tiebreak_seed(
+        m.match_nonce(),
+        &reveal_a,
+        &reveal_b,
+        &m.a().session_public_key,
+        &m.b().session_public_key,
+    );
+    let body = DuelMatchV1::new(
+        *m.match_nonce(),
+        m.turn_cap(),
+        seed,
+        m.a().clone(),
+        m.b().clone(),
+    )?;
+    Ok(Staked {
+        body,
+        reveal_a,
+        reveal_b,
+    })
+}
+
+/// A staked match with the table cap: side A reveals `[reveal; 32]` and side
+/// B its complement.
+pub fn staked(reveal: u8, a: DuelSide, b: DuelSide) -> R<Staked> {
+    staked_on(duel(reveal, a, b)?, [reveal; 32], [reveal ^ 0xFF; 32])
+}
+
+/// [`staked`] on the first reveal byte from `from` whose derived seed's last
+/// byte has the parity `parity`, which the cap's equal-HP rule reads.
+pub fn staked_with_parity(from: u8, parity: u8, a: DuelSide, b: DuelSide) -> R<Staked> {
+    for k in 0..=u8::MAX {
+        let s = staked(from.wrapping_add(k), a.clone(), b.clone())?;
+        if s.body.tiebreak_seed()[31] % 2 == parity {
+            return Ok(s);
+        }
+    }
+    Err("no reveal byte derives a seed of that parity".into())
+}
+
+/// A random staked match: random sides staked on random reveals.
+pub fn random_staked(rng: &mut Rng) -> R<Staked> {
+    let m = random_match(rng)?;
+    let reveal_a = rng.digest();
+    let reveal_b = rng.digest();
+    staked_on(m, reveal_a, reveal_b)
 }
 
 pub fn mv(index: u8) -> DuelMoveV1 {

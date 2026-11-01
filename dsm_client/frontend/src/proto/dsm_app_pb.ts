@@ -30751,6 +30751,14 @@ export class ConnectDuelReadyV1 extends Message<ConnectDuelReadyV1> {
    */
   opponentReady = new Uint8Array(0);
 
+  /**
+   * The other side's start entropy, handed out with its ready (SoFi Amendment
+   * S33); empty exactly when opponent_ready is.
+   *
+   * @generated from field: bytes opponent_reveal = 3;
+   */
+  opponentReveal = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelReadyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -30761,6 +30769,7 @@ export class ConnectDuelReadyV1 extends Message<ConnectDuelReadyV1> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "opponent_ready", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "opponent_reveal", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyV1 {
@@ -31999,6 +32008,14 @@ export class ConnectDuelSessionKeyResultV1 extends Message<ConnectDuelSessionKey
    */
   signatureAlg = 0;
 
+  /**
+   * H(DSM/escrow/start-commit/v1 ‖ r): the wallet's commitment to its start
+   * entropy for the match, which the setup carries (SoFi Amendment S33).
+   *
+   * @generated from field: bytes start_commitment = 3;
+   */
+  startCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelSessionKeyResultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -32009,6 +32026,7 @@ export class ConnectDuelSessionKeyResultV1 extends Message<ConnectDuelSessionKey
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "session_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "signature_alg", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "start_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSessionKeyResultV1 {
@@ -32204,6 +32222,13 @@ export class ConnectDuelReadyResultV1 extends Message<ConnectDuelReadyResultV1> 
    */
   cells?: ConnectDuelCellsV1;
 
+  /**
+   * This wallet's start entropy, opened with its ready (SoFi Amendment S33).
+   *
+   * @generated from field: bytes reveal = 3;
+   */
+  reveal = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelReadyResultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -32214,6 +32239,7 @@ export class ConnectDuelReadyResultV1 extends Message<ConnectDuelReadyResultV1> 
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "ready_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "cells", kind: "message", T: ConnectDuelCellsV1 },
+    { no: 3, name: "reveal", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyResultV1 {

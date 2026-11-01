@@ -427,7 +427,9 @@ pub enum Request {
     /// Ready for the match; with the other side's ready, write the Start.
     DuelReady {
         match_cell: [u8; 32],
-        opponent_ready: Option<Vec<u8>>,
+        /// The other side's ready signature and start entropy, when this
+        /// wallet readies second.
+        opponent: Option<(Vec<u8>, [u8; 32])>,
     },
     DuelWithdraw {
         match_cell: [u8; 32],
@@ -471,7 +473,7 @@ fn duel_lock_from_wire(r: &generated::ConnectDuelLockV1) -> Result<DuelLock, Str
         2 => Side::B,
         other => return Err(format!("side {other} is neither A (1) nor B (2)")),
     };
-    let program = wildstate_duel::DuelSetupV1::decode(&r.setup)
+    let program = wildstate_duel::DuelSetupV2::decode(&r.setup)
         .map_err(|e| format!("the match setup: {e}"))?
         .program;
     let counterpart = match r.counterpart_vault_id.as_slice() {
@@ -647,9 +649,17 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
         Some(Kind::DuelLock(r)) => Ok(Request::DuelLock(duel_lock_from_wire(r)?)),
         Some(Kind::DuelReady(r)) => Ok(Request::DuelReady {
             match_cell: d32(&r.match_cell, "the match cell")?,
-            opponent_ready: match r.opponent_ready.as_slice() {
-                [] => None,
-                bytes => Some(bytes.to_vec()),
+            opponent: match (r.opponent_ready.as_slice(), r.opponent_reveal.as_slice()) {
+                ([], []) => None,
+                ([], _) | (_, []) => {
+                    return Err(
+                        "the other side's ready comes with its start entropy, never alone".into(),
+                    )
+                }
+                (ready, reveal) => Some((
+                    ready.to_vec(),
+                    d32(reveal, "the other side's start entropy")?,
+                )),
             },
         }),
         Some(Kind::DuelWithdraw(r)) => Ok(Request::DuelWithdraw {
@@ -1249,10 +1259,17 @@ mod tests {
     fn setup_pinning(pinned: [u8; 32]) -> Vec<u8> {
         let set = wildstate_duel::vectors::DuelVectorSetV1::decode(wildstate_duel::VECTORS_V1)
             .expect("the vectors");
-        wildstate_duel::DuelSetupV1 {
-            program: pinned,
-            body: set.vectors[0].body.clone(),
-        }
+        let v = &set.vectors[0];
+        wildstate_duel::DuelSetupV2::new(
+            pinned,
+            *v.body.match_nonce(),
+            v.body.turn_cap(),
+            wildstate_duel::start_commitment(&v.reveal_a),
+            wildstate_duel::start_commitment(&v.reveal_b),
+            v.body.a().clone(),
+            v.body.b().clone(),
+        )
+        .expect("a setup")
         .encode()
     }
 
@@ -1403,7 +1420,7 @@ mod tests {
         let line = super::super::wallet::describe_scope(&duel_grant()[0], &Default::default());
         assert!(
             line.starts_with("Stake up to")
-                && line.contains("in battles decided by program wildstate-duel v1 ("),
+                && line.contains("in battles decided by program wildstate-duel v2 ("),
             "{line}"
         );
         assert!(line.ends_with("and play your moves"), "{line}");
