@@ -3796,6 +3796,14 @@ Detection is not recovery. Whether the defrauded recipient is made whole is a qu
 exposure policy and the issuer, not for the state machine. And the clone boundary is real: no
 offline-only protocol distinguishes a perfect clone, and DSM does not claim to.
 
+> **Amendment A24 (owner, 2026-11-01) — the anchor's identity is pinned on first use, and offline acceptance claims no more than it checks.** From the security audit of 2026-10-31 (finding SA-175): the receiver's acceptance carried a flag set to "uncompromised" on every pin, a first-transfer flag set to "not genesis" on every release, so that an upgrade-certificate check never ran, and a delivery check that repeated the recipient check. Owner's words, 2026-11-01: "Delete, state TOFU", provided that "the pinned appliance identity is bound to the intended DSM account", that "subsequent identity changes cannot silently replace that binding", that "Core's existing state-continuity, authorization, and replay checks remain mandatory", and that "the specification explicitly acknowledges that offline verification cannot necessarily detect a compromise or revocation discovered elsewhere."
+>
+> - **Pinned on first use, to the account.** A receiver pins a holder's anchor (its bundle `B`, its anchor identity, `pk_chip` and `pk_host`) at the first offline payment it accepts from that holder, and only when `B` recomputes for the holder's pinned online key, device id, offline policy and birth commitment. The anchor is then the one the holder's own online load named.
+> - **Never replaced silently.** A later release whose anchor identity, bundle, policy, enrolled counter, `pk_host` or `pk_chip` differs from the pin is refused, and the pin is kept.
+> - **Core's checks stay mandatory.** Acceptance runs only on a confirm Core has decided. State continuity, the sender's authorization and the replay guards are Core's, and nothing here weakens them. Delivery to this receiver is the receipt's.
+> - **What offline acceptance cannot know.** An offline receiver checks the evidence it is handed. It cannot learn of a compromise or revocation of an anchor discovered elsewhere. A compromised anchor is answered online: the holder unloads its offline account.
+> - **What pinning does not prove.** The anchor's identity rests on the holder's online provisioning, through `B`. The chip vendor's certificate chain certifies the chip's pairing key, not its signing key `pk_chip`, so no certificate check attests `pk_chip`. Removing the flags does not change that, and this amendment does not claim it.
+
 
 <!-- spec-section: DSM-HL-073 -->
 ### 73 Conflict-Local Finality as a State Property

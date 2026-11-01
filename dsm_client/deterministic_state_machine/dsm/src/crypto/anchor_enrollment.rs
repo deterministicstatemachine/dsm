@@ -36,8 +36,6 @@ pub struct FusedAnchorPin {
     /// in the holder TROPIC01's ECC slot; signatures are hedged/non-deterministic, so `σ^chip` is
     /// verified but NEVER hashed into state.
     pub pk_chip: Vec<u8>,
-    /// `true` iff no firmware-boundary / physical-compromise / policy event invalidates the anchor.
-    pub uncompromised: bool,
 }
 
 /// What an anchor's bundle `B` binds besides its pin keys: the owner it was
@@ -113,9 +111,9 @@ pub enum PinAdmitDecision {
 /// ([`require_bundle_of`]) — from the disclosed keys, enrolled counter and
 /// `birth_commitment`, the sender's pinned online key `sender_online_key`, its
 /// device id and the disclosed policy: the bundle is then the one the sender's
-/// online load named. It is pinned as disclosed: a disclosure carries no
-/// compromise state, so `disclosed.uncompromised` is what the receiver that
-/// built it states. Against an existing pin the disclosure must match it on
+/// online load named. It is pinned as disclosed, on first use (DSM Amendment
+/// A24): nothing offline can learn of a compromise of the anchor found
+/// elsewhere. Against an existing pin the disclosure must match it on
 /// the anchor identity and bundle, the policy, `H₀`, `pk_host` and `pk_chip`.
 pub fn pin_admit_decision(
     device_id: [u8; 32],
@@ -265,7 +263,6 @@ mod tests {
             enrolled_counter: 1_000_000,
             partition_pk: vec![0x07; 64],
             pk_chip: vec![0x0C; 32],
-            uncompromised: true,
         }
     }
 

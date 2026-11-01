@@ -591,7 +591,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// final (`duel_match.progress` may be NULL): the tiebreak seed exists only
 /// once the Start opened both sides' start entropy (SoFi Amendment S33,
 /// SA-140). A database made at 40 is refused at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 41;
+///
+/// v42: `anchor_enrollments.uncompromised` is gone. It was set on every pin and
+/// read by an acceptance step that checked nothing; the anchor is pinned on
+/// first use, and a compromise found elsewhere is answered online (SA-175, DSM
+/// Amendment A24). A database made at 41 is refused at open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 42;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -2072,8 +2077,7 @@ fn create_schema(conn: &Connection) -> Result<()> {
             anchor_id          BLOB NOT NULL,
             enrolled_counter   INTEGER NOT NULL,
             partition_pk       BLOB NOT NULL,
-            pk_chip            BLOB NOT NULL,
-            uncompromised      INTEGER NOT NULL
+            pk_chip            BLOB NOT NULL
         );
         "#
         );
@@ -3395,11 +3399,11 @@ mod tests {
             "enrolled_counter",
             "partition_pk",
             "pk_chip",
-            "uncompromised",
         ] {
             assert!(cols.iter().any(|c| c == want), "missing column {want}");
         }
         for gone in [
+            "uncompromised",
             "id_anchor",
             "commitment_c",
             "leaf_spki",

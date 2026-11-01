@@ -3749,7 +3749,6 @@ impl BilateralBleHandler {
             enrolled_counter: disclosed.enrolled_counter,
             partition_pk: disclosed.partition_pk,
             pk_chip: disclosed.pk_chip,
-            uncompromised: true,
         };
         let Some(store) = crate::bridge::anchor_enrollment_store() else {
             return AnchorAdmission::Nothing;

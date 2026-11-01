@@ -69,8 +69,6 @@ pub struct PinnedAnchor {
     pub partition_pk: Vec<u8>,
     /// The pinned resident chip public key `pk_chip` (`σ^chip`, Ed25519).
     pub pk_chip: Vec<u8>,
-    /// `true` iff no firmware-boundary / physical-compromise / policy event invalidates it.
-    pub uncompromised: bool,
 }
 
 impl PinnedAnchor {
@@ -82,7 +80,6 @@ impl PinnedAnchor {
             enrolled_counter: p.enrolled_counter,
             partition_pk: p.partition_pk.clone(),
             pk_chip: p.pk_chip.clone(),
-            uncompromised: p.uncompromised,
         }
     }
 }
@@ -115,7 +112,6 @@ impl anchor_core::tropic::HostSig for SphincsPart {
 /// reimplements anchor crypto. The offline-state proofs `Π_i`/`Π_{i+1}` are carried IN the release
 /// and passed to `verify_offline_state` by the predicate.
 struct DsmStateVerifier<'a> {
-    receiver_device_id: &'a [u8; 32],
     /// The pinned bundle `B` — the device leaf of its offline account is
     /// `offline_account_leaf_key(B)`.
     bundle: &'a [u8; 32],
@@ -168,23 +164,6 @@ impl DsmVerifier for DsmStateVerifier<'_> {
             && self.verified.counter == self.anchor_counter
             && self.verified.frontier == *prev_frontier
             && self.verified.next_frontier == *next_frontier
-    }
-
-    fn delivers_to_receiver(&self, _transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool {
-        recipient == self.receiver_device_id
-    }
-
-    fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
-        // Dormant in Stage 3: acceptance sets is_genesis=false, so the predicate never reaches this.
-        // First-transfer admission stays TOFU (Core's `pin_admit_decision`); the real
-        // dual-identity upgrade cert is Stage 5.
-        //
-        // FAILS CLOSED rather than returning true. Because the hook is unreachable today the two
-        // answers are behaviourally identical NOW, which is exactly why the choice matters: whoever
-        // first sets `is_genesis = true` inherits whatever this returns. `true` would silently admit
-        // every genesis release. `false` refuses them until the Stage 5 cert is implemented, which
-        // is a visible failure that names this function instead of a silent admission.
-        false
     }
 }
 
@@ -287,12 +266,8 @@ pub fn accept_offline_release(
         expected_receiver_challenge,
         expected_recipient: receiver_device_id,
         expected_policy_hash,
-        anchor_uncompromised: pinned.uncompromised,
-        // Stage 3: genesis handling stays TOFU (Core's pin_admit_decision); the upgrade cert is Stage 5.
-        is_genesis: false,
     };
     let dsm = DsmStateVerifier {
-        receiver_device_id,
         bundle: &pinned.bundle,
         verified: spend,
         anchor_counter: t.anchor_counter,
@@ -326,36 +301,6 @@ fn decode_release(
 mod tests {
     use super::*;
 
-    /// The genesis upgrade-cert hook is unreachable today (`is_genesis` is hardcoded `false` at
-    /// every construction site), so this is the only way to observe what it answers. It must be
-    /// `false`.
-    ///
-    /// The point is precisely that the hook is dormant: whoever first sets `is_genesis = true`
-    /// inherits this answer. `true` would silently admit every genesis release; `false` refuses
-    /// them with a named error until the Stage 5 dual-identity cert exists.
-    #[test]
-    fn the_dormant_genesis_upgrade_cert_hook_fails_closed() {
-        let receiver = [7u8; 32];
-        let bundle = [9u8; 32];
-        let leaves = dsm::verification::receipt_verification::BearerLeaves {
-            bundle,
-            counter: 4,
-            frontier: [0x0Au8; 32],
-            next_frontier: [0x0Bu8; 32],
-        };
-        let dsm = DsmStateVerifier {
-            receiver_device_id: &receiver,
-            bundle: &bundle,
-            verified: &leaves,
-            anchor_counter: 4,
-        };
-        assert!(
-            !dsm.verify_upgrade_cert(&bundle),
-            "verify_upgrade_cert returned true while dormant — the first caller to set \
-             is_genesis=true would admit genesis releases with no cert check at all"
-        );
-    }
-
     /// SA-54. Def. 12 step 12 is the consumption the verified receipt proves: the transition's
     /// frontier pair and the release's counter, under the pinned bundle, must be the account
     /// spend the receipt's write set makes. Any other frontier, counter or bundle is not that
@@ -364,7 +309,6 @@ mod tests {
     /// that ignores a frontier) turns this red.
     #[test]
     fn the_transition_is_only_the_consumption_the_verified_receipt_proves() {
-        let receiver = [7u8; 32];
         let bundle = [9u8; 32];
         let (prev, next, counter) = ([0x21u8; 32], [0x22u8; 32], 41u64);
         let leaves = dsm::verification::receipt_verification::BearerLeaves {
@@ -376,7 +320,6 @@ mod tests {
         let digest = [0x23u8; 32];
         let check = |bundle: &[u8; 32], counter: u64, prev: &[u8; 32], next: &[u8; 32]| {
             DsmStateVerifier {
-                receiver_device_id: &receiver,
                 bundle,
                 verified: &leaves,
                 anchor_counter: counter,
