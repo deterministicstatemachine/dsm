@@ -767,12 +767,11 @@ pub fn activate(
 /// A verified DSM-successor acceptance: the exact operation the successor
 /// carried and the successor's chain-state commitment.
 ///
-/// Private fields: this cannot be conjured from a literal. The constructor's
-/// contract is that the exact `C_dsm+` / `sigma_dsm` evidence at
-/// `evidence_addr` has been verified and found to carry `verified_operation`
-/// and commit `c_dsm_plus`. The operation DIGEST is derived here, never
-/// supplied — a caller cannot claim a digest its own operation bytes do not
-/// produce — and `c_dsm_plus` is what the v2 economic operation id binds.
+/// Private fields, and built only from a
+/// [`VerifiedDsmSuccessor`](crate::economic::successor_evidence::VerifiedDsmSuccessor),
+/// which only the verifier makes: the exact `C_dsm+` / `sigma_dsm` evidence at
+/// `evidence_addr` was checked and carries `verified_operation` and commits
+/// `c_dsm_plus`, which is what the v2 economic operation id binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedDsmSuccessor {
     verified_operation: crate::types::operations::Operation,
@@ -810,23 +809,18 @@ pub enum AcceptedSubstrate {
 }
 
 impl AcceptedSubstrate {
-    /// Call only after the exact `C_dsm+` / `sigma_dsm` at `evidence_addr`
-    /// has been verified and found to carry exactly `verified_operation` and
-    /// commit `c_dsm_plus` (the accepted successor's chain-state commitment).
+    /// The successor `verify_dsm_successor_evidence` established, at the
+    /// address of its exact bytes. `VerifiedDsmSuccessor` has no other
+    /// constructor, so the successor cannot be asserted here.
     pub fn from_verified_dsm_successor(
-        verified_operation: crate::types::operations::Operation,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        evidence_addr: [u8; 32],
+        verified: crate::economic::successor_evidence::VerifiedDsmSuccessor,
     ) -> Self {
-        let operation_digest =
-            crate::economic::admission::dsm_operation_digest(&verified_operation.to_bytes());
         Self::DsmSuccessor(Box::new(AcceptedDsmSuccessor {
-            verified_operation,
-            operation_digest,
-            c_dsm_plus,
-            embedded_parent,
-            evidence_addr,
+            operation_digest: verified.operation_digest(),
+            c_dsm_plus: verified.c_dsm_plus(),
+            embedded_parent: verified.embedded_parent(),
+            evidence_addr: verified.evidence_addr(),
+            verified_operation: verified.into_operation(),
         }))
     }
 

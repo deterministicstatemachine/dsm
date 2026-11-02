@@ -25,7 +25,9 @@ pub fn install_anchor_transport() {
         ))?;
         Ok(Box::new(app) as Box<dyn dsm_sdk::anchor::AnchorAppliance + Send>)
     }));
-    log::info!("[anchor-install] USB anchor appliance factory installed (sender release = physical chip)");
+    log::info!(
+        "[anchor-install] USB anchor appliance factory installed (sender release = physical chip)"
+    );
 }
 
 /// JNI trigger: install the sender anchor transport. Returns `true` on success. Absent from the

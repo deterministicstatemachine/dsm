@@ -33,7 +33,6 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::shared_lineage::{EstablishedSharedHead, GenerationChain, LineageKind, SharedGenesisV1};
 use dsm::types::operations::Operation;
 
-#[path = "common/identity.rs"]
 mod identity;
 const NETWORK: &[u8] = b"dsm-testnet";
 const SET_ID: [u8; 32] = [0xB1; 32];

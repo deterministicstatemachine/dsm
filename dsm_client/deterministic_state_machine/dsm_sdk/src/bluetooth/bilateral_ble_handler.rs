@@ -2075,10 +2075,8 @@ impl BilateralBleHandler {
 
         // Emit prepare_received event to frontend with verification status and BLE address for response routing
         log::warn!(
-            "[BilateralBleHandler] 🔔 EMITTING prepare_received event: commitment_hash={}, sender_ble_address={:?}, amount={:?}",
-            bytes_to_base32(&origin_commitment_hash),
-            sender_ble_address,
-            amount_opt
+            "[BilateralBleHandler] 🔔 EMITTING prepare_received event: commitment_hash={}",
+            bytes_to_base32(&origin_commitment_hash)
         );
         self.emit_event(&generated::BilateralEventNotification {
             // Rendered in emit_event, the one boundary all emitters cross.

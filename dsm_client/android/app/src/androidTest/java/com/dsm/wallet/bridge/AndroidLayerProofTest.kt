@@ -360,7 +360,7 @@ class AndroidLayerProofTest {
 
         val requestBytes = encodeBridgeRpcRequest(
             "nativeBoundaryIngress",
-            buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+            buildRouterQueryIngressRequest("wallet.history", ByteArray(0))
         )
         val framedResp = MainActivity.processBridgeRequestForTest(ctx, prependMessageId(300L, requestBytes))
         assertTrue("Must get response", framedResp.size > 8)
@@ -641,7 +641,7 @@ class AndroidLayerProofTest {
             {
                 callBridgeMethod(
                     "nativeBoundaryIngress",
-                    buildRouterQueryIngressRequest("wallet.history", walletHistoryArgs())
+                    buildRouterQueryIngressRequest("wallet.history", ByteArray(0))
                 )
             },
         )
@@ -852,14 +852,6 @@ class AndroidLayerProofTest {
         assertTrue("getTransportHeadersV3Bin must succeed", resp.first)
         return Headers.parseFrom(resp.second)
     }
-
-    /** `wallet.history`'s argument as the frontend sends it (strictQueries.ts): limit and offset, u64 LE. */
-    private fun walletHistoryArgs(): ByteArray =
-        ArgPack.newBuilder()
-            .setCodec(Codec.CODEC_PROTO)
-            .setBody(ByteString.copyFrom(ByteArray(16)))
-            .build()
-            .toByteArray()
 
     /** The bytes a routed call answered; a refusal fails the test with Rust's reason. */
     private fun okBytes(response: IngressResponse, route: String): ByteArray {

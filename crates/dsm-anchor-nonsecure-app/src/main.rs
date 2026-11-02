@@ -217,7 +217,13 @@ fn serve_over_usb(serial: &mut Serial, usb_dev: &mut UsbDev) -> ! {
             }
             // A part is complete (a full slot, or the frame's last bytes): forward it.
             if refused == 0 {
-                let crossing = secure_call(OP_REQUEST_PART, forwarded, total, &part[..part_len], &mut resp);
+                let crossing = secure_call(
+                    OP_REQUEST_PART,
+                    forwarded,
+                    total,
+                    &part[..part_len],
+                    &mut resp,
+                );
                 match crossing.status {
                     SG_MORE => {}
                     SG_OK => write_response(serial, usb_dev, &crossing, &mut resp),

@@ -670,34 +670,14 @@ impl AppRouterImpl {
 
             // -------- wallet.history --------
             "wallet.history" => {
-                // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, offset): (Option<usize>, Option<usize>) =
-                    match generated::ArgPack::decode(&*q.params) {
-                        Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                            if pack.body.len() >= 16 {
-                                let mut l = [0u8; 8];
-                                l.copy_from_slice(&pack.body[0..8]);
-                                let mut o = [0u8; 8];
-                                o.copy_from_slice(&pack.body[8..16]);
-                                (
-                                    Some(u64::from_le_bytes(l) as usize),
-                                    Some(u64::from_le_bytes(o) as usize),
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        }
-                        _ => return err("wallet.history: expected ArgPack(codec=PROTO)".into()),
-                    };
-
                 let my_device_id_str =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
                 let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
-                    limit,
-                    offset,
+                    None,
+                    None,
                 ) {
                     Ok(txs) => txs,
                     Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
@@ -711,10 +691,9 @@ impl AppRouterImpl {
                 );
                 for (i, t) in sqlite_txs.iter().enumerate().take(3) {
                     log::info!(
-                        "[wallet.history] tx[{}]: id={}, amount={}, tx_type={}",
+                        "[wallet.history] tx[{}]: id={}, tx_type={}",
                         i,
                         t.tx_id,
-                        t.amount,
                         t.tx_type
                     );
                 }
@@ -2071,24 +2050,15 @@ mod history_tests {
     use crate::handlers::app_router_impl::AppRouterImpl;
     use crate::storage::client_db::{store_transaction, TransactionRecord};
     use dsm::types::proto as generated;
-    use prost::Message;
 
-    /// `wallet.history` as the frontend asks for it: limit 16, offset 0.
+    /// `wallet.history` as the frontend asks for it: with no argument.
     async fn history_of(
         router: &AppRouterImpl,
     ) -> Result<generated::WalletHistoryResponse, String> {
-        let mut body = Vec::with_capacity(16);
-        body.extend_from_slice(&16u64.to_le_bytes());
-        body.extend_from_slice(&0u64.to_le_bytes());
         let answer = router
             .query(AppQuery {
                 path: "wallet.history".to_string(),
-                params: generated::ArgPack {
-                    codec: generated::Codec::Proto as i32,
-                    body,
-                    ..Default::default()
-                }
-                .encode_to_vec(),
+                params: Vec::new(),
             })
             .await;
         if !answer.success {
@@ -2419,8 +2389,10 @@ mod send_offline_tests {
 
         // A host build has no BLE: the send stops only at the dispatch, past
         // the relationship's send status, the token, the amount and its policy.
-        let host_dispatch =
-            Err("wallet.sendOffline is only available on Android BLE builds".to_string());
+        let host_dispatch = Err(
+            "wallet.sendOffline is only available on a build with the bluetooth feature"
+                .to_string(),
+        );
         assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
 
         update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))

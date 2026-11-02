@@ -14,7 +14,7 @@ use serial_test::serial;
 use crate::bridge::{AppInvoke, AppResult, AppRouter};
 use crate::economic_fixtures::{self, foreign_walk, NETWORK};
 use crate::handlers::app_router_impl::AppRouterImpl;
-use crate::sdk::economic_admission_flow::resume_pending_admission;
+use crate::sdk::economic_admission_flow::{resume_pending_admission, verified_frozen_successor};
 use crate::storage::client_db;
 use crate::test_support::one_device::Device;
 use crate::test_support::two_device::{assert_incomplete, Pair};
@@ -1441,6 +1441,135 @@ async fn a_failed_finish_holds_the_creation_and_resume_completes_the_same_admiss
         2,
         "the resumed admission is the one the fleet holds"
     );
+}
+
+/// A finish validates against the evidence its admission froze, verified as a
+/// foreign walker verifies it and held to what the admission bound. The bytes
+/// are refused when they do not verify, when they verify but are not the bytes
+/// the admission names, and when they verify but carry another operation or
+/// another successor. Holding an accepted substrate means this ran: nothing
+/// else makes one (S-SUBSTRATE).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_finish_validates_only_the_successor_evidence_its_admission_froze() {
+    use dsm::economic::admission::AcceptedSubstrateCoords;
+    use dsm::economic::successor_evidence::{sign_dsm_successor_evidence, successor_evidence_addr};
+
+    let mut d = Device::funded(0xC8).await;
+    let down = economic_fixtures::members_to_break_quorum();
+    d.nodes.take_down(&down).await;
+    let held = invoke(&d.router, "token.create", &create_request("FROZE", 0, 300)).await;
+    assert!(!held.success, "the creation is held");
+    let head = d.core().device_head().expect("head");
+    let pending = head
+        .pending_economic_admission()
+        .cloned()
+        .expect("the creation is held behind its pending admission");
+    let coords = *pending.accepted_coords().expect("accepted");
+    let (genesis, devid) = (head.genesis_digest(), head.devid());
+    let (ak, sk) = crate::sdk::signing_authority::current_keypair().expect("the signing key");
+    let digest = pending.operation_digest;
+
+    let verified = verified_frozen_successor(&coords, &digest, &genesis, &devid, &ak)
+        .expect("the evidence the admission froze verifies");
+    assert_eq!(verified.evidence_addr(), coords.accepted_substrate_addr);
+
+    let another_operation = verified_frozen_successor(&coords, &[0xEE; 32], &genesis, &devid, &ak)
+        .expect_err("another operation's digest");
+    assert!(
+        another_operation.to_string().contains("does not match"),
+        "{another_operation}"
+    );
+
+    let mut another_successor = coords;
+    another_successor.substrate = AcceptedSubstrateCoords::Successor {
+        c_dsm_plus: [0xEE; 32],
+        embedded_parent: verified.embedded_parent(),
+    };
+    let refused = verified_frozen_successor(&another_successor, &digest, &genesis, &devid, &ak)
+        .expect_err("another successor's commitment");
+    assert!(refused.to_string().contains("does not match"), "{refused}");
+
+    let another_parent = {
+        let mut bent = coords;
+        bent.substrate = AcceptedSubstrateCoords::Successor {
+            c_dsm_plus: verified.c_dsm_plus(),
+            embedded_parent: [0xEE; 32],
+        };
+        bent
+    };
+    let refused = verified_frozen_successor(&another_parent, &digest, &genesis, &devid, &ak)
+        .expect_err("another successor's parent");
+    assert!(refused.to_string().contains("does not match"), "{refused}");
+
+    // The honest bytes under a stranger's key: address, digest and pair all
+    // hold, so only the signature can refuse.
+    let stranger =
+        dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
+            .expect("a stranger's key");
+    let refused =
+        verified_frozen_successor(&coords, &digest, &genesis, &devid, &stranger.public_key)
+            .expect_err("a stranger's key");
+    assert!(refused.to_string().contains("verify frozen"), "{refused}");
+
+    let key = crate::sdk::economic_registers::immutable_object_key_for_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+        &coords.accepted_substrate_addr,
+    );
+    let honest = client_db::frozen_publication_artifact::get_artifact(&key)
+        .expect("the frozen row")
+        .expect("the frozen evidence")
+        .payload;
+    let freeze = |bytes: &[u8]| {
+        let binding = client_db::get_connection().expect("the database");
+        let conn = binding.lock().expect("the database lock");
+        conn.execute(
+            "UPDATE frozen_publication_artifact SET payload = ?1 WHERE object_key = ?2",
+            rusqlite::params![bytes, key],
+        )
+        .expect("the frozen row is rewritten");
+    };
+
+    // Good evidence the trader did sign, for this operation, but not the bytes
+    // the admission names.
+    let decoded = dsm::types::proto::DsmSuccessorEvidenceV1::decode(honest.as_slice())
+        .expect("the evidence decodes");
+    let parent: [u8; 32] = decoded.embedded_parent.as_slice().try_into().expect("32");
+    let rel_key: [u8; 32] = decoded.rel_key.as_slice().try_into().expect("32");
+    let counterparty: [u8; 32] = decoded
+        .counterparty_devid
+        .as_slice()
+        .try_into()
+        .expect("32");
+    let elsewhere = sign_dsm_successor_evidence(
+        &rel_key,
+        &parent,
+        &counterparty,
+        &decoded.operation_bytes,
+        &[0xDD; 32],
+        None,
+        &genesis,
+        &devid,
+        &sk,
+    )
+    .expect("signs");
+    assert_ne!(
+        successor_evidence_addr(&elsewhere),
+        coords.accepted_substrate_addr
+    );
+    freeze(&elsewhere);
+    let refused = verified_frozen_successor(&coords, &digest, &genesis, &devid, &ak)
+        .expect_err("evidence the admission does not name");
+    assert!(refused.to_string().contains("address-match"), "{refused}");
+
+    // The named bytes with a byte of the signature changed.
+    let mut bent = honest.clone();
+    let last = bent.len() - 1;
+    bent[last] ^= 0x01;
+    freeze(&bent);
+    let refused = verified_frozen_successor(&coords, &digest, &genesis, &devid, &ak)
+        .expect_err("evidence that does not verify");
+    assert!(refused.to_string().contains("verify frozen"), "{refused}");
 }
 
 /// COMPARE-AND-FINISH (ownership ruled 2026-09-15). A resume of an admission

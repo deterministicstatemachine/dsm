@@ -132,7 +132,9 @@ static mut LAST_SEQ: u32 = 0;
 
 // `bench_self_enroll` is a BENCH-ONLY escape hatch and must never ship in production.
 #[cfg(all(feature = "bench_self_enroll", feature = "production"))]
-compile_error!("`bench_self_enroll` must NOT be enabled in a production build (feature `production`)");
+compile_error!(
+    "`bench_self_enroll` must NOT be enabled in a production build (feature `production`)"
+);
 
 /// The OTP-sealed enrolled digest (secure-read; see `otp-plan.json`). `None` = permission-denied or
 /// blank OTP.
@@ -188,7 +190,11 @@ unsafe fn bench_self_enroll_at_boot() {
     // Self-verify that the §2 gate now PASSES the same way an authority op will: a fresh measure +
     // constant-time compare against the just-enrolled digest. 0xBE0C_0FED only if measurement_ok()
     // actually returns true (0xBE0C_0BAD would flag a self-enroll that somehow does not satisfy §2).
-    let marker = if measurement_ok() { 0xBE0C_0FED } else { 0xBE0C_0BAD };
+    let marker = if measurement_ok() {
+        0xBE0C_0FED
+    } else {
+        0xBE0C_0BAD
+    };
     core::ptr::write_volatile(core::ptr::addr_of_mut!(BENCH_ENROLLED_MARKER), marker);
 }
 
@@ -230,7 +236,6 @@ fn measurement_ok() -> bool {
     let measured = blake3::hash(bytes);
     measured.as_bytes().ct_eq(&enrolled).into()
 }
-
 
 // ── The Secure handler behind the NSC veneer ─────────────────────────────────────────────────
 

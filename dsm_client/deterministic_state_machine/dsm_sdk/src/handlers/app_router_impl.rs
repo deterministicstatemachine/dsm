@@ -873,9 +873,8 @@ impl AppRouterImpl {
             &signing_bytes,
         );
         log::info!(
-            "🔐 wallet.send: canonical signing preimage hash(first8)={:?} amount={} token={}",
+            "🔐 wallet.send: canonical signing preimage hash(first8)={:?} token={}",
             &preimage_hash.as_bytes()[..8],
-            intent.amount,
             token_id
         );
 
@@ -1910,7 +1909,7 @@ impl AppRouterImpl {
             &econ_validated,
             econ_parts_final.witness,
             econ_parts_final.manifest,
-            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(Box::new(admission_op)),
+            crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
             pending_admission,
             Vec::new(),
         )

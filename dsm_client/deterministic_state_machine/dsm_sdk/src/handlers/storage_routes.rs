@@ -1570,8 +1570,6 @@ impl AppRouterImpl {
                 let admission_build: std::cell::RefCell<
                     Option<crate::sdk::economic_admission_flow::RecipientAdmissionBuild>,
                 > = std::cell::RefCell::new(None);
-                let signed_op_stash: std::cell::RefCell<Option<dsm::types::operations::Operation>> =
-                    std::cell::RefCell::new(None);
                 let mut accepted_admission: Option<
                     dsm::economic::admission::PendingEconomicAdmission,
                 > = None;
@@ -1688,7 +1686,6 @@ impl AppRouterImpl {
                                         &rel_key,
                                     )?;
                                 *admission_build.borrow_mut() = Some(built);
-                                *signed_op_stash.borrow_mut() = Some(v.signed_op.clone());
                                 Ok(b_art)
                             },
                             |tx, _outcome, artifacts| {
@@ -1809,9 +1806,7 @@ impl AppRouterImpl {
                 // deliverable. On failure: accepted-but-held; the poll-level
                 // resume (Step 0) finishes the SAME admission next pass.
                 if let Some(pending) = accepted_admission.take() {
-                    let built = admission_build.borrow_mut().take();
-                    let signed_op = signed_op_stash.borrow_mut().take();
-                    let (Some(built), Some(signed_op)) = (built, signed_op) else {
+                    let Some(built) = admission_build.borrow_mut().take() else {
                         failures.push(format!(
                             "split transfer {name}: admission accepted with no build \
                              (invariant violated); held for resume"
@@ -1825,9 +1820,7 @@ impl AppRouterImpl {
                         &prereqs.validated,
                         built.parts.witness,
                         built.parts.manifest,
-                        crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm(Box::new(
-                            signed_op,
-                        )),
+                        crate::sdk::economic_admission_flow::AdmittedSubstrate::Dsm,
                         pending,
                         // The RELEASE object: frozen only in the admit
                         // transaction, published right after.

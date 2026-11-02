@@ -677,7 +677,7 @@ pub(crate) async fn admitted_self_loop_operation(
         &validated,
         parts.witness,
         parts.manifest,
-        AdmittedSubstrate::Dsm(Box::new(operation)),
+        AdmittedSubstrate::Dsm,
         pending,
         Vec::new(),
     )
@@ -1245,13 +1245,57 @@ fn admission_already_finished(
     }
 }
 
-/// The substrate an admission's finish validates against: the exact
-/// operation a DSM successor carried, or the exact bytes of an offline
-/// boundary's body. The finish verifies each again before it trusts it.
+/// The substrate an admission's finish validates against: a DSM successor,
+/// whose evidence the admission froze and names, or the exact bytes of an
+/// offline boundary's body. The finish verifies each before it trusts it.
 pub(crate) enum AdmittedSubstrate {
-    // Boxed: an operation can carry a SPHINCS+ signature.
-    Dsm(Box<Operation>),
+    Dsm,
     OfflineBoundary(Vec<u8>),
+}
+
+/// The successor evidence the admission froze, verified the way a foreign
+/// walker verifies it, and held to the coordinates the admission bound.
+pub(crate) fn verified_frozen_successor(
+    coords: &dsm::economic::admission::AcceptedAdmissionCoords,
+    operation_digest: &[u8; 32],
+    genesis: &[u8; 32],
+    devid: &[u8; 32],
+    proven_ak: &[u8],
+) -> Result<dsm::economic::successor_evidence::VerifiedDsmSuccessor, DsmError> {
+    let key = crate::sdk::economic_registers::immutable_object_key_for_inner(
+        dsm::common::domain_tags::TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
+        &coords.accepted_substrate_addr,
+    );
+    let frozen = crate::storage::client_db::frozen_publication_artifact::get_artifact(&key)
+        .map_err(|e| storage_err("load frozen successor evidence", e))?
+        .ok_or_else(|| {
+            DsmError::storage(
+                "no frozen successor evidence for the pending admission".to_string(),
+                None::<std::io::Error>,
+            )
+        })?;
+    let verified = dsm::economic::successor_evidence::verify_dsm_successor_evidence(
+        &frozen.payload,
+        genesis,
+        devid,
+        proven_ak,
+    )
+    .map_err(|e| storage_err("verify frozen successor evidence", e))?;
+    if verified.evidence_addr() != coords.accepted_substrate_addr {
+        return Err(DsmError::storage(
+            "frozen successor evidence does not address-match the pending admission".to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+    if verified.operation_digest() != *operation_digest
+        || coords.substrate.successor() != Some((verified.embedded_parent(), verified.c_dsm_plus()))
+    {
+        return Err(DsmError::storage(
+            "frozen successor evidence does not match the pending admission".to_string(),
+            None::<std::io::Error>,
+        ));
+    }
+    Ok(verified)
 }
 
 /// Everything after local acceptance. Separated so recovery re-enters here.
@@ -1428,20 +1472,14 @@ async fn finish_locked(
     );
     if pending.state < EconomicAdmissionState::Validated {
         let accepted = match substrate {
-            AdmittedSubstrate::Dsm(operation) => {
-                let operation = *operation;
-                let (embedded_parent, c_dsm_plus) =
-                    coords.substrate.successor().ok_or_else(|| {
-                        DsmError::invalid_operation(
-                            "a DSM admission whose coordinates are not a successor's",
-                        )
-                    })?;
-                AcceptedSubstrate::from_verified_dsm_successor(
-                    operation,
-                    c_dsm_plus,
-                    embedded_parent,
-                    coords.accepted_substrate_addr,
-                )
+            AdmittedSubstrate::Dsm => {
+                AcceptedSubstrate::from_verified_dsm_successor(verified_frozen_successor(
+                    &coords,
+                    &operation_digest,
+                    &genesis,
+                    &devid,
+                    &public_key,
+                )?)
             }
             AdmittedSubstrate::OfflineBoundary(body) => {
                 if dsm::economic::offline_boundary::offline_boundary_evidence_addr(&body)
@@ -1905,57 +1943,6 @@ pub(crate) async fn resume_pending_admission(
         .await;
     }
 
-    // The EXACT operation, from the frozen SUCCESSOR EVIDENCE — recovery
-    // re-derives nothing and re-signs nothing. The evidence is verified the
-    // same way a foreign walker verifies it, and its address must be the one
-    // the admission bound.
-    let substrate_key_prefix = format!(
-        "immutable::{}::",
-        String::from_utf8_lossy(
-            dsm::common::domain_tags::TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE.source_bytes()
-        )
-    );
-    let successor_bytes =
-        crate::storage::client_db::frozen_publication_artifact::find_current_payload_with_prefix_and_purpose(
-            &substrate_key_prefix,
-            "economic-dsm-successor-evidence",
-        )
-        .map_err(|e| storage_err("load frozen successor evidence", e))?
-        .ok_or_else(|| {
-            DsmError::storage(
-                "no frozen successor evidence for the pending admission".to_string(),
-                None::<std::io::Error>,
-            )
-        })?;
-    if dsm::economic::successor_evidence::successor_evidence_addr(&successor_bytes)
-        != coords.accepted_substrate_addr
-    {
-        return Err(DsmError::storage(
-            "frozen successor evidence does not address-match the pending admission".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-    let own_pk = crate::sdk::signing_authority::current_keypair()
-        .map_err(|e| storage_err("signing authority", e))?
-        .0;
-    let verified_successor = dsm::economic::successor_evidence::verify_dsm_successor_evidence(
-        &successor_bytes,
-        &genesis,
-        &devid,
-        &own_pk,
-    )
-    .map_err(|e| storage_err("verify frozen successor evidence", e))?;
-    let operation = verified_successor.operation;
-    if verified_successor.operation_digest != pending.operation_digest
-        || Some(verified_successor.c_dsm_plus)
-            != coords.substrate.successor().map(|(_, c_plus)| c_plus)
-    {
-        return Err(DsmError::storage(
-            "frozen successor evidence does not match the pending admission".to_string(),
-            None::<std::io::Error>,
-        ));
-    }
-
     // A recipient admission's RELEASE (frozen only at admit): recover the
     // exact bytes from the acceptance journal by the manifest address this
     // admission binds, so a crash-resumed recipient still publishes it.
@@ -1983,7 +1970,7 @@ pub(crate) async fn resume_pending_admission(
         &validated,
         witness,
         manifest,
-        AdmittedSubstrate::Dsm(Box::new(operation)),
+        AdmittedSubstrate::Dsm,
         pending,
         post_admit,
     )

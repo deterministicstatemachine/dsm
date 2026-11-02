@@ -21,6 +21,10 @@ use dsm::economic::lineage::{
     EconomicValidationError,
 };
 use dsm::economic::mutation::EconomicLeafMutation;
+use dsm::economic::successor_evidence::{
+    sign_dsm_successor_evidence, successor_evidence_addr, verify_dsm_successor_evidence,
+};
+use dsm::types::device_state::relationship_chain_tip_v2;
 use dsm::economic::register::RegisteredEconomicRoot;
 use dsm::economic::provenance::{
     PeerLineageFailure, ProvenanceResolver, ReserveReleaseWin, ValidatedPeerTransition,
@@ -31,7 +35,6 @@ use dsm::economic::witness::EconomicTransitionWitness;
 use dsm::types::operations::{Operation, TransactionMode};
 use dsm::types::token_types::Balance;
 
-#[path = "common/identity.rs"]
 mod identity;
 const ERA: [u8; 32] = [0xAA; 32];
 
@@ -270,6 +273,37 @@ fn bal(pc: [u8; 32], amount: u64) -> EconomicLeafState {
 const C_DSM_PLUS: [u8; 32] = [0xCD; 32];
 const EMBEDDED_PARENT: [u8; 32] = [0xCE; 32];
 const SUBSTRATE_ADDR: [u8; 32] = [0xA4; 32];
+const REL_KEY: [u8; 32] = [0xC1; 32];
+const COUNTERPARTY: [u8; 32] = [0xC2; 32];
+const ENTROPY: [u8; 32] = [0xC3; 32];
+
+/// The successor evidence the trader signs for `op`, as an admission freezes it.
+fn successor_evidence(op: &Operation, entropy: &[u8]) -> Vec<u8> {
+    sign_dsm_successor_evidence(
+        &REL_KEY,
+        &EMBEDDED_PARENT,
+        &COUNTERPARTY,
+        &op.to_bytes(),
+        entropy,
+        None,
+        &g(),
+        dev(),
+        &holder().ak_secret_key,
+    )
+    .expect("the trader signs its successor")
+}
+
+/// The `C_dsm+` that evidence commits.
+fn c_dsm_plus(op: &Operation) -> [u8; 32] {
+    relationship_chain_tip_v2(
+        &REL_KEY,
+        &EMBEDDED_PARENT,
+        &COUNTERPARTY,
+        &op.to_bytes(),
+        &ENTROPY,
+        None,
+    )
+}
 
 fn canonical_set_id() -> [u8; 32] {
     dsm::economic::register::resolve_root_register_profile(b"dsm-testnet")
@@ -342,7 +376,7 @@ fn faucet_fixture(position: u64) -> FaucetFixture {
     let witness = EconomicTransitionWitness::new(
         pre_root,
         post_root,
-        dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
+        dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
         op_digest,
         vec![mutation],
         vec![CreditSource::NativeReserveRelease(
@@ -501,23 +535,35 @@ impl ProvenanceResolver for NoRegisterSet {
     }
 }
 
-fn accepted_for(op: &Operation) -> AcceptedSubstrate {
+/// What the verifier establishes over `evidence`, the one way to an
+/// [`AcceptedSubstrate`].
+fn accepted_over(evidence: &[u8]) -> AcceptedSubstrate {
     AcceptedSubstrate::from_verified_dsm_successor(
-        op.clone(),
-        C_DSM_PLUS,
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
+        verify_dsm_successor_evidence(evidence, &g(), dev(), &holder().ak_public_key)
+            .expect("the trader's evidence verifies"),
     )
 }
 
-fn manifest_for(witness: &EconomicTransitionWitness) -> EconomicAdmissionManifest {
+fn accepted_for(op: &Operation) -> AcceptedSubstrate {
+    accepted_over(&successor_evidence(op, &ENTROPY))
+}
+
+fn manifest_for(op: &Operation, witness: &EconomicTransitionWitness) -> EconomicAdmissionManifest {
+    manifest_naming(
+        witness,
+        successor_evidence_addr(&successor_evidence(op, &ENTROPY)),
+    )
+}
+
+fn manifest_naming(
+    witness: &EconomicTransitionWitness,
+    evidence_addr: [u8; 32],
+) -> EconomicAdmissionManifest {
     EconomicAdmissionManifest::new(
         [0xA1; 32],
         [0xA2; 32],
         [0xA3; 32],
-        AdmissionSubstrate::DsmSuccessor {
-            evidence_addr: SUBSTRATE_ADDR,
-        },
+        AdmissionSubstrate::DsmSuccessor { evidence_addr },
         witness.derived_provenance_index(),
     )
     .expect("valid manifest")
@@ -606,7 +652,7 @@ fn run(
 #[test]
 fn a_faucet_claim_transition_advances_the_validated_lineage() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
     let advanced = run(&fx, &registered, &manifest, &fx.witness, &accepted).expect("validates");
@@ -632,7 +678,7 @@ fn a_faucet_claim_transition_advances_the_validated_lineage() {
 #[test]
 fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let accepted = accepted_for(&fx.op);
     let zero = activate(EconomicActivationSnapshot::fresh()).expect("fresh");
@@ -669,7 +715,7 @@ fn a_register_set_not_established_is_not_a_verdict_about_the_claimant() {
 #[test]
 fn a_registered_claim_of_another_trader_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let accepted = accepted_for(&fx.op);
     let addr = manifest.addr().expect("addressable");
     static OTHER: std::sync::OnceLock<(Vec<u8>, Vec<u8>)> = std::sync::OnceLock::new();
@@ -708,13 +754,13 @@ fn a_witness_that_is_not_the_operations_exact_effect_is_refused() {
     let forged = EconomicTransitionWitness::new(
         pre_root,
         tree.root(),
-        dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
+        dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&fx.op)),
         fx.witness.operation_digest,
         vec![mutation],
         Vec::new(),
     )
     .expect("internally valid");
-    let manifest = manifest_for(&forged);
+    let manifest = manifest_for(&fx.op, &forged);
     let registered = registered_for(&manifest, 1, tree.root());
     let accepted = accepted_for(&fx.op);
     match run(&fx, &registered, &manifest, &forged, &accepted) {
@@ -729,7 +775,7 @@ fn a_successor_paired_with_a_different_operation_is_refused() {
     // objects are individually valid; together they describe two different
     // operations.
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, fx.post_root);
     let other_op = Operation::FaucetClaim {
         reserve_id: dsm::economic::native_reserve::era_reserve_id(b"dsm-testnet"),
@@ -748,14 +794,12 @@ fn a_witness_naming_a_different_successor_is_refused() {
     // not merely this operation. Same operation bytes, different successor
     // commitment ⇒ refused.
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    // Other entropy: a different accepted successor of the same operation, and
+    // the manifest names that evidence, so only the identity conjunct is left.
+    let other = successor_evidence(&fx.op, &[0xDD; 32]);
+    let manifest = manifest_naming(&fx.witness, successor_evidence_addr(&other));
     let registered = registered_for(&manifest, 1, fx.post_root);
-    let accepted = AcceptedSubstrate::from_verified_dsm_successor(
-        fx.op.clone(),
-        [0xDD; 32], // a different accepted successor
-        EMBEDDED_PARENT,
-        SUBSTRATE_ADDR,
-    );
+    let accepted = accepted_over(&other);
     match run(&fx, &registered, &manifest, &fx.witness, &accepted) {
         Err(EconomicValidationError::EconomicOperationIdMismatch { .. }) => {}
         other => panic!("a witness naming another successor must be refused, got {other:?}"),
@@ -804,7 +848,7 @@ fn the_manifest_must_name_the_substrate_evidence_actually_used() {
 #[test]
 fn a_registration_at_the_wrong_position_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 5, fx.post_root); // not 0 + 1
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -819,7 +863,7 @@ fn a_registration_at_the_wrong_position_is_refused() {
 #[test]
 fn a_registration_naming_another_manifest_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_naming(1, fx.post_root, [0xFF; 32]);
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -831,7 +875,7 @@ fn a_registration_naming_another_manifest_is_refused() {
 #[test]
 fn a_registered_root_disagreeing_with_the_witness_is_refused() {
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let registered = registered_for(&manifest, 1, [0xEE; 32]); // invented root
     let accepted = accepted_for(&fx.op);
     assert!(matches!(
@@ -934,7 +978,7 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
             &op,
             &g(),
             dev(),
-            &dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
+            &dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
             &dsm::economic::write_set::EconomicPreState::new(&std::collections::BTreeMap::new(), 0),
             &mut build_tree,
             &dsm::economic::write_set::CreditSourceFacts::None,
@@ -948,13 +992,13 @@ fn a_setup_transition_binds_its_position_and_its_derived_root() {
         let witness = EconomicTransitionWitness::new(
             pre_root,
             built.post_root,
-            dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &C_DSM_PLUS),
+            dsm::economic::admission::dsm_economic_operation_id(&g(), dev(), &c_dsm_plus(&op)),
             dsm::economic::admission::dsm_operation_digest(&op.to_bytes()),
             built.mutations,
             built.credit_sources,
         )
         .expect("a witness");
-        let manifest = manifest_for(&witness);
+        let manifest = manifest_for(&op, &witness);
         let registered = registered_for(&manifest, 1, witness.post_economic_root);
         advance_validated(
             &zero,
@@ -1033,7 +1077,9 @@ fn held_first_claim(
     .into_locally_accepted(dsm::economic::admission::AcceptedAdmissionCoords {
         post_economic_root: fx.post_root,
         accepted_substrate_addr: SUBSTRATE_ADDR,
-        admission_manifest_addr: manifest_for(&fx.witness).addr().expect("addressable"),
+        admission_manifest_addr: manifest_for(&fx.op, &fx.witness)
+            .addr()
+            .expect("addressable"),
         substrate: match kind {
             PendingAdmissionKind::OfflineLoad { .. }
             | PendingAdmissionKind::OfflineUnload { .. } => {
@@ -1414,7 +1460,7 @@ fn an_offline_load_and_unload_advance_the_lineage_and_an_unload_funds_once() {
     use dsm::economic::native_reserve::ERA_FAUCET_PAYOUT;
     let era = dsm::core::token::token_state_manager::era_policy_commit();
     let fx = faucet_fixture(1);
-    let manifest = manifest_for(&fx.witness);
+    let manifest = manifest_for(&fx.op, &fx.witness);
     let at_one = run(
         &fx,
         &registered_for(&manifest, 1, fx.post_root),

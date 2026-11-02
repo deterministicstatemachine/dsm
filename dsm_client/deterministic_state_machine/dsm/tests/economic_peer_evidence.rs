@@ -73,7 +73,7 @@ fn successor_evidence_round_trips_and_refuses_tampering() {
     .expect("signable");
     let verified = verify_dsm_successor_evidence(&bytes, &G_SENDER, &DEV_SENDER, &ak_pk)
         .expect("verifies under the signing AK");
-    assert_eq!(verified.operation.to_bytes(), op.to_bytes());
+    assert_eq!(verified.operation().to_bytes(), op.to_bytes());
 
     // A DIFFERENT proven AK: signature invalid.
     let (other_pk, _) = generate_sphincs_keypair().unwrap();

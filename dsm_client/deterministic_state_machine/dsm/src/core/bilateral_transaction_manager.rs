@@ -594,15 +594,11 @@ impl BilateralTransactionManager {
             .get_contact(remote_device_id)
             .ok_or_else(|| DsmError::ContactNotFound("remote device".into()))?;
         info!(
-            "[BTM] establish_relationship: contact.alias={}, public_key.len()={}, genesis_verified={}, chain_tip={:?}",
-            contact.alias, contact.public_key.len(), contact.genesis_verified_online,
+            "[BTM] establish_relationship: contact.alias={}, public_key.len()={}, chain_tip={:?}",
+            contact.alias,
+            contact.public_key.len(),
             contact.chain_tip.map(|ct| labeling::hash_to_short_id(&ct))
         );
-        if !contact.can_perform_bilateral_transaction() {
-            return Err(DsmError::InvalidContact(
-                "Contact Genesis not verified online".into(),
-            ));
-        }
         let contact_genesis_hash = contact.genesis_hash;
         // Strict: a relationship established for bilateral transfer needs the
         // counterparty's signing key, which verifies its acceptance proofs.
@@ -1123,16 +1119,6 @@ mod tests {
         let remote = make_remote_ids().0;
         let res = manager.establish_relationship(&remote).await;
         assert!(res.is_err());
-    }
-
-    #[tokio::test]
-    async fn establish_relationship_requires_genesis_verified() {
-        let (mut manager, _kp) = make_manager();
-        let contact = make_verified_contact("Alice", true, false);
-        // Add contact (pre-verified API allows any, but BTM enforces on use)
-        manager.add_verified_contact(contact.clone()).expect("add");
-        let res = manager.establish_relationship(&contact.device_id).await;
-        assert!(matches!(res, Err(DsmError::InvalidContact(_))));
     }
 
     /// A relationship its store does not hold is not established, and

@@ -37,7 +37,10 @@ fn arr32(b: &[u8]) -> Result<[u8; 32], DsmError> {
 
 /// One appliance op over the transport: frame `LE32(len) ++ ApplianceRequest`, run the opaque USB
 /// round-trip and decode the `ApplianceResponse`, refused or not.
-fn exchange(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
+fn exchange(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+) -> Result<pb::ApplianceResponse, DsmError> {
     let body = encode_request(&req);
     let mut frame = (body.len() as u32).to_le_bytes().to_vec();
     frame.extend_from_slice(&body);
@@ -49,7 +52,10 @@ fn exchange(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::Applia
 
 /// One appliance op that must succeed: fail closed unless the chip reported `ok`. Free function so
 /// it is usable from `connect()` before `self` exists.
-fn roundtrip(usb: &UsbTransceive, req: pb::ApplianceRequest) -> Result<pb::ApplianceResponse, DsmError> {
+fn roundtrip(
+    usb: &UsbTransceive,
+    req: pb::ApplianceRequest,
+) -> Result<pb::ApplianceResponse, DsmError> {
     let resp = exchange(usb, req)?;
     if !resp.ok {
         return Err(DsmError::invalid_operation(format!(
@@ -257,32 +263,46 @@ mod tests {
     #[test]
     fn connect_fails_closed_without_pk_chip() {
         let usb: UsbTransceive = Arc::new(|_frame| {
-            Ok(anchor_core::proto::encode_response(&pb::ApplianceResponse {
-                op: pb::Op::Status as i32,
-                ok: true,
-                active_root: vec![0x11; 32],
-                anchor_bundle: vec![0xB1; 32],
-                pin_anchor_id: vec![0xA1; 32],
-                pin_enrolled_counter: 1_000,
-                pin_partition_pk: vec![0x07; 64],
-                pin_chip_pk: Vec::new(), // pre-v2 firmware
-                ..Default::default()
-            }))
+            Ok(anchor_core::proto::encode_response(
+                &pb::ApplianceResponse {
+                    op: pb::Op::Status as i32,
+                    ok: true,
+                    active_root: vec![0x11; 32],
+                    anchor_bundle: vec![0xB1; 32],
+                    pin_anchor_id: vec![0xA1; 32],
+                    pin_enrolled_counter: 1_000,
+                    pin_partition_pk: vec![0x07; 64],
+                    pin_chip_pk: Vec::new(), // pre-v2 firmware
+                    ..Default::default()
+                },
+            ))
         });
         let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
         let refused = app
             .provisioned_pin()
             .expect_err("a pin without pk_chip cannot verify σ^chip — reading it must fail closed");
-        assert!(refused.to_string().contains("expected 32-byte field"), "{refused}");
+        assert!(
+            refused.to_string().contains("expected 32-byte field"),
+            "{refused}"
+        );
     }
 
     #[test]
     fn recover_answers_the_appliances_own_outcome_and_frontier() {
         for (kind, want) in [
             (pb::Recovery::Accept, RecoverOutcome::Accept([0x11; 32])),
-            (pb::Recovery::ReemitCommitted, RecoverOutcome::ReemitCommitted([0x11; 32])),
-            (pb::Recovery::AcceptPreparedCanComplete, RecoverOutcome::AcceptPreparedCanComplete),
-            (pb::Recovery::DowngradeOnline, RecoverOutcome::DowngradeOnline),
+            (
+                pb::Recovery::ReemitCommitted,
+                RecoverOutcome::ReemitCommitted([0x11; 32]),
+            ),
+            (
+                pb::Recovery::AcceptPreparedCanComplete,
+                RecoverOutcome::AcceptPreparedCanComplete,
+            ),
+            (
+                pb::Recovery::DowngradeOnline,
+                RecoverOutcome::DowngradeOnline,
+            ),
         ] {
             let usb: UsbTransceive = Arc::new(move |frame| {
                 let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
@@ -304,7 +324,9 @@ mod tests {
             Ok(anchor_core::proto::encode_response(&answer))
         });
         let mut app = UsbAnchorAppliance::connect(unnamed).expect("connect");
-        let refused = app.recover().expect_err("an outcome the wire does not name fails closed");
+        let refused = app
+            .recover()
+            .expect_err("an outcome the wire does not name fails closed");
         assert!(refused.to_string().contains("no outcome"), "{refused}");
     }
 
@@ -313,30 +335,39 @@ mod tests {
         let usb: UsbTransceive = Arc::new(|frame| {
             let req = anchor_core::proto::decode_request(&frame[4..]).expect("a request");
             if req.op == pb::Op::Status as i32 {
-                return Ok(anchor_core::proto::encode_response(&pb::ApplianceResponse {
-                    op: req.op,
-                    error: anchor_core::service::err::NOT_PROVISIONED,
-                    ..Default::default()
-                }));
+                return Ok(anchor_core::proto::encode_response(
+                    &pb::ApplianceResponse {
+                        op: req.op,
+                        error: anchor_core::service::err::NOT_PROVISIONED,
+                        ..Default::default()
+                    },
+                ));
             }
             Ok(status_response(0))
         });
         let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
-        assert_eq!(app.provisioned_pin().expect("status").map(|pin| pin.bundle), None);
+        assert_eq!(
+            app.provisioned_pin().expect("status").map(|pin| pin.bundle),
+            None
+        );
     }
 
     #[test]
     fn onchip_error_fails_closed() {
         let usb: UsbTransceive = Arc::new(|_frame| {
-            Ok(anchor_core::proto::encode_response(&pb::ApplianceResponse {
-                op: pb::Op::Status as i32,
-                ok: false,
-                error: 5,
-                ..Default::default()
-            }))
+            Ok(anchor_core::proto::encode_response(
+                &pb::ApplianceResponse {
+                    op: pb::Op::Status as i32,
+                    ok: false,
+                    error: 5,
+                    ..Default::default()
+                },
+            ))
         });
         let mut app = UsbAnchorAppliance::connect(usb).expect("connect");
-        let refused = app.provisioned_pin().expect_err("an on-chip error fails closed");
+        let refused = app
+            .provisioned_pin()
+            .expect_err("an on-chip error fails closed");
         assert!(refused.to_string().contains("failed on-chip"), "{refused}");
     }
 }

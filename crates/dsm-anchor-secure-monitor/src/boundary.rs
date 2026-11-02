@@ -67,12 +67,12 @@ const NSC_BASE: u32 = 0x2006_0000;
 const NSC_LIMIT: u32 = 0x2006_0FFF; // NSC veneer region [0x20060000, 0x20061000)
 const NS_BASE: u32 = 0x2006_1000;
 const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20061000, 0x20080000)
-// Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
-// This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
-// per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
-// every Secure peripheral (OTP 0x…60a8, SPI0 0x…6090, DMA, …) keeps its reset default NSP=0, so an
-// NS access to it still bus-errors. Covers APB (0x40000000+) and the USB block (0x50100000+); SIO
-// (0xd0000000) is deliberately NOT covered (the NS app uses no GPIO).
+                                   // Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
+                                   // This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
+                                   // per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
+                                   // every Secure peripheral (OTP 0x…60a8, SPI0 0x…6090, DMA, …) keeps its reset default NSP=0, so an
+                                   // NS access to it still bus-errors. Covers APB (0x40000000+) and the USB block (0x50100000+); SIO
+                                   // (0xd0000000) is deliberately NOT covered (the NS app uses no GPIO).
 const PERIPH_BASE: u32 = 0x4000_0000;
 const PERIPH_LIMIT: u32 = 0x501F_FFFF;
 

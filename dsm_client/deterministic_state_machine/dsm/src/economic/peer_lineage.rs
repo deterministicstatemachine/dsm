@@ -1220,7 +1220,7 @@ impl Verifier<'_> {
                     // debit and names no credit source, so nothing behind it
                     // is asked for.
                     if !matches!(
-                        verified.operation,
+                        verified.operation(),
                         crate::types::operations::Operation::Transfer {
                             authority_policy: None,
                             ..
@@ -1231,18 +1231,14 @@ impl Verifier<'_> {
                         )));
                     }
                 }
+                let peer = PeerSubstrate::Dsm {
+                    c_dsm_plus: verified.c_dsm_plus(),
+                    embedded_parent: verified.embedded_parent(),
+                    verified_operation: verified.operation().clone(),
+                };
                 (
-                    AcceptedSubstrate::from_verified_dsm_successor(
-                        verified.operation.clone(),
-                        verified.c_dsm_plus,
-                        verified.embedded_parent,
-                        *successor_addr,
-                    ),
-                    PeerSubstrate::Dsm {
-                        c_dsm_plus: verified.c_dsm_plus,
-                        embedded_parent: verified.embedded_parent,
-                        verified_operation: verified.operation,
-                    },
+                    AcceptedSubstrate::from_verified_dsm_successor(verified),
+                    peer,
                 )
             }
             AdmissionSubstrate::OfflineBoundary { evidence_addr } => {

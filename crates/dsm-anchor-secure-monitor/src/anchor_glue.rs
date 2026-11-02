@@ -217,7 +217,12 @@ pub unsafe fn init() -> Result<(), InitFailure> {
 
     let timer = hal::Timer::new_timer0(pac.TIMER0, &mut pac.RESETS, &clocks);
     let sio = hal::Sio::new(pac.SIO);
-    let pins = hal::gpio::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut pac.RESETS);
+    let pins = hal::gpio::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
     let sck = pins.gpio18.into_function::<hal::gpio::FunctionSpi>();
     let mosi = pins.gpio19.into_function::<hal::gpio::FunctionSpi>();
     let miso = pins.gpio16.into_function::<hal::gpio::FunctionSpi>();
@@ -254,7 +259,7 @@ pub unsafe fn init() -> Result<(), InitFailure> {
     // Space the cert-store read from session_start's own internal cert read — the TROPIC needs a gap
     // between back-to-back L2 reads (the pico gets this implicitly from USB polling).
     cortex_m::asm::delay(15_000_000); // ~100 ms @150 MHz
-    // The board's sealed secret: without it the anchor has no identity to serve under.
+                                      // The board's sealed secret: without it the anchor has no identity to serve under.
     let sealed = sealed::read_sealed_secret().map_err(InitFailure::Sealed)?;
     #[cfg(feature = "production")]
     sealed::assert_secure_context().map_err(InitFailure::Sealed)?;

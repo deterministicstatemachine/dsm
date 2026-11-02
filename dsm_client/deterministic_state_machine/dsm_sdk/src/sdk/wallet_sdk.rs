@@ -794,10 +794,7 @@ impl WalletSDK {
         }
 
         log::info!(
-            "send_transfer_op completed: {} -> {}, amount: {}, token: {}",
-            transaction.from_device_id,
-            transaction.to_device_id,
-            transaction.amount,
+            "send_transfer_op completed: token: {}",
             transaction.token_id
         );
 

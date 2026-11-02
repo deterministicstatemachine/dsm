@@ -2804,10 +2804,8 @@ impl CoreSDK {
                 );
                 let record = record_for(&staged.outcome);
                 log::info!(
-                    "[apply_full_state] ✅ applied transfer tx={} amount={} from={} (single full-state tx)",
+                    "[apply_full_state] ✅ applied transfer tx={} (single full-state tx)",
                     tx_id_str,
-                    amount_val,
-                    sender_device_id,
                 );
                 Ok(ApplyOutcome::Applied {
                     record,
