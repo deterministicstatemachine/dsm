@@ -472,7 +472,7 @@ impl Links {
                 });
                 match answer {
                     Ok(Answer::Reply(reply, responding)) => Ok((
-                        State::Responding(responding),
+                        State::Responding(*responding),
                         Inbound {
                             reply: fragments(Kind::Reply, &reply.encode())?,
                             ..Inbound::default()

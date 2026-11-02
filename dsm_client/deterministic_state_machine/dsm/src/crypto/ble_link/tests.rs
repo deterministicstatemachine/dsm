@@ -49,7 +49,7 @@ fn handshake(a: &Wallet, b: &Wallet) -> (LinkSession, LinkSession) {
     let reply = Reply::decode(&reply.encode()).expect("the Reply round-trips");
     let (confirm, at_a) = complete(initiating, &reply, &a.kem.secret_key).expect("a completes");
     let confirm = Confirm::decode(&confirm.encode()).expect("the Confirm round-trips");
-    let at_b = finish(responding, &confirm).expect("b finishes");
+    let at_b = finish(*responding, &confirm).expect("b finishes");
     (at_a, at_b)
 }
 
@@ -146,7 +146,8 @@ fn a_record_opens_once_in_order_and_only_for_the_other_side() {
 ///   the responder.
 ///
 /// MUTATION CONTROL: dropping the genesis comparison in `respond` takes the
-/// Hello under another genesis: red.
+/// Hello under another genesis: red. Skipping the Confirm's opening in
+/// `finish` takes the junk Confirm: red.
 #[test]
 fn the_handshake_refuses_every_side_that_does_not_hold_its_pinned_key() {
     let (a, b, c) = (wallet(0xA5), wallet(0xB6), wallet(0xC7));
@@ -204,7 +205,7 @@ fn the_handshake_refuses_every_side_that_does_not_hold_its_pinned_key() {
         sealed: vec![0x42; Confirm::LEN],
     };
     assert!(matches!(
-        finish(responding, &replayed),
+        finish(*responding, &replayed),
         Err(LinkError::DoesNotOpen(..))
     ));
 }

@@ -205,17 +205,14 @@ pub fn get_checkpoint(reserve_id: &[u8; 32]) -> Result<Option<ReserveCheckpoint>
         return Ok(None);
     };
     let generation = u64_of(generation, "checkpoint generation")?;
-    let whole = steps.chunks_exact(32);
-    if !whole.remainder().is_empty() || whole.len() as u64 != generation {
+    let (whole, rest) = steps.as_chunks::<32>();
+    if !rest.is_empty() || whole.len() as u64 != generation {
         return Err(anyhow!(
             "native_reserve_checkpoint: {} bytes of steps for generation {generation}",
             steps.len()
         ));
     }
-    let steps = whole
-        .map(<[u8; 32]>::try_from)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| anyhow!("native_reserve_checkpoint: a step: {e}"))?;
+    let steps = whole.to_vec();
     let seal = <[u8; 32]>::try_from(seal.as_slice())
         .map_err(|e| anyhow!("native_reserve_checkpoint: the seal: {e}"))?;
     Ok(Some(ReserveCheckpoint::from_parts(steps, seal)))

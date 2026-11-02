@@ -20,8 +20,9 @@
 //!    and `ct₃` to `e`, and a fresh nonce `n_R` sealed under a key chained
 //!    from `ss₁ ‖ ss₂ ‖ ss₃`. Only the holder of the responder's key could
 //!    seal it.
-//! 3. **Confirm**, initiator to responder: `n_R`, sealed under the next key
-//!    in the chain. Only the holder of the initiator's key could seal it.
+//! 3. **Confirm**, initiator to responder: nothing, sealed under the next key
+//!    in the chain, whose transcript names `n_R`. Only the holder of the
+//!    initiator's key could seal it, and only for this Reply.
 //!
 //! The chain then gives one key per direction and a session id. `e` gives the
 //! session forward secrecy: the static keys re-derive from the wallet seed.
@@ -274,14 +275,16 @@ impl Reply {
     }
 }
 
-/// The initiator's proof that it holds its key.
+/// The initiator's proof that it holds its key: an empty message sealed
+/// under the key that the chain and the Reply's nonce derive, so its opening
+/// is the whole check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirm {
     pub sealed: Vec<u8>,
 }
 
 impl Confirm {
-    pub const LEN: usize = NONCE_SEALED_LEN;
+    pub const LEN: usize = TAG_LEN;
 
     pub fn encode(&self) -> Vec<u8> {
         self.sealed.clone()
@@ -371,7 +374,7 @@ pub enum Answer {
     /// The Hello was not sealed for this wallet: answer with a Decline.
     NotForMe,
     /// The Hello names a contact: send the Reply and wait for the Confirm.
-    Reply(Reply, Responding),
+    Reply(Reply, Box<Responding>),
 }
 
 /// The reply transcript both sides compute from the Hello's transcript, the
@@ -454,12 +457,12 @@ pub fn respond(
             to_ephemeral: ct3,
             sealed,
         },
-        Responding {
+        Box::new(Responding {
             peer: initiator,
             chain,
             reply_transcript,
             responder_nonce,
-        },
+        }),
     ))
 }
 
@@ -493,7 +496,7 @@ pub fn complete(
     let responder_nonce = d32_of(&open_once(&k2, &reply_transcript, &reply.sealed)?)?;
     let confirm_transcript = confirm_transcript(&reply_transcript, &responder_nonce);
     let k3 = key(b"confirm", &confirm_transcript, chain.as_slice());
-    let sealed = seal_once(&k3, &confirm_transcript, &responder_nonce)?;
+    let sealed = seal_once(&k3, &confirm_transcript, &[])?;
     Ok((
         Confirm { sealed },
         LinkSession::new(
@@ -510,12 +513,7 @@ pub fn finish(responding: Responding, confirm: &Confirm) -> Result<LinkSession, 
     let confirm_transcript =
         confirm_transcript(&responding.reply_transcript, &responding.responder_nonce);
     let k3 = key(b"confirm", &confirm_transcript, responding.chain.as_slice());
-    let opened = open_once(&k3, &confirm_transcript, &confirm.sealed)?;
-    if opened.as_slice() != &responding.responder_nonce[..] {
-        return Err(LinkError::DoesNotOpen(
-            "the Confirm names another nonce than the Reply sent".into(),
-        ));
-    }
+    open_once(&k3, &confirm_transcript, &confirm.sealed)?;
     Ok(LinkSession::new(
         &responding.chain,
         &confirm_transcript,

@@ -486,7 +486,7 @@ fn established_lineage(
 ) -> Result<(ReserveLineage, Option<Vec<u8>>), DsmError> {
     let members = crate::sdk::storage_set::as_ccb_members(set)?;
     let mut lineage = match resumed(genesis)? {
-        Start::Checkpoint(lineage) => lineage,
+        Start::Checkpoint(lineage) => *lineage,
         Start::Genesis(why) => {
             log::info!("[reserve] the lineage is established from its genesis: {why}");
             ReserveLineage::from_genesis(genesis).map_err(|e| storage_err("reserve genesis", e))?
@@ -538,7 +538,7 @@ fn established_lineage(
 /// Where a load of the reserve lineage starts (SA-75).
 enum Start {
     /// This device's checkpoint, resumed by Core.
-    Checkpoint(ReserveLineage),
+    Checkpoint(Box<ReserveLineage>),
     /// The genesis, and why not a checkpoint: none is kept, or Core refused
     /// the one kept. Every release is then established from the memo again.
     Genesis(String),
@@ -555,7 +555,7 @@ fn resumed(genesis: &NativeReserveState) -> Result<Start, DsmError> {
     };
     let key = checkpoint_key()?;
     Ok(match ReserveLineage::resume(genesis, &checkpoint, &key) {
-        Ok(lineage) => Start::Checkpoint(lineage),
+        Ok(lineage) => Start::Checkpoint(Box::new(lineage)),
         Err(refused) => Start::Genesis(format!(
             "the checkpoint at generation {} is refused: {refused}",
             checkpoint.generation()
@@ -567,7 +567,7 @@ fn resumed(genesis: &NativeReserveState) -> Result<Start, DsmError> {
 /// under its at-rest key: a checkpoint written into the store by anything
 /// that does not hold the wallet seed does not resume. Fails closed while
 /// the wallet is locked.
-fn checkpoint_key() -> Result<[u8; 32], DsmError> {
+pub(crate) fn checkpoint_key() -> Result<[u8; 32], DsmError> {
     let at_rest = crate::init::current_chain_head_at_rest_key()?;
     let mut h =
         dsm::crypto::blake3::Hasher::new_derive_key("DSM/native-reserve-checkpoint-key/v1\0");

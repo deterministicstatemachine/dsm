@@ -4896,9 +4896,10 @@ async fn a_payment_over_ble_carries_no_identity_on_the_radio() {
 
 /// A record opens once, on the link it was sealed for: replayed on the same
 /// link it is refused, and after the link closes and the two pair again, a
-/// record of the old link opens on nothing.
+/// record of the old link opens on nothing, the one never delivered too.
 /// MUTATION CONTROL: dropping the counter check in `LinkSession::open` takes
-/// the replay: red.
+/// the replay: red. Keeping the session when its link closes opens the
+/// record never delivered: red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
@@ -4907,7 +4908,7 @@ async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
     a.device.enter();
     let sealed = a
         .links
-        .seal_on(&at_a, &[b"a unit".to_vec()])
+        .seal_on(&at_a, &[b"a unit".to_vec(), b"never delivered".to_vec()])
         .expect("sealed");
     b.device.enter();
     assert_eq!(
@@ -4933,6 +4934,174 @@ async fn a_record_replayed_or_from_a_closed_link_opens_on_nothing() {
     assert!(
         matches!(b.links.inbound(&again_b, &sealed[0], &WalletKeys), Err(..)),
         "a record of the closed link does not open on the new one"
+    );
+    assert!(
+        matches!(b.links.inbound(&again_b, &sealed[1], &WalletKeys), Err(..)),
+        "nor does one the closed link never delivered"
+    );
+}
+
+/// What a link refuses to take: the reason, or a panic if it took the bytes.
+fn refusal(
+    taken: Result<crate::bluetooth::link_session::Inbound, dsm::types::error::DsmError>,
+) -> String {
+    match taken {
+        Ok(inbound) => panic!("the link took the bytes, opening {:?}", inbound.unit),
+        Err(refused) => refused.to_string(),
+    }
+}
+
+/// The link handshake up to the server's ready, which the client has not
+/// heard: neither side is paired ahead of the proof that pairs it. Returns
+/// the ready.
+fn up_to_the_ready(
+    client: &OfflineDevice,
+    server: &OfflineDevice,
+    at_client: &Link,
+    at_server: &Link,
+) -> Vec<Vec<u8>> {
+    client.device.enter();
+    let hello = client
+        .links
+        .opened(
+            at_client.clone(),
+            Some(server.device.device_id),
+            &WalletKeys,
+        )
+        .expect("the Hello");
+    server.device.enter();
+    server
+        .links
+        .opened(at_server.clone(), None, &WalletKeys)
+        .expect("the server listens");
+    let reply: Vec<Vec<u8>> = hello
+        .iter()
+        .flat_map(|bytes| server.hear(at_server, bytes).reply)
+        .collect();
+    assert_eq!(
+        server.links.link_of(&client.device.device_id),
+        None,
+        "a Hello pairs nothing"
+    );
+    let confirm: Vec<Vec<u8>> = reply
+        .iter()
+        .flat_map(|bytes| client.hear(at_client, bytes).reply)
+        .collect();
+    assert_eq!(
+        client.links.link_of(&server.device.device_id),
+        None,
+        "the client waits for the server's ready"
+    );
+    let mut ready = Vec::new();
+    let mut paired = None;
+    for bytes in &confirm {
+        let inbound = server.hear(at_server, bytes);
+        ready.extend(inbound.reply);
+        paired = paired.or(inbound.paired);
+    }
+    assert_eq!(
+        paired.map(|peer| peer.device_id),
+        Some(client.device.device_id),
+        "the server is paired at the Confirm"
+    );
+    assert_eq!(
+        server.links.link_of(&client.device.device_id),
+        Some(at_server.clone())
+    );
+    assert_eq!(
+        client.links.link_of(&server.device.device_id),
+        None,
+        "the client is not paired before it hears the ready"
+    );
+    ready
+}
+
+/// A link takes only handshake fragments and sealed records, each in its
+/// turn, and pairs only on each side's proof (MR-DSM-0343):
+/// - bytes in the clear are refused, on a link in its handshake and on a
+///   paired one;
+/// - a sealed record on a link with no session is refused;
+/// - a handshake message out of turn is refused and drops the handshake;
+/// - the server is paired at the Confirm, the client at the server's ready;
+/// - a record the server seals ahead of its ready is refused and pairs nothing.
+///
+/// MUTATION CONTROL: taking other bytes as a radio unit, taking a message out
+/// of turn, counting a client waiting for its ready as paired, or taking a
+/// record ahead of the ready: each red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_link_takes_nothing_in_the_clear_and_pairs_only_on_each_sides_proof() {
+    use crate::bluetooth::link_session::{HANDSHAKE, RECORD};
+    use dsm::crypto::ble_link::{Confirm, RECORD_LEN};
+    let (_pair, a, b, _appliance, _operation) = bearer_pair().await;
+    let (client, server) = if a.device.slot < b.device.slot {
+        (&a, &b)
+    } else {
+        (&b, &a)
+    };
+    let at_client = Link {
+        address: server.device.slot.to_string(),
+        role: GattRole::Client,
+    };
+    let at_server = Link {
+        address: client.device.slot.to_string(),
+        role: GattRole::Server,
+    };
+    let in_the_clear = [0x0A, 0x01, 0x42];
+
+    let another = Link {
+        address: "another".to_string(),
+        role: GattRole::Server,
+    };
+    server.device.enter();
+    server
+        .links
+        .opened(another.clone(), None, &WalletKeys)
+        .expect("the server listens");
+    let refused = refusal(server.links.inbound(&another, &in_the_clear, &WalletKeys));
+    assert!(refused.contains("neither"), "{refused}");
+    let record = [vec![RECORD], vec![0x42; RECORD_LEN]].concat();
+    let refused = refusal(server.links.inbound(&another, &record, &WalletKeys));
+    assert!(refused.contains("no session"), "{refused}");
+    let confirm_first = [&[HANDSHAKE, 3, 0, 1][..], &[0x42; Confirm::LEN]].concat();
+    let refused = refusal(server.links.inbound(&another, &confirm_first, &WalletKeys));
+    assert!(refused.contains("out of turn"), "{refused}");
+    let refused = refusal(server.links.inbound(&another, &confirm_first, &WalletKeys));
+    assert!(refused.contains("not opened"), "{refused}");
+
+    let ready = up_to_the_ready(client, server, &at_client, &at_server);
+    let mut paired = None;
+    for bytes in &ready {
+        paired = paired.or(client.hear(&at_client, bytes).paired);
+    }
+    assert_eq!(
+        paired.map(|peer| peer.device_id),
+        Some(server.device.device_id),
+        "the client is paired at the ready"
+    );
+    assert_eq!(
+        client.links.link_of(&server.device.device_id),
+        Some(at_client.clone())
+    );
+    client.device.enter();
+    let refused = refusal(client.links.inbound(&at_client, &in_the_clear, &WalletKeys));
+    assert!(refused.contains("neither"), "{refused}");
+
+    client.links.closed(&at_client);
+    server.links.closed(&at_server);
+    up_to_the_ready(client, server, &at_client, &at_server);
+    server.device.enter();
+    let ahead = server
+        .links
+        .seal_on(&at_server, &[b"ahead of the ready".to_vec()])
+        .expect("sealed");
+    client.device.enter();
+    let refused = refusal(client.links.inbound(&at_client, &ahead[0], &WalletKeys));
+    assert!(refused.contains("before the server's ready"), "{refused}");
+    assert_eq!(
+        client.links.link_of(&server.device.device_id),
+        None,
+        "a record ahead of the ready pairs nothing"
     );
 }
 

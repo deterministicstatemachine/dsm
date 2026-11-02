@@ -362,6 +362,8 @@ mod tests {
     enum Refuse {
         Nothing,
         OfflineState,
+        /// The offline state at this counter only: `Π_{i+1}` when it names `u_i + 1`.
+        OfflineStateAt(u64),
         Transition,
     }
     struct DsmChecks {
@@ -380,12 +382,13 @@ mod tests {
             _r: &[u8; 32],
             _b: &[u8; 32],
             _f: &[u8; 32],
-            _u: u64,
+            u: u64,
             _p: &[u8],
         ) -> Result<(), OfflineStateRefused> {
             match self.refuse {
                 Refuse::OfflineState => Err(OfflineStateRefused),
-                Refuse::Nothing | Refuse::Transition => Ok(()),
+                Refuse::OfflineStateAt(counter) if counter == u => Err(OfflineStateRefused),
+                Refuse::OfflineStateAt(..) | Refuse::Nothing | Refuse::Transition => Ok(()),
             }
         }
         fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
@@ -736,16 +739,12 @@ mod tests {
         );
     }
 
-    // (11) Stale frontier WITH a valid BranchProof chaining adopted → cert.prev_frontier.
-    #[test]
-    fn accepts_stale_frontier_with_branch_proof() {
-        // Receiver adopted `old`. A prior hop advanced old --(u:0→1)--> h_bridge; the current
-        // release then advances from h_bridge (u:1→2). The branch proof bridges the gap.
-        let old = [0xF1; 32];
-        let d_hop = h("mock/hop-digest", &[&old]);
+    /// A prior advance from `old` (u:0→1), signed by the pinned chip and host.
+    fn bridge_from(old: [u8; 32]) -> Certificate {
+        let d_hop = h("anchor-test/hop-digest", &[&old]);
         let h_bridge = anchor_root_advance(&old, &d_hop);
-        let r_b = h("mock/hop-rb", &[&old]);
-        let r_a = h("mock/hop-ra", &[&h_bridge]);
+        let r_b = h("anchor-test/hop-rb", &[&old]);
+        let r_a = h("anchor-test/hop-ra", &[&h_bridge]);
         let m_hop = root_advance_message(
             &B,
             &r_b,
@@ -758,7 +757,7 @@ mod tests {
             &RECIPIENT,
             &R_CHALLENGE,
         );
-        let hop = Certificate {
+        Certificate {
             anchor_bundle: B,
             sender_device_root_before: r_b,
             sender_device_root_after: r_a,
@@ -773,7 +772,125 @@ mod tests {
             sigma_host: host_sign(&m_hop),
             receiver_challenge: R_CHALLENGE,
             recipient: RECIPIENT,
+        }
+    }
+
+    // (1) Δ, Cert, bundle and anchor must describe one advance: each field bent alone is
+    // refused here, before anything is recomputed from it.
+    #[test]
+    fn rejects_a_release_whose_parts_describe_different_advances() {
+        let bends: [fn(&mut OfflineRelease); 7] = [
+            |rel| rel.cert.prev_frontier = [0xA1; 32],
+            |rel| rel.cert.next_frontier = [0xA2; 32],
+            |rel| rel.cert.anchor_counter += 1,
+            |rel| rel.cert.next_anchor_counter += 1,
+            |rel| rel.cert.anchor_bundle = [0xA3; 32],
+            |rel| rel.cert.anchor_id = [0xA4; 32],
+            |rel| rel.cert.recipient = [0xA5; 32],
+        ];
+        for (field, bend) in bends.iter().enumerate() {
+            let mut rel = valid_release(H0, 0);
+            bend(&mut rel);
+            assert_eq!(
+                accept_offline::<_, Ed25519Chip, SphincsHost>(
+                    &rel,
+                    &ctx(&H0),
+                    &DsmChecks::default()
+                ),
+                Err(AcceptError::NonCanonical),
+                "field {field}"
+            );
+        }
+    }
+
+    // (7) A transition other than the one the certificate's digest commits.
+    #[test]
+    fn rejects_a_digest_that_does_not_recompute_from_its_transition() {
+        let mut rel = valid_release(H0, 0);
+        rel.transition.payload_hash = [0xA6; 32];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
+            Err(AcceptError::DigestMismatch)
+        );
+    }
+
+    // (8) A successor frontier other than H(h_i ‖ D), named alike by Δ and the certificate:
+    // Δ° excludes it, so only the recompute catches it.
+    #[test]
+    fn rejects_a_next_frontier_that_does_not_recompute() {
+        let mut rel = valid_release(H0, 0);
+        let invented = [0xA7; 32];
+        rel.transition.next_root = invented;
+        rel.cert.next_frontier = invented;
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &DsmChecks::default()),
+            Err(AcceptError::FrontierMismatch)
+        );
+    }
+
+    // (14) The device SMT commits the account before the advance, but not after it.
+    #[test]
+    fn rejects_an_uncommitted_successor_offline_state() {
+        let rel = valid_release(H0, 0);
+        let dsm = DsmChecks {
+            refuse: Refuse::OfflineStateAt(rel.cert.next_anchor_counter),
         };
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&H0), &dsm),
+            Err(AcceptError::NextStateUncommitted)
+        );
+    }
+
+    // (15) A release under another authority policy than the previous state's.
+    #[test]
+    fn rejects_another_authority_policy() {
+        let rel = valid_release(H0, 0);
+        let other = [0xA8; 32];
+        let mut c = ctx(&H0);
+        c.expected_policy_hash = &other;
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &c, &DsmChecks::default()),
+            Err(AcceptError::PolicyMismatch)
+        );
+    }
+
+    // (2) A BranchProof hop that starts anywhere but the adopted frontier, or whose signature
+    // is not the pinned chip's, bridges nothing.
+    #[test]
+    fn rejects_a_branch_proof_hop_that_does_not_chain_or_verify() {
+        use ed25519_dalek::Signer;
+        let old = [0xF1; 32];
+        let hop = bridge_from(old);
+        let mut rel = valid_release(hop.next_frontier, 1);
+
+        rel.branch_proof = alloc::vec![bridge_from([0xF2; 32])];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&old), &DsmChecks::default()),
+            Err(AcceptError::BranchProofInvalid),
+            "a hop from another frontier"
+        );
+
+        let mut forged = hop.clone();
+        forged.sigma_chip = ed25519_dalek::SigningKey::from_bytes(&[0x34; 32])
+            .sign(&forged.root_advance_message)
+            .to_bytes()
+            .to_vec();
+        rel.branch_proof = alloc::vec![forged];
+        assert_eq!(
+            accept_offline::<_, Ed25519Chip, SphincsHost>(&rel, &ctx(&old), &DsmChecks::default()),
+            Err(AcceptError::BranchProofInvalid),
+            "a hop another key signed"
+        );
+    }
+
+    // (11) Stale frontier WITH a valid BranchProof chaining adopted → cert.prev_frontier.
+    #[test]
+    fn accepts_stale_frontier_with_branch_proof() {
+        // Receiver adopted `old`. A prior hop advanced old --(u:0→1)--> h_bridge; the current
+        // release then advances from h_bridge (u:1→2). The branch proof bridges the gap.
+        let old = [0xF1; 32];
+        let hop = bridge_from(old);
+        let h_bridge = hop.next_frontier;
 
         let mut rel = valid_release(h_bridge, 1); // current advance starts at the bridged frontier
         rel.branch_proof = alloc::vec![hop];

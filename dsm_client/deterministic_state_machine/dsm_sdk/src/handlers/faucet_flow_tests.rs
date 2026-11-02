@@ -1681,6 +1681,60 @@ async fn the_reserve_head_is_a_sealed_checkpoint_and_a_load_verifies_only_after_
     assert_eq!(release_at(3).await, honest);
 }
 
+/// SA-75. A release whose memo row the checkpoint let go is read back from
+/// its cell only as the release the sealed step names. Here this device's
+/// checkpoint, under its own key, seals another valid release of the same
+/// parent, so what the members hold final at the cell is not the one its walks
+/// established: the read-back is an error, never that release.
+/// MUTATION CONTROL: taking the cell's final release without comparing it
+/// with the sealed step answers it: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_release_read_back_must_be_the_one_its_checkpoint_sealed() {
+    use client_db::native_reserve::{let_go_through, put_checkpoint};
+    use dsm::economic::native_reserve::ReserveLineage;
+    let d = Device::start(0xAD).await;
+    claim_era_faucet(d.core(), NETWORK).await.expect("a claim");
+    reserve_head().await;
+    let genesis = reserve_genesis();
+    let reserve_id = *genesis.reserve_id();
+    let held = release_at(1).await;
+
+    let others = crate::test_support::reserve::signed_releases(&genesis, 1);
+    assert_ne!(others[0], held.envelope_bytes, "another release of R_0");
+    let mut lineage = ReserveLineage::from_genesis(&genesis).expect("R_0");
+    lineage.establish(&others[0]).expect("generation 1");
+    let key = crate::sdk::native_reserve::checkpoint_key().expect("this device's key");
+    put_checkpoint(&reserve_id, &lineage.checkpoint(&key)).expect("the checkpoint");
+    let another = [0xEE; 32];
+    assert_eq!(
+        let_go_through(&reserve_id, 1, &another, &another).expect("the memo"),
+        1,
+        "the release the members hold is no longer in the memo"
+    );
+    crate::sdk::final_reads::forget_everything();
+
+    let handle = tokio::runtime::Handle::current();
+    let read = tokio::task::spawn_blocking(move || {
+        let set = canonical_set(NETWORK).expect("canonical set");
+        crate::sdk::native_reserve::release_at(&set, NETWORK, &handle, &reserve_id, 1)
+    })
+    .await
+    .expect("join");
+    match read {
+        Err(refused) => assert!(
+            refused
+                .to_string()
+                .contains("is not the one this device's walks established"),
+            "{refused}"
+        ),
+        Ok(answer) => panic!(
+            "the read-back answered the release to {:?}",
+            answer.map(|win| recipient_of(&win))
+        ),
+    }
+}
+
 /// How one memo row is made something Core does not establish.
 enum Corruption {
     /// The release's envelope, in place of the one memoised.

@@ -56,4 +56,4 @@ link fails closed, reconnection re-runs the handshake. Prepare/PrepareResponse u
   salt or amount appears in any radio byte; replayed record refused; Hello from a non-contact
   declined; records of a previous link do not open after reconnect; pairing completes on both
   sides only after Confirm / ready.
-- Mutation: genesis comparison in respond; counter check in open; seal check (Confirm nonce).
+- Mutation: genesis comparison in respond; counter check in open; the Confirm's opening (the nonce comparison it replaced could never refuse on its own); clear bytes on an established link; the closing of a link; the turn of a handshake; the ready; a record before the ready.
