@@ -384,15 +384,7 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_createBleConn
 /// (`bluetooth::link_session`).
 /// Uses the dedicated Payload::BleEvent field (proto schema v2.4+).
 pub(crate) fn build_ble_event_envelope(ble_event: BleEvent) -> Result<Vec<u8>, String> {
-    let envelope =
-        crate::jni::helpers::encode_payload_transport(pb::envelope::Payload::BleEvent(ble_event));
-
-    let mut buf = Vec::new();
-    buf.push(0x03); // Canonical framing byte for FramedEnvelopeV3
-    envelope
-        .encode(&mut buf)
-        .map_err(|e| format!("Failed to encode Envelope: {e}"))?;
-    Ok(buf)
+    Ok(crate::host::ble_event_envelope(ble_event))
 }
 
 /// ble.permission.error — BLE permission denied (scan or advertise)

@@ -11,15 +11,9 @@ use super::app_router_impl::AppRouterImpl;
 use super::response_helpers::{pack_envelope_ok, err};
 use super::app_router_impl::{collect_tagged_inbox_addresses, RouteFreshness};
 
-#[cfg(all(target_os = "android", feature = "jni"))]
 fn emit_authoritative_wallet_refresh() {
-    if let Err(e) = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]) {
-        log::debug!("[storage.sync] wallet refresh dispatch skipped: {e}");
-    }
+    crate::host::post_event("dsm-wallet-refresh", &[]);
 }
-
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn emit_authoritative_wallet_refresh() {}
 
 /// Block the relationship with `device_id` until it is reconciled online.
 fn mark_contact_needs_online_reconcile_and_refresh(device_id: &[u8]) -> Result<(), String> {

@@ -26,18 +26,9 @@ pub fn publish() {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "jni"))]
 fn show(count: i32) {
-    if let Err(e) = crate::jni::event_dispatch::show_money_received(count) {
+    if let Err(e) = crate::host::host().and_then(|host| host.show_money_received(count)) {
         log::warn!("[money_waiting] the icon count was not handed to the host: {e}");
     }
-    if let Err(e) = crate::jni::event_dispatch::post_event_to_webview("money.waiting", &[]) {
-        log::warn!("[money_waiting] money.waiting was not posted to the page: {e}");
-    }
-}
-
-/// Builds with no Android host have no icon to draw on.
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn show(count: i32) {
-    log::debug!("[money_waiting] {count} waiting; no host icon in this build");
+    crate::host::post_event("money.waiting", &[]);
 }

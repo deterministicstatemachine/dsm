@@ -21,6 +21,8 @@ doctest = false
 default = []
 demos = []
 jni = ["dep:jni"]
+# The C ABI Swift calls on iOS (`src/ffi`); the host registers C callbacks.
+ffi = []
 test-utils = []
 bluetooth = ["tokio-stream"]
 [build-dependencies]

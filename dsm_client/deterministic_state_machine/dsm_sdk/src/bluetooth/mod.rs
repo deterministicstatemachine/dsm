@@ -21,6 +21,8 @@ pub mod owed_frame_driver;
 pub mod pairing_orchestrator;
 pub mod peer_address;
 pub mod radio_ingress;
+#[cfg(feature = "bluetooth")]
+pub mod radio_link;
 
 // Re-export bilateral transaction components
 pub use bilateral_ble_handler::{
@@ -37,21 +39,22 @@ pub use ble_frame_coordinator::{
 };
 pub use pairing_orchestrator::{PairingOrchestrator, PairingSession, PairingState};
 
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
-use dsm::types::error::DsmError;
-
 use std::sync::Arc;
 use std::sync::RwLock;
 
 /// Pairing follows the session (`SessionManager::pairing_may_run`): the loop
 /// runs while the app is in the foreground with Bluetooth on and permitted and
 /// an identity to pair as, and ends by itself once no contact is unpaired; it
-/// stops when the session says it may not run. Host builds have no BLE to pair
-/// over.
+/// stops when the session says it may not run. A build without the
+/// `bluetooth` feature has no radio to pair over.
 pub fn pairing_follows(may_run: bool) {
-    #[cfg(all(target_os = "android", feature = "jni"))]
+    #[cfg(feature = "bluetooth")]
     {
         let orchestrator = get_pairing_orchestrator();
+        log::info!(
+            "[pairing] follows the session: may_run={may_run} loop_running={}",
+            orchestrator.is_loop_running()
+        );
         if may_run {
             if !orchestrator.is_loop_running() {
                 crate::runtime::get_runtime().spawn(async move {
@@ -62,14 +65,14 @@ pub fn pairing_follows(may_run: bool) {
             orchestrator.stop_pairing_loop();
         }
     }
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    let _ = may_run;
+    #[cfg(not(feature = "bluetooth"))]
+    log::debug!("[pairing] no radio in this build; pairing may_run={may_run} is not acted on");
 }
 
 /// A contact was added: it is paired now if the session lets pairing run. A
 /// running loop is woken to take it up; otherwise one is started.
 pub fn contact_added() {
-    #[cfg(all(target_os = "android", feature = "jni"))]
+    #[cfg(feature = "bluetooth")]
     {
         if !crate::sdk::session_manager::pairing_may_run_now() {
             return;
@@ -145,9 +148,8 @@ impl BluetoothManager {
             crate::handlers::bilateral_settlement::DefaultBilateralSettlementDelegate,
         ));
 
-        // Bilateral events go to the WebView through the JNI bridge; a build
-        // without one has nowhere to deliver them, so it installs no callback.
-        #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+        // Bilateral events go to the page through the host.
+        #[cfg(feature = "bluetooth")]
         {
             use std::sync::Arc;
             let callback_arc: Arc<dyn Fn(&[u8]) + Send + Sync> =
@@ -165,9 +167,7 @@ impl BluetoothManager {
                                 event.status
                             );
                         }
-                        if let Err(e) = post_bilateral_event_to_webview_jni(data) {
-                            log::warn!("the bilateral event did not reach the WebView: {e}");
-                        }
+                        crate::host::post_event("bilateral.event", &data);
                     });
                 });
             bilateral_handler.set_event_callback(callback_arc);
@@ -199,7 +199,7 @@ impl BluetoothManager {
                 }
             });
             // Steps restored in flight may owe frames nobody is reaching for.
-            #[cfg(all(target_os = "android", feature = "bluetooth"))]
+            #[cfg(feature = "bluetooth")]
             owed_frame_driver::kick();
         });
 
@@ -318,7 +318,7 @@ pub(crate) fn reset_bluetooth_stack_for_tests() {
 /// Hand a contact to the live BLE stack's handler. With no stack yet there is
 /// nothing to hand it to, and nothing is lost: `init_dsm_sdk` loads every
 /// stored contact into the stack it builds. Returns whether a stack took it.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn sync_contact_to_bluetooth_manager(
     contact: dsm::types::contact_types::DsmVerifiedContact,
 ) -> Result<bool, String> {
@@ -330,13 +330,6 @@ pub async fn sync_contact_to_bluetooth_manager(
         .await
         .map_err(|e| format!("add_verified_contact failed: {e}"))?;
     Ok(true)
-}
-
-// Android WebView event dispatch: delegates to the generic event_dispatch module.
-// Bytes-only MessagePort: invokes SinglePathWebViewBridge.postBinary("bilateral.event", payloadBytes).
-#[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
-pub fn post_bilateral_event_to_webview_jni(event_bytes: Vec<u8>) -> Result<(), DsmError> {
-    crate::jni::event_dispatch::post_event_to_webview("bilateral.event", &event_bytes)
 }
 
 #[cfg(test)]

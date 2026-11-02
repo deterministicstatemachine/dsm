@@ -1,0 +1,6 @@
+// The Rust SDK's C ABI as a Swift module. `make ios-libs` copies this beside
+// the cbindgen header into the XCFramework's headers directory.
+module DsmSdk {
+    header "dsm_sdk.h"
+    export *
+}

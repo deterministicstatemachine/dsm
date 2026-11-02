@@ -104,6 +104,13 @@ pub mod prelude;
 #[cfg(all(target_os = "android", feature = "jni"))]
 pub mod jni;
 
+/// The app that hosts the SDK: what Rust asks of the platform, and who answers.
+pub mod host;
+
+/// The C ABI the iOS host calls.
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 pub mod bridge;
 pub mod envelope;
 pub mod handlers;
@@ -163,13 +170,13 @@ pub mod bluetooth;
 pub mod runtime;
 
 use crate::storage_utils::ensure_storage_base_dir;
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Readiness flags (core + bilateral). Core readiness lives in unified_protobuf_bridge (SDK_READY)
 // but we expose bilateral readiness here after preconditions succeed so JNI / UI can query
 // deterministically without racing the initialization sequence.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 static BILATERAL_READY: AtomicBool = AtomicBool::new(false);
 
 /// STRICT init: requires the storage dir and the env config.
@@ -403,7 +410,7 @@ pub fn get_transport_headers_v3_bytes() -> Result<Vec<u8>, dsm::types::error::Ds
 
 /// Mark the bilateral SDK ready once its preconditions hold: the SDK context
 /// is initialized and the BLE stack is live.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     use dsm::types::error::DsmError;
 
@@ -431,31 +438,31 @@ pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmErro
 
 /// A build without the Android BLE stack has no bilateral runtime to make
 /// ready, and says so rather than reporting one.
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub async fn initialize_bilateral_sdk() -> Result<(), dsm::types::error::DsmError> {
     Err(dsm::types::error::DsmError::invalid_operation(
-        "no bilateral stack on this build: the offline protocol runs on Android with the bluetooth feature",
+        "no bilateral stack on this build: the offline protocol runs on a build with the bluetooth feature",
     ))
 }
 
 /// Returns true once bilateral preconditions have been verified (context + handler).
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub fn is_bilateral_ready() -> bool {
     BILATERAL_READY.load(Ordering::SeqCst)
 }
 
 /// Convenience aggregate readiness – usable by UI gating logic.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub fn is_sdk_fully_ready() -> bool {
     is_sdk_context_initialized() && is_bilateral_ready()
 }
 
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub fn is_bilateral_ready() -> bool {
     false
 }
 
-#[cfg(not(all(target_os = "android", feature = "bluetooth")))]
+#[cfg(not(feature = "bluetooth"))]
 pub fn is_sdk_fully_ready() -> bool {
     is_sdk_context_initialized() && is_bilateral_ready()
 }

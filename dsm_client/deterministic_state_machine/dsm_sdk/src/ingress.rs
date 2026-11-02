@@ -35,37 +35,17 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
-    let envelope = crate::envelope::local_answer(payload);
-    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-    buf.push(0x03);
-    envelope.encode(&mut buf).map_err(|e| {
-        ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            format!("ingress: envelope encode failed: {e}"),
-        )
-    })?;
-    Ok(buf)
-}
-
+/// Hand the page a canonical envelope event through the host.
 fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), pb::Error> {
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    {
-        let framed = encode_framed_envelope(payload)?;
-        crate::jni::event_dispatch::post_event_to_webview("canonical.envelope.bin", &framed)
-            .map_err(|e| {
-                ingress_error(
-                    ERROR_CODE_PROCESSING_FAILED,
-                    format!("ingress: canonical envelope dispatch failed: {e}"),
-                )
-            })?;
-    }
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    {
-        let _ = payload;
-    }
-    Ok(())
+    let framed = crate::host::framed_local_answer(payload);
+    crate::host::host()
+        .and_then(|host| host.post_event("canonical.envelope.bin", &framed))
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("ingress: canonical envelope dispatch failed: {e}"),
+            )
+        })
 }
 
 /// Push a genesis lifecycle event to the WebView (EventBridge maps kinds to the

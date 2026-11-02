@@ -509,7 +509,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
     // identity exists; the core handlers above stay installed so bootstrap queries work before
     // genesis, and wallet creation builds it once the identity is there.
-    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    #[cfg(feature = "bluetooth")]
     build_ble_stack_for_identity()?;
 
     Ok(())
@@ -523,7 +523,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 /// identity is installed: without it a device that created its wallet in this session paired
 /// over Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
 /// app restarted. With no identity yet it builds nothing and says so.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     // Create and register BluetoothManager using AppState identity.
     // Identity MUST be available - this is called post-genesis only.

@@ -599,8 +599,8 @@ async fn run_inbox_sync_cycle_counted(source: &str) -> (u32, u32, usize) {
     (processed, pulled, routes_pending)
 }
 
-/// Push inbox.updated + optional wallet refresh to WebView.
-#[cfg(all(target_os = "android", feature = "jni"))]
+/// Push inbox.updated, and a wallet refresh when something was processed, to
+/// the page through the host.
 fn push_inbox_event_to_webview(pulled: u32, processed: u32, more_pending: Vec<String>) {
     let event_payload = generated::StorageSyncResponse {
         success: true,
@@ -610,22 +610,10 @@ fn push_inbox_event_to_webview(pulled: u32, processed: u32, more_pending: Vec<St
         errors: vec![],
         more_pending,
     };
-    let payload_bytes = event_payload.encode_to_vec();
-
-    if let Err(e) =
-        crate::jni::event_dispatch::post_event_to_webview("inbox.updated", &payload_bytes)
-    {
-        log::warn!("[inbox_poller] Failed to push inbox.updated to WebView: {e}");
-    }
-
+    crate::host::post_event("inbox.updated", &event_payload.encode_to_vec());
     if processed > 0 {
-        let _ = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]);
+        crate::host::post_event("dsm-wallet-refresh", &[]);
     }
-}
-
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn push_inbox_event_to_webview(_pulled: u32, _processed: u32, _more_pending: Vec<String>) {
-    // No-op on non-Android / non-JNI builds.
 }
 
 /// The `(processed, pulled)` counts of `storage.sync`'s answer. The router

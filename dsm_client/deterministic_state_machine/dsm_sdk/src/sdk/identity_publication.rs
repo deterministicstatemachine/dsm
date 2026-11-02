@@ -179,15 +179,9 @@ fn record_pending(device_id_b32: &str, genesis_hash_b32: &str, required: u32, er
 /// `dsm-wallet-refresh` is the topic the Android host treats as a session hint:
 /// it re-runs `publishSessionState`, which recomputes the phase from the
 /// persisted publication row this module just wrote.
-#[cfg(all(target_os = "android", feature = "jni"))]
 fn push_session_refresh() {
-    if let Err(e) = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]) {
-        log::warn!("identity_publication: session refresh dispatch failed: {e}");
-    }
+    crate::host::post_event("dsm-wallet-refresh", &[]);
 }
-
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn push_session_refresh() {}
 
 /// Whether this device's identity is ready to use: its directory entry was
 /// read back from enough members. A durable local genesis record does NOT

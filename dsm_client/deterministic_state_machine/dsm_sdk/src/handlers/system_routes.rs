@@ -194,7 +194,7 @@ pub(crate) fn handle_create_genesis_v2(args: &[u8]) -> AppResult {
     //     identity already exists, so without this a wallet created in this session paired over
     //     Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
     //     app restarted.
-    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    #[cfg(feature = "bluetooth")]
     if let Err(e) = crate::init::build_ble_stack_for_identity() {
         return fail_rolled_back(format!(
             "system.createGenesisV2: the Bluetooth transfer stack could not be built: {e}"

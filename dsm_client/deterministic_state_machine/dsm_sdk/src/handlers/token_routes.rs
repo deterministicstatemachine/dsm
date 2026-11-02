@@ -410,14 +410,8 @@ pub(crate) async fn try_fetch_policy_from_network(
 /// it true. The screen reloads from the persisted registry rather than trusting
 /// optimistic frontend state — an adopted token that exists only in React is a
 /// token this device cannot actually hold.
-#[cfg(all(target_os = "android", feature = "jni"))]
 fn push_wallet_refresh() {
-    let _ = crate::jni::event_dispatch::post_event_to_webview("dsm-wallet-refresh", &[]);
-}
-
-#[cfg(not(all(target_os = "android", feature = "jni")))]
-fn push_wallet_refresh() {
-    // No-op on host builds; there is no WebView to notify.
+    crate::host::post_event("dsm-wallet-refresh", &[]);
 }
 
 /// Scheme prefix for a token-adoption payload.
