@@ -54,9 +54,9 @@ use super::exercise::{
     RecognizedExercise,
 };
 use super::facts::{
-    establish, establish_ground, establish_key_ground, refuted_in_hand, Established,
-    EstablishedFacts, ExerciseReads, GroundFacts, GroundReads, InHandRefutation, KeyGroundReads,
-    LegReads, NotEstablished, ResolvedParent, TraderAtParent,
+    establish, establish_ground, establish_key_ground, last_link_holds, refuted_in_hand,
+    Established, EstablishedFacts, ExerciseReads, GroundFacts, GroundReads, InHandRefutation,
+    KeyGroundReads, LastLinkReads, LegReads, NotEstablished, ResolvedParent, TraderAtParent,
 };
 use super::lineage::{
     advance_peer_resolved, AdvanceError, PeerResolvedAdvance, genesis_accepted,
@@ -72,8 +72,9 @@ use super::resolution::{
 };
 use super::storage::{Discovered, Resolved};
 use super::validation::{
-    route_validation, setup_lineage, vault_leaves_from_core, vault_post_states, Evidence,
-    EvidenceNeeds, Missing, SetupLineage, VaultLeafPre, VaultPostState,
+    route_validation, route_validation_short_of_lineage, setup_lineage, vault_leaves_from_core,
+    vault_post_states, Evidence, EvidenceNeeds, Missing, SetupLineage, VaultLeafPre,
+    VaultPostState,
 };
 use super::wire::{
     CoreEntry, DlvCore, ParentClaimRef, SettlementBody, SettlementPreimage, SofiResolutionClaim,
@@ -104,6 +105,10 @@ pub enum Tie {
     /// it would have.
     NotYet(String),
 }
+
+/// What a round of evidence reads of a trader's lineage at the positions of
+/// the setups it holds.
+type ReadLineages<'a> = dyn Fn(&BTreeMap<D32, Vec<u8>>) -> BTreeMap<u64, SetupLineage> + 'a;
 
 /// The history head a frontier commits, as read.
 enum CommittedHead {
@@ -1726,6 +1731,46 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         preimage: &SettlementPreimage,
         carried: &BTreeMap<ValidationRef, Vec<u8>>,
     ) -> Result<Acquired<Evidence, Missing>, VerifierFailure> {
+        self.acquire_rounds(
+            precommit,
+            preimage,
+            carried,
+            &|setups| self.setup_lineages_of(precommit, setups),
+            route_validation,
+        )
+    }
+
+    /// What a history's last link is validated over (SoFi Amendment S34): the
+    /// evidence of [`Self::acquire_evidence`] with no trader's lineage read.
+    fn acquire_last_link_evidence(
+        &self,
+        precommit: &TraderPrecommitBody,
+        preimage: &SettlementPreimage,
+        carried: &BTreeMap<ValidationRef, Vec<u8>>,
+    ) -> Result<Acquired<Evidence, Missing>, VerifierFailure> {
+        self.acquire_rounds(
+            precommit,
+            preimage,
+            carried,
+            &|_| BTreeMap::new(),
+            route_validation_short_of_lineage,
+        )
+    }
+
+    /// Read what `P` and `P(E)` name, round by round, until `verdict` reaches
+    /// one over it.
+    fn acquire_rounds(
+        &self,
+        precommit: &TraderPrecommitBody,
+        preimage: &SettlementPreimage,
+        carried: &BTreeMap<ValidationRef, Vec<u8>>,
+        lineages: &ReadLineages<'_>,
+        verdict: fn(
+            &TraderPrecommitBody,
+            &SettlementPreimage,
+            &Evidence,
+        ) -> Result<Validation, Missing>,
+    ) -> Result<Acquired<Evidence, Missing>, VerifierFailure> {
         let needs = EvidenceNeeds::of(precommit, preimage);
         let mut missing = Vec::new();
         // Token policies the predicate named as missing in an earlier round:
@@ -1733,8 +1778,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         // before fetched (SoFi Amendment S21).
         let mut named_tokens: BTreeSet<D32> = BTreeSet::new();
         for round in 1..=ACQUIRE_ROUNDS {
-            let evidence = self.gather(precommit, preimage, &needs, carried, &named_tokens)?;
-            match route_validation(precommit, preimage, &evidence) {
+            let evidence = self.gather(preimage, &needs, carried, &named_tokens, lineages)?;
+            match verdict(precommit, preimage, &evidence) {
                 Ok(Validation::Valid | Validation::Invalid) => {
                     return Ok(Acquired::Complete(evidence))
                 }
@@ -1752,21 +1797,50 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         Ok(Acquired::Exhausted(missing))
     }
 
+    /// The claims the trader's lineage accepted at each of `setups`' positions.
+    fn setup_lineages_of(
+        &self,
+        precommit: &TraderPrecommitBody,
+        setups: &BTreeMap<D32, Vec<u8>>,
+    ) -> BTreeMap<u64, SetupLineage> {
+        let mut lineages = BTreeMap::new();
+        for bytes in setups.values() {
+            if let Some((.., signed)) = recognize_setup(bytes) {
+                let position = signed.body.position();
+                let validated = self.reads.accepted_claim_at(
+                    precommit.genesis(),
+                    precommit.device_id(),
+                    position,
+                );
+                lineages.insert(
+                    position,
+                    setup_lineage(
+                        *precommit.genesis(),
+                        *precommit.device_id(),
+                        position,
+                        validated,
+                    ),
+                );
+            }
+        }
+        lineages
+    }
+
     /// One round of reading every item `needs` names: the trader's
     /// `TraderPreBalance` objects from what the operation carries or the
     /// immutable store, vault leaf pre values from the vault's accepted
     /// genesis at `R_0` or the generation this device established at the
     /// root the core names, policy objects from the immutable store under the
     /// addresses the vault state commits, token policies rooted by this
-    /// device, setups at each `ρ`, and the claims the trader's lineage
-    /// accepted at each setup's position.
+    /// device, setups at each `ρ`, and what `lineages` reads at their
+    /// positions.
     fn gather(
         &self,
-        precommit: &TraderPrecommitBody,
         preimage: &SettlementPreimage,
         needs: &EvidenceNeeds,
         carried: &BTreeMap<ValidationRef, Vec<u8>>,
         named_tokens: &BTreeSet<D32>,
+        lineages: &ReadLineages<'_>,
     ) -> Result<Evidence, VerifierFailure> {
         let mut objects: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
         for addr in &needs.trader_pre_balances {
@@ -1829,30 +1903,13 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         }
 
         let mut setups: BTreeMap<D32, Vec<u8>> = BTreeMap::new();
-        let mut setup_lineages: BTreeMap<u64, SetupLineage> = BTreeMap::new();
         for setup_ref in &needs.setups {
             let Resolved::Kept(bytes) = self.reads.setup_bytes(setup_ref)? else {
                 continue;
             };
-            if let Some((.., signed)) = recognize_setup(&bytes) {
-                let position = signed.body.position();
-                let validated = self.reads.accepted_claim_at(
-                    precommit.genesis(),
-                    precommit.device_id(),
-                    position,
-                );
-                setup_lineages.insert(
-                    position,
-                    setup_lineage(
-                        *precommit.genesis(),
-                        *precommit.device_id(),
-                        position,
-                        validated,
-                    ),
-                );
-            }
             setups.insert(*setup_ref, bytes);
         }
+        let setup_lineages = lineages(&setups);
 
         Ok(Evidence::acquired(
             objects,
@@ -2356,16 +2413,19 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// - the history holds the accepted genesis root `R_0` at 0;
     /// - it holds the frontier's root at `g`;
     /// - for `g ≥ 1`, the frontier's root is the post root of the exercise
-    ///   final at `R_{g−1}`, the root the history holds at `g − 1`;
+    ///   final at `R_{g−1}`, the root the history holds at `g − 1`: the last
+    ///   link over its own objects, and the full check where it does not hold
+    ///   ([`Self::frontier_step_holds`]);
     /// - no contradiction published under the vault's locator for this
-    ///   baseline holds when this reader checks it again, and the read of
-    ///   the locator is complete.
+    ///   baseline holds when this reader checks it again, in full, and the
+    ///   read of the locator is complete.
     ///
     /// A check that fails on what the owner signed is `Contradicted`, which
     /// anyone can check again; anything not in hand is `NotYet`. The history
-    /// between the genesis and `g − 1` is the owner's: a step there that does
-    /// not hold is found by a reader that checks it and published, and every
-    /// later reader then refuses the baseline (the last check).
+    /// between the genesis and `g − 1` is the owner's, and so is a last link
+    /// whose trader has no lineage: a step that does not hold is found by a
+    /// reader that checks it in full and published, and every later reader
+    /// then refuses the baseline (the last check).
     pub fn tie_baseline(
         &self,
         genesis: &AcceptedVaultGenesis,
@@ -2404,7 +2464,7 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             Check::Undecided(why) => return Ok(Tie::NotYet(why)),
         }
         if frontier.generation > 0 {
-            match self.step_holds(
+            match self.frontier_step_holds(
                 &head,
                 genesis,
                 &vault_id,
@@ -2432,12 +2492,14 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
             if claim.vault_id != vault_id || claim.frontier_commitment != frontier_commitment {
                 continue;
             }
-            // Genesis and Top were checked above, and the step at the
-            // frontier's own generation: only a lower step can still hold.
+            // Genesis and Top were checked above. The step at the frontier's
+            // own generation was checked only as far as its last link, so a
+            // claim of it takes the full check like any lower step; nothing
+            // above the frontier is in its history.
             let BaselineContradiction::Step { generation } = claim.kind else {
                 continue;
             };
-            if generation >= frontier.generation {
+            if generation > frontier.generation {
                 continue;
             }
             let claimed = match history::leaf_root_at(
@@ -2503,9 +2565,164 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         )
     }
 
-    /// Whether `root`, which `head` holds at `generation ≥ 1`, is the post
-    /// root of the exercise final at the root `head` holds at
-    /// `generation − 1` (the accepted genesis root at 0): the one step,
+    /// The root `head` holds below `generation ≥ 1`: the accepted genesis root
+    /// at 0, and otherwise the root its leaf at `generation − 1` holds. The
+    /// inner `Err` is why it is not read yet.
+    fn history_root_below(
+        &self,
+        head: &VaultHistoryHeadV1,
+        genesis: &AcceptedVaultGenesis,
+        vault_id: &D32,
+        generation: u64,
+    ) -> Result<Result<D32, String>, VerifierFailure> {
+        let before = generation - 1;
+        if before == 0 {
+            return Ok(Ok(*genesis.genesis_root()));
+        }
+        Ok(history::leaf_root_at(
+            head,
+            vault_id,
+            before,
+            |node| {
+                self.reads
+                    .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
+            },
+            |leaf| {
+                self.reads
+                    .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, leaf)
+            },
+        )?
+        .map_err(|why| format!("the history's root at generation {before} is not read: {why:?}")))
+    }
+
+    /// Whether `root`, the frontier's at `generation ≥ 1`, is the post root of
+    /// the exercise final at the root `head` holds below it (SoFi Amendment
+    /// S34). The last link is read from the objects at that root alone, so
+    /// what a reader reads does not grow with any trader's lineage. A link
+    /// that holds decides. One that does not decides nothing, since anyone
+    /// can occupy a first key: the full check does.
+    fn frontier_step_holds(
+        &self,
+        head: &VaultHistoryHeadV1,
+        genesis: &AcceptedVaultGenesis,
+        vault_id: &D32,
+        generation: u64,
+        root: &D32,
+    ) -> Result<Check, VerifierFailure> {
+        let parent = match self.history_root_below(head, genesis, vault_id, generation)? {
+            Ok(parent) => parent,
+            Err(why) => return Ok(Check::Undecided(why)),
+        };
+        match self.last_link(vault_id, &parent, generation, root)? {
+            Ok(()) => Ok(Check::Holds),
+            Err(why) => {
+                log::info!(
+                    "[sofi verifier] vault {}: the last link at generation {generation} takes \
+                     the full check: {why}",
+                    short_id(vault_id)
+                );
+                self.step_from(vault_id, parent, generation, root)
+            }
+        }
+    }
+
+    /// Whether the exercise holding `parent`'s first key is the last link of
+    /// the vault's history at `generation`: [`last_link_holds`] over what is
+    /// read here, none of it a trader's lineage or another vault's chain. The
+    /// inner `Err` is why it is not, which decides nothing.
+    fn last_link(
+        &self,
+        vault_id: &D32,
+        parent: &D32,
+        generation: u64,
+        root: &D32,
+    ) -> Result<Result<(), String>, VerifierFailure> {
+        let first = match self.read_attempt_cell(vault_id, parent, 0)? {
+            Ok(read) => read,
+            Err(missing) => return Ok(Err(format!("its first key: {missing:?}"))),
+        };
+        let Some(exercise) = first.exercise() else {
+            return Ok(Err("nothing holds its first key".into()));
+        };
+        // Refuted by its own bytes: nothing it names is read.
+        if let Some(refutation) = refuted_in_hand(exercise) {
+            return Ok(Err(format!("{:?}", refutation.refuted())));
+        }
+        let precommit = &exercise.precommit().body;
+        let fulfillment = &exercise.fulfillment().body;
+        let mut cells = Vec::with_capacity(precommit.legs().len());
+        for leg in precommit.legs() {
+            if leg.vault_id == *vault_id && leg.parent_root == *parent {
+                cells.push(first.clone());
+                continue;
+            }
+            match self.read_attempt_cell(&leg.vault_id, &leg.parent_root, 0)? {
+                Ok(read) => cells.push(read),
+                Err(missing) => return Ok(Err(format!("another leg's first key: {missing:?}"))),
+            }
+        }
+        let registration = match self.read_registration(
+            precommit.genesis(),
+            precommit.device_id(),
+            fulfillment.position(),
+            precommit.void_root(),
+        )? {
+            Ok(registration) => registration,
+            Err(missing) => return Ok(Err(format!("its position pair: {missing:?}"))),
+        };
+        let verdict = match exercise.preimage().settlement() {
+            SettlementBody::Release {
+                vault_id,
+                verdict_cell,
+                ..
+            } => match self.read_release_cells(vault_id, verdict_cell)? {
+                Ok(read) => Some(read),
+                Err(why) => return Ok(Err(format!("its verdict cell: {why:?}"))),
+            },
+            SettlementBody::Swap { .. } | SettlementBody::Close { .. } => None,
+        };
+        let own = exercise.closure_objects();
+        let objects = ExerciseObjects {
+            precommit,
+            precommit_signature: &exercise.precommit().signature,
+            preimage: exercise.preimage(),
+            fulfillment,
+            fulfillment_signature: &exercise.fulfillment().signature,
+            own_objects: &own,
+        };
+        let conformance = match self.acquire_conformance_evidence(&objects)? {
+            Acquired::Complete(evidence) => evidence,
+            Acquired::Exhausted(missing) => {
+                return Ok(Err(format!("its conformance evidence: {missing:?}")))
+            }
+        };
+        let evidence =
+            match self.acquire_last_link_evidence(precommit, exercise.preimage(), &own)? {
+                Acquired::Complete(evidence) => evidence,
+                Acquired::Exhausted(missing) => {
+                    return Ok(Err(format!("its route evidence: {missing:?}")))
+                }
+            };
+        Ok(last_link_holds(
+            &LastLinkReads {
+                exercise,
+                registration: &registration,
+                cells: &cells,
+                conformance: &conformance,
+                evidence: &evidence,
+                verdict: verdict.as_ref(),
+            },
+            vault_id,
+            parent,
+            generation,
+            root,
+        )
+        .map_err(|why| format!("{why:?}")))
+    }
+
+    /// The full check of a step: whether `root`, which `head` holds at
+    /// `generation ≥ 1`, is the post root of the exercise final at the root
+    /// `head` holds at `generation − 1` (the accepted genesis root at 0),
     /// recomputed by Core from the exercise and its evidence as a walk
     /// recomputes it.
     fn step_holds(
@@ -2516,30 +2733,22 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
         generation: u64,
         root: &D32,
     ) -> Result<Check, VerifierFailure> {
+        match self.history_root_below(head, genesis, vault_id, generation)? {
+            Ok(parent) => self.step_from(vault_id, parent, generation, root),
+            Err(why) => Ok(Check::Undecided(why)),
+        }
+    }
+
+    /// [`Self::step_holds`] from the root `parent` the history holds below
+    /// `generation`.
+    fn step_from(
+        &self,
+        vault_id: &D32,
+        parent: D32,
+        generation: u64,
+        root: &D32,
+    ) -> Result<Check, VerifierFailure> {
         let before = generation - 1;
-        let parent = match before {
-            0 => *genesis.genesis_root(),
-            _ => match history::leaf_root_at(
-                head,
-                vault_id,
-                before,
-                |node| {
-                    self.reads
-                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_NODE, node)
-                },
-                |leaf| {
-                    self.reads
-                        .immutable_object(TAG_DSM_SOFI_VAULT_HISTORY_LEAF, leaf)
-                },
-            )? {
-                Ok(parent) => parent,
-                Err(why) => {
-                    return Ok(Check::Undecided(format!(
-                        "the history's root at generation {before} is not read: {why:?}"
-                    )))
-                }
-            },
-        };
         let mut chains: BTreeMap<D32, VaultChain> = BTreeMap::new();
         chains.insert(*vault_id, VaultChain::at_history_root(before, parent));
         Ok(

@@ -41,7 +41,10 @@ use super::resolution::{
     AttemptWalk, GroundRouteFacts, LegFacts, ParentPosition, ParentStatus, RefutedInHand,
     RouteFacts, VaultChain, VerdictFact,
 };
-use super::validation::{route_invalid_in_hand, route_validation, vault_post_states, Evidence, Missing};
+use super::validation::{
+    route_invalid_in_hand, route_validation, route_validation_short_of_lineage, vault_post_states,
+    Evidence, Missing,
+};
 use super::wire::{ParentClaimRef, SettlementBody, SettlementPreimage};
 
 type D32 = [u8; 32];
@@ -536,6 +539,138 @@ pub fn establish(reads: &ExerciseReads<'_>) -> Result<EstablishedFacts, NotEstab
     })
 }
 
+/// What a reader holds of the exercise at a parent root's first key to check
+/// a vault history's last link (SoFi Amendment S34), none of it read from a
+/// trader's lineage or another vault's chain.
+#[derive(Debug, Clone, Copy)]
+pub struct LastLinkReads<'a> {
+    pub exercise: &'a RecognizedExercise,
+    /// The exercise's position pair, routed by the void root `P` names.
+    pub registration: &'a RegistrationRead,
+    /// Each leg's first key, in `P`'s leg order.
+    pub cells: &'a [AttemptCellRead],
+    pub conformance: &'a ConformanceEvidence,
+    pub evidence: &'a Evidence,
+    /// For a Release, its verdict cell (SoFi Amendment S21).
+    pub verdict: Option<&'a EscrowCellRead>,
+}
+
+/// Why a history's last link does not hold over its own objects. None of it
+/// is a contradiction, since anyone can occupy a first key: the reader takes
+/// the full check, which alone decides (SoFi Amendment S34).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotTheLastLink {
+    /// A leg is at a later key, or its first key is not final on the
+    /// exercise.
+    Leg { vault_id: D32 },
+    /// The position pair read is of another position, or is not final on
+    /// `F` and on exactly `derive(P, F)`.
+    Pair(Option<PairStanding>),
+    /// A Release whose verdict is not final on its outcome.
+    Verdict,
+    /// `FulfillmentConformance(F)` is not Valid over what was read.
+    Conformance(String),
+    /// `RouteValidation` short of the trader's lineage is not Valid over
+    /// what was read, or the vault's post state does not recompute.
+    Route(String),
+    /// The exercise recomputes no state of this vault on this root.
+    NoState,
+    /// The exercise recomputes another generation or root than the history
+    /// holds.
+    AnotherRoot,
+}
+
+/// Whether the exercise `reads` holds is the last link of a vault history:
+/// that the root `root`, at `generation`, is the post root of the exercise
+/// final at `parent_root`'s first key (SoFi Amendment S34). Every fact of a
+/// walk's classification that a walk can read without walking: every leg at
+/// its first key and final on the exercise, its position pair registered, a
+/// Release's verdict final on its outcome, `FulfillmentConformance` Valid,
+/// `RouteValidation` Valid short of the trader's lineage, and Core's fold
+/// builds `root`.
+///
+/// What it leaves out is what only a walk reads: that `P`'s parent and a
+/// setup's claim are the ones the trader's lineage holds, and that another
+/// leg's parent is on that vault's chain. It establishes no generation: a
+/// reader that holds it adopts an owner baseline, and records nothing.
+pub fn last_link_holds(
+    reads: &LastLinkReads<'_>,
+    vault_id: &D32,
+    parent_root: &D32,
+    generation: u64,
+    root: &D32,
+) -> Result<(), NotTheLastLink> {
+    let exercise = reads.exercise;
+    let precommit = &exercise.precommit().body;
+    let fulfillment = &exercise.fulfillment().body;
+    let final_on_exercise = CellFact::Held {
+        id: *exercise.external_commitment(),
+        state: ChainState::Final,
+    };
+    if reads.cells.len() != precommit.legs().len() {
+        return Err(NotTheLastLink::Leg {
+            vault_id: *vault_id,
+        });
+    }
+    for (leg, cell) in precommit.legs().iter().zip(reads.cells) {
+        let fixed_at_first = fulfillment
+            .attempts()
+            .iter()
+            .any(|a| a.vault_id == leg.vault_id && a.attempt == 0);
+        let of_this_leg = *cell.vault_id() == leg.vault_id
+            && *cell.parent_root() == leg.parent_root
+            && cell.attempt() == 0;
+        if !(fixed_at_first && of_this_leg && cell.fact() == final_on_exercise) {
+            return Err(NotTheLastLink::Leg {
+                vault_id: leg.vault_id,
+            });
+        }
+    }
+    if !reads.registration.is_of(precommit, fulfillment) {
+        return Err(NotTheLastLink::Pair(None));
+    }
+    match reads.registration.standing_of(precommit, fulfillment) {
+        PairStanding::Registered => {}
+        standing => return Err(NotTheLastLink::Pair(Some(standing))),
+    }
+    if !verdict_fact(exercise, reads.verdict).is_ok_and(VerdictFact::permits_consumption) {
+        return Err(NotTheLastLink::Verdict);
+    }
+    if reads.conformance.precommit.body != *precommit
+        || reads.conformance.preimage != *exercise.preimage()
+    {
+        return Err(NotTheLastLink::Conformance(
+            "the conformance evidence is of another operation".into(),
+        ));
+    }
+    match fulfillment_conformance(
+        fulfillment,
+        &exercise.fulfillment().signature,
+        reads.conformance,
+    ) {
+        Ok(verdict) if verdict.verdict() == Validation::Valid => {}
+        other => return Err(NotTheLastLink::Conformance(format!("{other:?}"))),
+    }
+    match route_validation_short_of_lineage(precommit, exercise.preimage(), reads.evidence) {
+        Ok(Validation::Valid) => {}
+        other => return Err(NotTheLastLink::Route(format!("{other:?}"))),
+    }
+    let posts = vault_post_states(precommit, fulfillment, exercise.preimage(), reads.evidence)
+        .map_err(|why| NotTheLastLink::Route(format!("{why:?}")))?;
+    let post = posts
+        .iter()
+        .find(|post| post.vault_id() == vault_id && post.pre_root() == parent_root)
+        .ok_or(NotTheLastLink::NoState)?;
+    if Some(post.pre_generation()) == generation.checked_sub(1)
+        && post.generation() == generation
+        && post.root() == root
+    {
+        Ok(())
+    } else {
+        Err(NotTheLastLink::AnotherRoot)
+    }
+}
+
 /// The trader parent the ladder reads (§23.3, §6.62): `named` is the claim
 /// `P` names at `position`, `held` what this verifier established the
 /// trader's lineage holds there. A single-root parent carries both claims and
@@ -836,6 +971,11 @@ mod tests {
     }
 
     impl Reads {
+        /// The exact bytes holding the exercise's first leg's key.
+        fn exercise_bytes(&self) -> Vec<u8> {
+            self.cells[0].value().expect("a held key").to_vec()
+        }
+
         fn legs(&self) -> Vec<LegReads<'_>> {
             self.cells
                 .iter()
@@ -939,7 +1079,12 @@ mod tests {
     /// The reads of a route of `legs` legs exercised at `attempts`, every
     /// cell holding the exercise final.
     fn reads(legs: usize, attempts: &[u64]) -> (Fixture, Reads) {
-        let fx = swap_fixture_n(legs);
+        reads_of(swap_fixture_n(legs), attempts)
+    }
+
+    /// The reads of `fx`'s operation exercised at `attempts`, every cell
+    /// holding the exercise final.
+    fn reads_of(fx: Fixture, attempts: &[u64]) -> (Fixture, Reads) {
         let built = build_exercise(&fx, attempts);
         let bytes = built.exercise.encode();
         let exercise = recognize_exercise(&bytes).expect("the fixture's exercise recognizes");
@@ -1749,5 +1894,245 @@ mod tests {
         // Two hops are run: the same fixture at the cap is not refuted.
         let (_, two) = reads(2, &[0, 0]);
         assert_eq!(refuted_in_hand(&two.exercise), None);
+    }
+
+    // ── a history's last link (SoFi Amendment S34) ─────────────────────────
+
+    /// The vault, parent root, generation and root Core's fold recomputes for
+    /// `r`'s first leg.
+    fn link_of(r: &Reads) -> (D32, D32, u64, D32) {
+        let posts = vault_post_states(
+            &r.exercise.precommit().body,
+            &r.exercise.fulfillment().body,
+            r.exercise.preimage(),
+            &r.evidence,
+        )
+        .expect("the fixture's post states recompute");
+        let post = posts.first().expect("a post state");
+        (
+            *post.vault_id(),
+            *post.pre_root(),
+            post.generation(),
+            *post.root(),
+        )
+    }
+
+    fn last_link_over(
+        r: &Reads,
+        (vault_id, parent, generation, root): &(D32, D32, u64, D32),
+    ) -> Result<(), NotTheLastLink> {
+        last_link_holds(
+            &LastLinkReads {
+                exercise: &r.exercise,
+                registration: &r.registration,
+                cells: &r.cells,
+                conformance: &r.conformance,
+                evidence: &r.evidence,
+                verdict: None,
+            },
+            vault_id,
+            parent,
+            *generation,
+            root,
+        )
+    }
+
+    /// One leg and two: the link holds with nothing of the trader's lineage in
+    /// hand, where the full route validation cannot reach a verdict.
+    #[test]
+    fn a_last_link_holds_over_its_own_objects_with_no_lineage_read() {
+        for legs in [1usize, 2] {
+            let (.., mut r) = reads(legs, &vec![0; legs]);
+            let link = link_of(&r);
+            r.parent = None;
+            r.evidence.setup_lineages.clear();
+            assert!(
+                matches!(
+                    route_validation(
+                        &r.exercise.precommit().body,
+                        r.exercise.preimage(),
+                        &r.evidence
+                    ),
+                    Err(Missing::AcceptedClaim { .. })
+                ),
+                "the full validation needs the lineage"
+            );
+            assert_eq!(last_link_over(&r, &link), Ok(()));
+        }
+    }
+
+    /// The link is the root its exercise builds, at that generation, of that
+    /// vault, on that parent.
+    ///
+    /// MUTATION CONTROL: the comparison of generation and root left out holds
+    /// a frontier root the exercise never built.
+    #[test]
+    fn a_last_link_holds_only_for_what_its_exercise_builds() {
+        let (.., r) = reads(1, &[0]);
+        let (vault_id, parent, generation, root) = link_of(&r);
+        assert_eq!(
+            last_link_over(&r, &(vault_id, parent, generation, OTHER_ROOT)),
+            Err(NotTheLastLink::AnotherRoot)
+        );
+        assert_eq!(
+            last_link_over(&r, &(vault_id, parent, generation + 1, root)),
+            Err(NotTheLastLink::AnotherRoot)
+        );
+        assert_eq!(
+            last_link_over(&r, &(vault_id, OTHER_ROOT, generation, root)),
+            Err(NotTheLastLink::NoState)
+        );
+        assert_eq!(
+            last_link_over(&r, &(OTHER_ROOT, parent, generation, root)),
+            Err(NotTheLastLink::NoState)
+        );
+    }
+
+    /// Every leg at its first key, final on the exercise: an open key, a leader
+    /// link alone, another leg's open key, and a fulfillment that fixes a later
+    /// key are each left to the full check.
+    ///
+    /// MUTATION CONTROL: the check of each leg's key left out holds them.
+    #[test]
+    fn a_leg_not_final_on_the_exercise_at_its_first_key_is_no_last_link() {
+        let (.., mut r) = reads(1, &[0]);
+        let link = link_of(&r);
+        let leg = r.exercise.precommit().body.legs()[0];
+        let at = AttemptCell::new(
+            &leg.vault_id,
+            &leg.parent_root,
+            0,
+            &committed_set(),
+            &committed_set_id(),
+        )
+        .unwrap();
+        let bytes = r.exercise_bytes();
+        let mut leader_only = Cell::at(at.routed());
+        leader_only.write(&bytes, 0, &[]);
+        r.cells[0] = attempt_resolution(&at, &leader_only.evidence()).unwrap();
+        assert!(matches!(
+            r.cells[0].fact(),
+            CellFact::Held { state, .. } if state != ChainState::Final
+        ));
+        let on_this_leg = Err(NotTheLastLink::Leg {
+            vault_id: leg.vault_id,
+        });
+        assert_eq!(last_link_over(&r, &link), on_this_leg);
+        r.cells[0] = cell_read(&leg.vault_id, &leg.parent_root, 0, None);
+        assert_eq!(last_link_over(&r, &link), on_this_leg);
+
+        let (.., mut two) = reads(2, &[0, 0]);
+        let link = link_of(&two);
+        let other = two.exercise.precommit().body.legs()[1];
+        two.cells[1] = cell_read(&other.vault_id, &other.parent_root, 0, None);
+        assert_eq!(
+            last_link_over(&two, &link),
+            Err(NotTheLastLink::Leg {
+                vault_id: other.vault_id
+            })
+        );
+
+        let (.., later) = reads(1, &[1]);
+        let link = link_of(&later);
+        assert!(matches!(
+            last_link_over(&later, &link),
+            Err(NotTheLastLink::Leg { .. })
+        ));
+    }
+
+    /// MUTATION CONTROL: the pair's standing left out holds an exercise whose
+    /// fulfillment never registered.
+    #[test]
+    fn a_position_pair_not_final_on_its_fulfillment_is_no_last_link() {
+        let (.., mut r) = reads(1, &[0]);
+        let link = link_of(&r);
+        let p = r.exercise.precommit().body.clone();
+        let f = r.exercise.fulfillment().clone();
+        r.registration = registration_read(&p, &f.body, &f.signature, p.void_root(), None);
+        assert_eq!(
+            last_link_over(&r, &link),
+            Err(NotTheLastLink::Pair(Some(PairStanding::Pending)))
+        );
+        r.registration = registration_read(
+            &p,
+            &f.body,
+            &f.signature,
+            &OTHER_ROOT,
+            Some(derive::resolution_claim(&p, &f.body)),
+        );
+        assert_eq!(
+            last_link_over(&r, &link),
+            Err(NotTheLastLink::Pair(None)),
+            "a pair routed by another root is another position's"
+        );
+    }
+
+    /// MUTATION CONTROL: conformance left out holds a fulfillment its evidence
+    /// does not reach a verdict over.
+    #[test]
+    fn a_fulfillment_not_valid_over_its_evidence_is_no_last_link() {
+        let (.., mut r) = reads(1, &[0]);
+        let link = link_of(&r);
+        r.conformance.setups.clear();
+        assert!(matches!(
+            last_link_over(&r, &link),
+            Err(NotTheLastLink::Conformance(..))
+        ));
+        let (.., other) = reads(2, &[0, 0]);
+        r.conformance = other.conformance;
+        assert!(matches!(
+            last_link_over(&r, &link),
+            Err(NotTheLastLink::Conformance(..))
+        ));
+    }
+
+    /// MUTATION CONTROL: the route validation left out holds a route whose
+    /// setups were never seen, since the fold reads no setup.
+    #[test]
+    fn a_route_not_valid_short_of_the_lineage_is_no_last_link() {
+        let (.., mut r) = reads(1, &[0]);
+        let link = link_of(&r);
+        r.evidence.setups.clear();
+        assert!(matches!(
+            last_link_over(&r, &link),
+            Err(NotTheLastLink::Route(..))
+        ));
+    }
+
+    /// A Release counts only once its verdict is final on its outcome: with
+    /// its verdict cell open, or not read at all, the link does not hold.
+    ///
+    /// MUTATION CONTROL: the verdict left out holds a release no verdict
+    /// settled.
+    #[test]
+    fn a_release_whose_verdict_is_not_final_is_no_last_link() {
+        use crate::sofi::escrow::{verdict_resolution, EscrowCellRead, VerdictCell};
+        use crate::sofi::validation::tests::{escrow_fixture, release, OTHER_OWNER};
+        let (fx, r) = reads_of(escrow_fixture(OTHER_OWNER, release(b"a-wins")), &[0]);
+        let link = link_of(&r);
+        let SettlementBody::Release { verdict_cell, .. } = fx.preimage.settlement() else {
+            panic!("the fixture is a release");
+        };
+        assert_eq!(last_link_over(&r, &link), Err(NotTheLastLink::Verdict));
+        let cell = VerdictCell::new(verdict_cell, &committed_set(), &committed_set_id()).unwrap();
+        let open = verdict_resolution(&cell, &Cell::at(cell.routed()).evidence()).unwrap();
+        let (vault_id, parent, generation, root) = link;
+        assert_eq!(
+            last_link_holds(
+                &LastLinkReads {
+                    exercise: &r.exercise,
+                    registration: &r.registration,
+                    cells: &r.cells,
+                    conformance: &r.conformance,
+                    evidence: &r.evidence,
+                    verdict: Some(&EscrowCellRead::Signed(open)),
+                },
+                &vault_id,
+                &parent,
+                generation,
+                &root,
+            ),
+            Err(NotTheLastLink::Verdict)
+        );
     }
 }

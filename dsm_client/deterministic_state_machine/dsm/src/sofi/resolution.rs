@@ -531,7 +531,7 @@ impl VerdictFact {
     /// Whether the verdict lets a consumption count: an operation that is no
     /// release reads none, and a release counts only once the cell's verdict
     /// is final on its outcome (`ConsumedRoute`, SoFi §19.9).
-    fn permits_consumption(self) -> bool {
+    pub(super) fn permits_consumption(self) -> bool {
         matches!(
             self,
             Self::NotARelease | Self::Release(super::escrow::VerdictStanding::Final)

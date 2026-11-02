@@ -694,19 +694,17 @@ impl VaultTerms {
     }
 }
 
-/// `SetupValid` for one leg of P (SoFi §16, §20.1): the setup the leg names by
-/// `ρ` is the canonical envelope whose body re-derives `ρ`, names P's trader
-/// and the leg's vault, is signed by P's trader key, and names by
-/// `claim_ref` the claim the trader's lineage accepted at the setup's
-/// position (Amendment S9).
+/// The half of `SetupValid` for one leg of P (SoFi §16, §20.1) that a setup's
+/// own bytes decide: the setup the leg names by `ρ` is the canonical envelope
+/// whose body re-derives `ρ`, names P's trader and the leg's vault, and is
+/// signed by P's trader key.
 ///
-/// Bytes that do not authenticate to `ρ` supply nothing (note 9), and an
-/// accepted claim of another trader supplies nothing either.
-fn setup_valid(
+/// Bytes that do not authenticate to `ρ` supply nothing (note 9).
+fn setup_signed(
     precommit: &TraderPrecommitBody,
     leg: &crate::sofi::wire::PrecommitLeg,
     evidence: &Evidence,
-) -> Result<(), Refusal> {
+) -> Result<crate::sofi::publication::Signed<crate::sofi::wire::SofiSetupBody>, Refusal> {
     let bytes = evidence
         .setups
         .get(&leg.setup_ref)
@@ -732,6 +730,20 @@ fn setup_valid(
     }
     crate::sofi::signature::verify_setup(body, &signed.signature, precommit.claimant_public_key())
         .map_err(|e| Refusal::Invalid(Invalid::SetupSignature(e)))?;
+    Ok(signed)
+}
+
+/// `SetupValid` for one leg of P (SoFi §16, §20.1): [`setup_signed`], and the
+/// setup names by `claim_ref` the claim the trader's lineage accepted at its
+/// position (Amendment S9). An accepted claim of another trader supplies
+/// nothing.
+fn setup_valid(
+    precommit: &TraderPrecommitBody,
+    leg: &crate::sofi::wire::PrecommitLeg,
+    evidence: &Evidence,
+) -> Result<(), Refusal> {
+    let signed = setup_signed(precommit, leg, evidence)?;
+    let body = &signed.body;
     let missing_claim = Refusal::Incomplete(Missing::AcceptedClaim {
         economic_position: body.position(),
     });
@@ -816,6 +828,25 @@ pub fn route_validation(
     evidence: &Evidence,
 ) -> Result<Validation, Missing> {
     match validate(precommit, preimage, evidence) {
+        Ok(()) => Ok(Validation::Valid),
+        Err(r) => r.validation(),
+    }
+}
+
+/// [`route_validation`] short of the trader's lineage (SoFi Amendment S34):
+/// every check it makes, except that a setup's `claim_ref` is the claim the
+/// trader's lineage accepted. What a history's last link is held to, so a
+/// reader's cost does not grow with that lineage. Core's own: it establishes
+/// no generation and reaches no other layer, and a position is resolved only
+/// through [`route_validation`].
+pub(crate) fn route_validation_short_of_lineage(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+) -> Result<Validation, Missing> {
+    match validate_each_setup(precommit, preimage, evidence, |p, leg, held| {
+        setup_signed(p, leg, held).map(drop)
+    }) {
         Ok(()) => Ok(Validation::Valid),
         Err(r) => r.validation(),
     }
@@ -1405,6 +1436,21 @@ pub fn validate(
     preimage: &SettlementPreimage,
     evidence: &Evidence,
 ) -> Result<(), Refusal> {
+    validate_each_setup(precommit, preimage, evidence, setup_valid)
+}
+
+/// The conjunction [`validate`] states, with `setup` as what each leg's setup
+/// is held to.
+fn validate_each_setup(
+    precommit: &TraderPrecommitBody,
+    preimage: &SettlementPreimage,
+    evidence: &Evidence,
+    setup: fn(
+        &TraderPrecommitBody,
+        &crate::sofi::wire::PrecommitLeg,
+        &Evidence,
+    ) -> Result<(), Refusal>,
+) -> Result<(), Refusal> {
     let mut verdict = Verdict::default();
 
     let bytes = preimage
@@ -1475,7 +1521,7 @@ pub fn validate(
     // carries only the durability half, SetupRegistered; without this,
     // setup validity would drop out of the conjunction realization depends on.
     for leg in precommit.legs() {
-        verdict.note(setup_valid(precommit, leg, evidence));
+        verdict.note(setup(precommit, leg, evidence));
     }
 
     // Every token passes its policy on every SoFi leg, an intermediate token
@@ -3431,7 +3477,7 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 #[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
-mod tests {
+pub(crate) mod tests {
     use super::fixtures::*;
     use super::*;
     use crate::economic::tree::{EconomicSmt, ECONOMIC_SMT_HEIGHT};
@@ -6466,7 +6512,7 @@ mod tests {
     use crate::sofi::wire::{EscrowBranch, EscrowOutcome, EscrowSigner};
 
     /// What an escrow fixture settles.
-    enum EscrowOp {
+    pub(crate) enum EscrowOp {
         Release {
             outcome: &'static [u8],
             amount: u64,
@@ -6478,7 +6524,7 @@ mod tests {
     /// The amount the fixture's escrow vault holds.
     const STAKE: u64 = 2_500;
     /// The escrow vault's owner when it is not the trader.
-    const OTHER_OWNER: D32 = [0x0B; 32];
+    pub(crate) const OTHER_OWNER: D32 = [0x0B; 32];
 
     /// The referee, the one signer of every fixture outcome. Static validity
     /// verifies no signature, so its key signs nothing here.
@@ -6564,7 +6610,7 @@ mod tests {
     /// One operation against an escrow vault of `owner_device`, by the
     /// fixture trader, built the way a trader builds one: the vault retires,
     /// the trader takes the stake and is debited nothing.
-    fn escrow_fixture(owner_device: D32, op: EscrowOp) -> Fixture {
+    pub(crate) fn escrow_fixture(owner_device: D32, op: EscrowOp) -> Fixture {
         escrow_fixture_of(
             owner_device,
             EscrowKind::Signed(escrow_terms(owner_device)),
@@ -6730,7 +6776,7 @@ mod tests {
         }
     }
 
-    fn release(outcome: &'static [u8]) -> EscrowOp {
+    pub(crate) fn release(outcome: &'static [u8]) -> EscrowOp {
         EscrowOp::Release {
             outcome,
             amount: STAKE,

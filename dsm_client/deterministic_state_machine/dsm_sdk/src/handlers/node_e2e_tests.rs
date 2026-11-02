@@ -2915,6 +2915,8 @@ async fn a_withheld_preimage_leaves_an_exercise_unbuilt_and_nothing_decided() {
         owner_walks: std::sync::atomic::AtomicUsize::new(0),
         genesis_scans: std::sync::atomic::AtomicUsize::new(0),
         withheld_preimage: withheld,
+        lineage_reads: std::sync::atomic::AtomicUsize::new(0),
+        lineage_invalid: None,
     };
     let withheld = reads_withholding(Some(*precommit.body.external_commitment()));
     let in_hand = reads_withholding(None);
@@ -5207,6 +5209,16 @@ fn forget_the_vault(d: &TestDevice, vault_id: &[u8; 32]) {
 /// A walks its vault to its head, as the account does after each realized
 /// trade, and offers B its witness at the baseline it publishes there.
 async fn offered_to_b(p: &Pair, m: &Market) -> Vec<generated::ConnectVaultWitnessV1> {
+    offered_to(p, m, &p.b).await
+}
+
+/// A walks its vault to its head and offers `reader` its witness at the
+/// baseline it publishes there.
+async fn offered_to(
+    p: &Pair,
+    m: &Market,
+    reader: &TestDevice,
+) -> Vec<generated::ConnectVaultWitnessV1> {
     invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await;
     p.a.enter();
     let set = canonical_set(NETWORK).expect("the pinned set");
@@ -5214,7 +5226,7 @@ async fn offered_to_b(p: &Pair, m: &Market) -> Vec<generated::ConnectVaultWitnes
         &p.a.router().core_sdk,
         &set,
         &[m.era, m.tkn],
-        (p.b.genesis, p.b.device_id),
+        (reader.genesis, reader.device_id),
     )
     .await;
     assert!(
@@ -5846,10 +5858,298 @@ async fn a_fresh_reader_reads_the_same_at_any_vault_age() {
     );
 }
 
+/// What a wallet that never traded on the vault reads to adopt its baseline
+/// does not grow with the vault or its last trader's lineage (SoFi Amendment
+/// S34): C holds nothing of the vault and of B, whose trade is the last link,
+/// and adopts after two, four and six trades. Before the last link was read
+/// from its own objects these reads grew with every trade of B's, 2118, 3776
+/// and 6429 of them.
+///
+/// MUTATION CONTROL: the last link left out, so every step takes the full
+/// check, turns this red: C walks B's lineage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_reader_that_never_traded_reads_the_same_at_any_vault_age() {
+    use crate::storage::client_db::sofi_vault_head;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    let mut c = TestDevice::create("C", 0x0C);
+    c.boot(&p.fleet).await;
+    c.fund_admitted(100).await;
+    let mut measured = Vec::new();
+    for round in 1..=3u64 {
+        for _ in 0..2 {
+            realized_trade(&p, &m, 5).await;
+        }
+        let offered = offered_to(&p, &m, &c).await;
+        forget_the_vault(&c, &m.vault_id);
+        c.enter();
+        {
+            let binding = crate::storage::client_db::get_connection().expect("the store");
+            let conn = binding.lock().expect("the store is not poisoned");
+            for table in ["peer_frontier", "peer_ek_step"] {
+                conn.execute(&format!("DELETE FROM {table}"), [])
+                    .expect("forget what C holds of any lineage");
+            }
+        }
+        crate::sdk::sofi_reads::forget_judgements();
+        for node in &p.nodes.nodes {
+            node.forget_requests();
+        }
+        c.enter();
+        let set = canonical_set(NETWORK).expect("the pinned set");
+        crate::sdk::sofi_flow::adopt_offered(&c.router().core_sdk, &set, &offered)
+            .await
+            .expect("C reads what it was offered");
+        let reads = p
+            .nodes
+            .nodes
+            .iter()
+            .flat_map(|n| n.requests())
+            .filter(|r| r.starts_with("GET "))
+            .count();
+        c.enter();
+        let (held, ..) = sofi_vault_head::baseline(&m.vault_id)
+            .expect("C's store")
+            .expect("C adopted the baseline");
+        assert_eq!(held, 2 * round, "C adopted the baseline at the head");
+        measured.push(reads);
+    }
+    // Three paths of the history, from generation 2 to 6 two levels deeper:
+    // at most six more nodes, from any member.
+    let members = p.nodes.nodes.len();
+    assert!(
+        measured[2] <= measured[0] + 6 * members,
+        "a reader's reads grow only by the history paths' levels: {measured:?}"
+    );
+}
+
+/// The authenticated baseline A published at `generation`, as `verifier`'s
+/// reader reads it, and the genesis it was authenticated against.
+async fn baseline_at(
+    set: &crate::sdk::storage_set::StorageSet,
+    verifier: &dsm::sofi::resolve::Verifier<'_, CountingReads<'_>>,
+    vault_id: &[u8; 32],
+    generation: u64,
+) -> (
+    dsm::sofi::lineage::AcceptedVaultGenesis,
+    dsm::sofi::frontier::VerifiedFrontier,
+) {
+    let dsm::sofi::resolve::VaultGenesis::Accepted(genesis) =
+        verifier.vault_genesis(vault_id).expect("the genesis read")
+    else {
+        panic!("the vault's genesis is accepted");
+    };
+    let found = crate::sdk::storage_io::resolve_locator_all(
+        set,
+        dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_BASELINE_LOCATOR.source_bytes(),
+        &derive::vault_baseline_locator(vault_id, generation),
+        8,
+        |bytes| match crate::sdk::vault_baseline::authenticate(bytes, &genesis) {
+            Ok(verified) => {
+                let frontier = verified.frontier();
+                Some((
+                    derive::vault_baseline_locator(&frontier.vault_id, frontier.generation),
+                    verified,
+                ))
+            }
+            Err(why) => {
+                log::info!("a baseline candidate does not authenticate: {why}");
+                None
+            }
+        },
+    )
+    .await
+    .expect("the locator read");
+    let mut verified = match found {
+        dsm::sofi::storage::Discovered::Complete(found)
+        | dsm::sofi::storage::Discovered::Partial(found) => found,
+    };
+    let verified = verified.pop().expect("A's baseline at the generation");
+    (*genesis, verified)
+}
+
+/// SoFi Amendment S34: a history's last link is checked over its own objects
+/// and asks for no trader's lineage. It proves nothing about that lineage, so
+/// a `Step` contradiction published at the frontier's own generation takes
+/// the full check:
+/// - with none published, the baseline ties and no lineage is asked for;
+/// - with one published that its own check does not bear out, the full check
+///   runs and holds, and the baseline ties: a claim alone refuses nothing;
+/// - with the trader's lineage Invalid, the full check does not hold, and the
+///   baseline does not tie: what a walker named reaches a later reader.
+///
+/// MUTATION CONTROL: claims at the frontier's own generation passed over, as
+/// they were when the full check always ran, turns the last two red. The
+/// setup lineage gathered for the last link turns the first red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_last_link_reads_no_lineage_and_a_step_published_at_it_takes_the_full_check() {
+    use dsm::sofi::resolve::{AcceptedGeneses, Tie, Verifier};
+    use dsm::sofi::wire::{BaselineContradiction, VaultBaselineContradictionV1};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    for _ in 0..2 {
+        realized_trade(&p, &m, 5).await;
+    }
+    offered_to_b(&p, &m).await;
+    forget_the_vault(&p.b, &m.vault_id);
+    crate::sdk::sofi_reads::forget_judgements();
+    p.b.enter();
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let live = crate::sdk::sofi_reads::LiveSofiReads::new(&set, None).expect("live reads");
+    let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
+    let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
+    let reads_with = |lineage_invalid| CountingReads {
+        live: &live,
+        owner_walks: AtomicUsize::new(0),
+        genesis_scans: AtomicUsize::new(0),
+        withheld_preimage: None,
+        lineage_reads: AtomicUsize::new(0),
+        lineage_invalid,
+    };
+
+    // None published.
+    let reads = reads_with(None);
+    let verifier = Verifier::new(
+        &reads,
+        &members,
+        set.id(),
+        &network,
+        None,
+        AcceptedGeneses::default(),
+    );
+    let (genesis, verified) = baseline_at(&set, &verifier, &m.vault_id, 2).await;
+    let tied = verifier
+        .tie_baseline(&genesis, verified.clone())
+        .expect("the tie's reads");
+    assert!(matches!(tied, Tie::Tied(..)), "{tied:?}");
+    assert_eq!(
+        reads.lineage_reads.load(SeqCst),
+        0,
+        "the last link asked for no trader's lineage"
+    );
+
+    // A claim its own check does not bear out: the full check runs, and holds.
+    crate::sdk::vault_baseline::publish_contradiction(
+        &set,
+        &VaultBaselineContradictionV1 {
+            vault_id: m.vault_id,
+            frontier_commitment: *verified.commitment(),
+            kind: BaselineContradiction::Step { generation: 2 },
+        },
+    )
+    .await
+    .expect("the claim is published");
+    crate::sdk::sofi_reads::forget_judgements();
+    crate::sdk::final_reads::forget_everything();
+    let tied = verifier
+        .tie_baseline(&genesis, verified.clone())
+        .expect("the tie's reads");
+    assert!(matches!(tied, Tie::Tied(..)), "{tied:?}");
+    assert!(
+        reads.lineage_reads.load(SeqCst) > 0,
+        "a published claim takes the full check, which reads the lineage"
+    );
+
+    // The trader's lineage Invalid: what a walker finds of a trader that
+    // never held what it spent. The last link still holds; the claim does
+    // not let the baseline tie.
+    crate::sdk::sofi_reads::forget_judgements();
+    crate::sdk::final_reads::forget_everything();
+    let hostile = reads_with(Some("the trader never held what it spent"));
+    let verifier = Verifier::new(
+        &hostile,
+        &members,
+        set.id(),
+        &network,
+        None,
+        AcceptedGeneses::default(),
+    );
+    let tied = verifier
+        .tie_baseline(&genesis, verified)
+        .expect("the tie's reads");
+    assert!(
+        matches!(&tied, Tie::NotYet(why) if why.contains("generation 2")),
+        "the claim is checked in full and the baseline is not tied: {tied:?}"
+    );
+    crate::sdk::sofi_reads::forget_judgements();
+}
+
+/// SoFi Amendment S34: a griefer that takes a parent root's first key makes a
+/// reader take the full check, and is never a refusal. An exercise B's own
+/// bytes refute holds the first key at `R_1`, and B's next trade takes the
+/// second key, so the last link does not hold over the first; the full check
+/// walks past it to the trade, the baseline is adopted, nothing is
+/// quarantined and nothing is published.
+///
+/// MUTATION CONTROL: a last link that does not hold read as a contradiction
+/// turns this red: anyone could quarantine a vault for every reader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_griefer_on_a_first_key_takes_the_full_check_and_refuses_nothing() {
+    use crate::storage::client_db::sofi_vault_head;
+    let p = Pair::boot(500, 200).await;
+    let m = open_market(&p).await;
+    realized_trade(&p, &m, 10).await;
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let (own, parents) = standing_of(&p.b);
+    let ctx = VerifierContext::new(&set, Some(own), parents.as_ref()).expect("a verifier");
+    let verifier = ctx.verifier();
+    let chain = verifier.chain(&m.vault_id).expect("the vault's chain");
+    let (r0, r1) = (genesis_root_of(&verifier, &m.vault_id), head_root(&chain));
+    let honest = verifier
+        .read_attempt_cell(&m.vault_id, &r0, 0)
+        .expect("read")
+        .expect("decided")
+        .into_exercise()
+        .expect("B's exercise holds the key it consumed");
+    p.b.enter();
+    let secret_key = crate::sdk::signing_authority::current_secret_key().expect("B's signing key");
+    let hostile = reaimed(&honest, &m.vault_id, &r1, 0, &|digest| {
+        dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
+    });
+    let recognized = recognize_exercise(&hostile.encode())
+        .expect("the re-aimed bytes are one operation's exercise");
+    write_exercise(&set, &hostile, &recognized)
+        .await
+        .expect("any party may write an exercise");
+    realized_trade(&p, &m, 10).await;
+    let next = verifier
+        .read_attempt_cell(&m.vault_id, &r1, 1)
+        .expect("read")
+        .expect("decided")
+        .into_exercise()
+        .expect("B's trade holds the second key");
+    assert_eq!(next.fulfillment().body.attempts()[0].attempt, 1);
+
+    let offered = offered_to_b(&p, &m).await;
+    forget_the_vault(&p.b, &m.vault_id);
+    crate::sdk::sofi_reads::forget_judgements();
+    adopt_at_b(&p, &offered).await.expect("B reads the offer");
+    p.b.enter();
+    assert!(
+        sofi_vault_head::quarantined(&m.vault_id)
+            .expect("B's store")
+            .is_none(),
+        "nothing is quarantined"
+    );
+    let (held, ..) = sofi_vault_head::baseline(&m.vault_id)
+        .expect("B's store")
+        .expect("B adopted the baseline");
+    assert_eq!(held, 2, "the full check holds where the last link does not");
+    assert!(
+        contradictions_of(&p, &m.vault_id).await.is_empty(),
+        "nothing is published"
+    );
+}
+
 /// Two frontiers the owner signed at one generation (Req 6.3): B quarantines
 /// the vault, chooses neither, and does not fall back to a walk from the
-/// genesis — its trade on the vault is refused. The control is the test
-/// above, where one frontier is adopted.
+/// genesis — its trade on the vault is refused. The control is
+/// `a_fresh_reader_reads_the_same_at_any_vault_age`, where one frontier is
+/// adopted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_owner_that_signed_two_frontiers_at_one_generation_is_quarantined() {
@@ -6014,7 +6314,8 @@ async fn contradictions_of(
 ///
 /// MUTATION CONTROLS: the step check left out of `tie_baseline` takes the
 /// generation 3 baseline; the contradiction locator not read takes the
-/// generation 4 baseline the second time; each turns this red.
+/// generation 4 baseline the second time; a last link that does not hold read
+/// as holding takes the generation 3 baseline; each turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_owner_that_signs_an_invented_root_is_refused_and_named() {
@@ -6038,6 +6339,7 @@ async fn an_owner_that_signs_an_invented_root_is_refused_and_named() {
             _ => panic!("B accepts the vault's genesis"),
         }
     };
+    invoke(&p.a, "sofi.vaults", args(&generated::SofiVaultsRequest {})).await;
     p.a.enter();
     let mut roots = vec![*genesis.genesis_root()];
     for g in 1..=4 {
@@ -6046,6 +6348,21 @@ async fn an_owner_that_signs_an_invented_root_is_refused_and_named() {
                 .expect("A's record")
                 .expect("A's root"),
         );
+    }
+    // The state leaves a reader reads a step's exercise over, as the owner
+    // publishes them with its history. The lying baselines below carry none
+    // of their own.
+    for root in &roots[1..=3] {
+        let state = sofi_vault_head::state_at(&m.vault_id, root)
+            .expect("A's record")
+            .expect("A's state");
+        crate::sdk::storage_io::put_immutable(
+            &set,
+            dsm::common::domain_tags::TAG_DSM_SOFI_VAULT_LEAF_STATE,
+            &state.encode().expect("the state encodes"),
+        )
+        .await
+        .expect("the state leaf is put");
     }
     let invented = |what: &[u8]| {
         dsm::crypto::blake3::domain_hash_bytes(dsm::common::domain_tags::TAG_DSM_TEST_TIP, what)
@@ -6094,6 +6411,14 @@ async fn an_owner_that_signs_an_invented_root_is_refused_and_named() {
     adopt_at_b(&p, &offer(4))
         .await
         .expect("every check B runs itself holds on a lie in the middle");
+    p.b.enter();
+    assert_eq!(
+        sofi_vault_head::baseline(&m.vault_id)
+            .expect("B's store")
+            .map(|held| held.0),
+        Some(4),
+        "B adopted the baseline with the invented middle"
+    );
     // A genesis walker names it, and B, offered the baseline again, refuses.
     p.b.enter();
     crate::sdk::vault_baseline::publish_contradiction(
@@ -7171,14 +7496,20 @@ async fn every_sofi_route_reaches_its_producer() {
     );
 }
 
-/// The reads of a live verifier, counting the owner lineages it walks and
-/// the genesis locators it scans. Every read is the live one, except the
-/// preimage of `withheld_preimage`'s `E`, which this verifier cannot get.
+/// The reads of a live verifier, counting the owner lineages it walks, the
+/// genesis locators it scans and the trader lineages it asks for. Every read
+/// is the live one, except the preimage of `withheld_preimage`'s `E`, which
+/// this verifier cannot get, and a trader's lineage under `lineage_invalid`.
 struct CountingReads<'a> {
     live: &'a crate::sdk::sofi_reads::LiveSofiReads<'a>,
     owner_walks: std::sync::atomic::AtomicUsize,
     genesis_scans: std::sync::atomic::AtomicUsize,
     withheld_preimage: Option<[u8; 32]>,
+    /// How many times a trader's lineage was asked for.
+    lineage_reads: std::sync::atomic::AtomicUsize,
+    /// When set, every trader's lineage reads as Invalid, for this reason:
+    /// what a walk finds of a trader that never held what it spent.
+    lineage_invalid: Option<&'static str>,
 }
 
 impl CountingReads<'_> {
@@ -7333,6 +7664,13 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         ),
         dsm::economic::provenance::PeerLineageFailure,
     > {
+        self.lineage_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = self.lineage_invalid {
+            return Err(dsm::economic::provenance::PeerLineageFailure::Invalid(
+                why.to_string(),
+            ));
+        }
         self.live.trader_root_at(genesis, device_id, position)
     }
     fn accepted_claim_at(
@@ -7342,6 +7680,13 @@ impl dsm::sofi::resolve::SofiReads for CountingReads<'_> {
         position: u64,
     ) -> Result<dsm::economic::lineage::AcceptedClaim, dsm::economic::provenance::PeerLineageFailure>
     {
+        self.lineage_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(why) = self.lineage_invalid {
+            return Err(dsm::economic::provenance::PeerLineageFailure::Invalid(
+                why.to_string(),
+            ));
+        }
         self.live.accepted_claim_at(genesis, device_id, position)
     }
     fn record_generation(
@@ -7415,6 +7760,8 @@ async fn a_request_reads_each_vaults_genesis_once() {
         owner_walks: std::sync::atomic::AtomicUsize::new(0),
         genesis_scans: std::sync::atomic::AtomicUsize::new(0),
         withheld_preimage: None,
+        lineage_reads: std::sync::atomic::AtomicUsize::new(0),
+        lineage_invalid: None,
     };
     let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
     let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
@@ -7467,6 +7814,8 @@ async fn an_operations_verifiers_share_the_geneses_it_accepted() {
         owner_walks: std::sync::atomic::AtomicUsize::new(0),
         genesis_scans: std::sync::atomic::AtomicUsize::new(0),
         withheld_preimage: None,
+        lineage_reads: std::sync::atomic::AtomicUsize::new(0),
+        lineage_invalid: None,
     };
     let members = crate::sdk::storage_set::as_ccb_members(&set).expect("the set's members");
     let network = crate::sdk::economic_admission_flow::committed_network_id().expect("network");
