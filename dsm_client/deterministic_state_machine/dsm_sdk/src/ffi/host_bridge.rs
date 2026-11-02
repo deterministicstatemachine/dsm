@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn a_nonzero_code_is_the_hosts_refusal() {
-        let refused = answered("start_scan", 7).err().expect("refused");
+        let refused = answered("start_scan", 7).expect_err("refused");
         assert_eq!(refused, "the host's start_scan answered 7");
         assert_eq!(answered("start_scan", 0), Ok(()));
     }

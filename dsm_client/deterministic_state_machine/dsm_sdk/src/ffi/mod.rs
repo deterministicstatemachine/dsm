@@ -147,9 +147,8 @@ mod tests {
 
     #[test]
     fn a_null_string_is_refused_not_read_as_empty() {
-        let refused = unsafe { str_from(std::ptr::null(), "the path") }
-            .err()
-            .expect("null is refused");
+        let refused =
+            unsafe { str_from(std::ptr::null(), "the path") }.expect_err("null is refused");
         assert!(refused.contains("the path is null"), "{refused}");
     }
 

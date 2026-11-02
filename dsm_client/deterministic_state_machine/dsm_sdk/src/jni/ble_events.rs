@@ -8,10 +8,9 @@
 //! the Kotlin layer.
 
 use crate::generated as pb;
-use jni::objects::{JByteArray, JObject, JString};
+use jni::objects::{JObject, JString};
 use jni::JNIEnv;
 use pb::{BleDeviceInfo, BleEvent};
-use prost::Message;
 
 /// Convert raw JNIEnv pointer to safe wrapper.
 /// Returns None on failure instead of aborting the process.
@@ -30,12 +29,6 @@ unsafe fn env_from(raw: jni::sys::JNIEnv) -> Option<JNIEnv<'static>> {
 #[inline]
 unsafe fn jstr_from(raw: jni::sys::jstring) -> JString<'static> {
     JString::from(JObject::from_raw(raw))
-}
-
-/// Convert raw jbyteArray to safe JByteArray wrapper.
-#[inline]
-unsafe fn jbytes_from(raw: jni::sys::jbyteArray) -> JByteArray<'static> {
-    JByteArray::from(JObject::from_raw(raw))
 }
 
 /// Return an empty byte array to the JVM when envelope
