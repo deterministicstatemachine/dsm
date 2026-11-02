@@ -3,17 +3,14 @@
 //! Recovery-authority anchor (spec §0.5, step 5).
 //!
 //! The recovery-authority SPHINCS+ public key `K_A_pub` (derived from the recovery
-//! mnemonic via `derive_recovery_authority_seed`) authenticates a device's
+//! mnemonic via `recovery::recovery_keys::derive_recovery_authority_seed`) authenticates a device's
 //! tombstone/succession pair during recovery. For that authentication to be a real
 //! trust root it MUST be anchored to the genesis `G_A` — otherwise a verifier would
 //! have to trust an arbitrary runtime-supplied pubkey (exactly the contacts-DB
 //! authority confusion §0.5 removes).
 //!
-//! `K_A_pub` CANNOT be a genesis field: the recovery mnemonic is generated only when
-//! the user enables NFC backup (`recovery_sdk::derive_and_cache_key`, reached via the
-//! `recovery.enable` route), which happens AFTER genesis creation — the mnemonic is
-//! not in scope when genesis is created. So the authority is
-//! anchored by a separate **declaration chained off genesis**:
+//! `K_A_pub` is not a genesis field. The authority is anchored by a separate
+//! **declaration chained off genesis**:
 //!
 //! - It is signed by the device's **genesis signing key** (`GenesisState::signing_key`),
 //!   which IS genesis-authenticated and fetchable by peers via the device-tree quorum
@@ -28,10 +25,9 @@
 //! A thief holding the device also holds the genesis signing key, so a signature alone
 //! is not sufficient. The anchor is **bind-once per genesis**: the first declaration
 //! published for a genesis wins and is immutable thereafter (mirrors R1 per-contact
-//! bind-once). A user who enabled recovery before theft has `K_A_pub` anchored and the
-//! thief cannot override it. A user who NEVER enabled recovery has no recovery path at
-//! all (no mnemonic, no capsule), so a thief-authored first anchor grants nothing the
-//! thief lacks (they already control the device), and bearer assets independently stay
+//! bind-once). A user who anchored the authority before theft has `K_A_pub` anchored
+//! and the thief cannot override it. A user who NEVER anchored it has no recovery path
+//! at all, so a thief-authored first anchor grants nothing the thief lacks (they already control the device), and bearer assets independently stay
 //! `LOCKED_RECOVERY` until per-asset frontier reconciliation (two-gate model, P5).
 //!
 //! Bind-once is enforced at the storage/device-tree layer (append-once anchor leaf,

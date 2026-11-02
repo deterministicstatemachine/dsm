@@ -373,8 +373,7 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
 
         // Recovery & bilateral responses must not arrive as requests.
         Some(
-            gp::envelope::Payload::RecoveryCapsuleDecryptResponse(_)
-            | gp::envelope::Payload::RecoveryTombstoneResponse(_)
+            gp::envelope::Payload::RecoveryTombstoneResponse(_)
             | gp::envelope::Payload::RecoverySuccessionResponse(_)
             | gp::envelope::Payload::RecoveryResumeResponse(_)
             | gp::envelope::Payload::BilateralPrepareResponse(_)
@@ -562,7 +561,6 @@ pub fn handle_envelope_universal(env_bytes: &[u8]) -> Vec<u8> {
         // constructs or consumes it.
         | Some(gp::envelope::Payload::TokenAdoptionQrResponse(_))
         // Outbound-only push envelopes — never arrive as inbound requests
-        | Some(gp::envelope::Payload::NfcRecoveryCapsule(_))
         | Some(gp::envelope::Payload::GenesisLifecycle(_))
         | Some(gp::envelope::Payload::BootstrapMeasurementReport(_))
         | Some(gp::envelope::Payload::BootstrapFinalizeResponse(_))
@@ -650,17 +648,12 @@ mod tests {
 
     /// SA-119, SA-120. No recovery operation runs through the envelope
     /// bridge. Its arms called the recovery handler around the router's
-    /// gates: a capsule decrypted under a key the request carried and staged,
-    /// and a resume that skipped the tombstone-acknowledgement gate. Recovery
-    /// runs only as the router's `recovery.*` routes, so each is answered as
-    /// an operation the bridge does not take.
+    /// gates: a resume that skipped the tombstone-acknowledgement gate.
+    /// Recovery runs only as the router's `recovery.*` routes, so each is
+    /// answered as an operation the bridge does not take.
     #[test]
     fn no_recovery_operation_runs_through_the_bridge() {
         let kinds = [
-            gp::universal_op::Kind::RecoveryCapsuleDecrypt(gp::RecoveryCapsuleDecryptRequest {
-                encrypted_capsule: vec![1; 64],
-                mnemonic_key: vec![2; 32],
-            }),
             gp::universal_op::Kind::RecoveryTombstone(gp::RecoveryTombstoneRequest::default()),
             gp::universal_op::Kind::RecoverySuccession(gp::RecoverySuccessionRequest::default()),
             gp::universal_op::Kind::RecoveryResume(gp::RecoveryResumeRequest::default()),

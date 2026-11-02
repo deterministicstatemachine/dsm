@@ -2820,10 +2820,8 @@ impl AppRouter for AppRouterImpl {
             "inbox.startPoller" | "inbox.stopPoller" | "inbox.resume" | "inbox.moneySeen" => {
                 Box::pin(self.handle_inbox_invoke(i)).await
             }
-            // Recovery invoke routes (includes nfc.ring.write, nfc.ring.read)
-            m if m.starts_with("recovery.") || m == "nfc.ring.write" || m == "nfc.ring.read" => {
-                Box::pin(self.handle_recovery_invoke(i)).await
-            }
+            // Recovery invoke routes
+            m if m.starts_with("recovery.") => Box::pin(self.handle_recovery_invoke(i)).await,
             // Secondary-device admission invoke routes (gated additional-device enrollment)
             // Bitcoin invoke routes
             m if m.starts_with("bitcoin.") => Box::pin(self.handle_bitcoin_invoke(i)).await,

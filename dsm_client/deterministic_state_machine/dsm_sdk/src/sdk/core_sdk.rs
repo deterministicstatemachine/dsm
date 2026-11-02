@@ -547,7 +547,6 @@ impl CoreSDK {
     /// Recovery re-signs NOTHING and asks the user for nothing.
     pub(crate) fn commit_advance_with_pending_admission_and_artifacts(
         outcome: &dsm::types::device_state::AdvanceOutcome,
-        bump_capsule: bool,
         pending: &dsm::economic::admission::PendingEconomicAdmission,
         artifacts: &[(String, Vec<u8>, &'static str)],
         storage_set_id: &[u8; 32],
@@ -578,7 +577,6 @@ impl CoreSDK {
         let artifacts: Vec<(String, Vec<u8>, &'static str)> = artifacts.to_vec();
         Self::dual_write_advance_outcome_with_extra(
             outcome,
-            bump_capsule,
             Some(&move |tx: &rusqlite::Transaction<'_>,
                         o: &dsm::types::device_state::AdvanceOutcome| {
                 Self::make_admission_durable_in_tx(
@@ -855,7 +853,6 @@ impl CoreSDK {
 
     fn dual_write_advance_outcome_with_extra(
         outcome: &dsm::types::device_state::AdvanceOutcome,
-        bump_capsule: bool,
         in_tx_extra: Option<
             &dyn Fn(
                 &rusqlite::Transaction<'_>,
@@ -900,21 +897,6 @@ impl CoreSDK {
                 None::<std::io::Error>,
             )
         })?;
-        // Capsule currency (spec §5.1): advance the accepted-state index ATOMICALLY
-        // with the state commit so a frontier-changing transition can never be
-        // persisted without the recovery capsule being marked dirty. Closes the
-        // post-commit fail-OPEN (a missed bump on already-committed state). Uses
-        // the transaction's own connection — never opens a new one (deadlock).
-        if bump_capsule {
-            crate::storage::client_db::recovery::bump_accepted_state_index_with_conn(&tx).map_err(
-                |e| {
-                    DsmError::storage(
-                        format!("dual-write: bump accepted_state_index failed: {e}"),
-                        None::<std::io::Error>,
-                    )
-                },
-            )?;
-        }
         // A connected application's request this task is carrying out is
         // bound to the advance in this same transaction (SA-60).
         crate::sdk::connect::operations::bind_in_tx(&tx, outcome)?;
@@ -1593,24 +1575,13 @@ impl CoreSDK {
         // and any new Operation variant must be consciously classified. This is
         // the canonical state-advance chokepoint, so it covers bilateral
         // transfers, token ops, and DLV ops in one place.
-        // Recovery egress gate (spec R3) + capsule currency (spec §5.1). Classify
-        // before `operation` is moved into the advance.
-        let is_egress = operation.is_value_egress();
-        let frontier_changed = !matches!(operation, dsm::types::operations::Operation::Genesis);
-
-        // R2′ optimistic self-heal (BEFORE the lock, only when the capsule is
-        // stale): re-seal so a current device is not needlessly blocked, while
-        // keeping the heavy capsule rebuild off the hot path when already current.
-        if is_egress && crate::storage::client_db::recovery::is_capsule_dirty() {
-            crate::sdk::recovery_sdk::RecoverySDK::maybe_refresh_nfc_capsule();
-        }
-
+        // Recovery egress gate (spec R3).
         let mut sm = self.state_machine.lock();
 
         // Authoritative fail-closed egress gate UNDER the state-machine lock, so
-        // the decision is atomic with the commit + capsule-currency bump below.
-        // This closes the check-before-lock TOCTOU where two concurrent egress
-        // ops could both pass before either marked the capsule dirty.
+        // the decision is atomic with the commit below. This closes the
+        // check-before-lock TOCTOU where two concurrent egress ops could both
+        // pass before either committed.
         if let Some(reason) = value_egress_refusal(&operation) {
             return Err(DsmError::invalid_operation(reason));
         }
@@ -1761,15 +1732,12 @@ impl CoreSDK {
             // canonical apply) COMPOSES with the admission commit via `also`.
             Some((accepted, set_id)) => Self::commit_advance_with_pending_admission_and_artifacts(
                 &outcome,
-                frontier_changed,
                 accepted,
                 &artifacts,
                 set_id,
                 in_tx_extra,
             ),
-            None => {
-                Self::dual_write_advance_outcome_with_extra(&outcome, frontier_changed, in_tx_extra)
-            }
+            None => Self::dual_write_advance_outcome_with_extra(&outcome, in_tx_extra),
         };
         if let Err(e) = commit_result {
             if accepted.is_some() {

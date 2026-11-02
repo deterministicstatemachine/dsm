@@ -28,8 +28,6 @@ export const SCREEN_TYPES = [
   'bluetooth',
   'vault',
   'lock_setup',
-  'recovery',
-  'nfc_recovery',
   'recovery_pipeline',
   'sofi',
   'apps',

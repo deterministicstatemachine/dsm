@@ -1217,16 +1217,6 @@ export enum SdkEventKind {
   CONTACT_BLE_UPDATED = 12,
 
   /**
-   * @generated from enum value: SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
-   */
-  NFC_RECOVERY_CAPSULE = 13,
-
-  /**
-   * @generated from enum value: SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
-   */
-  NFC_BACKUP_WRITTEN = 14,
-
-  /**
    * @generated from enum value: SDK_EVENT_KIND_BRIDGE_READY = 15;
    */
   BRIDGE_READY = 15,
@@ -1250,8 +1240,6 @@ proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
   { no: 10, name: "SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
   { no: 11, name: "SDK_EVENT_KIND_DETERMINISTIC_SAFETY" },
   { no: 12, name: "SDK_EVENT_KIND_CONTACT_BLE_UPDATED" },
-  { no: 13, name: "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE" },
-  { no: 14, name: "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN" },
   { no: 15, name: "SDK_EVENT_KIND_BRIDGE_READY" },
   { no: 16, name: "SDK_EVENT_KIND_CANONICAL_ENVELOPE" },
 ]);
@@ -1285,31 +1273,9 @@ export enum NativeHostRequestKind {
   HOST_CONTROL_QR_STOP_SCAN = 3,
 
   /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
-   */
-  HOST_CONTROL_NFC_READER_START = 8,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
-   */
-  HOST_CONTROL_NFC_READER_STOP = 9,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
    */
   HOST_CONTROL_PERMISSIONS_REQUEST = 10,
-
-  /**
-   * platform_primitive.*
-   *
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
-   */
-  PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
-   */
-  PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106,
 }
 // Retrieve enum metadata with: proto3.getEnumType(NativeHostRequestKind)
 proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
@@ -1317,11 +1283,7 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 1, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET" },
   { no: 2, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN" },
   { no: 3, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN" },
-  { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
-  { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
-  { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
-  { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
 ]);
 
 /**
@@ -1337,16 +1299,6 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
    */
   QR_SCAN_RESULT = 1,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
-   */
-  NFC_TAG_READ = 4,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
-   */
-  NFC_TAG_WRITE = 5,
 
   /**
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
@@ -1365,8 +1317,6 @@ export enum NativeHostEventKind {
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
   { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
-  { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
-  { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
   { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
   { no: 7, name: "NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED" },
 ]);
@@ -14812,45 +14762,6 @@ export class BlePermissionEvent extends Message<BlePermissionEvent> {
 }
 
 /**
- * NFC recovery capsule payload — raw NdefRecord bytes wrapped in Envelope v3.
- *
- * @generated from message dsm.NfcRecoveryCapsule
- */
-export class NfcRecoveryCapsule extends Message<NfcRecoveryCapsule> {
-  /**
-   * @generated from field: bytes payload = 1;
-   */
-  payload = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<NfcRecoveryCapsule>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcRecoveryCapsule";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcRecoveryCapsule | PlainMessage<NfcRecoveryCapsule> | undefined, b: NfcRecoveryCapsule | PlainMessage<NfcRecoveryCapsule> | undefined): boolean {
-    return proto3.util.equals(NfcRecoveryCapsule, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.BleEvent
  */
 export class BleEvent extends Message<BleEvent> {
@@ -16922,12 +16833,6 @@ export class UniversalOp extends Message<UniversalOp> {
     case: "query";
   } | {
     /**
-     * @generated from field: dsm.RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
-     */
-    value: RecoveryCapsuleDecryptRequest;
-    case: "recoveryCapsuleDecrypt";
-  } | {
-    /**
      * @generated from field: dsm.RecoveryTombstoneRequest recovery_tombstone = 23;
      */
     value: RecoveryTombstoneRequest;
@@ -16970,7 +16875,6 @@ export class UniversalOp extends Message<UniversalOp> {
     { no: 15, name: "attested_action", kind: "message", T: AttestedAction, oneof: "kind" },
     { no: 16, name: "vault", kind: "message", T: VaultOp, oneof: "kind" },
     { no: 17, name: "query", kind: "message", T: QueryOp, oneof: "kind" },
-    { no: 22, name: "recovery_capsule_decrypt", kind: "message", T: RecoveryCapsuleDecryptRequest, oneof: "kind" },
     { no: 23, name: "recovery_tombstone", kind: "message", T: RecoveryTombstoneRequest, oneof: "kind" },
     { no: 24, name: "recovery_succession", kind: "message", T: RecoverySuccessionRequest, oneof: "kind" },
     { no: 25, name: "recovery_resume", kind: "message", T: RecoveryResumeRequest, oneof: "kind" },
@@ -17577,12 +17481,6 @@ export class Envelope extends Message<Envelope> {
     case: "batchEnvelope";
   } | {
     /**
-     * @generated from field: dsm.RecoveryCapsuleDecryptResponse recovery_capsule_decrypt_response = 15;
-     */
-    value: RecoveryCapsuleDecryptResponse;
-    case: "recoveryCapsuleDecryptResponse";
-  } | {
-    /**
      * @generated from field: dsm.RecoveryTombstoneResponse recovery_tombstone_response = 16;
      */
     value: RecoveryTombstoneResponse;
@@ -18037,12 +17935,6 @@ export class Envelope extends Message<Envelope> {
     case: "sessionStateResponse";
   } | {
     /**
-     * @generated from field: dsm.NfcRecoveryCapsule nfc_recovery_capsule = 96;
-     */
-    value: NfcRecoveryCapsule;
-    case: "nfcRecoveryCapsule";
-  } | {
-    /**
      * @generated from field: dsm.TokenPolicyListResponse token_policy_list_response = 97;
      */
     value: TokenPolicyListResponse;
@@ -18285,7 +18177,6 @@ export class Envelope extends Message<Envelope> {
     { no: 10, name: "universal_tx", kind: "message", T: UniversalTx, oneof: "payload" },
     { no: 11, name: "universal_rx", kind: "message", T: UniversalRx, oneof: "payload" },
     { no: 12, name: "batch_envelope", kind: "message", T: BatchEnvelope, oneof: "payload" },
-    { no: 15, name: "recovery_capsule_decrypt_response", kind: "message", T: RecoveryCapsuleDecryptResponse, oneof: "payload" },
     { no: 16, name: "recovery_tombstone_response", kind: "message", T: RecoveryTombstoneResponse, oneof: "payload" },
     { no: 17, name: "recovery_succession_response", kind: "message", T: RecoverySuccessionResponse, oneof: "payload" },
     { no: 18, name: "recovery_resume_response", kind: "message", T: RecoveryResumeResponse, oneof: "payload" },
@@ -18357,7 +18248,6 @@ export class Envelope extends Message<Envelope> {
     { no: 93, name: "bitcoin_withdrawal_execute_request", kind: "message", T: BitcoinWithdrawalExecuteRequest, oneof: "payload" },
     { no: 94, name: "bitcoin_withdrawal_execute_response", kind: "message", T: BitcoinWithdrawalExecuteResponse, oneof: "payload" },
     { no: 95, name: "session_state_response", kind: "message", T: AppSessionStateProto, oneof: "payload" },
-    { no: 96, name: "nfc_recovery_capsule", kind: "message", T: NfcRecoveryCapsule, oneof: "payload" },
     { no: 97, name: "token_policy_list_response", kind: "message", T: TokenPolicyListResponse, oneof: "payload" },
     { no: 99, name: "error", kind: "message", T: Error, oneof: "payload" },
     { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
@@ -20550,112 +20440,6 @@ export class ArchitectureInfoProto extends Message<ArchitectureInfoProto> {
 
   static equals(a: ArchitectureInfoProto | PlainMessage<ArchitectureInfoProto> | undefined, b: ArchitectureInfoProto | PlainMessage<ArchitectureInfoProto> | undefined): boolean {
     return proto3.util.equals(ArchitectureInfoProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.RecoveryCapsuleDecryptRequest
- */
-export class RecoveryCapsuleDecryptRequest extends Message<RecoveryCapsuleDecryptRequest> {
-  /**
-   * @generated from field: bytes encrypted_capsule = 1;
-   */
-  encryptedCapsule = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes mnemonic_key = 2;
-   */
-  mnemonicKey = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<RecoveryCapsuleDecryptRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RecoveryCapsuleDecryptRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "encrypted_capsule", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "mnemonic_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RecoveryCapsuleDecryptRequest | PlainMessage<RecoveryCapsuleDecryptRequest> | undefined, b: RecoveryCapsuleDecryptRequest | PlainMessage<RecoveryCapsuleDecryptRequest> | undefined): boolean {
-    return proto3.util.equals(RecoveryCapsuleDecryptRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.RecoveryCapsuleDecryptResponse
- */
-export class RecoveryCapsuleDecryptResponse extends Message<RecoveryCapsuleDecryptResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: dsm.Hash32 global_root = 2;
-   */
-  globalRoot?: Hash32;
-
-  /**
-   * @generated from field: repeated dsm.ChainTip chain_tips = 3;
-   */
-  chainTips: ChainTip[] = [];
-
-  /**
-   * @generated from field: dsm.Hash32 receipt_rollup = 4;
-   */
-  receiptRollup?: Hash32;
-
-  /**
-   * version/flags/counters only
-   *
-   * @generated from field: bytes meta_data = 5;
-   */
-  metaData = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<RecoveryCapsuleDecryptResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RecoveryCapsuleDecryptResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "global_root", kind: "message", T: Hash32 },
-    { no: 3, name: "chain_tips", kind: "message", T: ChainTip, repeated: true },
-    { no: 4, name: "receipt_rollup", kind: "message", T: Hash32 },
-    { no: 5, name: "meta_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RecoveryCapsuleDecryptResponse | PlainMessage<RecoveryCapsuleDecryptResponse> | undefined, b: RecoveryCapsuleDecryptResponse | PlainMessage<RecoveryCapsuleDecryptResponse> | undefined): boolean {
-    return proto3.util.equals(RecoveryCapsuleDecryptResponse, a, b);
   }
 }
 
@@ -27623,160 +27407,6 @@ export class HostPermissionsResult extends Message<HostPermissionsResult> {
 
   static equals(a: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined, b: HostPermissionsResult | PlainMessage<HostPermissionsResult> | undefined): boolean {
     return proto3.util.equals(HostPermissionsResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagReadPayload
- */
-export class NfcTagReadPayload extends Message<NfcTagReadPayload> {
-  /**
-   * @generated from field: string mime_type = 1;
-   */
-  mimeType = "";
-
-  constructor(data?: PartialMessage<NfcTagReadPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagReadPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined, b: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined): boolean {
-    return proto3.util.equals(NfcTagReadPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagReadResult
- */
-export class NfcTagReadResult extends Message<NfcTagReadResult> {
-  /**
-   * @generated from field: bool reader_started = 1;
-   */
-  readerStarted = false;
-
-  constructor(data?: PartialMessage<NfcTagReadResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagReadResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "reader_started", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined, b: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined): boolean {
-    return proto3.util.equals(NfcTagReadResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagWritePayload
- */
-export class NfcTagWritePayload extends Message<NfcTagWritePayload> {
-  /**
-   * @generated from field: string mime_type = 1;
-   */
-  mimeType = "";
-
-  /**
-   * @generated from field: bytes payload = 2;
-   */
-  payload = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<NfcTagWritePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagWritePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined, b: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined): boolean {
-    return proto3.util.equals(NfcTagWritePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagWriteResult
- */
-export class NfcTagWriteResult extends Message<NfcTagWriteResult> {
-  /**
-   * @generated from field: bool launched = 1;
-   */
-  launched = false;
-
-  constructor(data?: PartialMessage<NfcTagWriteResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagWriteResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "launched", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined, b: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined): boolean {
-    return proto3.util.equals(NfcTagWriteResult, a, b);
   }
 }
 

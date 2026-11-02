@@ -2,24 +2,18 @@
 
 package com.dsm.wallet.bridge
 
-import android.util.Log
 import com.google.protobuf.ByteString
-import com.google.protobuf.InvalidProtocolBufferException
 import dsm.types.proto.IngressRequest
 import dsm.types.proto.RouterInvokeOp
 import dsm.types.proto.RouterQueryOp
 
 internal object NativeBoundaryBridge {
-    private const val TAG = "NativeBoundaryBridge"
-
     fun startup(requestBytes: ByteArray): ByteArray {
         return Unified.dispatchStartup(requestBytes)
     }
 
     fun ingress(requestBytes: ByteArray): ByteArray {
-        val response = Unified.dispatchIngress(requestBytes)
-        runBestEffortPostIngressHooks(requestBytes)
-        return response
+        return Unified.dispatchIngress(requestBytes)
     }
 
     fun routerInvoke(method: String, args: ByteArray = ByteArray(0)): ByteArray {
@@ -44,34 +38,5 @@ internal object NativeBoundaryBridge {
             )
             .build()
         return ingress(request.toByteArray())
-    }
-
-    private fun runBestEffortPostIngressHooks(requestBytes: ByteArray) {
-        val request = try {
-            IngressRequest.parseFrom(requestBytes)
-        } catch (e: InvalidProtocolBufferException) {
-            Log.w(TAG, "ingress: unable to parse request for post-hooks", e)
-            return
-        }
-
-        when (request.operationCase) {
-            IngressRequest.OperationCase.ROUTER_INVOKE -> {
-                try {
-                    UnifiedNativeApi.maybeRefreshNfcCapsule()
-                } catch (_: Throwable) {
-                    // no-op
-                }
-            }
-            IngressRequest.OperationCase.ENVELOPE -> {
-                try {
-                    UnifiedNativeApi.maybeRefreshNfcCapsule()
-                } catch (_: Throwable) {
-                    // no-op
-                }
-            }
-            else -> {
-                // no-op
-            }
-        }
     }
 }

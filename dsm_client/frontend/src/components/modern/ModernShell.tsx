@@ -27,7 +27,7 @@ import { useOwnCard } from './ownCard';
 /** The DGen screens the Modern skin opens inside itself. */
 const CLASSIC_INSIDE = new Set<ScreenType>([
   'accounts', 'apps', 'qr', 'sofi', 'vault', 'storage', 'settings', 'dev_policy',
-  'lock_setup', 'recovery', 'nfc_recovery', 'recovery_pipeline',
+  'lock_setup', 'recovery_pipeline',
 ]);
 
 /** DGen screens the Modern skin has its own tab for. */

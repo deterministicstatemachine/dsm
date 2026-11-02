@@ -43,8 +43,8 @@ use super::get_connection;
 // 2. The SK lifetime is bounded: encrypted at receipt-build time for step n,
 //    used at receipt-build time for step n+1, then wiped (overwritten with
 //    NULL) when chain head advances.
-// 3. We use XChaCha20-Poly1305 (matching the recovery capsule choice in
-//    §16.10) for nonce-misuse resistance and consistency.
+// 3. We use XChaCha20-Poly1305 (whitepaper §16.10) for nonce-misuse resistance
+//    and consistency.
 //
 // AEAD AD: a fixed domain marker. Per-blob random 24-byte nonce is prepended
 // to the ciphertext on disk so each encryption is independent.

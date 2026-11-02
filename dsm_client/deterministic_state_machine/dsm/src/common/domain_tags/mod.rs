@@ -210,7 +210,7 @@ mod tests {
     // restart (DSM Amendment A20).
     // +1 with the join of two online transfers that cross (owner ruling,
     // 2026-10-29: "both settle"): `DSM/relationship-join/v1`.
-    const EXPECTED_TAG_COUNT: usize = 434;
+    const EXPECTED_TAG_COUNT: usize = 432;
 
     /// Scan the crate source for every declared domain-tag constant.
     ///

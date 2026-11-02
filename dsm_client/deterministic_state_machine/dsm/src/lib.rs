@@ -46,7 +46,7 @@
 //! - [`bilateral`] — Bilateral transaction types and protocol definitions
 //! - [`commitments`] — Deterministic, smart, and external commitments
 //! - [`envelope`] — Envelope v3 protobuf wire format (0x03 framing)
-//! - [`recovery`] — Recovery capsules, tombstones, and rollup proofs
+//! - [`recovery`] — Recovery tombstones, succession and rollup proofs
 //! - [`serialization`] — Protobuf serialization utilities
 //! - [`verification`] — Chain verification and integrity checking
 //!
