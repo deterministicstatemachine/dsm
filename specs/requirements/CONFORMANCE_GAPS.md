@@ -7175,6 +7175,18 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 **What it does not cover.** A forged credit followed by another step before the spend, so the spend sits past position 2. A credit's source at position 2 whose own step 1 is forged. Neither case was run. The direction names no rule for them.
 
 **Runs.** The owner directed on 2026-11-03 that this round's tests run in CI alone. The board on the commit that carries this section is the run of it.
+
+**A forged predecessor (owner, 2026-11-03: "a negative test proving that a forged predecessor would be refused").** `counterfeit_acceptance_tests::a_second_step_built_on_a_forged_predecessor_is_never_accepted`. The payer's first step is an honest faucet claim. Using the producer's own builders and its real key, the payer credits itself locally, publishes nothing of that credit, and debits the invented value at position 2 from the root the credit produced. The claim is final on the real nodes at the cell routed from that root, and it is the only claim at the position. A receiver new to the payer answers `Invalid`, "does not start from the root the step validated at position 1", both from `validated_peer_transition` and from `prevalidate_incoming_transfer_admission`, and is left with no pending admission, no admitted credit and no balance.
+
+Run at release on the commit that carries this paragraph, `counterfeit_acceptance_tests` filter, on one private Postgres database:
+
+| `validate_peer_step` | Result | What went red |
+|---|---|---|
+| As committed | 9 passed, 0 failed | nothing |
+| Root comparison removed | 8 passed, 1 failed | `a_second_step_built_on_a_forged_predecessor_is_never_accepted`: `Ok`, the debit of invented value validated |
+| Whole first-spend check removed | 6 passed, 3 failed | that test, `a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer` and `a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited` |
+
+This closes one gap: before this test, removing the root comparison left every test green. It covers position 2 alone. What the paragraph above says it does not cover is still not covered and still not run. The payer's state is built by hand, on real nodes, and has not run on a phone.
 ### 6.144 The fleet behind the client, the BLE link exports, and the burn procedure (`fix/beta-requirements-completion`, 2026-11-02 and 2026-11-03)
 
 **The fleet.** The phone run of 2026-11-02 onboarded three phones (genesis initialized, network connected, device verified), and every faucet claim then failed after 8 attempts. Each attempt's read-back of its seats was refused as longer than the 363,787 bytes one page may hold. A read of a missing cell with `?from=abc` answered 200 on all five nodes, where current code answers 400: the fleet predated paged cell reads (7e23a388b), so a cell read returned every value at once. The earlier phone runs of 2026-10-30 and 2026-10-31 ran against that node too. The fleet was wiped and reprovisioned on 2026-11-03 at `6d6c7a95d`, and the same read answered 400 on all five at 9:15 AM ET. The full protocol run has not yet run against it.
@@ -7564,7 +7576,7 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 | MR-DSM-0345 | Met | `dsm_sdk::sdk::connect::grant::request_from_wire` | `dsm_sdk::sdk::connect::grant::tests::a_statement_is_one_line_with_nothing_hidden`; `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
 | MR-DSM-0346 | Met | `dsm_sdk::handlers::connect_routes::connect_app_status` | `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
 | MR-DSM-0347 | Met | `dsm::economic::peer_lineage::scan_offline_boundaries`; `dsm_sdk::sdk::economic_registers::scan_payer_offline_boundaries`; `dsm_sdk::sdk::economic_admission_flow::settle_received_offline` | `dsm::economic::peer_lineage::tests::a_scan_stops_where_the_register_holds_nothing`; `dsm::economic::peer_lineage::tests::a_scan_stops_at_its_bound_and_reads_nothing_past_it`; `dsm::economic::peer_lineage::tests::a_scan_stops_short_on_a_position_not_decided_yet` | DSM Amendment A28 (§6.142). A default the owner was told of and did not object to, not a ruling. A payer's next boundary past the bound is not found. |
-| MR-DSM-0348 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm_sdk::handlers::counterfeit_acceptance_tests::a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited`; `dsm_sdk::handlers::one_hop_verification_tests::every_acceptance_reads_only_the_senders_paying_position` | DSM Amendment A28 (§6.143). Position 2 alone. The tests build the payer's state by hand. |
+| MR-DSM-0348 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm_sdk::handlers::counterfeit_acceptance_tests::a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_second_step_built_on_a_forged_predecessor_is_never_accepted`; `dsm_sdk::handlers::one_hop_verification_tests::every_acceptance_reads_only_the_senders_paying_position` | DSM Amendment A28 (§6.143). Position 2 alone. The tests build the payer's state by hand. |
 
 ### 8.2 SoFi settlement specification
 
