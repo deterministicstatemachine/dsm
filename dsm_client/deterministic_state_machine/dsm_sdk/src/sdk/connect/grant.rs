@@ -450,6 +450,10 @@ pub enum Request {
     },
     /// The DSM identities of this wallet's contacts (DSM Amendment A16).
     Contacts,
+    /// Sign a statement (DSM Amendment A28): shown whole, and never in a grant.
+    Sign {
+        statement: String,
+    },
 }
 
 /// The longest setup a duel lock carries.
@@ -581,6 +585,30 @@ fn escrow_lock_from_wire(r: &generated::ConnectEscrowLockV1) -> Result<EscrowLoc
     })
 }
 
+/// The words a person is asked to sign, as they will read them: one line, with
+/// nothing a screen would hide or reorder.
+fn statement_to_sign(statement: &str) -> Result<String, String> {
+    if statement.trim().is_empty() || statement.trim() != statement {
+        return Err("a statement to sign has words, and no space around them".into());
+    }
+    if statement.len() > MAX_STATEMENT_BYTES {
+        return Err(format!(
+            "a statement to sign is at most {MAX_STATEMENT_BYTES} bytes"
+        ));
+    }
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    };
+    if statement.chars().any(hidden) {
+        return Err("a statement to sign holds a character a screen would not show".into());
+    }
+    Ok(statement.to_string())
+}
+
+const MAX_STATEMENT_BYTES: usize = 512;
+
 pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, String> {
     use generated::app_request_body_v1::Kind;
     let pair = |a: &[u8], b: &[u8]| -> Result<([u8; 32], [u8; 32]), String> {
@@ -640,6 +668,9 @@ pub fn request_from_wire(body: &generated::AppRequestBodyV1) -> Result<Request, 
         }
         Some(Kind::EscrowLock(r)) => Ok(Request::EscrowLock(escrow_lock_from_wire(r)?)),
         Some(Kind::Contacts(..)) => Ok(Request::Contacts),
+        Some(Kind::Sign(r)) => Ok(Request::Sign {
+            statement: statement_to_sign(&r.statement)?,
+        }),
         Some(Kind::EscrowRelease(r)) => Ok(Request::EscrowRelease {
             vault_ids: vault_list(&r.vault_ids)?,
         }),
@@ -740,6 +771,9 @@ pub fn decide(
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not accept issued objects".into()),
         },
+        Request::Sign { .. } => {
+            Decision::Outside("only you can sign this, so it always waits for you".into())
+        }
         Request::Contacts => match of_kind(ScopeKind::Contacts).next() {
             Some(..) => Decision::InScope { spend: None },
             None => Decision::Outside("the grant does not let it see your contacts".into()),
@@ -1424,6 +1458,45 @@ mod tests {
             "{line}"
         );
         assert!(line.ends_with("and play your moves"), "{line}");
+    }
+
+    // ── a signature (DSM Amendment A28) ─────────────────────────────────
+
+    #[test]
+    fn a_signature_is_never_in_a_grant() {
+        let sign = Request::Sign {
+            statement: "Sign in as admin. Code 7K3M.".into(),
+        };
+        let spent = |_: &[u8; 32]| 0;
+        for scopes in [grant(), duel_grant(), vec![contacts_scope()], Vec::new()] {
+            assert!(matches!(
+                decide(&scopes, &sign, &spent, &BTreeSet::new()),
+                Decision::Outside(..)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_statement_is_one_line_with_nothing_hidden() {
+        for fits in [
+            "Sign in as admin. Code 7K3M.".to_string(),
+            "x".repeat(MAX_STATEMENT_BYTES),
+        ] {
+            assert_eq!(statement_to_sign(&fits).as_ref(), Ok(&fits));
+        }
+        for (refused, why) in [
+            (String::new(), "has words"),
+            ("   ".to_string(), "has words"),
+            (" leading space".to_string(), "has words"),
+            ("two\nlines".to_string(), "would not show"),
+            ("a tab\there".to_string(), "would not show"),
+            ("reordered \u{202e}text".to_string(), "would not show"),
+            ("hidden\u{200b}space".to_string(), "would not show"),
+            ("x".repeat(MAX_STATEMENT_BYTES + 1), "at most"),
+        ] {
+            let said = statement_to_sign(&refused).expect_err("refused");
+            assert!(said.contains(why), "{refused:?}: {said}");
+        }
     }
 
     // ── the contacts scope (DSM Amendment A16) ────────────────────────────

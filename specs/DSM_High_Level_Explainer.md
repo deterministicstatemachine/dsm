@@ -3825,6 +3825,14 @@ offline-only protocol distinguishes a perfect clone, and DSM does not claim to.
 > - **Reconnection.** A session lives in memory for one link and ends with it. Every connection runs the handshake again; nothing a link sealed opens on the next. Frames owed to a contact are sealed again on the next link that pairs with it.
 > - **What remains visible.** The DSM service and its advertisement, the radio's own address, and the timing and count of records: transport facts, carrying no identity, amount or salt.
 
+> **Amendment A28 (owner, 2026-11-03) — a wallet signs what its holder read.** An application signing a person in, or recording a person's handoff or report, had no way to ask for a signature: a holdings proof stood in for sign-in, which showed the wrong words and bound the approval to nothing. The owner approved a Connect request that shows and signs words the application chooses. This extends A11.
+>
+> - **The request.** `sign` carries one statement of at most 512 bytes: one line, with no control character and nothing a screen would hide or reorder. A statement that breaks this is refused before it is signed for the relay and by the wallet reading it.
+> - **Never in a grant.** No scope covers it. Every one waits on the device, whatever the grant says, and the wallet shows the statement whole before Approve or Decline.
+> - **The signature.** Approved, the wallet answers with the statement in the body of its signed answer, so the answer's own signature covers the words, the session and the request. Domain separation is the answer's. Nothing new is signed, and nothing moves or is committed.
+> - **The fact.** The application's account reports `CONNECT_FACT_SIGNED` only for a carried-out answer holding exactly the words asked, and gives the signature with the body so that anyone holding the wallet's key can check them again.
+> - **What it proves.** That the wallet's key signed those words after approval on its device. It does not prove who pressed Approve, and it does not place the signature in any chain or on the storage nodes.
+
 
 <!-- spec-section: DSM-HL-073 -->
 ### 73 Conflict-Local Finality as a State Property

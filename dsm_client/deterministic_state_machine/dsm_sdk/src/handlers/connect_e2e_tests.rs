@@ -1063,6 +1063,112 @@ async fn the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself() {
     );
 }
 
+/// A signature waits for its holder whatever the grant says, and what comes
+/// back is the wallet's signature over the very words it showed (DSM Amendment
+/// A28). Declining signs nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_signature_waits_for_its_holder_and_covers_the_words_shown() {
+    let p = Pair::boot(500, 200).await;
+    let wild = create_token(&p.a, "WILD", 1_000_000).await;
+    let relay = ForwardRelay::start().await;
+    let made = offer(&p.a, &relay, &wild).await;
+    let session = connect(&p, &relay, &made.code).await;
+    let words = "Sign in to Northgate as admin. Code 7K3M.";
+    let ask = |statement: &str| {
+        generated::connect_app_request_intent_v1::Kind::Sign(generated::ConnectSignV1 {
+            statement: statement.to_string(),
+        })
+    };
+    let respond = |seq: u64, decision: generated::ConnectDecision| {
+        args(&generated::ConnectRespondRequestV1 {
+            session_id: session.to_vec(),
+            seq,
+            decision: decision as i32,
+        })
+    };
+
+    let declined = request(&p.a, &relay, &session, ask(words)).await;
+    sync_clean(&p, &relay).await;
+    deliver_each_once(&p, &relay).await;
+    assert_eq!(
+        fact(&status(&p.a, &session, declined).await),
+        generated::ConnectFact::None,
+        "waiting on the phone proves nothing"
+    );
+    let waiting = reply(&query(&p.b, "connect.pending", Vec::new()).await);
+    let Reply::Pending(list) = waiting else {
+        panic!("connect.pending answered another reply");
+    };
+    assert!(
+        list.pending[0].summary.contains(words),
+        "the wallet shows the words: {}",
+        list.pending[0].summary
+    );
+    reply(&invoke(&p.b, "connect.respond", respond(declined, generated::ConnectDecision::Decline)).await);
+    deliver_each_once(&p, &relay).await;
+    let said_no = status(&p.a, &session, declined).await;
+    assert_eq!(outcome(&said_no), generated::ConnectOutcome::Declined);
+    assert_eq!(fact(&said_no), generated::ConnectFact::None);
+    assert!(said_no.signed_statement.is_empty());
+
+    let approved = request(&p.a, &relay, &session, ask(words)).await;
+    sync_clean(&p, &relay).await;
+    reply(&invoke(&p.b, "connect.respond", respond(approved, generated::ConnectDecision::Approve)).await);
+    deliver_each_once(&p, &relay).await;
+    let signed = status(&p.a, &session, approved).await;
+    assert_eq!(fact(&signed), generated::ConnectFact::Signed, "{}", signed.fact_detail);
+    assert_eq!(signed.signed_statement, words);
+
+    // The answer stands by itself: the same bytes check under the wallet's key
+    // again, name this session and request, and carry the words.
+    p.a.enter();
+    let held = crate::storage::client_db::connect::app_session(&session)
+        .expect("the store")
+        .expect("the session");
+    let body = crate::sdk::connect::app::verify_response(
+        &generated::AppResponseV1 {
+            body: signed.answer_body.clone(),
+            signature: signed.answer_signature.clone(),
+        },
+        &held,
+    )
+    .expect("the wallet's signature");
+    assert_eq!(body.session_id, session.to_vec());
+    assert_eq!(body.seq, approved);
+    assert!(matches!(
+        body.result,
+        Some(generated::app_response_body_v1::Result::Sign(ref r)) if r.statement == words
+    ));
+    let mut altered = signed.answer_body.clone();
+    let at = altered.len() - 1;
+    altered[at] ^= 1;
+    let forged = crate::sdk::connect::app::verify_response(
+        &generated::AppResponseV1 {
+            body: altered,
+            signature: signed.answer_signature,
+        },
+        &held,
+    )
+    .expect_err("other words do not carry the signature");
+    assert!(forged.contains("signature"), "{forged}");
+
+    let refused = invoke(
+        &p.a,
+        "connect.app.request",
+        args(&generated::ConnectAppRequestIntentV1 {
+            session_id: session.to_vec(),
+            kind: Some(ask("two\nlines")),
+        }),
+    )
+    .await;
+    assert!(
+        refused.error_message.as_deref().is_some_and(|why| why.contains("a screen would not show")),
+        "{:?}",
+        refused.error_message
+    );
+}
+
 /// The answers the relay holds, each delivered to A once.
 async fn deliver_each_once(p: &Pair, relay: &ForwardRelay) {
     let answers: std::collections::BTreeSet<Vec<u8>> = std::mem::take(&mut relay.held().responses)

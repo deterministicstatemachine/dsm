@@ -1597,6 +1597,13 @@ export enum ConnectFact {
   DUEL_WITHDRAWN = 8,
 
   /**
+   * the session's wallet signed exactly the statement asked, after approval on its device
+   *
+   * @generated from enum value: CONNECT_FACT_SIGNED = 10;
+   */
+  SIGNED = 10,
+
+  /**
    * an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
    *
    * @generated from enum value: CONNECT_FACT_DUEL_SETTLED = 9;
@@ -1614,6 +1621,7 @@ proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
   { no: 6, name: "CONNECT_FACT_DUEL_LOCKED" },
   { no: 7, name: "CONNECT_FACT_DUEL_STARTED" },
   { no: 8, name: "CONNECT_FACT_DUEL_WITHDRAWN" },
+  { no: 10, name: "CONNECT_FACT_SIGNED" },
   { no: 9, name: "CONNECT_FACT_DUEL_SETTLED" },
 ]);
 
@@ -29849,6 +29857,85 @@ export class ConnectContactsResultV1 extends Message<ConnectContactsResultV1> {
 }
 
 /**
+ * Sign a statement (DSM Amendment A28). The wallet shows these words whole, and
+ * only after its holder approves them does it answer with them, under the
+ * answer's own signature, which already names the session and the request. It
+ * is never in a grant: every one waits on the device.
+ *
+ * @generated from message dsm.ConnectSignV1
+ */
+export class ConnectSignV1 extends Message<ConnectSignV1> {
+  /**
+   * @generated from field: string statement = 1;
+   */
+  statement = "";
+
+  constructor(data?: PartialMessage<ConnectSignV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSignV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSignV1 | PlainMessage<ConnectSignV1> | undefined, b: ConnectSignV1 | PlainMessage<ConnectSignV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSignV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSignResultV1
+ */
+export class ConnectSignResultV1 extends Message<ConnectSignResultV1> {
+  /**
+   * @generated from field: string statement = 1;
+   */
+  statement = "";
+
+  constructor(data?: PartialMessage<ConnectSignResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSignResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSignResultV1 | PlainMessage<ConnectSignResultV1> | undefined, b: ConnectSignResultV1 | PlainMessage<ConnectSignResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSignResultV1, a, b);
+  }
+}
+
+/**
  * Lock a stake for a match the application referees (DSM Amendment A12). The
  * wallet builds the escrow terms itself from one fixed outcome table: a-wins
  * and b-wins, decided by the application's key, pay A and B; cancel, decided
@@ -30890,6 +30977,12 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectContactsV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignV1 sign = 25;
+     */
+    value: ConnectSignV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -30917,6 +31010,7 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
     { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
+    { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -31809,6 +31903,12 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: ConnectContactsResultV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignResultV1 sign = 21;
+     */
+    value: ConnectSignResultV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -31834,6 +31934,7 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 18, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1, oneof: "result" },
     { no: 19, name: "duel_sign", kind: "message", T: ConnectDuelSignResultV1, oneof: "result" },
     { no: 20, name: "contacts", kind: "message", T: ConnectContactsResultV1, oneof: "result" },
+    { no: 21, name: "sign", kind: "message", T: ConnectSignResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -32795,6 +32896,12 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectContactsV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignV1 sign = 25;
+     */
+    value: ConnectSignV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -32821,6 +32928,7 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
     { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
+    { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
@@ -33092,6 +33200,19 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
    */
   answerBody = new Uint8Array(0);
 
+  /**
+   * FACT_SIGNED: the statement, and the wallet's signature over answer_body,
+   * which anyone holding the wallet's AK can check again.
+   *
+   * @generated from field: string signed_statement = 18;
+   */
+  signedStatement = "";
+
+  /**
+   * @generated from field: bytes answer_signature = 19;
+   */
+  answerSignature = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppStatusV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -33117,6 +33238,8 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
     { no: 15, name: "escrow_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 16, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1 },
     { no: 17, name: "answer_body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 18, name: "signed_statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 19, name: "answer_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {

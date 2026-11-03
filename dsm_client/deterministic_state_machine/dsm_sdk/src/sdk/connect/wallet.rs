@@ -322,6 +322,7 @@ pub fn describe_request(request: &Request) -> String {
             1 => "Collect a battle result".to_string(),
             n => format!("Collect a battle result ({n} stakes)"),
         },
+        Request::Sign { statement } => format!("Sign this: \"{statement}\""),
         Request::Contacts => "Share your contacts' DSM IDs".to_string(),
     }
 }
