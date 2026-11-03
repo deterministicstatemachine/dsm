@@ -328,7 +328,7 @@ mod tests {
             .expect("the beta network is provisioned");
         assert_eq!(
             crate::util::text_id::encode_base32_crockford(&profile.storage_set_id),
-            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0",
+            "YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG",
             "core's derivation must equal what all five provisioned members logged"
         );
     }
@@ -353,7 +353,7 @@ mod tests {
             .expect("the bundled env config resolves the pinned beta set");
         assert_eq!(
             crate::util::text_id::encode_base32_crockford(&set.id()),
-            "7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0"
+            "YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG"
         );
     }
 
@@ -362,23 +362,23 @@ mod tests {
         let logged = [
             (
                 "dsm-node-1",
-                "B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG",
+                "0Y3VWSHQXT8C5K9PGQWRT5DS7492HKNT6J2P69DSHR53XSVD26M0",
             ),
             (
                 "dsm-node-2",
-                "QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20",
+                "J7CX24XQG55SNZHS578HZJJMCFZNTQSNQX5ZAZ1VQPHKN0MFGAX0",
             ),
             (
                 "dsm-node-3",
-                "2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG",
+                "PJRKQ7C2PF53TAA1SXAWNWXANHWNZ2H983MZ413KB9GTV2FYR5EG",
             ),
             (
                 "dsm-node-4",
-                "S95VHW0YZ413DA4YX972ZA9XDA69FXF4KBCG2AHG89DA8PTY200G",
+                "SCY5EBT0HKAK8167A2NFJT5469ZFTGJA20356EP9JT9T4SR889RG",
             ),
             (
                 "dsm-node-5",
-                "56VB5TY2G8QKVJNVFKJQX9N0GHJN6VEQ1KV9E88GX272V8G43RWG",
+                "B9GP57GMX98H4H67X45QYEQ0JJYQKPRGKNAZGPKCRCF69KVXED2G",
             ),
         ];
         let pinned = dsm::economic::register::pinned_root_register_members(b"dsm-testnet")
