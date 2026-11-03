@@ -407,7 +407,7 @@ fn every_union_variant_round_trips() {
             G,
             DEV,
             41,
-            r.clone(),
+            r,
             [0xEE; 32],
             vec![PrecommitLeg {
                 vault_id: V1,
