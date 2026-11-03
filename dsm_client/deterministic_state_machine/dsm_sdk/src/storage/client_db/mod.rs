@@ -599,7 +599,12 @@ fn get_database_path() -> Result<PathBuf> {
 /// the reserve lineage this device established, and the memo below it keeps
 /// only this device's own releases (SA-75). A database made at 41 is refused
 /// at open.
-pub const CLIENT_DB_SCHEMA_VERSION: i64 = 42;
+///
+/// v43: `peer_frontier` is gone. A peer's step is validated one hop, from its
+/// own parent (DSM Amendment A14 restored, A19 removed by the owner's ruling
+/// of 2026-11-03), so no frontier is kept. A database made at 42 is refused at
+/// open.
+pub const CLIENT_DB_SCHEMA_VERSION: i64 = 43;
 
 /// A 32-byte column, exactly. Any other length is a corrupt row and an error —
 /// never padded, never truncated.
@@ -982,24 +987,8 @@ fn create_schema(conn: &Connection) -> Result<()> {
             claim_ref         BLOB          -- 32B or NULL
         );
 
-        -- DSM Amendment A19: this receiver's frontier for a peer, a
-        -- coordinate it validated itself, with the claim it accepted there:
-        -- one row for every position a passing walk validated. v34: the
-        -- accepted claim's own digest beside the reference a later P names it
-        -- by, so a setup's claim behind the frontier is answered from here.
-        CREATE TABLE IF NOT EXISTS peer_frontier(
-            peer_genesis        BLOB NOT NULL,      -- 32B
-            peer_devid          BLOB NOT NULL,      -- 32B
-            economic_position   INTEGER NOT NULL,
-            economic_root       BLOB NOT NULL,      -- 32B
-            accepted_claim      BLOB NOT NULL,      -- ParentClaimRef encoding
-            claim_ref           BLOB NOT NULL CHECK (length(claim_ref) = 32),
-            PRIMARY KEY(peer_genesis, peer_devid, economic_position)
-        );
-
-        -- The EK steps this device's walks verified, each recorded with the
-        -- frontier the walk reached: a later walk of the signer holds them and
-        -- fetches only the rotations since (SA-93).
+        -- The EK steps this device's checks verified: a later check of the
+        -- signer holds them and fetches only the rotations since (SA-93).
         CREATE TABLE IF NOT EXISTS peer_ek_step(
             signer_devid BLOB NOT NULL CHECK (length(signer_devid) = 32),
             step_addr    BLOB NOT NULL CHECK (length(step_addr) = 32),

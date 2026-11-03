@@ -6,7 +6,7 @@
 //! The holder presents a position `p` and, for each asked token, the amount
 //! and the Sparse Merkle path from the token's balance key to the economic
 //! root. The verifier validates the holder's root at `p` itself (Amendment
-//! A8) and recomputes that root from every path here: each leaf is the one
+//! A14) and recomputes that root from every path here: each leaf is the one
 //! its stated amount puts at the holder's balance key, and a path that does
 //! not fold to the validated root proves no balance at all. Whether the proof
 //! is still current, the holder's next root cell, is read beside it.

@@ -177,91 +177,6 @@ fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
     }
 }
 
-/// This receiver's latest frontier for a peer strictly below `position`
-/// (DSM Amendment A19): a coordinate it validated itself, with the claim it
-/// accepted there.
-pub fn frontier_below(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("the client database lock: {e}"))?;
-    let read = |r: &rusqlite::Row<'_>| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, Vec<u8>>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-            super::column_32(r, 3)?,
-        ))
-    };
-    // A position past what a row can hold is above every recorded one.
-    let row = match i64::try_from(position) {
-        Ok(below) => conn
-            .query_row(
-                "SELECT economic_position, economic_root, accepted_claim, claim_ref FROM peer_frontier
-                 WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
-                 ORDER BY economic_position DESC LIMIT 1",
-                params![peer_genesis.as_slice(), peer_devid.as_slice(), below],
-                read,
-            )
-            .optional()?,
-        Err(..) => conn
-            .query_row(
-                "SELECT economic_position, economic_root, accepted_claim, claim_ref FROM peer_frontier
-                 WHERE peer_genesis = ?1 AND peer_devid = ?2
-                 ORDER BY economic_position DESC LIMIT 1",
-                params![peer_genesis.as_slice(), peer_devid.as_slice()],
-                read,
-            )
-            .optional()?,
-    };
-    row.map(|(recorded, root, accepted, claim_ref)| {
-        Ok(
-            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
-                *peer_genesis,
-                *peer_devid,
-                u64::try_from(recorded)
-                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
-                digest32(root, "frontier root")?,
-                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
-                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
-                claim_ref,
-            ),
-        )
-    })
-    .transpose()
-}
-
-/// Record, inside `tx`, a frontier a verification reached (DSM Amendment
-/// A19). The activation root is every receiver's frontier and is never
-/// recorded.
-fn record_frontier_in_tx(
-    tx: &Transaction<'_>,
-    frontier: &dsm::economic::peer_lineage::PeerFrontier,
-) -> Result<()> {
-    let (position, root, accepted, claim_ref) = frontier.recorded().ok_or_else(|| {
-        anyhow!("the activation root is every receiver's frontier and is never recorded")
-    })?;
-    tx.execute(
-        "INSERT OR IGNORE INTO peer_frontier(
-             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim,
-             claim_ref)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            frontier.genesis().as_slice(),
-            frontier.device_id().as_slice(),
-            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
-            root.as_slice(),
-            accepted.encode(),
-            claim_ref.as_slice()
-        ],
-    )?;
-    Ok(())
-}
-
 /// Record, inside `tx`, an offline account a verification validated (the
 /// owner's receive rule, 2026-10-22).
 fn record_offline_account_in_tx(
@@ -285,14 +200,12 @@ fn record_offline_account_in_tx(
     Ok(())
 }
 
-/// Record what one verification validated, in one transaction (DSM
-/// Amendment A19, owner ruling 2026-10-20: "Persist those frontiers
-/// atomically"), whatever the verification was for: the frontiers it
-/// established, and the offline accounts the boundaries it passed left (the
-/// owner's receive rule, 2026-10-22). A row is only ever added, so nothing
-/// recorded moves back.
+/// Record what one verification validated, in one transaction, whatever the
+/// verification was for: the offline accounts the boundaries it passed left
+/// (the owner's receive rule, 2026-10-22), the payments they exposed, and the
+/// EK steps it verified. A row is only ever added, so nothing recorded moves
+/// back.
 pub fn record_validated(
-    frontiers: &[dsm::economic::peer_lineage::PeerFrontier],
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
     offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
     ek_steps: &[dsm::economic::peer_acceptance::VerifiedEkStep],
@@ -302,18 +215,14 @@ pub fn record_validated(
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     let tx = conn.transaction()?;
-    for frontier in frontiers {
-        record_frontier_in_tx(&tx, frontier)?;
-    }
     for account in offline_accounts {
         record_offline_account_in_tx(&tx, account)?;
     }
     for exposure in offline_exposures {
         record_offline_exposure_in_tx(&tx, exposure)?;
     }
-    // The EK steps the walk verified, with the frontiers it reached: a later
-    // walk of these signers starts from them and fetches only the rotations
-    // since (SA-93).
+    // The EK steps the check verified: a later check of these signers starts
+    // from them and fetches only the rotations since (SA-93).
     for step in ek_steps {
         tx.execute(
             "INSERT OR IGNORE INTO peer_ek_step(signer_devid, step_addr, ek_pk)
@@ -359,7 +268,7 @@ fn record_offline_exposure_in_tx(
 }
 
 /// The payment a peer's offline boundary exposed under the release that
-/// signed it, as this receiver's walk of the peer recorded it; `None` while it
+/// signed it, as this receiver recorded it from the boundary's step; `None` while it
 /// has recorded no boundary exposing it.
 pub fn offline_exposure(
     release_message: &[u8; 32],
@@ -1215,9 +1124,8 @@ mod admitted_row_tests {
         assert_eq!(held_ek_step(&signer, &[0x43; 32]).expect("read"), None);
     }
 
-    /// SA-93. A step a walk verified, recorded with the walk's frontiers, is
-    /// held from then on, in its signer's chain only: a later walk of that
-    /// signer starts from it.
+    /// SA-93. A step a check verified, once recorded, is held from then on, in
+    /// its signer's chain only: a later check of that signer starts from it.
     /// MUTATION CONTROL: the held lookup not reading the recorded steps turns
     /// this red.
     #[test]
@@ -1229,7 +1137,6 @@ mod admitted_row_tests {
         let (signer, other, addr) = ([0x34; 32], [0x35; 32], [0x44; 32]);
         assert_eq!(held_ek_step(&signer, &addr).expect("read"), None);
         record_validated(
-            &[],
             &[],
             &[],
             &[dsm::economic::peer_acceptance::VerifiedEkStep {

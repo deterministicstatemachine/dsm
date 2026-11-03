@@ -425,8 +425,13 @@
  * the reserve lineage this device established, and the memo below it keeps
  * only this device's own releases (SA-75). A database made at 41 is refused
  * at open.
+ *
+ * v43: `peer_frontier` is gone. A peer's step is validated one hop, from its
+ * own parent (DSM Amendment A14 restored, A19 removed by the owner's ruling
+ * of 2026-11-03), so no frontier is kept. A database made at 42 is refused at
+ * open.
  */
-#define CLIENT_DB_SCHEMA_VERSION 42
+#define CLIENT_DB_SCHEMA_VERSION 43
 
 /**
  * The most frames whose chunks a startup keeps from a previous process.

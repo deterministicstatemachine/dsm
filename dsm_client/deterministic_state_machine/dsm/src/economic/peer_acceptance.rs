@@ -65,17 +65,17 @@ pub trait EkSteps {
 }
 
 /// Iteration budget for one EK ancestry walk: the steps fetched behind the
-/// first one this verifier holds, the same 512 a lineage walk takes (SA-93).
-/// A walk starts from the steps this verifier recorded with its frontier for
-/// the signer, so it fetches only the rotations since. Exhausting it is
+/// first one this verifier holds (SA-93). A walk starts from the steps this
+/// verifier recorded for the signer, so it fetches only the rotations since.
+/// Exhausting it is
 /// `Incomplete` — an adversarially deep (but acyclic) chain must never look
 /// like a forgery, and must never recurse the stack.
 const EK_CHAIN_BUDGET: usize = 512;
 
 /// One EK step a walk fetched and verified forward from a key this verifier
 /// already held: the signer, the step's address and the key it certifies. A
-/// verifier records these with the frontier the walk reached, and holds them
-/// from then on (SA-93).
+/// verifier records these once the step that verified them passes whole, and
+/// holds them from then on (SA-93).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedEkStep {
     pub signer: [u8; 32],

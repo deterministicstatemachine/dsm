@@ -463,11 +463,10 @@ pub trait SofiReads {
         genesis: &AcceptedVaultGenesis,
     ) -> Result<Option<crate::sofi::frontier::VerifiedFrontier>, ReadFailure>;
     /// The root trader `(genesis, device_id)`'s lineage selected AT
-    /// `position`, and the reference a later `P` names it by, by
-    /// frontier-relative verification of that lineage (DSM Amendment A8;
-    /// SoFi Amendment S15): a conditional position resolved from SoFi's
-    /// public objects. What a walk resolves another trader's conditional
-    /// parent with.
+    /// `position`, and the reference a later `P` names it by: the step there
+    /// validated from its own parent (DSM Amendment A14; SoFi Amendment S15),
+    /// a conditional position resolved from SoFi's public objects. What a
+    /// check resolves another trader's conditional parent with.
     fn trader_root_at(
         &self,
         genesis: &D32,
@@ -3538,8 +3537,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     /// What the trader's lineage holds at the position `exercise`'s `P`
     /// names as its parent — the claim final at its `K_root(p)` and the root
     /// that claim installed — as this verifier establishes it: its own
-    /// admitted position when that is the claim `P` names, and otherwise the
-    /// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
+    /// admitted position when that is the claim `P` names, and otherwise that
+    /// step of the trader validated one hop (DSM Amendment A14; SoFi
     /// Amendment S15). Whether what is held is what `P` names is the facts'
     /// to decide (§6.62). A lineage the walk establishes Invalid at or before
     /// that position, or quarantines for a divergent write-once register
@@ -3564,8 +3563,8 @@ impl<R: SofiReads + ?Sized> Verifier<'_, R> {
     }
 }
 
-/// What the walk of a trader's lineage to `position` establishes there
-/// (DSM Amendment A8; SoFi Amendment S15): the claim it holds and its root;
+/// What the one-hop check of a trader's step at `position` establishes there
+/// (DSM Amendment A14; SoFi Amendment S15): the claim it holds and its root;
 /// or, when the walk establishes the lineage Invalid at or before `position`
 /// — an Invalid step, or a divergent write-once register cell it
 /// quarantines — that it holds nothing there, ever (SoFi Amendment S13, the
@@ -3607,8 +3606,8 @@ fn held_at(
     })
 }
 
-/// Resolves another trader's conditional position for a frontier-relative
-/// walk of that trader's lineage (DSM Amendment A8, SoFi Amendment S15):
+/// Resolves another trader's conditional position for a one-hop check of that
+/// trader's step (DSM Amendment A14, SoFi Amendment S15):
 /// Core's own verdict over SoFi's public objects for that position alone.
 pub struct PeerPositionResolver<'a, R: SofiReads + ?Sized> {
     pub reads: &'a R,
@@ -3852,7 +3851,7 @@ mod tests {
     /// a walk of a trader whose positions each resolve through this vault
     /// asked for the chain again without end, until the stack overflowed
     /// (`node_e2e_tests::a_reader_at_a_baseline_proves_roots_below_it_from_the_vaults_history`
-    /// under DSM Amendment A19). A nested request reads the chain the running
+    /// when peers were walked). A nested request reads the chain the running
     /// extension established so far, and nothing once it ends.
     /// The chain kept for nested requests follows the extension one
     /// generation at a time, extended in place (the node tests that walk a

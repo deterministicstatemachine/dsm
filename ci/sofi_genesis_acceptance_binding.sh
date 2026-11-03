@@ -11,7 +11,7 @@
 # The specification corpus (SoFi §19.8, §28 step 5) states the sound form:
 # `genesis_accepted` binds the genesis bytes to the ACCEPTED owner transition
 # at p_create. That transition is a `ValidatedPeerTransition`, which only
-# `validate_peer_lineage` constructs (ci/peer_debit_lineage_authoritative.sh):
+# `validate_peer_step` constructs (ci/peer_debit_lineage_authoritative.sh):
 # the owner's operation, position and debits are the ones the verifier's own
 # walk validated, so the accepted creation is derived, never asserted
 # (F10). This gate holds that form:
