@@ -405,6 +405,17 @@ impl AcceptedClaim {
         }
     }
 
+    /// A claim at any coordinate, for a test's resolver to answer with.
+    #[cfg(test)]
+    pub(crate) fn at_coordinate_for_test(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        claim_ref: [u8; 32],
+    ) -> Self {
+        Self::from_resolved_sofi_position(genesis, device_id, economic_position, claim_ref)
+    }
+
     /// The SoFi counterpart, for a position whose claim is `C_q`. **Only
     /// `sofi::lineage::advance_resolved` may call this**, for the same reason
     /// as [`ValidatedEconomicRoot::from_resolved_sofi_position`].

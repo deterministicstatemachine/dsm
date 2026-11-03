@@ -29857,7 +29857,7 @@ export class ConnectContactsResultV1 extends Message<ConnectContactsResultV1> {
 }
 
 /**
- * Sign a statement (DSM Amendment A28). The wallet shows these words whole, and
+ * Sign a statement (DSM Amendment A29). The wallet shows these words whole, and
  * only after its holder approves them does it answer with them, under the
  * answer's own signature, which already names the session and the request. It
  * is never in a grant: every one waits on the device.

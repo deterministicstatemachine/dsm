@@ -450,7 +450,7 @@ pub enum Request {
     },
     /// The DSM identities of this wallet's contacts (DSM Amendment A16).
     Contacts,
-    /// Sign a statement (DSM Amendment A28): shown whole, and never in a grant.
+    /// Sign a statement (DSM Amendment A29): shown whole, and never in a grant.
     Sign {
         statement: String,
     },
@@ -1460,7 +1460,7 @@ mod tests {
         assert!(line.ends_with("and play your moves"), "{line}");
     }
 
-    // ── a signature (DSM Amendment A28) ─────────────────────────────────
+    // ── a signature (DSM Amendment A29) ─────────────────────────────────
 
     #[test]
     fn a_signature_is_never_in_a_grant() {

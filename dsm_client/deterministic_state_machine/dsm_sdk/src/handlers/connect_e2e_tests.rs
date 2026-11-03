@@ -1065,7 +1065,7 @@ async fn the_game_sees_the_wallets_contacts_as_device_ids_and_never_itself() {
 
 /// A signature waits for its holder whatever the grant says, and what comes
 /// back is the wallet's signature over the very words it showed (DSM Amendment
-/// A28). Declining signs nothing.
+/// A29). Declining signs nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_signature_waits_for_its_holder_and_covers_the_words_shown() {
@@ -1105,7 +1105,14 @@ async fn a_signature_waits_for_its_holder_and_covers_the_words_shown() {
         "the wallet shows the words: {}",
         list.pending[0].summary
     );
-    reply(&invoke(&p.b, "connect.respond", respond(declined, generated::ConnectDecision::Decline)).await);
+    reply(
+        &invoke(
+            &p.b,
+            "connect.respond",
+            respond(declined, generated::ConnectDecision::Decline),
+        )
+        .await,
+    );
     deliver_each_once(&p, &relay).await;
     let said_no = status(&p.a, &session, declined).await;
     assert_eq!(outcome(&said_no), generated::ConnectOutcome::Declined);
@@ -1114,10 +1121,22 @@ async fn a_signature_waits_for_its_holder_and_covers_the_words_shown() {
 
     let approved = request(&p.a, &relay, &session, ask(words)).await;
     sync_clean(&p, &relay).await;
-    reply(&invoke(&p.b, "connect.respond", respond(approved, generated::ConnectDecision::Approve)).await);
+    reply(
+        &invoke(
+            &p.b,
+            "connect.respond",
+            respond(approved, generated::ConnectDecision::Approve),
+        )
+        .await,
+    );
     deliver_each_once(&p, &relay).await;
     let signed = status(&p.a, &session, approved).await;
-    assert_eq!(fact(&signed), generated::ConnectFact::Signed, "{}", signed.fact_detail);
+    assert_eq!(
+        fact(&signed),
+        generated::ConnectFact::Signed,
+        "{}",
+        signed.fact_detail
+    );
     assert_eq!(signed.signed_statement, words);
 
     // The answer stands by itself: the same bytes check under the wallet's key
@@ -1163,7 +1182,10 @@ async fn a_signature_waits_for_its_holder_and_covers_the_words_shown() {
     )
     .await;
     assert!(
-        refused.error_message.as_deref().is_some_and(|why| why.contains("a screen would not show")),
+        refused
+            .error_message
+            .as_deref()
+            .is_some_and(|why| why.contains("a screen would not show")),
         "{:?}",
         refused.error_message
     );

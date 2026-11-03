@@ -7166,16 +7166,47 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 | MR-SOFI-0346, MR-SOFI-0347, MR-SOFI-0356 | Met | Met | Wording back to A14's; evidence re-cited. |
 | MR-DSM-0017, MR-DSM-0027, MR-DSM-0039, MR-DSM-0046, MR-DSM-0242, MR-SOFI-0196, MR-STOR-0138 | unchanged | unchanged | Evidence re-cited. |
 
+### 6.143 A first spend is held to the step before it (`fix/restore-a14-one-hop-acceptance`, DSM Amendment A28, 2026-11-03)
+
+**The direction (pasted into the session, 2026-11-03).** B and C had a contact and no prior transfer. B's step 1 claimed a token credit from A's step 2, where no debit was registered, and B's signed step 2 consumed step 1's root. C accepted under the original check. "For an offered step 2, independently validate step 1 from B's authenticated activation root". The isolated run let the honest funded transfer pass and made C reject the forged payment with a zero balance. "This result establishes the fix for the tested step-1-credit → step-2-spend case; it does not establish a rule for other positions."
+
+**What changed.** `validate_peer_step`, at position 2, runs `step_at` on position 1 and requires the target's `pre_economic_root` to equal the root position 1 installed. Every caller of `validate_peer_step` gets it: recipient admission, the provenance resolver and SoFi's peer reads. `peer_root_at`, `peer_claim_at` and a credit's `source_step` do not. No contact state is kept.
+
+**What it does not cover.** A forged credit followed by another step before the spend, so the spend sits past position 2. A credit's source at position 2 whose own step 1 is forged. Neither case was run. The direction names no rule for them.
+
+**Runs.** The owner directed on 2026-11-03 that this round's tests run in CI alone. The board on the commit that carries this section is the run of it.
+### 6.144 The fleet behind the client, the BLE link exports, and the burn procedure (`fix/beta-requirements-completion`, 2026-11-02 and 2026-11-03)
+
+**The fleet.** The phone run of 2026-11-02 onboarded three phones (genesis initialized, network connected, device verified), and every faucet claim then failed after 8 attempts. Each attempt's read-back of its seats was refused as longer than the 363,787 bytes one page may hold. A read of a missing cell with `?from=abc` answered 200 on all five nodes, where current code answers 400: the fleet predated paged cell reads (7e23a388b), so a cell read returned every value at once. The earlier phone runs of 2026-10-30 and 2026-10-31 ran against that node too. The fleet was wiped and reprovisioned on 2026-11-03 at `6d6c7a95d`, and the same read answered 400 on all five at 9:15 AM ET. The full protocol run has not yet run against it.
+
+**The BLE link exports.** CI's `every_java_export_runs_its_work_inside_the_unwind_guard` found `bleLinkOpened` and `bleLinkClosed` outside the panic guard, and the job stopped there. Both now run inside it. A caught panic reaches Kotlin as a link not opened, and the platform closes it.
+
+**The burn procedure.** Read and tried offline against picotool 2.2, with a throwaway key and no chip:
+
+- nothing burned the digest `otp_mu_enrolled` reads (OTP page 46), and provisioning is not gated on it, so a board would cage its chip and refuse every authority op;
+- the secret script put one secret on every board;
+- the last two burns were left to be written by hand, the page lock named a file that did not exist, and `picotool otp load --dry-run` is not an option;
+- `sign.sh` could not read a firmware file with no extension;
+- `bootkey-otp.json` also sets `SECURE_BOOT_ENABLE` and `KEY_VALID`.
+
+`sign.sh`, `provision-otp.sh` and the runbook now take each step in order, one secret per board, and `sign.sh` refuses an image shorter than the window it measures. None of this has run on a chip, and neither has the sealed secret read, the slot-1 birth, the cage or the R-memory record. CI does not compile the monitor. A chip caged under the old process cannot take the new birth, because its slot 0 may no longer write a pairing key, and a chip holding another key in slot 1 is refused too (read from source, not run).
+
+**The code map.** Entry points, one sentinel, the counts and the manifest follow the exports SA-35 removed and the remote SPI crate removed with the relay. The pin refresh waits on CI's logs of the commit that carries this section.
+
+**Connect signing** is DSM Amendment A29, and the one-hop ruling keeps A28: two branches had taken the same number.
+
+**Runs.** The owner directed on 2026-11-03 that this round's tests run in CI alone.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 344 | 217 | 47 | 16 | 0 | 37 | 27 |
+| DSM high-level (MR-DSM) | 348 | 221 | 47 | 16 | 0 | 37 | 27 |
 | SoFi (MR-SOFI) | 431 | 387 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 77 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1079** | **692** | **73** | **66** | **1** | **72** | **175** |
+| **All** | **1083** | **696** | **73** | **66** | **1** | **72** | **175** |
 
 ## 8 Per-requirement results
 
@@ -7526,10 +7557,11 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 | MR-DSM-0341 | Met | `dsm::crypto::ble_link::initiate`; `dsm::crypto::ble_link::respond`; `dsm::crypto::ble_link::complete`; `dsm::crypto::ble_link::finish`; `dsm_sdk::bluetooth::link_session::Links` | `dsm::crypto::ble_link::tests::two_contacts_complete_the_handshake_and_exchange_records`; `dsm::crypto::ble_link::tests::the_handshake_refuses_every_side_that_does_not_hold_its_pinned_key`; `dsm_sdk::bluetooth::offline_step_tests::a_hello_from_a_device_that_is_not_a_contact_is_declined` | DSM Amendment A27 (§6.138). |
 | MR-DSM-0342 | Met | `dsm::crypto::ble_link::LinkSession::seal`; `dsm::crypto::ble_link::LinkSession::open`; `dsm_sdk::bluetooth::link_session::Links::inbound` | `dsm::crypto::ble_link::tests::a_record_opens_once_in_order_and_only_for_the_other_side`; `dsm_sdk::bluetooth::offline_step_tests::a_payment_over_ble_carries_no_identity_on_the_radio`; `dsm_sdk::bluetooth::offline_step_tests::a_record_replayed_or_from_a_closed_link_opens_on_nothing` | DSM Amendment A27 (§6.138). Every offline test over BLE now runs through link sessions. |
 | MR-DSM-0343 | Met | `dsm_sdk::bluetooth::link_session::Links::inbound`; `dsm_sdk::bluetooth::pairing_orchestrator::PairingOrchestrator::link_paired` | `dsm_sdk::bluetooth::pairing_orchestrator::tests::a_paired_link_completes_only_once_the_address_is_stored`; `dsm_sdk::bluetooth::offline_step_tests::a_record_replayed_or_from_a_closed_link_opens_on_nothing` | DSM Amendment A27 (§6.138). Not run on phones: BLE between devices is the hardware stage. |
-| MR-DSM-0344 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::wallet::describe_request` | `grant::tests::a_signature_is_never_in_a_grant`; `connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
-| MR-DSM-0345 | Met | `dsm_sdk::sdk::connect::grant::request_from_wire` | `grant::tests::a_statement_is_one_line_with_nothing_hidden`; `connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
-| MR-DSM-0346 | Met | `dsm_sdk::handlers::connect_routes::connect_app_status` | `connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
+| MR-DSM-0344 | Met | `dsm_sdk::sdk::connect::grant::decide`; `dsm_sdk::sdk::connect::wallet::describe_request` | `dsm_sdk::sdk::connect::grant::tests::a_signature_is_never_in_a_grant`; `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
+| MR-DSM-0345 | Met | `dsm_sdk::sdk::connect::grant::request_from_wire` | `dsm_sdk::sdk::connect::grant::tests::a_statement_is_one_line_with_nothing_hidden`; `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
+| MR-DSM-0346 | Met | `dsm_sdk::handlers::connect_routes::connect_app_status` | `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
 | MR-DSM-0347 | Met | `dsm::economic::peer_lineage::scan_offline_boundaries`; `dsm_sdk::sdk::economic_registers::scan_payer_offline_boundaries`; `dsm_sdk::sdk::economic_admission_flow::settle_received_offline` | `dsm::economic::peer_lineage::tests::a_scan_stops_where_the_register_holds_nothing`; `dsm::economic::peer_lineage::tests::a_scan_stops_at_its_bound_and_reads_nothing_past_it`; `dsm::economic::peer_lineage::tests::a_scan_stops_short_on_a_position_not_decided_yet` | DSM Amendment A28 (§6.142). A default the owner was told of and did not object to, not a ruling. A payer's next boundary past the bound is not found. |
+| MR-DSM-0348 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm_sdk::handlers::counterfeit_acceptance_tests::a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited`; `dsm_sdk::handlers::one_hop_verification_tests::every_acceptance_reads_only_the_senders_paying_position` | DSM Amendment A28 (§6.143). Position 2 alone. The tests build the payer's state by hand. |
 
 ### 8.2 SoFi settlement specification
 
