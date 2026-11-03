@@ -180,7 +180,7 @@ fn owner_authority(b: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn parent_claim_ref(b: &[u8]) -> Result<Vec<u8>, String> {
-    Ok(ParentClaimRef::decode(b).map_err(text)?.encode())
+    Ok(whole(b, ParentClaimRef::at)?.encode())
 }
 
 fn route_digest_shown(class: u16, preimage: &RouteDigestPreimage) -> Shown {

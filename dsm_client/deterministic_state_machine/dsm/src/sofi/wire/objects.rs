@@ -263,12 +263,6 @@ impl ParentClaimRef {
         }
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let mut c = Cursor { b: bytes, i: 0 };
-        let v = Self::at(&mut c)?;
-        finish(&c, v)
-    }
-
     /// The typed parent reference `𝒞_E^pre` carries for this parent, named by
     /// the trader `(genesis, device_id)` at the position `P` extends (P
     /// conformance rule 2): a single-root claim by its exact envelope digest,

@@ -403,7 +403,26 @@ fn every_union_variant_round_trips() {
             fulfillment_id: [2; 32],
         },
     ] {
-        assert_eq!(ParentClaimRef::decode(&r.encode()).expect("decode"), r);
+        let body = TraderPrecommitBody::new(
+            G,
+            DEV,
+            41,
+            r.clone(),
+            [0xEE; 32],
+            vec![PrecommitLeg {
+                vault_id: V1,
+                parent_root: R1,
+                setup_ref: [0xBB; 32],
+            }],
+            [0xC1; 32],
+            [0xC2; 32],
+            [0xC3; 32],
+            ALG,
+            &KEY,
+        )
+        .expect("precommit");
+        let back = TraderPrecommitBody::decode(&body.encode()).expect("decode");
+        assert_eq!(back.parent_claim_ref(), &r);
     }
 }
 
