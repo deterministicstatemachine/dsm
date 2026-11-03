@@ -9,7 +9,9 @@ host-signing secret lives in OTP readable only by Secure firmware.
 > chip.** Rehearse it on a spent board first, then stop and look after the first new one.
 
 Requires: `picotool` v2.2+, `openssl`, `b3sum`, `arm-none-eabi-nm`, `arm-none-eabi-objcopy`, the
-built firmware ELF, and the board in BOOTSEL. Build with the production profile:
+built firmware ELF, and the board in BOOTSEL. The build reads the TROPIC01 driver from outside the
+repository: `libtropic-rs` (github.com/tropicsquare/libtropic-rs) beside the checkout's parent, at
+commit `0cacb5ed94e5df491bfbb39e8702cc47598f7d63`. Build with the production profile:
 
 ```
 cd crates/dsm-anchor-secure-monitor

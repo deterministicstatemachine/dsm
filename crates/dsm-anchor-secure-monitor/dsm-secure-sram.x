@@ -175,7 +175,9 @@ SECTIONS
     . = ALIGN(4);
     __srodata = .;
     *(.rodata .rodata.*);
-    . = ALIGN(4);
+    /* To the largest section alignment, so .data starts where .rodata ends. The linear LOAD_MAP
+     * copy names this whole range, and picotool cannot hash across bytes no segment holds. */
+    . = ALIGN(32);
     __erodata = .;
   } > SECURE AT> FLASH
 
@@ -314,6 +316,13 @@ ASSERT(LOADADDR(.rodata) - LOADADDR(.vector_table) == ADDR(.rodata) - ADDR(.vect
   "BUG: .rodata LMA/VMA skew — the single linear LOAD_MAP copy would misplace .rodata in SRAM");
 ASSERT(LOADADDR(.data) - LOADADDR(.vector_table) == ADDR(.data) - ADDR(.vector_table),
   "BUG: .data LMA/VMA skew — the single linear LOAD_MAP copy would misplace .data in SRAM");
+
+ASSERT(LOADADDR(.data) == LOADADDR(.rodata) + SIZEOF(.rodata),
+  "BUG: a hole between .rodata and .data in flash — picotool cannot sign the linear LOAD_MAP copy");
+ASSERT(LOADADDR(.rodata) == LOADADDR(.text) + SIZEOF(.text),
+  "BUG: a hole between .text and .rodata in flash — picotool cannot sign the linear LOAD_MAP copy");
+ASSERT(LOADADDR(.text) == LOADADDR(.vector_table) + SIZEOF(.vector_table),
+  "BUG: a hole between .vector_table and .text in flash — picotool cannot sign the linear LOAD_MAP copy");
 
 /* §6 Secure code+rodata size ceiling (SRAM-resident budget from MEMORY_MAP.md). */
 ASSERT((__etext - _stext) <= 224K, "Secure monitor code+rodata exceeds the 224 KiB budget (MEMORY_MAP.md)");

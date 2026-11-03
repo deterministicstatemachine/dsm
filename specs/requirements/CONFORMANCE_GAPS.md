@@ -7189,6 +7189,9 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 - `sign.sh` could not read a firmware file with no extension;
 - `bootkey-otp.json` also sets `SECURE_BOOT_ENABLE` and `KEY_VALID`.
 
+- `picotool seal` refused the current firmware (`The ELF file does not contain the storage address 10027a5c`): a 4-byte hole between `.rodata` and `.data` lay inside the linear LOAD_MAP copy. `.rodata` now pads to the largest section alignment, and the linker refuses a hole in that range. A build at this commit seals, and picotool reports its signature verified, with a throwaway key;
+- the monitor had no lockfile, and its driver is outside the repository. The lockfile is committed, and the runbook names the driver's commit, `0cacb5e`. The checkout used here also carries an uncommitted `l1_passthrough` in that driver, which nothing in this repository calls.
+
 `sign.sh`, `provision-otp.sh` and the runbook now take each step in order, one secret per board, and `sign.sh` refuses an image shorter than the window it measures. None of this has run on a chip, and neither has the sealed secret read, the slot-1 birth, the cage or the R-memory record. CI does not compile the monitor. A chip caged under the old process cannot take the new birth, because its slot 0 may no longer write a pairing key, and a chip holding another key in slot 1 is refused too (read from source, not run).
 
 **The code map.** Entry points, one sentinel, the counts and the manifest follow the exports SA-35 removed and the remote SPI crate removed with the relay. The pin refresh waits on CI's logs of the commit that carries this section.
