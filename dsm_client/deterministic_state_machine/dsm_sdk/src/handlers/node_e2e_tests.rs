@@ -1923,22 +1923,18 @@ async fn a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing
 }
 
 /// MR-SOFI-0346 (owner ruling 2026-09-30): resolving another trader's
-/// position reads only the verifier's frontier-to-parent segment of that
-/// trader — within it the position, its predecessor and the accepted claim
-/// at each setup position `P`'s legs name — and never walks back past the
-/// frontier. B sets up with the vault and pays A, so A's frontier for B
-/// stands at that payment; B then trades and pays A again, and A's
-/// acceptance resolves B's SoFi position on the way. A asks no member for any
-/// of B's root cells at or below its frontier but the setup position's.
-///
-/// MUTATION CONTROL: a peer walk that starts from B's genesis rather than A's
-/// frontier turns this red.
+/// position reads only that trader's position, its predecessor and the
+/// accepted claim at each setup position `P`'s legs name (DSM Amendment A14).
+/// B sets up with the vault and pays A; B then trades and pays A again, and
+/// A's acceptance resolves B's SoFi position on the way. A asks no member for
+/// any of B's root cells before the trade but the position the setup names,
+/// the one before the step that carries it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn resolving_another_traders_position_reads_only_its_segment() {
+async fn resolving_another_traders_position_reads_only_that_position() {
     let p = Pair::boot(500, 200).await;
     let m = open_market(&p).await;
-    let setup_position = admitted_position(&p.b);
+    let setup_names = admitted_position(&p.b) - 1;
     let paid = |label: &'static str| {
         let (a, b) = (&p.a, &p.b);
         async move {
@@ -1951,7 +1947,7 @@ async fn resolving_another_traders_position_reads_only_its_segment() {
         }
     };
     paid("the first payment").await;
-    let frontier = admitted_position(&p.b);
+    let before_the_trade = admitted_position(&p.b);
     let a_before = p.a.era_balance();
 
     realized_trade(&p, &m, 10).await;
@@ -1985,9 +1981,10 @@ async fn resolving_another_traders_position_reads_only_its_segment() {
         .collect();
     for position in &read_positions {
         assert!(
-            *position > frontier || *position == setup_position,
-            "A read B's root cell at position {position}, at or below its frontier {frontier} \
-             (setup at {setup_position}); B's root cells A read: {read_positions:?}"
+            *position >= before_the_trade || *position == setup_names,
+            "A read B's root cell at position {position}, before {before_the_trade}, the trade's \
+             predecessor (the setup names {setup_names}); B's root cells A read: \
+             {read_positions:?}"
         );
     }
 }
@@ -3534,8 +3531,8 @@ async fn a_held_key_whose_pair_is_registered_is_carried_to_final_before_the_walk
 /// B trades with its pair's leader refusing the pair, then writes its pair
 /// itself: `F` at `K_ful(q)` and, at `K_root(q)`, a claim B signs naming `F`
 /// with another `R_realize`. The pair registers, being matched by `F`'s id;
-/// only the body tells it apart. A, walking B's lineage to `q` (DSM
-/// Amendment A8), gets Invalid, with the body check's own reason. B's own
+/// only the body tells it apart. A, checking B's step at `q` (DSM Amendment
+/// A14), gets Invalid, with the body check's own reason. B's own
 /// device resolves `q` Invalid too (pre-audit 12k, the owner's 2026-10-01
 /// ruling: "same bytes => same terminal verdict for local and peer
 /// resolution"); before 12k it answered `RetriesExhausted` for good. B's
@@ -4944,14 +4941,12 @@ async fn a_vault_traded_through_closes_for_its_owner() {
     );
 }
 
-/// Conditional positions back to back (DSM Amendment A19, restoring A8's
-/// SoFi positions in the chain): a trader trades
-/// three times in a row, so each trade's `P` names the trader's previous
+/// Conditional positions back to back (DSM Amendment A14, the conditional
+/// bound): a trader trades three times in a row, so each trade's `P` names the trader's previous
 /// trade, a conditional position, as its parent. Every trade resolves
 /// Realized, and the owner's close, which judges each of the trader's
-/// exercises as a peer's, resolves too: each conditional position in the
-/// walked segment is resolved from SoFi's public objects, and the next is
-/// read at the cell routed from the root it selected.
+/// exercises as a peer's, resolves too: each conditional position is resolved
+/// from SoFi's public objects, from the parent one position back.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn trades_back_to_back_resolve_and_the_owner_closes_after_them() {
@@ -5887,10 +5882,8 @@ async fn a_reader_that_never_traded_reads_the_same_at_any_vault_age() {
         {
             let binding = crate::storage::client_db::get_connection().expect("the store");
             let conn = binding.lock().expect("the store is not poisoned");
-            for table in ["peer_frontier", "peer_ek_step"] {
-                conn.execute(&format!("DELETE FROM {table}"), [])
-                    .expect("forget what C holds of any lineage");
-            }
+            conn.execute("DELETE FROM peer_ek_step", [])
+                .expect("forget what C holds of any lineage");
         }
         crate::sdk::sofi_reads::forget_judgements();
         for node in &p.nodes.nodes {

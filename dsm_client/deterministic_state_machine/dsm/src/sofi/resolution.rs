@@ -56,8 +56,8 @@ pub enum ParentPosition {
     /// `T0` is an ordinary single-root claim. `named` is the claim `P` names;
     /// `held` is the claim final at the trader's `K_root(p)` and `held_root`
     /// the root it installed, as this verifier itself established them: its
-    /// own admitted position, or the frontier-relative walk of the trader's
-    /// lineage (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is
+    /// own admitted position, or that step of the trader validated one hop
+    /// (DSM Amendment A14; SoFi Amendment S15). A claim `P` carries is
     /// never its own authority: `P` was built on a position the trader held
     /// only when the trader holds exactly what `P` names, at the root `P` was
     /// built on (§6.62).

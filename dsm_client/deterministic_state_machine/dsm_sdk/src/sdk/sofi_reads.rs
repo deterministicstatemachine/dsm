@@ -228,6 +228,17 @@ struct OnceFetcher<'r, 'a> {
 }
 
 impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
+    fn register_key_values(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        // Discovery: read fresh, never kept. A claim that arrives later is a
+        // candidate too.
+        self.live.register_key_values(genesis, device_id, position)
+    }
+
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         // Kept once Core reads a final claim at the cell from them.
         read_once(
@@ -315,7 +326,7 @@ impl<'a> LiveSofiReads<'a> {
         })
     }
 
-    /// The peer walks' fetcher: the live one, through this context's
+    /// The peer step checks' fetcher: the live one, through this context's
     /// readings.
     fn peer_resolver(&self) -> OnceFetcher<'_, '_> {
         OnceFetcher {
@@ -328,11 +339,10 @@ impl<'a> LiveSofiReads<'a> {
         }
     }
 
-    /// Another trader's lineage to `position`, verified from this device's
-    /// frontier for it (DSM Amendment A8); a conditional position on the way
-    /// is resolved by Core over SoFi's public objects for that position alone
-    /// (SoFi Amendment S15).
-    fn peer_walk(
+    /// Another trader's step at `position`, validated from its own parent (DSM
+    /// Amendment A14); a conditional position is resolved by Core over SoFi's
+    /// public objects for that position alone (SoFi Amendment S15).
+    fn peer_step(
         &self,
         genesis: &D32,
         device_id: &D32,
@@ -614,7 +624,7 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        self.peer_walk(genesis, device_id, position)
+        self.peer_step(genesis, device_id, position)
     }
 
     fn vault_state_at(
@@ -907,8 +917,8 @@ impl<'a> VerifierContext<'a> {
     }
 
     /// Core's resolver of another trader's conditional position (SoFi
-    /// Amendment S15), over this context's reads, for a frontier-relative walk
-    /// of that trader's lineage (DSM Amendment A8).
+    /// Amendment S15), over this context's reads, for a one-hop check of that
+    /// trader's step (DSM Amendment A14).
     pub fn peer_position_resolver(&self) -> PeerPositionResolver<'_, LiveSofiReads<'a>> {
         PeerPositionResolver {
             reads: &self.reads,

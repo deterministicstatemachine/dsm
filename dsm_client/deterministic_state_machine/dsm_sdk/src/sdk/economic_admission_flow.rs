@@ -1139,12 +1139,12 @@ pub(crate) async fn admitted_offline_settlement(
 }
 
 /// Settle every payment this device received offline that its payer's online
-/// history now exposes (SA-91). Each payer is walked from this device's
-/// frontier for it toward the head its register holds — the walk records the
-/// spends the payer's boundaries exposed — and each exposed payment is settled
-/// by its own admitted transition. A payment its payer has not exposed yet
-/// stays pending; it is no failure. Returns how many were settled, and what
-/// could not be done.
+/// history now exposes (SA-91). Each payer's positions past the latest boundary
+/// this device recorded of it are scanned by register key, within Core's bound,
+/// and only its offline boundaries validated, one hop each: that records the
+/// spends they exposed. Each exposed payment is settled by its own admitted
+/// transition. A payment its payer has not exposed yet stays pending; it is no
+/// failure. Returns how many were settled, and what could not be done.
 pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>) {
     let mut failures = Vec::new();
     let receipts = match client_db::offline_receipts::pending_offline_receipts() {
@@ -1154,20 +1154,35 @@ pub(crate) async fn settle_received_offline(core: &CoreSDK) -> (u32, Vec<String>
             return (0, failures);
         }
     };
-    let mut walked: std::collections::BTreeSet<[u8; 32]> = std::collections::BTreeSet::new();
+    let mut scans: std::collections::BTreeMap<([u8; 32], [u8; 32]), u64> =
+        std::collections::BTreeMap::new();
     for receipt in &receipts {
-        if walked.insert(receipt.payer_device) {
-            if let Err(e) = crate::sdk::economic_registers::prevalidate_contact(
-                receipt.payer_genesis,
-                receipt.payer_device,
-            )
-            .await
-            {
-                failures.push(format!(
-                    "the payer {} of a payment received offline could not be walked: {e}",
-                    crate::util::text_id::encode_base32_crockford(&receipt.payer_device)
-                ));
+        match client_db::economic_lineage::latest_offline_account(
+            &receipt.payer_genesis,
+            &receipt.payer_device,
+            &receipt.bundle,
+        ) {
+            Ok(recorded) => {
+                let from = recorded.map_or(1, |account| account.economic_position() + 1);
+                let start = scans
+                    .entry((receipt.payer_genesis, receipt.payer_device))
+                    .or_insert(from);
+                *start = from.min(*start);
             }
+            Err(e) => failures.push(format!(
+                "the recorded offline account of a payment's payer: {e}"
+            )),
+        }
+    }
+    for ((genesis, device), from) in scans {
+        if let Err(e) =
+            crate::sdk::economic_registers::scan_payer_offline_boundaries(genesis, device, from)
+                .await
+        {
+            failures.push(format!(
+                "the payer {} of a payment received offline could not be scanned: {e}",
+                crate::util::text_id::encode_base32_crockford(&device)
+            ));
         }
     }
     let mut settled = 0u32;
@@ -2097,16 +2112,13 @@ pub(crate) async fn prevalidate_incoming_transfer_admission(
         expected_network_id: network_id.clone(),
     };
     let recorder = crate::sdk::economic_registers::RecordingResolver::new(&live);
-    // DSM Amendment A19: the sender's lineage is validated from this device's
-    // frontier for it, each step from the root validated before it, and each
-    // of its credits' sources from this device's frontier for that source, so
-    // the recorder observes exactly the closure this acceptance depends on.
-    // A conditional position on the way is resolved from SoFi's public
-    // objects for that position (SoFi Amendment S15).
+    // DSM Amendment A14: the sender's step is validated from its own parent,
+    // and each of its credits' sources by the source's own step, so the
+    // recorder observes exactly the closure this acceptance depends on.
     let peer = {
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
             .map_err(|e| incomplete(format!("SoFi reads: {e}")))?;
-        recorder.validated_peer_lineage(
+        recorder.validated_peer_step(
             peer_genesis,
             peer_devid,
             sender_economic_position,

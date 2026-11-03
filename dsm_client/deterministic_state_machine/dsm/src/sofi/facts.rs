@@ -195,9 +195,8 @@ pub enum TraderAtParent {
 /// What this verifier itself established at `p`: the claim that holds the
 /// trader's `K_root(p)`, as a `P` names it, and the root the lineage holds
 /// there — for a conditional position, the root its resolution selected.
-/// Established from this verifier's own admitted position, or by the
-/// frontier-relative walk of the trader's lineage (DSM Amendment A8; SoFi
-/// Amendment S15). The one fact about a parent the facts read: a claim `P`
+/// Established from this verifier's own admitted position, or by that step of
+/// the trader validated one hop (DSM Amendment A14; SoFi Amendment S15). The one fact about a parent the facts read: a claim `P`
 /// carries is never its own authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedParent {
@@ -816,8 +815,8 @@ fn pair_and_parent(
     // The trader parent: what `P` names must be what the trader's lineage
     // holds at `p` — the claim final at its `K_root(p)` and the root that
     // claim installed — as this verifier itself established it, from its own
-    // admitted position or the frontier-relative walk of the trader's lineage
-    // (DSM Amendment A8; SoFi Amendment S15). A claim `P` carries is never
+    // admitted position or that step of the trader validated one hop (DSM
+    // Amendment A14; SoFi Amendment S15). A claim `P` carries is never
     // its own authority (§6.62).
     let named = *precommit.parent_claim_ref();
     let parent = parent_position(named, precommit.position(), resolved)
@@ -1309,7 +1308,7 @@ mod tests {
     /// The single-root parent `P` names is what the trader's lineage holds at
     /// `p` — the claim final at its `K_root(p)` and the root it installed —
     /// as this verifier established it, never a claim `P` carries for itself
-    /// (§6.62; SoFi §17.1 rules 2–3, DSM Amendment A8, SoFi Amendment S15).
+    /// (§6.62; SoFi §17.1 rules 2–3, DSM Amendment A14, SoFi Amendment S15).
     /// Here the fixture's parent claim verifies, names the trader, `p` and
     /// `P`'s root, and is signed under `P`'s key, but the trader's lineage
     /// holds another claim at `p`: `P` was built on a position the trader

@@ -5,7 +5,7 @@
 //! The holder presents its latest admitted economic position `p` and, for
 //! each asked token, the amount and the Sparse Merkle path from the token's
 //! balance key to the economic root. The application validates the holder's
-//! root at `p` from its own frontier (Amendment A8), Core recomputes that root
+//! step at `p` one hop (Amendment A14), Core recomputes that root
 //! from each path (`economic::holdings::proven_balances`), and the register
 //! cell of `p + 1` is read at its leader: the proof is current only while that
 //! cell is empty. A proof that does not verify is no balance at all. This
@@ -120,11 +120,9 @@ pub(crate) async fn verify(
         .map_err(|e| Refusal::Incomplete(format!("this account's network: {e}")))?;
     let set = crate::sdk::storage_set::canonical_set(&network)
         .map_err(|e| Refusal::Incomplete(format!("the pinned storage set: {e}")))?;
-    // The holder's root at `position` is read from this account's frontier
-    // for the holder (`economic_registers::resolve_peer_root`, DSM Amendment
-    // A19): a frontier at or past `position` answers it, and a read records
-    // nothing, so what lies past the frontier is walked again on each poll.
-    // Whether the proof is still current is read below
+    // The holder's root at `position` is validated one hop
+    // (`economic_registers::resolve_peer_root`, DSM Amendment A14). Whether
+    // the proof is still current is read below
     // on every call, never kept: the next root cell is open until the holder
     // moves on.
     let validated: ValidatedEconomicRoot = tokio::task::block_in_place(|| {

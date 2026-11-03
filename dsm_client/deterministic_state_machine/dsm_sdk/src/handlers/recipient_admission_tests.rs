@@ -342,11 +342,9 @@ async fn the_same_sender_debit_cannot_fund_a_second_credit() {
 }
 
 /// An outage during prevalidation HOLDS the transfer with zero durable state
-/// (no pending admission, no journal, no frontier, staging not accepted), and
-/// the SAME row completes when the fleet returns — an outage is never an
-/// attack and never a wedge. A frontier becomes trusted only once the whole
-/// segment to it has passed (A8, owner ruling 2026-10-01): a walk the outage
-/// cut short leaves none.
+/// (no pending admission, no journal, staging not accepted), and the SAME row
+/// completes when the fleet returns — an outage is never an attack and never a
+/// wedge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
@@ -385,12 +383,6 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
         0,
         "no journal row during the hold"
     );
-    assert!(
-        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, u64::MAX)
-            .unwrap()
-            .is_none(),
-        "no frontier for the sender: the walk the outage cut short promoted none"
-    );
 
     // Fleet back: the SAME row proceeds through the full admission.
     p.nodes.bring_up(&down).await;
@@ -405,17 +397,5 @@ async fn an_outage_holds_the_transfer_cleanly_and_it_recovers() {
             .0,
         1,
         "the credit admitted"
-    );
-    p.a.enter();
-    let (sender_paid_at, _) = client_db::economic_lineage::get_admitted_coordinate()
-        .unwrap()
-        .unwrap();
-    p.b.enter();
-    assert_eq!(
-        client_db::economic_lineage::frontier_below(&p.a.genesis, &p.a.device_id, u64::MAX)
-            .unwrap()
-            .map(|frontier| frontier.economic_position()),
-        Some(sender_paid_at),
-        "the walk that passed recorded the sender's paying position"
     );
 }

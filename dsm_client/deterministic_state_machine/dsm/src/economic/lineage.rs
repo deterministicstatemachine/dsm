@@ -163,10 +163,11 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// A root of a peer this verifier validated itself (DSM Amendment A19):
-    /// a frontier the receiver recorded, or the end of a step its walk
-    /// validated from the root before it, where `advance_validated` refuses
-    /// a witness built on any other root. Never a root a peer merely states.
+    /// The root a peer's step is validated from (DSM Amendment A14): the root
+    /// that step's own witness was built on, taken as its parent only because
+    /// the claim is final at the cell routed from it, and `advance_validated`
+    /// then refuses a witness built on any other root. Never a root a peer
+    /// merely states.
     /// **Only the peer step verifier may call this**, from one place
     /// (`peer_lineage::authenticated_root`).
     pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
@@ -355,10 +356,8 @@ impl AdmittedTree {
 ///
 /// Verifier-derived, like [`ValidatedEconomicRoot`]: [`advance_validated`]
 /// produces one for an ordinary position, `sofi::lineage::advance_resolved`
-/// for a SoFi position, [`Self::rehydrate_from_admitted_store`] for this
-/// device's own admitted position, and [`Self::from_validated_coordinate`]
-/// for a peer's coordinate this receiver validated. There is no other
-/// constructor.
+/// for a SoFi position, and [`Self::rehydrate_from_admitted_store`] for this
+/// device's own admitted position. There is no other constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcceptedClaim {
     genesis: [u8; 32],
@@ -406,27 +405,6 @@ impl AcceptedClaim {
         }
     }
 
-    /// A peer's claim at a coordinate this receiver validated itself and
-    /// recorded (DSM Amendment A19): the claim one of the constructors above
-    /// produced when the walk reached that coordinate, read back so that
-    /// nothing behind the receiver's frontier is read again. **Only
-    /// `peer_lineage` may call this**, from a frontier coordinate: one Core
-    /// built from a walk that passed, or the receiver rehydrated from its own
-    /// frontier store.
-    pub(crate) fn from_validated_coordinate(
-        genesis: [u8; 32],
-        device_id: [u8; 32],
-        economic_position: u64,
-        claim_ref: [u8; 32],
-    ) -> Self {
-        Self {
-            genesis,
-            device_id,
-            economic_position,
-            claim_ref,
-        }
-    }
-
     /// The SoFi counterpart, for a position whose claim is `C_q`. **Only
     /// `sofi::lineage::advance_resolved` may call this**, for the same reason
     /// as [`ValidatedEconomicRoot::from_resolved_sofi_position`].
@@ -469,7 +447,7 @@ pub struct ValidatedAdvance {
     pub funded: Vec<FundedCredit>,
     pub claim: AcceptedClaim,
     /// The EK steps the credits' acceptance checks fetched and verified: a
-    /// walker records them with the frontier it reaches (SA-93).
+    /// verifier records them once the step passes whole (SA-93).
     pub ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
 }
 
