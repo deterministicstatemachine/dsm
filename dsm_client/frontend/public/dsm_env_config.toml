@@ -2,10 +2,10 @@
 # Bundled into the APK: this file and ca.crt beside it are what a default
 # install reaches the network with.
 #
-# The fleet was reprovisioned 2026-09-27 on the storage node at main f779cb872;
+# The fleet was reprovisioned 2026-11-03 on the storage node at e78fd9208;
 # every member minted a new register incarnation into its fresh database, and
 # the committed set id every member logs is
-#   7GBBB51DM8XP433F6H896G4R88W6RJZATZ3CT0WTRAFZ2EHYZ9D0
+#   YTSBGCJFS144MK92CN6FNK4ZAQ60JGYW05N89XXKT25ZRKSA03GG
 # which is the id core pins (dsm::economic::register), so this list must stay
 # exactly the pinned pairs: `dsm_sdk::sdk::storage_set::tests::
 # the_bundled_env_config_resolves_the_pinned_beta_set` refuses anything else.
@@ -36,24 +36,24 @@ custom_ca_certs = ["ca.crt"]
 [[nodes]]
 name = "dsm-node-1"
 endpoint = "https://34.58.75.224:8080"
-register_incarnation = "B6DZ4TFJ2Y1GSJ8X57CE8BWX0QM5JRVAJP08JRQTV65DEQ53DYKG"
+register_incarnation = "0Y3VWSHQXT8C5K9PGQWRT5DS7492HKNT6J2P69DSHR53XSVD26M0"
 
 [[nodes]]
 name = "dsm-node-2"
 endpoint = "https://35.254.209.202:8080"
-register_incarnation = "QYR6K65CD8SZ40G4PZV4PMS2R0VK02N14TECZ0GP00ZR9VCSYC20"
+register_incarnation = "J7CX24XQG55SNZHS578HZJJMCFZNTQSNQX5ZAZ1VQPHKN0MFGAX0"
 
 [[nodes]]
 name = "dsm-node-3"
 endpoint = "https://146.148.99.141:8080"
-register_incarnation = "2AJ8GZ4QM7YH7D5G552EAHSPTSTWG9KXE04RTBKYN8ES17Y9BTWG"
+register_incarnation = "PJRKQ7C2PF53TAA1SXAWNWXANHWNZ2H983MZ413KB9GTV2FYR5EG"
 
 [[nodes]]
 name = "dsm-node-4"
 endpoint = "https://104.197.96.66:8080"
-register_incarnation = "S95VHW0YZ413DA4YX972ZA9XDA69FXF4KBCG2AHG89DA8PTY200G"
+register_incarnation = "SCY5EBT0HKAK8167A2NFJT5469ZFTGJA20356EP9JT9T4SR889RG"
 
 [[nodes]]
 name = "dsm-node-5"
 endpoint = "https://35.184.46.44:8080"
-register_incarnation = "56VB5TY2G8QKVJNVFKJQX9N0GHJN6VEQ1KV9E88GX272V8G43RWG"
+register_incarnation = "B9GP57GMX98H4H67X45QYEQ0JJYQKPRGKNAZGPKCRCF69KVXED2G"

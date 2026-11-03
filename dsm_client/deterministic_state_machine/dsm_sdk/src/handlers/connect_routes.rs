@@ -220,6 +220,7 @@ fn waits(
         // a match's own cells.
         Request::AcceptIssued { .. }
         | Request::Contacts
+        | Request::Sign { .. }
         | Request::DuelSessionKey { .. }
         | Request::DuelReady { .. }
         | Request::DuelWithdraw { .. }
@@ -302,6 +303,7 @@ fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<
         | Request::Swap { .. }
         | Request::Holdings { .. }
         | Request::Contacts
+        | Request::Sign { .. }
         | Request::EscrowLock(..)
         | Request::EscrowRelease { .. }
         | Request::DuelCollect { .. } => Ok(()),
@@ -1334,6 +1336,11 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(e),
                 }
             }
+            Request::Sign { statement } => Executed::carried_out(Some(
+                generated::app_response_body_v1::Result::Sign(generated::ConnectSignResultV1 {
+                    statement: statement.clone(),
+                }),
+            )),
             Request::Contacts => match shared_contacts() {
                 Ok(shared) => Executed::carried_out(Some(
                     generated::app_response_body_v1::Result::Contacts(shared),
@@ -1942,20 +1949,20 @@ impl AppRouterImpl {
         let request_body: generated::AppRequestBodyV1 =
             canonical(&request.body, "the stored request")?;
         let asked = request_from_wire(&request_body)?;
-        let (answer, answer_body) = match response {
+        let (answer, answer_body, answer_signature) = match response {
             Some(bytes) => {
-                let body = generated::AppResponseV1::decode(bytes.as_slice())
-                    .map_err(|e| format!("{ROUTE}: the stored answer: {e}"))?
-                    .body;
+                let signed = generated::AppResponseV1::decode(bytes.as_slice())
+                    .map_err(|e| format!("{ROUTE}: the stored answer: {e}"))?;
                 (
                     Some(canonical::<generated::AppResponseBodyV1>(
-                        &body,
+                        &signed.body,
                         "the stored answer",
                     )?),
-                    body,
+                    signed.body,
+                    signed.signature,
                 )
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), Vec::new()),
         };
         let mut status = generated::ConnectAppStatusV1 {
             session_id: sid.to_vec(),
@@ -2065,6 +2072,21 @@ impl AppRouterImpl {
             Request::Quote { .. } => {
                 status.fact_detail = "a quote is information and carries no authority".into();
             }
+            Request::Sign { statement } => match &answer {
+                Some(generated::AppResponseBodyV1 {
+                    outcome,
+                    result: Some(generated::app_response_body_v1::Result::Sign(signed)),
+                    ..
+                }) if *outcome == generated::ConnectOutcome::CarriedOut as i32
+                    && signed.statement == *statement =>
+                {
+                    status.fact = generated::ConnectFact::Signed as i32;
+                    status.signed_statement = statement.clone();
+                    status.answer_signature = answer_signature;
+                    status.fact_detail = "the wallet signed these words after they were approved on its device: proof of its key, not of who pressed".into();
+                }
+                _ => status.fact_detail = "no signature answers it yet".into(),
+            },
             Request::Contacts => {
                 status.fact_detail =
                     "contacts are the wallet's word: who its owner keeps, never proof of anything"
@@ -2544,6 +2566,7 @@ impl AppRouterImpl {
             }
             Some(Intent::Holdings(k)) => Body::Holdings(k),
             Some(Intent::Contacts(k)) => Body::Contacts(k),
+            Some(Intent::Sign(k)) => Body::Sign(k),
             Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
             Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
             Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),

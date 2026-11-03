@@ -4949,6 +4949,16 @@ message ConnectContactV1 {
 message ConnectContactsResultV1 {
   repeated ConnectContactV1 contacts = 1;
 }
+// Sign a statement (DSM Amendment A28). The wallet shows these words whole, and
+// only after its holder approves them does it answer with them, under the
+// answer's own signature, which already names the session and the request. It
+// is never in a grant: every one waits on the device.
+message ConnectSignV1 {
+  string statement = 1 [(dsm_max_len)=512];
+}
+message ConnectSignResultV1 {
+  string statement = 1 [(dsm_max_len)=512];
+}
 // Lock a stake for a match the application referees (DSM Amendment A12). The
 // wallet builds the escrow terms itself from one fixed outcome table: a-wins
 // and b-wins, decided by the application's key, pay A and B; cancel, decided
@@ -5104,6 +5114,7 @@ message AppRequestBodyV1 {
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
+    ConnectSignV1           sign             = 25;
   }
 }
 message AppRequestV1 {
@@ -5233,6 +5244,7 @@ message AppResponseBodyV1 {
     ConnectDuelCellsV1            duel_cells       = 18; // a withdraw's or a settle's
     ConnectDuelSignResultV1       duel_sign        = 19;
     ConnectContactsResultV1       contacts         = 20;
+    ConnectSignResultV1           sign             = 21;
   }
 }
 message AppResponseV1 {
@@ -5361,6 +5373,7 @@ message ConnectAppRequestIntentV1 {
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
+    ConnectSignV1           sign             = 25;
   }
 }
 message ConnectAppRequestsQueryV1 {
@@ -5385,6 +5398,7 @@ enum ConnectFact {
   CONNECT_FACT_DUEL_LOCKED     = 6; // the wallet's Active computed vault holds the stake under exactly the setup's terms, on its match cell
   CONNECT_FACT_DUEL_STARTED    = 7; // a Start holds the match's start cell: both sides readied
   CONNECT_FACT_DUEL_WITHDRAWN  = 8; // a Withdraw holds the match's start cell: void
+  CONNECT_FACT_SIGNED          = 10; // the session's wallet signed exactly the statement asked, after approval on its device
   CONNECT_FACT_DUEL_SETTLED    = 9; // an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
 }
 message VerifiedHoldingV1 {
@@ -5414,6 +5428,10 @@ message ConnectAppStatusV1 {
   // a duel's session key, ready or entry signature: never a fact; each is
   // checked where it is used. Empty while unanswered.
   bytes                      answer_body         = 17 [(dsm_max_len)=1048576];
+  // FACT_SIGNED: the statement, and the wallet's signature over answer_body,
+  // which anyone holding the wallet's AK can check again.
+  string                     signed_statement    = 18 [(dsm_max_len)=512];
+  bytes                      answer_signature    = 19 [(dsm_max_len)=65535];
 }
 
 // One envelope payload for every DSM Connect reply.
