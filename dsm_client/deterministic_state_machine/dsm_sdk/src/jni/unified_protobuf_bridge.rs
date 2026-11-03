@@ -1052,31 +1052,38 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleLinkOpened
     role: jni::sys::jint,
     jtarget: JByteArray<'a>,
 ) -> jni::sys::jobjectArray {
-    let opened = (|| -> Result<Vec<Vec<u8>>, String> {
-        let address: String = env
-            .get_string(&jaddress)
-            .map_err(|e| format!("the link's address: {e}"))?
-            .into();
-        let role =
-            crate::bluetooth::link_session::GattRole::from_wire(role).map_err(|e| e.to_string())?;
-        let target_bytes = env
-            .convert_byte_array(&jtarget)
-            .map_err(|e| format!("the link's target: {e}"))?;
-        let target = match target_bytes.as_slice() {
-            [] => None,
-            bytes => {
-                Some(<[u8; 32]>::try_from(bytes).map_err(|e| format!("the link's target: {e}"))?)
+    crate::jni::bridge_utils::jni_catch_unwind_jobjectarray(
+        "bleLinkOpened",
+        std::panic::AssertUnwindSafe(|| {
+            let opened = (|| -> Result<Vec<Vec<u8>>, String> {
+                let address: String = env
+                    .get_string(&jaddress)
+                    .map_err(|e| format!("the link's address: {e}"))?
+                    .into();
+                let role = crate::bluetooth::link_session::GattRole::from_wire(role)
+                    .map_err(|e| e.to_string())?;
+                let target_bytes = env
+                    .convert_byte_array(&jtarget)
+                    .map_err(|e| format!("the link's target: {e}"))?;
+                let target = match target_bytes.as_slice() {
+                    [] => None,
+                    bytes => Some(
+                        <[u8; 32]>::try_from(bytes)
+                            .map_err(|e| format!("the link's target: {e}"))?,
+                    ),
+                };
+                crate::bluetooth::radio_link::link_opened(&address, role, target)
+            })();
+            match opened.and_then(|frames| crate::jni::host_bridge::chunk_array(&mut env, &frames))
+            {
+                Ok(array) => array.into_raw(),
+                Err(why) => {
+                    throw_link_error(&mut env, &why);
+                    std::ptr::null_mut()
+                }
             }
-        };
-        crate::bluetooth::radio_link::link_opened(&address, role, target)
-    })();
-    match opened.and_then(|frames| crate::jni::host_bridge::chunk_array(&mut env, &frames)) {
-        Ok(array) => array.into_raw(),
-        Err(why) => {
-            throw_link_error(&mut env, &why);
-            std::ptr::null_mut()
-        }
-    }
+        }),
+    )
 }
 
 /// Raise `why` in Kotlin as an `IllegalStateException`: the link is not
@@ -1102,21 +1109,26 @@ pub extern "system" fn Java_com_dsm_wallet_bridge_UnifiedNativeApi_bleLinkClosed
     jaddress: JString<'a>,
     role: jni::sys::jint,
 ) {
-    let address: String = match env.get_string(&jaddress) {
-        Ok(address) => address.into(),
-        Err(e) => {
-            log::error!("[BLE link] a closed link's address is unreadable: {e}");
-            return;
-        }
-    };
-    let role = match crate::bluetooth::link_session::GattRole::from_wire(role) {
-        Ok(role) => role,
-        Err(e) => {
-            log::error!("[BLE link] a closed link's role: {e}");
-            return;
-        }
-    };
-    crate::bluetooth::radio_link::link_closed(&address, role);
+    crate::jni::bridge_utils::jni_catch_unwind_void(
+        "bleLinkClosed",
+        std::panic::AssertUnwindSafe(|| {
+            let address: String = match env.get_string(&jaddress) {
+                Ok(address) => address.into(),
+                Err(e) => {
+                    log::error!("[BLE link] a closed link's address is unreadable: {e}");
+                    return;
+                }
+            };
+            let role = match crate::bluetooth::link_session::GattRole::from_wire(role) {
+                Ok(role) => role,
+                Err(e) => {
+                    log::error!("[BLE link] a closed link's role: {e}");
+                    return;
+                }
+            };
+            crate::bluetooth::radio_link::link_closed(&address, role);
+        }),
+    )
 }
 
 // BLE coordinator helpers: availability checks and late-initialization attempt.

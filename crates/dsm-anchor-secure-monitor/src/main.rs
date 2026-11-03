@@ -136,10 +136,10 @@ compile_error!(
     "`bench_self_enroll` must NOT be enabled in a production build (feature `production`)"
 );
 
-/// The OTP-sealed enrolled digest (secure-read; see `otp-plan.json`). `None` = permission-denied or
-/// blank OTP.
+/// The OTP-sealed enrolled digest (`scripts/anchor-secure-boot`). `None` = permission-denied or blank
+/// OTP.
 fn otp_mu_enrolled() -> Option<[u8; 32]> {
-    // 16 ECC rows @ page 46 (row_base 2944) — MUST match otp-plan.json + provisioning.
+    // 16 ECC rows @ page 46 (row_base 2944) — MUST match DIGEST_ROW in provision-otp.sh.
     const MU_ROW: usize = 46 * hal::otp::NUM_ROWS_PER_PAGE;
     let mut out = [0u8; 32];
     let mut any = false;

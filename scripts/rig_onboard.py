@@ -33,6 +33,11 @@ def click_js(selector_expr):
 
 launch()
 got = wait_any(['Before you start', 'Choose your look', 'PRESS A', 'IT LIVES', 'WALLET SETUP REQUIRED', 'GENESIS: INITIALIZED', 'PROTECT YOUR WALLET'], 90)
+# The agreement mounts once the page has read its preferences, over whatever rendered first.
+dl = time.time() + 20
+while got != 'Before you start' and time.time() < dl:
+    if d.sees('Before you start'): got = 'Before you start'
+    time.sleep(1)
 log(f"first screen: {got}")
 
 # ── beta acknowledgement: every point ticked, then the agreement ──────────

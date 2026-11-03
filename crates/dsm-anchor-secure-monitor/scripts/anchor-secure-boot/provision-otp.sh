@@ -1,67 +1,129 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 # IRREVERSIBLE RP2350 OTP provisioning for the DSM anchor. Dry-run by default; every burn requires
-# --commit AND typing YES. See RUNBOOK.md. Do a full dry run on a sacrificial board first.
+# --commit AND typing YES. See RUNBOOK.md. Rehearse on a spent board before a new one.
 set -euo pipefail
 # Everything this script writes is the operator's alone.
 umask 077
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The sealed secret is the board's identity root: it lives outside the repository, in a directory
-# only its owner can open.
+# only its owner can open, one directory per board.
 SECRET_DIR="${DSM_ANCHOR_SECRET_DIR:-$HOME/.dsm-anchor-secure-boot}"
-mkdir -p "$SECRET_DIR"
-chmod 700 "$SECRET_DIR"
-SECRET_JSON="$SECRET_DIR/host-secret.json"
+BUILD_DIR="$SECRET_DIR/build"
 # page 48, row 0 — MUST equal SEALED_SECRET_ROW in ../../src/sealed.rs
-PAGE=48
-ROW_BASE=$(( PAGE * 64 ))
+SECRET_ROW=$(( 48 * 64 ))
+# page 46, row 0 — MUST equal MU_ROW in ../../src/main.rs
+DIGEST_ROW=$(( 46 * 64 ))
+# PAGEn_LOCK1 = 0xf80 + 2n + 1. Each row holds its low byte three times over.
+# LOCK_S 1 (Secure reads, nothing writes), LOCK_NS 3 (Non-secure no access), and LOCK_BL 3 for the
+# secret (the USB bootloader never serves it), 1 for the digest (it reads back, and it is public).
+SECRET_LOCK_ROW=$(( 0xf80 + 2 * 48 + 1 ))
+SECRET_LOCK=0x353535
+DIGEST_LOCK_ROW=$(( 0xf80 + 2 * 46 + 1 ))
+DIGEST_LOCK=0x1d1d1d
 
-COMMIT=0; CMD=""
-for a in "$@"; do case "$a" in --commit) COMMIT=1 ;; --*) CMD="$a" ;; esac; done
+COMMIT=0; CMD=""; BOARD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --commit) COMMIT=1 ;;
+    --board) shift; BOARD="${1:-}" ;;
+    --*) CMD="$1" ;;
+    *) echo "ERROR: unexpected argument $1"; exit 2 ;;
+  esac
+  shift
+done
+
+usage() {
+  echo "usage: $0 --board <name> [--check-blank | --gen-secret | --write-secret | --write-digest |"
+  echo "                           --lock-pages | --write-bootkey | --lockdown] [--commit]"
+  exit 2
+}
+[ -n "$CMD" ] || usage
+[ -n "$BOARD" ] || { echo "ERROR: --board names the board: every board has its own secret"; usage; }
+case "$BOARD" in *[!A-Za-z0-9_-]*) echo "ERROR: a board name is letters, digits, - and _"; exit 2 ;; esac
+BOARD_DIR="$SECRET_DIR/boards/$BOARD"
+mkdir -p "$BOARD_DIR"
+chmod 700 "$SECRET_DIR" "$SECRET_DIR/boards" "$BOARD_DIR"
+SECRET_BIN="$BOARD_DIR/host-secret.bin"
+MU_BIN="$BUILD_DIR/mu-enrolled.bin"
+OTP_JSON="$BUILD_DIR/bootkey-otp.json"
 
 run() { if [ "$COMMIT" = 1 ]; then echo "+ $*"; "$@"; else echo "[dry-run] $*"; fi; }
 confirm() {
   [ "$COMMIT" = 1 ] || return 0
-  read -r -p "IRREVERSIBLE OTP BURN. Board correct + backed up? Type YES to proceed: " x
+  picotool info -d || true
+  read -r -p "IRREVERSIBLE OTP BURN on board '$BOARD'. Is that this board? Type YES to proceed: " x
   [ "$x" = "YES" ] || { echo "aborted"; exit 1; }
 }
+need() { [ -f "$1" ] || { echo "ERROR: no $1 — $2"; exit 1; }; }
 
 case "$CMD" in
+  --check-blank)
+    # READ-ONLY. Every row this procedure writes must still be zero.
+    dump="$BOARD_DIR/otp-before.bin"
+    picotool otp dump -r --output "$dump"
+    python3 - "$dump" "$SECRET_ROW" "$DIGEST_ROW" <<'PY'
+import struct, sys
+data = open(sys.argv[1], "rb").read()
+rows = [word & 0xffffff for (word,) in struct.iter_unpack("<I", data)]
+if len(rows) != 4096:
+    sys.exit(f"ERROR: the dump holds {len(rows)} rows, not 4096")
+secret, digest = int(sys.argv[2]), int(sys.argv[3])
+watched = {"sealed secret": range(secret, secret + 16), "digest": range(digest, digest + 16),
+           "boot key 0": range(0x80, 0x90), "CRIT1": range(0x40, 0x48), "BOOT_FLAGS1": range(0x4b, 0x4e),
+           "secret page lock": range(0xf80 + 96, 0xf80 + 98), "digest page lock": range(0xf80 + 92, 0xf80 + 94)}
+used = {name: [hex(r) for r in span if rows[r] != 0] for name, span in watched.items()}
+used = {name: found for name, found in used.items() if found}
+if used:
+    sys.exit(f"ERROR: this board is not blank where the procedure writes: {used}")
+print("blank where the procedure writes")
+PY
+    ;;
   --gen-secret)
-    [ -f "$SECRET_JSON" ] && { echo "ERROR: $SECRET_JSON exists — refusing to regenerate a provisioned secret"; exit 1; }
-    python3 - "$SECRET_JSON" "$ROW_BASE" <<'PY'
-import os, sys, json
-path, base = sys.argv[1], int(sys.argv[2])
-b = os.urandom(32)  # the 256-bit sealed host-key secret
-rows = { str(base + i): (b[2*i] | (b[2*i+1] << 8)) for i in range(16) }
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w") as f:
-    json.dump({"otp": rows}, f, indent=2)
-print(f"wrote {path}: 16 rows @ base {base}. THIS FILE IS THE HOST SECRET — guard it like the key.")
+    [ -f "$SECRET_BIN" ] && { echo "ERROR: $SECRET_BIN exists — refusing to regenerate a provisioned secret"; exit 1; }
+    python3 - "$SECRET_BIN" <<'PY'
+import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, "wb") as f:
+    f.write(os.urandom(32))
+print(f"wrote {sys.argv[1]}: this board's 256-bit sealed secret. Guard it like the key.")
 PY
     ;;
   --write-secret)
-    [ -f "$SECRET_JSON" ] || { echo "ERROR: run '$0 --gen-secret' first"; exit 1; }
+    need "$SECRET_BIN" "run --gen-secret for this board first"
     confirm
-    run picotool otp load "$SECRET_JSON" ;;
-  --lock-secret)
-    # Lock OTP page $PAGE to secure-read only, so ONLY secure-state (enrolled) firmware reads the
-    # host secret. This script will NOT guess the permission encoding — write perms.json per the
-    # RP2350 datasheet §13 + 'picotool otp permissions' schema, then:
-    echo "Create $HERE/perms.json setting page $PAGE = secure-read-only (datasheet §13), then run:"
+    run picotool otp load -e -s "$SECRET_ROW" "$SECRET_BIN" -t bin ;;
+  --write-digest)
+    need "$MU_BIN" "run sign.sh --sign first"
     confirm
-    run picotool otp permissions "$HERE/perms.json" ;;
+    run picotool otp load -e -s "$DIGEST_ROW" "$MU_BIN" -t bin ;;
+  --lock-pages)
+    confirm
+    run picotool otp set -r "$SECRET_LOCK_ROW" "$SECRET_LOCK"
+    run picotool otp set -r "$DIGEST_LOCK_ROW" "$DIGEST_LOCK" ;;
+  --write-bootkey)
+    # The key's hash alone, so it can be read back before anything depends on it. sign.sh's OTP
+    # file also holds KEY_VALID and SECURE_BOOT_ENABLE, which --lockdown burns.
+    need "$OTP_JSON" "run sign.sh --sign first"
+    key_json="$BOARD_DIR/bootkey-only.json"
+    python3 - "$OTP_JSON" "$key_json" <<'PY'
+import json, sys
+json.dump({"bootkey0": json.load(open(sys.argv[1]))["bootkey0"]}, open(sys.argv[2], "w"))
+PY
+    confirm
+    run picotool otp load "$key_json" ;;
   --lockdown)
-    # DO LAST. SECURE_BOOT_ENABLE + DEBUG_DISABLE + boot-key-valid + alt-boot-disable in the CRIT
-    # OTP register. This script deliberately does NOT emit a hard-coded CRIT selector/value — a wrong
-    # CRIT burn bricks the board. Read the exact rows from RP2350 datasheet §13 (HAL reads CRIT bit0
-    # = secure_boot_enabled, bit2 = debug_disabled) and 'picotool otp list', then run the explicit
-    # 'picotool otp set <CRIT selector> <value>' commands yourself.
-    echo "LOCKDOWN is manual by design. After Steps 3-4 pass validation:"
-    echo "  picotool otp set <SECURE_BOOT_ENABLE row> ...   # datasheet §13"
-    echo "  picotool otp set <DEBUG_DISABLE row> ..."
-    echo "Then re-read: picotool otp dump | diff otp-before.json - "
-    exit 0 ;;
+    # DO LAST: after this the board boots only images signed by the key, with debug off. Boot key
+    # slots 1-3 are marked invalid so no other key can be installed later. The USB bootloader stays
+    # on, which is how a signed monitor update is loaded.
+    need "$OTP_JSON" "run sign.sh --sign first"
+    lock_json="$BOARD_DIR/lockdown.json"
+    python3 - "$lock_json" <<'PY'
+import json, sys
+json.dump({"boot_flags1": {"key_valid": 1, "key_invalid": 14},
+           "crit1": {"secure_boot_enable": 1, "debug_disable": 1}}, open(sys.argv[1], "w"))
+PY
+    confirm
+    run picotool otp load "$lock_json" ;;
   *)
-    echo "usage: $0 [--gen-secret | --write-secret | --lock-secret | --lockdown] [--commit]"; exit 2 ;;
+    usage ;;
 esac

@@ -65,8 +65,8 @@ internal object UnifiedNativeApi {
     @Keep @JvmStatic external fun detectEnvelopeFrameType(envelopeBytes: ByteArray): Int
     /** The radio's entry: bytes a peer wrote over BLE. Returns serialized BleIncomingDataResponse. */
     @Keep @JvmStatic external fun processIncomingBleData(deviceAddress: String, role: Int, data: ByteArray): ByteArray
-    /** A GATT link came up; returns the radio bytes to write on it (DSM Amendment A27). */
-    @Keep @JvmStatic external fun bleLinkOpened(address: String, role: Int, target: ByteArray): Array<ByteArray>
+    /** A GATT link came up; returns the radio bytes to write on it (DSM Amendment A27), or null when Rust panicked. */
+    @Keep @JvmStatic external fun bleLinkOpened(address: String, role: Int, target: ByteArray): Array<ByteArray>?
     /** A GATT link closed. */
     @Keep @JvmStatic external fun bleLinkClosed(address: String, role: Int)
     /** Extract response_chunks from a BleIncomingDataResponse proto. */

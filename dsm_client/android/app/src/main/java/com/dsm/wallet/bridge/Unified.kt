@@ -163,6 +163,7 @@ object Unified {
      */
     @Keep @JvmStatic fun bleLinkOpened(address: String, role: Int, target: ByteArray): Array<ByteArray> =
         UnifiedNativeApi.bleLinkOpened(address, role, target)
+            ?: throw IllegalStateException("BLE link: Rust panicked opening $address")
 
     /** The GATT link at [address], this device on it as [role], closed. */
     @Keep @JvmStatic fun bleLinkClosed(address: String, role: Int) {
