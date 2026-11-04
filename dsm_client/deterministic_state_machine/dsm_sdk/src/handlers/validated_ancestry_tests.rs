@@ -255,6 +255,81 @@ async fn every_acceptance_verifies_the_senders_predecessors() {
     }
 }
 
+/// What checking `peer`'s step at `position` costs, as one check from its
+/// activation root.
+async fn cost_of_check(
+    genesis: [u8; 32],
+    devid: [u8; 32],
+    position: u64,
+) -> dsm::economic::peer_lineage::StepCost {
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let set = crate::sdk::storage_set::canonical_set(NETWORK).expect("canonical set");
+        let resolver = crate::sdk::economic_registers::LiveRegisterResolver {
+            set: &set,
+            runtime: handle,
+            expected_network_id: NETWORK.to_vec(),
+        };
+        let context =
+            crate::sdk::sofi_reads::VerifierContext::new(&set, None, None).expect("SoFi reads");
+        dsm::economic::peer_lineage::validate_peer_step(
+            &resolver,
+            NETWORK,
+            &genesis,
+            &devid,
+            position,
+            &crate::sdk::economic_registers::StoredOfflineRecords,
+            &context.peer_position_resolver(),
+        )
+        .expect("the check passes")
+        .cost()
+    })
+    .await
+    .expect("join")
+}
+
+/// Two devices paying each other in turn: each one's credits are funded by the
+/// other's debits, so a check's credit sources lead back over the same positions
+/// again and again. A check establishes each of them once, so its cost is linear
+/// in the positions behind it (DSM Amendment A31, MR-DSM-0356) and these payments
+/// stay well inside the budget. A walk repeating them reaches the budget within
+/// a few rounds, and every payment after that is never taken.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_check_establishes_each_position_of_its_ancestry_once() {
+    let p = Pair::boot(100, 100).await;
+    let (a_held, b_held) = (p.a.era_balance(), p.b.era_balance());
+    for round in 0..8 {
+        for (from, to) in [(&p.a, &p.b), (&p.b, &p.a)] {
+            let sent = from.send(to, 1).await;
+            assert!(sent.success, "round {round}: {:?}", sent.error_message);
+            let credited = to.sync().await;
+            assert!(credited.success, "round {round}: {:?}", credited.errors);
+            let settled = from.sync().await;
+            assert!(settled.success, "round {round}: {:?}", settled.errors);
+        }
+    }
+    assert_eq!(p.a.era_balance(), a_held, "A took every payment of B's");
+    assert_eq!(p.b.era_balance(), b_held, "B took every payment of A's");
+
+    let position_of = |device: &TestDevice| {
+        device.enter();
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .expect("an admitted position")
+            .0
+    };
+    let (a_at, b_at) = (position_of(&p.a), position_of(&p.b));
+    let cost = cost_of_check(p.a.genesis, p.a.device_id, a_at).await;
+    println!("[ancestry] a check of A at {a_at}, with B at {b_at}: {cost:?}");
+    let behind = a_at + b_at;
+    assert!(
+        u64::from(cost.steps_validated) <= 2 * behind,
+        "{cost:?}: a check of A at {a_at}, with B at {b_at}, validated more than twice the \
+         positions behind it"
+    );
+}
+
 /// A credit's source is established through its own valid predecessors. C
 /// pays A, and A pays B; B checks both A's credit and C's debit ancestry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

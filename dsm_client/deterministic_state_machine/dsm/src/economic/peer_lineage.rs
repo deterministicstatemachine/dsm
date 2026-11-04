@@ -7,8 +7,10 @@
 //! This verifier starts at the activation root and advances each position
 //! from the root it validated before it. Each credit source is established
 //! through the same predicate. A conditional position resolves through SoFi's
-//! public evidence before it can parent another position. When evidence is
-//! unavailable or the validation budget is reached, nothing is accepted.
+//! public evidence before it can parent another position. One check
+//! establishes each position once, however many credits lead back to it, so
+//! its cost is linear in the positions behind it. When evidence is unavailable
+//! or the validation budget is reached, nothing is accepted.
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
@@ -618,6 +620,7 @@ impl Register {
 /// The parent a step is validated from: the root at the position before, and
 /// the claim accepted there when it was read for a conditional claim to name
 /// (`None` otherwise, and always at the activation root).
+#[derive(Clone, Copy)]
 struct ChainPoint {
     root: ValidatedEconomicRoot,
     accepted: Option<ParentClaimRef>,
@@ -650,6 +653,10 @@ enum Target {
 /// A peer's position under validation: its genesis, its device and the position.
 type StepCoordinate = ([u8; 32], [u8; 32], u64);
 
+/// What a walk established at a position: the point it left, and the claim
+/// accepted there.
+type EstablishedPosition = (ChainPoint, AcceptedClaim);
+
 struct Verifier<'a> {
     fetcher: &'a dyn PeerEvidenceFetcher,
     expected_network_id: &'a [u8],
@@ -659,6 +666,11 @@ struct Verifier<'a> {
     /// What this check has cost so far, counted as it reads.
     cost: std::cell::Cell<StepCost>,
     active: std::cell::RefCell<std::collections::BTreeSet<StepCoordinate>>,
+    /// Each position this check established on a walk, with the claim accepted
+    /// there. A later walk of the same peer passes over them: they hold for
+    /// this check alone, and a new check establishes them again (SA-92).
+    established:
+        std::cell::RefCell<std::collections::BTreeMap<StepCoordinate, EstablishedPosition>>,
     /// Every offline account a step this check validated left: each boundary
     /// in a step that passed.
     offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
@@ -704,6 +716,7 @@ impl<'a> Verifier<'a> {
                 steps_validated: 0,
             }),
             active: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            established: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             offline_accounts: std::cell::RefCell::new(Vec::new()),
             offline_exposures: std::cell::RefCell::new(Vec::new()),
             ek_steps: std::cell::RefCell::new(Vec::new()),
@@ -820,6 +833,12 @@ impl Verifier<'_> {
         target: Target,
     ) -> Result<(ChainPoint, AcceptedClaim, Option<ValidatedPeerTransition>), PeerLineageFailure>
     {
+        let coordinate = (*genesis, *device_id, position);
+        if let Target::Root = target {
+            if let Some((held, accepted)) = self.established.borrow().get(&coordinate).copied() {
+                return Ok((held, accepted, None));
+            }
+        }
         if self.cost.get().steps_validated >= VALIDATION_STEP_BUDGET {
             return Err(incomplete(format!(
                 "validation reached its budget of {VALIDATION_STEP_BUDGET} steps before \
@@ -884,8 +903,14 @@ impl Verifier<'_> {
             }
         };
         self.count(|c| c.steps_validated += 1);
+        if let Target::Root = target {
+            self.established
+                .borrow_mut()
+                .insert(coordinate, (result.0, result.1));
+        }
         Ok(result)
     }
+
     /// The claim final at `position`'s root cell, routed from the root
     /// authenticated at the position before. Only a claim naming
     /// `K_root(position)` is recognized there, and the key is a hash of
@@ -1348,9 +1373,9 @@ impl Verifier<'_> {
         })
     }
 
-    /// A credit's source: the source's own step at `position`, validated one
-    /// hop. It is an online transfer, a debit that names no source of its
-    /// own, so nothing behind it is read.
+    /// A credit's source: the source's own step at `position`, established
+    /// from the source's activation root. It is an online transfer, a debit
+    /// that names no source of its own.
     fn source_step(
         &self,
         genesis: &[u8; 32],

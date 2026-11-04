@@ -747,8 +747,12 @@ fn segment_bundle(
 
 /// The final release at `generation` of the reserve `reserve_id`, for a
 /// verifier, with the established heads around it: from what this device's
-/// walks established when they already passed it, else by walking. `None`
-/// while the lineage has not reached that generation with a final release.
+/// walks established when they already passed it, else by walking. A
+/// generation the lineage has already passed is read back from its cell with
+/// no walk, since a walk adds nothing behind the head: every check of a
+/// peer's ancestry that reaches a faucet claim asks for one (DSM Amendment
+/// A31). `None` while the lineage has not reached that generation with a
+/// final release.
 pub fn release_at(
     set: &StorageSet,
     network_id: &[u8],
@@ -765,9 +769,12 @@ pub fn release_at(
     if let Some(win) = established_release_at(set, &genesis, generation)? {
         return Ok(Some(win));
     }
-    walk_reserve(set, network_id, runtime)?;
-    if let Some(win) = established_release_at(set, &genesis, generation)? {
-        return Ok(Some(win));
+    let (lineage, _) = established_lineage(set, &genesis, None)?;
+    if lineage.head().head().generation() < generation {
+        walk_reserve(set, network_id, runtime)?;
+        if let Some(win) = established_release_at(set, &genesis, generation)? {
+            return Ok(Some(win));
+        }
     }
     read_back_release(set, &genesis, runtime, generation)
 }
