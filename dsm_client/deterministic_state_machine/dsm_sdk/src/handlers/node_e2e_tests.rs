@@ -1922,17 +1922,19 @@ async fn a_send_from_a_leaf_cache_its_admitted_root_does_not_hold_builds_nothing
     assert_eq!(p.b.era_balance(), before);
 }
 
-/// MR-SOFI-0432 (SoFi Amendment S35, DSM Amendment A31): resolving another
-/// trader's position establishes the economic ancestry of its parent root and
-/// of the setup claims its evidence names. B sets up with the vault and pays
-/// A; B then trades and pays A again, and A's acceptance resolves B's SoFi
-/// position on the way. A reads B's root cell at every position from the
-/// first to the step it accepted.
+/// MR-SOFI-0346 (owner ruling 2026-09-30): resolving another trader's
+/// position reads only that trader's position, its predecessor and the
+/// accepted claim at each setup position `P`'s legs name (DSM Amendment A14).
+/// B sets up with the vault and pays A; B then trades and pays A again, and
+/// A's acceptance resolves B's SoFi position on the way. A asks no member for
+/// any of B's root cells before the trade but the position the setup names,
+/// the one before the step that carries it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn resolving_another_traders_position_establishes_every_position_behind_it() {
+async fn resolving_another_traders_position_reads_only_that_position() {
     let p = Pair::boot(500, 200).await;
     let m = open_market(&p).await;
+    let setup_names = admitted_position(&p.b) - 1;
     let paid = |label: &'static str| {
         let (a, b) = (&p.a, &p.b);
         async move {
@@ -1945,6 +1947,7 @@ async fn resolving_another_traders_position_establishes_every_position_behind_it
         }
     };
     paid("the first payment").await;
+    let before_the_trade = admitted_position(&p.b);
     let a_before = p.a.era_balance();
 
     realized_trade(&p, &m, 10).await;
@@ -1976,11 +1979,14 @@ async fn resolving_another_traders_position_establishes_every_position_behind_it
             cell_reads.iter().any(|request| request.ends_with(&named))
         })
         .collect();
-    assert_eq!(
-        read_positions,
-        (1..=latest).collect::<Vec<u64>>(),
-        "A establishes every position of B's up to the step it accepted"
-    );
+    for position in &read_positions {
+        assert!(
+            *position >= before_the_trade || *position == setup_names,
+            "A read B's root cell at position {position}, before {before_the_trade}, the trade's \
+             predecessor (the setup names {setup_names}); B's root cells A read: \
+             {read_positions:?}"
+        );
+    }
 }
 
 /// B's own exercise re-aimed at the vault's next generation: `P` names the

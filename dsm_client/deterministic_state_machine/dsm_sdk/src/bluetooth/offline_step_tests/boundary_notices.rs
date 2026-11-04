@@ -137,10 +137,9 @@ async fn a_load_followed_by_an_online_payment_still_reaches_the_contact() {
 
 /// Every boundary since a contact was last told reaches it in order, each
 /// continuing the account the one before it left. A contact added after them is
-/// told at the payer's next sync of the latest alone, and checking that one
-/// establishes every position behind it (DSM Amendment A31), the earlier boundary
-/// among them. Once told, a contact is owed nothing more. MUTATION CONTROL: a sync
-/// that does not tell contacts leaves C with no record and turns this red.
+/// told at the payer's next sync of the latest alone, which validates with nothing
+/// behind it recorded. Once told, a contact is owed nothing more. MUTATION CONTROL:
+/// a sync that does not tell contacts leaves C with no record and turns this red.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
@@ -191,10 +190,12 @@ async fn each_contact_is_told_what_it_is_owed_of_a_payers_boundaries() {
     let recorded = recorded_by(&c, &pair.a, &appliance).expect("C recorded the unload");
     assert_eq!(recorded.economic_position(), unloaded_at);
     c.enter();
-    let behind = offline_account_below(&pair.a.genesis, &pair.a.device_id, &bundle, unloaded_at)
-        .expect("the store reads")
-        .expect("C's check of the unload established the load behind it");
-    assert_eq!(behind.economic_position(), loaded_at);
+    assert!(
+        offline_account_below(&pair.a.genesis, &pair.a.device_id, &bundle, unloaded_at)
+            .expect("the store reads")
+            .is_none(),
+        "C was told of the latest alone"
+    );
 }
 
 /// A notice is discovery and no authority. From a contact holding no boundary at
