@@ -72,6 +72,50 @@ pub fn rust_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Every `.rs` file a build of the crate at `src` compiles outside `cfg(test)`,
+/// in a stable order: the module tree from `lib.rs`, leaving out each module
+/// declared under `cfg(test)` and everything below it. A module under any other
+/// `cfg` (a target, a feature) is shipped code of some build, and is kept.
+pub fn production_files(src: &Path) -> Vec<PathBuf> {
+    let root = src.join("lib.rs");
+    let mut out = vec![root.clone()];
+    collect_modules(&parse(&root).items, src, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_modules(items: &[Item], dir: &Path, out: &mut Vec<PathBuf>) {
+    for item in items {
+        let Item::Mod(module) = item else { continue };
+        if under_cfg_test(&module.attrs) {
+            continue;
+        }
+        let below = dir.join(module.ident.to_string());
+        if let Some((_, inner)) = &module.content {
+            collect_modules(inner, &below, out);
+            continue;
+        }
+        let beside = dir.join(format!("{}.rs", module.ident));
+        let path = if beside.is_file() {
+            beside
+        } else {
+            below.join("mod.rs")
+        };
+        collect_modules(&parse(&path).items, &below, out);
+        out.push(path);
+    }
+}
+
+/// Whether an item's attributes hold exactly `#[cfg(test)]`.
+fn under_cfg_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg")
+            && a.meta
+                .require_list()
+                .is_ok_and(|list| list.tokens.to_string() == "test")
+    })
+}
+
 /// Whether an item is compiled only under a `cfg` (tests, features).
 pub fn cfg_gated(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("cfg"))

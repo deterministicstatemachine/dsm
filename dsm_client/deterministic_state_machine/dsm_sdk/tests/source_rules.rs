@@ -7,8 +7,8 @@
 mod source_calls;
 
 use source_calls::{
-    calls_in_order, cfg_gated, core_src, events, parse, production_fn, production_fns, rust_files,
-    sdk_source, Event,
+    calls_in_order, cfg_gated, core_src, events, parse, production_files, production_fn,
+    production_fns, rust_files, sdk_source, Event,
 };
 use syn::punctuated::Punctuated;
 use syn::{Fields, ImplItem, Item, Token, UseTree, Visibility};
@@ -808,7 +808,7 @@ fn the_reachability_gate_names_an_uncalled_public_sofi_method_and_an_unused_type
 fn the_sdk_takes_a_reserve_release_into_a_lineage_only_as_proven_final() {
     let sdk = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut proven = Vec::new();
-    for path in rust_files(&sdk) {
+    for path in production_files(&sdk) {
         let file = parse(&path);
         for (name, block) in production_fns(&file) {
             for event in events(&block) {

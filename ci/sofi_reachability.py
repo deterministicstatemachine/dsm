@@ -58,6 +58,11 @@ FEATURES = ["dsm_sdk/jni", "dsm_sdk/bluetooth"]
 DEFINITION, IMPORT = 0x1, 0x2
 
 
+def read_text(path):
+    with open(path, encoding="utf-8") as source:
+        return source.read()
+
+
 # ── SCIP, read by hand: the index is protobuf, and only four messages and
 # seven fields of it are needed (github.com/sourcegraph/scip, scip.proto). ──
 def _varint(buf, i):
@@ -104,7 +109,8 @@ def _packed_int32(value, wire):
 
 def read_index(path):
     """{relative_path: [(start_line, symbol, roles)]} of every document."""
-    data = open(path, "rb").read()
+    with open(path, "rb") as source:
+        data = source.read()
     documents = {}
     for number, _wire, value in _fields(data):
         if number != 2:  # Index.documents
@@ -145,7 +151,7 @@ def cfg_test_module_files():
     """Files declared `#[cfg(test)] mod x;` by their parent: test support."""
     gated = set()
     for decl in [f for r in ROOTS for f in glob.glob(r + "/**/*.rs", recursive=True)]:
-        text = open(decl, encoding="utf-8").read()
+        text = read_text(decl)
         pattern = (
             r"#\[cfg\((?:any\([^)]*\btest\b[^)]*\)|test)\)\]\s*"
             r"(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;"
@@ -184,7 +190,7 @@ _lines_cache = {}
 def test_lines(path):
     """The 0-based lines inside `#[cfg(test)]`-attributed items of `path`."""
     if path not in _lines_cache:
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
         lines = set()
         for start, end in PT.test_item_spans(text):
             first = text.count("\n", 0, start)
@@ -217,7 +223,7 @@ def public_sofi_functions(documents):
         path = os.path.normpath(os.path.join(WORKSPACE, rel))
         if not path.startswith(CORE_SOFI) or not is_production_file(path):
             continue
-        lines = open(path, encoding="utf-8").read().split("\n")
+        lines = read_text(path).split("\n")
         tests = test_lines(path)
         for line, symbol, roles in occurrences:
             if not roles & DEFINITION or line in tests:
@@ -263,7 +269,7 @@ def main():
             if symbol not in targets or targets[symbol][3] or roles & DEFINITION:
                 continue
             if text is None:
-                text = open(path, encoding="utf-8").read()
+                text = read_text(path)
                 lines = text.split("\n")
             if IMPL_HEADER.match(lines[line]):
                 own_impls.setdefault(symbol, []).append((path, body_lines(text, line)))
@@ -272,7 +278,7 @@ def main():
         if not is_production_file(path):
             continue
         tests = test_lines(path)
-        text = open(path, encoding="utf-8").read()
+        text = read_text(path)
         lines = text.split("\n")
         for line, symbol, roles in occurrences:
             if symbol not in callers or roles & (DEFINITION | IMPORT) or line in tests:
@@ -293,7 +299,7 @@ def main():
 
     baseline = set()
     if os.path.exists(BASELINE):
-        for line in open(BASELINE, encoding="utf-8"):
+        for line in read_text(BASELINE).splitlines():
             line = line.split("#", 1)[0].strip()
             if line:
                 baseline.add(line)
