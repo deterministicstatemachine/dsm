@@ -7183,10 +7183,13 @@ Run at release on the commit that carries this paragraph, `counterfeit_acceptanc
 | `validate_peer_step` | Result | What went red |
 |---|---|---|
 | As committed | 9 passed, 0 failed | nothing |
-| Root comparison removed | 8 passed, 1 failed | `a_second_step_built_on_a_forged_predecessor_is_never_accepted`: `Ok`, the debit of invented value validated |
+| Root comparison removed | 8 passed, 1 failed | `a_second_step_built_on_a_forged_predecessor_is_never_accepted`: `validate_peer_step` returns `Ok`, and the test stops there |
 | Whole first-spend check removed | 6 passed, 3 failed | that test, `a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer` and `a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited` |
 
-This closes one gap: before this test, removing the root comparison left every test green. It covers position 2 alone. What the paragraph above says it does not cover is still not covered and still not run. The payer's state is built by hand, on real nodes, and has not run on a phone.
+This closes one gap: before this test, removing the root comparison left every test green. It covers position 2 alone. What the paragraph above says it does not cover is still not covered and still not run. The payer's state is built by hand, on real nodes, and has not run on a phone. The test calls `prevalidate_incoming_transfer_admission` directly with a receipt whose SMT roots it made up, so it does not run `verify_receipt_state` or the apply: it says nothing about what the rest of the receive path does.
+
+**Two tests moved to A14.** The board on `3409cfa45` ran red on two tests that still stated A19's outcomes, the two the table above marks red. `a_claim_repeating_the_paying_step_at_the_next_position_is_never_accepted` now expects `Incomplete`, "not final yet". `a_claim_off_the_validated_chain_changes_nothing` is now `a_second_claim_final_along_its_own_parent_is_a_fork` and expects `Invalid`, "a fork is refused". Both are A14's bullets as A28 restored them. Neither change was run locally (owner, 2026-11-04: GitHub runs the tests on the PR).
+
 ### 6.144 The fleet behind the client, the BLE link exports, and the burn procedure (`fix/beta-requirements-completion`, 2026-11-02 and 2026-11-03)
 
 **The fleet.** The phone run of 2026-11-02 onboarded three phones (genesis initialized, network connected, device verified), and every faucet claim then failed after 8 attempts. Each attempt's read-back of its seats was refused as longer than the 363,787 bytes one page may hold. A read of a missing cell with `?from=abc` answered 200 on all five nodes, where current code answers 400: the fleet predated paged cell reads (7e23a388b), so a cell read returned every value at once. The earlier phone runs of 2026-10-30 and 2026-10-31 ran against that node too. The fleet was wiped and reprovisioned on 2026-11-03 at `6d6c7a95d`, and the same read answered 400 on all five at 9:15 AM ET. The full protocol run has not yet run against it.

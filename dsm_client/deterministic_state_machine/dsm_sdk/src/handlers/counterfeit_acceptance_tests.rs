@@ -5,10 +5,10 @@
 //! A payer runs software it compiled itself. It can build a step the rules do
 //! not allow, sign it with its real key, publish its evidence and register its
 //! claim, and the storage nodes take it: they store, they do not validate. What
-//! stops the value is the receiver's own walk (DSM Amendment A19, restoring
-//! A8): every step it has not validated, each from the root validated before
-//! it, and every credit's source through the source's own segment to a real
-//! online debit. These tests build each counterfeit with the producer's own
+//! stops the value is the receiver's own validation (DSM Amendments A14, A28):
+//! the offered step from its own parent, a first spend held to the step before
+//! it, and each credit's source by the source's own step, a real online debit.
+//! These tests build each counterfeit with the producer's own
 //! builders, as modified software would, publish it to the network's storage
 //! nodes, and ask a device that holds nothing of the payer.
 
@@ -645,8 +645,8 @@ async fn a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited() 
 /// left.
 ///
 /// MUTATION CONTROL: the root comparison dropped from `validate_peer_step`
-/// turns this red: the receiver validates the debit of value that never
-/// existed.
+/// turns this red: that call returns `Ok`, and the test stops there, so the
+/// receipt's state rules and the apply after it are not reached.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_second_step_built_on_a_forged_predecessor_is_never_accepted() {

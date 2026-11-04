@@ -229,19 +229,15 @@ async fn a_claim_whose_witness_names_another_parent_is_never_accepted() {
     }
 }
 
-/// A claim whose own witness was built on another root than the one the
-/// verifier validated before it is never accepted (DSM Amendment A19, audit
-/// finding SA-02). A pays B, then registers, under its own key, a claim at
-/// the next position that is its paying debit again: that step's manifest,
-/// whose witness was built on A's root before the payment, and the root the
-/// payment produced. The claim sits along the cell routed from A's real root
-/// at the paying position, is final there, its signature verifies, and its
-/// debit is valid from the root its own witness names. Walked from B's
-/// frontier for A, B validates the paying step, reads the next claim from the
-/// cell routed from the root it validated there, and refuses its step: the
-/// witness does not start from that root.
-/// MUTATION CONTROL: validating the step from the root its own witness names
-/// (A14's parent) turns this red: the debit is validated a second time.
+/// A claim final only along a route other than its own witness's parent is
+/// never accepted (DSM Amendments A14, A28). A pays B, then registers, under
+/// its own key, a claim at the next position that is its paying debit again:
+/// that step's manifest, whose witness was built on A's root before the
+/// payment, and the root the payment produced. The claim sits along the cell
+/// routed from A's real root at the paying position, is final there, and its
+/// signature verifies. Its parent is the root its own witness names, and at
+/// the cell routed from that root it is not final, so the step is not
+/// established.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_claim_repeating_the_paying_step_at_the_next_position_is_never_accepted() {
@@ -296,14 +292,14 @@ async fn a_claim_repeating_the_paying_step_at_the_next_position_is_never_accepte
 
     p.b.enter();
     match verify(p.a.genesis, p.a.device_id, again).await {
-        Err(PeerLineageFailure::Invalid(why)) => assert!(
-            why.contains(&format!("validation at {again}"))
-                && why.contains("the witness does not start from the validated predecessor"),
-            "the step at {again} is refused, its witness built on another root: {why}"
+        Err(PeerLineageFailure::Incomplete(why)) => assert!(
+            why.contains(&format!("position {again}")) && why.contains("not final yet"),
+            "the step at {again} is not established, its claim not final at its parent's cell: \
+             {why}"
         ),
         other => panic!(
-            "a claim whose witness names a root the verifier did not validate before it is \
-             never accepted: {other:?}"
+            "a claim final only along a route other than its witness's parent is never \
+             accepted: {other:?}"
         ),
     }
 }
@@ -714,16 +710,14 @@ async fn a_holdings_status_checks_the_root_one_hop_and_reads_the_next_cell_every
     );
 }
 
-/// A claim off the validated chain changes nothing (DSM Amendment A19;
-/// SA-92). B validates A's paying step. A then registers a second claim at
-/// that position, final along the cell routed from a root two positions back,
-/// a root B never validated at the position before. B reads a position only
-/// at the cell routed from the root it validated before it, so that claim is
-/// not on its chain: asked again, as a verifier asking for the first time
-/// would be, B validates the same step to the same root.
+/// Two claims at a position, each final at the cell routed from its own
+/// parent, are a fork, refused and never one chosen (DSM Amendments A14, A28).
+/// B validates A's paying step. A then registers a second claim at that
+/// position, final along the cell routed from the root two positions back, the
+/// parent its own witness names. Asked again, B refuses the position.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
-async fn a_claim_off_the_validated_chain_changes_nothing() {
+async fn a_second_claim_final_along_its_own_parent_is_a_fork() {
     use crate::sdk::economic_registers::{
         register_economic_root, root_cell, root_claim_settlement, RootClaimSettlement,
     };
@@ -737,7 +731,7 @@ async fn a_claim_off_the_validated_chain_changes_nothing() {
     assert!(paid_at >= 2, "A's paying step follows its funding");
 
     p.b.enter();
-    let before = verify(p.a.genesis, p.a.device_id, paid_at)
+    verify(p.a.genesis, p.a.device_id, paid_at)
         .await
         .expect("A's paying step is valid");
 
@@ -794,10 +788,13 @@ async fn a_claim_off_the_validated_chain_changes_nothing() {
     );
 
     p.b.enter();
-    let after = verify(p.a.genesis, p.a.device_id, paid_at)
-        .await
-        .expect("a claim off the validated chain changes nothing");
-    assert_eq!(after.validated_root(), before.validated_root());
+    match verify(p.a.genesis, p.a.device_id, paid_at).await {
+        Err(PeerLineageFailure::Invalid(why)) => assert!(
+            why.contains(&format!("position {paid_at}")) && why.contains("a fork is refused"),
+            "the position is refused as a fork: {why}"
+        ),
+        other => panic!("two final claims at a position are a fork: {other:?}"),
+    }
 }
 
 /// A read checks the step it asks about and nothing else, but for a first
