@@ -4,7 +4,7 @@ name = "dsm-android-anchor"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the sender USB anchor appliance (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive) into the dsm_sdk bridge seam, plus gated device-setup ops (counter birth, slot-0 birth cage) and read-only chip diagnostics. Depends on dsm_sdk + dsm-anchor-hw-verifier in ONE direction (no dependency cycle); transitively pulls tropic01, so it is EXCLUDED from the workspace and built only in the Android cargo-ndk pipeline — the default CI workspace stays tropic01-free."
+description = "On-device glue for the DSM Software-Authority / Hardware-Identity anchor: installs the sender USB anchor appliance (UsbAnchorAppliance over the opaque Kotlin picoUsbTransceive) into the dsm_sdk bridge seam. The appliance provisions itself over OP_PROVISION; no raw SPI reaches the chip from the phone. Depends on dsm_sdk in ONE direction (no dependency cycle); built in the Android cargo-ndk pipeline."
 
 # Its own workspace root. The repository workspace excludes this crate, and cargo keeps
 # climbing past an excluding root: from a checkout nested under another checkout (a git
@@ -19,21 +19,14 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
 # OFF by default. Compiles the ACCEPT-PRODUCING sender appliance-factory install (install.rs) and
-# the device-setup WRITES (counter birth, slot-0 birth cage) + their JNI triggers. A default build
-# cannot produce offline-bearer releases or touch hardware state — none of it even compiles in.
-# The device layer enables this for the 2-phone bench test; the production flip is the owner's call.
+# its JNI trigger. A default build cannot produce offline-bearer releases.
 on_device_installs = []
 
 [dependencies]
 # The SDK whose bridge install seams we fill. One-directional: dsm_sdk never depends back on us.
 dsm_sdk = { path = "../../dsm_client/deterministic_state_machine/dsm_sdk" }
-# The real libtropic-backed device-setup ops (counter birth, slot-0 birth cage, counter read).
-# This is the crate that pulls tropic01.
-dsm-anchor-hw-verifier = { path = "../dsm-anchor-hw-verifier" }
-# The tropic01-free SPI spine — SpiRelayChannel/RelayError for the local setup channel.
-dsm-anchor-verifier = { path = "../dsm-anchor-verifier" }
-# The OP_SPI_PASSTHROUGH ApplianceRequest/Response codec (tropic01-free) — the Phone->Pico USB
-# bridge frames requests / decodes responses in Rust so Kotlin stays an opaque byte transport.
+# The ApplianceRequest/Response codec — the Phone->Pico USB bridge frames requests and decodes
+# responses in Rust so Kotlin stays an opaque byte transport.
 dsm-anchor-core = { path = "../dsm-anchor-core" }
 # DsmError (the fail-closed error type at every op boundary).
 dsm = { path = "../../dsm_client/deterministic_state_machine/dsm" }

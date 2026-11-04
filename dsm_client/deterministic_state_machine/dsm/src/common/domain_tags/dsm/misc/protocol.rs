@@ -183,6 +183,21 @@ pub const TAG_DSM_RELATIONSHIP_FINALIZED: TaggedHashDomain<'static> =
 /// like the evidence tags above).
 pub const TAG_DSM_RELATIONSHIP_FINALIZED_ARTIFACT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/relationship-finalized-artifact/v1");
+/// The restart statement both AKs of a relationship sign to continue one
+/// device's per-step EK cert chain from the exact step it names, at the
+/// agreed accepted tip (cert resync, DSM Amendment A20).
+pub const TAG_DSM_CERT_RESTART: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/cert-restart/v1");
+/// The statement the restarting device's AK signs to ask its counterparty for
+/// a restart: the relationship, the agreed accepted tip, the epoch, the
+/// preserved acceptance commitment and its new key (DSM Amendment A20).
+pub const TAG_DSM_CERT_RESTART_REQUEST: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/cert-restart-request/v1");
+/// The statement the counterparty's AK signs once it recorded a restart step:
+/// that step's address and the counterparty's own latest step (DSM Amendment
+/// A20).
+pub const TAG_DSM_CERT_RESTART_DONE: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/cert-restart-done/v1");
 pub const TAG_DSM_SMT_PROOF: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/smt-proof");
 pub const TAG_DSM_SPARSE_IDX: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/sparse-idx");
 pub const TAG_DSM_STATE_ENTROPY: TaggedHashDomain<'static> =

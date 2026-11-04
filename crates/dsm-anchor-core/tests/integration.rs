@@ -9,13 +9,13 @@ use anchor_core::accept::{
 };
 use anchor_core::appliance::{Appliance, BootRecoveryRefusal, Record, RecoverOutcome, Status};
 use anchor_core::enrollment::{birth, BirthInputs};
-use anchor_core::hash::h as hash;
 use anchor_core::proto::{decode_response, encode_request, pb};
 use anchor_core::root_advance::{
     anchor_root_advance, transition_digest, OfflineRelease, OwnedTransition,
 };
 use anchor_core::service::{err, handle};
-use anchor_core::tropic::{ChipSig, PartitionSig, Tropic, TropicError};
+use anchor_core::tropic::{ChipSig, PartitionError, PartitionSig, Tropic, TropicError};
+use ed25519_dalek::{Signer, SigningKey};
 
 const H0: u32 = 100;
 const ANCHOR: [u8; 32] = [0xAA; 32];
@@ -31,26 +31,33 @@ const ONLINE_PK: [u8; 32] = [0x66; 32];
 const R_I: [u8; 32] = [0x51; 32];
 const R_NEXT: [u8; 32] = [0x52; 32];
 
-type App = Appliance<MockTropic, MockPart>;
+type App = Appliance<Chip, Partition>;
 
-// --- mocks ---
+const PARTITION: dsm_sphincs::SphincsVariant = dsm_sphincs::SphincsVariant::SPX128f;
 
-/// A faithful TROPIC01: a monotonic down-counter + a resident chip key. The chip signature
-/// is `H("mock/chip-sig" ‖ pk_chip ‖ M)` so [`MockChip::verify`] can recompute it from the
-/// pinned `pk_chip`; the private half (`csk`) never leaves this struct.
-struct MockTropic {
+// --- the appliance's parts, and the receiver's own checks ---
+
+/// A TROPIC01 as the appliance sees it: a monotonic down-counter and a resident Ed25519 key.
+/// `σ^chip` is that key's signature, which only its holder can make; the receiver verifies
+/// it under the pinned `pk_chip`.
+struct Chip {
     h: u32,
-    csk: [u8; 32],
+    resident: SigningKey,
+    closed_births: u32,
 }
-impl MockTropic {
+impl Chip {
     fn with_h(h: u32) -> Self {
-        Self { h, csk: [0xC0; 32] }
+        Self {
+            h,
+            resident: SigningKey::from_bytes(&[0xC0; 32]),
+            closed_births: 0,
+        }
     }
     fn pk(&self) -> Vec<u8> {
-        hash("mock/chip-pk", &[&self.csk]).to_vec()
+        self.resident.verifying_key().to_bytes().to_vec()
     }
 }
-impl Tropic for MockTropic {
+impl Tropic for Chip {
     fn counter_get(&mut self) -> Result<u32, TropicError> {
         Ok(self.h)
     }
@@ -62,32 +69,61 @@ impl Tropic for MockTropic {
         Ok(())
     }
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
-        let pk = self.pk();
-        Ok(hash("mock/chip-sig", &[&pk, message]).to_vec())
+        Ok(self.resident.sign(message).to_bytes().to_vec())
+    }
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        self.closed_births += 1;
+        Ok(())
     }
 }
 
-/// Receiver-side verification of the resident chip signature (`σ^chip`).
-struct MockChip;
-impl ChipSig for MockChip {
+/// Receiver-side verification of the resident chip signature (`σ^chip`), Ed25519.
+struct Ed25519Chip;
+impl ChipSig for Ed25519Chip {
     fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
-        sig == hash("mock/chip-sig", &[pk_chip, message])
+        use ed25519_dalek::Verifier;
+        let key: Result<[u8; 32], _> = pk_chip.try_into();
+        let signature: Result<[u8; 64], _> = sig.try_into();
+        matches!(
+            (key, signature),
+            (Ok(key), Ok(signature)) if matches!(
+                ed25519_dalek::VerifyingKey::from_bytes(&key).map(|vk| vk
+                    .verify(message, &ed25519_dalek::Signature::from_bytes(&signature))),
+                Ok(Ok(()))
+            )
+        )
     }
 }
 
-/// Deterministic mock partition (`σ^host`) scheme: `sk = pk = seed`; signature = keyed hash.
-struct MockPart;
-impl PartitionSig for MockPart {
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        (seed.to_vec(), seed.to_vec())
+/// The partition key (`σ^host`), BLAKE3-SPHINCS+ SPX128f as on the RP2350.
+struct Partition;
+impl PartitionSig for Partition {
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError> {
+        let kp =
+            dsm_sphincs::generate_keypair_from_seed(PARTITION, seed).map_err(partition_error)?;
+        Ok((kp.secret_key.clone(), kp.public_key.clone()))
     }
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8> {
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&sk[..32]);
-        anchor_core::hash::kdf(&k, "test/partsign", &[digest]).to_vec()
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError> {
+        dsm_sphincs::sign(PARTITION, sk, digest).map_err(partition_error)
     }
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-        Self::part_sign(pk, digest) == sig
+        matches!(dsm_sphincs::verify(PARTITION, pk, digest, sig), Ok(valid) if valid)
+    }
+}
+
+/// The SPHINCS+ failure, as the partition reports it.
+fn partition_error(e: dsm_sphincs::Error) -> PartitionError {
+    match e {
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::BadSecretKeySize) => {
+            PartitionError::SecretKey
+        }
+        dsm_sphincs::Error::Crypto(
+            dsm_sphincs::CryptoFailure::EmptySigningMessage
+            | dsm_sphincs::CryptoFailure::EmptyVerificationMessage,
+        ) => PartitionError::Message,
+        dsm_sphincs::Error::Crypto(dsm_sphincs::CryptoFailure::SignerSelfCheck) => {
+            PartitionError::SelfCheck
+        }
     }
 }
 
@@ -96,16 +132,12 @@ impl PartitionSig for MockPart {
 struct Dsm {
     smt_ok: bool,
     transition_ok: bool,
-    delivers: bool,
-    upgrade_ok: bool,
 }
 impl Dsm {
     fn ok() -> Self {
         Self {
             smt_ok: true,
             transition_ok: true,
-            delivers: true,
-            upgrade_ok: true,
         }
     }
 }
@@ -127,12 +159,6 @@ impl DsmVerifier for Dsm {
     fn verify_transition(&self, _d: &[u8; 32], _p: &[u8; 32], _n: &[u8; 32]) -> bool {
         self.transition_ok
     }
-    fn delivers_to_receiver(&self, _d: &[u8; 32], _r: &[u8; 32]) -> bool {
-        self.delivers
-    }
-    fn verify_upgrade_cert(&self, _b: &[u8; 32]) -> bool {
-        self.upgrade_ok
-    }
 }
 
 // --- helpers ---
@@ -146,8 +172,8 @@ struct Fixture {
 }
 
 fn fixture(h: u32) -> Fixture {
-    let chip_pk = MockTropic::with_h(0).pk(); // deterministic (csk fixed)
-    let b = birth::<MockPart>(&BirthInputs {
+    let chip_pk = Chip::with_h(0).pk(); // deterministic (csk fixed)
+    let b = birth::<Partition>(&BirthInputs {
         partition_trng: &[0x01; 32],
         chip_birth_witness: &[0x02; 32],
         host_nonce: &[0x03; 32],
@@ -160,11 +186,12 @@ fn fixture(h: u32) -> Fixture {
         partition_key_seed: &[0x04; 32],
         enrolled_counter: H0,
         genesis_root: &GENESIS_ROOT,
-    });
+    })
+    .expect("the anchor is born");
     let part_pk = b.partition_pk.clone();
     let bundle = b.bundle;
     let frontier0 = b.genesis_frontier;
-    let a = Appliance::new(MockTropic::with_h(h), H0, ANCHOR, PART_DEV, b);
+    let a = Appliance::new(Chip::with_h(h), H0, ANCHOR, PART_DEV, b);
     Fixture {
         a,
         part_pk,
@@ -224,8 +251,6 @@ fn ctx<'a>(
         expected_receiver_challenge: &RCHAL,
         expected_recipient: &RECIP,
         expected_policy_hash: &POLICY,
-        anchor_uncompromised: true,
-        is_genesis: false,
     }
 }
 
@@ -282,7 +307,7 @@ fn two_sequential_transfers() {
 fn accept_valid_release() {
     let (rel, part_pk, chip_pk, bundle, frontier0) = valid_release();
     let c = ctx(&bundle, &chip_pk, &part_pk, &frontier0);
-    accept_offline::<_, MockChip, MockPart>(&rel, &c, &Dsm::ok()).unwrap();
+    accept_offline::<_, Ed25519Chip, Partition>(&rel, &c, &Dsm::ok()).unwrap();
 }
 
 #[test]
@@ -291,7 +316,7 @@ fn accept_rejects_wrong_chip_key() {
     let wrong = [0xEE; 32];
     let c = ctx(&bundle, &wrong, &part_pk, &frontier0);
     assert_eq!(
-        accept_offline::<_, MockChip, MockPart>(&rel, &c, &Dsm::ok()),
+        accept_offline::<_, Ed25519Chip, Partition>(&rel, &c, &Dsm::ok()),
         Err(AcceptError::ChipSigInvalid)
     );
 }
@@ -306,7 +331,7 @@ fn accept_rejects_dsm_state_failures() {
         ..Dsm::ok()
     };
     assert_eq!(
-        accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
+        accept_offline::<_, Ed25519Chip, Partition>(&rel, &c, &d),
         Err(AcceptError::PrevStateUncommitted)
     );
     let d = Dsm {
@@ -314,27 +339,8 @@ fn accept_rejects_dsm_state_failures() {
         ..Dsm::ok()
     };
     assert_eq!(
-        accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
+        accept_offline::<_, Ed25519Chip, Partition>(&rel, &c, &d),
         Err(AcceptError::TransitionProofInvalid)
-    );
-    let d = Dsm {
-        delivers: false,
-        ..Dsm::ok()
-    };
-    assert_eq!(
-        accept_offline::<_, MockChip, MockPart>(&rel, &c, &d),
-        Err(AcceptError::NotDeliveredToReceiver)
-    );
-}
-
-#[test]
-fn accept_rejects_compromise() {
-    let (rel, part_pk, chip_pk, bundle, frontier0) = valid_release();
-    let mut c = ctx(&bundle, &chip_pk, &part_pk, &frontier0);
-    c.anchor_uncompromised = false;
-    assert_eq!(
-        accept_offline::<_, MockChip, MockPart>(&rel, &c, &Dsm::ok()),
-        Err(AcceptError::AnchorCompromised)
     );
 }
 
@@ -344,13 +350,6 @@ fn accept_rejects_compromise() {
 fn recover_ready_accepts() {
     let mut f = fixture(H0);
     assert_eq!(f.a.recover(), RecoverOutcome::Accept(f.frontier0));
-}
-
-#[test]
-fn recover_downgrades_on_firmware_boundary() {
-    let mut f = fixture(H0);
-    f.a.firmware_boundary_invalid = true;
-    assert_eq!(f.a.recover(), RecoverOutcome::DowngradeOnline);
 }
 
 #[test]
@@ -499,7 +498,7 @@ fn proto_release_roundtrip() {
     assert_eq!(back.cert.sigma_host, rel.cert.sigma_host);
     assert_eq!(back.cert.next_frontier, rel.cert.next_frontier);
     let c = ctx(&bundle, &chip_pk, &part_pk, &frontier0);
-    accept_offline::<_, MockChip, MockPart>(&back, &c, &Dsm::ok()).unwrap();
+    accept_offline::<_, Ed25519Chip, Partition>(&back, &c, &Dsm::ok()).unwrap();
 }
 
 #[test]
@@ -537,7 +536,7 @@ fn service_handle_full_flow() {
     assert!(r.ok);
     let rel = r.release.unwrap().to_release().unwrap();
     let c = ctx(&f.bundle, &f.chip_pk, &f.part_pk, &f.frontier0);
-    accept_offline::<_, MockChip, MockPart>(&rel, &c, &Dsm::ok()).unwrap();
+    accept_offline::<_, Ed25519Chip, Partition>(&rel, &c, &Dsm::ok()).unwrap();
 
     let fin = pb::ApplianceRequest {
         op: pb::Op::Finalize as i32,

@@ -31,6 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dsm::connect::{canonical, session_id, verify, Signed};
 use dsm::types::proto as generated;
 use generated::connect_reply_v1::Reply;
 use prost::Message;
@@ -46,9 +47,7 @@ use crate::sdk::connect::grant::{
 };
 use crate::sdk::connect::wager::{self, Player, Referee};
 use crate::sdk::connect::pinned_tls::Relay;
-use crate::sdk::connect::signed::{
-    canonical, own_card, own_network, session_id, sign_own, verify, Signed,
-};
+use crate::sdk::connect::signed::{own_card, own_network, sign_own};
 use crate::sdk::connect::wallet::{
     describe_request, describe_scope, granted_scopes, issued_by, payment_memo, short, Names,
     signed_response, verify_offer,
@@ -221,6 +220,7 @@ fn waits(
         // a match's own cells.
         Request::AcceptIssued { .. }
         | Request::Contacts
+        | Request::Sign { .. }
         | Request::DuelSessionKey { .. }
         | Request::DuelReady { .. }
         | Request::DuelWithdraw { .. }
@@ -303,6 +303,7 @@ fn duel_belongs_to(session: &store::WalletSession, request: &Request) -> Result<
         | Request::Swap { .. }
         | Request::Holdings { .. }
         | Request::Contacts
+        | Request::Sign { .. }
         | Request::EscrowLock(..)
         | Request::EscrowRelease { .. }
         | Request::DuelCollect { .. } => Ok(()),
@@ -509,6 +510,9 @@ impl AppRouterImpl {
             "connect.app.request" => Box::pin(self.connect_app_request(&i.args)).await,
             "connect.app.respond" => connect_app_respond(&i.args),
             "connect.app.status" => Box::pin(self.connect_app_status(&i.args)).await,
+            "connect.duelWithdraw" => Box::pin(self.connect_duel_withdraw(&i.args)).await,
+            "connect.duelSettle" => Box::pin(self.connect_duel_settle(&i.args)).await,
+            "connect.duelCollect" => Box::pin(self.connect_duel_collect(&i.args)).await,
             other => Err(format!("unknown connect invoke: {other}")),
         };
         match result {
@@ -518,6 +522,81 @@ impl AppRouterImpl {
     }
 
     // ------------------------------ the wallet ------------------------------
+
+    /// The player withdraws from a match no Start holds yet, from their own
+    /// wallet and with no application involved: their side's Withdraw, or a
+    /// Start, is first at the start cell's leader, and a Withdraw voids the
+    /// match and refunds both stakes (SA-77). The match is one this wallet
+    /// locked; its kept state names it.
+    async fn connect_duel_withdraw(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelWithdraw";
+        let req: generated::ConnectDuelWithdrawV1 = body(args, ROUTE)?;
+        let cell = d32(&req.match_cell, "the match cell")?;
+        let set = own_set()?;
+        let view = crate::sdk::computed_flow::withdraw(&self.core_sdk, &set, &cell)
+            .await
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        Ok(Reply::Duel(duel_cells(&view)))
+    }
+
+    /// The player collects a computed match's result from their own wallet,
+    /// with no application involved: each vault released to this wallet as its
+    /// predicate decides from the match's cells (SA-77). Each is a stake in a
+    /// match this wallet locked.
+    async fn connect_duel_collect(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelCollect";
+        let req: generated::ConnectDuelCollectV1 = body(args, ROUTE)?;
+        let set = own_set()?;
+        let mut released = Vec::with_capacity(req.vault_ids.len());
+        for vault in &req.vault_ids {
+            let vault_id = d32(vault, "a vault")?;
+            let held = crate::sdk::escrow_flow::vault(&self.core_sdk, &set, &vault_id)
+                .await
+                .map_err(|e| format!("{ROUTE}: vault {}: {e}", short(&vault_id)))?;
+            let kept = crate::storage::client_db::duel_matches::get_match(&held.verdict_cell)
+                .map_err(|e| format!("{ROUTE}: the kept matches: {e}"))?;
+            if held.program.is_none() || kept.is_none() {
+                return Err(format!(
+                    "{ROUTE}: vault {} is not a stake in a computed match this wallet staked in",
+                    short(&vault_id)
+                ));
+            }
+            let outcome = crate::sdk::computed_flow::release(&self.core_sdk, &set, &vault_id)
+                .await
+                .map_err(|e| format!("{ROUTE}: releasing {}: {e}", short(&vault_id)))?;
+            released.push(generated::ConnectEscrowReleasedV1 {
+                vault_id: vault_id.to_vec(),
+                position: outcome.position,
+                state: position_state(outcome.state) as i32,
+            });
+        }
+        Ok(Reply::Released(generated::ConnectEscrowReleaseResultV1 {
+            released,
+        }))
+    }
+
+    /// The player settles a started match from their own wallet, with no
+    /// application involved: from the transcript the wallet kept, and any of
+    /// the other side's last signed entries the player holds. Core decides the
+    /// outcome from the transcript's own bytes before anything is written
+    /// (SA-77).
+    async fn connect_duel_settle(&self, args: &[u8]) -> Result<Reply, String> {
+        const ROUTE: &str = "connect.duelSettle";
+        let req: generated::ConnectDuelSettleV1 = body(args, ROUTE)?;
+        let cell = d32(&req.match_cell, "the match cell")?;
+        let entries = crate::sdk::connect::grant::duel_entries(&req.entries)
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
+        let set = own_set()?;
+        let view = crate::sdk::computed_flow::settle(
+            &self.core_sdk,
+            &set,
+            &cell,
+            &signed_entries(&entries),
+        )
+        .await
+        .map_err(|e| format!("{ROUTE}: {e}"))?;
+        Ok(Reply::Duel(duel_cells(&view)))
+    }
 
     async fn connect_preview(&self, params: &[u8]) -> Result<Reply, String> {
         const ROUTE: &str = "connect.preview";
@@ -567,6 +646,10 @@ impl AppRouterImpl {
                 .scopes
                 .iter()
                 .map(|s| describe_scope(s, &names))
+                .chain([format!(
+                    "Up to {} requests that spend nothing; after them, each waits for you",
+                    verified.body.free_requests
+                )])
                 .collect(),
         }))
     }
@@ -643,11 +726,21 @@ impl AppRouterImpl {
                 .map_err(|e| format!("{ROUTE}: rooting {}: {e}", short(anchor)))?;
         }
 
+        // The secret this wallet alone reads the session's requests with: drawn
+        // from the system's CSPRNG, committed in the signed accept bound to
+        // this session, kept on this device and never logged (SA-128).
+        let read_secret = store::ReadSecret(d32(
+            &dsm::crypto::rng::generate_secure_random(32)
+                .map_err(|e| format!("{ROUTE}: the read secret: {e}"))?,
+            "the read secret",
+        )?);
         let accept_body = generated::AppConnectAcceptBodyV1 {
             offer_digest: digest.to_vec(),
             wallet_card: Some(card),
             wallet_att_a: att_a.to_vec(),
             granted: scopes_to_wire(&granted),
+            free_requests: verified.body.free_requests,
+            read_commitment: dsm::connect::read_commitment(&sid, &read_secret.0).to_vec(),
         }
         .encode_to_vec();
         let signature = sign_own(Signed::Accept, &accept_body)?;
@@ -671,6 +764,7 @@ impl AppRouterImpl {
             accept_body,
             last_seq: 0,
             connected: store::SessionStatus::Connected,
+            read_secret,
         };
         store::insert_session(&session).map_err(|e| format!("{ROUTE}: {e}"))?;
         crate::sdk::connect::wallet::start_listener()?;
@@ -733,7 +827,14 @@ impl AppRouterImpl {
                         reason: "the player declined it".into(),
                         result: None,
                     };
-                    self.finish(&session, request_body.seq, summary.clone(), declined, None)?;
+                    self.finish(
+                        &session,
+                        request_body.seq,
+                        summary.clone(),
+                        declined,
+                        None,
+                        store::GrantUse::Player,
+                    )?;
                     (
                         generated::ConnectOutcome::Declined,
                         format!("{name}: {summary}, declined."),
@@ -838,7 +939,14 @@ impl AppRouterImpl {
         .await;
         let outcome = executed.outcome;
         let reason = executed.reason.clone();
-        self.finish(session, seq, summary, executed, None)?;
+        self.finish(
+            session,
+            seq,
+            summary,
+            executed,
+            None,
+            store::GrantUse::Player,
+        )?;
         Ok(Approved::Done(outcome, reason))
     }
 
@@ -902,7 +1010,9 @@ impl AppRouterImpl {
             deliver_owed(&current).await?;
         }
         let after = connected(&session.session_id)?.last_seq;
-        let batch = relay.requests(&session.session_id, after).await?;
+        let batch = relay
+            .requests(&session.session_id, after, &session.read_secret.0)
+            .await?;
         let lock = session_lock(&session.session_id)?;
         for request in &batch.requests {
             let one = lock.lock().await;
@@ -968,7 +1078,11 @@ impl AppRouterImpl {
             Some(v) => *v,
             None => 0,
         };
-        match decide(&scopes, &request, &spent_of, &issued) {
+        let decision = match decide(&scopes, &request, &spent_of, &issued) {
+            Decision::InScope { spend } => free_requests_left(session, spend)?,
+            outside => outside,
+        };
+        match decision {
             Decision::InScope { spend } => {
                 // A quote or swap behind this device's own pending SoFi position (a
                 // trade cut off before it settled) finishes that position first, from
@@ -996,7 +1110,11 @@ impl AppRouterImpl {
                 )
                 .await;
                 let spend = executed.spend(spend);
-                self.finish(session, seq, summary, executed, spend)?;
+                let grant_use = match spend {
+                    Some(..) => store::GrantUse::Counted,
+                    None => store::GrantUse::Free,
+                };
+                self.finish(session, seq, summary, executed, spend, grant_use)?;
                 Ok(Flow::Processed)
             }
             Decision::Outside(reason) => {
@@ -1051,7 +1169,16 @@ impl AppRouterImpl {
             reason: said.clone(),
             result: None,
         };
-        self.finish(session, seq, summary.to_string(), executed, None)?;
+        // Its operations committed, and what it spent was counted with the
+        // first of them.
+        self.finish(
+            session,
+            seq,
+            summary.to_string(),
+            executed,
+            None,
+            store::GrantUse::Counted,
+        )?;
         Ok(Some(said))
     }
 
@@ -1065,6 +1192,7 @@ impl AppRouterImpl {
         summary: String,
         executed: Executed,
         spend: Option<([u8; 32], u64)>,
+        grant_use: store::GrantUse,
     ) -> Result<(), String> {
         let response = signed_response(&generated::AppResponseBodyV1 {
             session_id: session.session_id.to_vec(),
@@ -1083,6 +1211,7 @@ impl AppRouterImpl {
                 detail: executed.reason,
             },
             &response,
+            grant_use,
         )
         .map_err(|e| e.to_string())
     }
@@ -1156,11 +1285,10 @@ impl AppRouterImpl {
                     // A committed debit is paid, delivered or not: it stands
                     // and the sweep carries it forward (§16.6), so it counts
                     // against the grant (SA-19).
-                    OnlineSent::Debited(answer) => match (answer.success, answer.error_message) {
-                        (ok, _) if ok => Executed::carried_out(None),
-                        (_, Some(why)) => Executed::paid_undelivered(why),
-                        (_, None) => Executed::paid_undelivered("the send said nothing more"),
-                    },
+                    OnlineSent::Delivered(_) => Executed::carried_out(None),
+                    OnlineSent::Undelivered { why, .. } | OnlineSent::Stranded { why, .. } => {
+                        Executed::paid_undelivered(why)
+                    }
                     OnlineSent::NotDebited(answer) => match answer.error_message {
                         Some(why) => Executed::failed(why),
                         None => {
@@ -1208,6 +1336,11 @@ impl AppRouterImpl {
                     Err(e) => Executed::failed(e),
                 }
             }
+            Request::Sign { statement } => Executed::carried_out(Some(
+                generated::app_response_body_v1::Result::Sign(generated::ConnectSignResultV1 {
+                    statement: statement.clone(),
+                }),
+            )),
             Request::Contacts => match shared_contacts() {
                 Ok(shared) => Executed::carried_out(Some(
                     generated::app_response_body_v1::Result::Contacts(shared),
@@ -1224,12 +1357,18 @@ impl AppRouterImpl {
                 Box::pin(self.collect(session, vault_ids)).await
             }
             Request::DuelSessionKey { match_nonce } => {
-                match crate::sdk::computed_flow::session_public_key(match_nonce) {
-                    Ok(key) => Executed::carried_out(Some(
+                let answered =
+                    crate::sdk::computed_flow::session_public_key(match_nonce).and_then(|key| {
+                        crate::sdk::computed_flow::start_commitment(match_nonce)
+                            .map(|commitment| (key, commitment))
+                    });
+                match answered {
+                    Ok((key, commitment)) => Executed::carried_out(Some(
                         generated::app_response_body_v1::Result::DuelSessionKey(
                             generated::ConnectDuelSessionKeyResultV1 {
                                 session_public_key: key,
                                 signature_alg: u32::from(crate::sdk::sofi_flow::SIGNATURE_ALG),
+                                start_commitment: commitment.to_vec(),
                             },
                         ),
                     )),
@@ -1244,7 +1383,7 @@ impl AppRouterImpl {
             },
             Request::DuelReady {
                 match_cell,
-                opponent_ready,
+                opponent,
             } => {
                 let readied = async {
                     let set = own_set()?;
@@ -1252,7 +1391,9 @@ impl AppRouterImpl {
                         &self.core_sdk,
                         &set,
                         match_cell,
-                        opponent_ready.as_deref(),
+                        opponent
+                            .as_ref()
+                            .map(|(ready, reveal)| (ready.as_slice(), reveal)),
                     )
                     .await
                     .map_err(|e| format!("readying: {e}"))
@@ -1263,6 +1404,7 @@ impl AppRouterImpl {
                             generated::ConnectDuelReadyResultV1 {
                                 ready_signature: r.ready_signature,
                                 cells: Some(duel_cells(&r.view)),
+                                reveal: r.reveal.to_vec(),
                             },
                         ),
                     )),
@@ -1748,9 +1890,8 @@ impl AppRouterImpl {
         // Replayed over the public relay, one accept cost a SPHINCS+
         // verification and a directory read every time (SA-81).
         if let Some(card) = probe.wallet_card.as_ref() {
-            let named =
-                crate::sdk::connect::signed::card_identity(card, &probe.wallet_att_a, &network)
-                    .map_err(|e| format!("{ROUTE}: {e}"))?;
+            let named = dsm::connect::card_identity(card, &probe.wallet_att_a, &network)
+                .map_err(|e| format!("{ROUTE}: {e}"))?;
             let sid = session_id(&digest, &named.device_id);
             if let Some(held) = store::app_session(&sid).map_err(|e| format!("{ROUTE}: {e}"))? {
                 return if held.accept == accept.encode_to_vec() {
@@ -1762,6 +1903,11 @@ impl AppRouterImpl {
         }
         let verified =
             app::verify_accept(&accept, &offer, &network).map_err(|e| format!("{ROUTE}: {e}"))?;
+        // The offer is single-use: its first verified accept claims it before
+        // anything is added for the wallet, and every other wallet's accept is
+        // refused here (SA-79).
+        store::app_claim_offer(&verified.offer_digest, &verified.session_id)
+            .map_err(|e| format!("{ROUTE}: {e}"))?;
         let resolved = resolve_counterparty_via_transport(&verified.wallet_card)
             .await
             .map_err(|e| format!("{ROUTE}: resolving the wallet: {e}"))?;
@@ -1780,6 +1926,7 @@ impl AppRouterImpl {
             accept: accept.encode_to_vec(),
             next_seq: 1,
             connected: store::SessionStatus::Connected,
+            read_commitment: verified.read_commitment,
         };
         store::app_insert_session(&session).map_err(|e| format!("{ROUTE}: {e}"))?;
         Ok(Reply::Session(app_session_view(&session)?))
@@ -1802,20 +1949,20 @@ impl AppRouterImpl {
         let request_body: generated::AppRequestBodyV1 =
             canonical(&request.body, "the stored request")?;
         let asked = request_from_wire(&request_body)?;
-        let (answer, answer_body) = match response {
+        let (answer, answer_body, answer_signature) = match response {
             Some(bytes) => {
-                let body = generated::AppResponseV1::decode(bytes.as_slice())
-                    .map_err(|e| format!("{ROUTE}: the stored answer: {e}"))?
-                    .body;
+                let signed = generated::AppResponseV1::decode(bytes.as_slice())
+                    .map_err(|e| format!("{ROUTE}: the stored answer: {e}"))?;
                 (
                     Some(canonical::<generated::AppResponseBodyV1>(
-                        &body,
+                        &signed.body,
                         "the stored answer",
                     )?),
-                    body,
+                    signed.body,
+                    signed.signature,
                 )
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), Vec::new()),
         };
         let mut status = generated::ConnectAppStatusV1 {
             session_id: sid.to_vec(),
@@ -1925,6 +2072,21 @@ impl AppRouterImpl {
             Request::Quote { .. } => {
                 status.fact_detail = "a quote is information and carries no authority".into();
             }
+            Request::Sign { statement } => match &answer {
+                Some(generated::AppResponseBodyV1 {
+                    outcome,
+                    result: Some(generated::app_response_body_v1::Result::Sign(signed)),
+                    ..
+                }) if *outcome == generated::ConnectOutcome::CarriedOut as i32
+                    && signed.statement == *statement =>
+                {
+                    status.fact = generated::ConnectFact::Signed as i32;
+                    status.signed_statement = statement.clone();
+                    status.answer_signature = answer_signature;
+                    status.fact_detail = "the wallet signed these words after they were approved on its device: proof of its key, not of who pressed".into();
+                }
+                _ => status.fact_detail = "no signature answers it yet".into(),
+            },
             Request::Contacts => {
                 status.fact_detail =
                     "contacts are the wallet's word: who its owner keeps, never proof of anything"
@@ -2404,6 +2566,7 @@ impl AppRouterImpl {
             }
             Some(Intent::Holdings(k)) => Body::Holdings(k),
             Some(Intent::Contacts(k)) => Body::Contacts(k),
+            Some(Intent::Sign(k)) => Body::Sign(k),
             Some(Intent::EscrowLock(k)) => Body::EscrowLock(k),
             Some(Intent::EscrowRelease(k)) => Body::EscrowRelease(k),
             Some(Intent::DuelSessionKey(k)) => Body::DuelSessionKey(k),
@@ -2593,6 +2756,11 @@ fn wallet_session_view(
         scope_lines: granted
             .iter()
             .map(|s| describe_scope(s, &Names::new()))
+            .chain([format!(
+                "{} of {} requests that spend nothing used",
+                store::free_requests_used(&s.session_id).map_err(|e| e.to_string())?,
+                crate::sdk::connect::wallet::granted_free_requests(&s.accept_body)?
+            )])
             .collect(),
         last_error,
         offer_digest: s.offer_digest.to_vec(),
@@ -2764,8 +2932,15 @@ fn connect_app_offer(args: &[u8]) -> Result<Reply, String> {
         anchors.push(a);
     }
     let pin = d32(&req.cert_pin, "the certificate pin")?;
-    let made = app::make_offer(&req.display_name, &req.endpoint, pin, &scopes, &anchors)
-        .map_err(|e| format!("{ROUTE}: {e}"))?;
+    let made = app::make_offer(
+        &req.display_name,
+        &req.endpoint,
+        pin,
+        &scopes,
+        &anchors,
+        req.free_requests,
+    )
+    .map_err(|e| format!("{ROUTE}: {e}"))?;
     let text = code::encode(&made.code);
     store::app_put_offer(&made.code.offer_digest, &text, &made.offer)
         .map_err(|e| format!("{ROUTE}: {e}"))?;
@@ -2790,15 +2965,42 @@ fn connect_app_offer_of(params: &[u8]) -> Result<Reply, String> {
     }))
 }
 
+/// A request its grant would run, held to the grant's count of requests that
+/// move nothing (SA-78): once they are used, it waits for the player, and every
+/// later request waits behind it. A request that spends is held to the count
+/// too: it can fail and move nothing.
+fn free_requests_left(
+    session: &store::WalletSession,
+    spend: Option<([u8; 32], u64)>,
+) -> Result<Decision, String> {
+    let granted = crate::sdk::connect::wallet::granted_free_requests(&session.accept_body)?;
+    let used = store::free_requests_used(&session.session_id).map_err(|e| e.to_string())?;
+    if used < u64::from(granted) {
+        return Ok(Decision::InScope { spend });
+    }
+    Ok(Decision::Outside(format!(
+        "the {granted} requests that move nothing this grant allows are used"
+    )))
+}
+
 fn connect_app_requests(params: &[u8]) -> Result<Reply, String> {
     const ROUTE: &str = "connect.app.requests";
     let req: generated::ConnectAppRequestsQueryV1 = body(params, ROUTE)?;
     let sid = d32(&req.session_id, "the session")?;
     // A read for a session this account never made has nothing to wait for:
     // refused at once, so the relay does not hold it (SA-123).
-    store::app_session(&sid)
+    let session = store::app_session(&sid)
         .map_err(|e| format!("{ROUTE}: {e}"))?
         .ok_or_else(|| format!("{ROUTE}: no such session"))?;
+    // Only the session's wallet reads its requests: the read presents the
+    // secret its signed accept committed, and a session its wallet ended
+    // reads nothing more (SA-128). The secret is never logged.
+    let secret = d32(&req.read_secret, "the read secret")?;
+    dsm::connect::check_read_secret(&sid, &secret, &session.read_commitment)
+        .map_err(|e| format!("{ROUTE}: {e}"))?;
+    if session.connected != store::SessionStatus::Connected {
+        return Err(format!("{ROUTE}: the session's wallet ended it"));
+    }
     let mut requests = Vec::new();
     for bytes in store::app_requests_after(&sid, req.after).map_err(|e| format!("{ROUTE}: {e}"))? {
         requests.push(

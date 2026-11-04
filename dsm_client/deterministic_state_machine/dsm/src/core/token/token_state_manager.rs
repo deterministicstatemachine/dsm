@@ -160,6 +160,29 @@ pub fn resolve_policy_commit(token_id: &str) -> Result<[u8; 32], DsmError> {
 mod tests {
     use super::{derive_canonical_balance_key, resolve_policy_commit};
 
+    /// The built-in commitments, pinned when the SDK's copy of this lookup was
+    /// deleted (§6.118): ERA's, derived from its committed policy bytes, and
+    /// dBTC's fixed one. A ticker is a built-in only as spelled here.
+    #[test]
+    fn the_builtin_policy_commits_are_pinned() {
+        assert_eq!(
+            super::builtin_policy_commit_for_token("ERA"),
+            Some([
+                173, 96, 19, 155, 31, 50, 153, 174, 49, 182, 197, 125, 30, 254, 98, 107, 62, 113,
+                102, 202, 77, 205, 222, 67, 16, 186, 101, 9, 255, 218, 118, 96,
+            ])
+        );
+        assert_eq!(
+            super::builtin_policy_commit_for_token("dBTC"),
+            Some([
+                3, 164, 43, 103, 25, 23, 175, 132, 47, 7, 61, 135, 207, 164, 89, 216, 69, 185, 104,
+                253, 177, 171, 203, 3, 49, 45, 145, 78, 53, 1, 98, 34,
+            ])
+        );
+        assert_eq!(super::builtin_policy_commit_for_token("era"), None);
+        assert_eq!(super::builtin_policy_commit_for_token("WILD"), None);
+    }
+
     #[test]
     fn resolve_policy_commit_succeeds_for_builtins() {
         let era = resolve_policy_commit("ERA").expect("ERA is a builtin");

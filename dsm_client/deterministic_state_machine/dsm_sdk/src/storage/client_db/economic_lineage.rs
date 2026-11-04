@@ -177,87 +177,6 @@ fn admitted_from_row(row: AdmittedRow) -> Result<AdmittedEconomicPosition> {
     }
 }
 
-/// This receiver's latest frontier for a peer strictly below `position`
-/// (DSM Amendment A19): a coordinate it validated itself, with the claim it
-/// accepted there.
-pub fn frontier_below(
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    position: u64,
-) -> Result<Option<dsm::economic::peer_lineage::PeerFrontier>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|e| anyhow!("the client database lock: {e}"))?;
-    let read = |r: &rusqlite::Row<'_>| {
-        Ok((
-            r.get::<_, i64>(0)?,
-            r.get::<_, Vec<u8>>(1)?,
-            r.get::<_, Vec<u8>>(2)?,
-        ))
-    };
-    // A position past what a row can hold is above every recorded one.
-    let row = match i64::try_from(position) {
-        Ok(below) => conn
-            .query_row(
-                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
-                 WHERE peer_genesis = ?1 AND peer_devid = ?2 AND economic_position < ?3
-                 ORDER BY economic_position DESC LIMIT 1",
-                params![peer_genesis.as_slice(), peer_devid.as_slice(), below],
-                read,
-            )
-            .optional()?,
-        Err(..) => conn
-            .query_row(
-                "SELECT economic_position, economic_root, accepted_claim FROM peer_frontier
-                 WHERE peer_genesis = ?1 AND peer_devid = ?2
-                 ORDER BY economic_position DESC LIMIT 1",
-                params![peer_genesis.as_slice(), peer_devid.as_slice()],
-                read,
-            )
-            .optional()?,
-    };
-    row.map(|(recorded, root, accepted)| {
-        Ok(
-            dsm::economic::peer_lineage::PeerFrontier::rehydrate_recorded(
-                *peer_genesis,
-                *peer_devid,
-                u64::try_from(recorded)
-                    .map_err(|e| anyhow!("frontier position {recorded}: {e}"))?,
-                digest32(root, "frontier root")?,
-                dsm::sofi::wire::ParentClaimRef::decode(&accepted)
-                    .map_err(|e| anyhow!("frontier claim at {recorded}: {e:?}"))?,
-            ),
-        )
-    })
-    .transpose()
-}
-
-/// Record, inside `tx`, a frontier a verification reached (DSM Amendment
-/// A19). The activation root is every receiver's frontier and is never
-/// recorded.
-fn record_frontier_in_tx(
-    tx: &Transaction<'_>,
-    frontier: &dsm::economic::peer_lineage::PeerFrontier,
-) -> Result<()> {
-    let (position, root, accepted) = frontier.recorded().ok_or_else(|| {
-        anyhow!("the activation root is every receiver's frontier and is never recorded")
-    })?;
-    tx.execute(
-        "INSERT OR IGNORE INTO peer_frontier(
-             peer_genesis, peer_devid, economic_position, economic_root, accepted_claim)
-         VALUES(?1, ?2, ?3, ?4, ?5)",
-        params![
-            frontier.genesis().as_slice(),
-            frontier.device_id().as_slice(),
-            i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?,
-            root.as_slice(),
-            accepted.encode()
-        ],
-    )?;
-    Ok(())
-}
-
 /// Record, inside `tx`, an offline account a verification validated (the
 /// owner's receive rule, 2026-10-22).
 fn record_offline_account_in_tx(
@@ -281,29 +200,206 @@ fn record_offline_account_in_tx(
     Ok(())
 }
 
-/// Record what one verification validated, in one transaction (DSM
-/// Amendment A19, owner ruling 2026-10-20: "Persist those frontiers
-/// atomically"), whatever the verification was for: the frontiers it
-/// established, and the offline accounts the boundaries it passed left (the
-/// owner's receive rule, 2026-10-22). A row is only ever added, so nothing
-/// recorded moves back.
+/// Record what one verification validated, in one transaction, whatever the
+/// verification was for: the offline accounts the boundaries it passed left
+/// (the owner's receive rule, 2026-10-22), the payments they exposed, and the
+/// EK steps it verified. A row is only ever added, so nothing recorded moves
+/// back.
 pub fn record_validated(
-    frontiers: &[dsm::economic::peer_lineage::PeerFrontier],
     offline_accounts: &[dsm::economic::peer_lineage::PeerOfflineAccount],
+    offline_exposures: &[dsm::economic::peer_lineage::PeerOfflineExposure],
+    ek_steps: &[dsm::economic::peer_acceptance::VerifiedEkStep],
 ) -> Result<()> {
     let binding = get_connection()?;
     let mut conn = binding
         .lock()
         .map_err(|e| anyhow!("the client database lock: {e}"))?;
     let tx = conn.transaction()?;
-    for frontier in frontiers {
-        record_frontier_in_tx(&tx, frontier)?;
-    }
     for account in offline_accounts {
         record_offline_account_in_tx(&tx, account)?;
     }
+    for exposure in offline_exposures {
+        record_offline_exposure_in_tx(&tx, exposure)?;
+    }
+    // The EK steps the check verified: a later check of these signers starts
+    // from them and fetches only the rotations since (SA-93).
+    for step in ek_steps {
+        tx.execute(
+            "INSERT OR IGNORE INTO peer_ek_step(signer_devid, step_addr, ek_pk)
+             VALUES(?1, ?2, ?3)",
+            params![step.signer.as_slice(), step.addr.as_slice(), step.ek_pk],
+        )?;
+    }
     tx.commit()?;
     Ok(())
+}
+
+fn record_offline_exposure_in_tx(
+    tx: &Transaction<'_>,
+    exposure: &dsm::economic::peer_lineage::PeerOfflineExposure,
+) -> Result<()> {
+    let payment = exposure.payment();
+    tx.execute(
+        "INSERT OR IGNORE INTO peer_offline_exposure(
+             release_message, peer_genesis, peer_devid, economic_position, bundle, recipient,
+             asset, amount, before_root, before_counter, before_frontier, after_root,
+             after_counter, after_frontier, payload_hash)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            payment.release_message.as_slice(),
+            exposure.genesis().as_slice(),
+            exposure.device_id().as_slice(),
+            i64::try_from(exposure.economic_position())
+                .map_err(|e| anyhow!("position overflow: {e}"))?,
+            exposure.bundle().as_slice(),
+            payment.recipient.as_slice(),
+            payment.asset.as_slice(),
+            i64::try_from(payment.amount).map_err(|e| anyhow!("amount overflow: {e}"))?,
+            payment.before.root.as_slice(),
+            i64::try_from(payment.before.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
+            payment.before.frontier.as_slice(),
+            payment.after.root.as_slice(),
+            i64::try_from(payment.after.counter).map_err(|e| anyhow!("counter overflow: {e}"))?,
+            payment.after.frontier.as_slice(),
+            payment.payload_hash.as_slice(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// The payment a peer's offline boundary exposed under the release that
+/// signed it, as this receiver recorded it from the boundary's step; `None` while it
+/// has recorded no boundary exposing it.
+pub fn offline_exposure(
+    release_message: &[u8; 32],
+) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineExposure>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    type Row = (
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+        i64,
+        Vec<u8>,
+        Vec<u8>,
+    );
+    let row: Option<Row> = conn
+        .query_row(
+            "SELECT peer_genesis, peer_devid, economic_position, bundle, recipient, asset, amount,
+                    before_root, before_counter, before_frontier, after_root, after_counter,
+                    after_frontier, payload_hash
+             FROM peer_offline_exposure WHERE release_message = ?1",
+            params![release_message.as_slice()],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                    r.get(11)?,
+                    r.get(12)?,
+                    r.get(13)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|r| {
+        let unsigned =
+            |v: i64, what: &str| u64::try_from(v).map_err(|e| anyhow!("an exposure's {what}: {e}"));
+        Ok(
+            dsm::economic::peer_lineage::PeerOfflineExposure::rehydrate_recorded(
+                digest32(r.0, "exposure genesis")?,
+                digest32(r.1, "exposure device")?,
+                unsigned(r.2, "position")?,
+                digest32(r.3, "exposure bundle")?,
+                dsm::types::offline_chain::ChainPayment {
+                    recipient: digest32(r.4, "exposure recipient")?,
+                    asset: digest32(r.5, "exposure asset")?,
+                    amount: unsigned(r.6, "amount")?,
+                    release_message: *release_message,
+                    payload_hash: digest32(r.13, "exposure payload hash")?,
+                    before: dsm::types::offline_chain::AccountPoint {
+                        root: digest32(r.7, "exposure before root")?,
+                        counter: unsigned(r.8, "before counter")?,
+                        frontier: digest32(r.9, "exposure before frontier")?,
+                    },
+                    after: dsm::types::offline_chain::AccountPoint {
+                        root: digest32(r.10, "exposure after root")?,
+                        counter: unsigned(r.11, "after counter")?,
+                        frontier: digest32(r.12, "exposure after frontier")?,
+                    },
+                },
+            ),
+        )
+    })
+    .transpose()
+}
+
+/// The peer's offline account under `bundle` as the latest boundary this
+/// receiver recorded strictly below `position` left it.
+pub fn offline_account_below(
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    bundle: &[u8; 32],
+    position: u64,
+) -> Result<Option<dsm::economic::peer_lineage::PeerOfflineAccount>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database lock: {e}"))?;
+    let below = i64::try_from(position).map_err(|e| anyhow!("position overflow: {e}"))?;
+    let row = conn
+        .query_row(
+            "SELECT economic_position, account_root, funding_chain FROM peer_offline_account
+             WHERE peer_genesis = ?1 AND peer_devid = ?2 AND bundle = ?3
+               AND economic_position < ?4
+             ORDER BY economic_position DESC LIMIT 1",
+            params![
+                peer_genesis.as_slice(),
+                peer_devid.as_slice(),
+                bundle.as_slice(),
+                below
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(position, root, chain)| {
+        Ok(
+            dsm::economic::peer_lineage::PeerOfflineAccount::rehydrate_recorded(
+                *peer_genesis,
+                *peer_devid,
+                u64::try_from(position)
+                    .map_err(|e| anyhow!("offline account position {position}: {e}"))?,
+                *bundle,
+                digest32(root, "offline account root")?,
+                digest32(chain, "offline account funding chain")?,
+            ),
+        )
+    })
+    .transpose()
 }
 
 /// The peer's offline account under `bundle` as this receiver last
@@ -517,8 +613,10 @@ pub fn record_admitted_with_conn(
 }
 
 /// Load the cached leaves: `(leaf_key, leaf_value, state CCB bytes)`.
-/// The CALLER must recompute the root over these and compare it with the
-/// admitted root — a mismatched cache is discarded, never trusted.
+/// Never trusted: Core binds every row to its state and refuses the rows
+/// unless they recompute the root they are offered for
+/// (`ValidatedEconomicRoot::admitted_tree`,
+/// `ResolvedAdvance::installed_leaves`).
 pub fn load_leaf_cache() -> Result<Vec<([u8; 32], [u8; 32], Vec<u8>)>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
@@ -619,9 +717,14 @@ pub fn latest_ek_step_with_conn(
 pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Option<Vec<u8>>> {
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|p| p.into_inner());
+    // A step of one of this device's own relationships, or one a walk of this
+    // device's verified and recorded with its frontier (SA-93).
     Ok(conn
         .query_row(
             "SELECT ek_pk FROM ek_cert_step_chain
+             WHERE signer_devid = ?1 AND step_addr = ?2
+             UNION ALL
+             SELECT ek_pk FROM peer_ek_step
              WHERE signer_devid = ?1 AND step_addr = ?2
              LIMIT 1",
             params![signer_devid.as_slice(), step_addr.as_slice()],
@@ -630,9 +733,68 @@ pub fn held_ek_step(signer_devid: &[u8; 32], step_addr: &[u8; 32]) -> Result<Opt
         .optional()?)
 }
 
+/// The ordinal of the recorded step object `step_addr` in `signer_devid`'s
+/// chain on `rel_key`, if recorded.
+fn recorded_ek_step_ordinal_with_conn(
+    conn: &rusqlite::Connection,
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+    step_addr: &[u8; 32],
+) -> Result<Option<u64>> {
+    let ordinal: Option<i64> = conn
+        .query_row(
+            "SELECT step_ordinal FROM ek_cert_step_chain
+             WHERE rel_key = ?1 AND signer_devid = ?2 AND step_addr = ?3",
+            params![
+                rel_key.as_slice(),
+                signer_devid.as_slice(),
+                step_addr.as_slice()
+            ],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match ordinal {
+        Some(ordinal) => Ok(Some(
+            u64::try_from(ordinal).map_err(|e| anyhow!("negative step ordinal: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The address of the step object recorded for the per-step EK `ek_pk` in
+/// `signer_devid`'s chain on `rel_key`, if one is recorded: a step's object is
+/// built once, from the chain as it stood before it, and taken as built
+/// afterwards.
+pub fn recorded_ek_step_addr(
+    rel_key: &[u8; 32],
+    signer_devid: &[u8; 32],
+    ek_pk: &[u8],
+) -> Result<Option<[u8; 32]>> {
+    let binding = get_connection()?;
+    let conn = binding
+        .lock()
+        .map_err(|e| anyhow!("the client database connection is poisoned: {e}"))?;
+    let addr: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT step_addr FROM ek_cert_step_chain
+             WHERE rel_key = ?1 AND signer_devid = ?2 AND ek_pk = ?3",
+            params![rel_key.as_slice(), signer_devid.as_slice(), ek_pk],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match addr {
+        Some(addr) => Ok(Some(
+            <[u8; 32]>::try_from(addr.as_slice())
+                .map_err(|e| anyhow!("step addr is not 32 bytes: {e}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
 /// Append one signer-chain step inside the caller's transaction. Idempotent
-/// on exact re-append of the same head (crash replay); a DIFFERENT addr at
-/// the same next ordinal is refused by the primary key.
+/// on any step already recorded (crash replay, or a step recorded ahead of the
+/// one after it); a DIFFERENT addr at the same next ordinal is refused by the
+/// primary key.
 pub fn append_ek_step_with_conn(
     conn: &rusqlite::Connection,
     rel_key: &[u8; 32],
@@ -640,12 +802,17 @@ pub fn append_ek_step_with_conn(
     step_addr: &[u8; 32],
     ek_pk: &[u8],
 ) -> Result<u64> {
-    let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
-    if let Some((ord, addr, ..)) = &latest {
-        if addr == step_addr {
-            return Ok(*ord);
-        }
+    // A step object is content-addressed: one already recorded is recorded,
+    // wherever it sits. A device that countersigned a transfer crossing its
+    // own send recorded that send's step before the countersignature's
+    // (owner ruling, 2026-10-29: "both settle"), and its finalization meets
+    // the send's step again below the head.
+    if let Some(ordinal) =
+        recorded_ek_step_ordinal_with_conn(conn, rel_key, signer_devid, step_addr)?
+    {
+        return Ok(ordinal);
     }
+    let latest = latest_ek_step_with_conn(conn, rel_key, signer_devid)?;
     let next = latest.map(|(ordinal, ..)| ordinal + 1).unwrap_or(0);
     conn.execute(
         "INSERT INTO ek_cert_step_chain(rel_key, signer_devid, step_ordinal, step_addr, ek_pk)
@@ -955,5 +1122,34 @@ mod admitted_row_tests {
         );
         assert_eq!(held_ek_step(&other, &second).expect("read"), None);
         assert_eq!(held_ek_step(&signer, &[0x43; 32]).expect("read"), None);
+    }
+
+    /// SA-93. A step a check verified, once recorded, is held from then on, in
+    /// its signer's chain only: a later check of that signer starts from it.
+    /// MUTATION CONTROL: the held lookup not reading the recorded steps turns
+    /// this red.
+    #[test]
+    #[serial_test::serial]
+    fn a_step_a_walk_verified_is_held_once_recorded() {
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let (signer, other, addr) = ([0x34; 32], [0x35; 32], [0x44; 32]);
+        assert_eq!(held_ek_step(&signer, &addr).expect("read"), None);
+        record_validated(
+            &[],
+            &[],
+            &[dsm::economic::peer_acceptance::VerifiedEkStep {
+                signer,
+                addr,
+                ek_pk: b"walked key".to_vec(),
+            }],
+        )
+        .expect("record the walk");
+        assert_eq!(
+            held_ek_step(&signer, &addr).expect("read"),
+            Some(b"walked key".to_vec())
+        );
+        assert_eq!(held_ek_step(&other, &addr).expect("read"), None);
     }
 }

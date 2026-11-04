@@ -40,6 +40,11 @@
 # gate cannot find, a binding it cannot read and a probe the suite never sends
 # all fail.
 #
+# The iOS shell dispatches the same names: the string arms of the
+# `switch method` in BridgeDispatcher.handle(method:payload:) must be exactly
+# the names Kotlin handles. An arm only one shell has is a method one platform
+# answers and the other does not, which the frontend cannot see.
+#
 # Exit 0 only when every set is non-empty and each pair is equal. There is no
 # allowlist: a name one side must stop using is removed from that side.
 
@@ -56,6 +61,7 @@ KOTLIN_BRIDGE = os.path.join(
     "bridge", "SinglePathWebViewBridge.kt",
 )
 ANDROID_TEST = os.path.join(ROOT, "dsm_client", "android", "app", "src", "androidTest")
+SWIFT_BRIDGE = os.path.join(ROOT, "dsm_client", "ios", "DsmWallet", "Bridge", "BridgeDispatcher.swift")
 
 CALL_RE = re.compile(
     r"\b(?:callBin|sendBridgeRequestBytes|buildBridgeRequest|callBoundaryMethod)\(\s*[\"']([A-Za-z0-9_]+)[\"']"
@@ -63,6 +69,8 @@ CALL_RE = re.compile(
 CALL_IDENT_RE = re.compile(r"\bcallBin\(\s*([A-Z][A-Z0-9_]+)\b")
 HTML_RE = re.compile(r"\b(?:callBridgeMethod|encodeBridgeRequest)\(\s*[\"']([A-Za-z0-9_]+)[\"']")
 ARM_RE = re.compile(r"^\s*\"([A-Za-z0-9_]+)\"\s*->", re.M)
+# A Swift arm: `case "name":` or `case "name", "other":`.
+SWIFT_CASE_RE = re.compile(r"^\s*case\s+((?:\"[A-Za-z0-9_]+\"\s*,\s*)*\"[A-Za-z0-9_]+\")\s*:", re.M)
 # A member of the object literal: `key: value` or the shorthand `key,`.
 INSTALLED_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?::|,\s*$)", re.M)
 TYPE_MEMBER_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\??\s*:", re.M)
@@ -146,6 +154,44 @@ def handled_names():
         handled.setdefault(m.group(1), []).append(
             f"{os.path.relpath(KOTLIN_BRIDGE, ROOT)}:{text.count(chr(10), 0, i + m.start()) + 1}"
         )
+    return handled
+
+
+def block_after(text, start):
+    """The brace-delimited block whose opening brace follows `start`, with its offset."""
+    i = text.index("{", start)
+    depth = 0
+    j = i
+    while j < len(text):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return text[i:j + 1], i
+
+
+def swift_handled_names():
+    """{name: [where, ...]}: the string arms of BridgeDispatcher's `switch method`."""
+    text = read_text(SWIFT_BRIDGE)
+    fn = text.find("func handle(method: String, payload: Data)")
+    if fn < 0:
+        fail(f"{os.path.relpath(SWIFT_BRIDGE, ROOT)}: handle(method:payload:) not found")
+        sys.exit(2)
+    switch = text.find("switch method {", fn)
+    if switch < 0:
+        fail("handle(method:payload:) has no `switch method {` block")
+        sys.exit(2)
+    block, i = block_after(text, switch)
+    handled = {}
+    for m in SWIFT_CASE_RE.finditer(block):
+        for name in re.findall(r"\"([A-Za-z0-9_]+)\"", m.group(1)):
+            handled.setdefault(name, []).append(
+                f"{os.path.relpath(SWIFT_BRIDGE, ROOT)}:{text.count(chr(10), 0, i + m.start()) + 1}"
+            )
     return handled
 
 
@@ -278,6 +324,22 @@ def main():
         for name in unsent:
             print(f"  {name}: " + ", ".join(handled[name]))
         status = 1
+    swift = swift_handled_names()
+    if not swift:
+        fail("a scan that finds nothing is not a scan (the Swift dispatcher handles no name)")
+        return 2
+    only_kotlin = sorted(set(handled) - set(swift))
+    if only_kotlin:
+        fail("Kotlin handles bridge RPC names the Swift dispatcher does not:")
+        for name in only_kotlin:
+            print(f"  {name}: " + ", ".join(handled[name]))
+        status = 1
+    only_swift = sorted(set(swift) - set(handled))
+    if only_swift:
+        fail("the Swift dispatcher handles bridge RPC names Kotlin does not:")
+        for name in only_swift:
+            print(f"  {name}: " + ", ".join(swift[name]))
+        status = 1
     if not installed or not typed:
         fail(f"a scan that finds nothing is not a scan (installed={len(installed)}, typed={len(typed)})")
         return 2
@@ -327,7 +389,7 @@ def main():
         status = 1
     if status == 0:
         print(
-            f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled, the same set; "
+            f"[bridge-rpc-names] OK: {len(sent)} names sent, {len(handled)} handled by Kotlin and {len(swift)} by Swift, the same set; "
             f"the bridge object's {len(installed)} members typed as installed; "
             f"{len(stubbed)} names stubbed in tests, all handled; "
             f"{len(called)} names sent by the instrumented suite, all handled; "

@@ -44,10 +44,6 @@
     <!-- Asked only when the user picks a phone contact to link to a DSM contact
          (DSM Amendment A17); the wallet reads that one contact and nothing else. -->
     <uses-permission android:name="android.permission.READ_CONTACTS"/>
-    <!-- NFC for recovery capsule import -->
-    <uses-permission android:name="android.permission.NFC" />
-    <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <!-- Android 12+: while a connect approval, a send or another irreversible confirmation is
          shown, other apps' overlay windows are hidden (Window.setHideOverlayWindows). -->

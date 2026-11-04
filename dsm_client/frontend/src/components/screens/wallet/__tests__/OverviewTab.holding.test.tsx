@@ -37,6 +37,7 @@ function renderTab(balances: TokenBalanceView[]) {
     <OverviewTab
       balances={balances}
       balancesLoading={balances.length < 0}
+      pendingOffline={{ receipts: [], error: null }}
       transactions={[]}
       genesisB32=""
       deviceB32=""

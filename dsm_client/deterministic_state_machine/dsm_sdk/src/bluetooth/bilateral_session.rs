@@ -491,7 +491,10 @@ mod tests {
     }
 
     /// The durable rows count a step in flight by its phase tag: exactly the
-    /// tags of the phases a session in memory counts.
+    /// tags of the phases a session in memory counts — a bearer step releasing
+    /// on its anchor among them.
+    /// MUTATION CONTROL: dropping "releasing" from the durable tags turns this
+    /// red.
     #[test]
     fn the_durable_in_flight_tags_are_the_in_flight_phases() {
         for phase in [
@@ -500,6 +503,7 @@ mod tests {
             BilateralPhase::PendingUserAction,
             BilateralPhase::Accepted,
             BilateralPhase::Rejected,
+            BilateralPhase::Releasing,
             BilateralPhase::ConfirmPending,
             BilateralPhase::Committed,
             BilateralPhase::Failed,

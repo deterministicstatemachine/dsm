@@ -87,7 +87,9 @@ pub mod transfer_hooks;
 pub mod recovery_sdk;
 pub mod recovery_store;
 
-// Hardware-sealed wallet-seed vault (cold-start signer unlock without the mnemonic)
+// Hardware-sealed wallet-seed vault (cold-start signer unlock without the mnemonic),
+// on the builds whose platform holds a key to seal under.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub mod seed_vault;
 
 // Transport and communication modules

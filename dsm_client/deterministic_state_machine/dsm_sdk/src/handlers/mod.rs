@@ -48,8 +48,6 @@ pub mod escrow_routes;
 #[cfg(test)]
 mod faucet_flow_tests;
 pub mod faucet_routes;
-#[cfg(test)]
-mod frontier_verification_tests;
 pub mod identity_routes;
 pub mod inbox_routes;
 pub mod mempool_api;
@@ -57,6 +55,7 @@ pub mod mempool_api;
 mod money_waiting_tests;
 #[cfg(test)]
 mod node_e2e_tests;
+pub mod offline_boundary_notices;
 #[cfg(test)]
 mod offline_boundary_tests;
 pub mod offline_cash_routes;
@@ -83,6 +82,8 @@ mod token_adoption_tests;
 pub(crate) mod token_create_tests;
 pub mod token_routes;
 pub mod transfer_helpers;
+#[cfg(test)]
+mod validated_ancestry_tests;
 pub mod wallet_routes;
 pub use recovery_impl::RecoveryImpl;
 pub(crate) use system_routes::{handle_create_genesis_v2, handle_generate_mnemonic_query};

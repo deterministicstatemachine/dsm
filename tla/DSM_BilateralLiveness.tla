@@ -5,73 +5,94 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
   DSM Bilateral Liveness Specification
   =====================================
 
-  Formally proves that no DSM bilateral relationship can reach a stuck
-  state where live participants cannot make progress.
+  No bilateral relationship reaches a state where its live devices cannot
+  make progress. Each relationship is an independent two-party system with
+  no global state, no coordinator and no consensus, so two devices are the
+  whole model.
 
-  DSM has no quorum because there is no global state. Each bilateral
-  relationship R_{i,j} is an independent two-party system. The CAP
-  impossibility theorem is out of scope because DSM does not maintain
-  a single globally-shared object (whitepaper Section 15.1, Theorem 7).
+  The relationship carries two processes, one step at a time across both:
+    - OFFLINE steps (bilateral sessions over a co-present link), abstracted
+      to one commit on both devices; DSM_OfflineFinality.tla models the
+      frames between the two commits and holds them to both-or-neither.
+    - ONLINE transfers through storage, as the code runs them and as
+      DSM.tla models them (the same rules and the same variable names):
+        Send          T1: debit, the sender's lineage moves, the finality
+                      gate is armed, the transfer is frozen in the outbox.
+        RecvTransfer  T2+T3: the recipient applies a transfer whose debit was
+                      admitted, whose signed parent is its pin of the
+                      sender's head, and whose projection parent is its
+                      current tip; it is credited, its journal
+                      holds the countersign delta, and it awaits the
+                      sender's certificate.
+        RecvDelta     T4: the sender finalizes on the delta whose parent is
+                      its pin of the recipient's head.
+        CertPost      T5a: the certificate reaches quorum on storage, where
+                      the recipient can read it; the gate stays.
+        GateRelease   T5b: the sender's sweep finds it at quorum and releases
+                      the gate.
+        RecvCert      T6: the recipient reads it and is released.
+      A send is never refunded and never rolled back. Two sends that cross
+      both settle (owner ruling 2026-10-29, "both settle"): each device's
+      projection is joined deterministically from the shared parent and the
+      two children (Core `join_concurrent_tips`); each transfer keeps the
+      parent it was signed against.
 
-  MODEL SCOPE:
-  This spec uses a 2-device model {d1, d2}. The bilateral pair IS the
-  full device set. This is sufficient to verify all three liveness
-  properties:
-    - SessionTermination: holds regardless of device count.
-    - ModalLockResolution: single-pair property, 2 devices is exact.
-    - DLVLiveness: VaultExpire fires unconditionally (all-devices-dead
-      is covered — storage nodes expire vaults via BLAKE3 iteration
-      counter, no device needs to be alive). VaultInvalidate and
-      VaultClaim are also verified with both d1 and d2 as recipient.
+  Storage keeps what reaches it: a posted message is served, and may be read
+  any number of times, until the sender's certificate collects it. A post can
+  fail (a send's "delivery outcome unknown"); none is lost for good: the
+  sender re-drives an unfinalized transfer and the recipient re-emits the
+  delta its journal holds until the certificate exists. DSM.tla checks the
+  same rules against a bag that also drops and repeats copies in flight.
 
-  The 3-device "recipient outside bilateral pair" scenario is a proof
-  sketch comment: it follows directly from the same VaultUnlock/Claim
-  logic but with an independent third device. TLC cannot tractably
-  explore the 3-device model (~55M+ states, state space unbounded in
-  practice with temporal checking). The 2-device model is the
-  appropriate scope for mechanized verification here.
+  Properties (under the fairness below):
+    1. SessionTermination: every offline step between devices that stay
+       alive settles.
+    2. OnlineSendSettles: every online send's gate is released, and every
+       recipient awaiting a certificate is released, unless a device of the
+       pair dies. Crossing sends included.
+    3. RelationshipReturnsToRest: the relationship comes to rest — nothing
+       in flight either way — infinitely often, so later online and offline
+       steps can be made.
+    4. NoDeadlock (TLC CHECK_DEADLOCK).
 
-  NETWORK ISOLATION (PRLSM model):
-  Each bilateral relationship is hermetically sealed (PRLSM). Even if
-  R_{d1,d2} experiences total key loss, every other relationship is
-  completely unaffected. There is no global chain to halt, no consensus
-  to stall, no shared state to contaminate. This is the fundamental
-  advantage of the PRLSM architecture over consensus-based systems.
+  Safety invariants:
+    - TypeOK
+    - NoFork: no signer consumes its own lineage parent twice
+    - TokenConservation: balances + admitted debits in flight + burned value
+      is constant
+    - ProjectionAgreement: at rest, both devices hold one tip and pin each
+      other's lineage head
+    - BarrierHeldDurably: a gate is held by its frozen send, an awaited
+      certificate by its journal
+    - BalancesNonNegative
 
-  This spec proves (under the fairness below):
-    1. SessionTermination: every started bilateral session between devices
-       that stay alive eventually reaches a terminal state {Committed,
-       Rejected, Failed}. Nothing ends a step on a lost link or on time: its
-       commit, a signed rejection or cancellation, or its tripwire does. The
-       commit is abstracted here as one step on both devices;
-       DSM_OfflineFinality.tla models its two commits and the frames between
-       them, and holds them to both-or-neither.
-    2. ModalLockResolution: the pending-online modal lock always clears.
-    3. DLVLiveness: no vault remains non-terminal forever. UNCONDITIONAL.
-       Storage nodes (N=6, K=3 quorum) expire vaults autonomously via
-       deterministic BLAKE3 iteration counter — no device needs to be
-       alive. With 3+ devices, recipients outside the bilateral pair
-       can also unlock/claim independently. There is no stuck state.
-    4. NoDeadlock: the system is never stuck (TLC CHECK_DEADLOCK).
+  Falsification (registered config):
+    - DSM_BilateralLiveness_CrossingNotJoined.cfg: JoinCrossingSteps = FALSE
+      — the projection sync refuses a crossing step (the code before the
+      ruling); two crossing sends wedge and OnlineSendSettles fails.
 
-  Safety invariants (checked across all reachable states):
-    - TypeOK: all variables well-typed
-    - NoFork: Tripwire fork-exclusion (Theorem 2)
-    - TokenConservation: total balance + escrow is constant (Theorem 4)
-    - ModalLockConsistency: lock implies pending b0x item (Theorem 1)
-    - BalancesNonNegative: no negative balances
+  Out of this model, recorded as boundaries:
+    - Vaults: the DLV manager and LimboVault serve only the dBTC tap (out of
+      this round), and beta has no vault expiry (DSM Amendment A23, B5).
+      SoFi vaults are modeled in DSM_SofiFulfillment / DSM_SofiSuccessorCells.
+    - Recovery (capsule, tombstone, succession) is out of this round.
+    - Restart: every durable row survives it and nothing is held in memory
+      across it, so a restart is not an event of this model.
 
   Code traceability:
-    - BilateralPhase enum: bilateral_session.rs:136 (imported into handler)
-    - VaultState enum: limbo_vault.rs:137
-    - Tripwire enforcement: bilateral_transaction_manager.rs:1131 (finalize),
-      :1285 (prepare)
-    - Modal sync lock: security/modal_sync_lock.rs
-    - Restart: restore_sessions_from_storage resumes every step (a restart
-      is not an event of the protocol; no action here)
-    - Recovery capsule: recovery/capsule.rs
-    - Tombstone/Succession: recovery/tombstone.rs:26-67
-    - Vault expiry: terminal Invalidated transition, limbo_vault.rs:2145
+    - Send: handlers/app_router_impl.rs (wallet.send), online_outbox.rs
+      (`pending_online_outbox`, `local_bilateral_chain_tip`)
+    - RecvTransfer: handlers/storage_routes.rs (the recipient apply, decided
+      by the signed pair), recipient_receipt.rs (the fold's tip sync),
+      counterparty_canonical_heads.rs (the pin)
+    - RecvDelta: sender_outbox.rs (acceptance finalization: projection sync,
+      pin CAS, proposal finalized; the gate stays)
+    - CertPost, GateRelease: the certificate's delivery and the checkpoint
+      sweep (the only deleter of the gate)
+    - RecvCert: handlers/relationship_finalized.rs
+    - TipSync: storage/client_db/bilateral_tip_sync.rs
+      (`sync_tip_projections_in_tx`, crossing steps joined)
+    - Offline steps: bluetooth/bilateral_ble_handler.rs
 ***************************************************************************)
 
 \* ========================================================================
@@ -79,12 +100,12 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 \* ========================================================================
 
 CONSTANTS
-    Device,          \* Set of device identifiers, e.g., {d1, d2}
-    SessionId,       \* Set of session identifiers, e.g., {s1, s2}
-    VaultId,         \* Set of vault identifiers, e.g., {v1}
-    MaxChain,        \* Maximum chain tip value (bounds state space)
-    INITIAL_BALANCE, \* Starting balance per device
-    NULL             \* Sentinel value
+    Device,             \* the two devices of the relationship, e.g. {d1, d2}
+    SessionId,          \* offline session identifiers, e.g. {s1}
+    INITIAL_BALANCE,    \* starting balance per device
+    StepsPerDevice,     \* how many steps (online sends and offline proposals) each device begins
+    NULL,               \* sentinel value
+    JoinCrossingSteps   \* TRUE as the code runs: the projection sync joins a crossing step
 
 \* Derived constants
 Phase == {"Preparing", "Prepared", "PendingUserAction",
@@ -94,479 +115,449 @@ TerminalPhase == {"Rejected", "Committed", "Failed"}
 
 InFlightPhase == {"Preparing", "Prepared", "PendingUserAction", "Accepted"}
 
-VState == {"Limbo", "Unlocked", "Claimed", "Invalidated"}
+Pairs == { <<d, p>> \in Device \X Device : d # p }
 
-TerminalVState == {"Claimed", "Invalidated"}
+\* The relationship's genesis seed: both projections and both lineages start
+\* there, and each device pins the other's head there.
+GENESIS == 1
 
-Hash == 0..MaxChain
+\* ERA destroyed to create one token (dsm::core::token::TOKEN_CREATION_FEE_ERA).
+TOKEN_CREATION_FEE == 10
+
+MinNat(S) == CHOOSE x \in S : \A y \in S : x <= y
+MaxNat(S) == CHOOSE x \in S : \A y \in S : x >= y
 
 \* ========================================================================
 \* VARIABLES
 \* ========================================================================
 
 VARIABLES
-    \* === Per-Device State ===
-    chainTip,        \* chainTip[d] \in Hash
-    balance,         \* balance[d] \in Nat
+    deviceBalance,   \* deviceBalance[d] \in Nat
     deviceAlive,     \* deviceAlive[d] \in BOOLEAN
-
-    \* === Relationship State (single pair for 2 devices) ===
-    modalLock,       \* BOOLEAN: pending online submission exists
-    relationshipTip, \* Hash: shared chain tip
-
-    \* === Bilateral Sessions ===
-    sessions,        \* sessions[sid] = record or NULL
-
-    \* === b0x Spool (Online Queue) ===
-    b0xPending,      \* BOOLEAN
-    b0xAmount,       \* Nat
-    b0xSender,       \* Device
-    b0xReceiver,     \* Device
-
-    \* === DLV Vaults ===
-    vaults,          \* vaults[vid] = record or NULL
-
-    \* === Network/Transport ===
+    begun,           \* begun[d]: steps d has begun (bounds the model)
+    sessions,        \* sessions[sid] = offline session record or NULL
     coPresent,       \* BOOLEAN: BLE proximity
     networkUp,       \* networkUp[d] \in BOOLEAN
+    tip,             \* tip[<<d,p>>]: d's projection tip (contacts.chain_tip)
+    online,          \* online[<<d,p>>]: prev/local tips, lineage head, pin, gate, awaited certificate
+    outbox,          \* senders' frozen sends not yet released: the admitted debits
+    journal,         \* recipients' countersign deltas awaiting the certificate
+    certs,           \* step ids whose certificate reached quorum
+    joins,           \* the join oracle: [parent, lo, hi] -> tip
+    net,             \* messages on storage: served until collected; reading one does not remove it
+    nextMsgId,       \* fresh value allocator (clockless)
+    ledger,          \* accepted lineage steps: [signer, oldTip, newTip]
+    burnedTotal      \* ERA destroyed by token creation
 
-    \* === Recovery ===
-    capsuleExists,   \* capsuleExists[d] \in BOOLEAN
-    tombstoned,      \* tombstoned[d] \in BOOLEAN
-    successorOf,     \* successorOf[d] \in Device \cup {NULL}
+vars == <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp,
+          tip, online, outbox, journal, certs, joins, net, nextMsgId, ledger, burnedTotal>>
 
-    \* === Token creation ===
-    \* Total ERA DESTROYED by token creation. Creation burns the fee: the
-    \* value leaves circulation with no counterparty credit, so it must be
-    \* tracked explicitly or conservation would appear to be violated.
-    burnedTotal
-
-vars == <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-          sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-          vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf,
-          burnedTotal>>
-
-\* ERA destroyed to create one token (dsm::core::token::TOKEN_CREATION_FEE_ERA).
-TOKEN_CREATION_FEE == 10
+onlineVars == <<tip, online, outbox, journal, certs, joins, net, nextMsgId, ledger>>
 
 \* ========================================================================
 \* INITIAL STATE
 \* ========================================================================
 
-\* Pick an arbitrary device for initial b0x fields (unused until b0xPending=TRUE)
-AnyDevice == CHOOSE d \in Device : TRUE
-
 Init ==
-    /\ chainTip = [d \in Device |-> 0]
-    /\ balance = [d \in Device |-> INITIAL_BALANCE]
+    /\ deviceBalance = [d \in Device |-> INITIAL_BALANCE]
     /\ deviceAlive = [d \in Device |-> TRUE]
-    /\ modalLock = FALSE
-    /\ relationshipTip = 0
+    /\ begun = [d \in Device |-> 0]
     /\ sessions = [sid \in SessionId |-> NULL]
-    /\ b0xPending = FALSE
-    /\ b0xAmount = 0
-    /\ b0xSender = AnyDevice
-    /\ b0xReceiver = AnyDevice
-    /\ vaults = [vid \in VaultId |-> NULL]
     /\ coPresent = TRUE
     /\ networkUp = [d \in Device |-> TRUE]
-    /\ capsuleExists = [d \in Device |-> FALSE]
-    /\ tombstoned = [d \in Device |-> FALSE]
-    /\ successorOf = [d \in Device |-> NULL]
+    /\ tip = [x \in Pairs |-> GENESIS]
+    /\ online = [x \in Pairs |-> [prev |-> 0, local |-> GENESIS, lin |-> GENESIS, pin |-> GENESIS,
+                                  gate |-> 0, awaits |-> 0]]
+    /\ outbox = {}
+    /\ journal = {}
+    /\ certs = {}
+    /\ joins = {}
+    /\ net = {}
+    /\ nextMsgId = GENESIS + 1
+    /\ ledger = {}
     /\ burnedTotal = 0
 
 \* ========================================================================
-\* BILATERAL SESSION ACTIONS
+\* SHARED DEFINITIONS (as in DSM.tla)
 \* ========================================================================
 
-\* ---------- Phase 1: SenderPrepare ----------
-\* Maps to prepare_bilateral_transaction() in bilateral_ble_handler.rs:665
-\* Creates precommitment. Guards: no modal lock, sufficient balance, chain not full.
+View(d, p) == [chain |-> tip[<<d, p>>], prev |-> online[<<d, p>>].prev, local |-> online[<<d, p>>].local]
+
+JoinEntry(parent, a, b) ==
+    { j \in joins : j.parent = parent /\ j.lo = MinNat({a, b}) /\ j.hi = MaxNat({a, b}) }
+
+JoinTip(parent, a, b, fresh) ==
+    IF JoinEntry(parent, a, b) # {} THEN (CHOOSE j \in JoinEntry(parent, a, b) : TRUE).tip
+    ELSE fresh
+
+JoinsAfter(parent, a, b, fresh) ==
+    IF JoinEntry(parent, a, b) # {} THEN joins
+    ELSE joins \union {[parent |-> parent, lo |-> MinNat({a, b}), hi |-> MaxNat({a, b}), tip |-> fresh]}
+
+\* `sync_tip_projections_in_tx`, case for case; the join case only when the
+\* code joins crossing steps.
+TipSync(v, parent, target, fresh) ==
+    IF v.chain = target
+    THEN [ok |-> TRUE, chain |-> target, prev |-> v.prev, local |-> target]
+    ELSE IF v.chain = parent
+    THEN [ok |-> TRUE, chain |-> target, prev |-> parent, local |-> target]
+    ELSE IF JoinCrossingSteps /\ v.prev = parent /\ v.local = v.chain
+    THEN [ok |-> TRUE, chain |-> JoinTip(parent, v.chain, target, fresh), prev |-> v.chain,
+          local |-> JoinTip(parent, v.chain, target, fresh)]
+    ELSE IF /\ JoinCrossingSteps
+            /\ v.prev # 0 /\ v.prev # parent /\ v.prev # target
+            /\ JoinEntry(parent, v.prev, target) # {}
+            /\ JoinTip(parent, v.prev, target, fresh) = v.chain
+            /\ v.local = v.chain
+    THEN [ok |-> TRUE, chain |-> v.chain, prev |-> v.prev, local |-> v.local]
+    ELSE [ok |-> FALSE, chain |-> v.chain, prev |-> v.prev, local |-> v.local]
+
+JoinsAfterSync(v, parent, target, fresh) ==
+    IF JoinCrossingSteps /\ v.chain # target /\ v.chain # parent /\ v.prev = parent /\ v.local = v.chain
+    THEN JoinsAfter(parent, v.chain, target, fresh)
+    ELSE joins
+
+Applied(t) == [signer |-> t.from, oldTip |-> t.sp, newTip |-> t.sc] \in ledger
+
+Settled(d, p) ==
+    /\ online[<<d, p>>].gate = 0
+    /\ online[<<d, p>>].awaits = 0
+    /\ ~\E r \in outbox : r.from = d /\ r.to = p
+
+AtRest == \A x \in Pairs : Settled(x[1], x[2])
+
+NoOfflineStepInFlight ==
+    ~\E sid \in SessionId : sessions[sid] /= NULL /\ sessions[sid].phase \in InFlightPhase
+
+TransferMsg(r) ==
+    [id |-> r.id, kind |-> "transfer", from |-> r.from, to |-> r.to, payload |-> r.payload,
+     sp |-> r.sp, sc |-> r.sc, pp |-> r.pp, pc |-> r.pc]
+
+DeltaMsg(j) ==
+    [id |-> j.id, kind |-> "delta", from |-> j.from, to |-> j.to, payload |-> 0,
+     sp |-> j.sp, sc |-> j.sc, pp |-> j.pp, pc |-> j.pc]
+
+\* ========================================================================
+\* ONLINE TRANSFERS
+\* ========================================================================
+
+\* T1. The finality barrier: no send while the sender's own send is in flight,
+\* while it awaits the peer's certificate, or while an offline step is in
+\* flight on the relationship.
+Send(d, p, amt, posted) ==
+    LET id == nextMsgId
+        o  == online[<<d, p>>]
+        r  == [id |-> id, from |-> d, to |-> p, payload |-> amt,
+               sp |-> o.lin, sc |-> id, pp |-> tip[<<d, p>>], pc |-> id, fin |-> FALSE]
+    IN
+    /\ d # p
+    /\ deviceAlive[d]
+    /\ networkUp[d]
+    /\ begun[d] < StepsPerDevice
+    /\ NoOfflineStepInFlight
+    /\ o.gate = 0
+    /\ o.awaits = 0
+    /\ o.local = tip[<<d, p>>]
+    /\ amt > 0
+    /\ deviceBalance[d] >= amt
+    /\ outbox' = outbox \union {r}
+    /\ net' = IF posted THEN net \union {TransferMsg(r)} ELSE net
+    /\ online' = [online EXCEPT ![<<d, p>>].lin = id, ![<<d, p>>].local = id, ![<<d, p>>].gate = id]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d] = @ - amt]
+    /\ begun' = [begun EXCEPT ![d] = @ + 1]
+    /\ nextMsgId' = nextMsgId + 1
+    /\ UNCHANGED <<deviceAlive, sessions, coPresent, networkUp, tip, journal, certs, joins, ledger, burnedTotal>>
+
+\* T2+T3. The recipient applies the transfer `m`. Reading a message does not
+\* take it off storage: it can be read again.
+RecvTransfer(m, posted) ==
+    LET d     == m.to
+        p     == m.from
+        o     == online[<<d, p>>]
+        v     == View(d, p)
+        bc    == nextMsgId
+        fresh == nextMsgId + 1
+        s     == TipSync(v, m.pp, m.pc, fresh)
+        j     == [id |-> m.id, from |-> d, to |-> p, sp |-> o.lin, sc |-> bc, pp |-> m.pp, pc |-> m.pc]
+    IN
+    /\ m \in net
+    /\ m.kind = "transfer"
+    /\ deviceAlive[d]
+    /\ networkUp[d]
+    /\ ~Applied(m)
+    /\ \E r \in outbox : r.id = m.id /\ r.from = p /\ r.to = d /\ r.sp = m.sp /\ r.sc = m.sc
+    /\ o.awaits = 0
+    /\ m.sp = o.pin
+    /\ s.ok
+    /\ tip' = [tip EXCEPT ![<<d, p>>] = s.chain]
+    /\ online' = [online EXCEPT ![<<d, p>>] =
+                    [o EXCEPT !.prev = s.prev, !.local = s.local, !.lin = bc, !.pin = m.sc, !.awaits = m.id]]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d] = @ + m.payload]
+    /\ ledger' = ledger \union {[signer |-> p, oldTip |-> m.sp, newTip |-> m.sc]}
+    /\ journal' = journal \union {j}
+    /\ joins' = JoinsAfterSync(v, m.pp, m.pc, fresh)
+    /\ net' = IF posted THEN net \union {DeltaMsg(j)} ELSE net
+    /\ nextMsgId' = nextMsgId + 2
+    /\ UNCHANGED <<deviceAlive, begun, sessions, coPresent, networkUp, outbox, certs, burnedTotal>>
+
+\* T4. The sender finalizes its send on the delta `m`.
+RecvDelta(m) ==
+    LET d     == m.to
+        p     == m.from
+        o     == online[<<d, p>>]
+        v     == View(d, p)
+        fresh == nextMsgId
+        r     == CHOOSE x \in outbox : x.id = m.id
+        s     == TipSync(v, r.pp, r.pc, fresh)
+    IN
+    /\ m \in net
+    /\ m.kind = "delta"
+    /\ deviceAlive[d]
+    /\ networkUp[d]
+    /\ \E x \in outbox : x.id = m.id /\ x.from = d /\ x.to = p /\ ~x.fin
+    /\ o.gate = m.id
+    /\ m.sp = o.pin
+    /\ s.ok
+    /\ tip' = [tip EXCEPT ![<<d, p>>] = s.chain]
+    /\ online' = [online EXCEPT ![<<d, p>>] = [o EXCEPT !.prev = s.prev, !.local = s.local, !.pin = m.sc]]
+    /\ outbox' = (outbox \ {r}) \union {[r EXCEPT !.fin = TRUE]}
+    /\ ledger' = ledger \union {[signer |-> p, oldTip |-> m.sp, newTip |-> m.sc]}
+    /\ joins' = JoinsAfterSync(v, r.pp, r.pc, fresh)
+    /\ nextMsgId' = nextMsgId + 1
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, journal, certs, net, burnedTotal>>
+
+\* T5a. The finalized send's certificate reaches quorum on storage, where the
+\* recipient can read it. The gate stays until the sender's sweep sees it.
+CertPost(d, p) ==
+    /\ d # p
+    /\ LET s == online[<<d, p>>].gate
+       IN /\ s # 0
+          /\ s \notin certs
+          /\ deviceAlive[d]
+          /\ networkUp[d]
+          /\ \E r \in outbox : r.id = s /\ r.fin
+          /\ certs' = certs \union {s}
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, tip, online, outbox, journal, joins, net, nextMsgId, ledger, burnedTotal>>
+
+\* T5b. The sender's sweep finds its certificate at quorum and releases the
+\* gate. Storage no longer serves the send's transfer or its delta.
+GateRelease(d, p) ==
+    /\ d # p
+    /\ LET s == online[<<d, p>>].gate
+       IN /\ s # 0
+          /\ s \in certs
+          /\ deviceAlive[d]
+          /\ networkUp[d]
+          /\ outbox' = { r \in outbox : r.id # s }
+          /\ online' = [online EXCEPT ![<<d, p>>].gate = 0]
+          /\ net' = { m \in net : m.id # s }
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, tip, journal, certs, joins, nextMsgId, ledger, burnedTotal>>
+
+\* T6. The recipient reads the certificate and is released.
+RecvCert(d, p) ==
+    /\ d # p
+    /\ LET s == online[<<d, p>>].awaits
+       IN /\ s # 0
+          /\ s \in certs
+          /\ deviceAlive[d]
+          /\ networkUp[d]
+          /\ journal' = { j \in journal : j.id # s }
+          /\ online' = [online EXCEPT ![<<d, p>>].awaits = 0]
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, tip, outbox, certs, joins, net, nextMsgId, ledger, burnedTotal>>
+
+\* The sender re-drives a transfer it has not finalized.
+RedriveTransfer(r) ==
+    /\ r \in outbox
+    /\ ~r.fin
+    /\ deviceAlive[r.from]
+    /\ networkUp[r.from]
+    /\ TransferMsg(r) \notin net
+    /\ net' = net \union {TransferMsg(r)}
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, tip, online, outbox, journal, certs, joins, nextMsgId, ledger, burnedTotal>>
+
+\* The recipient re-emits the delta its journal holds until the certificate
+\* exists (from then on it reads the certificate instead).
+RedriveDelta(j) ==
+    /\ j \in journal
+    /\ j.id \notin certs
+    /\ deviceAlive[j.from]
+    /\ networkUp[j.from]
+    /\ DeltaMsg(j) \notin net
+    /\ net' = net \union {DeltaMsg(j)}
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, networkUp, tip, online, outbox, journal, certs, joins, nextMsgId, ledger, burnedTotal>>
+
+\* ========================================================================
+\* OFFLINE STEPS
+\* ========================================================================
+
+\* ---------- SenderPrepare ----------
+\* One step at a time on the relationship, across both processes: no offline
+\* step in flight, and nothing online in flight either way.
 SenderPrepare(sender, receiver, sid, amount) ==
     /\ sender /= receiver
     /\ deviceAlive[sender]
     /\ deviceAlive[receiver]
+    /\ begun[sender] < StepsPerDevice
     /\ sessions[sid] = NULL
-    /\ ~modalLock                                \* Whitepaper Theorem 1
-    /\ balance[sender] >= amount
+    /\ deviceBalance[sender] >= amount
     /\ amount > 0
-    /\ chainTip[sender] < MaxChain
-    \* One step at a time on the relationship, in either direction
-    /\ ~\E sid2 \in SessionId :
-        /\ sessions[sid2] /= NULL
-        /\ sessions[sid2].phase \in InFlightPhase
-        /\ {sessions[sid2].sender, sessions[sid2].receiver} = {sender, receiver}
+    /\ NoOfflineStepInFlight
+    /\ AtRest
     /\ sessions' = [sessions EXCEPT ![sid] =
         [phase |-> "Prepared",
          sender |-> sender,
          receiver |-> receiver,
-         tipAtCreation |-> chainTip[sender],
+         tipAtCreation |-> online[<<sender, receiver>>].lin,
          amount |-> amount,
          hasBothSigs |-> FALSE]]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ begun' = [begun EXCEPT ![sender] = @ + 1]
+    /\ UNCHANGED <<deviceBalance, deviceAlive, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* ---------- Phase 1→2: ReceiverReceivePrepare ----------
-\* Maps to handle_prepare_request() in bilateral_ble_handler.rs:1055
-\* Receiver gets the prepare via BLE (co-present) or network (both online).
+\* ---------- ReceiverReceivePrepare ----------
 ReceiverReceivePrepare(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "Prepared"
     /\ deviceAlive[sessions[sid].receiver]
-    /\ \/ coPresent
-       \/ (networkUp[sessions[sid].sender] /\ networkUp[sessions[sid].receiver])
+    /\ coPresent
     /\ sessions' = [sessions EXCEPT ![sid].phase = "PendingUserAction"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* ---------- Phase 2: UserAccept ----------
-\* Maps to create_prepare_accept_envelope() in bilateral_ble_handler.rs:1557
+\* ---------- UserAccept ----------
 UserAccept(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "PendingUserAction"
     /\ deviceAlive[sessions[sid].receiver]
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Accepted",
                                      ![sid].hasBothSigs = TRUE]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* ---------- Phase 2: UserReject ----------
-\* Maps to create_prepare_reject_envelope_with_cleanup()
+\* ---------- UserReject ----------
 UserReject(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "PendingUserAction"
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Rejected"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* ---------- Phase 3: Commit ----------
-\* Maps to prepare_bilateral_advance() in bilateral_transaction_manager.rs
-\* followed by the canonical Core advance (DeviceState::advance).
-\* Includes TRIPWIRE ENFORCEMENT (prepare_bilateral_advance):
-\*   chainTip[sender] MUST equal tipAtCreation (parent not consumed)
+\* ---------- Commit ----------
+\* Tripwire: the sender's lineage head is still the one the step was prepared
+\* on. Both lineages advance, each device pins the other's new head, both
+\* projections advance and the amount moves.
 Commit(sid) ==
+    LET s   == sessions[sid].sender
+        r   == sessions[sid].receiver
+        amt == sessions[sid].amount
+        t   == tip[<<s, r>>]
+        c1  == nextMsgId
+        c2  == nextMsgId + 1
+        os  == online[<<s, r>>]
+        orr == online[<<r, s>>]
+    IN
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "Accepted"
     /\ sessions[sid].hasBothSigs = TRUE
-    \* TRIPWIRE (Whitepaper Section 6.1)
-    /\ chainTip[sessions[sid].sender] = sessions[sid].tipAtCreation
-    /\ chainTip[sessions[sid].sender] < MaxChain
-    /\ chainTip[sessions[sid].receiver] < MaxChain
-    /\ deviceAlive[sessions[sid].sender]
-    /\ deviceAlive[sessions[sid].receiver]
-    /\ LET s == sessions[sid].sender
-           r == sessions[sid].receiver
-           amt == sessions[sid].amount
-       IN /\ sessions' = [sessions EXCEPT ![sid].phase = "Committed"]
-          /\ balance' = [balance EXCEPT ![s] = balance[s] - amt,
-                                        ![r] = balance[r] + amt]
-          /\ chainTip' = [chainTip EXCEPT ![s] = chainTip[s] + 1,
-                                          ![r] = chainTip[r] + 1]
-          /\ relationshipTip' = relationshipTip + 1
-    /\ UNCHANGED <<deviceAlive, modalLock, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ os.lin = sessions[sid].tipAtCreation
+    /\ deviceAlive[s]
+    /\ deviceAlive[r]
+    /\ sessions' = [sessions EXCEPT ![sid].phase = "Committed"]
+    /\ deviceBalance' = [deviceBalance EXCEPT ![s] = @ - amt, ![r] = @ + amt]
+    /\ tip' = [tip EXCEPT ![<<s, r>>] = c1, ![<<r, s>>] = c1]
+    /\ online' = [online EXCEPT
+         ![<<s, r>>] = [os EXCEPT !.prev = t, !.local = c1, !.lin = c1, !.pin = c2],
+         ![<<r, s>>] = [orr EXCEPT !.prev = t, !.local = c1, !.lin = c2, !.pin = c1]]
+    /\ ledger' = ledger \union {[signer |-> s, oldTip |-> os.lin, newTip |-> c1],
+                                [signer |-> r, oldTip |-> orr.lin, newTip |-> c2]}
+    /\ nextMsgId' = nextMsgId + 2
+    /\ UNCHANGED <<deviceAlive, begun, coPresent, networkUp, outbox, journal, certs, joins, net, burnedTotal>>
 
 \* ---------- ProposerCancel ----------
-\* Maps to cancel_proposal(): the proposer ends a proposal it has not
-\* confirmed, with a signed cancellation. Past its confirm nothing ends the
-\* step but its commit: the receiver may already have committed.
+\* The proposer ends a proposal it has not confirmed, with a signed
+\* cancellation. Past its confirm nothing ends the step but its commit.
 ProposerCancel(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase \in {"Preparing", "Prepared"}
     /\ deviceAlive[sessions[sid].sender]
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Rejected"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
 \* ---------- TripwireAbort ----------
-\* When the chain tip has moved since precommitment (another transaction consumed
-\* the parent), the session MUST abort. Maps to DeterministicSafetyClass::ParentConsumed
-\* at bilateral_transaction_manager.rs:990.
+\* The sender's lineage moved since the precommitment: the step fails.
 TripwireAbort(sid) ==
     /\ sessions[sid] /= NULL
     /\ sessions[sid].phase = "Accepted"
-    /\ chainTip[sessions[sid].sender] /= sessions[sid].tipAtCreation
+    /\ online[<<sessions[sid].sender, sessions[sid].receiver>>].lin /= sessions[sid].tipAtCreation
     /\ sessions' = [sessions EXCEPT ![sid].phase = "Failed"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
 \* ========================================================================
-\* MODAL LOCK / B0X ACTIONS
+\* ENVIRONMENT
 \* ========================================================================
 
-\* ---------- OnlineSubmit ----------
-\* Submit via b0x spool (online unilateral). Engages modal lock.
-\* Maps to B0xSDK submit flow, security/modal_sync_lock.rs.
-\* CRITICAL: Also blocks when any in-flight session exists (modal lock is
-\* relationship-wide, covering both online AND offline paths).
-\* Balance is escrowed (deducted) immediately at submission time.
-OnlineSubmit(sender, receiver, amount) ==
-    /\ sender /= receiver
-    /\ deviceAlive[sender]
-    /\ ~modalLock
-    /\ networkUp[sender]
-    /\ balance[sender] >= amount
-    /\ amount > 0
-    /\ ~b0xPending
-    /\ chainTip[sender] < MaxChain
-    \* No in-flight sessions (modal lock covers entire relationship)
-    /\ ~\E sid \in SessionId :
-        /\ sessions[sid] /= NULL
-        /\ sessions[sid].phase \in InFlightPhase
-    /\ b0xPending' = TRUE
-    /\ b0xAmount' = amount
-    /\ b0xSender' = sender
-    /\ b0xReceiver' = receiver
-    /\ modalLock' = TRUE
-    \* Escrow: deduct balance at submission (refund on reject)
-    /\ balance' = [balance EXCEPT ![sender] = balance[sender] - amount]
-    /\ UNCHANGED <<chainTip, deviceAlive, relationshipTip,
-                   sessions, vaults, coPresent, networkUp,
-                   capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ---------- OnlineDeliver ----------
-\* b0x item delivered and accepted by receiver. Releases modal lock.
-\* Sender balance was already escrowed at OnlineSubmit; only credit receiver here.
-OnlineDeliver ==
-    /\ b0xPending
-    /\ modalLock
-    /\ networkUp[b0xReceiver]
-    /\ deviceAlive[b0xReceiver]
-    /\ deviceAlive[b0xSender]
-    /\ chainTip[b0xSender] < MaxChain
-    /\ chainTip[b0xReceiver] < MaxChain
-    /\ LET r == b0xReceiver
-           amt == b0xAmount
-       IN /\ balance' = [balance EXCEPT ![r] = balance[r] + amt]
-          /\ chainTip' = [chainTip EXCEPT ![b0xSender] = chainTip[b0xSender] + 1,
-                                          ![r] = chainTip[r] + 1]
-          /\ relationshipTip' = relationshipTip + 1
-    /\ modalLock' = FALSE
-    /\ b0xPending' = FALSE
-    /\ UNCHANGED <<deviceAlive, sessions, vaults, coPresent, networkUp,
-                   capsuleExists, tombstoned, successorOf, b0xAmount, b0xSender, b0xReceiver, burnedTotal>>
-
-\* ---------- OnlineReject ----------
-\* b0x item rejected, cancelled, or expired. Releases modal lock.
-\* REFUND: return escrowed balance to sender.
-OnlineReject ==
-    /\ b0xPending
-    /\ modalLock
-    /\ modalLock' = FALSE
-    /\ b0xPending' = FALSE
-    /\ balance' = [balance EXCEPT ![b0xSender] = balance[b0xSender] + b0xAmount]
-    /\ UNCHANGED <<chainTip, deviceAlive, relationshipTip, sessions,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf,
-                   b0xAmount, b0xSender, b0xReceiver, burnedTotal>>
-
-\* ========================================================================
-\* DLV VAULT ACTIONS
-\* ========================================================================
-
-\* Maps to DLVManager in dlv_manager.rs and LimboVault in limbo_vault.rs
-
-\* ---------- VaultCreate ----------
-\* Creator designates an intended recipient who can unlock/claim.
-\* The recipient can be ANY device in the network — not necessarily
-\* part of the bilateral pair. This models real DLV behavior where
-\* vaults target specific counterparties.
-VaultCreate(vid, creator, recipient) ==
-    /\ vaults[vid] = NULL
-    /\ deviceAlive[creator]
-    /\ creator /= recipient
-    /\ vaults' = [vaults EXCEPT ![vid] = [state |-> "Limbo",
-                                           creator |-> creator,
-                                           recipient |-> recipient]]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ---------- VaultUnlock ----------
-\* Intended recipient presents fulfillment proof. Maps to LimboVault::unlock()
-\* at line 1512. Does NOT require creator to be alive. The recipient can be
-\* ANY device in the network (e.g., d3 outside the d1/d2 bilateral pair).
-\* Vault data is redundantly stored on N=6 storage nodes (K=3 quorum),
-\* so it survives creator device death.
-VaultUnlock(vid) ==
-    /\ vaults[vid] /= NULL
-    /\ vaults[vid].state = "Limbo"
-    /\ deviceAlive[vaults[vid].recipient]  \* Recipient must be alive to present proof
-    /\ vaults' = [vaults EXCEPT ![vid].state = "Unlocked"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ---------- VaultClaim ----------
-\* Maps to LimboVault::claim() at line 1545.
-\* Intended recipient presents Kyber secret key. No creator needed.
-\* The recipient is a specific device — potentially outside the bilateral pair.
-VaultClaim(vid) ==
-    /\ vaults[vid] /= NULL
-    /\ vaults[vid].state = "Unlocked"
-    /\ deviceAlive[vaults[vid].recipient]  \* Recipient claims with their key
-    /\ vaults' = [vaults EXCEPT ![vid].state = "Claimed"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ---------- VaultInvalidate ----------
-\* Creator unilaterally invalidates vault. THE critical DLV liveness escape.
-\* Maps to LimboVault::invalidate() at line 1631.
-\* Works from BOTH Limbo AND Unlocked states.
-VaultInvalidate(vid) ==
-    /\ vaults[vid] /= NULL
-    /\ vaults[vid].state \in {"Limbo", "Unlocked"}
-    /\ LET creator == vaults[vid].creator
-       IN \/ deviceAlive[creator]
-          \* Successor can also invalidate on behalf of dead creator
-          \/ \E dNew \in Device :
-               /\ successorOf[creator] = dNew
-               /\ deviceAlive[dNew]
-    /\ vaults' = [vaults EXCEPT ![vid].state = "Invalidated"]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ---------- VaultExpire ----------
-\* Vaults have a deterministic expiration (BLAKE3 iteration counter, not wall
-\* clock). Vault data lives on N=6 storage nodes (K=3 quorum). Storage nodes
-\* track the vault's lifetime counter and expire it autonomously when it hits
-\* zero. NO DEVICE NEEDS TO BE ALIVE — this is entirely handled by the storage
-\* layer. Maps to VaultStatus::Expired at limbo_vault.rs:1768.
-\*
-\* This is the ultimate liveness escape: even if every device in the network
-\* dies, storage nodes still expire vaults deterministically.
-VaultExpire(vid) ==
-    /\ vaults[vid] /= NULL
-    /\ vaults[vid].state \in {"Limbo", "Unlocked"}
-    /\ vaults' = [vaults EXCEPT ![vid].state = "Invalidated"]  \* Expiry => terminal
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* ========================================================================
-\* ENVIRONMENT ACTIONS (nondeterministic)
-\* ========================================================================
-
-\* Network partition and healing
 PartitionStart(d) ==
     /\ networkUp[d]
     /\ networkUp' = [networkUp EXCEPT ![d] = FALSE]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
 PartitionEnd(d) ==
     /\ ~networkUp[d]
     /\ networkUp' = [networkUp EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, coPresent, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* BLE proximity changes
 BleConnect ==
     /\ ~coPresent
     /\ coPresent' = TRUE
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
 BleDisconnect ==
     /\ coPresent
     /\ coPresent' = FALSE
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceBalance, deviceAlive, begun, sessions, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
-\* ========================================================================
-\* RECOVERY ACTIONS
-\* ========================================================================
-
-\* Maps to recovery/capsule.rs and recovery/tombstone.rs
-
-\* Write recovery capsule (after each committed transaction)
-CapsuleWrite(d) ==
-    /\ deviceAlive[d]
-    /\ capsuleExists' = [capsuleExists EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, tombstoned, successorOf, burnedTotal>>
-
-\* Device failure. A step in flight with the failed device fails nothing on
-\* its peer: the peer cannot tell a dead device from an absent one, and past
-\* the confirm its step may have committed on the other side. It stays in
-\* flight (SessionTermination excepts it).
+\* Device failure. A step in flight with the failed device fails nothing on its
+\* peer: the peer cannot tell a dead device from an absent one. It stays in
+\* flight (the liveness properties except it).
 DeviceFail(d) ==
     /\ deviceAlive[d]
     /\ deviceAlive' = [deviceAlive EXCEPT ![d] = FALSE]
-    /\ UNCHANGED <<chainTip, balance, modalLock, relationshipTip, sessions,
-                   b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, successorOf, burnedTotal>>
-
-\* Tombstone (marks old device invalid). Maps to TombstoneReceipt at tombstone.rs:28.
-TombstoneCreate(d) ==
-    /\ ~deviceAlive[d]
-    /\ ~tombstoned[d]
-    /\ capsuleExists[d]
-    /\ tombstoned' = [tombstoned EXCEPT ![d] = TRUE]
-    /\ UNCHANGED <<chainTip, balance, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, successorOf, burnedTotal>>
-
-\* Succession (new device takes over). Maps to SuccessionReceipt at tombstone.rs:46.
-SuccessionCreate(dOld, dNew) ==
-    /\ dOld /= dNew
-    /\ tombstoned[dOld]
-    /\ ~deviceAlive[dOld]
-    /\ deviceAlive[dNew]
-    /\ successorOf[dOld] = NULL
-    /\ successorOf' = [successorOf EXCEPT ![dOld] = dNew]
-    /\ chainTip' = [chainTip EXCEPT ![dNew] = chainTip[dOld]]
-    /\ balance' = [balance EXCEPT ![dNew] = balance[dNew] + balance[dOld],
-                                  ![dOld] = 0]
-    /\ UNCHANGED <<deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned, burnedTotal>>
-
-\* ========================================================================
-\* NEXT-STATE RELATION
-\* ========================================================================
+    /\ UNCHANGED <<deviceBalance, begun, sessions, coPresent, networkUp, burnedTotal>>
+    /\ UNCHANGED onlineVars
 
 \* ========================================================================
 \* TOKEN CREATION
 \* ========================================================================
 
-\* Create a token: DESTROY the fee from the creator's ERA balance.
-\*
-\* Models the fee leg of the two-leg create-token conservation rule. The
-\* issuance leg credits a DIFFERENT asset (the new token), which this
-\* single-asset model does not track — and that is exactly why it cannot
-\* offset the burn here. The fee is a strict destruction: no counterparty is
-\* credited, so it must land in `burnedTotal` for conservation to close.
-\*
-\* Insufficient balance means NO state change at all — a failed creation
-\* burns nothing.
+\* Create a token: DESTROY the fee from the creator's ERA balance. The
+\* issuance leg credits a different asset this single-asset model does not
+\* track, so the fee must land in `burnedTotal` for conservation to close.
+\* Insufficient balance changes nothing.
 CreateTokenBurn(d) ==
     /\ deviceAlive[d]
-    /\ ~modalLock
-    /\ balance[d] >= TOKEN_CREATION_FEE
-    /\ balance' = [balance EXCEPT ![d] = @ - TOKEN_CREATION_FEE]
+    /\ deviceBalance[d] >= TOKEN_CREATION_FEE
+    /\ deviceBalance' = [deviceBalance EXCEPT ![d] = @ - TOKEN_CREATION_FEE]
     /\ burnedTotal' = burnedTotal + TOKEN_CREATION_FEE
-    /\ UNCHANGED <<chainTip, deviceAlive, modalLock, relationshipTip,
-                   sessions, b0xPending, b0xAmount, b0xSender, b0xReceiver,
-                   vaults, coPresent, networkUp, capsuleExists, tombstoned,
-                   successorOf, burnedTotal>>
+    /\ UNCHANGED <<deviceAlive, begun, sessions, coPresent, networkUp>>
+    /\ UNCHANGED onlineVars
+
+\* ========================================================================
+\* NEXT-STATE RELATION
+\* ========================================================================
+
+\* Delivery to `d` of some transfer, or of some delta, on storage.
+DeliverTransferTo(d) == \E m \in net, posted \in BOOLEAN : m.to = d /\ RecvTransfer(m, posted)
+DeliverDeltaTo(d) == \E m \in net : m.to = d /\ RecvDelta(m)
 
 Next ==
-    \* Token creation (fee burn)
     \/ \E d \in Device : CreateTokenBurn(d)
-    \* Bilateral session actions
+    \* Offline steps
     \/ \E s, r \in Device, sid \in SessionId, amt \in 1..INITIAL_BALANCE :
         SenderPrepare(s, r, sid, amt)
     \/ \E sid \in SessionId : ReceiverReceivePrepare(sid)
@@ -575,128 +566,97 @@ Next ==
     \/ \E sid \in SessionId : Commit(sid)
     \/ \E sid \in SessionId : ProposerCancel(sid)
     \/ \E sid \in SessionId : TripwireAbort(sid)
-    \* Modal lock / b0x actions
-    \/ \E s, r \in Device, amt \in 1..INITIAL_BALANCE :
-        OnlineSubmit(s, r, amt)
-    \/ OnlineDeliver
-    \/ OnlineReject
-    \* DLV vault actions
-    \/ \E vid \in VaultId, cr, rcpt \in Device : VaultCreate(vid, cr, rcpt)
-    \/ \E vid \in VaultId : VaultUnlock(vid)
-    \/ \E vid \in VaultId : VaultClaim(vid)
-    \/ \E vid \in VaultId : VaultInvalidate(vid)
-    \/ \E vid \in VaultId : VaultExpire(vid)
-    \* Environment actions
+    \* Online transfers
+    \/ \E d, p \in Device, amt \in 1..INITIAL_BALANCE, posted \in BOOLEAN : Send(d, p, amt, posted)
+    \/ \E d \in Device : DeliverTransferTo(d)
+    \/ \E d \in Device : DeliverDeltaTo(d)
+    \/ \E d, p \in Device : CertPost(d, p)
+    \/ \E d, p \in Device : GateRelease(d, p)
+    \/ \E d, p \in Device : RecvCert(d, p)
+    \/ \E r \in outbox : RedriveTransfer(r)
+    \/ \E j \in journal : RedriveDelta(j)
+    \* Environment
     \/ \E d \in Device : PartitionStart(d)
     \/ \E d \in Device : PartitionEnd(d)
     \/ BleConnect
     \/ BleDisconnect
-    \* Recovery actions
-    \/ \E d \in Device : CapsuleWrite(d)
     \/ \E d \in Device : DeviceFail(d)
-    \/ \E d \in Device : TombstoneCreate(d)
-    \/ \E dOld, dNew \in Device : SuccessionCreate(dOld, dNew)
 
 \* ========================================================================
 \* SAFETY INVARIANTS
 \* ========================================================================
 
-\* TypeOK: all variables have valid types
 TypeOK ==
-    /\ chainTip \in [Device -> Hash]
-    /\ balance \in [Device -> Nat]
+    /\ deviceBalance \in [Device -> Nat]
     /\ deviceAlive \in [Device -> BOOLEAN]
-    /\ modalLock \in BOOLEAN
-    /\ relationshipTip \in Nat
+    /\ begun \in [Device -> 0..StepsPerDevice]
     /\ \A sid \in SessionId :
         sessions[sid] = NULL \/
         (/\ sessions[sid].phase \in Phase
          /\ sessions[sid].sender \in Device
          /\ sessions[sid].receiver \in Device
-         /\ sessions[sid].tipAtCreation \in Hash
+         /\ sessions[sid].tipAtCreation \in Nat
          /\ sessions[sid].amount \in 1..INITIAL_BALANCE
          /\ sessions[sid].hasBothSigs \in BOOLEAN)
-    /\ b0xPending \in BOOLEAN
-    /\ b0xAmount \in Nat
-    /\ b0xSender \in Device
-    /\ b0xReceiver \in Device
-    /\ \A vid \in VaultId :
-        vaults[vid] = NULL \/
-        (/\ vaults[vid].state \in VState
-         /\ vaults[vid].creator \in Device
-         /\ vaults[vid].recipient \in Device)
     /\ coPresent \in BOOLEAN
     /\ networkUp \in [Device -> BOOLEAN]
-    /\ capsuleExists \in [Device -> BOOLEAN]
-    /\ tombstoned \in [Device -> BOOLEAN]
-    /\ successorOf \in [Device -> Device \cup {NULL}]
+    /\ tip \in [Pairs -> Nat]
+    /\ online \in [Pairs -> [prev: Nat, local: Nat, lin: Nat, pin: Nat, gate: Nat, awaits: Nat]]
+    /\ outbox \subseteq [id: Nat, from: Device, to: Device, payload: 1..INITIAL_BALANCE,
+                         sp: Nat, sc: Nat, pp: Nat, pc: Nat, fin: BOOLEAN]
+    /\ journal \subseteq [id: Nat, from: Device, to: Device, sp: Nat, sc: Nat, pp: Nat, pc: Nat]
+    /\ certs \subseteq Nat
+    /\ joins \subseteq [parent: Nat, lo: Nat, hi: Nat, tip: Nat]
+    /\ net \subseteq [id: Nat, kind: {"transfer", "delta"}, from: Device, to: Device,
+                      payload: 0..INITIAL_BALANCE, sp: Nat, sc: Nat, pp: Nat, pc: Nat]
+    /\ nextMsgId \in Nat
+    /\ ledger \subseteq [signer: Device, oldTip: Nat, newTip: Nat]
+    /\ burnedTotal \in Nat
 
-\* NoFork (Tripwire Theorem 2, Whitepaper Section 6.1):
-\* No two committed sessions consumed the same parent tip for the same sender.
+\* NoFork (Tripwire): no signer consumes its own lineage parent twice.
 NoFork ==
-    \A s1, s2 \in SessionId :
-        (s1 /= s2
-         /\ sessions[s1] /= NULL /\ sessions[s2] /= NULL
-         /\ sessions[s1].phase = "Committed" /\ sessions[s2].phase = "Committed"
-         /\ sessions[s1].sender = sessions[s2].sender)
-        => sessions[s1].tipAtCreation /= sessions[s2].tipAtCreation
+    \A l1, l2 \in ledger :
+        (l1.signer = l2.signer /\ l1.oldTip = l2.oldTip) => l1.newTip = l2.newTip
 
-\* TokenConservation (Theorem 4): ERA is conserved MODULO an explicitly
-\* tracked burn. Total balance + escrowed amount + burned amount is constant.
-\*
-\* When b0xPending, the escrowed amount was deducted from sender but not yet
-\* credited to receiver — so visible balances sum to (total - escrow).
-\*
-\* Token creation destroys `TOKEN_CREATION_FEE` with NO counterparty credit,
-\* so that value must appear in `burnedTotal` for the sum to close. This is
-\* what makes the two-leg create-token conservation rule checkable: the fee
-\* leg cannot silently vanish, and it cannot be credited anywhere.
 RECURSIVE SumBal(_)
 SumBal(S) == IF S = {} THEN 0
              ELSE LET d == CHOOSE x \in S : TRUE
-                  IN balance[d] + SumBal(S \ {d})
+                  IN deviceBalance[d] + SumBal(S \ {d})
 
-EscrowedAmount == IF b0xPending THEN b0xAmount ELSE 0
+RECURSIVE SumPayload(_)
+SumPayload(S) == IF S = {} THEN 0
+                 ELSE LET r == CHOOSE x \in S : TRUE IN r.payload + SumPayload(S \ {r})
 
+\* TokenConservation: ERA is conserved modulo the tracked burn. An admitted
+\* debit not yet credited is value in flight, never lost.
 TokenConservation ==
-    SumBal(Device) + EscrowedAmount + burnedTotal
+    SumBal(Device) + SumPayload({ r \in outbox : ~Applied(r) }) + burnedTotal
         = Cardinality(Device) * INITIAL_BALANCE
 
-\* The burn is monotone: destroyed value is never restored.
-BurnIsMonotone == burnedTotal >= 0
+\* At rest, both devices hold one tip and each pins the other's lineage head.
+ProjectionAgreement ==
+    AtRest =>
+        \A x \in Pairs :
+            /\ tip[x] = tip[<<x[2], x[1]>>]
+            /\ online[x].pin = online[<<x[2], x[1]>>].lin
 
-\* ModalLockConsistency (Theorem 1): lock implies pending b0x item.
-ModalLockConsistency ==
-    modalLock => b0xPending
+\* The barrier is held by durable state.
+BarrierHeldDurably ==
+    \A x \in Pairs :
+        /\ online[x].gate # 0 => \E r \in outbox : r.id = online[x].gate /\ r.from = x[1] /\ r.to = x[2]
+        /\ online[x].awaits # 0 => \E j \in journal : j.id = online[x].awaits /\ j.from = x[1] /\ j.to = x[2]
 
-\* Balances never go negative.
 BalancesNonNegative ==
-    \A d \in Device : balance[d] >= 0
+    \A d \in Device : deviceBalance[d] >= 0
 
 \* ========================================================================
-\* LIVENESS PROPERTIES
+\* LIVENESS
 \* ========================================================================
 
-\* ------------------------------------------------------------
-\* FAIRNESS ASSUMPTIONS
-\*
-\* Weak fairness: if an action is continuously enabled, it is
-\* eventually taken. This is the standard assumption for liveness
-\* in distributed systems.
-\*
-\* We require WF on:
-\*   - User actions (users eventually respond)
-\*   - Commit (accepted sessions eventually finalize)
-\*   - TripwireAbort (detected conflicts eventually abort)
-\* and SF on the receiver taking a proposal: it is enabled whenever the pair
-\* is linked, and the link comes and goes.
-\*   - Modal lock resolution (b0x items eventually delivered/rejected)
-\*   - Network healing (partitions eventually end)
-\*   - BLE reconnection
-\*   - Vault invalidation (creators eventually act on stuck vaults)
-\*   - Recovery (tombstones and successions eventually happen)
-\* ------------------------------------------------------------
-
+\* Weak fairness on what a live device eventually does by itself (answer its
+\* user, commit, abort on a tripwire, release a gate at quorum, read a
+\* certificate, re-drive), on partitions and the link healing; strong
+\* fairness on delivery, which drops and partitions can interrupt.
 Fairness ==
     /\ \A sid \in SessionId :
         /\ WF_vars(UserAccept(sid))
@@ -704,40 +664,25 @@ Fairness ==
         /\ WF_vars(Commit(sid))
         /\ WF_vars(TripwireAbort(sid))
         /\ SF_vars(ReceiverReceivePrepare(sid))
-    /\ WF_vars(OnlineDeliver)
-    /\ WF_vars(OnlineReject)
-    /\ \A d \in Device : WF_vars(PartitionEnd(d))
+    /\ \A d \in Device :
+        /\ SF_vars(DeliverTransferTo(d))
+        /\ SF_vars(DeliverDeltaTo(d))
+        /\ WF_vars(PartitionEnd(d))
+    \* Over the relationship's two directions: with d = p these actions are
+    \* never enabled, and a fairness condition on them would only cost TLC.
+    /\ \A x \in Pairs :
+        /\ SF_vars(CertPost(x[1], x[2]))
+        /\ SF_vars(GateRelease(x[1], x[2]))
+        /\ SF_vars(RecvCert(x[1], x[2]))
+    /\ SF_vars(\E r \in outbox : RedriveTransfer(r))
+    /\ SF_vars(\E j \in journal : RedriveDelta(j))
     /\ WF_vars(BleConnect)
-    /\ \A vid \in VaultId : WF_vars(VaultUnlock(vid))
-    /\ \A vid \in VaultId : WF_vars(VaultClaim(vid))
-    /\ \A vid \in VaultId : WF_vars(VaultInvalidate(vid))
-    \* VaultExpire must use SF (strong fairness) not WF (weak fairness).
-    \* WF only fires when no other vars-changing step occurs. PartitionStart/End
-    \* cycle on networkUp indefinitely, keeping VaultExpire enabled but blocked
-    \* under WF. SF fires whenever the action is infinitely-often enabled —
-    \* this is the correct assumption for storage-node autonomous expiry
-    \* (BLAKE3 iteration counter τ ticks forward regardless of network churn).
-    /\ \A vid \in VaultId : SF_vars(VaultExpire(vid))
-    /\ \A d \in Device : WF_vars(TombstoneCreate(d))
-    /\ \A dOld, dNew \in Device : WF_vars(SuccessionCreate(dOld, dNew))
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
-\* ------------------------------------------------------------
-\* Property 1: SESSION TERMINATION
-\*
-\* Every bilateral session that starts eventually reaches a
-\* terminal state {Committed, Rejected, Failed}, unless a device of
-\* the pair dies: nothing ends a step on a lost link or on time.
-\*
-\* Proof sketch:
-\*   Prepared: the pair is linked infinitely often (WF on BleConnect,
-\*     PartitionEnd), so the receiver takes it (SF)
-\*   PendingUserAction: UserAccept or UserReject (WF on both)
-\*   Accepted + tipMatch: Commit enabled (WF fires)
-\*   Accepted + tipMoved: TripwireAbort enabled (WF fires)
-\* Every case leads to a terminal state. QED.
-\* ------------------------------------------------------------
+BothAlive == \A d \in Device : deviceAlive[d]
+
+\* 1. Every offline step between devices that stay alive settles.
 SessionTermination ==
     \A sid \in SessionId :
         [](sessions[sid] /= NULL /\ sessions[sid].phase \in InFlightPhase
@@ -746,58 +691,31 @@ SessionTermination ==
                  \/ ~deviceAlive[sessions[sid].sender]
                  \/ ~deviceAlive[sessions[sid].receiver]))
 
-\* ------------------------------------------------------------
-\* Property 2: MODAL LOCK RESOLUTION
-\*
-\* The modal lock (Whitepaper Theorem 1) always eventually clears.
-\*
-\* Proof sketch:
-\*   modalLock => b0xPending (invariant).
-\*   OnlineReject is always enabled when b0xPending /\ modalLock.
-\*   WF on OnlineReject fires. modalLock' = FALSE. QED.
-\* ------------------------------------------------------------
-ModalLockResolution ==
-    [](modalLock => <>(~modalLock))
+\* 2. Every online send's gate releases and every awaited certificate
+\*    arrives, crossing sends included, unless a device of the pair dies.
+OnlineSendSettles ==
+    \A x \in Pairs :
+        /\ [](online[x].gate # 0 => <>(online[x].gate = 0 \/ ~BothAlive))
+        /\ [](online[x].awaits # 0 => <>(online[x].awaits = 0 \/ ~BothAlive))
 
-\* ------------------------------------------------------------
-\* Property 3: DLV LIVENESS (UNCONDITIONAL)
-\*
-\* No vault remains non-terminal forever. No device-alive guard.
-\*
-\* Vault data lives on N=6 storage nodes (K=3 quorum). Storage
-\* nodes expire vaults autonomously via deterministic BLAKE3
-\* iteration counter — no device needs to be alive.
-\*
-\* Resolution paths (all covered by weak fairness):
-\*   Case 1: Creator alive → VaultInvalidate (WF fires)
-\*   Case 2: Recipient alive → VaultUnlock → VaultClaim (WF fires)
-\*   Case 3: Creator dead + capsule + live successor →
-\*           Tombstone → Succession → successor invalidates
-\*   Case 4: ALL devices dead → VaultExpire fires anyway.
-\*           Storage nodes handle it autonomously. WF guarantees
-\*           termination. No device needs to be alive.
-\*
-\* Every case resolves. There is no stuck state. QED.
-\* (The 3-device "recipient outside pair" case is a superset of
-\* Case 2 and follows from the same WF argument with an additional
-\* independent device not modeled here for tractability.)
-\* ------------------------------------------------------------
-DLVLiveness ==
-    \A vid \in VaultId :
-        [](  vaults[vid] /= NULL
-           /\ vaults[vid].state \in {"Limbo", "Unlocked"}
-           => <>(vaults[vid] = NULL \/ vaults[vid].state \in TerminalVState))
+\* 3. The relationship comes to rest infinitely often: it never wedges.
+RelationshipReturnsToRest ==
+    []<>(AtRest \/ ~BothAlive)
 
-\* ========================================================================
-\* SPECIFICATION AND PROPERTIES BUNDLE
-\* ========================================================================
+\* Non-vacuity witnesses (each expected violated in its registered config).
+NeverCrossed ==
+    ~\E x \in Pairs : online[x].gate # 0 /\ online[<<x[2], x[1]>>].gate # 0
+                      /\ \E r1, r2 \in outbox : r1.from = x[1] /\ r2.from = x[2] /\ r1.pp = r2.pp
 
-\* All safety invariants
+NeverSettledCrossing ==
+    ~(AtRest /\ joins # {} /\ \A x \in Pairs : tip[x] \in { j.tip : j \in joins })
+
 Safety ==
     /\ TypeOK
     /\ NoFork
     /\ TokenConservation
-    /\ ModalLockConsistency
+    /\ ProjectionAgreement
+    /\ BarrierHeldDurably
     /\ BalancesNonNegative
 
 ====

@@ -6,13 +6,12 @@
 //! signatures + the in-release SMT proofs and needs NO chip, NO relay, NO verifier slot. The one
 //! device-layer install that remains is the sender's appliance factory
 //! ([`install::install_anchor_transport`] → [`usb_appliance::UsbAnchorAppliance`] over the opaque
-//! Kotlin USB round-trip in [`usb_pico`]). Device SETUP (counter birth, slot-0 birth cage) and
-//! read-only chip diagnostics live in [`se_slot`].
+//! Kotlin USB round-trip in [`usb_pico`]). The appliance provisions itself: the phone sends one
+//! `OP_PROVISION` with its device's identity, and the firmware closes the chip to a second birth.
+//! No raw SPI reaches the chip from the phone.
 //!
-//! Dependency direction is ONE-WAY (`dsm-android-anchor` -> `dsm_sdk` + `dsm-anchor-hw-verifier`);
-//! `dsm_sdk` never depends back on this crate. This crate transitively pulls `tropic01`, so it is
-//! EXCLUDED from the workspace and built only in the Android cargo-ndk pipeline. The default CI
-//! workspace stays `tropic01`-free.
+//! Dependency direction is ONE-WAY (`dsm-android-anchor` -> `dsm_sdk`); `dsm_sdk` never depends
+//! back on this crate. It is built in the Android cargo-ndk pipeline.
 //!
 //! Fail-closed everywhere: no factory installed -> every offline-bearer send errors
 //! ("offline = chips"); a USB/chip failure inside any op -> `DsmError` -> no release.
@@ -22,7 +21,6 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 pub mod install;
-pub mod se_slot;
 pub mod usb_appliance;
 pub mod usb_pico;
 pub use usb_appliance::UsbAnchorAppliance;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect } from 'react';
+import { isTextEntry } from './useBackButton';
 
 type Intents = {
   prevItem: () => void;
@@ -17,6 +18,9 @@ export function useKeyboardBindings(intents: Intents): void {
     if (typeof document === 'undefined') return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A key typed into a field is the field's: a space, Enter or an arrow
+      // there is text or caret movement, never the menu's. Escape still backs out.
+      if (isTextEntry(e.target) && e.key !== 'Escape') return;
       // When a sub-screen has its own D-pad nav active, defer arrow/select keys to it.
       // The screen's capture-phase handler already handled these.
       const screenNav = !!(window as any).__dsmScreenNavActive;

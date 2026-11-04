@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Recovery capsule persistence and preferences.
+//! Recovery state persistence and preferences.
 //!
 //! Tables:
-//! - `recovery_capsules`: stores encrypted capsule bytes indexed by capsule_index
-//! - `recovery_prefs`: key/value store for recovery settings (enabled, configured, etc.)
+//! - `recovery_prefs`: key/value store for the recovery phase, the staged
+//!   recovery source, the sealed wallet seed and the receipts
+//! - `recovery_sync_status`, `recovered_chain_tips`, `recovery_locked_assets`
 
 use anyhow::{anyhow, Result};
 use log::debug;
@@ -12,8 +13,6 @@ use rusqlite::params;
 use super::get_connection;
 use dsm::recovery::BearerAssetLockState;
 use dsm::types::operations::{EgressAsset, Operation};
-
-const PENDING_CAPSULE_INDEX_KEY: &str = "pending_capsule_index";
 
 /// Ensure the recovery tables exist (called from schema migration path).
 pub fn ensure_recovery_tables() -> Result<()> {
@@ -24,12 +23,6 @@ pub fn ensure_recovery_tables() -> Result<()> {
 
     conn.execute_batch(
         r#"
-        CREATE TABLE IF NOT EXISTS recovery_capsules(
-            capsule_index     INTEGER PRIMARY KEY,
-            encrypted_bytes   BLOB NOT NULL,
-            smt_root          BLOB NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS recovery_prefs(
             key   TEXT PRIMARY KEY,
             value BLOB NOT NULL
@@ -59,256 +52,33 @@ pub fn ensure_recovery_tables() -> Result<()> {
         "#,
     )?;
 
-    // Builds before SA-17's fix stored K_R here wrapped under a key derived from the
-    // device id and genesis hash, both public. That fix stopped writing it but left the
-    // row on upgraded devices, still opening every ring capsule to anyone who reads the
-    // database (SA-118). Nothing reads the row; it is removed whenever the tables open.
+    // Builds before SA-17's fix stored a recovery key here wrapped under a key derived
+    // from the device id and genesis hash, both public. That fix stopped writing it but
+    // left the row on upgraded devices (SA-118). Nothing reads the row; it is removed
+    // whenever the tables open.
     conn.execute(
         "DELETE FROM recovery_prefs WHERE key = ?1",
         params![STALE_PUBLICLY_WRAPPED_RECOVERY_KEY],
     )?;
 
-    Ok(())
-}
-
-/// The `recovery_prefs` key under which builds before SA-17's fix kept K_R wrapped under
-/// public values.
-const STALE_PUBLICLY_WRAPPED_RECOVERY_KEY: &str = "encrypted_recovery_key";
-
-/// Store an encrypted recovery capsule.
-pub fn store_recovery_capsule(
-    capsule_index: u64,
-    encrypted_bytes: &[u8],
-    smt_root: &[u8],
-) -> Result<()> {
-    if encrypted_bytes.is_empty() {
-        return Err(anyhow!("encrypted_bytes cannot be empty"));
-    }
-    if smt_root.len() != 32 {
-        return Err(anyhow!("smt_root must be 32 bytes, got {}", smt_root.len()));
-    }
-
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    conn.execute(
-        "INSERT OR REPLACE INTO recovery_capsules(capsule_index, encrypted_bytes, smt_root)
-         VALUES (?1, ?2, ?3)",
-        params![capsule_index as i64, encrypted_bytes, smt_root],
-    )?;
-
-    debug!(
-        "[CLIENT_DB] Stored recovery capsule index={}",
-        capsule_index
-    );
-    Ok(())
-}
-
-/// Get the latest (highest capsule_index) recovery capsule.
-pub fn get_latest_recovery_capsule() -> Result<Option<(u64, Vec<u8>)>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let mut stmt = conn.prepare(
-        "SELECT capsule_index, encrypted_bytes FROM recovery_capsules
-         ORDER BY capsule_index DESC LIMIT 1",
-    )?;
-
-    let result = stmt
-        .query_row([], |row| {
-            let idx: i64 = row.get(0)?;
-            let bytes: Vec<u8> = row.get(1)?;
-            Ok((idx as u64, bytes))
-        })
-        .optional()?;
-
-    Ok(result)
-}
-
-/// Mark a stored capsule as pending for the next NFC write.
-pub fn mark_pending_recovery_capsule(capsule_index: u64) -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let exists: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM recovery_capsules WHERE capsule_index = ?1",
-        params![capsule_index as i64],
-        |row| row.get(0),
-    )?;
-    if exists == 0 {
-        return Err(anyhow!(
-            "cannot mark missing recovery capsule {} as pending",
-            capsule_index
-        ));
-    }
-
-    drop(conn);
-    set_recovery_pref(PENDING_CAPSULE_INDEX_KEY, &capsule_index.to_le_bytes())
-}
-
-/// Clear the pending NFC-write capsule marker.
-pub fn clear_pending_recovery_capsule() -> Result<()> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
+    // A build with no platform key seals nothing. Earlier builds sealed the wallet seed
+    // here under a key derived from a constant, which anyone holding the store could
+    // open. Nothing reads the row off a device; it is removed whenever the tables open.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
     conn.execute(
         "DELETE FROM recovery_prefs WHERE key = ?1",
-        params![PENDING_CAPSULE_INDEX_KEY],
+        params![SEALED_WALLET_SEED],
     )?;
+
     Ok(())
 }
 
-/// Get the exact capsule currently pending for NFC write.
-pub fn get_pending_recovery_capsule() -> Result<Option<(u64, Vec<u8>)>> {
-    let Some(bytes) = get_recovery_pref(PENDING_CAPSULE_INDEX_KEY)? else {
-        return Ok(None);
-    };
-    if bytes.len() != 8 {
-        return Err(anyhow!(
-            "pending capsule index pref must be 8 bytes, got {}",
-            bytes.len()
-        ));
-    }
-    let mut idx_bytes = [0u8; 8];
-    idx_bytes.copy_from_slice(&bytes);
-    let capsule_index = u64::from_le_bytes(idx_bytes);
+/// The `recovery_prefs` key under which builds before SA-17's fix kept a recovery key
+/// wrapped under public values.
+const STALE_PUBLICLY_WRAPPED_RECOVERY_KEY: &str = "encrypted_recovery_key";
 
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-    let capsule = conn
-        .query_row(
-            "SELECT encrypted_bytes FROM recovery_capsules WHERE capsule_index = ?1",
-            params![capsule_index as i64],
-            |row| row.get::<_, Vec<u8>>(0),
-        )
-        .optional()?;
-
-    if let Some(encrypted_bytes) = capsule {
-        return Ok(Some((capsule_index, encrypted_bytes)));
-    }
-
-    drop(conn);
-    clear_pending_recovery_capsule()?;
-    Ok(None)
-}
-
-/// Metadata about a stored capsule (for dashboard display, no decryption).
-pub struct CapsuleMetadata {
-    pub capsule_index: u64,
-    pub smt_root: Vec<u8>,
-    pub counterparty_count: u64,
-}
-
-/// Get metadata for the latest capsule (no decryption needed).
-pub fn get_latest_capsule_metadata() -> Result<Option<CapsuleMetadata>> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let result = conn
-        .query_row(
-            "SELECT capsule_index, smt_root FROM recovery_capsules
-             ORDER BY capsule_index DESC LIMIT 1",
-            [],
-            |row| {
-                let idx: i64 = row.get(0)?;
-                let smt_root: Vec<u8> = row.get(1)?;
-                Ok(CapsuleMetadata {
-                    capsule_index: idx as u64,
-                    smt_root,
-                    // Counterparty count is inside the encrypted capsule; we store it
-                    // as a separate column or derive from the recovery_sync_status table.
-                    // For now, use sync status table count as a proxy.
-                    counterparty_count: 0, // Filled below
-                })
-            },
-        )
-        .optional()?;
-
-    match result {
-        Some(mut meta) => {
-            let stored_count: Option<Vec<u8>> = conn
-                .query_row(
-                    "SELECT value FROM recovery_prefs WHERE key = 'latest_capsule_counterparty_count'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .unwrap_or(None);
-
-            if let Some(bytes) = stored_count {
-                if bytes.len() == 8 {
-                    if let Ok(arr) = <[u8; 8]>::try_from(bytes.as_slice()) {
-                        meta.counterparty_count = u64::from_le_bytes(arr);
-                        return Ok(Some(meta));
-                    }
-                }
-            }
-
-            // Fall back to staged recovered tips if present, then verified contacts.
-            let staged_count: i64 = conn
-                .query_row("SELECT COUNT(*) FROM recovered_chain_tips", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or(0);
-            if staged_count > 0 {
-                meta.counterparty_count = staged_count as u64;
-                return Ok(Some(meta));
-            }
-
-            let contacts: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM contacts WHERE verified = 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0);
-            meta.counterparty_count = contacts as u64;
-            Ok(Some(meta))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Get the total number of stored capsules.
-pub fn get_capsule_count() -> Result<u64> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM recovery_capsules", [], |row| {
-        row.get(0)
-    })?;
-
-    Ok(count as u64)
-}
-
-/// Get the highest capsule index, or 0 if no capsules exist.
-pub fn get_max_capsule_index() -> Result<u64> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let idx: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(capsule_index), 0) FROM recovery_capsules",
-        [],
-        |row| row.get(0),
-    )?;
-
-    Ok(idx as u64)
-}
+/// The `recovery_prefs` key of the wallet seed sealed at rest.
+pub(crate) const SEALED_WALLET_SEED: &str = "encrypted_wallet_seed";
 
 /// Set a recovery preference (binary value).
 pub fn set_recovery_pref(key: &str, value: &[u8]) -> Result<()> {
@@ -478,35 +248,6 @@ pub fn value_egress_block_reason() -> Option<&'static str> {
             );
         }
     }
-
-    // R2′ (spec §5 — durable-persist-before-value): when recovery is enabled, the
-    // recovery capsule MUST capture the latest accepted state before value
-    // egress, so a lost/destroyed device is always recoverable to a frontier at
-    // or beyond any spend. The egress chokepoint attempts a best-effort re-seal
-    // first; if it still cannot seal (e.g. no cached key), egress is refused.
-    //
-    // NOTE: this enforces capsule *seal* currency. Confirmation of durable write
-    // to the external recovery medium (NFC tag / storage-node publish) is the
-    // stronger form tracked separately as the durable-capsule index.
-    let enabled = match get_recovery_pref("nfc_backup_enabled") {
-        Ok(v) => v.as_deref() == Some(&[1u8][..]),
-        Err(_) => return Some(UNREADABLE),
-    };
-    if enabled {
-        let accepted = match read_u64_pref_checked(ACCEPTED_STATE_INDEX_KEY) {
-            Ok(v) => v,
-            Err(_) => return Some(UNREADABLE),
-        };
-        let sealed = match read_u64_pref_checked(CAPSULE_STATE_INDEX_KEY) {
-            Ok(v) => v,
-            Err(_) => return Some(UNREADABLE),
-        };
-        if sealed < accepted {
-            return Some(
-                "recovery capsule is stale (latest accepted state not yet sealed): refresh recovery before value egress",
-            );
-        }
-    }
     None
 }
 
@@ -518,98 +259,8 @@ pub fn precheck_value_egress() -> Result<()> {
     Ok(())
 }
 
-const ACCEPTED_STATE_INDEX_KEY: &str = "accepted_state_index";
-const CAPSULE_STATE_INDEX_KEY: &str = "capsule_state_index";
 const RECOVERED_SUCCESSOR_KEY: &str = "recovered_successor";
 const RECOVERY_ACTIVATED_KEY: &str = "recovery_activated";
-
-/// Read an 8-byte u64 pref, propagating DB read errors. A missing/short row is
-/// `Ok(0)` (legitimately unset); only a genuine DB error is `Err`. The gate uses
-/// this so it can fail CLOSED on an unreadable DB while still treating "never
-/// set" as allow.
-fn read_u64_pref_checked(key: &str) -> Result<u64> {
-    match get_recovery_pref(key)? {
-        Some(bytes) if bytes.len() == 8 => {
-            let mut a = [0u8; 8];
-            a.copy_from_slice(&bytes);
-            Ok(u64::from_le_bytes(a))
-        }
-        _ => Ok(0),
-    }
-}
-
-fn read_u64_pref(key: &str) -> u64 {
-    read_u64_pref_checked(key).unwrap_or(0)
-}
-
-/// Device-level monotone count of accepted frontier-changing transitions
-/// (capsule currency anchor, spec §5.1). 0 if unset.
-pub fn accepted_state_index() -> u64 {
-    read_u64_pref(ACCEPTED_STATE_INDEX_KEY)
-}
-
-/// Increment and return the accepted-state index. Called on every accepted
-/// frontier-changing transition. A bump marks the recovery capsule dirty until
-/// the next successful seal records the new index via `set_capsule_state_index`.
-pub fn bump_accepted_state_index() -> Result<u64> {
-    let next = accepted_state_index().saturating_add(1);
-    set_recovery_pref(ACCEPTED_STATE_INDEX_KEY, &next.to_le_bytes())?;
-    Ok(next)
-}
-
-/// Increment `accepted_state_index` using an EXISTING connection/transaction so
-/// the bump is ATOMIC with the caller's state-commit transaction: if the
-/// surrounding tx rolls back the bump rolls back too, and if the bump fails the
-/// whole advance fails closed. This removes the post-commit fail-OPEN window
-/// where a missed bump leaves the capsule un-dirtied on already-committed state.
-///
-/// MUST be passed the connection that owns the open transaction — do NOT open a
-/// new connection here (it would deadlock on the connection mutex).
-pub fn bump_accepted_state_index_with_conn(conn: &rusqlite::Connection) -> Result<u64> {
-    let current: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT value FROM recovery_prefs WHERE key = ?1",
-            params![ACCEPTED_STATE_INDEX_KEY],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let cur = match current {
-        Some(b) if b.len() == 8 => {
-            let mut a = [0u8; 8];
-            a.copy_from_slice(&b);
-            u64::from_le_bytes(a)
-        }
-        _ => 0,
-    };
-    let next = cur.saturating_add(1);
-    conn.execute(
-        "INSERT OR REPLACE INTO recovery_prefs(key, value) VALUES (?1, ?2)",
-        params![ACCEPTED_STATE_INDEX_KEY, &next.to_le_bytes()[..]],
-    )?;
-    Ok(next)
-}
-
-/// The accepted-state index captured by the latest successful capsule seal.
-pub fn capsule_state_index() -> u64 {
-    read_u64_pref(CAPSULE_STATE_INDEX_KEY)
-}
-
-/// Record that a capsule has sealed the given accepted-state index. Clears the
-/// dirty condition up to that point (spec §5.2).
-pub fn set_capsule_state_index(index: u64) -> Result<()> {
-    set_recovery_pref(CAPSULE_STATE_INDEX_KEY, &index.to_le_bytes())
-}
-
-/// Capsule currency check (spec §5.2):
-/// `CapsuleCurrent ⟺ capsule_state_index == accepted_state_index`.
-///
-/// The capsule is dirty when the latest sealed capsule does not capture the
-/// latest accepted state. While dirty, the exported recovery artifact does not
-/// represent the latest accepted device frontier; the wallet surfaces this, and
-/// (R2′, Phase 1 follow-up) value egress is refused until it is current.
-pub fn is_capsule_dirty() -> bool {
-    capsule_state_index() < accepted_state_index()
-}
 
 /// True if this device was produced by a recovery succession (it replaced an old
 /// device). Such a device is spend-frozen until a valid recovery activation seal
@@ -657,108 +308,17 @@ pub fn resume_tip_diverges_from_floor(
 
 /// Store the hardware-sealed wallet-seed bundle (the Genesis v2 root-secret input,
 /// one-way BIP39-derived from the paper mnemonic — never the mnemonic itself). The
-/// sealing key is the Android Keystore (hardware-backed) on device; the blob here is
+/// sealing key is the platform's own (hardware-backed on device); the blob here is
 /// already ciphertext.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub fn store_encrypted_wallet_seed(blob: &[u8]) -> Result<()> {
-    set_recovery_pref("encrypted_wallet_seed", blob)
+    set_recovery_pref(SEALED_WALLET_SEED, blob)
 }
 
 /// Load the hardware-sealed wallet-seed bundle.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub fn load_encrypted_wallet_seed() -> Result<Option<Vec<u8>>> {
-    get_recovery_pref("encrypted_wallet_seed")
-}
-
-/// Check if NFC backup is enabled.
-pub fn is_nfc_backup_enabled() -> bool {
-    get_recovery_pref("nfc_backup_enabled")
-        .ok()
-        .flatten()
-        .map(|v| v == [1u8])
-        .unwrap_or(false)
-}
-
-/// Check if NFC backup was ever configured (mnemonic was set up).
-pub fn is_nfc_backup_configured() -> bool {
-    get_recovery_pref("nfc_backup_configured")
-        .ok()
-        .flatten()
-        .map(|v| v == [1u8])
-        .unwrap_or(false)
-}
-
-/// Set NFC backup enabled state.
-pub fn set_nfc_backup_enabled(enabled: bool) -> Result<()> {
-    set_recovery_pref("nfc_backup_enabled", &[if enabled { 1u8 } else { 0u8 }])
-}
-
-/// Set NFC backup configured state.
-pub fn set_nfc_backup_configured(configured: bool) -> Result<()> {
-    set_recovery_pref(
-        "nfc_backup_configured",
-        &[if configured { 1u8 } else { 0u8 }],
-    )
-}
-
-/// Check if NFC auto-write-on-transaction is enabled.
-pub fn is_nfc_auto_write_enabled() -> bool {
-    get_recovery_pref("nfc_auto_write_prompt")
-        .ok()
-        .flatten()
-        .map(|v| v == [1u8])
-        .unwrap_or(false)
-}
-
-/// Set NFC auto-write-on-transaction enabled state.
-pub fn set_nfc_auto_write_enabled(enabled: bool) -> Result<()> {
-    set_recovery_pref("nfc_auto_write_prompt", &[if enabled { 1u8 } else { 0u8 }])
-}
-
-/// Store the exact counterparty count for the latest capsule preview.
-pub fn set_latest_capsule_counterparty_count(count: u64) -> Result<()> {
-    set_recovery_pref("latest_capsule_counterparty_count", &count.to_le_bytes())
-}
-
-/// Delete all capsules except the latest N (cleanup).
-pub fn prune_old_capsules(keep_latest_n: u64) -> Result<u64> {
-    let binding = get_connection()?;
-    let conn = binding
-        .lock()
-        .map_err(|_| anyhow!("Database lock poisoned"))?;
-
-    let deleted = conn.execute(
-        "DELETE FROM recovery_capsules WHERE capsule_index NOT IN (
-            SELECT capsule_index FROM recovery_capsules ORDER BY capsule_index DESC LIMIT ?1
-        )",
-        params![keep_latest_n as i64],
-    )?;
-
-    let pending_pref: Option<Vec<u8>> = conn
-        .query_row(
-            "SELECT value FROM recovery_prefs WHERE key = ?1",
-            params![PENDING_CAPSULE_INDEX_KEY],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if let Some(bytes) = pending_pref {
-        if bytes.len() == 8 {
-            let mut idx_bytes = [0u8; 8];
-            idx_bytes.copy_from_slice(&bytes);
-            let pending_index = u64::from_le_bytes(idx_bytes);
-            let exists: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM recovery_capsules WHERE capsule_index = ?1",
-                params![pending_index as i64],
-                |row| row.get(0),
-            )?;
-            if exists == 0 {
-                drop(conn);
-                clear_pending_recovery_capsule()?;
-                return Ok(deleted as u64);
-            }
-        }
-    }
-
-    Ok(deleted as u64)
+    get_recovery_pref(SEALED_WALLET_SEED)
 }
 
 use rusqlite::OptionalExtension;
@@ -1380,77 +940,23 @@ mod tests {
         ensure_recovery_tables().expect("ensure recovery tables");
     }
 
+    /// Owner, 2026-10-04: "No seal off Android". A seed an earlier build sealed under a
+    /// key every build carries does not outlive the next start.
+    ///
+    /// MUTATION CONTROL: removing the delete from `ensure_recovery_tables` leaves the
+    /// row: red.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
     #[test]
     #[serial]
-    fn test_store_and_retrieve_capsule() {
+    fn off_a_device_a_seed_an_earlier_build_sealed_is_removed_when_the_tables_open() {
         setup_test_db();
-        let smt_root = [42u8; 32];
-        let capsule_bytes = b"encrypted_capsule_data";
-
-        store_recovery_capsule(1, capsule_bytes, &smt_root).expect("store");
-
-        let latest = get_latest_recovery_capsule().expect("get latest");
-        assert!(latest.is_some());
-        let (idx, bytes) = latest.expect("should have capsule");
-        assert_eq!(idx, 1);
-        assert_eq!(bytes, capsule_bytes);
-    }
-
-    #[test]
-    #[serial]
-    fn test_capsule_count_and_max_index() {
-        setup_test_db();
-        let smt_root = [42u8; 32];
-
-        assert_eq!(get_capsule_count().expect("count"), 0);
-        assert_eq!(get_max_capsule_index().expect("max"), 0);
-
-        store_recovery_capsule(5, b"cap5", &smt_root).expect("store");
-        store_recovery_capsule(10, b"cap10", &smt_root).expect("store");
-
-        assert_eq!(get_capsule_count().expect("count"), 2);
-        assert_eq!(get_max_capsule_index().expect("max"), 10);
-    }
-
-    #[test]
-    #[serial]
-    fn test_pending_capsule_marker_clears_without_deleting_capsule() {
-        setup_test_db();
-        let smt_root = [7u8; 32];
-
-        store_recovery_capsule(1, b"cap1", &smt_root).expect("store cap1");
-        store_recovery_capsule(2, b"cap2", &smt_root).expect("store cap2");
-        mark_pending_recovery_capsule(2).expect("mark pending");
-
-        let pending = get_pending_recovery_capsule().expect("read pending");
-        assert_eq!(pending, Some((2, b"cap2".to_vec())));
-
-        clear_pending_recovery_capsule().expect("clear pending");
-        assert!(get_pending_recovery_capsule()
-            .expect("pending cleared")
-            .is_none());
-
-        let latest = get_latest_recovery_capsule().expect("latest");
-        assert_eq!(latest, Some((2, b"cap2".to_vec())));
-    }
-
-    #[test]
-    #[serial]
-    fn test_recovery_prefs() {
-        setup_test_db();
-
-        assert!(!is_nfc_backup_enabled());
-        assert!(!is_nfc_backup_configured());
-
-        set_nfc_backup_enabled(true).expect("set enabled");
-        set_nfc_backup_configured(true).expect("set configured");
-
-        assert!(is_nfc_backup_enabled());
-        assert!(is_nfc_backup_configured());
-
-        set_nfc_backup_enabled(false).expect("set disabled");
-        assert!(!is_nfc_backup_enabled());
-        assert!(is_nfc_backup_configured()); // configured stays true
+        set_recovery_pref(SEALED_WALLET_SEED, b"an earlier build's blob").expect("the row");
+        ensure_recovery_tables().expect("the tables open");
+        assert_eq!(
+            get_recovery_pref(SEALED_WALLET_SEED).expect("read the store"),
+            None,
+            "the earlier build's blob is gone"
+        );
     }
 
     #[test]
@@ -1541,84 +1047,6 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_capsule_currency_dirty_tracking() {
-        setup_test_db();
-
-        // Fresh: no transitions, no seals → current (not dirty).
-        assert_eq!(accepted_state_index(), 0);
-        assert_eq!(capsule_state_index(), 0);
-        assert!(!is_capsule_dirty());
-
-        // Accepted transitions advance the accepted-state index → dirty.
-        assert_eq!(bump_accepted_state_index().expect("bump"), 1);
-        assert_eq!(bump_accepted_state_index().expect("bump"), 2);
-        assert_eq!(accepted_state_index(), 2);
-        assert!(is_capsule_dirty());
-
-        // Sealing a capsule that captured index 2 clears dirty.
-        set_capsule_state_index(2).expect("seal");
-        assert!(!is_capsule_dirty());
-
-        // A further accepted transition re-dirties.
-        assert_eq!(bump_accepted_state_index().expect("bump"), 3);
-        assert!(is_capsule_dirty());
-
-        // A seal that only captured an older index does NOT clear dirty.
-        set_capsule_state_index(2).expect("stale seal");
-        assert!(is_capsule_dirty());
-    }
-
-    #[test]
-    #[serial]
-    fn test_r2prime_dirty_capsule_blocks_egress_only_when_recovery_enabled() {
-        setup_test_db();
-        set_recovery_state(RecoveryState::None).expect("state");
-
-        // Make the capsule dirty (an accepted transition occurred, not yet sealed).
-        bump_accepted_state_index().expect("bump");
-        assert!(is_capsule_dirty());
-
-        // Recovery NOT enabled: a dirty capsule does not gate egress — there is no
-        // recovery contract for this device.
-        assert!(!is_nfc_backup_enabled());
-        assert!(value_egress_block_reason().is_none());
-
-        // Recovery enabled + dirty capsule: egress is refused (R2′).
-        set_nfc_backup_enabled(true).expect("enable");
-        assert!(value_egress_block_reason().is_some());
-        assert!(precheck_value_egress().is_err());
-
-        // Sealing the latest accepted state clears the block.
-        set_capsule_state_index(accepted_state_index()).expect("seal");
-        assert!(!is_capsule_dirty());
-        assert!(value_egress_block_reason().is_none());
-        assert!(precheck_value_egress().is_ok());
-    }
-
-    #[test]
-    #[serial]
-    fn test_bump_accepted_state_index_with_conn_increments_atomically() {
-        setup_test_db();
-        assert_eq!(accepted_state_index(), 0);
-        {
-            // Mirrors the dual-write path: bump using the same connection that
-            // owns the transaction (never opening a new one).
-            let binding = get_connection().expect("conn");
-            let conn = binding.lock().expect("lock");
-            assert_eq!(
-                bump_accepted_state_index_with_conn(&conn).expect("bump1"),
-                1
-            );
-            assert_eq!(
-                bump_accepted_state_index_with_conn(&conn).expect("bump2"),
-                2
-            );
-        } // release the connection lock before reading via a fresh connection
-        assert_eq!(accepted_state_index(), 2);
-    }
-
-    #[test]
-    #[serial]
     fn test_recovered_successor_frozen_until_activated() {
         setup_test_db();
         set_recovery_state(RecoveryState::None).expect("state");
@@ -1704,11 +1132,13 @@ mod tests {
         let ticker = std::str::from_utf8(token_id).expect("a builtin ticker");
         Operation::Transfer {
             to_device_id: vec![0xCC; 32],
+            to_genesis: [0x6E; 32],
             amount: Balance::amount(amount),
             policy_commit: dsm::core::token::token_state_manager::builtin_policy_commit_for_token(
                 ticker,
             )
             .expect("a builtin token"),
+            token_policy: Vec::new(),
             terms_commitment: dsm::types::operations::TransferTerms {
                 token_id: token_id.to_vec(),
                 nonce: vec![],
@@ -1746,8 +1176,10 @@ mod tests {
                 ..
             } => Operation::Transfer {
                 to_device_id,
+                to_genesis: [0x6E; 32],
                 amount,
                 policy_commit: [0x77; 32],
+                token_policy: Vec::new(),
                 terms_commitment,
                 signature,
                 authority_policy,

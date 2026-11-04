@@ -28,7 +28,18 @@ fn init_backend() {
     );
 }
 
-#[cfg(not(target_os = "android"))]
+/// On iOS Rust's log goes to the host (`ffi::host_bridge::HostLogger`), so
+/// the app's own log and Rust's are read back together.
+#[cfg(all(not(target_os = "android"), feature = "ffi"))]
+fn init_backend() {
+    if let Err(e) = log::set_logger(&crate::ffi::host_bridge::HostLogger) {
+        eprintln!("the Rust log backend was not installed: {e}");
+        return;
+    }
+    log::set_max_level(LevelFilter::Debug);
+}
+
+#[cfg(all(not(target_os = "android"), not(feature = "ffi")))]
 fn init_backend() {
     use std::io::Write;
 

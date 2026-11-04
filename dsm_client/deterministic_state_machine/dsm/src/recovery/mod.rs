@@ -2,23 +2,24 @@
 
 //! DSM Recovery Module
 //!
-//! Implements the offline-first, post-quantum recovery protocol described in the whitepaper.
-//! Uses AEAD-encrypted NFC capsules containing SMT roots, per-counterparty bilateral tips,
-//! and receipt rollups for immediate recovery without history replay.
+//! Implements the offline-first, post-quantum recovery protocol described in the whitepaper:
+//! tombstone and succession receipts under a genesis-anchored recovery authority, posted
+//! relationship-chain evidence, and receipt rollups for recovery without history replay.
 
 pub mod activation;
 pub mod assembly;
 pub mod authority_anchor;
 pub mod bearer_lock;
 pub mod bundle;
-pub mod capsule;
 pub mod cell;
 pub mod chain_segment;
+pub mod contact_set;
 pub mod dbtc_backing;
 pub mod dbtc_reconcile;
 pub mod dbtc_vault_index;
 pub mod gate_set;
 pub mod pdsmt_posting;
+pub mod recovery_keys;
 pub mod rollup;
 pub mod succession_binding;
 pub mod succession_proof;
@@ -47,7 +48,6 @@ pub use pdsmt_posting::{
     build_pdsmt_snapshot, decode_leaf_set, encode_leaf_set, verify_head_with_leaves,
     PostedPdsmtHead, PostedPdsmtLeafRecord, GENESIS_PARENT_HEAD_HASH,
 };
-pub use capsule::{CapsuleMetadata, EncryptedCapsule, RecoveryCapsule, derive_recovery_authority_seed};
 pub use succession_binding::{
     build_recovery_establishment_op, compute_carry_forward_commitment, is_recovery_establish_op,
     recovery_establishment_floor, verify_forward_ancestry, verify_recovery_reestablish_request,
@@ -55,20 +55,15 @@ pub use succession_binding::{
 };
 pub use succession_proof::RecoverySuccessionProof;
 pub use rollup::{ReceiptRollup, RollupEntry};
+pub use recovery_keys::{derive_recovery_authority_seed, derive_recovery_key};
 pub use tombstone::{ContactTombstoneAck, TombstoneReceipt, SuccessionReceipt, RecoveryReceipt};
 
 use crate::types::error::DsmError;
-use std::collections::HashMap;
 
 /// Initialize the recovery subsystem
 pub fn init_recovery() {
     // Initialize the recovery subsystem components
     tracing::info!("Initializing offline-first recovery subsystem...");
-
-    // Initialize capsule encryption/decryption
-    if let Err(e) = capsule::init_capsule_subsystem() {
-        tracing::error!("Failed to initialize capsule subsystem: {}", e);
-    }
 
     // Initialize rollup accumulator
     rollup::init_rollup_subsystem();
@@ -77,57 +72,6 @@ pub fn init_recovery() {
     tombstone::init_tombstone_subsystem();
 
     tracing::info!("Recovery subsystem initialized");
-}
-
-/// Create an encrypted recovery capsule for NFC ring storage
-pub fn create_recovery_capsule(
-    smt_root: &[u8],
-    counterparty_tips: HashMap<String, (u64, Vec<u8>)>, // counterparty_id -> (height, head_hash)
-    rollup: &ReceiptRollup,
-    wallet_seed: &[u8],
-    counter: u64,
-) -> Result<EncryptedCapsule, DsmError> {
-    capsule::create_encrypted_capsule(smt_root, counterparty_tips, rollup, wallet_seed, counter)
-}
-
-/// Create an encrypted recovery capsule using a pre-derived recovery key.
-pub fn create_recovery_capsule_with_key(
-    smt_root: &[u8],
-    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
-    rollup: &ReceiptRollup,
-    key: &[u8; 32],
-    counter: u64,
-) -> Result<EncryptedCapsule, DsmError> {
-    capsule::create_encrypted_capsule_with_key(smt_root, counterparty_tips, rollup, key, counter)
-}
-
-/// Create an encrypted recovery capsule with device-binding metadata.
-pub fn create_recovery_capsule_with_binding(
-    smt_root: &[u8],
-    counterparty_tips: HashMap<String, (u64, Vec<u8>)>,
-    rollup: &ReceiptRollup,
-    key: &[u8; 32],
-    counter: u64,
-    source_device_id: &[u8],
-    genesis_hash: &[u8],
-) -> Result<EncryptedCapsule, DsmError> {
-    capsule::create_encrypted_capsule_with_binding(
-        smt_root,
-        counterparty_tips,
-        rollup,
-        key,
-        counter,
-        source_device_id,
-        genesis_hash,
-    )
-}
-
-/// Decrypt and verify a recovery capsule from NFC ring
-pub fn decrypt_recovery_capsule(
-    encrypted_capsule: &EncryptedCapsule,
-    wallet_seed: &[u8],
-) -> Result<RecoveryCapsule, DsmError> {
-    capsule::decrypt_capsule(encrypted_capsule, wallet_seed)
 }
 
 /// Create tombstone receipt to invalidate old device binding
@@ -204,42 +148,6 @@ pub fn verify_rollup(rollup: &ReceiptRollup, expected: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_capsule_creation() -> Result<(), DsmError> {
-        // Test capsule creation and decryption
-        let smt_root = vec![
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
-            25, 26, 27, 28, 29, 30, 31, 32,
-        ];
-        let mut counterparty_tips = HashMap::new();
-        counterparty_tips.insert("peer1".to_string(), (1u64, vec![0; 32]));
-        counterparty_tips.insert("peer2".to_string(), (2u64, vec![1; 32]));
-
-        let rollup = ReceiptRollup::new();
-        let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let counter = 1u64;
-
-        // Create encrypted capsule
-        let encrypted = create_recovery_capsule(
-            &smt_root,
-            counterparty_tips.clone(),
-            &rollup,
-            mnemonic.as_bytes(),
-            counter,
-        )?;
-
-        // Decrypt capsule
-        let decrypted = decrypt_recovery_capsule(&encrypted, mnemonic.as_bytes())?;
-
-        // Verify contents
-        assert_eq!(decrypted.smt_root, smt_root);
-        assert_eq!(decrypted.counterparty_tips.len(), 2);
-        assert!(decrypted.counterparty_tips.contains_key("peer1"));
-        assert!(decrypted.counterparty_tips.contains_key("peer2"));
-
-        Ok(())
-    }
 
     #[test]
     fn test_rollup_operations() -> Result<(), DsmError> {

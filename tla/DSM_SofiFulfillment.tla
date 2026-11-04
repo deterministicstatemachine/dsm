@@ -13,9 +13,11 @@ EXTENDS Naturals, FiniteSets, TLC
 \* a parent being orphaned, and a descendant claim at q + 1.
 \*
 \* Storage is at the level of the facts Core derives from raw reads
-\* (Section 13): a successor key is empty or Final(x) for the x that won its leader; a
-\* trader position holds one registered claim (Final at K_ful(q) and
-\* K_root(q), which DSM_SofiSuccessorCells proves is one value per key). No
+\* (Section 13): a successor key is empty or Final(x) for the x that won its
+\* leader, Final on the route chain (DSM_RouteChain: the leader's link and two
+\* further links carrying it); a trader position holds one registered claim
+\* (Final at K_ful(q) and K_root(q), which DSM_SofiSuccessorCells proves is one
+\* value per key). No
 \* member records anything, no key is ever dead, and NOTHING STORES AN OUTCOME:
 \* completion and permanent defeat are derived here from the leg reads
 \* (Section 21). Stored is not valid and registered is not conforming: a

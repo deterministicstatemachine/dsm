@@ -54,7 +54,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
         with:
-          components: llvm-tools-preview
+          # rust-analyzer, rust-src: the G1 negative control (dsm_sdk source_rules).
+          components: llvm-tools-preview, rust-analyzer, rust-src
 
       - uses: taiki-e/install-action@671164c891d3e20f5b8ece04798d0154d1262d65 # cargo-llvm-cov
 

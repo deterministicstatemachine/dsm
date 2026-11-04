@@ -12,11 +12,6 @@ use std::path::Path;
 
 use syn::{Expr, Item, ItemFn, Stmt};
 
-/// The JNI export Bitcoin work owns: Bitcoin is outside this round, and its
-/// export is left as it stands.
-const OUTSIDE_THIS_ROUND: [&str; 1] =
-    ["Java_com_dsm_wallet_bridge_UnifiedNativeApi_bitcoinGenerateAddress"];
-
 /// Whether `expr` is a call of a panic guard, directly or as what a `match`
 /// decides on.
 fn is_guard_call(expr: &Expr) -> bool {
@@ -61,10 +56,10 @@ fn first_work(export: &ItemFn) -> Option<&Expr> {
     }
 }
 
-/// SA-51. `clearPendingRecoveryCapsule` and `maybeRefreshNfcCapsule` ran
-/// their work outside any guard. Every Java export runs inside one now.
-/// MUTATION CONTROL: taking either export's work out of its guard turns
-/// this red.
+/// SA-51. Two exports (since removed with the ring backup) ran their work
+/// outside any guard. Every Java export runs inside one now.
+/// MUTATION CONTROL: taking any export's work out of its guard turns this
+/// red.
 #[test]
 fn every_java_export_runs_its_work_inside_the_unwind_guard(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -102,15 +97,15 @@ fn every_java_export_runs_its_work_inside_the_unwind_guard(
         }
     }
 
-    for named in [
-        "Java_com_dsm_wallet_bridge_UnifiedNativeApi_clearPendingRecoveryCapsule",
-        "Java_com_dsm_wallet_bridge_UnifiedNativeApi_maybeRefreshNfcCapsule",
-    ] {
-        assert!(exports.iter().any(|e| e == named), "{named} is not found");
-    }
+    assert!(
+        exports
+            .iter()
+            .any(|e| e == "Java_com_dsm_wallet_bridge_UnifiedNativeApi_dispatchIngress"),
+        "the scan found no exports"
+    );
     assert_eq!(
         unguarded,
-        OUTSIDE_THIS_ROUND,
+        Vec::<String>::new(),
         "of {} exports",
         exports.len()
     );

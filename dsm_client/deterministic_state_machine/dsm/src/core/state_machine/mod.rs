@@ -19,8 +19,9 @@ pub use utils::constant_time_eq;
 #[derive(Clone, Debug)]
 pub struct StateMachine {
     /// Canonical device state per §2.2: SMT root + device-level balances +
-    /// per-relationship chain tips. This IS the device head.
-    device_state: Option<crate::types::device_state::DeviceState>,
+    /// per-relationship chain tips. This IS the device head, and only a head
+    /// Core realized is ever held here.
+    device_state: Option<crate::types::device_state::RealizedHead>,
 }
 
 impl StateMachine {
@@ -30,12 +31,15 @@ impl StateMachine {
     }
 
     /// Get the canonical device state (§2.2 SMT head).
-    pub fn device_head(&self) -> Option<&crate::types::device_state::DeviceState> {
+    pub fn device_head(&self) -> Option<&crate::types::device_state::RealizedHead> {
         self.device_state.as_ref()
     }
 
-    /// Install a canonical DeviceState head directly.
-    pub fn set_device_head(&mut self, head: crate::types::device_state::DeviceState) {
+    /// Install a head Core realized (MR-DSM-0243/0244): the genesis head, a
+    /// head restored from this device's persisted encoding, or the result of
+    /// one of Core's transitions. A head assembled any other way is not a
+    /// `RealizedHead` and does not compile here.
+    pub fn set_device_head(&mut self, head: crate::types::device_state::RealizedHead) {
         self.device_state = Some(head);
     }
 
@@ -83,34 +87,6 @@ impl StateMachine {
             token_balances,
             ..State::default()
         })
-    }
-
-    /// Initialize with a genesis state. Bootstraps DeviceState from
-    /// the State's device info, seeding the SMT root from the State's hash
-    /// so legacy callers' verify_state checks have a head_hash to compare.
-    pub fn set_state(&mut self, state: State) {
-        let state_hash = state.hash().unwrap_or(state.hash);
-        // Re-seed an EXISTING head only. This function does not know the
-        // genesis authority root `G`, so it must not manufacture a head that
-        // claims one.
-        //
-        // It used to build `DeviceState::new([0u8; 32], ...)` whenever no head
-        // existed. That zero is not "unset" to any reader — `genesis_digest()`
-        // returns it as a genesis root like any other. Because genesis install
-        // calls this BEFORE `write_genesis_device_head`, the fabricated
-        // zero-root head is the one that got persisted, and the ERA faucet's
-        // authority evidence — which re-derives the real seed-rooted `v3.g` —
-        // fail-closed against zeros on every freshly created wallet. The check
-        // was right; the state was fabricated.
-        //
-        // Every production caller either holds `G` and writes the head itself
-        // immediately after (`install_v2_genesis` calls
-        // `write_genesis_device_head`), or already has a head
-        // (`migrate_token_balance_keys`). None needs a pre-genesis head, so
-        // nothing legitimate is lost by refusing to invent one.
-        if let Some(ds) = self.device_state.as_mut() {
-            ds.bootstrap_legacy_root(state_hash);
-        }
     }
 
     /// Compute the next AdvanceOutcome for a relationship without installing it.
@@ -224,16 +200,18 @@ mod state_machine_tests {
         // canonical head rather than an override — but how the head came to hold
         // a balance is not incidental: a restored, invented balance would make
         // this test pass against a head no device could ever have.
-        let head = crate::types::device_state::DeviceState::new(devid, devid, vec![0xAAu8; 32])
-            .admitted_faucet_claim(0)
-            .expect("faucet claim")
-            .admitted_faucet_claim(1)
-            .expect("faucet claim")
-            .admitted_faucet_claim(2)
-            .expect("faucet claim");
+        let head =
+            crate::types::device_state::DeviceState::genesis_head(devid, devid, vec![0xAAu8; 32])
+                .into_head()
+                .admitted_faucet_claim(0)
+                .expect("faucet claim")
+                .admitted_faucet_claim(1)
+                .expect("faucet claim")
+                .admitted_faucet_claim(2)
+                .expect("faucet claim");
 
         let mut sm = StateMachine::new();
-        sm.set_device_head(head.clone());
+        sm.set_device_head(crate::types::device_state::RealizedHead::of(head.clone()));
 
         let cs = sm.current_state().expect("state from head");
         let era = cs
@@ -251,7 +229,7 @@ mod state_machine_tests {
     }
     /// A device head over a real SPHINCS+ key, at a genesis root derived from
     /// the key — what `DeviceState::advance` runs on in production.
-    fn test_head() -> crate::types::device_state::DeviceState {
+    fn test_head() -> crate::types::device_state::RealizedHead {
         let (pk, _sk) = crate::crypto::sphincs::generate_sphincs_keypair().expect("keypair");
         let device_id = crate::crypto::blake3::domain_hash_bytes(
             crate::common::domain_tags::TAG_DEVICE_ID,
@@ -261,7 +239,21 @@ mod state_machine_tests {
             crate::common::domain_tags::TAG_DEVICE_ID,
             &device_id,
         );
-        crate::types::device_state::DeviceState::new(genesis, device_id, pk)
+        crate::types::device_state::DeviceState::genesis_head(genesis, device_id, pk)
+    }
+
+    /// A step that moves no value and is a transition: a vault's creation
+    /// (a zero-effect step is refused, MR-DSM-0201).
+    fn vault_record(vault_id: &[u8]) -> Operation {
+        Operation::DlvCreate {
+            vault_id: vault_id.to_vec(),
+            creator_public_key: vec![],
+            parameters_hash: vec![],
+            fulfillment_condition: vec![],
+            intended_recipient: None,
+            signature: vec![],
+            mode: crate::types::operations::TransactionMode::Bilateral,
+        }
     }
 
     #[test]
@@ -271,12 +263,7 @@ mod state_machine_tests {
         // SMT-advance mechanics test: a non-balance op carries no deltas. The
         // conservation guard requires balance-bearing deltas to match the op;
         // balance-bearing advances are covered by the device_state guard tests.
-        let op = Operation::Generic {
-            operation_type: b"test.post-genesis".to_vec(),
-            data: vec![],
-            message: "first post-genesis transition".to_string(),
-            signature: vec![],
-        };
+        let op = vault_record(b"test.post-genesis");
 
         let mut state_machine = StateMachine::new();
         state_machine.set_device_head(head);
@@ -297,12 +284,7 @@ mod state_machine_tests {
         machine.set_device_head(head);
 
         // SMT-advance mechanics test: non-balance op, no deltas (see conservation guard).
-        let op = Operation::Generic {
-            operation_type: b"test.advance".to_vec(),
-            data: vec![],
-            message: "Test transfer".to_string(),
-            signature: vec![],
-        };
+        let op = vault_record(b"test.advance");
 
         let rel_key = crate::core::bilateral_transaction_manager::compute_smt_key(&dev_id, &dev_id);
         let outcome = machine.advance_relationship(rel_key, dev_id, op, &[])?;

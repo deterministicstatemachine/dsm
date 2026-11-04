@@ -21,6 +21,7 @@ use serial_test::serial;
 
 use super::connect_e2e_tests::{
     args_raw, carried_out, fact, outcome, query, reply, request, status, wallet_log, ForwardRelay,
+    FREE_REQUESTS,
 };
 use super::node_e2e_tests::{args, balance, era, invoke, payload};
 use crate::economic_fixtures::whole_era;
@@ -55,6 +56,7 @@ async fn offer(r: &TestDevice, relay: &ForwardRelay) -> String {
                 programs: Vec::new(),
             }],
             token_anchors: Vec::new(),
+            free_requests: FREE_REQUESTS,
         }),
     )
     .await;
@@ -84,7 +86,12 @@ async fn connect(
     };
     assert_eq!(
         preview.scope_lines,
-        vec!["Lock stakes for matches: up to 30.00 ERA a time, 60.00 ERA in all".to_string()]
+        vec![
+            "Lock stakes for matches: up to 30.00 ERA a time, 60.00 ERA in all".to_string(),
+            format!(
+                "Up to {FREE_REQUESTS} requests that spend nothing; after them, each waits for you"
+            ),
+        ]
     );
     let approved = invoke(
         wallet,
@@ -260,9 +267,12 @@ async fn a_match_the_game_referees_pays_the_winner_both_stakes() {
     let p = Pair::boot(100, 100).await;
     let r = game(&p).await;
     let relay = ForwardRelay::start().await;
-    let code = offer(&r, &relay).await;
-    let sid_a = connect(&r, &p.a, &relay, &code).await;
-    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(&r, &relay).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let (as_a, as_b) = (player_of(&r, &sid_a).await, player_of(&r, &sid_b).await);
     let stake = whole_era(25);
     let external = b"arena match 1: A v B";
@@ -393,9 +403,12 @@ async fn a_match_nobody_joined_is_voided_and_the_stake_returns() {
     let p = Pair::boot(100, 100).await;
     let r = game(&p).await;
     let relay = ForwardRelay::start().await;
-    let code = offer(&r, &relay).await;
-    let sid_a = connect(&r, &p.a, &relay, &code).await;
-    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(&r, &relay).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let as_b = player_of(&r, &sid_b).await;
     let stake = whole_era(20);
 
@@ -536,9 +549,12 @@ async fn side_b_locks_only_against_a_stake_that_pays_it_on_b_wins() {
     let p = Pair::boot(100, 100).await;
     let r = game(&p).await;
     let relay = ForwardRelay::start().await;
-    let code = offer(&r, &relay).await;
-    let sid_a = connect(&r, &p.a, &relay, &code).await;
-    let sid_b = connect(&r, &p.b, &relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(&r, &relay).await;
+    let sid_a = connect(&r, &p.a, &relay, &code_a).await;
+    let code_b = offer(&r, &relay).await;
+    let sid_b = connect(&r, &p.b, &relay, &code_b).await;
     let as_a = player_of(&r, &sid_a).await;
     let (pa, pb, pr) = (party(&p.a).await, party(&p.b).await, party(&r).await);
     let signer = |x: &generated::EscrowPartyResponse| x.signer.clone().expect("a signer");
@@ -619,9 +635,12 @@ struct Staked {
 /// A locks 25 ERA for a match against B, and B locks 25 ERA against A's vault,
 /// each asked by R through its own session.
 async fn both_staked(p: &Pair, r: &TestDevice, relay: &ForwardRelay) -> Staked {
-    let code = offer(r, relay).await;
-    let sid_a = connect(r, &p.a, relay, &code).await;
-    let sid_b = connect(r, &p.b, relay, &code).await;
+    // Each player connects through a code of their own: an offer connects
+    // one wallet (SA-79).
+    let code_a = offer(r, relay).await;
+    let sid_a = connect(r, &p.a, relay, &code_a).await;
+    let code_b = offer(r, relay).await;
+    let sid_b = connect(r, &p.b, relay, &code_b).await;
     let (as_a, as_b) = (player_of(r, &sid_a).await, player_of(r, &sid_b).await);
     let stake = whole_era(25);
     let external = b"arena match 1: A v B";

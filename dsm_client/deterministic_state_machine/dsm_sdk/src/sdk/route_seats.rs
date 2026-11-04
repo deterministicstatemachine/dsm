@@ -89,18 +89,43 @@ pub trait RouteSeats: Send + Sync {
     ) -> impl core::future::Future<Output = Option<CellCommitProof>> + Send;
 }
 
+/// What a write got at its cell's leader, position 0 of the route (storage
+/// spec §9). Whether the value holds the cell is Core's reading of the cell
+/// afterwards, never this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtLeader {
+    /// The leader holds the value and no other value was first there: the
+    /// record of the value's first copy is its leader link, and the write
+    /// carries it to the later seats.
+    Link,
+    /// Another value is first at the leader, shown by the record the leader
+    /// gave that value's copy. The cell is decided for that value: the write
+    /// stopped at the leader and put nothing of its own there.
+    Taken,
+    /// Nothing of this write is at the leader: the leader did not answer, or,
+    /// for a position pair, the other cell was taken and the two go there
+    /// both or neither ([`pair_at_leader`]). The write waits for the leader.
+    Unanswered,
+}
+
 /// What one cell's write produced at each route position, in route order.
+/// Empty when nothing was written: a position pair whose other cell was
+/// taken at the leader.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteReport {
     pub slots: Vec<ChainSlot>,
 }
 
 impl WriteReport {
-    /// Whether the leader answered with a link. Only the leader's copy can
-    /// hold the cell; whether this value holds it is Core's reading of the
-    /// cell afterwards, never this report.
-    pub fn reached_leader(&self) -> bool {
-        matches!(self.slots.first(), Some(ChainSlot::Link(..)))
+    /// What the write got at the leader. Only the leader's copy can hold the
+    /// cell, and a taken leader decides it for another value (§9 route
+    /// chains, rules 3 and 5).
+    pub fn leader(&self) -> AtLeader {
+        match self.slots.first() {
+            Some(ChainSlot::Link(..)) => AtLeader::Link,
+            Some(ChainSlot::Taken(..)) => AtLeader::Taken,
+            Some(ChainSlot::NoResponse) | None => AtLeader::Unanswered,
+        }
     }
 
     /// Whether every position of `route` is recorded — as a link or an empty
@@ -118,31 +143,71 @@ impl WriteReport {
     }
 }
 
+/// What a position pair's write got at the leader of `s(q)` (SoFi §17.4):
+/// taken when either cell is first at the leader for another value, so the
+/// position went to that value and the pair goes no further; a link when the
+/// leader holds both; unanswered otherwise.
+pub fn pair_at_leader(reports: &[WriteReport; 2]) -> AtLeader {
+    let at = reports.each_ref().map(WriteReport::leader);
+    if at.contains(&AtLeader::Taken) {
+        AtLeader::Taken
+    } else if at.iter().all(|leader| *leader == AtLeader::Link) {
+        AtLeader::Link
+    } else {
+        AtLeader::Unanswered
+    }
+}
+
+/// A cell's rule for what can count there: the copies the reader of that
+/// cell kind keeps ([`dsm::route_chain::recognized_copies`]). The writer
+/// reads which of them is first at the leader by Core's own rule
+/// ([`dsm::route_chain::first_recognized_at_leader`]).
+pub type Recognized<'r> = &'r (dyn Fn(&RouteEntry) -> bool + Sync);
+
 /// Records a write's progress after the leader and after every later seat,
 /// so a write that stops part-way continues from where it stopped.
 type Recorder<'r, const N: usize> =
     dyn FnMut(&[WriteReport; N]) -> Result<(), DsmError> + Send + 'r;
 
-/// What the leader holds for one value, read from its arrival log.
-enum LeaderHolds {
-    /// The record of the value's first copy: its leader link.
-    Record(ArrivalRecord),
-    /// The leader answered and holds no copy of the value.
-    Nothing,
+/// What the leader's arrival log shows for one value.
+enum LeaderLog {
+    /// The slot the value's write gets at the leader: its leader link, or a
+    /// taken empty carrying the record of the value first there instead.
+    Decided(ChainSlot),
+    /// The leader answered, and holds neither the value nor any other value
+    /// first.
+    Open,
     /// The leader did not answer.
     Unread,
 }
 
-async fn leader_holds<S: RouteSeats>(seats: &S, cell: &RoutedCell, value: &[u8]) -> LeaderHolds {
+/// Read what the leader holds for `value` at `cell`, keeping the cell's
+/// recognized copies and the value's own. Another value first there, by
+/// Core's rule ([`dsm::route_chain::first_recognized_at_leader`]), is a
+/// taken empty carrying its record (§9 route chains, rule 5). The value
+/// itself first, or its own copy where no recognized value is first, gets
+/// the record of its first copy, its leader link (§9, the leader first,
+/// rule 2): writing it there again would add a copy no chain begins with.
+async fn read_leader<S: RouteSeats>(
+    seats: &S,
+    cell: &RoutedCell,
+    recognized: Recognized<'_>,
+    value: &[u8],
+) -> LeaderLog {
     let copy = dsm::route_chain::leader_copy(cell, value);
-    let keep = dsm::route_chain::copies_of(&copy);
+    let own = dsm::route_chain::copies_of(&copy);
+    let keep = |entry: &RouteEntry| recognized(entry) || own(entry);
     let log = HeldLog::new(cell.namespace(), cell.key());
-    match fold_seat(seats, cell.route().leader(), log, &keep, None).await {
-        Some(log) => match dsm::route_chain::leader_copy_record(cell, value, &log) {
-            Some(record) => LeaderHolds::Record(record),
-            None => LeaderHolds::Nothing,
+    let Some(log) = fold_seat(seats, cell.route().leader(), log, &keep, None).await else {
+        return LeaderLog::Unread;
+    };
+    match dsm::route_chain::first_recognized_at_leader(cell, &log, recognized) {
+        Some((first, record)) if first == value => LeaderLog::Decided(ChainSlot::Link(record)),
+        Some((_, record)) => LeaderLog::Decided(ChainSlot::Taken(record)),
+        None => match dsm::route_chain::leader_copy_record(cell, value, &log) {
+            Some(record) => LeaderLog::Decided(ChainSlot::Link(record)),
+            None => LeaderLog::Open,
         },
-        None => LeaderHolds::Unread,
     }
 }
 
@@ -162,74 +227,123 @@ fn entry_at_leader(cell: &RoutedCell, value: &[u8]) -> RouteEntry {
     )
 }
 
-/// Write `N` values that share `route`, the leader first (§9 route chains,
-/// rule 1). Position 0 is always the leader and everything waits for it: the
-/// leader's record for each value is the first link, and every later copy
-/// carries it. So the leader's log is read first, and a value the leader
-/// already holds keeps the record of its FIRST copy — writing it again would
-/// add a copy whose record no chain begins with. Only the values it does not
-/// hold are put there, together in one transaction, each record returned to
-/// the value it names. When the leader does not answer, the write stops: a
-/// later copy would have no leader record to carry.
-async fn from_leader<S: RouteSeats, const N: usize>(
+/// One value for one cell, with the cell's rule for what can count there.
+type LeaderWrite<'w> = (&'w RoutedCell, Recognized<'w>, &'w [u8]);
+
+/// Read what the leader holds for each of `cells`, asked at once and taken
+/// in the cells' order. `None` when the leader did not answer for one.
+async fn read_leaders<S: RouteSeats>(
     seats: &S,
-    route: &Route,
-    cells: [(&RoutedCell, &[u8]); N],
-    record: &mut Recorder<'_, N>,
-) -> Result<[WriteReport; N], DsmError> {
-    let mut links: [Option<ArrivalRecord>; N] = [(); N].map(|()| None);
+    cells: &[LeaderWrite<'_>],
+) -> Option<Vec<Option<ChainSlot>>> {
     // The leader's log of each cell is its own read, and none waits on
-    // another: they are asked at once and taken in the cells' order.
+    // another.
     let held = futures::future::join_all(
         cells
             .iter()
-            .map(|(cell, value)| leader_holds(seats, cell, value)),
+            .map(|&(cell, recognized, value)| read_leader(seats, cell, recognized, value)),
     )
     .await;
-    for (link, holds) in links.iter_mut().zip(held) {
-        match holds {
-            LeaderHolds::Record(found) => *link = Some(found),
-            LeaderHolds::Nothing => {}
-            LeaderHolds::Unread => {
-                log::warn!("route write: the leader did not answer; the write waits for it");
-                return Ok(leader_unanswered());
-            }
-        }
-    }
-    let missing: Vec<usize> = (0..N).filter(|&i| links[i].is_none()).collect();
-    if !missing.is_empty() {
-        let batch: Vec<CellPut> = missing
+    held.into_iter()
+        .map(|held| match held {
+            LeaderLog::Decided(slot) => Some(Some(slot)),
+            LeaderLog::Open => Some(None),
+            LeaderLog::Unread => None,
+        })
+        .collect()
+}
+
+/// Write `N` values that share `route`, the leader first (§9 route chains,
+/// rule 1). Position 0 is always the leader and everything waits for it: the
+/// leader's record for each value is the first link, and every later copy
+/// carries it. So the leader's log is read first, by each cell's rule for
+/// what can count there:
+///
+/// - another value first at a cell's leader decides that cell for it. The
+///   write records a taken empty with that value's record and stops (§9
+///   rule 5), and the values written together go to the leader both or
+///   neither (SoFi §17.4), so nothing is put;
+/// - a value the leader already holds keeps the record of its FIRST copy —
+///   writing it again would add a copy whose record no chain begins with;
+/// - the values it does not hold are put there together, in one
+///   transaction, and each is decided again from the leader's log, not from
+///   the record the put returned: another value may have got there first
+///   between the read and the put.
+///
+/// When the leader does not answer, the write stops: a later copy would have
+/// no leader record to carry.
+async fn from_leader<S: RouteSeats, const N: usize>(
+    seats: &S,
+    route: &Route,
+    cells: [LeaderWrite<'_>; N],
+    record: &mut Recorder<'_, N>,
+) -> Result<[WriteReport; N], DsmError> {
+    let Some(mut slots) = read_leaders(seats, &cells).await else {
+        log::warn!("route write: the leader did not answer; the write waits for it");
+        return Ok(leader_unanswered());
+    };
+    let missing: Vec<usize> = (0..N).filter(|&i| slots[i].is_none()).collect();
+    let taken = slots
+        .iter()
+        .any(|slot| matches!(slot, Some(ChainSlot::Taken(..))));
+    if !taken && !missing.is_empty() {
+        let put: Vec<LeaderWrite<'_>> = missing.iter().map(|&i| cells[i]).collect();
+        let batch: Vec<CellPut> = put
             .iter()
-            .map(|&i| {
-                let (cell, value) = cells[i];
+            .map(|&(cell, _, value)| {
                 let entry = entry_at_leader(cell, value);
                 (entry.namespace.clone(), entry.key, entry.encode())
             })
             .collect();
-        match seats.put_entries(route.leader(), &batch).await {
-            Ok(records) => {
-                log::info!("route write: the leader took {} values", records.len());
-                for (&i, put) in missing.iter().zip(records) {
-                    links[i] = Some(put);
-                }
-            }
+        let returned = match seats.put_entries(route.leader(), &batch).await {
+            Ok(records) => records,
             Err(e) => {
                 log::warn!("route write: the leader did not answer: {e}; the write waits for it");
                 return Ok(leader_unanswered());
             }
-        }
-    }
-    let mut entries = cells.map(|(cell, value)| entry_at_leader(cell, value));
-    let mut reports = [(); N].map(|()| WriteReport { slots: Vec::new() });
-    for ((entry, report), link) in entries.iter_mut().zip(&mut reports).zip(links) {
-        let Some(leader_record) = link else {
-            log::warn!("route write: the leader returned no record for a value");
+        };
+        log::info!("route write: the leader took {} values", returned.len());
+        let Some(after) = read_leaders(seats, &put).await else {
+            log::warn!(
+                "route write: the leader's log was not read after the put; the write waits for it"
+            );
             return Ok(leader_unanswered());
         };
-        report.slots.push(ChainSlot::Link(leader_record.clone()));
-        if let Some(next) = entry.next(ChainSlot::Link(leader_record), route) {
+        for (n, (&i, decided)) in missing.iter().zip(after).enumerate() {
+            let Some(decided) = decided else {
+                log::warn!("route write: the leader's log does not hold the value it took");
+                return Ok(leader_unanswered());
+            };
+            if let ChainSlot::Link(link) = &decided {
+                if returned.get(n) != Some(link) {
+                    log::warn!(
+                        "route write: the leader returned a record its log does not give; the \
+                         log's record is the leader link"
+                    );
+                }
+            }
+            slots[i] = Some(decided);
+        }
+    }
+    let mut entries = cells.map(|(cell, _, value)| entry_at_leader(cell, value));
+    let mut reports = [(); N].map(|()| WriteReport { slots: Vec::new() });
+    for ((entry, report), slot) in entries.iter_mut().zip(&mut reports).zip(slots) {
+        let Some(slot) = slot else {
+            continue;
+        };
+        report.slots.push(slot.clone());
+        if let Some(next) = entry.next(slot, route) {
             *entry = next;
         }
+    }
+    // A cell decided for another value stops the write, and is not recorded:
+    // nothing continues it, and a value written beside it goes no further.
+    if reports
+        .iter()
+        .any(|report| report.leader() != AtLeader::Link)
+    {
+        log::info!("route write: another value is first at the leader; the write stops there");
+        return Ok(reports);
     }
     record(&reports)?;
     write_along(seats, route, entries, reports, record).await
@@ -242,6 +356,16 @@ async fn from_leader<S: RouteSeats, const N: usize>(
 /// without waiting for a ByteCommit. A seat after the leader that does not
 /// answer is recorded as no response and the write goes on (§9 rule 5); once
 /// a later position is recorded, that seat is closed for this chain.
+///
+/// No seat after the leader is ever recorded taken. A taken empty there would
+/// show another value's valid chain at that seat, and a valid chain begins
+/// with the cell's leader link, which one value at most holds (§9 finality
+/// 2). A write gets here only with its leader link: its value was first
+/// recognized at the leader, so no other value's chain is valid anywhere on
+/// the route; or its value is nothing the cell recognizes, and no slot of its
+/// chain is ever read. And a later seat holding another value's copies never
+/// keeps this value's copy from being a link there (§9 rule 4 asks no seat
+/// but the leader which value came first).
 async fn write_along<S: RouteSeats, const N: usize>(
     seats: &S,
     route: &Route,
@@ -353,7 +477,7 @@ async fn continue_write<S: RouteSeats>(
     let Some(seat) = route.seat(position) else {
         return Ok(report);
     };
-    if !report.reached_leader() {
+    if report.leader() != AtLeader::Link {
         return Ok(report);
     }
     let entry = RouteEntry {
@@ -432,10 +556,13 @@ fn record(cell: &RoutedCell, value: &[u8], report: &WriteReport) -> Result<(), D
 /// link yet, or whose recorded chain closed every position short of three
 /// links, starts at the leader: the leader's record of the value's first
 /// copy begins a new chain, and one chain of the value with three links is
-/// final (§9: any party can complete it).
+/// final (§9: any party can complete it). At the leader, `recognized` — the
+/// cell's rule for what can count there — decides whether another value is
+/// first, and the write is then taken there ([`AtLeader::Taken`]).
 pub async fn write_recorded(
     set: &StorageSet,
     cell: &RoutedCell,
+    recognized: Recognized<'_>,
     value: &[u8],
 ) -> Result<WriteReport, DsmError> {
     let seats = NodeSeats::new(set)?;
@@ -445,7 +572,7 @@ pub async fn write_recorded(
     };
     if let Some(write) = recorded(cell, value)? {
         let report = WriteReport { slots: write.slots };
-        if report.reached_leader() && !report.closed_short(cell.route()) {
+        if report.leader() == AtLeader::Link && !report.closed_short(cell.route()) {
             return continue_write(&seats, cell, value, report, &mut recorder).await;
         }
         log::info!(
@@ -454,16 +581,24 @@ pub async fn write_recorded(
             report.slots.len()
         );
     }
-    let [report] = from_leader(&seats, cell.route(), [(cell, value)], &mut recorder).await?;
+    let [report] = from_leader(
+        &seats,
+        cell.route(),
+        [(cell, recognized, value)],
+        &mut recorder,
+    )
+    .await?;
     Ok(report)
 }
 
 /// Write a trader's position pair, `F` at `K_ful(q)` and `C_q` at
 /// `K_root(q)`, each along its own chain on the one route both share (SoFi
-/// §17.4). At the leader both go in one transaction; a recorded pair that
+/// §17.4). At the leader both go in one transaction, both or neither, each
+/// cell read by its own rule for what can count there; a recorded pair that
 /// has both leader links and open positions continues, each cell from the
 /// position after the last one it reached; otherwise both start at the
-/// leader, as new chains from the leader's records.
+/// leader, as new chains from the leader's records. Another value first at
+/// either cell's leader takes the position ([`pair_at_leader`]).
 pub async fn write_recorded_position(
     set: &StorageSet,
     cells: &PositionCells,
@@ -478,7 +613,7 @@ pub async fn write_recorded_position(
         let report = WriteReport {
             slots: slots.to_vec(),
         };
-        report.reached_leader() && !report.closed_short(ful_cell.route())
+        report.leader() == AtLeader::Link && !report.closed_short(ful_cell.route())
     };
     match (ful, root) {
         (Some(ful), Some(root)) if continuable(&ful.slots) && continuable(&root.slots) => {
@@ -524,10 +659,14 @@ pub async fn write_recorded_position(
                 record(ful_cell, fulfillment, ful_report)?;
                 record(root_cell, claim, root_report)
             };
+            let (ful_rule, root_rule) = (cells.keeps_fulfillment(), cells.root().keeps());
             from_leader(
                 &seats,
                 ful_cell.route(),
-                [(ful_cell, fulfillment), (root_cell, claim)],
+                [
+                    (ful_cell, &ful_rule, fulfillment),
+                    (root_cell, &root_rule, claim),
+                ],
                 &mut recorder,
             )
             .await
@@ -552,7 +691,7 @@ pub async fn continue_recorded_writes(
     let mut completed = 0u32;
     for write in open {
         let report = WriteReport { slots: write.slots };
-        if !report.reached_leader() {
+        if report.leader() != AtLeader::Link {
             continue;
         }
         let Some(set) = catalog.resolve(&write.storage_set_id) else {
@@ -1276,15 +1415,27 @@ mod tests {
         let seats = NodeSeats::new(&set).expect("seats");
         let leader = a.route().leader().to_vec();
 
+        let (keeps_a, keeps_b) = (
+            dsm::route_chain::recognized_copies(&a, |bytes: &[u8]| bytes == b"A"),
+            dsm::route_chain::recognized_copies(&b, |bytes: &[u8]| bytes == b"B"),
+        );
         let mut quiet_one = |_: &[WriteReport; 1]| Ok(());
-        let [first] = from_leader(&seats, a.route(), [(&a, b"A".as_slice())], &mut quiet_one)
-            .await
-            .expect("write A");
+        let [first] = from_leader(
+            &seats,
+            a.route(),
+            [(&a, &keeps_a, b"A".as_slice())],
+            &mut quiet_one,
+        )
+        .await
+        .expect("write A");
         let mut quiet_two = |_: &[WriteReport; 2]| Ok(());
         let [again, fresh] = from_leader(
             &seats,
             a.route(),
-            [(&a, b"A".as_slice()), (&b, b"B".as_slice())],
+            [
+                (&a, &keeps_a, b"A".as_slice()),
+                (&b, &keeps_b, b"B".as_slice()),
+            ],
             &mut quiet_two,
         )
         .await
@@ -1304,6 +1455,58 @@ mod tests {
             "A's leader link is the record of its first copy"
         );
         assert!(matches!(fresh.slots.first(), Some(ChainSlot::Link(_))));
+    }
+
+    /// SoFi §17.4, MR-SOFI-0092: a trader's two position cells, `K_ful(q)`
+    /// and `K_root(q)`, are written together at their leader. They share one
+    /// route, and each seat — the leader first — is asked for both in one
+    /// put, which the node applies all or none.
+    ///
+    /// MUTATION CONTROL: writing the pair as two writes, one per cell, turns
+    /// this red: the leader is asked twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_positions_two_cells_go_to_each_seat_in_one_put() {
+        let (nodes, _config, set, _cell) = pinned(0x92).await;
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let cells = crate::sdk::sofi_register::position_cells(
+            &set,
+            &[0x91; 32],
+            &[0x92; 32],
+            7,
+            &[0x93; 32],
+        )
+        .expect("the pair's cells");
+        assert_eq!(
+            cells.fulfillment().route(),
+            cells.root().routed().route(),
+            "one route serves both cells"
+        );
+        for node in &nodes.nodes {
+            node.forget_requests();
+        }
+        let reports = write_recorded_position(&set, &cells, b"F", b"C_q")
+            .await
+            .expect("the pair is written");
+        assert_eq!(pair_at_leader(&reports), AtLeader::Link);
+        let puts = |member: &str| {
+            let Some(node) = nodes.nodes.iter().find(|n| n.member_id == member) else {
+                panic!("no node {member}");
+            };
+            node.requests()
+                .iter()
+                .filter(|request| request.as_str() == "POST /api/v2/cells")
+                .count()
+        };
+        for (position, seat) in cells.fulfillment().route().seats().iter().enumerate() {
+            assert_eq!(
+                puts(&member_id(seat)),
+                1,
+                "the seat at position {position} is asked once, for both cells"
+            );
+        }
     }
 
     /// The network's pinned nodes on Postgres, the SDK pointed at them, the
@@ -1387,9 +1590,14 @@ mod tests {
         nodes.take_down(std::slice::from_ref(&leader)).await;
 
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        let [stopped] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        let [stopped] = from_leader(
+            &seats,
+            route,
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         assert_eq!(
             stopped.slots,
             vec![ChainSlot::NoResponse],
@@ -1404,9 +1612,14 @@ mod tests {
         }
 
         nodes.bring_up(&[leader]).await;
-        let [written] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        let [written] = from_leader(
+            &seats,
+            route,
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         let Some(ChainSlot::Link(leader_link)) = written.slots.first() else {
             panic!("the leader answers with a link: {:?}", written.slots);
         };
@@ -1424,6 +1637,281 @@ mod tests {
         }
     }
 
+    /// Whether any seat of `cell` holds a copy of `value`.
+    async fn copies_of_anywhere(seats: &NodeSeats, cell: &RoutedCell, value: &[u8]) -> Vec<usize> {
+        let mut at = Vec::new();
+        for (position, seat) in cell.route().seats().iter().enumerate() {
+            let carries = held(seats, seat, cell)
+                .await
+                .iter()
+                .filter_map(|bytes| RouteEntry::decode(bytes))
+                .any(|entry| entry.value == value);
+            if carries {
+                at.push(position);
+            }
+        }
+        at
+    }
+
+    /// Storage spec §9 route chains, rule 5 (MR-STOR-0134): where another
+    /// value is first at the leader, the writer records a taken empty
+    /// carrying the record the leader gave that value's copy, and stops.
+    /// Nothing of its own value is put at the leader or carried to a later
+    /// seat, and the write is not recorded for anything to continue. Junk
+    /// ahead of both blocks nothing. On the storage node's own code, on
+    /// Postgres.
+    /// MUTATION CONTROL: reading another value first at the leader as an open
+    /// cell puts V at the leader and carries it along the route; this turns
+    /// red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_value_another_holds_first_at_the_leader_is_recorded_taken() {
+        let (_nodes, _config, set, cell) = pinned(0x3A).await;
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let seats = NodeSeats::new(&set).expect("seats");
+        let rule = dsm::route_chain::recognized_copies(&cell, |bytes: &[u8]| {
+            bytes == b"V" || bytes == b"W"
+        });
+        seats
+            .put_entries(
+                cell.route().leader(),
+                &[(cell.namespace().to_vec(), *cell.key(), b"junk".to_vec())],
+            )
+            .await
+            .expect("the leader keeps the junk");
+        let first = write_recorded(&set, &cell, &rule, b"W")
+            .await
+            .expect("W is written");
+        let Some(ChainSlot::Link(w_link)) = first.slots.first().cloned() else {
+            panic!("W is first at the leader: {:?}", first.slots);
+        };
+
+        let taken = write_recorded(&set, &cell, &rule, b"V")
+            .await
+            .expect("V's write is reported");
+        assert_eq!(taken.leader(), AtLeader::Taken);
+        assert_eq!(
+            taken.slots,
+            vec![ChainSlot::Taken(w_link)],
+            "V's write records the cell taken, with W's leader record"
+        );
+        assert_eq!(
+            copies_of_anywhere(&seats, &cell, b"V").await,
+            Vec::<usize>::new(),
+            "no seat holds a copy of V"
+        );
+        assert_eq!(
+            crate::storage::client_db::route_writes::get_write(cell.namespace(), cell.key(), b"V")
+                .expect("read the record"),
+            None,
+            "a taken write is not recorded"
+        );
+    }
+
+    /// A seat set whose leader takes another value's copy just before the
+    /// first put it is asked for: that value got to the leader between the
+    /// writer's read of the leader and its put.
+    struct Racing<'a> {
+        seats: &'a NodeSeats,
+        leader: Vec<u8>,
+        rival: CellPut,
+        raced: std::sync::Mutex<Option<ArrivalRecord>>,
+    }
+
+    impl RouteSeats for Racing<'_> {
+        fn members(&self) -> Vec<Vec<u8>> {
+            self.seats.members()
+        }
+
+        async fn put_entries(
+            &self,
+            member: &[u8],
+            entries: &[CellPut],
+        ) -> Result<Vec<ArrivalRecord>, String> {
+            let first_put = member == self.leader.as_slice()
+                && self
+                    .raced
+                    .lock()
+                    .map_err(|e| format!("the race record: {e}"))?
+                    .is_none();
+            if first_put {
+                let [record] = <[ArrivalRecord; 1]>::try_from(
+                    self.seats
+                        .put_entries(member, core::slice::from_ref(&self.rival))
+                        .await?,
+                )
+                .map_err(|records| format!("{} records for one rival copy", records.len()))?;
+                *self
+                    .raced
+                    .lock()
+                    .map_err(|e| format!("the race record: {e}"))? = Some(record);
+            }
+            self.seats.put_entries(member, entries).await
+        }
+
+        async fn fold_values(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+            from: u64,
+            take: &mut CellFold<'_>,
+        ) -> Option<u64> {
+            self.seats
+                .fold_values(member, namespace, key, from, take)
+                .await
+        }
+
+        async fn close(&self, member: &[u8]) -> Option<u64> {
+            self.seats.close(member).await
+        }
+
+        async fn latest_cycle(&self, member: &[u8]) -> Option<u64> {
+            self.seats.latest_cycle(member).await
+        }
+
+        async fn sync_mirror(&self, member: &[u8]) {
+            self.seats.sync_mirror(member).await
+        }
+
+        async fn mirrored(
+            &self,
+            mirror: &[u8],
+            member: &[u8],
+            cycle: u64,
+        ) -> Option<Vec<ByteCommit>> {
+            self.seats.mirrored(mirror, member, cycle).await
+        }
+
+        async fn proof(
+            &self,
+            member: &[u8],
+            namespace: &[u8],
+            key: &[u8; 32],
+            cycle: u64,
+        ) -> Option<CellCommitProof> {
+            self.seats.proof(member, namespace, key, cycle).await
+        }
+    }
+
+    /// MR-STOR-0134: the writer decides the leader from the leader's log after
+    /// its put, not from the record the put returned. W lands at the leader
+    /// between the writer's read, which found the cell open, and its put of
+    /// V; the leader returns V's own record, and its log shows W first. The
+    /// write is recorded taken with W's record and goes no further than the
+    /// leader. On the storage node's own code, on Postgres.
+    /// MUTATION CONTROL: taking the record the put returned as V's leader
+    /// link records a link and carries V along the route; this turns red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_value_that_gets_first_between_the_read_and_the_put_takes_the_write() {
+        let (_nodes, _config, set, cell) = pinned(0x3B).await;
+        let seats = NodeSeats::new(&set).expect("seats");
+        let rival = dsm::route_chain::leader_copy(&cell, b"W");
+        let racing = Racing {
+            seats: &seats,
+            leader: cell.route().leader().to_vec(),
+            rival: (rival.namespace.clone(), rival.key, rival.encode()),
+            raced: std::sync::Mutex::new(None),
+        };
+        let rule = dsm::route_chain::recognized_copies(&cell, |bytes: &[u8]| {
+            bytes == b"V" || bytes == b"W"
+        });
+        let mut quiet = |_: &[WriteReport; 1]| Ok(());
+        let [report] = from_leader(
+            &racing,
+            cell.route(),
+            [(&cell, &rule, b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
+        let w_record = racing
+            .raced
+            .lock()
+            .expect("the race record")
+            .clone()
+            .expect("W got to the leader first");
+        assert_eq!(report.slots, vec![ChainSlot::Taken(w_record)]);
+        assert_eq!(
+            copies_of_anywhere(&seats, &cell, b"V").await,
+            vec![0],
+            "V is at the leader, put after W, and at no later seat"
+        );
+    }
+
+    /// SoFi §17.4 with storage spec §9 rule 5 (MR-STOR-0134): values written
+    /// together at one leader go there both or neither. With another value
+    /// first at the leader of `a`, the pair's write records `a` taken and
+    /// puts nothing: `b`'s value is not put at the leader either, and the
+    /// pair reads taken. On the storage node's own code, on Postgres.
+    /// MUTATION CONTROL: putting the open cell's value beside the taken one
+    /// puts B at the leader; this turns red.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial]
+    async fn a_pair_whose_other_cell_is_taken_puts_neither_at_the_leader() {
+        let (_nodes, _config, set, _cell) = pinned(0x3C).await;
+        let members = crate::sdk::storage_set::as_ccb_members(&set).expect("members");
+        let cell = |key: u8| {
+            RoutedCell::new(
+                b"DSM/test/pair-taken",
+                [key; 32],
+                &[0x3C; 32],
+                &members,
+                &set.id(),
+            )
+            .expect("a routed cell")
+        };
+        let (a, b) = (cell(0x01), cell(0x02));
+        let seats = NodeSeats::new(&set).expect("seats");
+        let keeps_a =
+            dsm::route_chain::recognized_copies(&a, |bytes: &[u8]| bytes == b"A" || bytes == b"X");
+        let keeps_b = dsm::route_chain::recognized_copies(&b, |bytes: &[u8]| bytes == b"B");
+        let mut quiet_one = |_: &[WriteReport; 1]| Ok(());
+        let [x] = from_leader(
+            &seats,
+            a.route(),
+            [(&a, &keeps_a, b"X".as_slice())],
+            &mut quiet_one,
+        )
+        .await
+        .expect("X is written");
+        let Some(ChainSlot::Link(x_link)) = x.slots.first().cloned() else {
+            panic!("X is first at a's leader: {:?}", x.slots);
+        };
+
+        let mut quiet_two = |_: &[WriteReport; 2]| Ok(());
+        let reports = from_leader(
+            &seats,
+            a.route(),
+            [
+                (&a, &keeps_a, b"A".as_slice()),
+                (&b, &keeps_b, b"B".as_slice()),
+            ],
+            &mut quiet_two,
+        )
+        .await
+        .expect("the pair's report");
+        assert_eq!(pair_at_leader(&reports), AtLeader::Taken);
+        assert_eq!(reports[0].slots, vec![ChainSlot::Taken(x_link)]);
+        assert_eq!(
+            reports[1].slots,
+            Vec::<ChainSlot>::new(),
+            "b is not written"
+        );
+        assert_eq!(
+            held(&seats, b.route().leader(), &b).await,
+            Vec::<Vec<u8>>::new(),
+            "B is not at the leader"
+        );
+        assert_eq!(
+            copies_of_anywhere(&seats, &a, b"A").await,
+            Vec::<usize>::new()
+        );
+    }
+
     /// Storage spec §9, one chain in route order (MR-STOR-0151): links and
     /// empties are appended strictly in route order, and at a seat that does
     /// not answer the writer records an empty and goes on. With the seat at
@@ -1439,9 +1927,14 @@ mod tests {
         nodes.take_down(&[member_id(&route.seats()[2])]).await;
 
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        let [report] = from_leader(&seats, route, [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        let [report] = from_leader(
+            &seats,
+            route,
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         assert_eq!(report.slots.len(), route.seats().len());
         assert_eq!(
             report.slots[2],
@@ -1497,7 +1990,7 @@ mod tests {
         let stopped = from_leader(
             &seats,
             route,
-            [(&cell, b"V".as_slice())],
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
             &mut stop_after_position_two,
         )
         .await;
@@ -1721,9 +2214,14 @@ mod tests {
             liar: cell.route().seats()[1].to_vec(),
         };
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        let [written] = from_leader(&lying, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        let [written] = from_leader(
+            &lying,
+            cell.route(),
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         assert_eq!(
             written.slots[1],
             ChainSlot::NoResponse,
@@ -1762,9 +2260,14 @@ mod tests {
         let (_nodes, _config, set, cell) = pinned(0x34).await;
         let seats = NodeSeats::new(&set).expect("seats");
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        let [written] = from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        let [written] = from_leader(
+            &seats,
+            cell.route(),
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         assert!(
             written
                 .slots
@@ -1822,9 +2325,14 @@ mod tests {
         let (_nodes, _config, set, cell) = pinned(0x35).await;
         let seats = NodeSeats::new(&set).expect("seats");
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        from_leader(
+            &seats,
+            cell.route(),
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         let watched = || Watched {
             seats: &seats,
             in_flight: AtomicUsize::new(0),
@@ -1985,9 +2493,14 @@ mod tests {
         let (_nodes, _config, set, cell) = pinned(0x37).await;
         let seats = NodeSeats::new(&set).expect("seats");
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        from_leader(
+            &seats,
+            cell.route(),
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         let trickling = Trickling {
             seats: &seats,
             cell: &cell,
@@ -2033,9 +2546,14 @@ mod tests {
                 .expect("the leader takes the junk");
         }
         let mut quiet = |_: &[WriteReport; 1]| Ok(());
-        from_leader(&seats, cell.route(), [(&cell, b"V".as_slice())], &mut quiet)
-            .await
-            .expect("a report");
+        from_leader(
+            &seats,
+            cell.route(),
+            [(&cell, &keeps_v(&cell), b"V".as_slice())],
+            &mut quiet,
+        )
+        .await
+        .expect("a report");
         let evidence = read_cell(&seats, &cell, &keeps_v(&cell)).await;
         assert_eq!(
             evidence.seats[0].values.as_ref().map(HeldLog::count),
@@ -2064,14 +2582,18 @@ mod tests {
         const VALUE_BYTES: usize = 64 * 1024;
         let (_nodes, _config, set, cell) = pinned(0x39).await;
         let seats = NodeSeats::new(&set).expect("seats");
+        // Each value is written under a rule that recognizes it alone, so
+        // none is taken at the leader and each reaches every seat; the
+        // reader's rule below keeps all six.
         for n in 0..VALUES {
             let mut value = vec![0x57u8; VALUE_BYTES];
             value[1] = n as u8;
+            let alone = dsm::route_chain::recognized_copies(&cell, |bytes: &[u8]| bytes == value);
             let mut quiet = |_: &[WriteReport; 1]| Ok(());
             from_leader(
                 &seats,
                 cell.route(),
-                [(&cell, value.as_slice())],
+                [(&cell, &alone, value.as_slice())],
                 &mut quiet,
             )
             .await

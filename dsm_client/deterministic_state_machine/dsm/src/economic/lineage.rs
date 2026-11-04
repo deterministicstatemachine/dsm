@@ -163,25 +163,176 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// A root of a peer this verifier validated itself (DSM Amendment A19):
-    /// a frontier the receiver recorded, or the end of a step its walk
-    /// validated from the root before it, where `advance_validated` refuses
-    /// a witness built on any other root. Never a root a peer merely states.
-    /// **Only the peer step verifier may call this**, from one place
-    /// (`peer_lineage::authenticated_root`).
-    pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
-        Self {
-            economic_position,
-            economic_root,
-        }
-    }
-
     pub fn economic_position(&self) -> u64 {
         self.economic_position
     }
 
     pub fn economic_root(&self) -> [u8; 32] {
         self.economic_root
+    }
+
+    /// The producer's tree at this root, from this device's leaf cache, and
+    /// the balances a write set starts from (SoFi §2.1: the SDK computes no
+    /// root of its own).
+    ///
+    /// THE CACHE IS NEVER AN AUTHORITY. Every row is bound to the state its
+    /// bytes decode to, and the rows are refused unless they recompute this
+    /// root. The root commits the exact key and value of every leaf, so a row
+    /// that passes both is the leaf the root holds, under the key its
+    /// transition derived. A balance the root does not hold never reaches a
+    /// write set.
+    pub fn admitted_tree(&self, rows: &[LeafRow]) -> Result<AdmittedTree, LeafCacheError> {
+        let (tree, states) = tree_of_rows(rows, &self.economic_root)?;
+        let mut balances = std::collections::BTreeMap::new();
+        for state in states {
+            match state {
+                EconomicLeafState::Balance(b) => {
+                    balances.insert(b.policy_commit, b.amount);
+                }
+                // Write-once records a write set inserts and never starts
+                // from: a consumed source, and the creation records a write
+                // set refuses to create twice by reading the tree.
+                EconomicLeafState::ConsumedSource(..)
+                | EconomicLeafState::VaultCreation(..)
+                | EconomicLeafState::TokenCreation(..) => {}
+                // A SoFi relationship's base is read by `sofi::validation`, by
+                // key, with the vault's own evidence; a write set's balances
+                // have no slot for it.
+                EconomicLeafState::Relationship(..) => {}
+            }
+        }
+        Ok(AdmittedTree {
+            root: *self,
+            tree,
+            balances,
+        })
+    }
+}
+
+/// One row of a device's economic leaf cache: the leaf key, the leaf value,
+/// and the canonical bytes of the state that value hashes.
+pub type LeafRow = ([u8; 32], [u8; 32], Vec<u8>);
+
+/// Why a leaf cache is not the tree of the root it is offered for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeafCacheError {
+    /// A row's bytes are not a canonical leaf state.
+    RowDoesNotDecode {
+        key: [u8; 32],
+        why: crate::ccb::decode::DecodeError,
+    },
+    /// A state has no canonical bytes, so it has no leaf value.
+    StateHasNoBytes {
+        key: [u8; 32],
+        why: crate::ccb::CcbError,
+    },
+    /// A row's value is not the hash of the state its bytes decode to.
+    RowIsNotItsState { key: [u8; 32] },
+    /// The rows do not recompute the root.
+    DoesNotRecomputeTheRoot {
+        root: [u8; 32],
+        recomputed: [u8; 32],
+    },
+}
+
+impl core::fmt::Display for LeafCacheError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let id = crate::utils::text_id::encode_base32_crockford;
+        match self {
+            Self::RowDoesNotDecode { key, why } => write!(
+                f,
+                "the leaf cache row at {} is not a canonical leaf state: {why:?}",
+                id(key)
+            ),
+            Self::StateHasNoBytes { key, why } => write!(
+                f,
+                "the state at {} has no canonical bytes: {why:?}",
+                id(key)
+            ),
+            Self::RowIsNotItsState { key } => write!(
+                f,
+                "the leaf cache row at {} holds a value that is not its state's",
+                id(key)
+            ),
+            Self::DoesNotRecomputeTheRoot { root, recomputed } => write!(
+                f,
+                "the leaf cache does not recompute the root {}: it gives {}",
+                id(root),
+                id(recomputed)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LeafCacheError {}
+
+/// `rows` as a tree, each row bound to the state its bytes decode to, and
+/// refused unless the tree recomputes `root`. The states come back in the
+/// rows' order. The one place a leaf cache becomes a tree, for the producer
+/// ([`ValidatedEconomicRoot::admitted_tree`]) and for a resolved SoFi
+/// position (`sofi::lineage::ResolvedAdvance::installed_leaves`).
+pub(crate) fn tree_of_rows(
+    rows: &[LeafRow],
+    root: &[u8; 32],
+) -> Result<(crate::economic::tree::EconomicSmt, Vec<EconomicLeafState>), LeafCacheError> {
+    let mut tree = crate::economic::tree::EconomicSmt::new();
+    let mut states = Vec::with_capacity(rows.len());
+    for (key, value, ccb) in rows {
+        let state = crate::economic::decode::decode_leaf_state(ccb)
+            .map_err(|why| LeafCacheError::RowDoesNotDecode { key: *key, why })?;
+        let state_value = state
+            .leaf_value()
+            .map_err(|why| LeafCacheError::StateHasNoBytes { key: *key, why })?;
+        if state_value != *value {
+            return Err(LeafCacheError::RowIsNotItsState { key: *key });
+        }
+        tree.insert(*key, *value);
+        states.push(state);
+    }
+    let recomputed = tree.root();
+    if recomputed != *root {
+        return Err(LeafCacheError::DoesNotRecomputeTheRoot {
+            root: *root,
+            recomputed,
+        });
+    }
+    Ok((tree, states))
+}
+
+/// The producer's tree at a validated root, and the balances a write set
+/// starts from: what [`ValidatedEconomicRoot::admitted_tree`] binds to the
+/// root. A producer builds on it and computes no root of its own.
+#[derive(Debug, Clone)]
+pub struct AdmittedTree {
+    root: ValidatedEconomicRoot,
+    tree: crate::economic::tree::EconomicSmt,
+    balances: std::collections::BTreeMap<[u8; 32], u64>,
+}
+
+impl AdmittedTree {
+    /// The validated root the tree recomputes.
+    pub fn root(&self) -> &ValidatedEconomicRoot {
+        &self.root
+    }
+
+    pub fn tree(&self) -> &crate::economic::tree::EconomicSmt {
+        &self.tree
+    }
+
+    /// Every balance the root holds, by policy commit.
+    pub fn balances(&self) -> &std::collections::BTreeMap<[u8; 32], u64> {
+        &self.balances
+    }
+
+    /// The tree and the balances, for a producer whose write set advances
+    /// the tree from here.
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::economic::tree::EconomicSmt,
+        std::collections::BTreeMap<[u8; 32], u64>,
+    ) {
+        (self.tree, self.balances)
     }
 }
 
@@ -281,6 +432,9 @@ pub struct ValidatedAdvance {
     pub root: ValidatedEconomicRoot,
     pub funded: Vec<FundedCredit>,
     pub claim: AcceptedClaim,
+    /// The EK steps the credits' acceptance checks fetched and verified: a
+    /// verifier records them once the step passes whole (SA-93).
+    pub ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
 }
 
 /// The device's own admitted position, as the durable store records it.
@@ -577,12 +731,11 @@ pub fn activate(
 /// A verified DSM-successor acceptance: the exact operation the successor
 /// carried and the successor's chain-state commitment.
 ///
-/// Private fields: this cannot be conjured from a literal. The constructor's
-/// contract is that the exact `C_dsm+` / `sigma_dsm` evidence at
-/// `evidence_addr` has been verified and found to carry `verified_operation`
-/// and commit `c_dsm_plus`. The operation DIGEST is derived here, never
-/// supplied — a caller cannot claim a digest its own operation bytes do not
-/// produce — and `c_dsm_plus` is what the v2 economic operation id binds.
+/// Private fields, and built only from a
+/// [`VerifiedDsmSuccessor`](crate::economic::successor_evidence::VerifiedDsmSuccessor),
+/// which only the verifier makes: the exact `C_dsm+` / `sigma_dsm` evidence at
+/// `evidence_addr` was checked and carries `verified_operation` and commits
+/// `c_dsm_plus`, which is what the v2 economic operation id binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptedDsmSuccessor {
     verified_operation: crate::types::operations::Operation,
@@ -620,23 +773,18 @@ pub enum AcceptedSubstrate {
 }
 
 impl AcceptedSubstrate {
-    /// Call only after the exact `C_dsm+` / `sigma_dsm` at `evidence_addr`
-    /// has been verified and found to carry exactly `verified_operation` and
-    /// commit `c_dsm_plus` (the accepted successor's chain-state commitment).
+    /// The successor `verify_dsm_successor_evidence` established, at the
+    /// address of its exact bytes. `VerifiedDsmSuccessor` has no other
+    /// constructor, so the successor cannot be asserted here.
     pub fn from_verified_dsm_successor(
-        verified_operation: crate::types::operations::Operation,
-        c_dsm_plus: [u8; 32],
-        embedded_parent: [u8; 32],
-        evidence_addr: [u8; 32],
+        verified: crate::economic::successor_evidence::VerifiedDsmSuccessor,
     ) -> Self {
-        let operation_digest =
-            crate::economic::admission::dsm_operation_digest(&verified_operation.to_bytes());
         Self::DsmSuccessor(Box::new(AcceptedDsmSuccessor {
-            verified_operation,
-            operation_digest,
-            c_dsm_plus,
-            embedded_parent,
-            evidence_addr,
+            operation_digest: verified.operation_digest(),
+            c_dsm_plus: verified.c_dsm_plus(),
+            embedded_parent: verified.embedded_parent(),
+            evidence_addr: verified.evidence_addr(),
+            verified_operation: verified.into_operation(),
         }))
     }
 
@@ -1082,20 +1230,14 @@ pub fn advance_validated(
         verified_operation: accepted.dsm_verified_operation(),
         offline_boundary: accepted.offline_boundary(),
     };
-    let funded = verify_transition_provenance(witness, resolver, &ctx)
+    let (funded, ek_steps) = verify_transition_provenance(witness, resolver, &ctx)
         .map_err(EconomicValidationError::Provenance)?;
 
-    // THE TRANSFER CONJUNCT: a Transfer moves a token only when its committed
-    // policy transfers (SoFi §49, "on every transfer, online and offline").
-    // Checked here, on the verified operation, so every verifier of the
-    // step — not only the two endpoints — refuses a non-transferable token
-    // moved by a sender that skips its own check (SA-136).
-    if let Some(crate::types::operations::Operation::Transfer { policy_commit, .. }) =
-        accepted.dsm_verified_operation()
-    {
-        crate::economic::provenance::check_transfer_policy(policy_commit, resolver)
-            .map_err(EconomicValidationError::Provenance)?;
-    }
+    // The transfer and burn conjuncts (SoFi §49, DSM §61) are the write
+    // set's: `verify_operation_write_set` above refuses a Transfer or Burn
+    // its token's committed policy forbids, from the policy bytes the signed
+    // operation carries, for every verifier of the step and for the
+    // producer before its head commits (owner question 9, 2026-10-27).
 
     // A SoFi operation cannot reach here — `verify_operation_write_set`
     // refuses it by name above — and if it ever did, "no DLV transition"
@@ -1122,6 +1264,7 @@ pub fn advance_validated(
             economic_position: registered.economic_position(),
             claim_ref: registered.claim_ref(),
         },
+        ek_steps,
     })
 }
 
@@ -1135,6 +1278,120 @@ mod admitted_position_tests {
     const VOID: [u8; 32] = [0xB1; 32];
     const FID: [u8; 32] = [0xF1; 32];
     const CLAIM_REF: [u8; 32] = [0xC7; 32];
+
+    /// A leaf cache row for `state`, under one device's keys.
+    fn row(state: &EconomicLeafState) -> LeafRow {
+        (
+            state.leaf_key(&[0x11; 32], &[0x12; 32]),
+            state.leaf_value().unwrap(),
+            state.encode().unwrap(),
+        )
+    }
+
+    fn balance(policy_commit: u8, amount: u64) -> EconomicLeafState {
+        EconomicLeafState::Balance(
+            crate::economic::state::EconomicBalanceState::new([policy_commit; 32], amount).unwrap(),
+        )
+    }
+
+    /// The root `rows` recompute, computed apart from the function under test.
+    fn root_of(rows: &[LeafRow]) -> [u8; 32] {
+        let mut tree = crate::economic::tree::EconomicSmt::new();
+        for (key, value, ..) in rows {
+            tree.insert(*key, *value);
+        }
+        tree.root()
+    }
+
+    /// This device's position 3, admitted at `root`.
+    fn admitted_at(root: [u8; 32]) -> ValidatedEconomicRoot {
+        ValidatedEconomicRoot::rehydrate_from_admitted_store(AdmittedEconomicPosition::SingleRoot {
+            economic_position: 3,
+            economic_root: root,
+            claim_ref: CLAIM_REF,
+        })
+        .unwrap()
+    }
+
+    /// The cache of two balances and a SoFi relationship.
+    fn cache() -> Vec<LeafRow> {
+        vec![
+            row(&balance(0x7A, 40)),
+            row(&balance(0x7B, 9)),
+            row(&EconomicLeafState::Relationship(
+                crate::sofi::wire::TraderRelationshipLeaf {
+                    vault_id: [0xC1; 32],
+                    leaf: [0x0B; 32],
+                },
+            )),
+        ]
+    }
+
+    /// THE PRODUCER'S TREE IS CORE'S (SoFi §2.1). The cache of an admitted
+    /// root gives the tree that recomputes it and every balance it holds; the
+    /// relationship leaf is in the tree and not among the balances.
+    #[test]
+    fn the_producer_tree_is_the_cache_of_the_admitted_root() {
+        let rows = cache();
+        let validated = admitted_at(root_of(&rows));
+        let admitted = validated.admitted_tree(&rows).unwrap();
+        assert_eq!(admitted.root(), &validated);
+        assert_eq!(admitted.tree().root(), validated.economic_root());
+        assert_eq!(
+            admitted.balances(),
+            &std::collections::BTreeMap::from([([0x7A; 32], 40), ([0x7B; 32], 9)])
+        );
+    }
+
+    /// A CACHE THAT IS NOT THE ADMITTED ROOT'S BUILDS NOTHING. A balance row
+    /// rewritten consistently to a larger amount, a row whose bytes are
+    /// another state than its value hashes, and a row that is no state at
+    /// all are each refused: a producer never starts a write set from a
+    /// balance the validated root does not hold.
+    /// MUTATION CONTROL: the root check removed, or the row binding removed,
+    /// turns this red.
+    #[test]
+    fn a_leaf_cache_that_is_not_the_admitted_roots_is_refused() {
+        let rows = cache();
+        let root = root_of(&rows);
+        let validated = admitted_at(root);
+
+        let mut inflated = rows.clone();
+        inflated[0] = row(&balance(0x7A, 4_000));
+        assert!(matches!(
+            validated.admitted_tree(&inflated),
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { root: named, .. }) if named == root
+        ));
+
+        let mut forged = rows.clone();
+        forged[0].2 = balance(0x7A, 4_000).encode().unwrap();
+        assert_eq!(root_of(&forged), root, "the root still recomputes");
+        assert!(matches!(
+            validated.admitted_tree(&forged),
+            Err(LeafCacheError::RowIsNotItsState { key }) if key == rows[0].0
+        ));
+
+        let mut junk = rows.clone();
+        junk[1].2 = vec![0x00, 0x01];
+        assert!(matches!(
+            validated.admitted_tree(&junk),
+            Err(LeafCacheError::RowDoesNotDecode { key, .. }) if key == rows[1].0
+        ));
+    }
+
+    /// At activation the root is the empty root: an empty cache is its tree,
+    /// with nothing to spend, and a row left from anything else is refused.
+    #[test]
+    fn at_activation_the_producer_tree_is_empty() {
+        let zero = activate(EconomicActivationSnapshot::fresh()).unwrap();
+        let admitted = zero.admitted_tree(&[]).unwrap();
+        assert!(admitted.balances().is_empty());
+        assert_eq!(admitted.tree().root(), zero.economic_root());
+        assert!(matches!(
+            zero.admitted_tree(&cache()),
+            Err(LeafCacheError::DoesNotRecomputeTheRoot { .. })
+        ));
+    }
 
     /// AN UNRESOLVED POSITION MINTS NOTHING, from either of its two roots.
     ///

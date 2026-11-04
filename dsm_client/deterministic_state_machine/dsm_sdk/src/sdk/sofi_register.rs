@@ -31,14 +31,14 @@ use dsm::sofi::conformance::{
 };
 use dsm::sofi::derive;
 use dsm::sofi::publication::Publication;
-use dsm::sofi::registration::PositionCells;
+use dsm::sofi::registration::{PositionCells, Registration};
 use dsm::sofi::resolve::{Acquired, ExerciseObjects, SofiReads, Verifier};
 use dsm::sofi::wire::{
     SettlementPreimage, SofiWireError, TraderFulfillmentBody, TraderPrecommitBody, ValidationRef,
 };
 use dsm::types::error::DsmError;
 
-use crate::sdk::route_seats::{write_recorded_position, WriteReport};
+use crate::sdk::route_seats::{pair_at_leader, write_recorded_position, AtLeader, WriteReport};
 use crate::sdk::storage_set::StorageSet;
 
 type D32 = [u8; 32];
@@ -96,6 +96,11 @@ pub enum InstallError {
     /// The leader of `s(q)` did not answer with the pair's links. The write
     /// is recorded and resumes at the leader; no other seat stands in.
     LeaderUnreached,
+    /// Another value is first at the leader of one of the pair's cells, so
+    /// the pair, which goes there both or neither, went no further (SoFi
+    /// §17.4, storage spec §9 route chains, rule 5), and Core reads the
+    /// position standing on no pair of this `F`: it went to that value.
+    PositionTaken,
 }
 
 impl From<SofiWireError> for InstallError {
@@ -160,6 +165,35 @@ pub struct Installed {
     pub resolution_claim: Vec<u8>,
 }
 
+/// Whether Core reads `fulfillment`'s position pair standing on it:
+/// registered or held on `F`, matched by its id (SoFi Amendment S20). Reads
+/// that do not decide the pair are not an answer.
+fn stands_on<R: SofiReads>(
+    verifier: &Verifier<'_, R>,
+    precommit: &TraderPrecommitBody,
+    fulfillment: &TraderFulfillmentBody,
+) -> Result<bool, InstallError> {
+    let read = verifier
+        .read_registration(
+            precommit.genesis(),
+            precommit.device_id(),
+            fulfillment.position(),
+            precommit.void_root(),
+        )
+        .map_err(|e| InstallError::Storage(e.to_string()))?
+        .map_err(|missing| {
+            InstallError::Storage(format!(
+                "the position pair's cells are not decided yet: {missing:?}"
+            ))
+        })?;
+    let id = derive::fulfillment_id(fulfillment);
+    Ok(matches!(
+        read.registration(),
+        Registration::Registered(signed) | Registration::Held(signed)
+            if derive::fulfillment_id(&signed.body) == id
+    ))
+}
+
 /// Install `F` at its position: conformance first — over evidence the
 /// verifier acquires and decides — then the pair at the leader of `s(q)`
 /// and the same bytes at each later seat, continuing an earlier install of
@@ -207,9 +241,19 @@ pub async fn install_fulfillment<R: SofiReads>(
     )?
     .encode();
     let reports = write_recorded_position(set, &cells, &fulfillment_bytes, &claim_bytes).await?;
-    let [ful, root] = &reports;
-    if !(ful.reached_leader() && root.reached_leader()) {
-        return Err(InstallError::LeaderUnreached);
+    match pair_at_leader(&reports) {
+        AtLeader::Link => {}
+        // Another value is first at one cell's leader and nothing of the
+        // pair was put. Whether the position still stands on this F is
+        // Core's reading of the two cells: a claim naming F under another
+        // body leaves the pair registered on F (SoFi Amendment S20), and the
+        // exercise and the ladder then decide it.
+        AtLeader::Taken => {
+            if !stands_on(verifier, request.precommit, request.fulfillment)? {
+                return Err(InstallError::PositionTaken);
+            }
+        }
+        AtLeader::Unanswered => return Err(InstallError::LeaderUnreached),
     }
     Ok(Installed {
         cells,

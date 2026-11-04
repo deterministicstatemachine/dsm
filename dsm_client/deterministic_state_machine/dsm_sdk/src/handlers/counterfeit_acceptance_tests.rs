@@ -5,10 +5,10 @@
 //! A payer runs software it compiled itself. It can build a step the rules do
 //! not allow, sign it with its real key, publish its evidence and register its
 //! claim, and the storage nodes take it: they store, they do not validate. What
-//! stops the value is the receiver's own walk (DSM Amendment A19, restoring
-//! A8): every step it has not validated, each from the root validated before
-//! it, and every credit's source through the source's own segment to a real
-//! online debit. These tests build each counterfeit with the producer's own
+//! stops the value is the receiver's own validation (DSM Amendment A31):
+//! every predecessor from activation, and each credit's source debit through
+//! that source's established economic ancestry.
+//! These tests build each counterfeit with the producer's own
 //! builders, as modified software would, publish it to the network's storage
 //! nodes, and ask a device that holds nothing of the payer.
 
@@ -97,6 +97,33 @@ fn chain_state(
     }
 }
 
+/// `own`'s step on its own self-loop relationship over `operation`: the
+/// relationship a burn or a token creation advances.
+fn self_loop_state(own: &TestDevice, operation: &Operation, entropy: u8) -> RelationshipChainState {
+    own.enter();
+    let rel_key =
+        dsm::core::bilateral_transaction_manager::compute_smt_key(&own.device_id, &own.device_id);
+    let Some(embedded_parent) = own
+        .router()
+        .core_sdk
+        .device_head()
+        .expect("the head")
+        .chain_tip(&rel_key)
+    else {
+        panic!("the self-loop has a tip: the device has advanced it");
+    };
+    RelationshipChainState {
+        rel_key,
+        embedded_parent,
+        counterparty_devid: own.device_id,
+        operation: operation.clone(),
+        entropy: vec![entropy; 32],
+        encapsulated_entropy: None,
+        entity_sig: None,
+        counterparty_sig: None,
+    }
+}
+
 /// Put every artifact of `parts` on the network's set, and register, under
 /// `device`'s own key, the claim naming them at `position` along the cell
 /// routed from `parent_root`. Asserts the claim is final there: the nodes
@@ -119,6 +146,7 @@ async fn publish_and_register(
             "economic-dsm-successor-evidence" => TAG_DSM_ECONOMIC_SUCCESSOR_EVIDENCE,
             "economic-authority-evidence" => TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
             "peer-transfer-acceptance" => TAG_DSM_PEER_TRANSFER_ACCEPTANCE,
+            "source-ek-step" | "payer-ek-step" => dsm::common::domain_tags::TAG_DSM_EK_CERT_STEP,
             other => panic!("an artifact this test does not publish: {other}"),
         };
         crate::sdk::storage_io::put_immutable(&set, namespace, bytes)
@@ -165,9 +193,11 @@ async fn publish_and_register(
     );
 }
 
-/// What `payer`'s counterfeit first step produced.
+/// What the payer's counterfeit credit produced.
 struct Counterfeit {
     activation_root: [u8; 32],
+    credit_position: u64,
+    post_balance: u64,
     parts: DsmAdmissionParts,
     tree: dsm::economic::tree::EconomicSmt,
 }
@@ -185,8 +215,17 @@ async fn counterfeit_credit(
     payer.enter();
     let core = payer.router().core_sdk.clone();
     let validated = validated_root_or_activate(&core).expect("the payer's activation root");
-    assert_eq!(validated.economic_position(), 0, "the payer is new");
     let (mut tree, pre_state) = producer_tree_and_pre_state(&validated).expect("the tree");
+    let credit_position = pre_state.economic_position;
+    let pre_balance = match pre_state
+        .balances
+        .get(&dsm::core::token::era_policy::era_policy_commit())
+    {
+        Some(amount) => *amount,
+        None if validated.economic_position() == 0 => 0,
+        None => panic!("a funded payer must have its ERA balance"),
+    };
+    let post_balance = pre_balance.checked_add(amount).expect("the credit fits");
     let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
     let bundle = {
         use prost::Message;
@@ -230,9 +269,11 @@ async fn counterfeit_credit(
     )
     .expect("the producer's builders build what they are given");
     let activation_root = validated.economic_root();
-    publish_and_register(payer, 1, &activation_root, &parts).await;
+    publish_and_register(payer, credit_position, &activation_root, &parts).await;
     Counterfeit {
         activation_root,
+        credit_position,
+        post_balance,
         parts,
         tree,
     }
@@ -251,24 +292,30 @@ async fn three_parties() -> (Pair, TestDevice) {
     (p, c)
 }
 
-/// `payer`'s next step at its real admitted root: `operation`, with the write
-/// set `write_set_operation` produces. An honest producer builds the write
-/// set from the operation it signs; software that does not can build it from
-/// another. Published and registered along the cell routed from that root.
-/// Returns the position it was registered at.
+/// Where [`next_step`] registered the payer's step, and the index in its
+/// witness of the mutation whose balance fell: what a payee's locator names.
+struct Registered {
+    position: u64,
+    debit_mutation_index: u32,
+}
+
+/// `payer`'s next step at its real admitted root: the relationship step
+/// `state` over its operation, with the write set `write_set_operation`
+/// produces. An honest producer builds the write set from the operation it
+/// signs; software that does not can build it from another. Published and
+/// registered along the cell routed from that root.
 async fn next_step(
     payer: &TestDevice,
-    payee: &TestDevice,
-    operation: &Operation,
+    state: RelationshipChainState,
     write_set_operation: &Operation,
-) -> u64 {
+) -> Registered {
     use dsm::economic::admission::{
         dsm_economic_operation_id, dsm_operation_digest, AcceptedAdmissionCoords,
         AcceptedSubstrateCoords,
     };
     use dsm::economic::claim::{AdmissionSubstrate, EconomicAdmissionManifest};
     use dsm::storage_object::immutable_inner;
-    let state = chain_state(payer, payee, operation, 0x33);
+    let operation = &state.operation;
     payer.enter();
     let core = payer.router().core_sdk.clone();
     let validated = validated_root_or_activate(&core).expect("the payer's admitted root");
@@ -288,6 +335,16 @@ async fn next_step(
         &CreditSourceFacts::None,
     )
     .expect("the write set of the other operation");
+    let debit_mutation_index = built
+        .mutations
+        .iter()
+        .position(|m| {
+            m.post_state.as_ref().and_then(|s| s.credit_amount())
+                < m.pre_state.as_ref().and_then(|s| s.credit_amount())
+        })
+        .map(u32::try_from)
+        .expect("the write set debits the payer")
+        .expect("the index fits");
     let witness = dsm::economic::witness::EconomicTransitionWitness::new(
         pre_root,
         built.post_root,
@@ -353,7 +410,10 @@ async fn next_step(
     };
     let position = pre_state.economic_position;
     publish_and_register(payer, position, &validated.economic_root(), &parts).await;
-    position
+    Registered {
+        position,
+        debit_mutation_index,
+    }
 }
 
 /// `from`'s online transfer of `amount` of the token `policy_commit` to `to`,
@@ -361,6 +421,19 @@ async fn next_step(
 fn signed_token_transfer(
     from: &TestDevice,
     to: &TestDevice,
+    policy_commit: [u8; 32],
+    ticker: &str,
+    amount: u64,
+) -> Operation {
+    signed_transfer_naming(from, to, to.genesis, policy_commit, ticker, amount)
+}
+
+/// [`signed_token_transfer`] naming `to_genesis` as the recipient's lineage
+/// beside `to`'s device id: what a sender's software chooses to sign.
+fn signed_transfer_naming(
+    from: &TestDevice,
+    to: &TestDevice,
+    to_genesis: [u8; 32],
     policy_commit: [u8; 32],
     ticker: &str,
     amount: u64,
@@ -379,8 +452,11 @@ fn signed_token_transfer(
     );
     let unsigned = Operation::Transfer {
         to_device_id: to.device_id.to_vec(),
+        to_genesis,
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&policy_commit)
+            .expect("the payer holds its token's committed policy"),
         terms_commitment: terms.commitment(),
         signature: Vec::new(),
         authority_policy: None,
@@ -406,9 +482,8 @@ fn signed_token_transfer(
 /// payer's history is consistent and every claim is final at its cell; the
 /// value never came out of anyone's balance.
 ///
-/// MUTATION CONTROL: validating each unseen step of the payer's history only
-/// from the root its claim states (skipping `full_step` in `next_point`)
-/// turns this red: the receiver accepts the debit of value that never existed.
+/// MUTATION CONTROL: accepting a witness-named predecessor without validating
+/// its ancestry turns this red: the receiver takes value that never existed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer() {
@@ -449,8 +524,8 @@ async fn a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_t
 }
 
 /// The payer's next step: an ordinary debit of `amount` ERA to `payee`,
-/// built on the root `first` produced, published and registered at position
-/// 2. Returns the debit, its relationship step and what it built.
+/// built on the root `first` produced, published and registered at the next
+/// position. Returns the debit, its relationship step and what it built.
 async fn counterfeit_debit(
     payer: &TestDevice,
     payee: &TestDevice,
@@ -463,10 +538,13 @@ async fn counterfeit_debit(
     let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
     let mut tree = first.tree;
     let pre_state = AdmittedPreState {
-        balances: [(dsm::core::token::era_policy::era_policy_commit(), amount)]
-            .into_iter()
-            .collect(),
-        economic_position: 2,
+        balances: [(
+            dsm::core::token::era_policy::era_policy_commit(),
+            first.post_balance,
+        )]
+        .into_iter()
+        .collect(),
+        economic_position: first.credit_position + 1,
     };
     let parts = build_dsm_admission(
         &payer.genesis,
@@ -480,7 +558,13 @@ async fn counterfeit_debit(
         Vec::new(),
     )
     .expect("an ordinary debit of the credited value");
-    publish_and_register(payer, 2, &first.parts.coords.post_economic_root, &parts).await;
+    publish_and_register(
+        payer,
+        first.credit_position + 1,
+        &first.parts.coords.post_economic_root,
+        &parts,
+    )
+    .await;
     (debit, state, parts)
 }
 
@@ -493,8 +577,8 @@ async fn counterfeit_debit(
 /// written) refuses it, and nothing durable is left: no pending admission, no
 /// admitted credit, no balance.
 ///
-/// MUTATION CONTROL: skipping `full_step` for the payer's unseen steps in
-/// `next_point` turns this red: the receiver's acceptance prepares the credit.
+/// MUTATION CONTROL: the source-ancestry check dropped from `validate_peer_step`
+/// turns this red: the receiver's acceptance prepares the credit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited() {
@@ -573,6 +657,343 @@ async fn a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited() 
     assert_eq!(c.era_balance(), 0, "no balance");
 }
 
+/// B1 is an honest faucet claim. B2 credits the payer from a signed A2 debit
+/// that the attacker never registers. B3 spends the apparent B1+B2 balance
+/// to a new receiver. The receiver takes the actual transfer bytes through
+/// its incoming admission seam and must find the missing A2 at the nodes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_third_step_spending_an_unregistered_credit_is_refused_in_full_receive() {
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let (p, c) = three_parties().await;
+    let (source, payer) = (&p.a, &p.b);
+    payer.fund_admitted(100).await;
+    source.enter();
+    let source_at = client_db::economic_lineage::get_admitted_coordinate()
+        .expect("read")
+        .expect("the source's faucet claim")
+        .0;
+    let invented = payout();
+    let credit = counterfeit_credit(payer, source, source_at + 1, invented).await;
+    assert_eq!(credit.credit_position, 2, "B2 is the forged credit");
+    let amount = credit.post_balance;
+    let (debit, state, parts) = counterfeit_debit(payer, &c, credit, amount).await;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        payer.genesis,
+        payer.device_id,
+        c.device_id,
+        state.embedded_parent,
+        state.compute_chain_tip(),
+        [0x51; 32],
+        [0x52; 32],
+        [0x32; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &debit else {
+        panic!("B3 is a transfer")
+    };
+
+    c.enter();
+    let lineage_failure = verify(payer, 3)
+        .await
+        .expect_err("B3 cannot inherit a credit whose source debit is not registered");
+    assert!(
+        matches!(&lineage_failure, PeerLineageFailure::Incomplete(_)),
+        "the absent A2 is incomplete, not an invented negative verdict: {lineage_failure:?}"
+    );
+    assert!(
+        format!("{lineage_failure:?}").contains(&format!("{}", source_at + 1)),
+        "the failure identifies the missing A2: {lineage_failure:?}"
+    );
+
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &payer.genesis,
+        &payer.device_id,
+        &payer.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &debit.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: 3,
+                debit_mutation_index: parts.debit_mutation_index.expect("B3 debit index"),
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(payer),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("the receiver never prepares a credit from B3");
+    assert!(
+        format!("{refusal}").contains(&format!("{}", source_at + 1)),
+        "the receive path identifies the missing A2: {refusal}"
+    );
+    c.enter();
+    assert!(
+        c.router()
+            .core_sdk
+            .device_head()
+            .expect("receiver head")
+            .pending_economic_admission()
+            .is_none(),
+        "no pending admission"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .is_none(),
+        "no admitted credit"
+    );
+    assert_eq!(c.era_balance(), 0, "no counterfeit balance");
+}
+
+/// A payer's second step built on a forged predecessor is never accepted (DSM
+/// Amendment A31). The payer's first step is honest and final. Its modified
+/// software then credits itself locally, publishing nothing, and debits the
+/// invented value at position 2 from the root that credit produced. Its claim
+/// is final at the cell routed from that root, the only claim at the position,
+/// and the debit is valid from the root its own witness names. A receiver new
+/// to the payer validates the honest step at position 1 and routes position 2
+/// from that root. The offered claim has no finality at the honest route, so
+/// the result is Incomplete and nothing durable is left.
+///
+/// MUTATION CONTROL: routing from the witness-named root instead of the
+/// established predecessor turns this red: the forged step is accepted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_second_step_built_on_a_forged_predecessor_is_never_accepted() {
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let (p, c) = three_parties().await;
+    let (payer, source) = (&p.a, &p.b);
+    let era = dsm::core::token::era_policy::era_policy_commit();
+    let invented = 10 * payout();
+
+    // The forged predecessor: a credit on the payer's real root at position 1,
+    // kept local. No claim of it, no artifact of it, reaches a node.
+    let transfer = signed_transfer(source, payer, invented);
+    let state = chain_state(payer, source, &transfer, 0x41);
+    payer.enter();
+    let core = payer.router().core_sdk.clone();
+    let validated = validated_root_or_activate(&core).expect("the payer's admitted root");
+    assert_eq!(
+        validated.economic_position(),
+        1,
+        "the payer's one step is its faucet claim"
+    );
+    let honest_root = validated.economic_root();
+    let (mut tree, pre_state) = producer_tree_and_pre_state(&validated).expect("the tree");
+    let held = *pre_state.balances.get(&era).expect("the payer's ERA");
+    let authority = authority_material(NETWORK, &payer.genesis).expect("authority evidence");
+    let forged = build_dsm_admission(
+        &payer.genesis,
+        &payer.device_id,
+        &state,
+        &transfer,
+        &pre_state,
+        &mut tree,
+        &CreditSourceFacts::PeerDebit {
+            peer_genesis: source.genesis,
+            peer_devid: source.device_id,
+            peer_economic_position: 1,
+            peer_debit_mutation_index: 0,
+            acceptance_evidence_addr: [0x41; 32],
+        },
+        &authority,
+        Vec::new(),
+    )
+    .expect("the producer's builders build what they are given");
+    let forged_root = forged.coords.post_economic_root;
+    assert_ne!(forged_root, honest_root, "the credit moved the root");
+
+    // An ordinary debit of more than the honest step left, from the forged root.
+    let amount = held + invented;
+    let debit = signed_transfer(payer, &c, amount);
+    let debit_state = chain_state(payer, &c, &debit, 0x42);
+    payer.enter();
+    let parts = build_dsm_admission(
+        &payer.genesis,
+        &payer.device_id,
+        &debit_state,
+        &debit,
+        &AdmittedPreState {
+            balances: [(era, amount)].into_iter().collect(),
+            economic_position: 2,
+        },
+        &mut tree,
+        &CreditSourceFacts::None,
+        &authority,
+        Vec::new(),
+    )
+    .expect("an ordinary debit of the credited value");
+    assert_eq!(parts.witness.pre_economic_root, forged_root);
+    publish_and_register(payer, 2, &forged_root, &parts).await;
+
+    c.enter();
+    match verify(payer, 2).await {
+        Err(PeerLineageFailure::Incomplete(why)) => assert!(
+            why.contains("position 2")
+                && (why.contains("not final yet") || why.contains("no claim holds")),
+            "the honest predecessor's route is not final: {why}"
+        ),
+        other => panic!("a step on a forged predecessor is never validated: {other:?}"),
+    }
+
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        payer.genesis,
+        payer.device_id,
+        c.device_id,
+        debit_state.embedded_parent,
+        debit_state.compute_chain_tip(),
+        [0x51; 32],
+        [0x52; 32],
+        [0x42; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &debit else {
+        panic!("the debit is a transfer")
+    };
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &payer.genesis,
+        &payer.device_id,
+        &payer.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &debit.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: 2,
+                debit_mutation_index: parts.debit_mutation_index.expect("the debit's index"),
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(payer),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("a step on a forged predecessor is never prepared for admission");
+    assert!(
+        format!("{refusal}").contains("not final yet")
+            || format!("{refusal}").contains("no claim holds"),
+        "the honest predecessor's route is not final: {refusal}"
+    );
+    c.enter();
+    assert!(
+        c.router()
+            .core_sdk
+            .device_head()
+            .expect("a head")
+            .pending_economic_admission()
+            .is_none(),
+        "no pending admission"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .is_none(),
+        "no admitted credit"
+    );
+    assert_eq!(c.era_balance(), 0, "no balance");
+}
+
+/// SA-133. A payment names its recipient's lineage, not its device id alone:
+/// two geneses can share a device id (its AK and AttA are the identity's own
+/// choice), and one debit must not fund a credit in each. The source's
+/// honest, funded and registered debit to C's device id, naming another
+/// lineage's genesis, is refused by C's own acceptance before anything is
+/// written.
+///
+/// MUTATION CONTROL: the recipient-genesis conjunct dropped from
+/// `prevalidate_sender_debit` lets the acceptance go past it: red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_debit_naming_another_lineage_is_never_accepted_by_its_device() {
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let (p, c) = three_parties().await;
+    let (source, twin) = (&p.a, &p.b);
+    let debit = signed_transfer_naming(
+        source,
+        &c,
+        twin.genesis,
+        dsm::core::token::era_policy::era_policy_commit(),
+        "ERA",
+        payout() / 10,
+    );
+    let state = chain_state(source, &c, &debit, 0x41);
+    let embedded_parent = state.embedded_parent;
+    let child_tip = state.compute_chain_tip();
+    let registered = next_step(source, state, &debit).await;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        source.genesis,
+        source.device_id,
+        c.device_id,
+        embedded_parent,
+        child_tip,
+        [0x51; 32],
+        [0x52; 32],
+        [0x41; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &debit else {
+        panic!("the debit is a transfer")
+    };
+
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &source.genesis,
+        &source.device_id,
+        &source.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &debit.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: registered.position,
+                debit_mutation_index: registered.debit_mutation_index,
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(source),
+    )
+    .await
+    .map(|_| ())
+    .expect_err("a debit naming another lineage funds nothing here");
+    assert!(
+        format!("{refusal}").contains("addressed to a different identity than the consumer"),
+        "refused for the lineage it names: {refusal}"
+    );
+    assert!(
+        c.router()
+            .core_sdk
+            .device_head()
+            .expect("a head")
+            .pending_economic_admission()
+            .is_none(),
+        "no pending admission"
+    );
+    assert_eq!(c.era_balance(), 0, "no balance");
+}
+
 /// A credit whose source is the source's faucet claim, a step that debited
 /// nobody, is never accepted by a receiver new to the payer.
 ///
@@ -625,13 +1046,20 @@ async fn a_credit_whose_source_is_an_activation_root_is_never_accepted() {
 }
 
 /// A transfer of a token whose committed policy does not let it transfer is
-/// never accepted, however valid the payer's history and the step's write
-/// set. The payer created the token itself, honestly, with transfers turned
-/// off, and then debits some of it to a receiver new to it; its own wallet
-/// would refuse the send, so it builds the step itself.
+/// never accepted, however valid the payer's history and the step's debit.
+/// The payer created the token itself, honestly, with transfers turned off,
+/// and then debits some of it to a receiver new to it. Its own wallet and
+/// Core's builder refuse the send, so it builds the step itself: the signed
+/// transfer carries the token's own committed policy, and the debit is the one a burn
+/// of the same amount writes. The receiver's provenance walk refuses the step,
+/// and so does its whole acceptance (`prevalidate_incoming_transfer_admission`,
+/// which every payment its sync picks up goes through before anything is
+/// written), from the signed transfer, the locator of the registered debit
+/// and a receipt naming the step: nothing durable is left (owner question 9:
+/// the enforcement is Core's, past the payer's SDK).
 ///
-/// MUTATION CONTROL: skipping `check_transfer_policy` in `advance_validated`
-/// turns this red: the receiver accepts the transfer.
+/// MUTATION CONTROL: removing the `transferable` refusal from the write set's
+/// Transfer arm turns this red: the receiver accepts the transfer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted() {
@@ -664,15 +1092,144 @@ async fn a_transfer_of_a_token_whose_policy_forbids_transfers_is_never_accepted(
         .expect("BOUND is registered")
         .policy_commit;
     let transfer = signed_token_transfer(payer, &c, bound, "BOUND", 5);
-    let position = next_step(payer, &c, &transfer, &transfer).await;
+    let same_debit = Operation::Burn {
+        amount: dsm::types::token_types::Balance::amount(5),
+        token_id: b"BOUND".to_vec(),
+        policy_commit: bound,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&bound)
+            .expect("the payer holds BOUND's committed policy"),
+        message: String::new(),
+    };
+    let state = chain_state(payer, &c, &transfer, 0x33);
+    let step = next_step(payer, state.clone(), &same_debit).await;
 
     c.enter();
-    match verify(payer, position).await {
+    match verify(payer, step.position).await {
         Err(PeerLineageFailure::Invalid(why)) => assert!(
-            why.contains("does not let it transfer"),
+            why.contains("does not let it move between holders"),
             "refused by the token's committed policy: {why}"
         ),
         other => panic!("a transfer the token's policy forbids is never accepted: {other:?}"),
+    }
+
+    use crate::sdk::economic_admission_flow::{
+        prevalidate_incoming_transfer_admission, IncomingTransfer,
+    };
+    use crate::storage::client_db::recipient_staging::LocatorHint;
+    let receipt = dsm::types::receipt_types::StitchedReceiptV2::new(
+        payer.genesis,
+        payer.device_id,
+        c.device_id,
+        state.embedded_parent,
+        state.compute_chain_tip(),
+        [0x51; 32],
+        [0x52; 32],
+        [0x33; 32],
+        Vec::new(),
+        Vec::new(),
+    )
+    .to_full_protobuf()
+    .expect("the receipt encodes");
+    let Operation::Transfer { signature, .. } = &transfer else {
+        panic!("the step is a transfer")
+    };
+    c.enter();
+    let refusal = prevalidate_incoming_transfer_admission(
+        &c.router().core_sdk,
+        &payer.genesis,
+        &payer.device_id,
+        &payer.ak_pk,
+        &IncomingTransfer {
+            canonical_operation_bytes: &transfer.with_cleared_signature().to_bytes(),
+            signature,
+            hint: LocatorHint {
+                economic_position: step.position,
+                debit_mutation_index: step.debit_mutation_index,
+            },
+            evidence_bytes: &receipt,
+        },
+        &c.rel_key_with(payer),
+    )
+    .await
+    .map(drop)
+    .expect_err("a transfer the token's policy forbids is never prepared for admission");
+    assert!(
+        format!("{refusal}").contains("does not let it move between holders"),
+        "the acceptance is refused by the token's committed policy: {refusal}"
+    );
+    c.enter();
+    let head = c.router().core_sdk.device_head().expect("a head");
+    assert!(
+        head.pending_economic_admission().is_none(),
+        "no pending admission"
+    );
+    assert!(
+        client_db::economic_lineage::get_admitted_coordinate()
+            .expect("read")
+            .is_none(),
+        "no admitted credit"
+    );
+    assert_eq!(head.balance(&bound), 0, "no BOUND");
+}
+
+/// A burn of a token whose committed policy does not let it be burned is
+/// never accepted (DSM §61, MR-DSM-0191: no operation bypasses the asset's
+/// committed policy). The payer created the token itself, honestly, with
+/// burns turned off, and then burns some of it. Its own wallet and Core's
+/// builder refuse the burn, so it builds the step itself: the signed burn
+/// carries the token's own committed policy, and the debit is the one a transfer of
+/// the same amount writes. A receiver new to the payer walks its history.
+///
+/// MUTATION CONTROL: removing the `burn_enabled` refusal from the write set's
+/// Burn arm turns this red: the receiver accepts the burn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_burn_of_a_token_whose_policy_forbids_burns_is_never_accepted() {
+    use crate::bridge::{AppInvoke, AppRouter};
+    use prost::Message;
+    let (p, c) = three_parties().await;
+    let payer = &p.a;
+    payer.enter();
+    let created = payer
+        .router()
+        .invoke(AppInvoke {
+            method: "token.create".into(),
+            args: dsm::types::proto::ArgPack {
+                codec: dsm::types::proto::Codec::Proto as i32,
+                body: super::sender_admission_tests::non_burnable_request("KEPT").encode_to_vec(),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        })
+        .await;
+    assert!(
+        created.success,
+        "the token is created: {:?}",
+        created.error_message
+    );
+    payer.enter();
+    let kept = client_db::token_registry::get_token_by_ticker("KEPT")
+        .expect("registry read")
+        .expect("KEPT is registered")
+        .policy_commit;
+    let burn = Operation::Burn {
+        amount: dsm::types::token_types::Balance::amount(5),
+        token_id: b"KEPT".to_vec(),
+        policy_commit: kept,
+        token_policy: crate::sdk::economic_registers::carried_token_policy(&kept)
+            .expect("the payer holds KEPT's committed policy"),
+        message: "burn 5 KEPT".to_string(),
+    };
+    let same_debit = signed_token_transfer(payer, &c, kept, "KEPT", 5);
+    let step = next_step(payer, self_loop_state(payer, &burn, 0x34), &same_debit).await;
+
+    c.enter();
+    match verify(payer, step.position).await {
+        Err(PeerLineageFailure::Invalid(why)) => assert!(
+            why.contains("does not let it be burned"),
+            "refused by the token's committed policy: {why}"
+        ),
+        other => panic!("a burn the token's policy forbids is never accepted: {other:?}"),
     }
 }
 
@@ -691,10 +1248,10 @@ async fn a_debit_that_takes_less_than_it_sends_is_never_accepted() {
     let payer = &p.a;
     let whole = signed_transfer(payer, &c, payout());
     let one = signed_transfer(payer, &c, 1);
-    let position = next_step(payer, &c, &whole, &one).await;
+    let step = next_step(payer, chain_state(payer, &c, &whole, 0x33), &one).await;
 
     c.enter();
-    match verify(payer, position).await {
+    match verify(payer, step.position).await {
         Err(PeerLineageFailure::Invalid(why)) => assert!(
             why.contains("debit delta is not exactly the operation amount"),
             "refused: the debit is not the amount sent: {why}"

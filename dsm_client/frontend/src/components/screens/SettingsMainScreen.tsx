@@ -2,16 +2,9 @@
 
 // src/components/screens/SettingsMainScreen.tsx
 // Settings on the StateBoy frame: the version (and its 7-tap developer
-// unlock), the tour, the wallet lock, the ring backup as Rust reports it, and
-// the developer options once unlocked.
+// unlock), the tour, the wallet lock, and the developer options once unlocked.
 import React, { useCallback, useEffect, useRef, useState, memo } from 'react';
 import { dsmClient } from '../../services/dsmClient';
-import {
-  getNfcBackupStatus,
-  setAutoWriteEnabled,
-  type NfcBackupStatus,
-} from '../../services/recovery/nfcRecoveryService';
-import { getNfcBackupUiModel } from '../../services/recovery/nfcBackupUi';
 import { tourStore } from '../tour/tourStore';
 import { chooseSkin, setReceiptsEmail } from '../../runtime/skinPreferences';
 import { RECEIPT_CONSENT } from '../../domain/receiptConsent';
@@ -25,9 +18,6 @@ const DEV_MODE_PREF_KEY = 'dev_mode';
 const OPEN_DIAGNOSTICS_EVENT = 'dsm-open-diagnostics';
 let cachedDevMode: boolean | null = null;
 
-/** The backup status as Rust reported it, the failure of asking, or not asked yet. */
-type NfcStatusRead = { status: NfcBackupStatus } | { error: string } | undefined;
-
 interface SettingsMainScreenProps {
   onNavigate?: (screen: string) => void;
 }
@@ -39,27 +29,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
   const [tapCount, setTapCount] = useState<number>(0);
   const devModeUnlockingRef = useRef(false);
   const [status, setStatus] = useState<string>('');
-
-  // --- Compact NFC status (full management is on NfcRecoveryScreen) ---
-  // A status that could not be read is shown as that failure; it used to be
-  // shown as "NOT SET", the status of a device with no backup at all.
-  const [nfcRead, setNfcRead] = useState<NfcStatusRead>(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const status = await getNfcBackupStatus();
-        if (!cancelled) setNfcRead({ status });
-      } catch (e) {
-        if (!cancelled) setNfcRead({ error: e instanceof Error ? e.message : String(e) });
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const nfcStatus = nfcRead && 'status' in nfcRead ? nfcRead.status : null;
-  const nfcUi = nfcStatus ? getNfcBackupUiModel(nfcStatus) : null;
 
   // Initial preferences load (deterministic, event-driven only)
   useEffect(() => {
@@ -121,13 +90,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
     window.dispatchEvent(new CustomEvent(OPEN_DIAGNOSTICS_EVENT, { detail: { autoGather: true } }));
     setStatus('Diagnostics workspace opened');
   }, []);
-
-  const onToggleAutoWrite = useCallback((next: boolean) => {
-    if (!nfcStatus || nfcStatus.autoWriteEnabled === next) return;
-    void setAutoWriteEnabled(next).then(() =>
-      setNfcRead({ status: { ...nfcStatus, autoWriteEnabled: next } }),
-    );
-  }, [nfcStatus]);
 
   return (
     <ScreenFrame
@@ -239,53 +201,6 @@ const SettingsMainScreen: React.FC<SettingsMainScreenProps> = ({ onNavigate }) =
         >
           Configure wallet lock
         </button>
-      </section>
-
-      {/* NFC Ring Backup — compact card, full management on dedicated screen */}
-      <section className="sb-card sb-card--dark" aria-labelledby="nfc-section-title">
-        <div id="nfc-section-title" className="sb-card__title">NFC ring backup</div>
-        <div className="sb-hero__value" style={{ fontSize: 14, marginTop: 0 }}>
-          {nfcRead === undefined ? '…' : nfcUi ? nfcUi.backupLabel : 'NOT READ'}
-          {nfcUi && nfcUi.writeStateLabel !== '--' ? ` / ${nfcUi.writeStateLabel}` : ''}
-        </div>
-        <div className="sb-hint sb-hint--tight" style={{ marginBottom: 8 }}>
-          {nfcRead === undefined
-            ? 'Reading the backup status…'
-            : nfcUi
-              ? nfcUi.compactSummary
-              : `Status not read: ${(nfcRead as { error: string }).error}`}
-        </div>
-        <div style={{ display: 'grid', gap: 8 }}>
-          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('nfc_recovery')}>
-            Manage backup
-          </button>
-          <button type="button" className="sb-btn sb-btn--block" onClick={() => onNavigate?.('recovery')}>
-            Inspect or recover
-          </button>
-        </div>
-        {nfcStatus && nfcStatus.enabled && nfcStatus.configured && (
-          <div className="sb-kv" style={{ marginTop: 8, alignItems: 'center' }}>
-            <span className="sb-kv__k">Auto-backup to ring</span>
-            <div className="sb-seg" role="group" aria-label="Auto-backup to ring">
-              <button
-                type="button"
-                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? ' active' : ''}`}
-                aria-pressed={nfcStatus.autoWriteEnabled}
-                onClick={() => onToggleAutoWrite(true)}
-              >
-                On
-              </button>
-              <button
-                type="button"
-                className={`sb-seg__opt${nfcStatus.autoWriteEnabled ? '' : ' active'}`}
-                aria-pressed={!nfcStatus.autoWriteEnabled}
-                onClick={() => onToggleAutoWrite(false)}
-              >
-                Off
-              </button>
-            </div>
-          </div>
-        )}
       </section>
 
       {/* Developer Options (only when unlocked) */}

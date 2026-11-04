@@ -22,10 +22,15 @@ use dsm::economic::tree::{EconomicSmt, ABSENT_LEAF};
 use dsm::economic::write_set::CreditSourceFacts;
 use dsm::sofi::derive;
 use dsm::sofi::frontier::VaultWitness;
+use dsm::sofi::lineage::SetupNames;
 use dsm::sofi::publication::{Publication, Signed, VaultPolicyClass};
 use dsm::sofi::registration::{PairStanding, Registration};
 use dsm::sofi::resolution::{VaultChain, WalkOutcome};
-use dsm::sofi::resolve::{AcceptedGeneses, Acquired, LocalLeaves, VaultGenesis, Verifier, WALK_BUDGET};
+use dsm::sofi::conformance::{fulfillment_conformance, FulfillmentConformance};
+use dsm::sofi::resolve::{
+    AcceptedGeneses, Acquired, ExerciseObjects, LocalLeaves, SofiReads, VaultGenesis, Verifier,
+    WALK_BUDGET,
+};
 use dsm::sofi::storage::Discovered;
 use dsm::sofi::validation::{
     movement_shape, retire_vault_post, route_endpoints, swap_vault_post, Evidence, EvidenceNeeds,
@@ -183,8 +188,9 @@ pub struct RelayIntent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Relayed {
-    /// Cells whose write reached their route's leader: the position pair's
-    /// two, and each leg key the exercise was carried to.
+    /// Cells whose write got its link at their route's leader: of the
+    /// position pair's two, and of each leg key the exercise was carried to.
+    /// A cell another value was first at is not counted.
     pub cells_written: u32,
 }
 
@@ -256,6 +262,29 @@ pub(crate) fn identity(core: &CoreSDK) -> Result<(D32, D32), DsmError> {
 
 // ── §28 Creating a vault ───────────────────────────────────────────────────
 
+/// The committed policies of the tokens a vault creation funds, which the
+/// creation carries (MR-SOFI-0311), each held or fetched and re-hashed to its
+/// token. Core's own check is asked of them here, before anything is
+/// published or signed: a token whose policy forbids it to move between
+/// holders cannot be locked in a vault, and the owner learns that now rather
+/// than from a refused admission. Core refuses the same creation in its write
+/// set whatever this producer does.
+pub(crate) async fn vault_funding_policies(
+    set: &StorageSet,
+    funded: &[D32],
+) -> Result<Vec<Vec<u8>>, DsmError> {
+    let mut carried = Vec::new();
+    for commit in dsm::economic::write_set::carried_policy_commits(funded) {
+        carried.push(
+            crate::sdk::economic_registers::anchored_policy_bytes_async(set, &commit)
+                .await
+                .map_err(|e| storage("funded token policy", e))?,
+        );
+    }
+    dsm::economic::write_set::funded_tokens_permitted(funded, &carried).map_err(refuse)?;
+    Ok(carried)
+}
+
 /// §28: the owner's creation. The three policy objects and the genesis
 /// preimage are published and read back `Stored` first: a genesis nobody's
 /// creation carried is refused by `genesis_accepted`, so publishing first
@@ -267,6 +296,25 @@ pub async fn create_vault(
     core: &CoreSDK,
     set: &StorageSet,
     intent: &CreateVaultIntent,
+) -> Result<VaultCreated, DsmError> {
+    let funding_policies = vault_funding_policies(
+        set,
+        &[intent.token_a_policy_commit, intent.token_b_policy_commit],
+    )
+    .await?;
+    create_vault_carrying(core, set, intent, funding_policies).await
+}
+
+/// [`create_vault`] carrying `funding_policies` as the funded tokens'
+/// committed policies. Core refuses the creation in its write set unless
+/// they are exactly those policies and each lets its token be locked, so a
+/// producer that skips [`vault_funding_policies`] meets the same refusal
+/// there, before anything is debited.
+pub(crate) async fn create_vault_carrying(
+    core: &CoreSDK,
+    set: &StorageSet,
+    intent: &CreateVaultIntent,
+    funding_policies: Vec<Vec<u8>>,
 ) -> Result<VaultCreated, DsmError> {
     let (genesis, device_id) = identity(core)?;
     let validated = validated_root_or_activate(core)?;
@@ -322,7 +370,7 @@ pub async fn create_vault(
         create_position,
         state,
     };
-    let produced = build_vault_create(&preimage, &market).map_err(refuse)?;
+    let produced = build_vault_create(&preimage, &market, funding_policies).map_err(refuse)?;
     // The genesis is indexed under its genesis locator and under each token
     // of its pair, so any trader finds it by the tokens it trades (Amendment
     // S16). None of the four objects waits on another's answer.
@@ -468,12 +516,14 @@ async fn setup(
     let produced = build_setup(
         &validated,
         &pre_tree,
-        genesis,
-        device_id,
-        intent.vault_id,
-        claim_ref,
-        SIGNATURE_ALG,
-        &public_key,
+        &SetupNames {
+            genesis,
+            device_id,
+            vault_id: intent.vault_id,
+            claim_ref,
+            signature_alg: SIGNATURE_ALG,
+            claimant_public_key: &public_key,
+        },
     )
     .map_err(refuse)?;
     let signature = sign(produced.signs.bytes())?;
@@ -629,14 +679,15 @@ pub(crate) async fn vault_at_head(
     head_of(set, verifier, vault_id, chain).await
 }
 
-/// Start the record of each vault `offered` that this device holds nothing
-/// of at the owner baseline offered for it (SoFi Amendment S24): what a
-/// quote and a swap do before they walk the vaults' heads.
+/// Start the record of each vault `offered` at the owner baseline offered
+/// for it, when that is later than the one the record starts at (SoFi
+/// Amendment S24; MR-DSM-0331): what a quote and a swap do before they walk
+/// the vaults' heads. Names each baseline the record contradicts.
 pub(crate) async fn adopt_offered(
     core: &CoreSDK,
     set: &StorageSet,
     offered: &[dsm::types::proto::ConnectVaultWitnessV1],
-) -> Result<(), DsmError> {
+) -> Result<Vec<crate::sdk::vault_baseline::ContradictedBaseline>, DsmError> {
     let accepted = &AcceptedGeneses::default();
     let standing = standing(core)?;
     let ctx = standing.context(set, accepted)?;
@@ -720,6 +771,16 @@ pub(crate) async fn head_of(
     {
         return Err(refuse(format!("the vault is quarantined: {why}")));
     }
+    // A walk that stopped where what it read did not decide the next
+    // generation has not reached the vault's head: its last generation is
+    // not the head, and is never read as one (MR-DSM-0331). A network
+    // status: the caller asks again.
+    if let Some(why) = chain.not_complete() {
+        return Err(storage(
+            "vault walk",
+            format!("not complete yet, retry: {why}"),
+        ));
+    }
     let (.., root) = chain
         .head()
         .ok_or_else(|| refuse("no head of this vault is established"))?;
@@ -796,18 +857,18 @@ fn head_witness(
             VaultWitness::at_genesis(&accepted, own.0, own.1).map_err(refuse)?
         }
         _ => {
-            let (tree, state, relationships) = crate::sdk::vault_baseline::tree_at(
-                vault_id, generation, &root,
-            )?
-            .ok_or_else(|| {
-                refuse("this device holds no witness of the vault's head, and not its whole tree")
-            })?;
+            let whole = crate::sdk::vault_baseline::tree_at(vault_id, generation, &root)?
+                .ok_or_else(|| {
+                    refuse(
+                        "this device holds no witness of the vault's head, and not its whole tree",
+                    )
+                })?;
             let rel_key = derive::relationship_key(&own.0, &own.1, vault_id);
             let wire = dsm::sofi::frontier::witness_from_tree(
-                &tree,
+                &whole.tree,
                 vault_id,
-                &state,
-                relationships.get(&rel_key).copied(),
+                &whole.state,
+                whole.relationships.get(&rel_key).copied(),
                 &own.0,
                 &own.1,
             );
@@ -888,7 +949,7 @@ fn quote(
 
 /// One hop priced at a vault's head, naming this device's setup with it, and
 /// the post state Core computes from it.
-fn price_hop(
+pub(crate) fn price_hop(
     vault: &VaultAtHead,
     token_in: D32,
     amount_in: u64,
@@ -1547,9 +1608,9 @@ enum Walked {
     /// an exercise still in flight holds.
     Live(u64),
     /// A key the walk would have passed was held by an exercise short of
-    /// final: its withheld pair is now registered from the exercise, or the
-    /// exercise of an already decided pair was carried to its keys. The walk
-    /// is run again.
+    /// final: its withheld pair is now registered from the exercise, or was
+    /// found taken by another claim at its leader, or the exercise of an
+    /// already decided pair was carried to its keys. The walk is run again.
     Registered,
     /// The vault moved under the draft: its parent was consumed, or every
     /// nearby key is held by an exercise still in flight. Nothing is
@@ -1669,19 +1730,28 @@ async fn walk_for_attempt(
         if standing == Some(PairStanding::Pending) {
             let relayed =
                 crate::sdk::sofi_relay::relay_exercise(set, vault_id, parent_root, attempt).await?;
-            if !relayed.pair.iter().all(|report| report.reached_leader()) {
-                return Err(storage(
-                    "withheld pair",
-                    format!(
-                        "the leader of the pair the exercise at attempt {attempt} carries did not \
-                         take it"
-                    ),
-                ));
+            match crate::sdk::route_seats::pair_at_leader(&relayed.pair) {
+                crate::sdk::route_seats::AtLeader::Link => log::info!(
+                    "[sofi] registered the withheld pair of the exercise at attempt {attempt} \
+                     from its own signed C_q"
+                ),
+                // Another claim got to the leader of the pair first: the
+                // exercise's fulfillment is lost at its position, and the
+                // walk run again reads it so (SoFi Amendments S14, S20).
+                crate::sdk::route_seats::AtLeader::Taken => log::info!(
+                    "[sofi] the withheld pair of the exercise at attempt {attempt} lost its \
+                     position to another claim"
+                ),
+                crate::sdk::route_seats::AtLeader::Unanswered => {
+                    return Err(storage(
+                        "withheld pair",
+                        format!(
+                            "the leader of the pair the exercise at attempt {attempt} carries \
+                             did not take it"
+                        ),
+                    ))
+                }
             }
-            log::info!(
-                "[sofi] registered the withheld pair of the exercise at attempt {attempt} from \
-                 its own signed C_q"
-            );
             return Ok(Walked::Registered);
         }
         attempt = next_attempt(attempt).map_err(refuse)?;
@@ -2024,7 +2094,7 @@ pub(crate) async fn exercise_draft_at_head(
 /// The purpose a fulfillment built on position `position` freezes its
 /// objects under before any is published (SA-71). The position is part of
 /// it because a root can repeat: a Void position keeps its parent's root.
-fn prepared_purpose(position: u64) -> String {
+pub(crate) fn prepared_purpose(position: u64) -> String {
     format!("sofi-prepared-fulfillment/{position}")
 }
 
@@ -2194,7 +2264,8 @@ pub(crate) fn prepared_fulfillment(
 }
 
 /// Freeze every object of `prepared`, bound to `parent`, in one transaction,
-/// before any is published.
+/// before any is published. The store freezes the fulfillment withheld,
+/// owed to no set until its conformance is Valid ([`publish_gated`]).
 fn freeze_prepared(
     set: &StorageSet,
     position: u64,
@@ -2234,7 +2305,8 @@ fn freeze_prepared(
 }
 
 /// Stages 3 to 5 of §31: validate the draft over acquired evidence, sign it,
-/// freeze what it publishes, and publish it. The head does not move: a
+/// freeze what it publishes, and publish it, the fulfillment only once its
+/// conformance is Valid ([`publish_gated`]). The head does not move: a
 /// device that stops here finds this fulfillment frozen against its parent
 /// and completes it, and signs no other there (SA-71).
 pub(crate) async fn prepare_fulfillment(
@@ -2307,36 +2379,99 @@ pub(crate) async fn prepare_fulfillment(
         &prepared,
     )?;
     // Stages 4 and 5.
-    publish_prepared(set, &prepared).await?;
+    publish_gated(set, &verifier, &prepared).await?;
     Ok(Prepared::Published(prepared))
 }
 
-/// Publish every object of `prepared` and read each back Stored.
-async fn publish_prepared(
+/// Publish `prepared` in the order SoFi's producer rule fixes (L1738: "A
+/// producer MUST obtain Valid before it publishes F"): every object but `F`,
+/// each read back Stored; then `F`'s conformance over evidence the verifier
+/// acquires, the predicate the install decides; and `F` itself only on
+/// Valid, released from where it was withheld and read back Stored. An
+/// Invalid `F` is refused with nothing of it put and the head unmoved;
+/// evidence not yet in hand is the network's status, and `F` stays withheld.
+async fn publish_gated<R: SofiReads>(
     set: &StorageSet,
+    verifier: &Verifier<'_, R>,
     prepared: &PreparedFulfillment,
 ) -> Result<(), DsmError> {
-    let publications: Vec<Publication<'_>> = prepared
+    let ahead: Vec<Publication<'_>> = prepared
         .objects
         .iter()
+        .filter(|object| !matches!(object, PreparedObject::Fulfillment(..)))
         .map(PreparedObject::publication)
         .collect();
-    for published in publish_all(set, &publications).await? {
+    for published in publish_all(set, &ahead).await? {
         require_stored("route object", &published)?;
     }
-    Ok(())
+    let precommit = prepared.precommit()?;
+    let preimage = prepared.preimage()?;
+    let fulfillment = prepared.fulfillment()?;
+    let own_objects = own_closure_objects(set, &precommit.body, preimage).await?;
+    let objects = ExerciseObjects {
+        precommit: &precommit.body,
+        precommit_signature: &precommit.signature,
+        preimage,
+        fulfillment: &fulfillment.body,
+        fulfillment_signature: &fulfillment.signature,
+        own_objects: &own_objects,
+    };
+    let evidence = match verifier
+        .acquire_conformance_evidence(&objects)
+        .map_err(verifier_error)?
+    {
+        Acquired::Complete(evidence) => evidence,
+        Acquired::Exhausted(missing) => {
+            return Err(storage(
+                "conformance evidence",
+                format!(
+                    "not in hand after the acquisition rounds: {missing:?}; the fulfillment stays \
+                     withheld"
+                ),
+            ))
+        }
+    };
+    match fulfillment_conformance(&fulfillment.body, &fulfillment.signature, &evidence) {
+        Ok(FulfillmentConformance::Valid) => {}
+        Ok(FulfillmentConformance::Invalid(why)) => {
+            return Err(refuse(format!(
+                "the fulfillment does not conform ({why:?}): it is not published, and the head \
+                 does not move"
+            )))
+        }
+        Err(missing) => {
+            return Err(storage(
+                "conformance evidence",
+                format!("{missing:?} not in hand; the fulfillment stays withheld"),
+            ))
+        }
+    }
+    let publication = Publication::Fulfillment {
+        body: &fulfillment.body,
+        signature: &fulfillment.signature,
+    };
+    let bytes = publication
+        .object_bytes()
+        .map_err(|e| refuse(format!("the fulfillment does not encode: {e:?}")))?;
+    let key = crate::sdk::economic_registers::immutable_object_key(publication.namespace(), &bytes);
+    crate::storage::client_db::frozen_publication_artifact::release_withheld(&key)
+        .map_err(|e| storage("prepared fulfillment", e))?;
+    require_stored("fulfillment", &publish(set, &publication).await?)
 }
 
 /// Stages 6 to 10 for a prepared fulfillment: published again (a device
-/// that stopped may not have finished publishing), then the transition, the
-/// install and the exercise, and the resolution rounds.
+/// that stopped may not have finished publishing), `F` only once its
+/// conformance is Valid, then the transition, the install and the exercise,
+/// and the resolution rounds.
 async fn finish_prepared(
     core: &CoreSDK,
     set: &StorageSet,
     accepted: &AcceptedGeneses,
     prepared: &PreparedFulfillment,
 ) -> Result<PositionOutcome, DsmError> {
-    publish_prepared(set, prepared).await?;
+    let standing = standing(core)?;
+    let ctx = standing.context(set, accepted)?;
+    publish_gated(set, &ctx.verifier(), prepared).await?;
     let precommit = prepared.precommit()?;
     let preimage = prepared.preimage()?;
     let fulfillment = prepared.fulfillment()?;
@@ -2721,12 +2856,12 @@ pub async fn relay(set: &StorageSet, intent: &RelayIntent) -> Result<Relayed, Ds
     let relayed = relay_fulfillment(set, &derive::fulfillment_id(&fulfillment.body)).await?;
     let mut cells_written = 0u32;
     for report in &relayed.pair {
-        if report.reached_leader() {
+        if report.leader() == crate::sdk::route_seats::AtLeader::Link {
             cells_written += 1;
         }
     }
     for leg in &relayed.legs {
-        if leg.reached_leader {
+        if leg.leader == crate::sdk::route_seats::AtLeader::Link {
             cells_written += 1;
         }
     }
@@ -2759,6 +2894,86 @@ mod tests {
         let mut g = [0x51; 32];
         g[..2].copy_from_slice(&i.to_be_bytes());
         (g, [0x52; 32])
+    }
+
+    /// MR-DSM-0215: pricing is checked integer arithmetic and the choice a
+    /// function of the candidates and the trader, so two conforming SDKs given
+    /// the same vault states choose byte-identical routes. Each vault alone
+    /// and each pair split are priced from the same reserves, and the route
+    /// chosen is the same whatever order the candidates were enumerated in.
+    ///
+    /// MUTATION CONTROL: breaking ties by candidate position instead of the
+    /// route-lane order turns this red.
+    #[test]
+    fn the_same_vault_states_choose_the_same_route_in_any_enumeration_order() {
+        use dsm::dlv::route_commit::constant_product_output;
+        let reserves: [(u64, u64); 4] = [(100, 1_000), (100, 1_000), (100, 1_000), (90, 900)];
+        let price = |amount: u64, (a, b): (u64, u64)| {
+            constant_product_output(amount, a, b, 30).expect("priced within the reserves")
+        };
+        let mut routes: Vec<(u64, Vec<[u8; 32]>)> = reserves
+            .iter()
+            .zip(0u8..)
+            .map(|(r, i)| (price(10, *r), vec![lane(i)]))
+            .collect();
+        for (i, a) in reserves.iter().enumerate() {
+            for (j, b) in reserves.iter().enumerate().skip(i + 1) {
+                let lanes = vec![lane(i as u8), lane(j as u8)];
+                routes.push((price(5, *a) + price(5, *b), lanes));
+            }
+        }
+        for t in 0..20 {
+            let (g, d) = trader(t);
+            let chosen = |candidates: &[(u64, Vec<[u8; 32]>)]| {
+                candidates[choose_route(candidates, (&g, &d)).expect("a route")].clone()
+            };
+            let reference = chosen(&routes);
+            let mut reversed = routes.clone();
+            reversed.reverse();
+            assert_eq!(chosen(&reversed), reference, "trader {t}, reversed");
+            for k in 1..routes.len() {
+                let mut rotated = routes.clone();
+                rotated.rotate_left(k);
+                assert_eq!(chosen(&rotated), reference, "trader {t}, rotated by {k}");
+            }
+        }
+    }
+
+    /// MR-DSM-0215: a split is the same route whichever order its two legs
+    /// are listed in. A search builds each split in the order discovery
+    /// returned the pair's vaults (`find_route`), so two SDKs reading one
+    /// index can list one split in two hop orders. Four equal vaults, every
+    /// pair a split that beats any vault alone by more than the tolerance:
+    /// for each of twenty traders, the split chosen from the candidates as
+    /// built and the one chosen with every split's legs reversed spend the
+    /// same two vaults.
+    ///
+    /// MUTATION CONTROL: hashing the route lane over the legs in hop order,
+    /// not sorted, turns this red.
+    #[test]
+    fn a_split_is_chosen_the_same_whichever_order_its_legs_are_listed_in() {
+        let mut built: Vec<(u64, Vec<[u8; 32]>)> = (0..4).map(|i| (100, vec![lane(i)])).collect();
+        for i in 0..4 {
+            for j in i + 1..4 {
+                built.push((300, vec![lane(i), lane(j)]));
+            }
+        }
+        let reversed: Vec<(u64, Vec<[u8; 32]>)> = built
+            .iter()
+            .map(|(out, legs)| (*out, legs.iter().rev().copied().collect()))
+            .collect();
+        for t in 0..20 {
+            let (g, d) = trader(t);
+            let spent = |candidates: &[(u64, Vec<[u8; 32]>)]| {
+                let chosen = choose_route(candidates, (&g, &d)).expect("a route");
+                let mut legs = candidates[chosen].1.clone();
+                legs.sort();
+                legs
+            };
+            let as_built = spent(&built);
+            assert_eq!(as_built.len(), 2, "trader {t} takes a split");
+            assert_eq!(spent(&reversed), as_built, "trader {t}");
+        }
     }
 
     /// Five equal vaults of a pair, each alone or split in two: a small

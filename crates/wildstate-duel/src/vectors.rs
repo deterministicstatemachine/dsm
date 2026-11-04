@@ -16,13 +16,17 @@ pub const MAX_VECTORS: usize = 4096;
 /// Bound on a vector's label.
 pub const MAX_LABEL_BYTES: usize = 64;
 
-/// `0x5709 DuelVectorV1` — one frozen match.
+/// `0x5709 DuelVectorV1` (schema 2; schema 1 is retired) — one frozen match.
 ///
 /// 1 `label` bytes, `1..=64`, what the vector exercises · 2 `match` nested
-/// `0x5702` · 3 `opened` `seq<0x570B>` (nested), `1..=turn_cap`, each turn's
-/// openings exactly as revealed, garbled ones included · 4 `winner`
-/// u8 · 5 `end` u8 · 6 `final_state` digest32, the state digest after the
-/// last turn · 7 `trace` digest32, the chain over every state the match
+/// `0x5702` · 3 `reveal_a` digest32 · 4 `reveal_b` digest32, both sides'
+/// start entropy, from which the match's tiebreak seed is derived (SoFi
+/// Amendment S33): a vector whose seed is not what they derive does not
+/// reproduce, so the seed rule is part of what `P` pins · 5 `opened`
+/// `seq<0x570B>` (nested), `1..=turn_cap`, each turn's
+/// openings exactly as revealed, garbled ones included · 6 `winner`
+/// u8 · 7 `end` u8 · 8 `final_state` digest32, the state digest after the
+/// last turn · 9 `trace` digest32, the chain over every state the match
 /// passed through (`t_0 = H(trace ‖ state_0)`, `t_i = H(trace ‖ t_{i−1} ‖
 /// state_i)` over state digests), so a rule change that heals over by the
 /// end still fails. The match is decided exactly at its last turn.
@@ -30,6 +34,8 @@ pub const MAX_LABEL_BYTES: usize = 64;
 pub struct DuelVectorV1 {
     pub label: Vec<u8>,
     pub body: DuelMatchV1,
+    pub reveal_a: [u8; 32],
+    pub reveal_b: [u8; 32],
     /// Each turn's openings as revealed: what the vector freezes.
     pub opened: Vec<DuelOpenedTurnV1>,
     /// The turns the rules play from `opened` ([`DuelOpenedTurnV1::turn`]).
@@ -43,18 +49,26 @@ pub struct DuelVectorV1 {
 
 impl DuelVectorV1 {
     pub const CLASS: u16 = class::DUEL_VECTOR;
+    pub const SCHEMA: u16 = 2;
 
-    /// Freezes a match: plays its openings and records what it decided.
+    /// Freezes a match started on `reveal_a` and `reveal_b`: its tiebreak seed
+    /// must be what they derive. Plays its openings and records what it
+    /// decided.
     pub fn freeze(
         label: &str,
         body: DuelMatchV1,
+        reveal_a: [u8; 32],
+        reveal_b: [u8; 32],
         opened: Vec<DuelOpenedTurnV1>,
     ) -> Result<Self, Refusal> {
+        seed_derived(&body, &reveal_a, &reveal_b).map_err(|what| Refusal::Invariant { what })?;
         let turns: Vec<DuelTurnV1> = opened.iter().map(DuelOpenedTurnV1::turn).collect();
         let (state, winner, trace) = play(&body, &turns)?;
         Ok(Self {
             label: label.as_bytes().to_vec(),
             body,
+            reveal_a,
+            reveal_b,
             opened,
             turns,
             winner: winner.side,
@@ -67,6 +81,8 @@ impl DuelVectorV1 {
     fn write_body(&self, w: &mut Writer) {
         w.bytes(&self.label);
         w.nested(&self.body.encode());
+        w.digest(&self.reveal_a);
+        w.digest(&self.reveal_b);
         w.count(self.opened.len());
         for t in &self.opened {
             w.nested(&t.encode());
@@ -79,6 +95,8 @@ impl DuelVectorV1 {
     fn read_body(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         let label = r.bytes("vector.label", 1, MAX_LABEL_BYTES)?;
         let body = r.nested(DuelMatchV1::read_body, DuelMatchV1::CLASS)?;
+        let reveal_a = r.digest("vector.reveal_a")?;
+        let reveal_b = r.digest("vector.reveal_b")?;
         let n = r.count("vector.opened", 1, usize::from(TABLES.constants.turn_cap))?;
         let mut opened = Vec::with_capacity(n);
         for _ in 0..n {
@@ -100,6 +118,8 @@ impl DuelVectorV1 {
         Ok(Self {
             label,
             body,
+            reveal_a,
+            reveal_b,
             opened,
             turns,
             winner,
@@ -109,8 +129,9 @@ impl DuelVectorV1 {
         })
     }
 
-    /// Plays the vector and compares every recorded result.
+    /// Plays the vector and compares every recorded result, its seed first.
     pub fn check(&self) -> Result<(), &'static str> {
+        seed_derived(&self.body, &self.reveal_a, &self.reveal_b)?;
         let turns: Vec<DuelTurnV1> = self.opened.iter().map(DuelOpenedTurnV1::turn).collect();
         let (state, winner, trace) = play(&self.body, &turns).map_err(|r| match r {
             Refusal::MatchOver { .. } => "the match was decided before its last turn",
@@ -130,6 +151,27 @@ impl DuelVectorV1 {
             return Err("a state along the way differs");
         }
         Ok(())
+    }
+}
+
+/// `body`'s tiebreak seed is what `reveal_a` and `reveal_b` derive under its
+/// nonce and session keys ([`crate::tiebreak_seed`]).
+fn seed_derived(
+    body: &DuelMatchV1,
+    reveal_a: &[u8; 32],
+    reveal_b: &[u8; 32],
+) -> Result<(), &'static str> {
+    let derived = crate::tiebreak_seed(
+        body.match_nonce(),
+        reveal_a,
+        reveal_b,
+        &body.a().session_public_key,
+        &body.b().session_public_key,
+    );
+    if *body.tiebreak_seed() == derived {
+        Ok(())
+    } else {
+        Err("the tiebreak seed is not what the reveals derive")
     }
 }
 
@@ -163,7 +205,7 @@ impl DuelVectorSetV1 {
         let mut w = Writer::object(Self::CLASS);
         w.count(self.vectors.len());
         for v in &self.vectors {
-            let mut inner = Writer::object(DuelVectorV1::CLASS);
+            let mut inner = Writer::object_at(DuelVectorV1::CLASS, DuelVectorV1::SCHEMA);
             v.write_body(&mut inner);
             w.nested(&inner.finish());
         }
@@ -174,7 +216,11 @@ impl DuelVectorSetV1 {
         let n = r.count("vector_set.vectors", 1, MAX_VECTORS)?;
         let mut vectors = Vec::with_capacity(n);
         for _ in 0..n {
-            vectors.push(r.nested(DuelVectorV1::read_body, DuelVectorV1::CLASS)?);
+            vectors.push(r.nested_at(
+                DuelVectorV1::read_body,
+                DuelVectorV1::CLASS,
+                DuelVectorV1::SCHEMA,
+            )?);
         }
         r.finish()?;
         Ok(Self { vectors })

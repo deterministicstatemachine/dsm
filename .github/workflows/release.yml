@@ -99,6 +99,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: dtolnay/rust-toolchain@5059963b1731bf1580991b5f3b1eecfb5da406c0 # 1.98.0
+        with:
+          # rust-analyzer, rust-src: the G1 negative control (dsm_sdk source_rules).
+          components: rust-analyzer, rust-src
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
@@ -112,13 +115,28 @@ jobs:
 
       - name: Test (workspace, then the storage node on Postgres)
         run: |
+          set -euo pipefail
           # --test-threads=1 for the same reason as ci.yml: process-global
           # singletons make parallel test threads a nondeterministic flake
           # source, and #[serial] only serializes #[serial] tests against each
           # other. This workflow previously omitted the flag, running a
           # parallelism the merge gate never exercised.
-          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1
-          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1
+          # The board is kept, headed by the commit it ran on: the
+          # security-assurance record decides each named test from it and
+          # refuses a board that names another commit.
+          mkdir -p board
+          echo "commit $(git rev-parse HEAD)" > board/board.log
+          cargo test --locked --workspace --exclude dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+          cargo test --locked -p dsm_storage_node --release -- --nocapture --test-threads=1 2>&1 | tee -a board/board.log
+
+      - name: Upload the board log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-board-log
+          path: board/board.log
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Security audit (every tracked Cargo.lock)
         run: |
@@ -244,7 +262,7 @@ jobs:
   # the full TLA check, unlike ci.yml's per-push SBOM which skips it).
   # --------------------------------------------------------------------------
   build-sbom:
-    name: Build SBOM (with validation evidence)
+    name: Build SBOM (with validation evidence and security assurance)
     runs-on: ubuntu-latest
     # validate-tag for the version every asset is named with (a job reads only
     # the outputs of the jobs it needs), test-gate so nothing builds from a
@@ -270,10 +288,38 @@ jobs:
           sudo apt-get install -y jq protobuf-compiler
           cargo install cargo-cyclonedx --quiet --locked --version 0.5.9
 
-      - name: Generate SBOM with validation
+      # The security-assurance record kernel-checks every Lean module itself
+      # (scripts/generate-assurance.py); without Lean it records the check as
+      # skipped, never as passed.
+      - name: Cache elan toolchain
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.elan
+          key: elan-${{ hashFiles('lean4/lean-toolchain') }}
+
+      - name: Install elan
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/.elan/bin/lean" ]; then
+            # elan v4.2.4's installer, by commit and digest (SA-155), as the CI Lean job pins it.
+            curl -fsSL -o elan-init.sh \
+              https://raw.githubusercontent.com/leanprover/elan/227caca133724d5516bee25c2aeb3e609478f2d8/elan-init.sh
+            echo "a620ff1641616222c8d37c54845492004bb84d6877cdbc944dd65c1aa685bf53  elan-init.sh" | sha256sum -c -
+            sh elan-init.sh -y --default-toolchain "$(cat lean4/lean-toolchain)"
+            rm elan-init.sh
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Download the board log
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: release-board-log
+          path: board/
+
+      - name: Generate SBOM with validation and the security-assurance record
         env:
           VERSION: ${{ needs.validate-tag.outputs.version }}
-        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}"
+        run: ./scripts/generate-sbom.sh --run-id "v${VERSION}" --board-log board/board.log
 
       - name: Package SBOM bundle
         env:

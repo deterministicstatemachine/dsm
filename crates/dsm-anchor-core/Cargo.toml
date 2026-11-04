@@ -17,6 +17,12 @@ name = "anchor_core"
 blake3 = { version = "1", default-features = false }
 prost = { version = "0.14", default-features = false, features = ["derive"] }
 
+# The durable-record tests run the appliance with real keys: the chip's resident Ed25519 key and
+# the BLAKE3-SPHINCS+ partition scheme receivers verify sigma^host with.
+[dev-dependencies]
+dsm-sphincs = { path = "../dsm-sphincs" }
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+
 [build-dependencies]
 prost-build = "0.14"
 protoc-bin-vendored = "3"

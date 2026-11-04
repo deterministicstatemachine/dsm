@@ -9,15 +9,13 @@
 //! account verifies; a trade shows through this account's own vault or a
 //! later proof.
 
+use dsm::connect::{canonical, card_identity, offer_digest, session_id, verify, CardIdentity, Signed};
 use dsm::types::proto as generated;
 use prost::Message;
 
 use super::code::{check_endpoint, ConnectCode};
 use super::grant::{narrows, scopes_from_wire, scopes_to_wire, Scope};
-use super::signed::{
-    canonical, card_identity, offer_digest, own_card, session_id, sign_own, verify, CardIdentity,
-    Signed,
-};
+use super::signed::{own_card, sign_own};
 use super::wallet::{payment_ref, MAX_DISPLAY_NAME};
 use super::d32;
 use crate::storage::client_db::connect::AppSession;
@@ -29,13 +27,15 @@ pub struct MadeOffer {
     pub offer: Vec<u8>,
 }
 
-/// Make and sign an offer under this account's AK.
+/// Make and sign an offer under this account's AK. `free_requests` is how
+/// many requests that move nothing it asks to make over the session's life.
 pub fn make_offer(
     display_name: &str,
     endpoint: &str,
     cert_pin: [u8; 32],
     scopes: &[Scope],
     anchors: &[[u8; 32]],
+    free_requests: u32,
 ) -> Result<MadeOffer, String> {
     check_endpoint(endpoint)?;
     let name = display_name.trim();
@@ -55,6 +55,7 @@ pub fn make_offer(
         scopes: scopes_to_wire(scopes),
         token_anchors: anchors.iter().map(|a| a.to_vec()).collect(),
         nonce,
+        free_requests,
     }
     .encode_to_vec();
     let signature = sign_own(Signed::Offer, &body)?;
@@ -76,6 +77,8 @@ pub struct VerifiedAccept {
     pub wallet: CardIdentity,
     pub wallet_card: generated::ContactQrV3,
     pub granted: Vec<Scope>,
+    /// What the wallet committed for its read secret (SA-128).
+    pub read_commitment: [u8; 32],
 }
 
 /// Check `accept` against the offer it names, which `offer` is (as this
@@ -104,12 +107,19 @@ pub fn verify_accept(
     let asked = scopes_from_wire(&offer_body.scopes)?;
     let granted = scopes_from_wire(&body.granted)?;
     narrows(&asked, &granted)?;
+    if body.free_requests > offer_body.free_requests {
+        return Err(format!(
+            "the accept grants {} requests that move nothing; the offer asked for {}",
+            body.free_requests, offer_body.free_requests
+        ));
+    }
     Ok(VerifiedAccept {
         session_id: session_id(&digest, &wallet.device_id),
         offer_digest: digest,
         wallet,
         wallet_card: card,
         granted,
+        read_commitment: d32(&body.read_commitment, "the read commitment")?,
     })
 }
 

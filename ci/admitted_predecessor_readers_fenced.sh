@@ -5,13 +5,18 @@ set -euo pipefail
 # predecessor is either FENCED or explicitly classified as not creating a
 # descendant.
 #
-# WHY THIS IS STATIC AND NOT A TEST. `descendant_fence` cannot fire today:
-# `record_admitted_with_conn` writes `claim_kind = 0` unconditionally because
-# F ingress is dark, so `predecessor_claim()` only ever answers `SingleRoot`.
-# Deleting both production fence calls turns NO test red — verified by
-# mutation. A descendant path added without the fence would therefore be
-# invisible now and become a live hole the day E2/E3 starts writing conditional
-# rows. Only a static check can hold that line in the meantime.
+# WHY THIS IS STATIC AND NOT A TEST. Neither refusal of `descendant_fence`
+# can be reached through production. `record_admitted_with_conn` records the
+# claim kind of the position it is given, and a resolved SoFi position is
+# recorded as kind 1 (`CoreSDK::admit_resolved_sofi_position`): after a trade
+# the fence checks that the next descendant is built on the root the
+# resolution selected, and it is, because every builder builds on that root.
+# No writer records an unresolved conditional position (kind 2), so
+# `predecessor_claim()` never answers `ConditionalUnresolved`. A test of either
+# refusal would have to stage a descendant no production builder makes. A
+# descendant path added without the fence would therefore go unseen, and
+# become a live hole the day a writer of unresolved positions, or a builder
+# on another root, arrives. Only a static check can hold that line.
 #
 # THE CLASSIFICATION IS THE POINT. A reader lands in exactly one bucket, and a
 # new reader lands in neither until someone rules on it.
@@ -48,8 +53,8 @@ prod=$(python3 ci/production_text.py "$fdef")
 for arm in ConditionalUnresolved ConditionalResolved; do
   if ! grep -c "PredecessorClaim::$arm" <<<"$prod" >/dev/null 2>&1; then
     echo "[FAIL] $fdef no longer decides PredecessorClaim::$arm"
-    echo "       E2/E3 needs both arms intact when it starts writing"
-    echo "       conditional admitted rows."
+    echo "       Resolved predecessors are recorded, and a writer of"
+    echo "       unresolved ones would need the arm that refuses them."
     exit 1
   fi
 done
@@ -126,9 +131,9 @@ if [[ -n "${missing// /}" ]]; then
   echo "       Rule on each: does it create the next economic position? If so"
   echo "       it must cross $fence and join FENCED_READERS. If not, add it to"
   echo "       EXEMPT with the reason. Defaulting to 'probably fine' is how a"
-  echo "       fence that cannot fire yet gets quietly bypassed."
+  echo "       fence nothing can trip yet gets quietly bypassed."
   exit 1
 fi
 echo "  ✓ every production reader is classified ($(grep -c . <<<"$unknown") total)"
 
-echo "✓ the descendant fence cannot be bypassed before E2/E3 makes it live"
+echo "✓ no descendant-producing path bypasses the descendant fence"

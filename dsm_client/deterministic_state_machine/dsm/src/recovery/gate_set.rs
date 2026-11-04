@@ -32,7 +32,7 @@
 //! the final rule is enforced.
 
 use crate::core::bilateral_transaction_manager::compute_smt_key;
-use crate::recovery::capsule::contact_set_commit_from_device_ids;
+use crate::recovery::contact_set::contact_set_commit_from_device_ids;
 use crate::recovery::pdsmt_posting::{verify_head_with_leaves, PostedPdsmtHead, PostedPdsmtLeafRecord};
 use crate::types::device_state::ValueCapability;
 use crate::types::error::DsmError;

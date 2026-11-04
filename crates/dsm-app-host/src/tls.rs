@@ -59,7 +59,7 @@ pub fn load_or_make(data_dir: &Path, names: &[String]) -> Result<RelayTls, Strin
             ))
         }
     };
-    let pin = dsm_sdk::sdk::connect::signed::cert_pin(&cert_der);
+    let pin = dsm::connect::cert_pin(&cert_der);
     Ok(RelayTls {
         cert_der,
         key_der,

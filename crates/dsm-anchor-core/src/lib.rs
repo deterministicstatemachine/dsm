@@ -32,11 +32,14 @@
 extern crate alloc;
 
 pub mod accept;
+pub mod anchor;
 pub mod appliance;
 pub mod domain;
+pub mod durable;
 pub mod enrollment;
 pub mod hash;
 pub mod proto;
+pub mod rmem;
 pub mod root_advance;
 pub mod service;
 pub mod tropic;

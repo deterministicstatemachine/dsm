@@ -19,7 +19,8 @@ use prost::Message;
 
 use super::d32;
 use super::grant::{scopes_from_wire, Request, Scope, ScopeKind};
-use super::signed::{canonical, card_identity, offer_digest, own_network, verify, CardIdentity, Signed};
+use super::signed::own_network;
+use dsm::connect::{canonical, card_identity, offer_digest, verify, CardIdentity, Signed};
 use crate::util::text_id::encode_base32_crockford;
 
 /// The longest display name an offer may carry.
@@ -86,6 +87,13 @@ pub fn verify_offer(
 pub fn granted_scopes(accept_body: &[u8]) -> Result<Vec<Scope>, String> {
     let body: generated::AppConnectAcceptBodyV1 = canonical(accept_body, "the stored accept")?;
     scopes_from_wire(&body.granted)
+}
+
+/// How many requests that move nothing the signed grant allows over the
+/// session's life (SA-78).
+pub fn granted_free_requests(accept_body: &[u8]) -> Result<u32, String> {
+    let body: generated::AppConnectAcceptBodyV1 = canonical(accept_body, "the stored accept")?;
+    Ok(body.free_requests)
 }
 
 /// A token as the player reads it: its symbol and an amount in its decimals,
@@ -314,6 +322,7 @@ pub fn describe_request(request: &Request) -> String {
             1 => "Collect a battle result".to_string(),
             n => format!("Collect a battle result ({n} stakes)"),
         },
+        Request::Sign { statement } => format!("Sign this: \"{statement}\""),
         Request::Contacts => "Share your contacts' DSM IDs".to_string(),
     }
 }

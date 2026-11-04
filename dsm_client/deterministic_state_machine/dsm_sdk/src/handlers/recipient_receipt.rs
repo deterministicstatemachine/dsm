@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::storage::client_db::bilateral_tip_sync::{
-    sync_tip_projection_and_record_acceptance_atomic, TipSyncOutcome, TipSyncRequest,
+    sync_tip_projection_and_record_acceptance_atomic, CrossingSteps, TipSyncOutcome, TipSyncRequest,
 };
 use crate::storage::client_db::{
     complete_applied_acceptance, get_acceptance_journal, get_canonical_apply_identity,
@@ -222,11 +222,14 @@ pub fn converge_accepted_locked(
         counterparty_device_id: journal.counterparty_device_id,
         expected_parent_tip: journal.projection_parent_tip,
         target_tip: journal.projection_target_tip,
+        crossing: CrossingSteps::Join,
     };
     match sync_tip_projection_and_record_acceptance_atomic(&request, &marker)? {
         TipSyncOutcome::Advanced { .. }
         | TipSyncOutcome::RepairedAtTarget { .. }
-        | TipSyncOutcome::AlreadyAtTarget { .. } => {}
+        | TipSyncOutcome::AlreadyAtTarget { .. }
+        | TipSyncOutcome::Joined { .. }
+        | TipSyncOutcome::AlreadyJoined { .. } => {}
         other => {
             return Err(anyhow!(
                 "projection sync failed closed ({other:?}) — reconciliation required"
@@ -348,9 +351,12 @@ pub fn generate_b_artifacts_from_inbound(
     wrap_key: &[u8; 32],
     b_pair: ([u8; 32], [u8; 32]),
 ) -> Result<GeneratedBArtifacts> {
-    use crate::sdk::receipts::{sign_receipt_with_per_step_ek_target, PerStepSigningInputs};
+    use crate::sdk::receipts::{sign_receipt_with_per_step_ek_after, PerStepSigningInputs};
     use dsm::types::receipt_types::compute_receipt_b_canonical_target;
-    use dsm::verification::receipt_verification::{verify_per_step_ek_signing_target, BilateralSide};
+    use dsm::verification::receipt_verification::{
+        per_step_ek_predecessor_in_lineage, verify_per_step_ek_signing_target, BilateralSide,
+        EkPredecessor,
+    };
     use crate::storage::client_db::cert_chain::{
         encrypt_chain_sk, load_cert_chain_head_pubkey, CertChainSide,
     };
@@ -366,11 +372,54 @@ pub fn generate_b_artifacts_from_inbound(
     let pre_step_b = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Local)?;
     let pre_step_a = load_cert_chain_head_pubkey(&rel_key, CertChainSide::Counterparty)?;
 
+    // The key this countersignature chains from, by Core's lineage rule: this
+    // device's own send still in flight, when this apply follows it in its
+    // canonical lineage (a transfer that crossed it), else its head, else its
+    // AK (owner ruling, 2026-10-29: "both settle").
+    let at_rest_key = crate::init::current_chain_head_at_rest_key()
+        .map_err(|e| anyhow!("the chain-head at-rest key: {e}"))?;
+    let head_sk = crate::storage::client_db::load_local_chain_head_sk(&rel_key, &at_rest_key)?;
+    let own_in_flight =
+        match crate::storage::client_db::sender_proposal::get_unfinalized_proposal_for_relationship(
+            &rel_key,
+        )? {
+            Some(send) => match crate::storage::client_db::pending_local_head_signer(
+                &rel_key,
+                &send.commitment,
+                &at_rest_key,
+            )? {
+                Some((pk, sk)) => Some((send.canonical_child, pk, sk)),
+                None => {
+                    return Err(anyhow!(
+                        "this device's send in flight on the relationship holds no pending EK"
+                    ))
+                }
+            },
+            None => None,
+        };
+    let prior_sk = per_step_ek_predecessor_in_lineage(
+        &b_pair.0,
+        own_in_flight
+            .as_ref()
+            .map(|(child, _pk, sk)| (child, Some(sk.as_slice()))),
+        head_sk.as_deref().map(Some),
+        Some(recipient_ak_sk),
+    );
+    let prior_pk = per_step_ek_predecessor_in_lineage(
+        &b_pair.0,
+        own_in_flight
+            .as_ref()
+            .map(|(child, pk, _sk)| (child, pk.as_slice())),
+        pre_step_b.as_deref(),
+        recipient_ak_pk,
+    );
+    let chained_from_own_step = matches!(prior_pk, EkPredecessor::OwnStepInFlight(_));
+
     // Online session binding is the commitment itself; the B-canonical target
     // extends it with the pair this apply commits.
     let b_target =
         compute_receipt_b_canonical_target(&commitment, &commitment, &b_pair.0, &b_pair.1);
-    let out = sign_receipt_with_per_step_ek_target(
+    let out = sign_receipt_with_per_step_ek_after(
         &PerStepSigningInputs {
             commitment: &commitment,
             h_n: inbound_receipt.parent_tip,
@@ -382,25 +431,21 @@ pub fn generate_b_artifacts_from_inbound(
             session_binding: &commitment,
         },
         &b_target,
+        prior_sk,
     )
     .map_err(|e| anyhow!("B-side per-step EK signing: {e}"))?;
 
-    if pre_step_b.is_none() != out.used_root_ak {
+    if !chained_from_own_step && pre_step_b.is_none() != out.used_root_ak {
         return Err(anyhow!("pre-step B head / used_root_ak inconsistency"));
     }
 
     let mut receipt = inbound_receipt.clone();
     receipt.set_ek_pk_b(out.ek_pk.clone());
     receipt.set_ek_cert_b(out.ek_cert.clone());
-    receipt.set_kyber_ct_b(out.kyber_ct.clone());
     receipt.add_sig_b(out.sig.clone());
 
     // Verify before journaling.
-    if receipt.sig_b.is_empty()
-        || receipt.ek_pk_b.is_empty()
-        || receipt.ek_cert_b.is_empty()
-        || receipt.kyber_ct_b.is_empty()
-    {
+    if receipt.sig_b.is_empty() || receipt.ek_pk_b.is_empty() || receipt.ek_cert_b.is_empty() {
         return Err(anyhow!(
             "constructed B-side receipt has an empty EK artifact"
         ));
@@ -420,13 +465,10 @@ pub fn generate_b_artifacts_from_inbound(
             "serialization drift: commitment mismatch after full serialize"
         ));
     }
-    let expected_prev_pk = pre_step_b
-        .clone()
-        .unwrap_or_else(|| recipient_ak_pk.to_vec());
     verify_per_step_ek_signing_target(
         &receipt,
         BilateralSide::B,
-        &expected_prev_pk,
+        prior_pk.key(),
         &receipt.parent_tip,
         &b_target,
     )
@@ -446,7 +488,12 @@ pub fn generate_b_artifacts_from_inbound(
         receipt_child_root_a: inbound_receipt.child_root,
         precommit_digest: *c_pre,
         prepared_receipt_artifact_hash,
-        expected_local_b_head: pre_step_b,
+        // The head this step moves the Local head from: the key it chained
+        // from — the send in flight it follows, else the head it held.
+        expected_local_b_head: match own_in_flight {
+            Some((_child, pk, _sk)) if chained_from_own_step => Some(pk),
+            _ => pre_step_b,
+        },
         new_local_b_head: out.ek_pk,
         new_local_b_sk_enc,
         expected_counterparty_a_head: pre_step_a,

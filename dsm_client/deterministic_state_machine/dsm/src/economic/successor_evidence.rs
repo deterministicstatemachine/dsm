@@ -55,17 +55,47 @@ impl core::fmt::Display for SuccessorEvidenceError {
 
 impl std::error::Error for SuccessorEvidenceError {}
 
-/// What verified successor evidence establishes.
+/// What verified successor evidence establishes. Private fields, and only
+/// [`verify_dsm_successor_evidence`] makes one: holding one means the exact
+/// bytes at its address were checked.
 #[derive(Debug, Clone)]
 pub struct VerifiedDsmSuccessor {
-    pub operation: Operation,
-    pub operation_digest: [u8; 32],
-    pub c_dsm_plus: [u8; 32],
+    operation: Operation,
+    operation_digest: [u8; 32],
+    c_dsm_plus: [u8; 32],
     /// The successor's own parent tip from the verified preimage — with
     /// `c_dsm_plus` this is the successor's `(embedded_parent, tip)` pair,
     /// which acceptance-evidence verification binds the countersigned
     /// B-side pair to (a bundle must never self-select its pair).
-    pub embedded_parent: [u8; 32],
+    embedded_parent: [u8; 32],
+    evidence_addr: [u8; 32],
+}
+
+impl VerifiedDsmSuccessor {
+    pub fn operation(&self) -> &Operation {
+        &self.operation
+    }
+
+    pub(crate) fn into_operation(self) -> Operation {
+        self.operation
+    }
+
+    pub fn operation_digest(&self) -> [u8; 32] {
+        self.operation_digest
+    }
+
+    pub fn c_dsm_plus(&self) -> [u8; 32] {
+        self.c_dsm_plus
+    }
+
+    pub fn embedded_parent(&self) -> [u8; 32] {
+        self.embedded_parent
+    }
+
+    /// The address of the exact bytes that verified.
+    pub fn evidence_addr(&self) -> [u8; 32] {
+        self.evidence_addr
+    }
 }
 
 /// The `sigma_dsm` signing digest.
@@ -195,5 +225,6 @@ pub fn verify_dsm_successor_evidence(
         operation_digest,
         c_dsm_plus: carried,
         embedded_parent,
+        evidence_addr: successor_evidence_addr(evidence_bytes),
     })
 }

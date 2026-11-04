@@ -5,22 +5,15 @@
 // shell. Each phase is the app's own (runtime appState); this only draws it.
 
 import React from 'react';
-import AppScreenRouter from '../AppScreenRouter';
 import LockScreen from '../lock/LockScreen';
-import type { AppState, ScreenType } from '../../types/app';
-import { Icon } from './parts';
+import type { AppState } from '../../types/app';
 import ModernPhrase from './ModernPhrase';
 import ModernShell from './ModernShell';
-
-/** The restore screens a wallet with no identity yet may open. */
-const RESTORE = new Set<ScreenType>(['recovery', 'nfc_recovery', 'recovery_pipeline']);
 
 type Props = {
   appState: AppState;
   error: string | null;
   securingProgress: number;
-  currentScreen: ScreenType;
-  navigate: (to: ScreenType) => void;
   handleGenerateGenesis: () => Promise<void> | void;
   cancelPhraseBackup: () => void;
   answerPhraseCheck: (word: string) => Promise<void>;
@@ -52,7 +45,7 @@ function Waiting({ title, lines }: { title: string; lines: string[] }): React.JS
 }
 
 export default function ModernBoot(props: Props): React.JSX.Element {
-  const { appState, navigate } = props;
+  const { appState } = props;
 
   switch (appState) {
     case 'wallet_ready':
@@ -63,18 +56,6 @@ export default function ModernBoot(props: Props): React.JSX.Element {
       return <Waiting title="Starting your wallet" lines={['Connecting to the DSM network…']} />;
 
     case 'needs_genesis':
-      if (RESTORE.has(props.currentScreen)) {
-        return (
-          <Frame>
-            <div className="s-classic">
-              <button type="button" className="s-icon-btn s-classic-back" aria-label="Back" onClick={() => navigate('home')}>
-                <Icon name="back" />
-              </button>
-              <AppScreenRouter currentScreen={props.currentScreen} navigate={navigate} eraTokenSrc={props.eraTokenSrc} btcLogoSrc={props.btcLogoSrc} />
-            </div>
-          </Frame>
-        );
-      }
       return (
         <Frame>
           <h1 className="s-title">Welcome to DSM</h1>
@@ -88,9 +69,6 @@ export default function ModernBoot(props: Props): React.JSX.Element {
           <div className="s-stack">
             <button type="button" className="s-btn s-btn-primary" onClick={() => { props.handleGenerateGenesis(); }}>
               Create my wallet
-            </button>
-            <button type="button" className="s-btn s-btn-quiet" onClick={() => navigate('recovery')}>
-              Restore from my recovery ring
             </button>
           </div>
           {props.error !== null ? <div className="s-notice s-error" style={{ marginTop: 14 }}>{props.error}</div> : null}

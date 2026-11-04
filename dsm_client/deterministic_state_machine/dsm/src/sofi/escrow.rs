@@ -331,10 +331,6 @@ impl VerdictCell {
         })
     }
 
-    pub fn key(&self) -> &D32 {
-        &self.key
-    }
-
     pub fn routed(&self) -> &RoutedCell {
         &self.cell
     }
@@ -353,6 +349,18 @@ impl VerdictCell {
                     &table_digest(verdict.table()),
                 ) == self.key
             })
+        })
+    }
+
+    /// The copies of verdicts that prove their authority for this cell: the
+    /// values its reading recognizes ([`verdict_resolution`]), narrower than
+    /// what [`Self::keeps`] keeps. What a writer reads as first at the
+    /// leader, so it records the cell taken only for a value that holds it.
+    pub fn recognizes(&self) -> impl Fn(&crate::route_chain::RouteEntry) -> bool + Sync + '_ {
+        crate::route_chain::recognized_copies(&self.cell, move |bytes| {
+            let refused = std::cell::RefCell::new(Vec::new());
+            let recognize = verdict_at(self, &refused);
+            recognize(bytes).is_some()
         })
     }
 }
@@ -394,11 +402,6 @@ impl VerdictCellRead {
     /// The verdict holding the cell, if any.
     pub fn verdict(&self) -> Option<&EscrowVerdict> {
         self.held.as_ref().map(|(verdict, _)| verdict)
-    }
-
-    /// The exact bytes of the verdict holding the cell: what a relay carries.
-    pub fn value(&self) -> Option<&[u8]> {
-        self.held.as_ref().map(|(_, value)| value.as_slice())
     }
 
     /// Why each value the leader holds ahead of the one deciding the cell

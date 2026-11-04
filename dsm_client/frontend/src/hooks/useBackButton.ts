@@ -25,7 +25,8 @@ function top(stack: Entry[]): Entry | undefined {
   return stack[stack.length - 1];
 }
 
-function isTextEntry(target: EventTarget | null): boolean {
+/** Whether a key event's target is a field the user types into. */
+export function isTextEntry(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el || !el.tagName) return false;
   const tag = el.tagName.toLowerCase();

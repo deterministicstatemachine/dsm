@@ -51,3 +51,7 @@ production = []
 # IS sealed, bench mode refuses (fail-closed) so a real seal is never overridden. Mutually exclusive
 # with `production`.
 bench_self_enroll = []
+
+# Size: the Secure TCB, its heap and its stack share one 256 KiB SRAM region.
+[profile.release]
+opt-level = "s"

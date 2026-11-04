@@ -121,6 +121,15 @@ pub fn vault_baseline_locator(vault_id: &D32, generation: u64) -> D32 {
     )
 }
 
+/// `H(vault-contradiction-locator/v1 ‖ v)` — where contradictions of vault
+/// `v`'s owner baselines are indexed (SoFi Amendment S34). Discovery only.
+pub fn vault_contradiction_locator(vault_id: &D32) -> D32 {
+    h(
+        crate::common::domain_tags::TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR,
+        &[vault_id],
+    )
+}
+
 /// `H(vault-genesis-locator/v1 ‖ v)`.
 pub fn vault_genesis_locator(vault_id: &D32) -> D32 {
     h(TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, &[vault_id])

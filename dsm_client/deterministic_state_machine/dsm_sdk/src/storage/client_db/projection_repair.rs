@@ -98,14 +98,13 @@ pub fn has_pending_projection_repairs() -> Result<bool> {
 /// out of the canonical BCR device head, so a wrong or stale queue row can never
 /// install a wrong balance — the worst it can do is trigger a redundant rebuild.
 ///
-/// A repair that cannot be completed (no canonical head yet, unresolvable policy)
-/// is LEFT in the queue for the next sweep rather than dropped.
+/// A repair that cannot be completed (no canonical head yet, a token whose
+/// policy this device has not installed) is LEFT in the queue for the next
+/// sweep rather than dropped. The token resolves through the one policy-commit
+/// lookup (`crate::policy::resolve_policy_commit_strict`).
 ///
 /// Returns `(repaired, remaining)`.
-pub fn drain_projection_repairs(
-    device_id_bytes: &[u8; 32],
-    resolve_policy_commit: impl Fn(&str) -> Option<[u8; 32]>,
-) -> Result<(usize, usize)> {
+pub fn drain_projection_repairs(device_id_bytes: &[u8; 32]) -> Result<(usize, usize)> {
     let pending = pending_projection_repairs()?;
     if pending.is_empty() {
         return Ok((0, 0));
@@ -129,13 +128,17 @@ pub fn drain_projection_repairs(
         if item.device_id != self_txt {
             continue;
         }
-        let Some(policy_commit) = resolve_policy_commit(&item.token_id) else {
-            log::warn!(
-                "[projection-repair] cannot resolve policy for {} — retaining",
-                item.token_id
-            );
-            continue;
-        };
+        let policy_commit =
+            match crate::policy::resolve_policy_commit_strict(item.token_id.as_bytes()) {
+                Ok(policy_commit) => policy_commit,
+                Err(e) => {
+                    log::warn!(
+                        "[projection-repair] cannot resolve the policy of {} ({e}) — retaining",
+                        item.token_id
+                    );
+                    continue;
+                }
+            };
         let effective = head.balance(&policy_commit);
         let locked = match super::get_locked_balance(&item.device_id, &item.token_id) {
             Ok(locked) => locked,
@@ -496,17 +499,27 @@ mod tests {
 
         // No canonical device head exists in this fixture, so nothing is
         // rebuildable — but the intent must survive for the next sweep.
-        let (repaired, remaining) = drain_projection_repairs(&device, |_| Some([7u8; 32])).unwrap();
+        let (repaired, remaining) = drain_projection_repairs(&device).unwrap();
         assert_eq!(
             repaired, 0,
             "nothing could be rebuilt without a canonical head"
         );
         assert_eq!(remaining, 1, "the repair MUST be retained");
         assert!(has_pending_projection_repairs().unwrap());
+    }
 
-        // Unresolvable policy is also a retain, not a drop.
-        let (repaired, remaining) = drain_projection_repairs(&device, |_| None).unwrap();
+    /// A repair for a token this device has not installed is retained too:
+    /// with a canonical head to rebuild from, the token still names no policy
+    /// here, so nothing is rebuilt against a guessed one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial]
+    async fn a_repair_for_a_token_not_installed_here_is_retained() {
+        let d = device_with_era_and_no_projection(0x8E, 1).await;
+        let self_txt = crate::util::text_id::encode_base32_crockford(&d.router.device_id_bytes);
+        enqueue_projection_repair(&self_txt, "NOTHERE", "post-commit sync failed").unwrap();
+        let (repaired, remaining) = drain_projection_repairs(&d.router.device_id_bytes).unwrap();
         assert_eq!((repaired, remaining), (0, 1));
+        assert!(has_pending_projection_repairs().unwrap());
     }
 
     /// A queued repair for a DIFFERENT device is not rebuildable from this
@@ -517,7 +530,7 @@ mod tests {
         init();
         let device = [0x5Au8; 32];
         enqueue_projection_repair("SOMEONEELSE", "ERA", "not ours").unwrap();
-        let (repaired, remaining) = drain_projection_repairs(&device, |_| Some([7u8; 32])).unwrap();
+        let (repaired, remaining) = drain_projection_repairs(&device).unwrap();
         assert_eq!(repaired, 0);
         assert_eq!(
             remaining, 1,

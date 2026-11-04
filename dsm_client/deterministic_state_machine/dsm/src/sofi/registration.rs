@@ -129,11 +129,6 @@ impl PositionCells {
     pub fn root(&self) -> &RootCell {
         &self.root
     }
-
-    /// `R_p`, the root the pair is routed by.
-    pub fn parent_root(&self) -> &D32 {
-        &self.parent_root
-    }
 }
 
 /// `FulfillmentRegistered` at one position as the reads established it,
@@ -161,33 +156,12 @@ pub struct RegistrationRead {
 }
 
 impl RegistrationRead {
-    pub fn genesis(&self) -> &D32 {
-        &self.genesis
-    }
-
-    pub fn device_id(&self) -> &D32 {
-        &self.device_id
-    }
-
-    pub fn position(&self) -> u64 {
-        self.position
-    }
-
-    pub fn parent_root(&self) -> &D32 {
-        &self.parent_root
-    }
-
     pub fn registration(&self) -> &Registration {
         &self.registration
     }
 
     pub fn into_registration(self) -> Registration {
         self.registration
-    }
-
-    /// The id of the claim holding `K_root(q)`'s leader link, if any.
-    pub fn root_claim(&self) -> Option<&D32> {
-        self.root_claim.as_ref()
     }
 
     /// The exact bytes final at `K_root(q)`, if a claim is final there.
@@ -867,5 +841,184 @@ mod tests {
             crate::sofi::validation::fixtures::TRADER_ATT_A,
         )
         .unwrap()
+    }
+
+    // ── model-to-code correspondence: the position pair of
+    //    tla/DSM_SofiSuccessorCells.tla ──────────────────────────────────────
+
+    /// What the leader holds first at `K_ful(q)` (F or nothing) and at
+    /// `K_root(q)` (the conditional claim C that F installs, an ordinary claim
+    /// S, or nothing), and how many copies carry each holder's leader record.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum RootHolder {
+        Empty,
+        C,
+        S,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    struct PairModel {
+        ful: Option<u8>,
+        root: RootHolder,
+        root_links: u8,
+        signed_f: Option<()>,
+    }
+
+    /// What Core's registration read reports, as the model distinguishes it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PairRead {
+        Registered,
+        Held,
+        LostAtRoot,
+        RootTaken(D32),
+        Unresolved,
+    }
+
+    impl PairModel {
+        fn next(self) -> Vec<PairModel> {
+            let mut out = Vec::new();
+            if self.signed_f.is_none() {
+                out.push(PairModel {
+                    signed_f: Some(()),
+                    ..self
+                });
+            }
+            // PutPair: F at K_ful(q), and C at K_root(q) unless something holds it.
+            if self.signed_f.is_some() && self.ful.is_none() {
+                let root = match self.root {
+                    RootHolder::Empty => RootHolder::C,
+                    held => held,
+                };
+                out.push(PairModel {
+                    ful: Some(0),
+                    root,
+                    ..self
+                });
+            }
+            // PutOrdinaryClaim: S at K_root(q) while nothing holds it.
+            if self.root == RootHolder::Empty {
+                out.push(PairModel {
+                    root: RootHolder::S,
+                    ..self
+                });
+            }
+            // PutCopy at each key, for its occupant, up to what Final needs.
+            if let Some(links) = self.ful.filter(|l| *l < 2) {
+                out.push(PairModel {
+                    ful: Some(links + 1),
+                    ..self
+                });
+            }
+            if self.root != RootHolder::Empty && self.root_links < 2 {
+                out.push(PairModel {
+                    root_links: self.root_links + 1,
+                    ..self
+                });
+            }
+            out
+        }
+
+        /// `FulfillmentRegistered`, the pair's mutual exclusion, and what
+        /// otherwise holds the pair, as the model reads them.
+        fn read(self, c_id: D32, s_id: D32) -> PairRead {
+            let root_id = |root: RootHolder| match root {
+                RootHolder::C => c_id,
+                RootHolder::S => s_id,
+                RootHolder::Empty => panic!("an empty root names no claim"),
+            };
+            match (self.ful, self.root) {
+                (Some(2), RootHolder::C) if self.root_links == 2 => PairRead::Registered,
+                (Some(_), RootHolder::S) => PairRead::LostAtRoot,
+                (Some(_), _) => PairRead::Held,
+                (None, RootHolder::Empty) => PairRead::Unresolved,
+                (None, held) => PairRead::RootTaken(root_id(held)),
+            }
+        }
+    }
+
+    /// MR-DSM-0267 (G3 ruling B9, owner 2026-10-28): Core's registration read
+    /// refines the position pair of `tla/DSM_SofiSuccessorCells.tla`. Every
+    /// reachable state of the pair (F signed or not; F, C and an ordinary
+    /// claim S written as the model writes them, the pair together; up to two
+    /// copies carrying each holder's leader record) is written to real cells
+    /// with real signed objects, and `fulfillment_registered` reads exactly
+    /// the model's `FulfillmentRegistered` (both cells final, the root on F's
+    /// own claim), never registers while S holds the root
+    /// (`PairMutualExclusion`), and otherwise reports what holds the pair as
+    /// the model does.
+    /// MUTATION CONTROL: registering with the root cell held by a claim that
+    /// does not name F, or with the root cell short of final, turns this red.
+    #[test]
+    fn the_registration_read_refines_the_position_pair_model() {
+        let p = swap_fixture_n(2).precommit;
+        let q = p.position() + 1;
+        let f = fulfillment(&p, q);
+        let f_bytes = envelope(&f);
+        let rival = rival_of(&p, &f);
+        let c = signed_c_q(derive::resolution_claim(&p, &f));
+        let s_claim = signed_c_q(derive::resolution_claim(&p, &rival));
+        let c_id = crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &f).encode());
+        let s_id =
+            crate::storage_cell::entry_digest(&derive::resolution_claim(&p, &rival).encode());
+        let cells = cells_at(q);
+        let written = |at: &RoutedCell, value: Option<(&[u8], u8)>| {
+            let mut cell = Cell::at(at);
+            if let Some((bytes, links)) = value {
+                cell.write(bytes, usize::from(links), &[]);
+            }
+            cell.evidence()
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut pending = vec![PairModel {
+            ful: None,
+            root: RootHolder::Empty,
+            root_links: 0,
+            signed_f: None,
+        }];
+        while let Some(model) = pending.pop() {
+            if !seen.insert(model) {
+                continue;
+            }
+            let ful = written(
+                cells.fulfillment(),
+                model.ful.map(|l| (f_bytes.as_slice(), l)),
+            );
+            let root_value = match model.root {
+                RootHolder::C => Some((c.as_slice(), model.root_links)),
+                RootHolder::S => Some((s_claim.as_slice(), model.root_links)),
+                RootHolder::Empty => None,
+            };
+            let root = written(cells.root().routed(), root_value);
+            let read = match fulfillment_registered(&cells, &ful, &root)
+                .expect("every seat is read and committed")
+                .into_registration()
+            {
+                Registration::Registered(signed) => {
+                    assert_eq!(signed.body, f, "{model:?}");
+                    PairRead::Registered
+                }
+                Registration::Held(signed) => {
+                    assert_eq!(signed.body, f, "{model:?}");
+                    PairRead::Held
+                }
+                Registration::NeverRegistered {
+                    fulfillment,
+                    settled_at: PositionCell::Root,
+                } => {
+                    assert_eq!(fulfillment.body, f, "{model:?}");
+                    PairRead::LostAtRoot
+                }
+                Registration::RootTaken { claim } => PairRead::RootTaken(claim),
+                Registration::Unresolved => PairRead::Unresolved,
+                other => panic!("{model:?}: a read the pair cannot produce: {other:?}"),
+            };
+            assert_eq!(read, model.read(c_id, s_id), "{model:?}");
+            pending.extend(model.next());
+        }
+        assert!(
+            seen.iter()
+                .any(|m| m.read(c_id, s_id) == PairRead::Registered),
+            "the search reached a registration"
+        );
     }
 }

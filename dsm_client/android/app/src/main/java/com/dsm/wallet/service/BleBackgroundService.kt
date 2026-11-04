@@ -100,8 +100,8 @@ class BleBackgroundService : Service() {
         createNotificationChannel()
         
         // Start foreground with notification + explicit service type (required API 34+).
-        // connectedDevice only: it has no daily limit, and the NFC permission the
-        // manifest declares satisfies its prerequisite. dataSync is capped at six
+        // connectedDevice only: it has no daily limit, and the Bluetooth permissions
+        // the manifest declares satisfy its prerequisite. dataSync is capped at six
         // hours a day from Android 15, and a service that keeps listening for its
         // contacts in the background would reach the cap.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

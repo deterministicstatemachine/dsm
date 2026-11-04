@@ -15,8 +15,8 @@
 \*       receiver: the counterparty of that relationship. There is no second
 \*       independent acceptor of the same relationship parent in online DSM,
 \*       so each relationship is modeled with a single acceptance locus
-\*       (cons[r], led[r]). Online acceptance is the receiver's own frontier
-\*       and proof checks (paper Def 55); no co-signing round is part of the
+\*       (cons[r], led[r]). Online acceptance is the receiver's own one-hop
+\*       and proof checks (paper Def 55, DSM Amendment A28); no co-signing round is part of the
 \*       online path. The only setting where one spendable object is
 \*       PRESENTED to multiple distinct receivers is offline bearer mode,
 \*       which is governed by the fused anchor, the pending lock against

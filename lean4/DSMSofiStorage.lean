@@ -576,9 +576,9 @@ theorem acquisition_decides_nothing (ev : Evidence) (a p : Nat) (check : Nat →
 
 -- ── §13 the producer, rebuild step R6 ──────────────────────────────────────
 
-/-- The three-valued conjunction of `sofi::conformance::Validation::and`: any
-Invalid is Invalid; otherwise any Unavailable is Unavailable; otherwise
-Valid. -/
+/-- The three-valued conjunction a producer's checks compose to (in Rust,
+`sofi::validation::Verdict`): any Invalid is Invalid; otherwise any
+Unavailable is Unavailable; otherwise Valid. -/
 def Verdict.and : Verdict → Verdict → Verdict
   | .invalid, _ => .invalid
   | _, .invalid => .invalid

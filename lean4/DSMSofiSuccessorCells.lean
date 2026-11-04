@@ -11,7 +11,11 @@
                         set and a validated root and wrote there first, so the
                         race ends at the leader: LeaderHeld(K, x) iff x is the
                         first object naming K in the leader's read; Final(K, x)
-                        iff LeaderHeld(K, x) and two other members hold x.
+                        iff LeaderHeld(K, x) and two other members hold a link
+                        of x: a copy that carries the leader's record for x
+                        (route chains, DSMRouteChain; G15). A copy that carries
+                        no leader record is no link, however many members hold
+                        it.
     - FINAL PERSISTS    a value final on a (partial) read is final on every
                         later, fuller read; one final value per key, ever.
     - LEADER-HELD       once the leader's first object is x, no other value is
@@ -53,6 +57,10 @@
       identity are DSMSofiAtomicity's. Which values in a member's list are
       objects naming the key is the caller's question; the model is handed the
       classified digests in arrival order, as `resolve` is.
+    * Whether a copy is a link is Core's (`route_chain::valid_links`): its
+      chain begins with the leader's arrival record, which the leader's
+      ByteCommit commits and the seat's own mirror of the leader covers. The
+      model is handed each object's kind, as it is handed its value.
     * The walk's per-key facts (final value, validation, orphan, rival
       consumption, route outcome, the trader parent's branch) are inputs;
       `Coherent` restates what the cell layer above proves about them.
@@ -88,6 +96,8 @@
         `finalSkippable`
     10. (S14) `positionLost` put back into      -> `route_impossibility_reads_no_fact_about_F`
         `RouteImpossible`
+    11. (G15) `holdsLink` counting a bare copy  -> `a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count`;
+        (the copy rule)                            `bare_copies_never_count`
   Run: `lean -DwarningAsError=true DSMSofiSuccessorCells.lean`
 -/
 
@@ -95,10 +105,24 @@ namespace DSMSofiSuccessorCells
 
 abbrev Val := Nat
 
+/-- An object a member holds at a key. A link carries the chain so far: at a
+later seat, a copy whose chain begins with the leader's record for its value;
+at the leader, its own arrival. A bare copy carries no leader record — written
+before the leader held the value, or without the chain — and is no link. At
+the leader the first arrival is the leader link whatever it carries. -/
+inductive Obj where
+  | link (v : Val)
+  | bare (v : Val)
+  deriving DecidableEq, Repr
+
+def Obj.val : Obj → Val
+  | .link v => v
+  | .bare v => v
+
 /-- What one member holds at one key: every object naming it, in arrival
 order. A member keeps what it is given; nothing is refused, replaced or
 compared. -/
-abbrev Held := List Val
+abbrev Held := List Obj
 
 /-- A store: the committed members' lists at ONE key, by position in the
 committed set. -/
@@ -109,13 +133,13 @@ def FINALITY : Nat := 3
 
 -- ── the store: puts append, nothing is ever removed ──────────────────────
 
-/-- Put: member `i` keeps `v` after everything it already holds. -/
-def putAt (i : Nat) (v : Val) (s : Store) : Store :=
-  fun j => if j = i then s j ++ [v] else s j
+/-- Put: member `i` keeps `o` after everything it already holds. -/
+def putAt (i : Nat) (o : Obj) (s : Store) : Store :=
+  fun j => if j = i then s j ++ [o] else s j
 
 inductive Reach : Store → Store → Prop
   | refl (s : Store) : Reach s s
-  | put {s s' : Store} (i : Nat) (v : Val) : Reach s s' → Reach s (putAt i v s')
+  | put {s s' : Store} (i : Nat) (o : Obj) : Reach s s' → Reach s (putAt i o s')
 
 theorem Reach.trans {a b c : Store} (h1 : Reach a b) (h2 : Reach b c) : Reach a c := by
   induction h2 with
@@ -131,11 +155,11 @@ theorem prefix_trans {a b c : Held} (h1 : a <+: b) (h2 : b <+: c) : a <+: c := b
 
 /-- KEEPS EVERYTHING: what a member holds is a prefix of what it holds after
 any put, anywhere. -/
-theorem put_keeps_prefix (i : Nat) (v : Val) (s : Store) (j : Nat) :
-    s j <+: putAt i v s j := by
+theorem put_keeps_prefix (i : Nat) (o : Obj) (s : Store) (j : Nat) :
+    s j <+: putAt i o s j := by
   unfold putAt
   split
-  · exact ⟨[v], rfl⟩
+  · exact ⟨[o], rfl⟩
   · exact prefix_refl _
 
 theorem reach_keeps_prefix {s s' : Store} (h : Reach s s') (j : Nat) : s j <+: s' j := by
@@ -146,18 +170,18 @@ theorem reach_keeps_prefix {s s' : Store} (h : Reach s s') (j : Nat) : s j <+: s
 /-- NEVER REFUSES (R2, Part II §12): after a put, the member holds the value it
 was given — it is the last thing in its list. With `put_keeps_prefix`, what a
 member holds is exactly everything it was given, in arrival order. -/
-theorem put_holds_what_it_was_given (i : Nat) (v : Val) (s : Store) :
-    (putAt i v s i).getLast? = some v := by
+theorem put_holds_what_it_was_given (i : Nat) (o : Obj) (s : Store) :
+    (putAt i o s i).getLast? = some o := by
   simp [putAt]
 
-theorem first_stable {l l' : Held} {v : Val} (hp : l <+: l') (hv : l.head? = some v) :
-    l'.head? = some v := by
+theorem first_stable {l l' : Held} {o : Obj} (hp : l <+: l') (hv : l.head? = some o) :
+    l'.head? = some o := by
   obtain ⟨t, rfl⟩ := hp
   cases l with
   | nil => cases hv
   | cons x xs => simp at hv; simp [hv]
 
-theorem mem_of_prefix {l l' : Held} {v : Val} (hp : l <+: l') (hv : v ∈ l) : v ∈ l' := by
+theorem mem_of_prefix {l l' : Held} {o : Obj} (hp : l <+: l') (hv : o ∈ l) : o ∈ l' := by
   obtain ⟨t, rfl⟩ := hp
   exact List.mem_append_left t hv
 
@@ -170,30 +194,33 @@ inductive Obs where
   | holds (vs : Held)
   | unknown
 
-def holdsVal (o : Obs) (v : Val) : Bool :=
+/-- Whether an answer holds a link of `v`. A bare copy of `v` is not one. -/
+def holdsLink (o : Obs) (v : Val) : Bool :=
   match o with
-  | .holds vs => decide (v ∈ vs)
+  | .holds vs => decide (Obj.link v ∈ vs)
   | .unknown => false
 
-theorem holdsVal_holds (vs : Held) (v : Val) : holdsVal (.holds vs) v = true ↔ v ∈ vs := by
-  simp [holdsVal]
+theorem holdsLink_holds (vs : Held) (v : Val) :
+    holdsLink (.holds vs) v = true ↔ Obj.link v ∈ vs := by
+  simp [holdsLink]
 
 /-- The first object naming the key in the leader's read, if the leader
 answered and holds one. -/
 def leaderFirst (obs : Nat → Obs) (leader : Nat) : Option Val :=
   match obs leader with
-  | .holds vs => vs.head?
+  | .holds vs => vs.head?.map Obj.val
   | .unknown => none
 
-/-- Whether member `i` counts as a copy of `v`: a member other than the
-leader that holds `v`. -/
-def copyAt (obs : Nat → Obs) (leader : Nat) (v : Val) (i : Nat) : Nat :=
-  if i ≠ leader ∧ holdsVal (obs i) v = true then 1 else 0
+/-- Whether member `i` counts as a further link of `v`: a member other than
+the leader that holds a link of `v`. -/
+def linkAt (obs : Nat → Obs) (leader : Nat) (v : Val) (i : Nat) : Nat :=
+  if i ≠ leader ∧ holdsLink (obs i) v = true then 1 else 0
 
-/-- Members other than the leader holding `v`, over the committed set. -/
-def copies (obs : Nat → Obs) (leader : Nat) (v : Val) : Nat :=
-  copyAt obs leader v 0 + copyAt obs leader v 1 + copyAt obs leader v 2
-    + copyAt obs leader v 3 + copyAt obs leader v 4
+/-- Members other than the leader holding a link of `v`, over the committed
+set: `v`'s further links. -/
+def links (obs : Nat → Obs) (leader : Nat) (v : Val) : Nat :=
+  linkAt obs leader v 0 + linkAt obs leader v 1 + linkAt obs leader v 2
+    + linkAt obs leader v 3 + linkAt obs leader v 4
 
 inductive Res where
   | final (v : Val)
@@ -205,7 +232,7 @@ inductive Res where
 def resolve (obs : Nat → Obs) (leader : Nat) : Res :=
   match leaderFirst obs leader with
   | none => .unresolved
-  | some v => if FINALITY ≤ copies obs leader v + 1 then .final v else .leaderHeld v
+  | some v => if FINALITY ≤ links obs leader v + 1 then .final v else .leaderHeld v
 
 /-- A truthful, complete read of a store. -/
 def observe (s : Store) : Nat → Obs := fun i => .holds (s i)
@@ -231,16 +258,16 @@ theorem compatible_reach {obs : Nat → Obs} {s s' : Store} (hc : Compatible obs
   | holds vs => rw [hobs] at hi; exact prefix_trans hi (reach_keeps_prefix hr i)
   | unknown => trivial
 
-theorem holdsVal_of_compatible {obs : Nat → Obs} {s : Store} (hc : Compatible obs s)
-    (i : Nat) (v : Val) (h : holdsVal (obs i) v = true) : holdsVal (observe s i) v = true := by
+theorem holdsLink_of_compatible {obs : Nat → Obs} {s : Store} (hc : Compatible obs s)
+    (i : Nat) (v : Val) (h : holdsLink (obs i) v = true) : holdsLink (observe s i) v = true := by
   have hi := hc i
   unfold compatAt at hi
   unfold observe
-  rw [holdsVal_holds]
+  rw [holdsLink_holds]
   cases hobs : obs i with
   | holds vs =>
     rw [hobs] at h hi
-    rw [holdsVal_holds] at h
+    rw [holdsLink_holds] at h
     exact mem_of_prefix hi h
   | unknown => rw [hobs] at h; cases h
 
@@ -257,26 +284,33 @@ theorem leaderFirst_of_compatible {obs : Nat → Obs} {s : Store} (hc : Compatib
       unfold compatAt at this
       rw [hobs] at this
       exact this
-    exact first_stable hp h
+    show (s leader).head?.map Obj.val = some v
+    change vs.head?.map Obj.val = some v at h
+    cases hh : vs.head? with
+    | none => rw [hh] at h; cases h
+    | some o =>
+      rw [hh] at h
+      rw [first_stable hp hh]
+      exact h
   | unknown => rw [hobs] at h; cases h
 
-theorem copyAt_mono {obs obs' : Nat → Obs} {leader : Nat} {v : Val}
-    (h : ∀ i, holdsVal (obs i) v = true → holdsVal (obs' i) v = true) (i : Nat) :
-    copyAt obs leader v i ≤ copyAt obs' leader v i := by
-  unfold copyAt
-  by_cases hc : i ≠ leader ∧ holdsVal (obs i) v = true
+theorem linkAt_mono {obs obs' : Nat → Obs} {leader : Nat} {v : Val}
+    (h : ∀ i, holdsLink (obs i) v = true → holdsLink (obs' i) v = true) (i : Nat) :
+    linkAt obs leader v i ≤ linkAt obs' leader v i := by
+  unfold linkAt
+  by_cases hc : i ≠ leader ∧ holdsLink (obs i) v = true
   · rw [if_pos hc, if_pos ⟨hc.1, h i hc.2⟩]; exact Nat.le_refl _
   · rw [if_neg hc]; exact Nat.zero_le _
 
-theorem copies_mono {obs obs' : Nat → Obs} {leader : Nat} {v : Val}
-    (h : ∀ i, holdsVal (obs i) v = true → holdsVal (obs' i) v = true) :
-    copies obs leader v ≤ copies obs' leader v := by
-  unfold copies
-  have h0 := copyAt_mono (leader := leader) h 0
-  have h1 := copyAt_mono (leader := leader) h 1
-  have h2 := copyAt_mono (leader := leader) h 2
-  have h3 := copyAt_mono (leader := leader) h 3
-  have h4 := copyAt_mono (leader := leader) h 4
+theorem links_mono {obs obs' : Nat → Obs} {leader : Nat} {v : Val}
+    (h : ∀ i, holdsLink (obs i) v = true → holdsLink (obs' i) v = true) :
+    links obs leader v ≤ links obs' leader v := by
+  unfold links
+  have h0 := linkAt_mono (leader := leader) h 0
+  have h1 := linkAt_mono (leader := leader) h 1
+  have h2 := linkAt_mono (leader := leader) h 2
+  have h3 := linkAt_mono (leader := leader) h 3
+  have h4 := linkAt_mono (leader := leader) h 4
   omega
 
 theorem resolve_names_leader_first {obs : Nat → Obs} {leader : Nat} {v : Val}
@@ -288,7 +322,7 @@ theorem resolve_names_leader_first {obs : Nat → Obs} {leader : Nat} {v : Val}
   | some u =>
     rw [hlf] at h
     dsimp only at h
-    by_cases hge : FINALITY ≤ copies obs leader u + 1
+    by_cases hge : FINALITY ≤ links obs leader u + 1
     · rw [if_pos hge] at h; rcases h with h | h <;> cases h; rfl
     · rw [if_neg hge] at h; rcases h with h | h <;> cases h; rfl
 
@@ -298,7 +332,7 @@ theorem resolve_of_leaderFirst {obs : Nat → Obs} {leader : Nat} {v : Val}
   unfold resolve
   rw [h]
   dsimp only
-  by_cases hge : FINALITY ≤ copies obs leader v + 1
+  by_cases hge : FINALITY ≤ links obs leader v + 1
   · rw [if_pos hge]; exact Or.inl rfl
   · rw [if_neg hge]; exact Or.inr rfl
 
@@ -312,13 +346,13 @@ theorem final_persists {obs : Nat → Obs} {s s' : Store} {leader : Nat} {v : Va
   have hc' := compatible_reach hc hr
   have hlf : leaderFirst obs leader = some v := resolve_names_leader_first (Or.inl h)
   have hlf' := leaderFirst_of_compatible hc' hlf
-  have hmono : copies obs leader v ≤ copies (observe s') leader v :=
-    copies_mono (fun i => holdsVal_of_compatible hc' i v)
+  have hmono : links obs leader v ≤ links (observe s') leader v :=
+    links_mono (fun i => holdsLink_of_compatible hc' i v)
   unfold resolve at h ⊢
   rw [hlf] at h
   rw [hlf']
   dsimp only at h ⊢
-  by_cases hge : FINALITY ≤ copies obs leader v + 1
+  by_cases hge : FINALITY ≤ links obs leader v + 1
   · rw [if_pos (Nat.le_trans hge (Nat.add_le_add_right hmono 1))]
   · rw [if_neg hge] at h; cases h
 
@@ -348,60 +382,61 @@ theorem leader_held_excludes_others {obs : Nat → Obs} {s s' : Store} {leader :
 leader makes any value leader-held (or final). -/
 theorem open_key_becomes_leader_held (s : Store) (leader : Nat) (hempty : s leader = [])
     (v : Val) :
-    resolve (observe (putAt leader v s)) leader = .final v
-      ∨ resolve (observe (putAt leader v s)) leader = .leaderHeld v := by
+    resolve (observe (putAt leader (.link v) s)) leader = .final v
+      ∨ resolve (observe (putAt leader (.link v) s)) leader = .leaderHeld v := by
   apply resolve_of_leaderFirst
-  simp [leaderFirst, observe, putAt, hempty]
+  simp [leaderFirst, observe, putAt, hempty, Obj.val]
 
 theorem holds_after_put_self (i : Nat) (v : Val) (s : Store) :
-    holdsVal (observe (putAt i v s) i) v = true := by
+    holdsLink (observe (putAt i (.link v) s) i) v = true := by
   unfold observe
-  rw [holdsVal_holds]
+  rw [holdsLink_holds]
   simp [putAt]
 
-theorem holds_after_put_other {i j : Nat} (v : Val) (s : Store) (u : Val)
-    (h : holdsVal (observe s j) u = true) : holdsVal (observe (putAt i v s) j) u = true := by
+theorem holds_after_put_other {i j : Nat} (o : Obj) (s : Store) (u : Val)
+    (h : holdsLink (observe s j) u = true) : holdsLink (observe (putAt i o s) j) u = true := by
   unfold observe at h ⊢
-  rw [holdsVal_holds] at h ⊢
-  exact mem_of_prefix (put_keeps_prefix i v s j) h
+  rw [holdsLink_holds] at h ⊢
+  exact mem_of_prefix (put_keeps_prefix i o s j) h
 
 /-- NO KEY IS DEAD (ii): a value the leader holds first becomes final once two
-other members hold it — and among members 0, 1 and 2, two are always not the
-leader. Nothing but puts is needed; nothing else can close the key. -/
+other members hold a link of it — and among members 0, 1 and 2, two are always
+not the leader. Nothing but puts is needed; nothing else can close the key. -/
 theorem leader_held_becomes_final (s : Store) (leader : Nat) (v : Val)
     (h : leaderFirst (observe s) leader = some v) :
     ∃ s', Reach s s' ∧ resolve (observe s') leader = .final v := by
-  let s'' := putAt 2 v (putAt 1 v (putAt 0 v s))
+  let s'' := putAt 2 (.link v) (putAt 1 (.link v) (putAt 0 (.link v) s))
   have hr : Reach s s'' :=
-    Reach.put 2 v (Reach.put 1 v (Reach.put 0 v (Reach.refl s)))
+    Reach.put 2 (.link v) (Reach.put 1 (.link v) (Reach.put 0 (.link v) (Reach.refl s)))
   refine ⟨s'', hr, ?_⟩
   have hlf : leaderFirst (observe s'') leader = some v :=
     leaderFirst_of_compatible (compatible_reach (compatible_observe s) hr) h
-  have hh0 : holdsVal (observe s'' 0) v = true :=
-    holds_after_put_other v _ v (holds_after_put_other v _ v (holds_after_put_self 0 v s))
-  have hh1 : holdsVal (observe s'' 1) v = true :=
-    holds_after_put_other v _ v (holds_after_put_self 1 v _)
-  have hh2 : holdsVal (observe s'' 2) v = true := holds_after_put_self 2 v _
-  have c0 : (leader = 0 ∧ copyAt (observe s'') leader v 0 = 0)
-      ∨ (leader ≠ 0 ∧ copyAt (observe s'') leader v 0 = 1) := by
-    unfold copyAt
+  have hh0 : holdsLink (observe s'' 0) v = true :=
+    holds_after_put_other (.link v) _ v
+      (holds_after_put_other (.link v) _ v (holds_after_put_self 0 v s))
+  have hh1 : holdsLink (observe s'' 1) v = true :=
+    holds_after_put_other (.link v) _ v (holds_after_put_self 1 v _)
+  have hh2 : holdsLink (observe s'' 2) v = true := holds_after_put_self 2 v _
+  have c0 : (leader = 0 ∧ linkAt (observe s'') leader v 0 = 0)
+      ∨ (leader ≠ 0 ∧ linkAt (observe s'') leader v 0 = 1) := by
+    unfold linkAt
     by_cases hl : leader = 0
     · left; exact ⟨hl, by rw [if_neg (fun hc => hc.1 hl.symm)]⟩
     · right; exact ⟨hl, by rw [if_pos ⟨fun hc => hl hc.symm, hh0⟩]⟩
-  have c1 : (leader = 1 ∧ copyAt (observe s'') leader v 1 = 0)
-      ∨ (leader ≠ 1 ∧ copyAt (observe s'') leader v 1 = 1) := by
-    unfold copyAt
+  have c1 : (leader = 1 ∧ linkAt (observe s'') leader v 1 = 0)
+      ∨ (leader ≠ 1 ∧ linkAt (observe s'') leader v 1 = 1) := by
+    unfold linkAt
     by_cases hl : leader = 1
     · left; exact ⟨hl, by rw [if_neg (fun hc => hc.1 hl.symm)]⟩
     · right; exact ⟨hl, by rw [if_pos ⟨fun hc => hl hc.symm, hh1⟩]⟩
-  have c2 : (leader = 2 ∧ copyAt (observe s'') leader v 2 = 0)
-      ∨ (leader ≠ 2 ∧ copyAt (observe s'') leader v 2 = 1) := by
-    unfold copyAt
+  have c2 : (leader = 2 ∧ linkAt (observe s'') leader v 2 = 0)
+      ∨ (leader ≠ 2 ∧ linkAt (observe s'') leader v 2 = 1) := by
+    unfold linkAt
     by_cases hl : leader = 2
     · left; exact ⟨hl, by rw [if_neg (fun hc => hc.1 hl.symm)]⟩
     · right; exact ⟨hl, by rw [if_pos ⟨fun hc => hl hc.symm, hh2⟩]⟩
-  have hge : FINALITY ≤ copies (observe s'') leader v + 1 := by
-    unfold copies FINALITY
+  have hge : FINALITY ≤ links (observe s'') leader v + 1 := by
+    unfold links FINALITY
     omega
   unfold resolve
   rw [hlf]
@@ -418,15 +453,15 @@ theorem unknown_never_counts (obs : Nat → Obs) (leader i : Nat) (hi : i ≠ le
     unfold leaderFirst
     dsimp only
     rw [if_neg (fun h => hi h.symm)]
-  have hca : ∀ v j, copyAt (fun j => if j = i then .holds [] else obs j) leader v j
-      = copyAt obs leader v j := by
+  have hca : ∀ v j, linkAt (fun j => if j = i then .holds [] else obs j) leader v j
+      = linkAt obs leader v j := by
     intro v j
-    unfold copyAt
+    unfold linkAt
     dsimp only
     by_cases hj : j = i
-    · rw [if_pos hj, hj, hu]; simp [holdsVal]
+    · rw [if_pos hj, hj, hu]; simp [holdsLink]
     · rw [if_neg hj]
-  unfold resolve copies
+  unfold resolve links
   rw [hlf]
   cases leaderFirst obs leader with
   | none => rfl
@@ -440,37 +475,76 @@ def A : Val := 10
 def B : Val := 11
 
 theorem the_leaders_first_value_held_by_two_others_is_final :
-    resolve (ofList [.holds [A], .holds [A], .holds [A], .holds [], .unknown]) 0 = .final A := by
+    resolve (ofList [.holds [.link A], .holds [.link A], .holds [.link A], .holds [], .unknown]) 0
+      = .final A := by
   decide
 
 /-- What replaces counting: the leader holds nothing, so whatever the others
 hold, the race has not ended. -/
 theorem three_non_leaders_agreeing_is_not_final :
-    resolve (ofList [.holds [], .holds [A], .holds [A], .holds [A], .holds [A]]) 0
+    resolve (ofList [.holds [], .holds [.link A], .holds [.link A], .holds [.link A],
+      .holds [.link A]]) 0
       = .unresolved := by
   decide
 
 /-- B arrived at the leader after A. Four members hold B; A is the winner
 because it got to the leader first. -/
 theorem a_later_value_at_the_leader_never_becomes_final :
-    resolve (ofList [.holds [A, B], .holds [B], .holds [B], .holds [B], .holds [B]]) 0
+    resolve (ofList [.holds [.link A, .link B], .holds [.link B], .holds [.link B],
+      .holds [.link B], .holds [.link B]]) 0
       = .leaderHeld A := by
   decide
 
 theorem leader_held_settles_the_race_before_finality :
-    resolve (ofList [.holds [A], .holds [], .unknown, .holds [], .holds []]) 0
+    resolve (ofList [.holds [.link A], .holds [], .unknown, .holds [], .holds []]) 0
       = .leaderHeld A := by
   decide
 
 theorem one_copy_is_not_final :
-    resolve (ofList [.holds [A], .holds [A], .holds [], .holds [], .holds []]) 0
+    resolve (ofList [.holds [.link A], .holds [.link A], .holds [], .holds [], .holds []]) 0
       = .leaderHeld A := by
   decide
 
 theorem unknown_is_not_a_copy :
-    resolve (ofList [.holds [A], .holds [A], .unknown, .unknown, .unknown]) 0 = .leaderHeld A
-      ∧ resolve (ofList [.holds [A], .holds [A], .holds [A], .unknown, .unknown]) 0 = .final A := by
+    resolve (ofList [.holds [.link A], .holds [.link A], .unknown, .unknown, .unknown]) 0
+        = .leaderHeld A
+      ∧ resolve (ofList [.holds [.link A], .holds [.link A], .holds [.link A], .unknown,
+        .unknown]) 0 = .final A := by
   decide
+
+/-- G15, the route chain (`route_chain::tests::a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count`):
+four members hold bare copies of the leader's value — copies carrying no
+leader record, written before the leader held it — and the cell is only
+leader-held. The copy rule counted them and called it final. -/
+theorem a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count :
+    resolve (ofList [.holds [.link A], .holds [.bare A], .holds [.bare A], .holds [.bare A],
+      .holds [.bare A]]) 0 = .leaderHeld A := by
+  decide
+
+/-- BARE COPIES NEVER COUNT: a bare copy put at any member other than the
+leader changes no resolution, now or with any other read. -/
+theorem bare_copies_never_count (s : Store) (leader i : Nat) (hi : i ≠ leader) (u : Val) :
+    resolve (observe (putAt i (.bare u) s)) leader = resolve (observe s) leader := by
+  have hlf : leaderFirst (observe (putAt i (.bare u) s)) leader = leaderFirst (observe s) leader := by
+    unfold leaderFirst observe putAt
+    dsimp only
+    rw [if_neg (fun h => hi h.symm)]
+  have hca : ∀ v j, linkAt (observe (putAt i (.bare u) s)) leader v j
+      = linkAt (observe s) leader v j := by
+    intro v j
+    have hh : holdsLink (observe (putAt i (.bare u) s) j) v = holdsLink (observe s j) v := by
+      unfold observe putAt
+      by_cases hj : j = i
+      · rw [if_pos hj]
+        simp [holdsLink]
+      · rw [if_neg hj]
+    unfold linkAt
+    rw [hh]
+  unfold resolve links
+  rw [hlf]
+  cases leaderFirst (observe s) leader with
+  | none => rfl
+  | some v => dsimp only; rw [hca, hca, hca, hca, hca]
 
 -- ── the attempt walk ──────────────────────────────────────────────────────
 
@@ -903,13 +977,13 @@ theorem storage_reachable_does_not_imply_canonical :
 #print axioms reach_keeps_prefix
 #print axioms first_stable
 #print axioms mem_of_prefix
-#print axioms holdsVal_holds
+#print axioms holdsLink_holds
 #print axioms compatible_observe
 #print axioms compatible_reach
-#print axioms holdsVal_of_compatible
+#print axioms holdsLink_of_compatible
 #print axioms leaderFirst_of_compatible
-#print axioms copyAt_mono
-#print axioms copies_mono
+#print axioms linkAt_mono
+#print axioms links_mono
 #print axioms resolve_names_leader_first
 #print axioms resolve_of_leaderFirst
 #print axioms final_persists
@@ -926,6 +1000,8 @@ theorem storage_reachable_does_not_imply_canonical :
 #print axioms leader_held_settles_the_race_before_finality
 #print axioms one_copy_is_not_final
 #print axioms unknown_is_not_a_copy
+#print axioms a_copy_whose_chain_does_not_begin_with_the_leader_link_does_not_count
+#print axioms bare_copies_never_count
 #print axioms consumed_not_skipped
 #print axioms walk_consumes_at_most_once
 #print axioms consumed_requires_attempt_live

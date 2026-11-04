@@ -15,7 +15,6 @@ class BridgeCompatRouteScanTest {
         "device.ble.scan.stop",
         "device.ble.advertise.start",
         "device.ble.advertise.stop",
-        "nfc.ring.stopRead",
     )
 
     private val removedBundleDispatchLiterals = listOf(
@@ -25,7 +24,6 @@ class BridgeCompatRouteScanTest {
         "'device.ble.scan.stop'",
         "'device.ble.advertise.start'",
         "'device.ble.advertise.stop'",
-        "'nfc.ring.stopRead'",
     )
 
     @Test

@@ -263,9 +263,7 @@ fn spawn_acceptance_recovery_sweep(origin: &'static str) {
                 let self_device: Option<[u8; 32]> = crate::sdk::app_state::AppState::get_device_id()
                     .and_then(|v| v.as_slice().try_into().ok());
                 if let Some(device_id) = self_device {
-                    match crate::storage::client_db::drain_projection_repairs(&device_id, |token| {
-                        crate::policy::builtin_policy_commit(token)
-                    }) {
+                    match crate::storage::client_db::drain_projection_repairs(&device_id) {
                         Ok((0, 0)) => {}
                         Ok((repaired, remaining)) => log::info!(
                             "[SDK] projection repair ({origin}): {repaired} rebuilt from canonical, \
@@ -413,12 +411,8 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
             // offline bearer could run over.
             fn sync_balance_cache(&self) {}
 
-            fn device_head(&self) -> Option<dsm::types::device_state::DeviceState> {
+            fn device_head(&self) -> Option<dsm::types::device_state::RealizedHead> {
                 None
-            }
-
-            fn resolve_policy_commit_strict(&self, _token_id: &[u8]) -> Result<[u8; 32], DsmError> {
-                Err(requires_genesis("resolve_policy_commit_strict"))
             }
 
             fn simulate_advance_for_confirm(
@@ -515,7 +509,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
     // 6) BLE (Android only): this identity's Bluetooth transfer stack. Deferred until an
     // identity exists; the core handlers above stay installed so bootstrap queries work before
     // genesis, and wallet creation builds it once the identity is there.
-    #[cfg(all(target_os = "android", feature = "bluetooth"))]
+    #[cfg(feature = "bluetooth")]
     build_ble_stack_for_identity()?;
 
     Ok(())
@@ -529,7 +523,7 @@ pub fn init_dsm_sdk(cfg: &SdkConfig) -> Result<(), String> {
 /// identity is installed: without it a device that created its wallet in this session paired
 /// over Bluetooth but refused every offline send ("the BLE stack is not live yet") until the
 /// app restarted. With no identity yet it builds nothing and says so.
-#[cfg(all(target_os = "android", feature = "bluetooth"))]
+#[cfg(feature = "bluetooth")]
 pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     // Create and register BluetoothManager using AppState identity.
     // Identity MUST be available - this is called post-genesis only.
@@ -584,11 +578,12 @@ pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
     // create_genesis_v2 registered. There is no device secret. The wallet seed is the
     // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
-    // and sealed at rest, so on a cold start we first try the hardware seed vault before
-    // demanding the mnemonic again. Either way init fails without it, and the failure is
-    // the session's fatal error. A vault that cannot be read is that failure in its own
-    // words: reporting it as "not unlocked" sent a device whose store refused its schema
-    // looking for its mnemonic.
+    // and on a device sealed at rest, so on a cold start there we first try the hardware
+    // seed vault before demanding the mnemonic again. Either way init fails without it, and
+    // the failure is the session's fatal error. A vault that cannot be read is that failure
+    // in its own words: reporting it as "not unlocked" sent a device whose store refused its
+    // schema looking for its mnemonic.
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
         match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
             Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),

@@ -70,6 +70,9 @@ sha2 = "0.11.0"
 pbkdf2 = "0.13.0"
 # SPHINCS+: the one implementation, shared with the anchor firmware.
 dsm-sphincs = { path = "../../../crates/dsm-sphincs" }
+# The offline anchor's release objects and their recomputation (`M`, `h_{i+1}`, `D`), the one
+# definition the chip signs under: Core verifies a payer's chain of offline spends with it.
+dsm-anchor-core = { path = "../../../crates/dsm-anchor-core" }
 getrandom = "0.4.2"
 merlin = "3.0.0"
 zeroize = { version = "1.7.0", features = ["zeroize_derive"] }

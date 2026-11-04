@@ -69,8 +69,6 @@ pub struct PinnedAnchor {
     pub partition_pk: Vec<u8>,
     /// The pinned resident chip public key `pk_chip` (`σ^chip`, Ed25519).
     pub pk_chip: Vec<u8>,
-    /// `true` iff no firmware-boundary / physical-compromise / policy event invalidates it.
-    pub uncompromised: bool,
 }
 
 impl PinnedAnchor {
@@ -82,7 +80,6 @@ impl PinnedAnchor {
             enrolled_counter: p.enrolled_counter,
             partition_pk: p.partition_pk.clone(),
             pk_chip: p.pk_chip.clone(),
-            uncompromised: p.uncompromised,
         }
     }
 }
@@ -100,18 +97,14 @@ impl ChipSig for Ed25519ChipSig {
 }
 
 /// SPHINCS+ partition (`σ^host`) verifier — reuses the host `dsm::crypto::sphincs` scheme under the
-/// receiver-pinned `pk_host`.
+/// receiver-pinned `pk_host`. The receiver only verifies.
 struct SphincsPart;
-impl anchor_core::tropic::PartitionSig for SphincsPart {
-    fn part_keygen(_seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>) {
-        // The receiver never generates a partition key; it only verifies.
-        (Vec::new(), Vec::new())
-    }
-    fn part_sign(_sk: &[u8], _digest: &[u8; 32]) -> Vec<u8> {
-        Vec::new()
-    }
-    fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
-        dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig).unwrap_or(false)
+impl anchor_core::tropic::HostSig for SphincsPart {
+    fn verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool {
+        matches!(
+            dsm::crypto::sphincs::verify(PARTITION_VARIANT, pk, digest, sig),
+            Ok(valid) if valid
+        )
     }
 }
 
@@ -119,7 +112,6 @@ impl anchor_core::tropic::PartitionSig for SphincsPart {
 /// reimplements anchor crypto. The offline-state proofs `Π_i`/`Π_{i+1}` are carried IN the release
 /// and passed to `verify_offline_state` by the predicate.
 struct DsmStateVerifier<'a> {
-    receiver_device_id: &'a [u8; 32],
     /// The pinned bundle `B` — the device leaf of its offline account is
     /// `offline_account_leaf_key(B)`.
     bundle: &'a [u8; 32],
@@ -173,74 +165,6 @@ impl DsmVerifier for DsmStateVerifier<'_> {
             && self.verified.frontier == *prev_frontier
             && self.verified.next_frontier == *next_frontier
     }
-
-    fn delivers_to_receiver(&self, _transition_digest: &[u8; 32], recipient: &[u8; 32]) -> bool {
-        recipient == self.receiver_device_id
-    }
-
-    fn verify_upgrade_cert(&self, _bundle: &[u8; 32]) -> bool {
-        // Dormant in Stage 3: acceptance sets is_genesis=false, so the predicate never reaches this.
-        // First-transfer admission stays TOFU (`pin_admit_decision`); the real dual-identity upgrade
-        // cert is Stage 5.
-        //
-        // FAILS CLOSED rather than returning true. Because the hook is unreachable today the two
-        // answers are behaviourally identical NOW, which is exactly why the choice matters: whoever
-        // first sets `is_genesis = true` inherits whatever this returns. `true` would silently admit
-        // every genesis release. `false` refuses them until the Stage 5 cert is implemented, which
-        // is a visible failure that names this function instead of a silent admission.
-        false
-    }
-}
-
-/// Receiver-admit fold: the decision for a sender's anchor disclosure against the receiver's pin
-/// state. PURE — no store, no I/O; the confirm handler applies it inside the offline branch, bound
-/// to that transfer, under the surrounding gates (offline op, verified contact, disclosure present).
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PinAdmitDecision {
-    /// No existing pin: admit the disclosed pin (first-transfer TOFU under the verified contact).
-    Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment),
-    /// Already pinned and the disclosure matches: keep the pin untouched.
-    NoChange,
-    /// The disclosure CONFLICTS with the pinned anchor (differing anchor_id / bundle / policy / H0 /
-    /// pk_host / pk_chip). A changed anchor after pinning is a silent-substitution attack: keep the
-    /// pinned anchor, never overwrite from a transfer.
-    Reject(&'static str),
-}
-
-/// Decide admit/no-change/reject for a disclosed pin. `disclosed.uncompromised` is ignored — the
-/// admitted flag is set true and thereafter only invalidated out of band.
-pub(crate) fn pin_admit_decision(
-    device_id: [u8; 32],
-    disclosed_policy: [u8; 32],
-    disclosed: &dsm::crypto::anchor_enrollment::FusedAnchorPin,
-    existing: Option<&dsm::crypto::anchor_enrollment::AnchorEnrollment>,
-) -> PinAdmitDecision {
-    let Some(cur) = existing else {
-        return PinAdmitDecision::Admit(dsm::crypto::anchor_enrollment::AnchorEnrollment {
-            device_id,
-            policy_hash: disclosed_policy,
-            pin: dsm::crypto::anchor_enrollment::FusedAnchorPin {
-                uncompromised: true,
-                ..disclosed.clone()
-            },
-        });
-    };
-    if cur.pin.anchor_id != disclosed.anchor_id || cur.pin.bundle != disclosed.bundle {
-        return PinAdmitDecision::Reject("disclosed anchor identity differs from the pinned one");
-    }
-    if cur.policy_hash != disclosed_policy {
-        return PinAdmitDecision::Reject("disclosed policy differs from the admitted one");
-    }
-    if cur.pin.enrolled_counter != disclosed.enrolled_counter {
-        return PinAdmitDecision::Reject("disclosed H0 differs from the enrolled counter");
-    }
-    if cur.pin.partition_pk != disclosed.partition_pk {
-        return PinAdmitDecision::Reject("disclosed pk_host differs from the pinned one");
-    }
-    if cur.pin.pk_chip != disclosed.pk_chip {
-        return PinAdmitDecision::Reject("disclosed pk_chip differs from the pinned one");
-    }
-    PinAdmitDecision::NoChange
 }
 
 /// The offline-account spend a sender's offline-bearer step makes, DERIVED — never read — from
@@ -297,25 +221,24 @@ pub struct AdoptedAnchorState {
 /// a verified receipt, and the device roots and anchor leaves are the receipt's, never values the
 /// caller supplies.
 ///
-/// `accepted_frontier`: the frontier adopted from the holder's last accepted release. `None` =
-/// relationship genesis (nothing adopted yet) — the release's own `prev_root` is adopted TOFU; its
-/// authenticity rests on the offline-state proofs + the three signatures, the same trust
-/// root as the first-transfer pin admit.
+/// The frontier the release must start from is the one Core established for the spend
+/// ([`dsm::bilateral::offline::VerifiedConfirm::bearer_start`]): this device's record of the
+/// holder's account carried forward by the holder's verified chain of spends, forward of the last
+/// spend it accepted from the holder.
 pub fn accept_offline_release(
     verified: &dsm::bilateral::offline::VerifiedConfirm,
     offline_release: &[u8],
     pinned: Option<&PinnedAnchor>,
-    accepted_frontier: Option<&[u8; 32]>,
     receiver_device_id: &[u8; 32],
     expected_receiver_challenge: &[u8; 32],
     expected_policy_hash: &[u8; 32],
 ) -> Result<AdoptedAnchorState, OfflineRecover> {
     let rel = decode_release(offline_release)?;
     let pinned = pinned.ok_or(OfflineRecover::AnchorNotEnrolled)?;
-    let spend = verified
-        .bearer()
-        .filter(|leaves| leaves.bundle == pinned.bundle)
-        .ok_or(OfflineRecover::NotTheStepsSpend)?;
+    let spend = verified.bearer();
+    if spend.bundle != pinned.bundle {
+        return Err(OfflineRecover::NotTheStepsSpend);
+    }
 
     // Tie the cert's device roots to the roots the verified receipt proves (its write set folds the
     // one to the other). The predicate checks Π against the CERT roots; if the cert roots were not
@@ -329,11 +252,6 @@ pub fn accept_offline_release(
     }
 
     let t = rel.transition.as_transition();
-    // The receiver's adopted frontier for this holder, or (genesis) the release's own prev_root TOFU.
-    let effective_frontier: [u8; 32] = match accepted_frontier {
-        Some(r) => *r,
-        None => *t.prev_root,
-    };
     let adopted = AdoptedAnchorState {
         next_root: *t.next_root,
         next_anchor_counter: t.next_anchor_counter,
@@ -344,16 +262,12 @@ pub fn accept_offline_release(
         pinned_anchor_id: &pinned.anchor_id,
         pinned_pk_chip: &pinned.pk_chip,
         pinned_pk_host: &pinned.partition_pk,
-        accepted_frontier: &effective_frontier,
+        accepted_frontier: &verified.bearer_start().frontier,
         expected_receiver_challenge,
         expected_recipient: receiver_device_id,
         expected_policy_hash,
-        anchor_uncompromised: pinned.uncompromised,
-        // Stage 3: genesis handling stays TOFU (pin_admit_decision); the upgrade cert is Stage 5.
-        is_genesis: false,
     };
     let dsm = DsmStateVerifier {
-        receiver_device_id,
         bundle: &pinned.bundle,
         verified: spend,
         anchor_counter: t.anchor_counter,
@@ -387,36 +301,6 @@ fn decode_release(
 mod tests {
     use super::*;
 
-    /// The genesis upgrade-cert hook is unreachable today (`is_genesis` is hardcoded `false` at
-    /// every construction site), so this is the only way to observe what it answers. It must be
-    /// `false`.
-    ///
-    /// The point is precisely that the hook is dormant: whoever first sets `is_genesis = true`
-    /// inherits this answer. `true` would silently admit every genesis release; `false` refuses
-    /// them with a named error until the Stage 5 dual-identity cert exists.
-    #[test]
-    fn the_dormant_genesis_upgrade_cert_hook_fails_closed() {
-        let receiver = [7u8; 32];
-        let bundle = [9u8; 32];
-        let leaves = dsm::verification::receipt_verification::BearerLeaves {
-            bundle,
-            counter: 4,
-            frontier: [0x0Au8; 32],
-            next_frontier: [0x0Bu8; 32],
-        };
-        let dsm = DsmStateVerifier {
-            receiver_device_id: &receiver,
-            bundle: &bundle,
-            verified: &leaves,
-            anchor_counter: 4,
-        };
-        assert!(
-            !dsm.verify_upgrade_cert(&bundle),
-            "verify_upgrade_cert returned true while dormant — the first caller to set \
-             is_genesis=true would admit genesis releases with no cert check at all"
-        );
-    }
-
     /// SA-54. Def. 12 step 12 is the consumption the verified receipt proves: the transition's
     /// frontier pair and the release's counter, under the pinned bundle, must be the account
     /// spend the receipt's write set makes. Any other frontier, counter or bundle is not that
@@ -425,7 +309,6 @@ mod tests {
     /// that ignores a frontier) turns this red.
     #[test]
     fn the_transition_is_only_the_consumption_the_verified_receipt_proves() {
-        let receiver = [7u8; 32];
         let bundle = [9u8; 32];
         let (prev, next, counter) = ([0x21u8; 32], [0x22u8; 32], 41u64);
         let leaves = dsm::verification::receipt_verification::BearerLeaves {
@@ -437,7 +320,6 @@ mod tests {
         let digest = [0x23u8; 32];
         let check = |bundle: &[u8; 32], counter: u64, prev: &[u8; 32], next: &[u8; 32]| {
             DsmStateVerifier {
-                receiver_device_id: &receiver,
                 bundle,
                 verified: &leaves,
                 anchor_counter: counter,
@@ -492,83 +374,6 @@ mod tests {
         assert!(matches!(
             decode_release(&bytes),
             Err(OfflineRecover::Malformed)
-        ));
-    }
-
-    // --- receiver-admit fold: pin_admit_decision matrix ---
-
-    fn fused_pin() -> dsm::crypto::anchor_enrollment::FusedAnchorPin {
-        dsm::crypto::anchor_enrollment::FusedAnchorPin {
-            bundle: [0xB1; 32],
-            anchor_id: [0xA1; 32],
-            enrolled_counter: 1_000_000,
-            partition_pk: vec![0x07; 64],
-            pk_chip: vec![0x0C; 32],
-            uncompromised: true,
-        }
-    }
-
-    fn pinned() -> dsm::crypto::anchor_enrollment::AnchorEnrollment {
-        dsm::crypto::anchor_enrollment::AnchorEnrollment {
-            device_id: [0x11; 32],
-            policy_hash: [0x9A; 32],
-            pin: fused_pin(),
-        }
-    }
-
-    #[test]
-    fn pin_admit_decision_first_transfer_admits_under_disclosed_policy() {
-        let d = fused_pin();
-        match pin_admit_decision([0x11; 32], [0x9A; 32], &d, None) {
-            PinAdmitDecision::Admit(e) => {
-                assert_eq!(e.device_id, [0x11; 32]);
-                assert_eq!(e.policy_hash, [0x9A; 32]);
-                assert_eq!(e.pin.anchor_id, [0xA1; 32]);
-                assert_eq!(e.pin.pk_chip, vec![0x0C; 32]);
-                assert!(e.pin.uncompromised, "admission sets uncompromised=true");
-            }
-            other => panic!("expected Admit, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn pin_admit_decision_no_change_when_disclosure_matches() {
-        let cur = pinned();
-        assert_eq!(
-            pin_admit_decision([0x11; 32], [0x9A; 32], &fused_pin(), Some(&cur)),
-            PinAdmitDecision::NoChange
-        );
-    }
-
-    #[test]
-    fn pin_admit_decision_rejects_every_conflicting_disclosure() {
-        let cur = pinned();
-        let base = fused_pin();
-
-        let mut anchor = base.clone();
-        anchor.anchor_id = [0xEE; 32];
-        let mut bundle = base.clone();
-        bundle.bundle = [0xEE; 32];
-        let mut h0 = base.clone();
-        h0.enrolled_counter = 999_999;
-        let mut host = base.clone();
-        host.partition_pk = vec![0x08; 64];
-        let mut chip = base.clone();
-        chip.pk_chip = vec![0x0D; 32];
-
-        for d in [&anchor, &bundle, &h0, &host, &chip] {
-            assert!(
-                matches!(
-                    pin_admit_decision([0x11; 32], [0x9A; 32], d, Some(&cur)),
-                    PinAdmitDecision::Reject(_)
-                ),
-                "conflicting disclosure must be rejected: {d:?}"
-            );
-        }
-        // Differing policy rejects too.
-        assert!(matches!(
-            pin_admit_decision([0x11; 32], [0x9B; 32], &base, Some(&cur)),
-            PinAdmitDecision::Reject(_)
         ));
     }
 }

@@ -29,7 +29,9 @@ pub fn token_decimals(token_id: &str) -> Result<u32, String> {
         "ERA" => dsm::core::token::era_policy::era_policy()
             .map(|era| era.decimals)
             .map_err(|e| e.to_string()),
-        "DBTC" | "BTC" => Ok(8),
+        // dBTC is built in: one unit is one satoshi. A token a device creates may carry no
+        // built-in ticker, and "BTC" is not one, so it is read from the registry like any other.
+        "DBTC" => Ok(8),
         _ => crate::storage::client_db::token_registry::get_token_by_ticker(&canonical)
             .map_err(|e| format!("token registry unreadable for {canonical}: {e}"))?
             .map(|row| row.decimals)
@@ -224,7 +226,7 @@ pub(crate) fn enrich_balance_metadata(
             reply.decimals = 8;
             reply.token_name = "dBTC".to_string();
             reply.display_amount = format_base_units_for_display(reply.available, 8);
-            if let Some(c) = crate::policy::builtin_policy_commit("dBTC") {
+            if let Some(c) = dsm::core::token::builtin_policy_commit_for_token("dBTC") {
                 set_anchor_and_offline(reply, &c, offline_of);
             }
             reply.protocol_defined = true;
@@ -573,10 +575,12 @@ pub(crate) fn wallet_amount(
 /// item 4).
 pub(crate) fn encode_offline_transfer_operation_canonical(
     to_device_id: &[u8; 32],
+    to_genesis: &[u8; 32],
     amount: u64,
     token_id: &str,
     memo: &str,
     policy_commit: &[u8; 32],
+    token_policy: Vec<u8>,
 ) -> (Vec<u8>, dsm::types::operations::TransferTerms) {
     // Offline mode is HARD-REQUIRED to be chip-attested ("offline = chips"):
     // the canonical offline-bearer authority policy rides on the transfer so
@@ -595,9 +599,11 @@ pub(crate) fn encode_offline_transfer_operation_canonical(
     );
     let operation = dsm::types::operations::Operation::Transfer {
         to_device_id: to_device_id.to_vec(),
+        to_genesis: *to_genesis,
         amount: dsm::types::token_types::Balance::amount(amount),
         policy_commit: *policy_commit,
         terms_commitment: terms.commitment(),
+        token_policy,
         signature: Vec::new(),
         authority_policy: Some(policy),
     };
@@ -664,34 +670,14 @@ impl AppRouterImpl {
 
             // -------- wallet.history --------
             "wallet.history" => {
-                // Require ArgPack(codec=PROTO) with body = [limit_le_u64 | offset_le_u64].
-                let (limit, offset): (Option<usize>, Option<usize>) =
-                    match generated::ArgPack::decode(&*q.params) {
-                        Ok(pack) if pack.codec == generated::Codec::Proto as i32 => {
-                            if pack.body.len() >= 16 {
-                                let mut l = [0u8; 8];
-                                l.copy_from_slice(&pack.body[0..8]);
-                                let mut o = [0u8; 8];
-                                o.copy_from_slice(&pack.body[8..16]);
-                                (
-                                    Some(u64::from_le_bytes(l) as usize),
-                                    Some(u64::from_le_bytes(o) as usize),
-                                )
-                            } else {
-                                (None, None)
-                            }
-                        }
-                        _ => return err("wallet.history: expected ArgPack(codec=PROTO)".into()),
-                    };
-
                 let my_device_id_str =
                     crate::util::text_id::encode_base32_crockford(&self.device_id_bytes);
 
                 // CRITICAL: Read from SQLite client_db - this is where bilateral transfers store transactions
                 let sqlite_txs = match crate::storage::client_db::get_transaction_history(
                     Some(&my_device_id_str),
-                    limit,
-                    offset,
+                    None,
+                    None,
                 ) {
                     Ok(txs) => txs,
                     Err(e) => return err(format!("wallet.history: history unreadable: {e}")),
@@ -705,10 +691,9 @@ impl AppRouterImpl {
                 );
                 for (i, t) in sqlite_txs.iter().enumerate().take(3) {
                     log::info!(
-                        "[wallet.history] tx[{}]: id={}, amount={}, tx_type={}",
+                        "[wallet.history] tx[{}]: id={}, tx_type={}",
                         i,
                         t.tx_id,
-                        t.amount,
                         t.tx_type
                     );
                 }
@@ -816,6 +801,14 @@ impl AppRouterImpl {
                 }
             }
 
+            // -------- wallet.pendingOffline --------
+            "wallet.pendingOffline" => match pending_offline_value() {
+                Ok(reply) => pack_envelope_ok(
+                    generated::envelope::Payload::PendingOfflineValueResponse(reply),
+                ),
+                Err(e) => err(format!("wallet.pendingOffline: {e}")),
+            },
+
             _ => err(format!("unknown wallet query path: {}", q.path)),
         }
     }
@@ -848,6 +841,31 @@ impl AppRouterImpl {
                         )
                     }
                 };
+                // The payment names its recipient's genesis beside its device id,
+                // under the signature (SA-133): the genesis the contact pinned.
+                let counterparty_genesis: [u8; 32] =
+                    match crate::storage::client_db::get_contact_by_device_id(
+                        &counterparty_device_id,
+                    ) {
+                        Ok(Some(contact)) => match contact.genesis_hash.as_slice().try_into() {
+                            Ok(genesis) => genesis,
+                            Err(e) => {
+                                return err(format!(
+                                    "wallet.sendOffline: the contact's genesis: {e}"
+                                ))
+                            }
+                        },
+                        Ok(None) => {
+                            return err(
+                                "wallet.sendOffline: the counterparty is not a contact".into()
+                            )
+                        }
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: the counterparty's contact: {e}"
+                            ))
+                        }
+                    };
                 // The counterparty's device id routes the prepare. Where its
                 // appliance was last seen over BLE — the address its contact
                 // holds, else the one its identity was seen at this session — is
@@ -888,23 +906,28 @@ impl AppRouterImpl {
                         Ok(amount) => amount,
                         Err(e) => return err(format!("wallet.sendOffline: invalid amount: {e}")),
                     };
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => {
-                        return err(format!(
-                            "wallet.sendOffline: policy_commit resolve failed: {e}"
-                        ))
-                    }
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => {
+                            return err(format!(
+                                "wallet.sendOffline: policy_commit resolve failed: {e}"
+                            ))
+                        }
+                    };
+                let token_policy =
+                    match crate::sdk::economic_registers::carried_token_policy(&policy_commit) {
+                        Ok(bytes) => bytes,
+                        Err(e) => return err(format!("wallet.sendOffline: {e}")),
+                    };
                 let (operation_bytes, transfer_terms) = encode_offline_transfer_operation_canonical(
                     &counterparty_device_id,
+                    &counterparty_genesis,
                     transfer_amount,
                     &token_id,
                     req.memo.trim(),
                     &policy_commit,
+                    token_policy,
                 );
                 let operation =
                     match dsm::types::operations::Operation::from_bytes(&operation_bytes) {
@@ -921,7 +944,7 @@ impl AppRouterImpl {
                     return err(format!("wallet.sendOffline: {e}"));
                 }
 
-                #[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+                #[cfg(feature = "bluetooth")]
                 {
                     // The live BLE stack carries the step; `init_dsm_sdk` builds it
                     // once the identity exists, and nothing builds a second one.
@@ -1017,51 +1040,34 @@ impl AppRouterImpl {
                         }
                     };
 
-                    use crate::jni::jni_common::get_java_vm_borrowed;
                     // From here the proposal is prepared and its prepare is owed:
                     // a send that does not complete fails nothing, and the prepare
-                    // is sent again when the link returns.
-                    let vm = match get_java_vm_borrowed() {
-                        Some(vm) => vm,
-                        None => {
-                            return err(
-                                "wallet.sendOffline: Java VM unavailable for BLE dispatch; the \
-                                 prepare is sent when the link returns"
-                                    .into(),
-                            );
-                        }
-                    };
-                    // JNI AttachGuard is !Send — do all JNI work in a sync block,
-                    // drop the guard, THEN handle errors with async.
-                    //
-                    // Send the bilateral prepare chunks via the single BLE dispatch path.
-                    let ble_send_result: Result<bool, String> = (|| {
-                        let mut jni_env = vm.attach_current_thread().map_err(|e| {
-                            format!("wallet.sendOffline: attach_current_thread failed: {e}")
-                        })?;
-                        crate::jni::unified_protobuf_bridge::send_ble_chunks_via_unified(
-                            &mut jni_env,
+                    // is sent again when the link returns. The chunks go on the
+                    // one BLE dispatch path: sealed on the link Rust chose, written
+                    // by the host.
+                    let ble_send_result: Result<crate::host::Delivery, String> =
+                        crate::bluetooth::radio_link::send_to_contact(
                             &counterparty_device_id,
                             address_hint.as_deref(),
                             &chunks,
                         )
-                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"))
-                    })();
-                    // jni_env is dropped here — safe to .await below
-                    if !matches!(ble_send_result, Ok(true)) {
+                        .map_err(|e| format!("wallet.sendOffline: BLE dispatch failed: {e}"));
+                    if !matches!(ble_send_result, Ok(crate::host::Delivery::Sent)) {
                         crate::bluetooth::owed_frame_driver::kick();
                     }
                     match ble_send_result {
-                        Ok(true) => crate::bluetooth::owed_frame_driver::delivered(
-                            counterparty_device_id,
-                            &[(
-                                commitment_hash,
-                                crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
-                            )],
-                        ),
-                        Ok(false) => {
+                        Ok(crate::host::Delivery::Sent) => {
+                            crate::bluetooth::owed_frame_driver::delivered(
+                                counterparty_device_id,
+                                &[(
+                                    commitment_hash,
+                                    crate::bluetooth::bilateral_session::OfflineFrameKind::Prepare,
+                                )],
+                            )
+                        }
+                        Ok(crate::host::Delivery::NotNow) => {
                             return err(
-                                "wallet.sendOffline: BLE bridge rejected the prepared chunks; the \
+                                "wallet.sendOffline: no paired link to the counterparty now; the \
                                  prepare is sent again when the link returns"
                                     .into(),
                             );
@@ -1090,10 +1096,10 @@ impl AppRouterImpl {
                     ))
                 }
 
-                #[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
+                #[cfg(not(feature = "bluetooth"))]
                 {
                     let _ = (counterparty_device_id, address_hint, operation);
-                    err("wallet.sendOffline is only available on Android BLE builds".into())
+                    err("wallet.sendOffline is only available on a build with the bluetooth feature".into())
                 }
             }
 
@@ -1138,13 +1144,11 @@ impl AppRouterImpl {
                 if token_id.is_empty() {
                     return err("wallet.sendSmart: the request names no token".into());
                 }
-                let policy_commit = match self
-                    .core_sdk
-                    .resolve_policy_commit_strict(token_id.as_bytes())
-                {
-                    Ok(pc) => pc,
-                    Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
-                };
+                let policy_commit =
+                    match crate::policy::resolve_policy_commit_strict(token_id.as_bytes()) {
+                        Ok(pc) => pc,
+                        Err(e) => return err(format!("wallet.sendSmart: {token_id}: {e}")),
+                    };
                 let token_decimals = match token_of_commit(&policy_commit) {
                     Ok((_, d)) => d,
                     Err(e) => return err(format!("wallet.sendSmart: {e}")),
@@ -1169,6 +1173,42 @@ impl AppRouterImpl {
             _ => err(format!("unknown wallet invoke method: {}", i.method)),
         }
     }
+}
+
+/// Every payment received offline and not yet settled, oldest first, each
+/// with its token's ticker and decimals and its payer as this device names it
+/// (owner ruling, 2026-10-28: "Show it separately from spendable balance,
+/// including asset, amount and pending-settlement status. It must not
+/// contribute to either spendable online funds or offline allocation.").
+///
+/// The value is read from the receipts held pending (§6.103), the rows
+/// `balance.list` never reads: it settles online once the payer's return
+/// online exposes its signed spend chain, and only then is it a balance.
+pub(crate) fn pending_offline_value() -> Result<generated::PendingOfflineValueResponse, String> {
+    let pending = crate::storage::client_db::offline_receipts::pending_offline_receipts()
+        .map_err(|e| format!("the receipts held pending are unreadable: {e}"))?;
+    let aliases = contact_aliases()?;
+    let receipts = pending
+        .into_iter()
+        .map(|receipt| {
+            let (ticker, decimals) = token_of_commit(&receipt.asset)?;
+            let payer_b32 = crate::util::text_id::encode_base32_crockford(&receipt.payer_device);
+            let payer = match aliases.get(&payer_b32) {
+                Some(alias) if !alias.is_empty() => alias.clone(),
+                _ => payer_b32,
+            };
+            Ok(generated::PendingOfflineReceiptView {
+                asset: receipt.asset.to_vec(),
+                ticker,
+                decimals,
+                base_units: receipt.amount,
+                display_amount: format_base_units_for_display(receipt.amount, decimals),
+                payer,
+                release_message: receipt.release_message.to_vec(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(generated::PendingOfflineValueResponse { receipts })
 }
 
 /// This device's contacts' aliases by device id (Base32), for naming a
@@ -1740,10 +1780,12 @@ mod tests {
         let to_device_id = [0xabu8; 32];
         let (bytes, terms) = encode_offline_transfer_operation_canonical(
             &to_device_id,
+            &[0x6E; 32],
             42,
             "DBTC",
             "memo",
             &[0u8; 32],
+            vec![0x0A; 40],
         );
 
         let op = Operation::from_bytes(&bytes).expect("transfer op should decode");
@@ -1897,6 +1939,28 @@ mod tests {
     /// A created token's facts are its committed policy's, read from bytes
     /// verified against the anchor: the supply in display units, what holders
     /// may do, the icon.
+    /// A token a device created under the ticker BTC is scaled by its own registered decimals,
+    /// never by the built-in dBTC's.
+    #[test]
+    #[serial_test::serial]
+    fn a_created_token_named_btc_takes_its_own_decimals() {
+        fresh_db();
+        crate::storage::client_db::token_registry::insert_token(
+            &crate::storage::client_db::token_registry::TokenRegistryRow {
+                token_id: "token-BTC".to_string(),
+                policy_commit: [0x42; 32],
+                ticker: "BTC".to_string(),
+                alias: "BTC token".to_string(),
+                decimals: 2,
+                genesis_supply: 1_000,
+                creator_device_id: [0x22; 32],
+            },
+        )
+        .expect("the token is registered");
+        assert_eq!(token_decimals("BTC"), Ok(2));
+        assert_eq!(token_decimals("dBTC"), Ok(8));
+    }
+
     #[test]
     #[serial_test::serial]
     fn a_registered_token_reports_its_policy_supply_and_permissions() {
@@ -1986,24 +2050,15 @@ mod history_tests {
     use crate::handlers::app_router_impl::AppRouterImpl;
     use crate::storage::client_db::{store_transaction, TransactionRecord};
     use dsm::types::proto as generated;
-    use prost::Message;
 
-    /// `wallet.history` as the frontend asks for it: limit 16, offset 0.
+    /// `wallet.history` as the frontend asks for it: with no argument.
     async fn history_of(
         router: &AppRouterImpl,
     ) -> Result<generated::WalletHistoryResponse, String> {
-        let mut body = Vec::with_capacity(16);
-        body.extend_from_slice(&16u64.to_le_bytes());
-        body.extend_from_slice(&0u64.to_le_bytes());
         let answer = router
             .query(AppQuery {
                 path: "wallet.history".to_string(),
-                params: generated::ArgPack {
-                    codec: generated::Codec::Proto as i32,
-                    body,
-                    ..Default::default()
-                }
-                .encode_to_vec(),
+                params: Vec::new(),
             })
             .await;
         if !answer.success {
@@ -2086,7 +2141,7 @@ mod history_tests {
         let me = crate::util::text_id::encode_base32_crockford(&device.router.device_id_bytes);
         let peer_id = [0x76u8; 32];
         let peer = crate::util::text_id::encode_base32_crockford(&peer_id);
-        let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+        let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
         // The nonce the sender's send derives (§4.1), over the relationship.
         let relationship = dsm::core::bilateral_transaction_manager::compute_smt_key(
             &peer_id,
@@ -2105,8 +2160,10 @@ mod history_tests {
         );
         let unsigned = Operation::Transfer {
             to_device_id: device.router.device_id_bytes.to_vec(),
+            to_genesis: [0x6E; 32],
             amount: dsm::types::token_types::Balance::amount(100),
             policy_commit: era,
+            token_policy: dsm::core::token::era_policy::era_policy_bytes().to_vec(),
             terms_commitment: terms.commitment(),
             signature: Vec::new(),
             authority_policy: None,
@@ -2332,8 +2389,10 @@ mod send_offline_tests {
 
         // A host build has no BLE: the send stops only at the dispatch, past
         // the relationship's send status, the token, the amount and its policy.
-        let host_dispatch =
-            Err("wallet.sendOffline is only available on Android BLE builds".to_string());
+        let host_dispatch = Err(
+            "wallet.sendOffline is only available on a build with the bluetooth feature"
+                .to_string(),
+        );
         assert_eq!(send_offline(&device.router, peer).await, host_dispatch);
 
         update_contact_ble_status(&peer, None, Some("AA:BB:CC:DD:EE:FF"))

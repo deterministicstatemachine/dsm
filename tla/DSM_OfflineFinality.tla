@@ -42,7 +42,11 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
       signed rejection; a confirmed step answers a repeated response with its
       confirm and a cancelled one with its cancellation; a committed step
       answers a repeated confirm with its ack (the lost ack,
-      answer_committed_confirm).
+      answer_committed_confirm). A device told that a step ended keeps the
+      counterparty's signed rejection or cancellation as the step's terminal
+      record, in place of the frame it owed, and answers the step's frames
+      delivered again with it (owner ruling, 2026-09-26). The other side
+      takes back its own signature as no rejection of anything.
     * A step ends without committing only on a signed rejection (the
       receiver's), a signed cancellation (the proposer's, and only before
       its confirm), or invalid evidence. Never on time.
@@ -72,11 +76,11 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
                                   takes the peer's proposal. Two proposals
                                   that cross each commit on its receiver: two
                                   successors of one tip -> NoFork
-    SenderCommitsAtRelease        TRUE for an offline-bearer step (the code's
-                                  value-moving steps): the proposer commits as
-                                  it confirms. FALSE: it commits on the ack
-                                  (DSM_OfflineFinality_CommitOnAck.cfg, the
-                                  code's steps that move no value).
+    SenderCommitsAtRelease        TRUE: the code's order. Every offline step
+                                  is an offline-bearer transfer (the offline
+                                  door, MR-DSM-0219), and its proposer commits
+                                  as it confirms. FALSE: it commits on the
+                                  ack, an order no step of the code takes.
     ConfirmOwedWithCommit         FALSE: the proposer's commit and its owed
                                   confirm are not one write; it commits and
                                   restarts still Prepared, then cancels. Its
@@ -201,6 +205,9 @@ RecvPrepare(s) ==
          [] phase[r][s] = "Rejected" ->
               /\ Answer(m, "reject")
               /\ UNCHANGED phase
+         [] phase[r][s] = "Ended" ->
+              /\ Answer(m, "cancel")
+              /\ UNCHANGED phase
          [] phase[r][s] = "None" /\ ReceiverRefusesWhileInFlight /\ InFlight(r) ->
               /\ phase' = [phase EXCEPT ![r][s] = "Rejected"]
               /\ Answer(m, "reject")
@@ -268,6 +275,9 @@ RecvResponse(s) ==
               /\ UNCHANGED <<chain, phase>>
          [] phase[p][s] = "Rejected" ->
               /\ Answer(m, "cancel")
+              /\ UNCHANGED <<chain, phase>>
+         [] phase[p][s] = "Ended" ->
+              /\ Answer(m, "reject")
               /\ UNCHANGED <<chain, phase>>
          [] OTHER ->
               /\ Consume(m)

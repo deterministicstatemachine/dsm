@@ -48,6 +48,9 @@ pub mod devtree;
 pub mod genesis;
 pub mod state;
 
+#[cfg(test)]
+mod every_class_tests;
+
 pub use decode::{
     decode_delegation, decode_genesis_params, decode_transition, decode_vault_state, DecodeError,
 };
@@ -138,6 +141,11 @@ pub mod class {
     pub const OFFLINE_LOAD_BOUNDARY_BODY: u16 = 0x002A;
     /// `0x002B` — an offline unload boundary body.
     pub const OFFLINE_UNLOAD_BOUNDARY_BODY: u16 = 0x002B;
+    /// `0x002C` — an offline settlement body: a receiver's admission of value
+    /// it received offline, funded by the payer's spend its online history
+    /// exposed (SA-91). Promoted from reserved (`OFFLINE_SPEND_STEP_EVIDENCE`)
+    /// with its field table.
+    pub const OFFLINE_SETTLEMENT_BODY: u16 = 0x002C;
 
     // ── SoFi v8: the unilateral trader operation ────────────────────────
     //
@@ -173,9 +181,6 @@ pub mod class {
     pub const SOFI_REF_SETUP: u16 = 0x0040;
     /// `𝒞_E^pre` — the canonical pre-E validation closure index (lives in `B°`).
     pub const SOFI_PRE_E_CLOSURE_INDEX: u16 = 0x0041;
-    /// `PolicyFulfillmentAuxRef` — a content-addressed auxiliary evidence
-    /// candidate. Never an identity field, never a singleton slot.
-    pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
     /// `Γ` — the canonical route-leg set folded into a route E.
     pub const SOFI_ROUTE_LEG_SET: u16 = 0x004A;
 
@@ -321,6 +326,10 @@ pub mod class {
     /// peaks of the append-only tree whose leaf `g` is `R_g` (SoFi
     /// Amendment S26).
     pub const SOFI_VAULT_HISTORY_HEAD: u16 = 0x0074;
+    /// `0x0076` — what a reader found an owner baseline to contradict in its
+    /// vault's history: the genesis leaf, the frontier's own root, or one
+    /// step (SoFi Amendment S34).
+    pub const SOFI_VAULT_BASELINE_CONTRADICTION: u16 = 0x0076;
 }
 
 /// Discriminants **allocated but not encodable** — see [`class`] for the ones
@@ -342,7 +351,6 @@ pub mod class {
 /// it. Reaching into `reserved` from a `CcbObject` impl is caught by
 /// `reserved_classes_have_no_encoder`.
 pub mod reserved {
-    pub const OFFLINE_SPEND_STEP_EVIDENCE: u16 = 0x002C;
     pub const OFFLINE_BRANCH_EVIDENCE: u16 = 0x002D;
     pub const PORTABLE_ANCHOR_ENROLLMENT_BODY: u16 = 0x002E;
     pub const PORTABLE_HARDWARE_ENROLLMENT_BODY: u16 = 0x002F;
@@ -350,7 +358,6 @@ pub mod reserved {
     /// Every reserved discriminant, so the set can be asserted against rather
     /// than restated.
     pub const ALL: &[u16] = &[
-        OFFLINE_SPEND_STEP_EVIDENCE,
         OFFLINE_BRANCH_EVIDENCE,
         PORTABLE_ANCHOR_ENROLLMENT_BODY,
         PORTABLE_HARDWARE_ENROLLMENT_BODY,
@@ -381,11 +388,18 @@ pub mod declared_unencoded {
     pub const TRADE_DIGEST: u16 = 0x0012;
     /// §5.8.
     pub const REFERENCE_WINDOW: u16 = 0x0013;
+    /// SoFi §36's `PolicyFulfillmentAuxRef`, a content-addressed auxiliary
+    /// evidence candidate's reference. The auxiliary-candidate mechanism is
+    /// out of beta (owner, 2026-09-23, the rest of G8), so it has no encoder;
+    /// the class stays one no pre-E closure may name, since auxiliary
+    /// evidence depends on E.
+    pub const SOFI_POLICY_FULFILLMENT_AUX_REF: u16 = 0x0042;
     pub const ALL: &[u16] = &[
         FULFILLMENT_MECHANISM,
         MARKET_BOUNDS,
         TRADE_DIGEST,
         REFERENCE_WINDOW,
+        SOFI_POLICY_FULFILLMENT_AUX_REF,
     ];
 
     pub fn is_declared_unencoded(object_class: u16) -> bool {
@@ -526,6 +540,25 @@ pub mod schema {
     /// silent divergence §2.8 exists to prevent, and it is why a bump
     /// propagates upward through every enclosing object.
     pub const BURNED: &[(u16, u16)] = &[
+        // Schema 1 of the offline boundary bodies carried no ancestry: nothing
+        // tied the account a boundary started from to the one the boundary
+        // before it left, nor named the anchor its bundle commits. Schema 2
+        // carries both, and the spends since the last boundary.
+        (super::class::OFFLINE_LOAD_BOUNDARY_BODY, 1),
+        (super::class::OFFLINE_UNLOAD_BOUNDARY_BODY, 1),
+        // Schema 1 of the offline settlement did not carry the transfer its
+        // payment was, so it named its recipient by device id alone. Schema 2
+        // carries it, re-hashed to the payload the anchor signed (SA-133).
+        (super::class::OFFLINE_SETTLEMENT_BODY, 1),
+        // Schema 1 of the computed-escrow objects nested a table with no start
+        // commitments, so nothing fixed either side's start entropy at lock and
+        // a program's randomness was chosen by whoever supplied a key second.
+        // Schema 2 commits both in the table, and the Start and the transcript
+        // outcome open them (SoFi Amendment S33, SA-140).
+        (super::class::ESCROW_COMPUTED_TERMS, 1),
+        (super::class::ESCROW_TRANSCRIPT_OUTCOME, 1),
+        (super::class::ESCROW_EQUIVOCATION_PROOF, 1),
+        (super::class::ESCROW_MATCH_START, 1),
         // Schema 1 had no arm for an offline unload's credit, so an unload
         // could not be witnessed at all. Schema 2 adds `0x0075`; the source
         // sequence of schema 1 bytes is not that of schema 2.
@@ -680,6 +713,9 @@ pub enum CcbError {
     /// One transition introduces more direct external provenance references
     /// than `MAX_PROVENANCE_FANOUT` (SoFi §18.4). A known bound violation.
     ProvenanceFanoutExceeded { count: usize, max: usize },
+    /// An offline boundary body of a kind that is no boundary of the
+    /// device's own offline account: a settlement has a body of its own.
+    NotAnOfflineAccountBoundary,
 }
 
 impl core::fmt::Display for CcbError {
@@ -799,6 +835,10 @@ impl core::fmt::Display for CcbError {
                 f,
                 "economic admission: the transition introduces {count} direct external \
                  provenance references, more than the bound of {max}"
+            ),
+            CcbError::NotAnOfflineAccountBoundary => write!(
+                f,
+                "an offline boundary body is a load or an unload of the device's own account"
             ),
         }
     }

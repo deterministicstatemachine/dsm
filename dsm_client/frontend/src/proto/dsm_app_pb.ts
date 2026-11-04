@@ -1217,16 +1217,6 @@ export enum SdkEventKind {
   CONTACT_BLE_UPDATED = 12,
 
   /**
-   * @generated from enum value: SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
-   */
-  NFC_RECOVERY_CAPSULE = 13,
-
-  /**
-   * @generated from enum value: SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
-   */
-  NFC_BACKUP_WRITTEN = 14,
-
-  /**
    * @generated from enum value: SDK_EVENT_KIND_BRIDGE_READY = 15;
    */
   BRIDGE_READY = 15,
@@ -1250,8 +1240,6 @@ proto3.util.setEnumType(SdkEventKind, "dsm.SdkEventKind", [
   { no: 10, name: "SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS" },
   { no: 11, name: "SDK_EVENT_KIND_DETERMINISTIC_SAFETY" },
   { no: 12, name: "SDK_EVENT_KIND_CONTACT_BLE_UPDATED" },
-  { no: 13, name: "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE" },
-  { no: 14, name: "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN" },
   { no: 15, name: "SDK_EVENT_KIND_BRIDGE_READY" },
   { no: 16, name: "SDK_EVENT_KIND_CANONICAL_ENVELOPE" },
 ]);
@@ -1285,31 +1273,9 @@ export enum NativeHostRequestKind {
   HOST_CONTROL_QR_STOP_SCAN = 3,
 
   /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
-   */
-  HOST_CONTROL_NFC_READER_START = 8,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
-   */
-  HOST_CONTROL_NFC_READER_STOP = 9,
-
-  /**
    * @generated from enum value: NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
    */
   HOST_CONTROL_PERMISSIONS_REQUEST = 10,
-
-  /**
-   * platform_primitive.*
-   *
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
-   */
-  PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
-   */
-  PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106,
 }
 // Retrieve enum metadata with: proto3.getEnumType(NativeHostRequestKind)
 proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
@@ -1317,11 +1283,7 @@ proto3.util.setEnumType(NativeHostRequestKind, "dsm.NativeHostRequestKind", [
   { no: 1, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_CAPABILITIES_GET" },
   { no: 2, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_START_SCAN" },
   { no: 3, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_QR_STOP_SCAN" },
-  { no: 8, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START" },
-  { no: 9, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP" },
   { no: 10, name: "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST" },
-  { no: 105, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD" },
-  { no: 106, name: "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD" },
 ]);
 
 /**
@@ -1337,16 +1299,6 @@ export enum NativeHostEventKind {
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT = 1;
    */
   QR_SCAN_RESULT = 1,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
-   */
-  NFC_TAG_READ = 4,
-
-  /**
-   * @generated from enum value: NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
-   */
-  NFC_TAG_WRITE = 5,
 
   /**
    * @generated from enum value: NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
@@ -1365,8 +1317,6 @@ export enum NativeHostEventKind {
 proto3.util.setEnumType(NativeHostEventKind, "dsm.NativeHostEventKind", [
   { no: 0, name: "NATIVE_HOST_EVENT_KIND_UNSPECIFIED" },
   { no: 1, name: "NATIVE_HOST_EVENT_KIND_QR_SCAN_RESULT" },
-  { no: 4, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ" },
-  { no: 5, name: "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE" },
   { no: 6, name: "NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT" },
   { no: 7, name: "NATIVE_HOST_EVENT_KIND_PHONE_CONTACT_PICKED" },
 ]);
@@ -1647,6 +1597,13 @@ export enum ConnectFact {
   DUEL_WITHDRAWN = 8,
 
   /**
+   * the session's wallet signed exactly the statement asked, after approval on its device
+   *
+   * @generated from enum value: CONNECT_FACT_SIGNED = 10;
+   */
+  SIGNED = 10,
+
+  /**
    * an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
    *
    * @generated from enum value: CONNECT_FACT_DUEL_SETTLED = 9;
@@ -1664,6 +1621,7 @@ proto3.util.setEnumType(ConnectFact, "dsm.ConnectFact", [
   { no: 6, name: "CONNECT_FACT_DUEL_LOCKED" },
   { no: 7, name: "CONNECT_FACT_DUEL_STARTED" },
   { no: 8, name: "CONNECT_FACT_DUEL_WITHDRAWN" },
+  { no: 10, name: "CONNECT_FACT_SIGNED" },
   { no: 9, name: "CONNECT_FACT_DUEL_SETTLED" },
 ]);
 
@@ -8663,7 +8621,10 @@ export class AuthorityEvidenceV1 extends Message<AuthorityEvidenceV1> {
  * chain, so the acceptance bundle references each side's predecessor by
  * signer identity through these objects. `prior_step_addr` absent means
  * relationship genesis: the expected certifying key is the signer's
- * P0-P6-proven AK.
+ * P0-P6-proven AK. A step's authority is either the previous key's
+ * certificate or, for a restart (DSM Amendment A20), both devices' AK
+ * signatures over one restart statement; a restart's `h_n` is the agreed
+ * accepted tip and its `prior_step_addr` is the step it continues.
  *
  * @generated from message dsm.EkCertStepV1
  */
@@ -8674,11 +8635,23 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   ekPk = new Uint8Array(0);
 
   /**
-   * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
-   *
-   * @generated from field: bytes ek_cert = 2;
+   * @generated from oneof dsm.EkCertStepV1.authority
    */
-  ekCert = new Uint8Array(0);
+  authority: {
+    /**
+     * Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+     *
+     * @generated from field: bytes ek_cert = 2;
+     */
+    value: Uint8Array;
+    case: "ekCert";
+  } | {
+    /**
+     * @generated from field: dsm.CertRestartV1 restart = 5;
+     */
+    value: CertRestartV1;
+    case: "restart";
+  } | { case: undefined; value?: undefined } = { case: undefined };
 
   /**
    * @generated from field: bytes h_n = 3;
@@ -8699,7 +8672,8 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
   static readonly typeName = "dsm.EkCertStepV1";
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "ek_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ek_cert", kind: "scalar", T: 12 /* ScalarType.BYTES */, oneof: "authority" },
+    { no: 5, name: "restart", kind: "message", T: CertRestartV1, oneof: "authority" },
     { no: 3, name: "h_n", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "prior_step_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */, opt: true },
   ]);
@@ -8718,6 +8692,68 @@ export class EkCertStepV1 extends Message<EkCertStepV1> {
 
   static equals(a: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined, b: EkCertStepV1 | PlainMessage<EkCertStepV1> | undefined): boolean {
     return proto3.util.equals(EkCertStepV1, a, b);
+  }
+}
+
+/**
+ * The authority of a restart step (DSM Amendment A20): the epoch, the
+ * preserved acceptance commitment of the agreed accepted step, and both
+ * devices' AK signatures over
+ * H(DSM/cert-restart/v1 ‖ relationship ‖ predecessor ‖ agreed tip ‖ epoch ‖
+ * commitment ‖ new key). The relationship is the two devices' own; the
+ * predecessor, agreed tip and new key are the step's own fields.
+ *
+ * @generated from message dsm.CertRestartV1
+ */
+export class CertRestartV1 extends Message<CertRestartV1> {
+  /**
+   * @generated from field: uint64 epoch = 1;
+   */
+  epoch = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes preserved_acceptance_commitment = 2;
+   */
+  preservedAcceptanceCommitment = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes restarting_sig = 3;
+   */
+  restartingSig = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes counterparty_sig = 4;
+   */
+  counterpartySig = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<CertRestartV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.CertRestartV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "epoch", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "preserved_acceptance_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "restarting_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "counterparty_sig", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): CertRestartV1 {
+    return new CertRestartV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: CertRestartV1 | PlainMessage<CertRestartV1> | undefined, b: CertRestartV1 | PlainMessage<CertRestartV1> | undefined): boolean {
+    return proto3.util.equals(CertRestartV1, a, b);
   }
 }
 
@@ -9286,6 +9322,15 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
    */
   claimantAttA = new Uint8Array(0);
 
+  /**
+   * The claimant's own signed directory entry (DeviceDirectoryEntryV1 bytes):
+   * its bytes prove the AK, under the recipient genesis, by P0-P6, and so
+   * decide the claimant's entitlement at the cell (SA-63).
+   *
+   * @generated from field: bytes claimant_directory_entry = 3;
+   */
+  claimantDirectoryEntry = new Uint8Array(0);
+
   constructor(data?: PartialMessage<FaucetClaimantRecipientV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -9296,6 +9341,7 @@ export class FaucetClaimantRecipientV1 extends Message<FaucetClaimantRecipientV1
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "claimant_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "claimant_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "claimant_directory_entry", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): FaucetClaimantRecipientV1 {
@@ -11788,6 +11834,14 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
    */
   pkChip = new Uint8Array(0);
 
+  /**
+   * The public birth commitment S_birth B commits: with the keys above, the sender's pinned
+   * online key and its device id, the receiver recomputes B from what is disclosed.
+   *
+   * @generated from field: bytes birth_commitment = 10;
+   */
+  birthCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AnchorDisclosure>) {
     super();
     proto3.util.initPartial(data, this);
@@ -11802,6 +11856,7 @@ export class AnchorDisclosure extends Message<AnchorDisclosure> {
     { no: 4, name: "partition_pk", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "policy_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "pk_chip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 10, name: "birth_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AnchorDisclosure {
@@ -12505,7 +12560,7 @@ export class BilateralCommitResponse extends Message<BilateralCommitResponse> {
   /**
    * §11.1 receiver counter-sign: receiver's locally-built copy of the
    * stitched receipt with B-side per-step EK signing artifacts
-   * (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+   * (ek_pk_b / ek_cert_b / sig_b) stamped on top of the
    * sender's A-side fields. Sender verifies this on receipt and persists
    * a fully co-signed copy to its own archive. This field is required for
    * offline receipt authorization.
@@ -12604,6 +12659,15 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
    */
   anchorDisclosure?: AnchorDisclosure;
 
+  /**
+   * The sender's offline spends since the boundary of its online history that left the account
+   * its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
+   * spend starts at that account.
+   *
+   * @generated from field: dsm.OfflineSpendChain offline_spend_chain = 16;
+   */
+  offlineSpendChain?: OfflineSpendChain;
+
   constructor(data?: PartialMessage<BilateralConfirmRequest>) {
     super();
     proto3.util.initPartial(data, this);
@@ -12619,6 +12683,7 @@ export class BilateralConfirmRequest extends Message<BilateralConfirmRequest> {
     { no: 8, name: "pre_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 12, name: "offline_release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 15, name: "anchor_disclosure", kind: "message", T: AnchorDisclosure },
+    { no: 16, name: "offline_spend_chain", kind: "message", T: OfflineSpendChain },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BilateralConfirmRequest {
@@ -12763,28 +12828,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
-   * deterministic Kyber coins from
-   *   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
-   *                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
-   * encapsulates against the recipient's Kyber public key, and the
-   * resulting ciphertext travels here. The recipient decapsulates with
-   * their local Kyber secret key to recover the same shared secret `ss`,
-   * then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
-   * arrive at identical k_step, which is then mixed into the per-step
-   * EK derivation alongside Smaster. Wire-only — not part of canonical
-   * commit form (§4.2.1).
-   *
-   * @generated from field: bytes kyber_ct_a = 18;
-   */
-  kyberCtA = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes kyber_ct_b = 19;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The sender's transition entropy e_{n+1} (Part VII step 3, §39.3): the one
    * value Core derived inside DeviceState::advance for this step. CANONICAL —
    * part of the commit preimage, so sig_a binds it. The recipient cannot
@@ -12827,8 +12870,6 @@ export class ReceiptCommit extends Message<ReceiptCommit> {
     { no: 15, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 16, name: "ek_pk_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 17, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 18, name: "kyber_ct_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 19, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 21, name: "transition_entropy", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 22, name: "step_writes", kind: "message", T: StepWriteSet },
   ]);
@@ -13174,6 +13215,105 @@ export class OfflineStateProof extends Message<OfflineStateProof> {
 
   static equals(a: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined, b: OfflineStateProof | PlainMessage<OfflineStateProof> | undefined): boolean {
     return proto3.util.equals(OfflineStateProof, a, b);
+  }
+}
+
+/**
+ * One offline-bearer spend of an offline account as its anchor released it: the release
+ * (dsm.anchor.OfflineRelease — Δ, Π_i, Π_{i+1} and the certificate carrying σ^chip and σ^host),
+ * the spend's account witness, and what it moved. Π_i and Π_{i+1} prove the release's device
+ * roots commit the account before and after; the witness folds the one into the other.
+ *
+ * @generated from message dsm.OfflineSpendHop
+ */
+export class OfflineSpendHop extends Message<OfflineSpendHop> {
+  /**
+   * @generated from field: bytes release = 1;
+   */
+  release = new Uint8Array(0);
+
+  /**
+   * @generated from field: dsm.StepWriteOfflineAccount spend = 2;
+   */
+  spend?: StepWriteOfflineAccount;
+
+  /**
+   * @generated from field: bytes asset = 3;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint64 amount = 4;
+   */
+  amount = protoInt64.zero;
+
+  constructor(data?: PartialMessage<OfflineSpendHop>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendHop";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "release", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "spend", kind: "message", T: StepWriteOfflineAccount },
+    { no: 3, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendHop {
+    return new OfflineSpendHop().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined, b: OfflineSpendHop | PlainMessage<OfflineSpendHop> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendHop, a, b);
+  }
+}
+
+/**
+ * An offline account's spends, in order.
+ *
+ * @generated from message dsm.OfflineSpendChain
+ */
+export class OfflineSpendChain extends Message<OfflineSpendChain> {
+  /**
+   * @generated from field: repeated dsm.OfflineSpendHop hops = 1;
+   */
+  hops: OfflineSpendHop[] = [];
+
+  constructor(data?: PartialMessage<OfflineSpendChain>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.OfflineSpendChain";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "hops", kind: "message", T: OfflineSpendHop, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): OfflineSpendChain {
+    return new OfflineSpendChain().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined, b: OfflineSpendChain | PlainMessage<OfflineSpendChain> | undefined): boolean {
+    return proto3.util.equals(OfflineSpendChain, a, b);
   }
 }
 
@@ -14053,102 +14193,8 @@ export class BlePairingRequest extends Message<BlePairingRequest> {
 }
 
 /**
- * @generated from message dsm.BlePairingAccept
- */
-export class BlePairingAccept extends Message<BlePairingAccept> {
-  /**
-   * @generated from field: string address = 1;
-   */
-  address = "";
-
-  /**
-   * @generated from field: bytes genesis_hash = 2;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 3;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BlePairingAccept>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BlePairingAccept";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BlePairingAccept {
-    return new BlePairingAccept().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BlePairingAccept | PlainMessage<BlePairingAccept> | undefined, b: BlePairingAccept | PlainMessage<BlePairingAccept> | undefined): boolean {
-    return proto3.util.equals(BlePairingAccept, a, b);
-  }
-}
-
-/**
- * Phase 3 confirmation: scanner → advertiser after receiving BlePairingAccept.
- * Neither side persists ble_address until this round-trip completes (atomic pairing).
- *
- * @generated from message dsm.BlePairingConfirm
- */
-export class BlePairingConfirm extends Message<BlePairingConfirm> {
-  /**
-   * @generated from field: string address = 1;
-   */
-  address = "";
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BlePairingConfirm>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BlePairingConfirm";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "address", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BlePairingConfirm {
-    return new BlePairingConfirm().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BlePairingConfirm | PlainMessage<BlePairingConfirm> | undefined, b: BlePairingConfirm | PlainMessage<BlePairingConfirm> | undefined): boolean {
-    return proto3.util.equals(BlePairingConfirm, a, b);
-  }
-}
-
-/**
- * Identity observed implicitly via GATT identity characteristic read (not an explicit pairing handshake)
+ * A contact the link handshake authenticated and paired at this BLE address
+ * (DSM Amendment A27): a local event for the frontend, never radio bytes.
  *
  * @generated from message dsm.BleIdentityObserved
  */
@@ -14195,124 +14241,6 @@ export class BleIdentityObserved extends Message<BleIdentityObserved> {
 
   static equals(a: BleIdentityObserved | PlainMessage<BleIdentityObserved> | undefined, b: BleIdentityObserved | PlainMessage<BleIdentityObserved> | undefined): boolean {
     return proto3.util.equals(BleIdentityObserved, a, b);
-  }
-}
-
-/**
- * Protobuf-encoded identity value carried on the BLE GATT identity characteristic
- * (UUID 8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01). Replaces raw 64-byte concatenation.
- * Kotlin MUST NOT parse or split identity bytes — all encoding/decoding is Rust-side.
- *
- * @generated from message dsm.BleIdentityCharValue
- */
-export class BleIdentityCharValue extends Message<BleIdentityCharValue> {
-  /**
-   * @generated from field: bytes genesis_hash = 1;
-   */
-  genesisHash = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes device_id = 2;
-   */
-  deviceId = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleIdentityCharValue>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleIdentityCharValue";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleIdentityCharValue {
-    return new BleIdentityCharValue().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleIdentityCharValue | PlainMessage<BleIdentityCharValue> | undefined, b: BleIdentityCharValue | PlainMessage<BleIdentityCharValue> | undefined): boolean {
-    return proto3.util.equals(BleIdentityCharValue, a, b);
-  }
-}
-
-/**
- * Response from processGattIdentityRead JNI call.
- * Rust decodes the BleIdentityCharValue from GATT, dispatches identity events, and
- * returns the write-back envelope for the peer's PAIRING characteristic.
- *
- * @generated from message dsm.BleGattIdentityReadResult
- */
-export class BleGattIdentityReadResult extends Message<BleGattIdentityReadResult> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * Framed Envelope to write to PAIRING char
-   *
-   * @generated from field: bytes write_back_envelope = 2;
-   */
-  writeBackEnvelope = new Uint8Array(0);
-
-  /**
-   * @generated from field: string error_message = 3;
-   */
-  errorMessage = "";
-
-  /**
-   * Peer's deviceId (for Kotlin identity anchoring)
-   *
-   * @generated from field: bytes peer_device_id = 4;
-   */
-  peerDeviceId = new Uint8Array(0);
-
-  /**
-   * Peer's genesisHash
-   *
-   * @generated from field: bytes peer_genesis_hash = 5;
-   */
-  peerGenesisHash = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<BleGattIdentityReadResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.BleGattIdentityReadResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "write_back_envelope", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 3, name: "error_message", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 4, name: "peer_device_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 5, name: "peer_genesis_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): BleGattIdentityReadResult {
-    return new BleGattIdentityReadResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: BleGattIdentityReadResult | PlainMessage<BleGattIdentityReadResult> | undefined, b: BleGattIdentityReadResult | PlainMessage<BleGattIdentityReadResult> | undefined): boolean {
-    return proto3.util.equals(BleGattIdentityReadResult, a, b);
   }
 }
 
@@ -14842,45 +14770,6 @@ export class BlePermissionEvent extends Message<BlePermissionEvent> {
 }
 
 /**
- * NFC recovery capsule payload — raw NdefRecord bytes wrapped in Envelope v3.
- *
- * @generated from message dsm.NfcRecoveryCapsule
- */
-export class NfcRecoveryCapsule extends Message<NfcRecoveryCapsule> {
-  /**
-   * @generated from field: bytes payload = 1;
-   */
-  payload = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<NfcRecoveryCapsule>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcRecoveryCapsule";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcRecoveryCapsule {
-    return new NfcRecoveryCapsule().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcRecoveryCapsule | PlainMessage<NfcRecoveryCapsule> | undefined, b: NfcRecoveryCapsule | PlainMessage<NfcRecoveryCapsule> | undefined): boolean {
-    return proto3.util.equals(NfcRecoveryCapsule, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.BleEvent
  */
 export class BleEvent extends Message<BleEvent> {
@@ -14957,12 +14846,6 @@ export class BleEvent extends Message<BleEvent> {
     case: "pairingRequest";
   } | {
     /**
-     * @generated from field: dsm.BlePairingAccept pairing_accept = 12;
-     */
-    value: BlePairingAccept;
-    case: "pairingAccept";
-  } | {
-    /**
      * @generated from field: dsm.BleIdentityObserved identity_observed = 13;
      */
     value: BleIdentityObserved;
@@ -14973,12 +14856,6 @@ export class BleEvent extends Message<BleEvent> {
      */
     value: PairingStatusUpdate;
     case: "pairingStatus";
-  } | {
-    /**
-     * @generated from field: dsm.BlePairingConfirm pairing_confirm = 15;
-     */
-    value: BlePairingConfirm;
-    case: "pairingConfirm";
   } | {
     /**
      * @generated from field: dsm.BlePermissionEvent ble_permission = 17;
@@ -15006,10 +14883,8 @@ export class BleEvent extends Message<BleEvent> {
     { no: 9, name: "advertising_stopped", kind: "scalar", T: 8 /* ScalarType.BOOL */, oneof: "ev" },
     { no: 10, name: "connection_failed", kind: "message", T: BleConnectionFailed, oneof: "ev" },
     { no: 11, name: "pairing_request", kind: "message", T: BlePairingRequest, oneof: "ev" },
-    { no: 12, name: "pairing_accept", kind: "message", T: BlePairingAccept, oneof: "ev" },
     { no: 13, name: "identity_observed", kind: "message", T: BleIdentityObserved, oneof: "ev" },
     { no: 14, name: "pairing_status", kind: "message", T: PairingStatusUpdate, oneof: "ev" },
-    { no: 15, name: "pairing_confirm", kind: "message", T: BlePairingConfirm, oneof: "ev" },
     { no: 17, name: "ble_permission", kind: "message", T: BlePermissionEvent, oneof: "ev" },
   ]);
 
@@ -16966,12 +16841,6 @@ export class UniversalOp extends Message<UniversalOp> {
     case: "query";
   } | {
     /**
-     * @generated from field: dsm.RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
-     */
-    value: RecoveryCapsuleDecryptRequest;
-    case: "recoveryCapsuleDecrypt";
-  } | {
-    /**
      * @generated from field: dsm.RecoveryTombstoneRequest recovery_tombstone = 23;
      */
     value: RecoveryTombstoneRequest;
@@ -17014,7 +16883,6 @@ export class UniversalOp extends Message<UniversalOp> {
     { no: 15, name: "attested_action", kind: "message", T: AttestedAction, oneof: "kind" },
     { no: 16, name: "vault", kind: "message", T: VaultOp, oneof: "kind" },
     { no: 17, name: "query", kind: "message", T: QueryOp, oneof: "kind" },
-    { no: 22, name: "recovery_capsule_decrypt", kind: "message", T: RecoveryCapsuleDecryptRequest, oneof: "kind" },
     { no: 23, name: "recovery_tombstone", kind: "message", T: RecoveryTombstoneRequest, oneof: "kind" },
     { no: 24, name: "recovery_succession", kind: "message", T: RecoverySuccessionRequest, oneof: "kind" },
     { no: 25, name: "recovery_resume", kind: "message", T: RecoveryResumeRequest, oneof: "kind" },
@@ -17621,12 +17489,6 @@ export class Envelope extends Message<Envelope> {
     case: "batchEnvelope";
   } | {
     /**
-     * @generated from field: dsm.RecoveryCapsuleDecryptResponse recovery_capsule_decrypt_response = 15;
-     */
-    value: RecoveryCapsuleDecryptResponse;
-    case: "recoveryCapsuleDecryptResponse";
-  } | {
-    /**
      * @generated from field: dsm.RecoveryTombstoneResponse recovery_tombstone_response = 16;
      */
     value: RecoveryTombstoneResponse;
@@ -18081,12 +17943,6 @@ export class Envelope extends Message<Envelope> {
     case: "sessionStateResponse";
   } | {
     /**
-     * @generated from field: dsm.NfcRecoveryCapsule nfc_recovery_capsule = 96;
-     */
-    value: NfcRecoveryCapsule;
-    case: "nfcRecoveryCapsule";
-  } | {
-    /**
      * @generated from field: dsm.TokenPolicyListResponse token_policy_list_response = 97;
      */
     value: TokenPolicyListResponse;
@@ -18299,6 +18155,14 @@ export class Envelope extends Message<Envelope> {
     case: "moneyWaitingResponse";
   } | {
     /**
+     * Reply to `wallet.pendingOffline`.
+     *
+     * @generated from field: dsm.PendingOfflineValueResponse pending_offline_value_response = 140;
+     */
+    value: PendingOfflineValueResponse;
+    case: "pendingOfflineValueResponse";
+  } | {
+    /**
      * Reply to `token.adoptionQr`.
      *
      * @generated from field: dsm.TokenAdoptionQrResponse token_adoption_qr_response = 119;
@@ -18321,7 +18185,6 @@ export class Envelope extends Message<Envelope> {
     { no: 10, name: "universal_tx", kind: "message", T: UniversalTx, oneof: "payload" },
     { no: 11, name: "universal_rx", kind: "message", T: UniversalRx, oneof: "payload" },
     { no: 12, name: "batch_envelope", kind: "message", T: BatchEnvelope, oneof: "payload" },
-    { no: 15, name: "recovery_capsule_decrypt_response", kind: "message", T: RecoveryCapsuleDecryptResponse, oneof: "payload" },
     { no: 16, name: "recovery_tombstone_response", kind: "message", T: RecoveryTombstoneResponse, oneof: "payload" },
     { no: 17, name: "recovery_succession_response", kind: "message", T: RecoverySuccessionResponse, oneof: "payload" },
     { no: 18, name: "recovery_resume_response", kind: "message", T: RecoveryResumeResponse, oneof: "payload" },
@@ -18393,7 +18256,6 @@ export class Envelope extends Message<Envelope> {
     { no: 93, name: "bitcoin_withdrawal_execute_request", kind: "message", T: BitcoinWithdrawalExecuteRequest, oneof: "payload" },
     { no: 94, name: "bitcoin_withdrawal_execute_response", kind: "message", T: BitcoinWithdrawalExecuteResponse, oneof: "payload" },
     { no: 95, name: "session_state_response", kind: "message", T: AppSessionStateProto, oneof: "payload" },
-    { no: 96, name: "nfc_recovery_capsule", kind: "message", T: NfcRecoveryCapsule, oneof: "payload" },
     { no: 97, name: "token_policy_list_response", kind: "message", T: TokenPolicyListResponse, oneof: "payload" },
     { no: 99, name: "error", kind: "message", T: Error, oneof: "payload" },
     { no: 100, name: "genesis_lifecycle", kind: "message", T: GenesisLifecycleEvent, oneof: "payload" },
@@ -18424,6 +18286,7 @@ export class Envelope extends Message<Envelope> {
     { no: 137, name: "contact_profile", kind: "message", T: ContactProfileV1, oneof: "payload" },
     { no: 138, name: "receipt_email_result", kind: "message", T: ReceiptEmailResultV1, oneof: "payload" },
     { no: 139, name: "money_waiting_response", kind: "message", T: MoneyWaitingResponse, oneof: "payload" },
+    { no: 140, name: "pending_offline_value_response", kind: "message", T: PendingOfflineValueResponse, oneof: "payload" },
     { no: 119, name: "token_adoption_qr_response", kind: "message", T: TokenAdoptionQrResponse, oneof: "payload" },
   ]);
 
@@ -20585,112 +20448,6 @@ export class ArchitectureInfoProto extends Message<ArchitectureInfoProto> {
 
   static equals(a: ArchitectureInfoProto | PlainMessage<ArchitectureInfoProto> | undefined, b: ArchitectureInfoProto | PlainMessage<ArchitectureInfoProto> | undefined): boolean {
     return proto3.util.equals(ArchitectureInfoProto, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.RecoveryCapsuleDecryptRequest
- */
-export class RecoveryCapsuleDecryptRequest extends Message<RecoveryCapsuleDecryptRequest> {
-  /**
-   * @generated from field: bytes encrypted_capsule = 1;
-   */
-  encryptedCapsule = new Uint8Array(0);
-
-  /**
-   * @generated from field: bytes mnemonic_key = 2;
-   */
-  mnemonicKey = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<RecoveryCapsuleDecryptRequest>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RecoveryCapsuleDecryptRequest";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "encrypted_capsule", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 2, name: "mnemonic_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptRequest {
-    return new RecoveryCapsuleDecryptRequest().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RecoveryCapsuleDecryptRequest | PlainMessage<RecoveryCapsuleDecryptRequest> | undefined, b: RecoveryCapsuleDecryptRequest | PlainMessage<RecoveryCapsuleDecryptRequest> | undefined): boolean {
-    return proto3.util.equals(RecoveryCapsuleDecryptRequest, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.RecoveryCapsuleDecryptResponse
- */
-export class RecoveryCapsuleDecryptResponse extends Message<RecoveryCapsuleDecryptResponse> {
-  /**
-   * @generated from field: bool success = 1;
-   */
-  success = false;
-
-  /**
-   * @generated from field: dsm.Hash32 global_root = 2;
-   */
-  globalRoot?: Hash32;
-
-  /**
-   * @generated from field: repeated dsm.ChainTip chain_tips = 3;
-   */
-  chainTips: ChainTip[] = [];
-
-  /**
-   * @generated from field: dsm.Hash32 receipt_rollup = 4;
-   */
-  receiptRollup?: Hash32;
-
-  /**
-   * version/flags/counters only
-   *
-   * @generated from field: bytes meta_data = 5;
-   */
-  metaData = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<RecoveryCapsuleDecryptResponse>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.RecoveryCapsuleDecryptResponse";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "success", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-    { no: 2, name: "global_root", kind: "message", T: Hash32 },
-    { no: 3, name: "chain_tips", kind: "message", T: ChainTip, repeated: true },
-    { no: 4, name: "receipt_rollup", kind: "message", T: Hash32 },
-    { no: 5, name: "meta_data", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): RecoveryCapsuleDecryptResponse {
-    return new RecoveryCapsuleDecryptResponse().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: RecoveryCapsuleDecryptResponse | PlainMessage<RecoveryCapsuleDecryptResponse> | undefined, b: RecoveryCapsuleDecryptResponse | PlainMessage<RecoveryCapsuleDecryptResponse> | undefined): boolean {
-    return proto3.util.equals(RecoveryCapsuleDecryptResponse, a, b);
   }
 }
 
@@ -23220,11 +22977,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
   ekPkB = new Uint8Array(0);
 
   /**
-   * @generated from field: bytes kyber_ct_b = 6;
-   */
-  kyberCtB = new Uint8Array(0);
-
-  /**
    * The recipient's own canonical relationship pair for the applied step: its
    * local lineage head before this apply (parent) and after it (child) — the
    * exact parent the recipient will sign under when IT next originates.
@@ -23270,7 +23022,6 @@ export class ReceiptCountersignB extends Message<ReceiptCountersignB> {
     { no: 3, name: "sig_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "ek_cert_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 5, name: "ek_pk_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-    { no: 6, name: "kyber_ct_b", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 7, name: "b_parent_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 8, name: "b_child_tip", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 9, name: "recipient_economic_release_addr", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
@@ -23914,6 +23665,132 @@ export class OfflineAllocationView extends Message<OfflineAllocationView> {
 
   static equals(a: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined, b: OfflineAllocationView | PlainMessage<OfflineAllocationView> | undefined): boolean {
     return proto3.util.equals(OfflineAllocationView, a, b);
+  }
+}
+
+/**
+ * One payment this device received offline and holds pending: its value
+ * settles online only once the payer's return online exposes its signed spend
+ * chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+ * the offline allocation, and nothing spends it until it settles.
+ *
+ * @generated from message dsm.PendingOfflineReceiptView
+ */
+export class PendingOfflineReceiptView extends Message<PendingOfflineReceiptView> {
+  /**
+   * The token's policy commit, and its ticker and decimals as Rust read them.
+   *
+   * @generated from field: bytes asset = 1;
+   */
+  asset = new Uint8Array(0);
+
+  /**
+   * @generated from field: string ticker = 2;
+   */
+  ticker = "";
+
+  /**
+   * @generated from field: uint32 decimals = 3;
+   */
+  decimals = 0;
+
+  /**
+   * @generated from field: uint64 base_units = 4;
+   */
+  baseUnits = protoInt64.zero;
+
+  /**
+   * Display form of `base_units`, rendered by Rust.
+   *
+   * @generated from field: string display_amount = 5;
+   */
+  displayAmount = "";
+
+  /**
+   * The paying contact's alias, or its device id in Base32 when it has none.
+   *
+   * @generated from field: string payer = 6;
+   */
+  payer = "";
+
+  /**
+   * `M`, the release message the payer's anchor signed: the receipt's id.
+   *
+   * @generated from field: bytes release_message = 7;
+   */
+  releaseMessage = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<PendingOfflineReceiptView>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineReceiptView";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "asset", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 2, name: "ticker", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 3, name: "decimals", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 4, name: "base_units", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 5, name: "display_amount", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 6, name: "payer", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 7, name: "release_message", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineReceiptView {
+    return new PendingOfflineReceiptView().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined, b: PendingOfflineReceiptView | PlainMessage<PendingOfflineReceiptView> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineReceiptView, a, b);
+  }
+}
+
+/**
+ * wallet.pendingOffline: every payment received offline and not yet settled,
+ * oldest first.
+ *
+ * @generated from message dsm.PendingOfflineValueResponse
+ */
+export class PendingOfflineValueResponse extends Message<PendingOfflineValueResponse> {
+  /**
+   * @generated from field: repeated dsm.PendingOfflineReceiptView receipts = 1;
+   */
+  receipts: PendingOfflineReceiptView[] = [];
+
+  constructor(data?: PartialMessage<PendingOfflineValueResponse>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.PendingOfflineValueResponse";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "receipts", kind: "message", T: PendingOfflineReceiptView, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): PendingOfflineValueResponse {
+    return new PendingOfflineValueResponse().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined, b: PendingOfflineValueResponse | PlainMessage<PendingOfflineValueResponse> | undefined): boolean {
+    return proto3.util.equals(PendingOfflineValueResponse, a, b);
   }
 }
 
@@ -27542,160 +27419,6 @@ export class HostPermissionsResult extends Message<HostPermissionsResult> {
 }
 
 /**
- * @generated from message dsm.NfcTagReadPayload
- */
-export class NfcTagReadPayload extends Message<NfcTagReadPayload> {
-  /**
-   * @generated from field: string mime_type = 1;
-   */
-  mimeType = "";
-
-  constructor(data?: PartialMessage<NfcTagReadPayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagReadPayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadPayload {
-    return new NfcTagReadPayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined, b: NfcTagReadPayload | PlainMessage<NfcTagReadPayload> | undefined): boolean {
-    return proto3.util.equals(NfcTagReadPayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagReadResult
- */
-export class NfcTagReadResult extends Message<NfcTagReadResult> {
-  /**
-   * @generated from field: bool reader_started = 1;
-   */
-  readerStarted = false;
-
-  constructor(data?: PartialMessage<NfcTagReadResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagReadResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "reader_started", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagReadResult {
-    return new NfcTagReadResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined, b: NfcTagReadResult | PlainMessage<NfcTagReadResult> | undefined): boolean {
-    return proto3.util.equals(NfcTagReadResult, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagWritePayload
- */
-export class NfcTagWritePayload extends Message<NfcTagWritePayload> {
-  /**
-   * @generated from field: string mime_type = 1;
-   */
-  mimeType = "";
-
-  /**
-   * @generated from field: bytes payload = 2;
-   */
-  payload = new Uint8Array(0);
-
-  constructor(data?: PartialMessage<NfcTagWritePayload>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagWritePayload";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "mime_type", kind: "scalar", T: 9 /* ScalarType.STRING */ },
-    { no: 2, name: "payload", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWritePayload {
-    return new NfcTagWritePayload().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined, b: NfcTagWritePayload | PlainMessage<NfcTagWritePayload> | undefined): boolean {
-    return proto3.util.equals(NfcTagWritePayload, a, b);
-  }
-}
-
-/**
- * @generated from message dsm.NfcTagWriteResult
- */
-export class NfcTagWriteResult extends Message<NfcTagWriteResult> {
-  /**
-   * @generated from field: bool launched = 1;
-   */
-  launched = false;
-
-  constructor(data?: PartialMessage<NfcTagWriteResult>) {
-    super();
-    proto3.util.initPartial(data, this);
-  }
-
-  static readonly runtime: typeof proto3 = proto3;
-  static readonly typeName = "dsm.NfcTagWriteResult";
-  static readonly fields: FieldList = proto3.util.newFieldList(() => [
-    { no: 1, name: "launched", kind: "scalar", T: 8 /* ScalarType.BOOL */ },
-  ]);
-
-  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromBinary(bytes, options);
-  }
-
-  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromJson(jsonValue, options);
-  }
-
-  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): NfcTagWriteResult {
-    return new NfcTagWriteResult().fromJsonString(jsonString, options);
-  }
-
-  static equals(a: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined, b: NfcTagWriteResult | PlainMessage<NfcTagWriteResult> | undefined): boolean {
-    return proto3.util.equals(NfcTagWriteResult, a, b);
-  }
-}
-
-/**
  * @generated from message dsm.QrScanResultPayload
  */
 export class QrScanResultPayload extends Message<QrScanResultPayload> {
@@ -28780,6 +28503,342 @@ export class CellCommitProofV1 extends Message<CellCommitProofV1> {
 }
 
 /**
+ * The reads of one cell a client kept with a final value it memoised, so
+ * Core proves the value final again, offline, from what was read (storage
+ * spec §9 rule 11). Client store only; never sent.
+ *
+ * @generated from message dsm.KeptCellReadsV1
+ */
+export class KeptCellReadsV1 extends Message<KeptCellReadsV1> {
+  /**
+   * one per route position, in route order
+   *
+   * @generated from field: repeated dsm.KeptSeatReadsV1 seats = 1;
+   */
+  seats: KeptSeatReadsV1[] = [];
+
+  constructor(data?: PartialMessage<KeptCellReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCellReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "seats", kind: "message", T: KeptSeatReadsV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCellReadsV1 {
+    return new KeptCellReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined, b: KeptCellReadsV1 | PlainMessage<KeptCellReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptCellReadsV1, a, b);
+  }
+}
+
+/**
+ * What the client held about one seat: its folded arrival log at the cell,
+ * its committed state there, and its mirror of the leader's ByteCommits.
+ *
+ * @generated from message dsm.KeptSeatReadsV1
+ */
+export class KeptSeatReadsV1 extends Message<KeptSeatReadsV1> {
+  /**
+   * absent when the seat was not read
+   *
+   * @generated from field: dsm.KeptHeldLogV1 values = 1;
+   */
+  values?: KeptHeldLogV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 committed = 2;
+   */
+  committed?: KeptCommittedV1;
+
+  /**
+   * @generated from field: dsm.KeptCommittedV1 leader_seen = 3;
+   */
+  leaderSeen?: KeptCommittedV1;
+
+  constructor(data?: PartialMessage<KeptSeatReadsV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptSeatReadsV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "values", kind: "message", T: KeptHeldLogV1 },
+    { no: 2, name: "committed", kind: "message", T: KeptCommittedV1 },
+    { no: 3, name: "leader_seen", kind: "message", T: KeptCommittedV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptSeatReadsV1 {
+    return new KeptSeatReadsV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined, b: KeptSeatReadsV1 | PlainMessage<KeptSeatReadsV1> | undefined): boolean {
+    return proto3.util.equals(KeptSeatReadsV1, a, b);
+  }
+}
+
+/**
+ * A seat's arrival log at one cell as the client folded it: the running hash
+ * through every entry, and the copies of the cell it kept, each with where it
+ * arrived. Each distinct value is held once.
+ *
+ * @generated from message dsm.KeptHeldLogV1
+ */
+export class KeptHeldLogV1 extends Message<KeptHeldLogV1> {
+  /**
+   * entries folded
+   *
+   * @generated from field: uint64 count = 1;
+   */
+  count = protoInt64.zero;
+
+  /**
+   * running hash after the last
+   *
+   * @generated from field: bytes head = 2;
+   */
+  head = new Uint8Array(0);
+
+  /**
+   * running hashes a ByteCommit's proof asked for
+   *
+   * @generated from field: repeated dsm.KeptRunningHashV1 marks = 3;
+   */
+  marks: KeptRunningHashV1[] = [];
+
+  /**
+   * @generated from field: repeated bytes values = 4;
+   */
+  values: Uint8Array[] = [];
+
+  /**
+   * in arrival order
+   *
+   * @generated from field: repeated dsm.KeptHeldCopyV1 copies = 5;
+   */
+  copies: KeptHeldCopyV1[] = [];
+
+  constructor(data?: PartialMessage<KeptHeldLogV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldLogV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "count", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "head", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "marks", kind: "message", T: KeptRunningHashV1, repeated: true },
+    { no: 4, name: "values", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 5, name: "copies", kind: "message", T: KeptHeldCopyV1, repeated: true },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldLogV1 {
+    return new KeptHeldLogV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined, b: KeptHeldLogV1 | PlainMessage<KeptHeldLogV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldLogV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptRunningHashV1
+ */
+export class KeptRunningHashV1 extends Message<KeptRunningHashV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  constructor(data?: PartialMessage<KeptRunningHashV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptRunningHashV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptRunningHashV1 {
+    return new KeptRunningHashV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined, b: KeptRunningHashV1 | PlainMessage<KeptRunningHashV1> | undefined): boolean {
+    return proto3.util.equals(KeptRunningHashV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.KeptHeldCopyV1
+ */
+export class KeptHeldCopyV1 extends Message<KeptHeldCopyV1> {
+  /**
+   * @generated from field: uint64 index = 1;
+   */
+  index = protoInt64.zero;
+
+  /**
+   * @generated from field: bytes running_hash = 2;
+   */
+  runningHash = new Uint8Array(0);
+
+  /**
+   * @generated from field: bytes seat = 3;
+   */
+  seat = new Uint8Array(0);
+
+  /**
+   * @generated from field: uint32 position = 4;
+   */
+  position = 0;
+
+  /**
+   * @generated from field: repeated dsm.ChainSlotV1 chain = 5;
+   */
+  chain: ChainSlotV1[] = [];
+
+  /**
+   * index into the log's values
+   *
+   * @generated from field: uint32 value = 6;
+   */
+  value = 0;
+
+  constructor(data?: PartialMessage<KeptHeldCopyV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptHeldCopyV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "index", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 2, name: "running_hash", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "seat", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 4, name: "position", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 5, name: "chain", kind: "message", T: ChainSlotV1, repeated: true },
+    { no: 6, name: "value", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptHeldCopyV1 {
+    return new KeptHeldCopyV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined, b: KeptHeldCopyV1 | PlainMessage<KeptHeldCopyV1> | undefined): boolean {
+    return proto3.util.equals(KeptHeldCopyV1, a, b);
+  }
+}
+
+/**
+ * A member's committed state at a cell: its ByteCommit, the one before it,
+ * and the proof the ByteCommit commits the cell's latest entry.
+ *
+ * @generated from message dsm.KeptCommittedV1
+ */
+export class KeptCommittedV1 extends Message<KeptCommittedV1> {
+  /**
+   * @generated from field: dsm.ByteCommitV4 commit = 1;
+   */
+  commit?: ByteCommitV4;
+
+  /**
+   * absent at cycle 1
+   *
+   * @generated from field: dsm.ByteCommitV4 parent = 2;
+   */
+  parent?: ByteCommitV4;
+
+  /**
+   * @generated from field: dsm.CellCommitProofV1 proof = 3;
+   */
+  proof?: CellCommitProofV1;
+
+  constructor(data?: PartialMessage<KeptCommittedV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.KeptCommittedV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "commit", kind: "message", T: ByteCommitV4 },
+    { no: 2, name: "parent", kind: "message", T: ByteCommitV4 },
+    { no: 3, name: "proof", kind: "message", T: CellCommitProofV1 },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): KeptCommittedV1 {
+    return new KeptCommittedV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined, b: KeptCommittedV1 | PlainMessage<KeptCommittedV1> | undefined): boolean {
+    return proto3.util.equals(KeptCommittedV1, a, b);
+  }
+}
+
+/**
  * One value for one key, as a batch put carries it. The member keeps it
  * after anything already at the key, exactly as a single put would.
  *
@@ -29172,6 +29231,14 @@ export class AppConnectOfferBodyV1 extends Message<AppConnectOfferBodyV1> {
    */
   nonce = new Uint8Array(0);
 
+  /**
+   * How many requests that spend nothing the application asks to make over the
+   * session's whole life (SA-78). The player's grant names at most this many.
+   *
+   * @generated from field: uint32 free_requests = 8;
+   */
+  freeRequests = 0;
+
   constructor(data?: PartialMessage<AppConnectOfferBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29187,6 +29254,7 @@ export class AppConnectOfferBodyV1 extends Message<AppConnectOfferBodyV1> {
     { no: 5, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
     { no: 6, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
     { no: 7, name: "nonce", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 8, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectOfferBodyV1 {
@@ -29277,6 +29345,22 @@ export class AppConnectAcceptBodyV1 extends Message<AppConnectAcceptBodyV1> {
    */
   granted: ConnectScopeV1[] = [];
 
+  /**
+   * Requests that spend nothing the grant takes over the session's life, at most
+   * the offer's free_requests; past it each is refused (SA-78).
+   *
+   * @generated from field: uint32 free_requests = 5;
+   */
+  freeRequests = 0;
+
+  /**
+   * H(DSM/connect/read ‖ session_id ‖ secret): the wallet's secret, which it
+   * alone presents to read the session's requests (SA-128).
+   *
+   * @generated from field: bytes read_commitment = 6;
+   */
+  readCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<AppConnectAcceptBodyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -29289,6 +29373,8 @@ export class AppConnectAcceptBodyV1 extends Message<AppConnectAcceptBodyV1> {
     { no: 2, name: "wallet_card", kind: "message", T: ContactQrV3 },
     { no: 3, name: "wallet_att_a", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "granted", kind: "message", T: ConnectScopeV1, repeated: true },
+    { no: 5, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 6, name: "read_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppConnectAcceptBodyV1 {
@@ -29771,6 +29857,85 @@ export class ConnectContactsResultV1 extends Message<ConnectContactsResultV1> {
 }
 
 /**
+ * Sign a statement (DSM Amendment A29). The wallet shows these words whole, and
+ * only after its holder approves them does it answer with them, under the
+ * answer's own signature, which already names the session and the request. It
+ * is never in a grant: every one waits on the device.
+ *
+ * @generated from message dsm.ConnectSignV1
+ */
+export class ConnectSignV1 extends Message<ConnectSignV1> {
+  /**
+   * @generated from field: string statement = 1;
+   */
+  statement = "";
+
+  constructor(data?: PartialMessage<ConnectSignV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSignV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSignV1 {
+    return new ConnectSignV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSignV1 | PlainMessage<ConnectSignV1> | undefined, b: ConnectSignV1 | PlainMessage<ConnectSignV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSignV1, a, b);
+  }
+}
+
+/**
+ * @generated from message dsm.ConnectSignResultV1
+ */
+export class ConnectSignResultV1 extends Message<ConnectSignResultV1> {
+  /**
+   * @generated from field: string statement = 1;
+   */
+  statement = "";
+
+  constructor(data?: PartialMessage<ConnectSignResultV1>) {
+    super();
+    proto3.util.initPartial(data, this);
+  }
+
+  static readonly runtime: typeof proto3 = proto3;
+  static readonly typeName = "dsm.ConnectSignResultV1";
+  static readonly fields: FieldList = proto3.util.newFieldList(() => [
+    { no: 1, name: "statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+  ]);
+
+  static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromBinary(bytes, options);
+  }
+
+  static fromJson(jsonValue: JsonValue, options?: Partial<JsonReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromJson(jsonValue, options);
+  }
+
+  static fromJsonString(jsonString: string, options?: Partial<JsonReadOptions>): ConnectSignResultV1 {
+    return new ConnectSignResultV1().fromJsonString(jsonString, options);
+  }
+
+  static equals(a: ConnectSignResultV1 | PlainMessage<ConnectSignResultV1> | undefined, b: ConnectSignResultV1 | PlainMessage<ConnectSignResultV1> | undefined): boolean {
+    return proto3.util.equals(ConnectSignResultV1, a, b);
+  }
+}
+
+/**
  * Lock a stake for a match the application referees (DSM Amendment A12). The
  * wallet builds the escrow terms itself from one fixed outcome table: a-wins
  * and b-wins, decided by the application's key, pay A and B; cancel, decided
@@ -30077,6 +30242,14 @@ export class ConnectDuelReadyV1 extends Message<ConnectDuelReadyV1> {
    */
   opponentReady = new Uint8Array(0);
 
+  /**
+   * The other side's start entropy, handed out with its ready (SoFi Amendment
+   * S33); empty exactly when opponent_ready is.
+   *
+   * @generated from field: bytes opponent_reveal = 3;
+   */
+  opponentReveal = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelReadyV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -30087,6 +30260,7 @@ export class ConnectDuelReadyV1 extends Message<ConnectDuelReadyV1> {
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "match_cell", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "opponent_ready", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 3, name: "opponent_reveal", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyV1 {
@@ -30803,6 +30977,12 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
      */
     value: ConnectContactsV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignV1 sign = 25;
+     */
+    value: ConnectSignV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppRequestBodyV1>) {
@@ -30830,6 +31010,7 @@ export class AppRequestBodyV1 extends Message<AppRequestBodyV1> {
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
     { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
+    { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppRequestBodyV1 {
@@ -31325,6 +31506,14 @@ export class ConnectDuelSessionKeyResultV1 extends Message<ConnectDuelSessionKey
    */
   signatureAlg = 0;
 
+  /**
+   * H(DSM/escrow/start-commit/v1 ‖ r): the wallet's commitment to its start
+   * entropy for the match, which the setup carries (SoFi Amendment S33).
+   *
+   * @generated from field: bytes start_commitment = 3;
+   */
+  startCommitment = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelSessionKeyResultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -31335,6 +31524,7 @@ export class ConnectDuelSessionKeyResultV1 extends Message<ConnectDuelSessionKey
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "session_public_key", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "signature_alg", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
+    { no: 3, name: "start_commitment", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelSessionKeyResultV1 {
@@ -31530,6 +31720,13 @@ export class ConnectDuelReadyResultV1 extends Message<ConnectDuelReadyResultV1> 
    */
   cells?: ConnectDuelCellsV1;
 
+  /**
+   * This wallet's start entropy, opened with its ready (SoFi Amendment S33).
+   *
+   * @generated from field: bytes reveal = 3;
+   */
+  reveal = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectDuelReadyResultV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -31540,6 +31737,7 @@ export class ConnectDuelReadyResultV1 extends Message<ConnectDuelReadyResultV1> 
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "ready_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "cells", kind: "message", T: ConnectDuelCellsV1 },
+    { no: 3, name: "reveal", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectDuelReadyResultV1 {
@@ -31705,6 +31903,12 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
      */
     value: ConnectContactsResultV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignResultV1 sign = 21;
+     */
+    value: ConnectSignResultV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<AppResponseBodyV1>) {
@@ -31730,6 +31934,7 @@ export class AppResponseBodyV1 extends Message<AppResponseBodyV1> {
     { no: 18, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1, oneof: "result" },
     { no: 19, name: "duel_sign", kind: "message", T: ConnectDuelSignResultV1, oneof: "result" },
     { no: 20, name: "contacts", kind: "message", T: ConnectContactsResultV1, oneof: "result" },
+    { no: 21, name: "sign", kind: "message", T: ConnectSignResultV1, oneof: "result" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): AppResponseBodyV1 {
@@ -32494,6 +32699,13 @@ export class ConnectAppOfferRequestV1 extends Message<ConnectAppOfferRequestV1> 
    */
   tokenAnchors: Uint8Array[] = [];
 
+  /**
+   * asked for in the offer (SA-78)
+   *
+   * @generated from field: uint32 free_requests = 6;
+   */
+  freeRequests = 0;
+
   constructor(data?: PartialMessage<ConnectAppOfferRequestV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -32507,6 +32719,7 @@ export class ConnectAppOfferRequestV1 extends Message<ConnectAppOfferRequestV1> 
     { no: 3, name: "cert_pin", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 4, name: "scopes", kind: "message", T: ConnectScopeV1, repeated: true },
     { no: 5, name: "token_anchors", kind: "scalar", T: 12 /* ScalarType.BYTES */, repeated: true },
+    { no: 6, name: "free_requests", kind: "scalar", T: 13 /* ScalarType.UINT32 */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppOfferRequestV1 {
@@ -32683,6 +32896,12 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
      */
     value: ConnectContactsV1;
     case: "contacts";
+  } | {
+    /**
+     * @generated from field: dsm.ConnectSignV1 sign = 25;
+     */
+    value: ConnectSignV1;
+    case: "sign";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectAppRequestIntentV1>) {
@@ -32709,6 +32928,7 @@ export class ConnectAppRequestIntentV1 extends Message<ConnectAppRequestIntentV1
     { no: 22, name: "duel_settle", kind: "message", T: ConnectDuelSettleV1, oneof: "kind" },
     { no: 23, name: "duel_collect", kind: "message", T: ConnectDuelCollectV1, oneof: "kind" },
     { no: 24, name: "contacts", kind: "message", T: ConnectContactsV1, oneof: "kind" },
+    { no: 25, name: "sign", kind: "message", T: ConnectSignV1, oneof: "kind" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestIntentV1 {
@@ -32742,6 +32962,14 @@ export class ConnectAppRequestsQueryV1 extends Message<ConnectAppRequestsQueryV1
    */
   after = protoInt64.zero;
 
+  /**
+   * The secret the session's accept commits (read_commitment): only its
+   * wallet reads the session's requests (SA-128).
+   *
+   * @generated from field: bytes read_secret = 3;
+   */
+  readSecret = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppRequestsQueryV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -32752,6 +32980,7 @@ export class ConnectAppRequestsQueryV1 extends Message<ConnectAppRequestsQueryV1
   static readonly fields: FieldList = proto3.util.newFieldList(() => [
     { no: 1, name: "session_id", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
     { no: 2, name: "after", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
+    { no: 3, name: "read_secret", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppRequestsQueryV1 {
@@ -32971,6 +33200,19 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
    */
   answerBody = new Uint8Array(0);
 
+  /**
+   * FACT_SIGNED: the statement, and the wallet's signature over answer_body,
+   * which anyone holding the wallet's AK can check again.
+   *
+   * @generated from field: string signed_statement = 18;
+   */
+  signedStatement = "";
+
+  /**
+   * @generated from field: bytes answer_signature = 19;
+   */
+  answerSignature = new Uint8Array(0);
+
   constructor(data?: PartialMessage<ConnectAppStatusV1>) {
     super();
     proto3.util.initPartial(data, this);
@@ -32996,6 +33238,8 @@ export class ConnectAppStatusV1 extends Message<ConnectAppStatusV1> {
     { no: 15, name: "escrow_amount", kind: "scalar", T: 4 /* ScalarType.UINT64 */ },
     { no: 16, name: "duel_cells", kind: "message", T: ConnectDuelCellsV1 },
     { no: 17, name: "answer_body", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
+    { no: 18, name: "signed_statement", kind: "scalar", T: 9 /* ScalarType.STRING */ },
+    { no: 19, name: "answer_signature", kind: "scalar", T: 12 /* ScalarType.BYTES */ },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectAppStatusV1 {
@@ -33084,6 +33328,22 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
      */
     value: ConnectDecidedV1;
     case: "decided";
+  } | {
+    /**
+     * connect.duelWithdraw / connect.duelSettle: the match's cells after
+     *
+     * @generated from field: dsm.ConnectDuelCellsV1 duel = 11;
+     */
+    value: ConnectDuelCellsV1;
+    case: "duel";
+  } | {
+    /**
+     * connect.duelCollect: each stake released to this wallet
+     *
+     * @generated from field: dsm.ConnectEscrowReleaseResultV1 released = 12;
+     */
+    value: ConnectEscrowReleaseResultV1;
+    case: "released";
   } | { case: undefined; value?: undefined } = { case: undefined };
 
   constructor(data?: PartialMessage<ConnectReplyV1>) {
@@ -33104,6 +33364,8 @@ export class ConnectReplyV1 extends Message<ConnectReplyV1> {
     { no: 8, name: "status", kind: "message", T: ConnectAppStatusV1, oneof: "reply" },
     { no: 9, name: "request", kind: "message", T: ConnectRequestRefV1, oneof: "reply" },
     { no: 10, name: "decided", kind: "message", T: ConnectDecidedV1, oneof: "reply" },
+    { no: 11, name: "duel", kind: "message", T: ConnectDuelCellsV1, oneof: "reply" },
+    { no: 12, name: "released", kind: "message", T: ConnectEscrowReleaseResultV1, oneof: "reply" },
   ]);
 
   static fromBinary(bytes: Uint8Array, options?: Partial<BinaryReadOptions>): ConnectReplyV1 {

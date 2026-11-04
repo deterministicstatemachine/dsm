@@ -26,6 +26,11 @@ pub const TAG_BILATERAL_PRECOMMIT: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/bilateral-precommit/v1");
 pub const TAG_SMT_KEY: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/smt-key");
 pub const TAG_TIP: TaggedHashDomain<'static> = TaggedHashDomain::from_static(b"DSM/tip");
+/// The relationship tip two concurrent accepted steps from one tip leave:
+/// `H(tag ‖ h_n ‖ lo ‖ hi)`, `lo`/`hi` the two steps' successor tips in byte
+/// order (owner ruling, 2026-10-29: "both settle").
+pub const TAG_RELATIONSHIP_JOIN: TaggedHashDomain<'static> =
+    crate::tagged_domain!(b"DSM/relationship-join/v1");
 pub const TAG_STATE_HASH: TaggedHashDomain<'static> = crate::tagged_domain!(b"DSM/state-hash");
 /// The relationship successor commitment `h_n = C_dsm+`:
 /// `H(tag ‖ rel_key ‖ embedded_parent ‖ counterparty_devid ‖ len(op) ‖ op ‖
@@ -153,6 +158,7 @@ pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_BILATERAL_PRECOMMIT,
     TAG_SMT_KEY,
     TAG_TIP,
+    TAG_RELATIONSHIP_JOIN,
     TAG_STATE_HASH,
     TAG_DSM_RELATIONSHIP_CHAIN_TIP_V2,
     TAG_OFFLINE_ACCOUNT_LEAF,

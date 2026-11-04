@@ -7,29 +7,40 @@ use crate::support::{random_match, random_move, Play, Rng, R};
 use wildstate_duel::tables::{Constants, Tables, TABLES};
 use wildstate_duel::vectors::DuelVectorSetV1;
 use wildstate_duel::{
-    conformance_vectors_digest_of, outcome, program_hash, program_hash_for, replay, start, step,
-    tables_digest, verify_conformance, DuelMatchV1, DuelMoveV1, DuelSetupV1, DuelState, DuelTurnV1,
-    Refusal, Side, VECTORS_V1,
+    conformance_vectors_digest_of, outcome, outcome_of_match, program_hash, program_hash_for,
+    replay_match, start, start_commitment, step, tables_digest, tiebreak_seed, verify_conformance,
+    DuelMatchV1, DuelMoveV1, DuelSetupV2, DuelState, DuelTurnV1, Refusal, Side, VECTORS_V1,
 };
 
-/// `P` of rules version 1, pinned. A change to any table, constant or frozen
+/// `P` of rules version 2, pinned. A change to any table, constant or frozen
 /// vector changes it, and this test fails until the new value is pinned on
 /// purpose.
 const PINNED_P: [u8; 32] = [
-    164, 207, 112, 198, 252, 193, 147, 108, 96, 192, 4, 97, 109, 196, 107, 205, 239, 194, 0, 137,
-    40, 16, 207, 109, 161, 144, 10, 254, 116, 25, 77, 205,
+    167, 169, 84, 51, 3, 103, 142, 105, 68, 101, 76, 22, 163, 178, 10, 173, 19, 3, 154, 133, 13,
+    223, 99, 102, 42, 156, 190, 53, 215, 95, 127, 178,
 ];
 
 fn vectors() -> R<DuelVectorSetV1> {
     Ok(DuelVectorSetV1::decode(VECTORS_V1)?)
 }
 
-fn setup_bytes(body: &DuelMatchV1) -> Vec<u8> {
-    DuelSetupV1 {
-        program: program_hash(),
-        body: body.clone(),
-    }
-    .encode()
+/// Side A's and side B's start entropy in the staked setups below.
+const REVEAL_A: [u8; 32] = [0xA7; 32];
+const REVEAL_B: [u8; 32] = [0xB7; 32];
+
+/// The setup a staked match of `body`'s sides locks under `program`, each
+/// side committing its reveal above.
+fn staked(body: &DuelMatchV1, program: [u8; 32]) -> R<Vec<u8>> {
+    Ok(DuelSetupV2::new(
+        program,
+        *body.match_nonce(),
+        body.turn_cap(),
+        start_commitment(&REVEAL_A),
+        start_commitment(&REVEAL_B),
+        body.a().clone(),
+        body.b().clone(),
+    )?
+    .encode())
 }
 
 /// The frozen file is exactly what the rules build today. When it is not,
@@ -105,10 +116,9 @@ fn any_table_or_vector_change_changes_the_program_hash() -> R {
 #[test]
 fn incremental_steps_equal_full_replay_on_every_vector() -> R {
     for (i, v) in vectors()?.vectors.iter().enumerate() {
-        let setup = setup_bytes(&v.body);
-        let full = outcome(&setup, &v.turns)?;
+        let full = outcome_of_match(&v.body, &v.turns)?;
         assert_eq!((full.side, full.end), (v.winner, v.end), "vector {i}");
-        let mut kept = start(&setup)?.encode();
+        let mut kept = DuelState::start(&v.body).encode();
         for t in &v.turns {
             let state = DuelState::decode(&kept)?;
             let wire = DuelTurnV1::decode(&t.encode())?;
@@ -117,7 +127,7 @@ fn incremental_steps_equal_full_replay_on_every_vector() -> R {
         let last = DuelState::decode(&kept)?;
         assert_eq!(last.winner(), Some(full), "vector {i}");
         assert_eq!(last.digest(), v.final_state, "vector {i}");
-        let logs = replay(&setup, &v.turns)?;
+        let logs = replay_match(&v.body, &v.turns)?;
         assert_eq!(logs.len(), v.turns.len());
         assert_eq!(logs.last().and_then(|l| l.end), Some(full));
     }
@@ -128,30 +138,76 @@ fn incremental_steps_equal_full_replay_on_every_vector() -> R {
 fn a_transcript_is_judged_only_whole_and_only_under_its_own_program() -> R {
     let set = vectors()?;
     let v = &set.vectors[0];
-    let setup = setup_bytes(&v.body);
     let short = &v.turns[..v.turns.len() - 1];
     assert!(matches!(
-        outcome(&setup, short),
+        outcome_of_match(&v.body, short),
         Err(Refusal::Unfinished { .. })
     ));
-    assert_eq!(replay(&setup, short)?.len(), short.len());
+    assert_eq!(replay_match(&v.body, short)?.len(), short.len());
     let mut long = v.turns.clone();
     long.push(v.turns[0]);
     assert!(matches!(
-        outcome(&setup, &long),
+        outcome_of_match(&v.body, &long),
         Err(Refusal::MatchOver { .. })
+    ));
+    let setup = staked(&v.body, program_hash())?;
+    assert!(matches!(
+        outcome(&setup, &REVEAL_A, &REVEAL_B, &[]),
+        Err(Refusal::Unfinished { turns: 0 })
     ));
     let mut other = program_hash();
     other[0] ^= 1;
-    let foreign = DuelSetupV1 {
-        program: other,
-        body: v.body.clone(),
-    }
-    .encode();
+    let foreign = staked(&v.body, other)?;
     assert!(matches!(
-        outcome(&foreign, &v.turns),
+        outcome(&foreign, &REVEAL_A, &REVEAL_B, &v.turns),
         Err(Refusal::WrongProgram { .. })
     ));
+    Ok(())
+}
+
+/// SA-140, SoFi Amendment S33. A staked match's tiebreak seed is what both
+/// sides' opened start entropy derives: the setup carries only each side's
+/// commitment, a reveal that does not open its side's commitment starts no
+/// match, and another reveal derives another seed.
+/// MUTATION CONTROL: the opening check dropped from `DuelSetupV2::match_of`
+/// starts the match on a reveal its side never committed: red.
+#[test]
+fn a_staked_matchs_seed_is_what_both_opened_reveals_derive() -> R {
+    let set = vectors()?;
+    let v = &set.vectors[0];
+    let setup = staked(&v.body, program_hash())?;
+    let decoded = DuelSetupV2::decode(&setup)?;
+    let m = decoded.match_of(&REVEAL_A, &REVEAL_B)?;
+    let derived = tiebreak_seed(
+        v.body.match_nonce(),
+        &REVEAL_A,
+        &REVEAL_B,
+        &v.body.a().session_public_key,
+        &v.body.b().session_public_key,
+    );
+    assert_eq!(*m.tiebreak_seed(), derived);
+    assert_eq!(
+        start(&setup, &REVEAL_A, &REVEAL_B)?.encode(),
+        DuelState::start(&m).encode()
+    );
+    assert_eq!(
+        decoded.match_of(&[0x01; 32], &REVEAL_B),
+        Err(Refusal::RevealOpensNothing { side: Side::A })
+    );
+    assert_eq!(
+        decoded.match_of(&REVEAL_A, &REVEAL_A),
+        Err(Refusal::RevealOpensNothing { side: Side::B })
+    );
+    assert_ne!(
+        tiebreak_seed(
+            v.body.match_nonce(),
+            &REVEAL_A,
+            &[0x01; 32],
+            &v.body.a().session_public_key,
+            &v.body.b().session_public_key,
+        ),
+        derived
+    );
     Ok(())
 }
 
@@ -208,10 +264,9 @@ fn the_frozen_vectors_decide_matches_with_garbled_openings() -> R {
         .count();
     assert!(garbled >= 3, "{garbled} vectors with garbled openings");
     for v in &set.vectors {
-        let setup = setup_bytes(&v.body);
         let turns: Vec<DuelTurnV1> = v.opened.iter().map(|t| t.turn()).collect();
         assert_eq!(turns, v.turns);
-        let w = outcome(&setup, &turns)?;
+        let w = outcome_of_match(&v.body, &turns)?;
         assert_eq!((w.side, w.end), (v.winner, v.end));
     }
     Ok(())

@@ -140,7 +140,7 @@ impl BilateralTransportAdapter {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "bluetooth", feature = "jni"))]
+#[cfg(feature = "bluetooth")]
 async fn queue_follow_up_chunks(
     peer_address: &str,
     frame_type: BleFrameType,
@@ -154,31 +154,27 @@ async fn queue_follow_up_chunks(
         .encode_message(frame_type, payload)
         .map_err(|e| DsmError::invalid_operation(format!("BLE follow-up framing failed: {e}")))?;
 
-    crate::jni::jni_common::with_env(|env| {
-        let mut env = unsafe { jni::JNIEnv::from_raw(env.get_raw() as *mut _) }
-            .map_err(|e| format!("clone JNIEnv failed: {e}"))?;
-        // The ack answers the confirm on the link it arrived on; a lost ack is
-        // answered again when the sender sends its confirm again.
-        match crate::jni::unified_protobuf_bridge::send_ble_reply_on_link(
-            &mut env,
-            peer_address,
-            &chunks,
-        )? {
-            true => Ok(()),
-            false => Err("the reply's link is gone".to_string()),
-        }
-    })
-    .map_err(|e| DsmError::invalid_operation(format!("BLE follow-up dispatch failed: {e}")))
+    // The ack answers the confirm on the link it arrived on; a lost ack is
+    // answered again when the sender sends its confirm again.
+    match crate::bluetooth::radio_link::send_reply_on_link(peer_address, &chunks) {
+        Ok(crate::host::Delivery::Sent) => Ok(()),
+        Ok(crate::host::Delivery::NotNow) => Err(DsmError::invalid_operation(
+            "BLE follow-up dispatch failed: the reply's link is gone",
+        )),
+        Err(e) => Err(DsmError::invalid_operation(format!(
+            "BLE follow-up dispatch failed: {e}"
+        ))),
+    }
 }
 
-#[cfg(not(all(target_os = "android", feature = "bluetooth", feature = "jni")))]
+#[cfg(not(feature = "bluetooth"))]
 async fn queue_follow_up_chunks(
     _peer_address: &str,
     _frame_type: BleFrameType,
     _payload: &[u8],
 ) -> Result<(), DsmError> {
     Err(DsmError::invalid_operation(
-        "BLE follow-up dispatch requires Android JNI Bluetooth build".to_string(),
+        "BLE follow-up dispatch requires a build with the bluetooth feature".to_string(),
     ))
 }
 

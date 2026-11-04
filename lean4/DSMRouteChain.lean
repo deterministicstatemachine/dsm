@@ -15,10 +15,15 @@
     - APPEND ONLY   a node stores what it is given, in arrival order, and
                     removes nothing: a cell only grows.
 
-  Proved here: chain uniqueness (MR-STOR-0143), and stability of LeaderHeld
-  and Final under growth (MR-DSM-0270, MR-STOR-0127). Stated for the
-  verification step, beside the TLA+ model `tla/DSM_RouteChain.tla` that
-  checks it: survival of a final value under two lost seats (§12.6).
+  Proved here: chain uniqueness (MR-STOR-0143), stability of LeaderHeld and
+  Final under growth (MR-DSM-0270, MR-STOR-0127), and survival of a final
+  value under two lost seats (§12.6), which the TLA+ model
+  `tla/DSM_RouteChain.tla` also checks over the interleavings.
+  `DSMNativeReserve` and `DSMSofiSuccessorCells` take their finality from
+  this rule (G15): a copy counts only as a link carrying the leader's record.
+  Mutation controls (executed 2026-10-27): allowing three lost seats breaks
+  `two_holders_outlast_two_losses`; making Final two links (Preserved)
+  breaks `final_survives_two_losses`.
 -/
 
 namespace DSMRouteChain
@@ -132,9 +137,9 @@ theorem final_stable [DecidableEq V] (c c' : Cell V) (x : V)
   have := further_links_mono c c' x hg
   omega
 
-/-- §12.6, for the verification step: with at most two of the five seats lost,
-    some holder of a final value's chain survives. `lost p` says the seat at
-    route position p (0 the leader) is lost. -/
+/-- §12.6: with at most two of the five seats lost, some holder of a final
+    value's chain survives. `lost p` says the seat at route position p (0 the
+    leader) is lost. -/
 def FinalSurvivesTwoLosses [DecidableEq V] : Prop :=
   ∀ (c : Cell V) (x : V) (lost : Fin 5 → Bool),
     ((List.range 5).filter (fun p => if h : p < 5 then lost ⟨p, h⟩ else false)).length ≤ 2 →
@@ -142,4 +147,53 @@ def FinalSurvivesTwoLosses [DecidableEq V] : Prop :=
     lost ⟨0, by decide⟩ = false ∨
       ∃ i ∈ laterPositions, (c.copies i).contains x = true ∧ lost ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ = false
 
+/-- The counting core of §12.6 over every assignment: two of the four later
+    seats hold a link, at most two of the five seats are lost, so the leader
+    or a holder survives. -/
+theorem two_holders_outlast_two_losses : ∀ b0 b1 b2 b3 l0 l1 l2 l3 l4 : Bool,
+    ([l0, l1, l2, l3, l4].filter id).length ≤ 2 →
+    2 ≤ ([b0, b1, b2, b3].filter id).length →
+    l0 = false ∨ (b0 = true ∧ l1 = false) ∨ (b1 = true ∧ l2 = false)
+      ∨ (b2 = true ∧ l3 = false) ∨ (b3 = true ∧ l4 = false) := by
+  decide
+
+/-- The later seats holding a copy, as the four seats' answers. -/
+theorem later_filter_length (q : Fin 4 → Bool) :
+    (laterPositions.filter q).length = ([q 0, q 1, q 2, q 3].filter id).length := by
+  unfold laterPositions
+  cases h0 : q 0 <;> cases h1 : q 1 <;> cases h2 : q 2 <;> cases h3 : q 3
+    <;> simp [h0, h1, h2, h3]
+
+/-- The lost seats, as the five seats' answers. -/
+theorem lost_filter_length (lost : Fin 5 → Bool) :
+    ((List.range 5).filter (fun p => if h : p < 5 then lost ⟨p, h⟩ else false)).length
+      = ([lost 0, lost 1, lost 2, lost 3, lost 4].filter id).length := by
+  cases h0 : lost 0 <;> cases h1 : lost 1 <;> cases h2 : lost 2 <;> cases h3 : lost 3
+    <;> cases h4 : lost 4
+    <;> simp [List.range, List.range.loop, h0, h1, h2, h3, h4]
+
+/-- §12.6: with at most two of the five seats lost, some holder of a final
+    value's chain survives. -/
+theorem final_survives_two_losses [DecidableEq V] : FinalSurvivesTwoLosses (V := V) := by
+  intro c x lost hloss hfin
+  have hfl : 2 ≤ furtherLinks c x := by
+    unfold Final validLinks at hfin
+    cases h : c.arrivals.head? with
+    | none => rw [h] at hfin; simp at hfin
+    | some y =>
+      rw [h] at hfin
+      by_cases hy : y = x
+      · simp only [hy, if_true] at hfin; omega
+      · simp [hy] at hfin
+  unfold furtherLinks at hfl
+  rw [later_filter_length] at hfl
+  rw [lost_filter_length] at hloss
+  rcases two_holders_outlast_two_losses _ _ _ _ _ _ _ _ _ hloss hfl with h | ⟨hb, hl⟩ | ⟨hb, hl⟩ | ⟨hb, hl⟩ | ⟨hb, hl⟩
+  · exact Or.inl h
+  · exact Or.inr ⟨⟨0, by decide⟩, by simp [laterPositions], hb, hl⟩
+  · exact Or.inr ⟨⟨1, by decide⟩, by simp [laterPositions], hb, hl⟩
+  · exact Or.inr ⟨⟨2, by decide⟩, by simp [laterPositions], hb, hl⟩
+  · exact Or.inr ⟨⟨3, by decide⟩, by simp [laterPositions], hb, hl⟩
+
 end DSMRouteChain
+

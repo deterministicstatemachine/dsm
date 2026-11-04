@@ -35,7 +35,7 @@ use serial_test::serial;
 const STEP: Duration = Duration::from_secs(240);
 
 fn era() -> [u8; 32] {
-    let Some(commit) = dsm_sdk::policy::builtin_policy_commit("ERA") else {
+    let Some(commit) = dsm::core::token::builtin_policy_commit_for_token("ERA") else {
         panic!("ERA's policy is not built in");
     };
     commit
@@ -148,6 +148,8 @@ impl Host {
         let args = vec![
             "--data-dir".to_string(),
             root.join(name).display().to_string(),
+            "--ingress-secret-dir".to_string(),
+            root.join(format!("{name}-ingress")).display().to_string(),
             "--env-config".to_string(),
             config.display().to_string(),
             "--game-bind".to_string(),
@@ -208,7 +210,10 @@ impl Host {
         };
         self.child = Some(child);
         let probe = format!("{}/activity/0", self.ingress);
-        let token = self.dir.join(self.name).join("ingress-token");
+        let token = self
+            .dir
+            .join(format!("{}-ingress", self.name))
+            .join("ingress-token");
         let deadline = tokio::time::Instant::now() + STEP;
         loop {
             let Some(child) = self.child.as_mut() else {
@@ -724,6 +729,7 @@ async fn connect(game: &Host, wallet: &Host, wild: &[u8; 32]) -> [u8; 32] {
         cert_pin: Vec::new(),
         scopes: game_scopes(wild),
         token_anchors: vec![wild.to_vec()],
+        free_requests: 512,
     };
     let offer = match game
         .connect(Route::Invoke, "connect.app.offer", request.encode_to_vec())

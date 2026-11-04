@@ -68,7 +68,7 @@ fn every_root_is_proven_under_every_later_head() {
                 Err(why) => panic!("R_{g} under the head at {n}: {why:?}"),
             };
             assert_eq!(
-                (proven.vault_id(), proven.generation(), proven.root()),
+                (&proven.vault_id, proven.generation(), proven.root()),
                 (&VAULT, g, &root_of(g))
             );
         }
@@ -213,5 +213,49 @@ fn a_leaf_reads_back_as_written() {
     assert_ne!(
         history_locator(&VAULT, &root_of(9)),
         history_locator(&VAULT, &root_of(8))
+    );
+}
+
+/// SoFi Amendment S34: the root a history holds at a generation is read from
+/// the leaf at the end of its path, checked against the hash the path asked
+/// for. A leaf not in hand, another leaf's bytes, and another vault read
+/// nothing.
+#[test]
+fn a_leaf_root_is_read_at_the_end_of_its_path() {
+    let published = publish(9);
+    let head = &published.heads[9];
+    let nodes = &published.nodes_by[9];
+    let leaves: HashMap<D32, Vec<u8>> = (0..=9)
+        .map(|g| {
+            (
+                leaf_hash(&VAULT, g, &root_of(g)),
+                leaf_bytes(&VAULT, g, &root_of(g)),
+            )
+        })
+        .collect();
+    for g in 0..=9 {
+        assert_eq!(
+            leaf_root_at(head, &VAULT, g, read(nodes), read(&leaves)).expect("reads"),
+            Ok(root_of(g)),
+            "R_{g}"
+        );
+    }
+    let none = HashMap::new();
+    assert!(matches!(
+        leaf_root_at(head, &VAULT, 4, read(nodes), read(&none)).expect("reads"),
+        Err(NotProven::NodeUnavailable(..))
+    ));
+    let mut swapped = leaves.clone();
+    swapped.insert(
+        leaf_hash(&VAULT, 4, &root_of(4)),
+        leaf_bytes(&VAULT, 5, &root_of(5)),
+    );
+    assert!(matches!(
+        leaf_root_at(head, &VAULT, 4, read(nodes), read(&swapped)).expect("reads"),
+        Err(NotProven::NodeUnavailable(..))
+    ));
+    assert_eq!(
+        leaf_root_at(head, &[8; 32], 4, read(nodes), read(&leaves)).expect("reads"),
+        Err(NotProven::OutsideTheHead)
     );
 }

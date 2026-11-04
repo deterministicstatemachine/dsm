@@ -14,7 +14,6 @@
 //! All hashing in this module uses `BLAKE3-256("DSM/<domain>\0" || data)` for
 //! domain separation as mandated by the protocol specification.
 
-use crate::common::canonical_encoding::CanonicalEncode;
 use crate::common::domain_tags::{TAG_DEVICE_ID, TAG_STATE_HASH};
 use crate::crypto::blake3::{domain_hash, dsm_domain_hasher};
 use crate::types::error::DsmError;
@@ -488,16 +487,6 @@ impl State {
         // The canonical wire format shrinks by `1 + 4 + state_type.len()` bytes.
 
         Ok(out)
-    }
-}
-
-impl CanonicalEncode for State {
-    fn to_canonical_bytes(&self) -> Result<Vec<u8>, DsmError> {
-        self.compute_hash().map(|h| h.to_vec())
-    }
-
-    fn domain_tag(&self) -> &'static str {
-        "DSM/state"
     }
 }
 

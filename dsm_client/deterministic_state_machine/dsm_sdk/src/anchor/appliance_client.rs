@@ -36,6 +36,9 @@ pub struct AnchorPin {
     pub partition_pk: Vec<u8>,
     /// Resident chip public key `pk_chip` (`σ^chip`, Ed25519) — pinned in `B`, verifies `σ^chip`.
     pub pk_chip: Vec<u8>,
+    /// The public birth commitment `S_birth` `B` commits: with the keys above, the owner's online
+    /// key and device id, `B` recomputes from the pin.
+    pub birth_commitment: [u8; 32],
 }
 
 /// Transport-agnostic producer interface to the anchor appliance: what an RP2350 USB-CDC/BLE
@@ -61,8 +64,14 @@ pub trait AnchorAppliance {
     fn finalize(&mut self) -> Result<[u8; 32], DsmError>;
     /// `OP_CANCEL`: discard a prepared (uncommitted) record.
     fn cancel(&mut self) -> Result<(), DsmError>;
-    /// The receiver pin material for this anchor (pinned at admission).
-    fn pin(&self) -> AnchorPin;
+    /// The pin material of the anchor as provisioned, or `None` while it was never provisioned.
+    fn provisioned_pin(&mut self) -> Result<Option<AnchorPin>, DsmError>;
+    /// `OP_PROVISION`: provision a never-provisioned anchor for the device `provisioning` names,
+    /// once, and return its pin. Refused by an anchor already provisioned.
+    fn provision(
+        &mut self,
+        provisioning: &anchor_core::enrollment::Provisioning,
+    ) -> Result<AnchorPin, DsmError>;
 
     /// `OP_RECOVER` (§26) — OBSERVATION ONLY. Report the appliance's recovery state after a power
     /// loss / host re-attach. This NEVER cancels, commits, moves the counter, or erases a release;

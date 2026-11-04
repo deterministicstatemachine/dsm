@@ -319,14 +319,47 @@ impl EstablishedSharedHead {
     pub fn state_root(&self) -> &D32 {
         &self.state_root
     }
+
+    /// The head one established generation later: `state_root` installed by
+    /// the step whose digest is `step_digest`. Core's own walks extend a head
+    /// this way and nothing else does, so no layer outside Core builds a
+    /// head except through [`GenerationChain`].
+    pub(crate) fn extended(
+        &self,
+        state_root: D32,
+        step_digest: D32,
+    ) -> Result<Self, LineageObjectError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(LineageObjectError::GenerationOverflow)?;
+        let next = SharedGenerationV1::new(
+            self.kind,
+            self.lineage_id,
+            generation,
+            self.generation_digest,
+            state_root,
+            step_digest,
+        )?;
+        Ok(Self {
+            generation,
+            generation_digest: next.digest(),
+            state_root,
+            ..*self
+        })
+    }
 }
 
 /// The digests `d_0 … d_n` of the generations a reader established, in
 /// order. The digests are a commitment a reader computes for itself; feeding
-/// it anything but generations the reader's own Core walk established makes
-/// its digests describe something nobody established, and nothing here can
-/// tell. Hints and checkpoints are compared against these, never the other
-/// way round.
+/// it anything but generations Core established makes its digests describe
+/// something nobody established, and nothing here can tell. So a generation
+/// enters a chain only from Core: a reserve generation through
+/// [`crate::economic::native_reserve::ReserveLineage`], which proves the
+/// release final and checks it against the head before it, and a vault
+/// generation only from Core's own walk of the vault (`sofi::resolution`).
+/// Hints and checkpoints are compared against these, never the other way
+/// round.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationChain {
     kind: LineageKind,
@@ -344,22 +377,15 @@ impl GenerationChain {
         }
     }
 
-    /// Append the next established generation, its root and step digest.
-    pub fn push(&mut self, state_root: D32, step_digest: D32) -> Result<(), LineageObjectError> {
-        let parent = self.head();
-        let generation = parent
-            .generation
-            .checked_add(1)
-            .ok_or(LineageObjectError::GenerationOverflow)?;
-        let next = SharedGenerationV1::new(
-            self.kind,
-            self.lineage_id,
-            generation,
-            parent.generation_digest,
-            state_root,
-            step_digest,
-        )?;
-        self.generations.push((state_root, next.digest()));
+    /// Append the next generation, its root and step digest. Crate-private:
+    /// only Core, having established the generation, appends it.
+    pub(crate) fn push(
+        &mut self,
+        state_root: D32,
+        step_digest: D32,
+    ) -> Result<(), LineageObjectError> {
+        let next = self.head().extended(state_root, step_digest)?;
+        self.generations.push((state_root, next.generation_digest));
         Ok(())
     }
 
@@ -374,6 +400,19 @@ impl GenerationChain {
             generation_digest,
             state_root,
         }
+    }
+
+    /// The head as it stood at generation `g`, when `g` has been pushed:
+    /// what a checkpoint whose segment ends at `g` is compared with.
+    pub fn head_at(&self, generation: u64) -> Option<EstablishedSharedHead> {
+        let (state_root, generation_digest) = self.at(generation)?;
+        Some(EstablishedSharedHead {
+            kind: self.kind,
+            lineage_id: self.lineage_id,
+            generation,
+            generation_digest,
+            state_root,
+        })
     }
 
     /// The digest and root of generation `g`, when it has been pushed.

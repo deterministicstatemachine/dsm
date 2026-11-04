@@ -1,49 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! The foreign lineage verifier, frontier-relative (DSM Amendment A19,
-//! restoring Amendment A8).
+//! Foreign economic-state validation.
 //!
-//! A receiver accepts a peer's step only from a root it validated itself. It
-//! starts at its own frontier for the peer: the last coordinate it validated,
-//! or the peer's activation root where it holds none. For each position from
-//! there to the target it:
-//!
-//! 1. reads the claim final at the register cell derived from
-//!    `(G, DevID, position)` and the root it validated at the position
-//!    before. The root a claim's own witness names is never the parent: it
-//!    must equal the validated root, or `advance_validated` refuses the step;
-//! 2. authenticates the claim: its manifest by content address, its key the
-//!    AK the manifest's authority evidence proves (P0–P6), its register set
-//!    the canonical set of the committed network;
-//! 3. validates the transition that produced the root against that parent,
-//!    with the SAME `advance_validated` any device runs.
-//!
-//! A payer's software can build a valid step on a root it invented and
-//! register it, because a claim is self-signed and the register keeps what is
-//! written first (audit finding SA-02). Read from the receiver's own
-//! frontier, that step is not on the chain: the cell routed from the root the
-//! receiver validated holds no claim, or a claim whose witness names another
-//! root, and nothing is accepted.
-//!
-//! A receiver current with a peer walks one position per payment. Every
-//! position spends from one budget for the whole verification, and a budget
-//! that runs out is `Incomplete`, held and retried, never accepted.
-//!
-//! ## Sources
-//!
-//! A credit's source is held to account like a payer (Amendment A8 for
-//! credit sources, owner 2026-10-01): its own segment from this verifier's
-//! frontier for it is validated step by step, its credits' sources the same
-//! way. The source step itself is an online transfer, a debit, so nothing
-//! further is asked of it. Each source's coordinate reached is reported, for
-//! the receiver to record with the acceptance.
-//!
-//! ## Conditional positions
-//!
-//! A position whose claim is conditional (`C_q`) selects no root by its
-//! bytes. Inside a chain, the [`ConditionalPositionResolver`] derives the root
-//! it selected from SoFi's public objects for that position alone (SoFi
-//! Amendment S15), and the chain continues from it.
+//! A registered claim proves which bytes hold one routed cell. It does not
+//! prove that the root used to route that cell was produced by a valid step.
+//! This verifier starts at the activation root and advances each position
+//! from the root it validated before it. Each credit source is established
+//! through the same predicate. A conditional position resolves through SoFi's
+//! public evidence before it can parent another position. When evidence is
+//! unavailable or the validation budget is reached, nothing is accepted.
 
 use crate::common::domain_tags::{
     TAG_DSM_ECONOMIC_ADMISSION_MANIFEST, TAG_DSM_ECONOMIC_AUTHORITY_EVIDENCE,
@@ -66,23 +31,31 @@ use crate::economic::provenance::{
     ValidatedPeerTransition,
 };
 use crate::economic::register::{
-    read_root_cell, resolve_for_trader, resolve_root_register_profile, RegisteredEconomicRoot,
-    RootCell, RootRegisterProfile,
+    economic_root_register_key, read_root_cell, resolve_for_trader, resolve_root_register_profile,
+    root_claim_naming, RegisteredEconomicRoot, RootCell, RootRegisterProfile,
 };
 use crate::economic::successor_evidence::verify_dsm_successor_evidence;
 use crate::route_chain::{CellEvidence, CellReading, ChainState};
 use crate::sofi::wire::{ParentClaimRef, SofiResolutionClaim};
 use crate::utils::text_id::encode_base32_crockford;
 
-/// The step budget for one verification, across every identity it touches:
-/// the payer's segment and each credit source's.
-pub const WALK_STEP_BUDGET: u32 = 512;
-
 /// I/O the verifier needs: raw reads of the register cells it names, and
 /// immutable objects by address. The fetcher supplies bytes, never a verdict:
 /// the verifier evaluates every cell's route chains itself and re-checks every
 /// address.
 pub trait PeerEvidenceFetcher {
+    /// Every value any member of the register holds under `K_root(position)`
+    /// of `(genesis, device_id)`, as the member stores it (a route entry),
+    /// read at every member without a route. It is
+    /// where to look, never what is final: each claim found there is checked
+    /// at the cell routed from the parent it names (DSM Amendment A14).
+    /// `Incomplete` when no member answered.
+    fn register_key_values(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure>;
     /// Every seat's reads of `cell` (storage spec §9): the values each seat
     /// holds, its committed state from a mirror, and each later seat's own
     /// mirror of the leader. The verifier evaluates them.
@@ -109,7 +82,8 @@ pub trait PeerEvidenceFetcher {
         addr: &[u8; 32],
     ) -> Result<Vec<u8>, PeerLineageFailure>;
     /// The certified key of the EK step at `addr` in `signer`'s chain, when
-    /// this verifier is a party to that relationship and holds the step.
+    /// this verifier holds the step: it is a party to that relationship, or
+    /// it verified the step and recorded it (SA-93).
     fn held_ek_step(
         &self,
         signer: &[u8; 32],
@@ -125,136 +99,6 @@ pub trait PeerEvidenceFetcher {
     ) -> Result<Vec<u8>, PeerLineageFailure>;
 }
 
-/// A coordinate of a peer this verifier validated itself: its frontier for
-/// that peer (DSM Amendments A8, A19).
-///
-/// Either the peer's activation root, which every verifier derives without
-/// being told it, or a coordinate a verification reached and the receiver
-/// recorded. A root the peer merely claims is never a frontier: the fields
-/// are private, and the only constructor from outside this module rehydrates
-/// what the receiver recorded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PeerFrontier {
-    genesis: [u8; 32],
-    device_id: [u8; 32],
-    at: FrontierAt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum FrontierAt {
-    /// Position 0, the canonical empty root. No claim was accepted there.
-    Activation,
-    /// A position the receiver validated, the root it validated there and
-    /// the claim it accepted there.
-    Recorded {
-        economic_position: u64,
-        economic_root: [u8; 32],
-        accepted: ParentClaimRef,
-    },
-}
-
-impl PeerFrontier {
-    /// The peer's activation root: the frontier of a receiver that has
-    /// validated nothing of this peer.
-    pub fn activation(genesis: [u8; 32], device_id: [u8; 32]) -> Self {
-        Self {
-            genesis,
-            device_id,
-            at: FrontierAt::Activation,
-        }
-    }
-
-    /// The coordinate `transition` reached: its position, the root it
-    /// validated there and the claim it accepted there. `None` for a
-    /// transition at a resolved SoFi position, whose facts do not carry the
-    /// fulfillment that names its claim as a parent.
-    pub fn reached_by(transition: &ValidatedPeerTransition) -> Option<Self> {
-        match transition {
-            ValidatedPeerTransition::SingleRoot(_) => Some(Self {
-                genesis: *transition.peer_genesis(),
-                device_id: *transition.peer_devid(),
-                at: FrontierAt::Recorded {
-                    economic_position: transition.validated_root().economic_position(),
-                    economic_root: transition.validated_root().economic_root(),
-                    accepted: ParentClaimRef::SingleRoot {
-                        claim_ref: transition.accepted_claim().claim_ref(),
-                    },
-                },
-            }),
-            ValidatedPeerTransition::ResolvedSofi(_) => None,
-        }
-    }
-
-    /// The coordinate a chain this verifier walked stands at.
-    fn at_point(genesis: [u8; 32], device_id: [u8; 32], point: &ChainPoint) -> Option<Self> {
-        let accepted = point.accepted?;
-        Some(Self {
-            genesis,
-            device_id,
-            at: FrontierAt::Recorded {
-                economic_position: point.root.economic_position(),
-                economic_root: point.root.economic_root(),
-                accepted,
-            },
-        })
-    }
-
-    /// A frontier this device recorded, read back from its own store.
-    ///
-    /// **Only the receiver's frontier store may call this**, with exactly
-    /// the fields of a frontier this module produced and the receiver
-    /// recorded. Anything read from a network or taken from a peer is not a
-    /// frontier, and feeding it here is the fabrication the private fields
-    /// exist to prevent.
-    pub fn rehydrate_recorded(
-        genesis: [u8; 32],
-        device_id: [u8; 32],
-        economic_position: u64,
-        economic_root: [u8; 32],
-        accepted: ParentClaimRef,
-    ) -> Self {
-        Self {
-            genesis,
-            device_id,
-            at: FrontierAt::Recorded {
-                economic_position,
-                economic_root,
-                accepted,
-            },
-        }
-    }
-
-    pub fn genesis(&self) -> &[u8; 32] {
-        &self.genesis
-    }
-
-    pub fn device_id(&self) -> &[u8; 32] {
-        &self.device_id
-    }
-
-    pub fn economic_position(&self) -> u64 {
-        match &self.at {
-            FrontierAt::Activation => 0,
-            FrontierAt::Recorded {
-                economic_position, ..
-            } => *economic_position,
-        }
-    }
-
-    /// The recorded coordinate: position, root and accepted claim. `None` at
-    /// the activation root, which is never recorded.
-    pub fn recorded(&self) -> Option<(u64, [u8; 32], &ParentClaimRef)> {
-        match &self.at {
-            FrontierAt::Activation => None,
-            FrontierAt::Recorded {
-                economic_position,
-                economic_root,
-                accepted,
-            } => Some((*economic_position, *economic_root, accepted)),
-        }
-    }
-}
-
 /// What a receiver validated itself of a peer's offline account: the account
 /// as one of the peer's offline boundaries (a load or an unload) left it, at
 /// the economic position of the step that admitted the boundary (the owner's
@@ -263,9 +107,9 @@ impl PeerFrontier {
 ///
 /// The account is named by its anchor bundle `B`, which commits the anchor's
 /// identity and keys and the peer's online identity. The fields are private:
-/// one is built only from a boundary this module's walk verified, in a step
-/// that passed, and the only constructor from outside rehydrates what the
-/// receiver recorded.
+/// one is built only from a boundary this module verified, in a step that
+/// passed, and the only constructor from outside rehydrates what the receiver
+/// recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerOfflineAccount {
     genesis: [u8; 32],
@@ -277,21 +121,22 @@ pub struct PeerOfflineAccount {
 }
 
 impl PeerOfflineAccount {
-    /// The account `boundary` left, validated in the step at `position`.
+    /// The account `boundary` left, validated in the step at `position`;
+    /// `None` for a settlement, which moves no offline account.
     fn validated(
         genesis: [u8; 32],
         device_id: [u8; 32],
         position: u64,
         boundary: &crate::economic::offline_boundary::VerifiedOfflineBoundary,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             genesis,
             device_id,
             economic_position: position,
             bundle: boundary.bundle(),
-            account_root: boundary.post_account_root(),
+            account_root: boundary.post_account_root()?,
             funding_chain: boundary.operation_id(),
-        }
+        })
     }
 
     /// An offline account this device recorded, read back from its own store.
@@ -348,16 +193,94 @@ impl PeerOfflineAccount {
     }
 }
 
-/// The receiver's frontiers: the coordinates it recorded for each peer.
-pub trait PeerFrontiers {
-    /// This receiver's latest recorded frontier for `(genesis, device_id)`
-    /// strictly below `position`, or `None` when it recorded none there.
-    fn frontier_below(
+/// What this receiver recorded of its peers' offline accounts.
+pub trait OfflineRecords {
+    /// The offline account under `bundle` of `(genesis, device_id)` as the
+    /// latest boundary this receiver recorded strictly below `position` left
+    /// it, or `None` when it recorded none there.
+    fn offline_account_below(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
+        bundle: &[u8; 32],
         position: u64,
-    ) -> Result<Option<PeerFrontier>, PeerLineageFailure>;
+    ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure>;
+}
+
+/// An offline boundary continues the account the most recent earlier boundary
+/// in its established economic ancestry left. The first boundary must open
+/// the account; a later boundary cannot claim an unestablished predecessor.
+pub fn continues_the_account(
+    since: crate::economic::offline_boundary::BoundarySince,
+    previous: Option<&PeerOfflineAccount>,
+) -> Result<(), PeerLineageFailure> {
+    use crate::economic::offline_boundary::BoundarySince;
+    match (since, previous) {
+        (BoundarySince::Opened { .. }, None) => Ok(()),
+        (BoundarySince::Previous { .. }, None) => Err(invalid(
+            "an offline boundary names a previous account with no established earlier boundary",
+        )),
+        (BoundarySince::Previous { account_root }, Some(previous))
+            if account_root == previous.account_root =>
+        {
+            Ok(())
+        }
+        (BoundarySince::Opened { .. } | BoundarySince::Previous { .. }, Some(_)) => Err(invalid(
+            "an offline boundary that does not continue the account its previous boundary left",
+        )),
+    }
+}
+
+/// A payment a peer's offline boundary exposed online: one spend of the
+/// chain the boundary carried, verified hop by hop from the account the
+/// previous boundary left, at the economic position of the step that admitted
+/// the boundary. Built only from a step that passed whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerOfflineExposure {
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    economic_position: u64,
+    bundle: [u8; 32],
+    payment: crate::types::offline_chain::ChainPayment,
+}
+
+impl PeerOfflineExposure {
+    /// An exposure this device recorded, read back from its own store.
+    ///
+    /// **Only the receiver's store may call this**, with exactly the fields of
+    /// an exposure this module produced and the receiver recorded.
+    pub fn rehydrate_recorded(
+        genesis: [u8; 32],
+        device_id: [u8; 32],
+        economic_position: u64,
+        bundle: [u8; 32],
+        payment: crate::types::offline_chain::ChainPayment,
+    ) -> Self {
+        Self {
+            genesis,
+            device_id,
+            economic_position,
+            bundle,
+            payment,
+        }
+    }
+
+    pub fn genesis(&self) -> &[u8; 32] {
+        &self.genesis
+    }
+    pub fn device_id(&self) -> &[u8; 32] {
+        &self.device_id
+    }
+    /// The position of the step that admitted the boundary exposing it.
+    pub fn economic_position(&self) -> u64 {
+        self.economic_position
+    }
+    pub fn bundle(&self) -> &[u8; 32] {
+        &self.bundle
+    }
+    pub fn payment(&self) -> &crate::types::offline_chain::ChainPayment {
+        &self.payment
+    }
 }
 
 /// Derives the root a conditional SoFi position selected, from SoFi's public
@@ -376,36 +299,30 @@ pub trait ConditionalPositionResolver {
     ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure>;
 }
 
-/// What a verification cost: the positions it walked from the receiver's
-/// frontiers, the payer's and each credit source's, and the root cells it
-/// read. A receiver current with a peer walks one position for its payment.
+/// The reads and transitions used to establish a peer's economic state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepCost {
-    /// Positions validated, across every identity the walk touched.
-    pub steps_validated: u32,
+    /// Unrouted reads of a register key at every member.
+    pub register_probes: u32,
     /// Routed reads of a root cell.
     pub routed_reads: u32,
-    /// Credit sources walked to their source steps.
+    /// Credit sources whose ancestry was validated.
     pub source_steps: u32,
+    /// Conditional positions resolved during ancestry validation.
+    pub conditional_hops: u32,
+    /// Economic transitions whose predecessor was established in this check.
+    pub steps_validated: u32,
 }
 
-/// An answer about a peer, with what establishing it cost and every frontier
-/// the walk established on the way.
-///
-/// Each frontier stands at the end of a segment that passed whole, from a
-/// frontier this receiver held: the walked identity's own last coordinate and
-/// each credit source's (owner ruling 2026-10-01: "A frontier becomes trusted
-/// only after the complete segment to it has passed validation"). A walk that
-/// fails returns none. The receiver records them whatever the walk was for
-/// (owner ruling 2026-10-20, Amendment A19: "Record every successfully
-/// validated economic frontier, including those reached through read-only
-/// operations").
+/// An answer about one step of a peer, with what checking it cost and what the
+/// step left for this receiver to record.
 #[derive(Debug)]
 pub struct Checked<T> {
     answer: T,
     cost: StepCost,
-    reached: Vec<PeerFrontier>,
     offline_accounts: Vec<PeerOfflineAccount>,
+    offline_exposures: Vec<PeerOfflineExposure>,
+    ek_steps: Vec<crate::economic::peer_acceptance::VerifiedEkStep>,
 }
 
 impl<T> Checked<T> {
@@ -417,17 +334,22 @@ impl<T> Checked<T> {
         self.cost
     }
 
-    /// Every frontier this walk established, in the order it established
-    /// them.
-    pub fn reached(&self) -> &[PeerFrontier] {
-        &self.reached
+    /// Every EK step this check fetched and verified, each in a step that
+    /// passed whole: the verifier records them, and a later check starts from
+    /// them (SA-93).
+    pub fn ek_steps(&self) -> &[crate::economic::peer_acceptance::VerifiedEkStep] {
+        &self.ek_steps
     }
 
-    /// Every offline account this walk validated: what each offline boundary
-    /// it passed left, in the order it passed them. Like the frontiers, they
-    /// come only from a walk that passed, each from a step that passed whole.
+    /// Every offline account this check validated: what each offline boundary
+    /// it passed left, each from a step that passed whole.
     pub fn offline_accounts(&self) -> &[PeerOfflineAccount] {
         &self.offline_accounts
+    }
+
+    /// Every payment an offline boundary this check validated exposed.
+    pub fn offline_exposures(&self) -> &[PeerOfflineExposure] {
+        &self.offline_exposures
     }
 
     pub fn into_answer(self) -> T {
@@ -435,56 +357,18 @@ impl<T> Checked<T> {
     }
 }
 
-/// How far a validation of a peer's lineage reached, walked toward its head
-/// (DSM Amendment A19: on a contact add).
-#[derive(Debug)]
-pub struct ValidatedPrefix {
-    reached: Option<PeerFrontier>,
-    stop: PrefixStop,
-}
+const VALIDATION_STEP_BUDGET: u32 = 512;
 
-/// Why a walk toward a peer's head stopped.
-#[derive(Debug)]
-pub enum PrefixStop {
-    /// The next position's root cell holds no claim: the walk reached the
-    /// head the register holds.
-    Head,
-    /// The walk stopped short, at its budget or on a read not decided yet;
-    /// what it validated before stopping stands.
-    Short(String),
-}
-
-impl ValidatedPrefix {
-    /// The peer's coordinate the walk validated last, every position from
-    /// the frontier it started at passed; `None` when it validated nothing
-    /// past that frontier.
-    pub fn reached(&self) -> Option<&PeerFrontier> {
-        self.reached.as_ref()
-    }
-
-    /// Why the walk stopped.
-    pub fn stop(&self) -> &PrefixStop {
-        &self.stop
-    }
-}
-
-/// Verify a peer's lineage from this receiver's frontier to
-/// `target_position`: the target step's validated transition (DSM Amendment
-/// A19).
-///
-/// Every step from the frontier to the target is validated from the root the
-/// verifier validated before it; a credit's source is validated through its
-/// own segment back to a frontier this receiver holds, or one this walk
-/// already validated; a conditional position before the target is resolved
-/// by `conditional`, and one at the target is `Unresolved`: the peer is
-/// mid-route. Nothing behind a frontier is read.
-pub fn validate_peer_lineage(
+/// A peer's step at `target_position`, validated through every economic
+/// predecessor from activation. Each credit source is established under the
+/// same rule. A conditional target is unresolved until SoFi selects its root.
+pub fn validate_peer_step(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     target_position: u64,
-    frontiers: &dyn PeerFrontiers,
+    records: &dyn OfflineRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<ValidatedPeerTransition>, PeerLineageFailure> {
     if target_position == 0 {
@@ -492,49 +376,31 @@ pub fn validate_peer_lineage(
             "position 0 is the activation root; it has no transition to validate",
         ));
     }
-    let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
-    let transition = verifier.segment(peer_genesis, peer_devid, target_position)?;
-    let own = PeerFrontier::reached_by(&transition);
-    Ok(verifier.checked(transition, own))
+    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
+    let (_, _, answer) = verifier.validated_to(
+        peer_genesis,
+        peer_devid,
+        target_position,
+        Target::Transition(StepRole::Offered),
+    )?;
+    let answer = answer.ok_or_else(|| invalid("the offered position has no transition"))?;
+    Ok(verifier.checked(answer))
 }
 
-/// Validate a peer's lineage from this receiver's frontier toward its head,
-/// as far as the register holds and the budget allows (DSM Amendment A19:
-/// on a contact add, so the contact's first payment is one step). Every
-/// position validated is validated as a segment step is, sources included.
-/// A step that verifies as wrong is `Invalid`; stopping short is not a
-/// failure, and what was validated before it stands.
-pub fn validate_peer_prefix(
-    fetcher: &dyn PeerEvidenceFetcher,
-    expected_network_id: &[u8],
-    peer_genesis: &[u8; 32],
-    peer_devid: &[u8; 32],
-    frontiers: &dyn PeerFrontiers,
-    conditional: &dyn ConditionalPositionResolver,
-) -> Result<Checked<ValidatedPrefix>, PeerLineageFailure> {
-    let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
-    let (reached, stop) = verifier.toward_head(peer_genesis, peer_devid)?;
-    let own = reached.clone();
-    Ok(verifier.checked(ValidatedPrefix { reached, stop }, own))
-}
-
-/// The root a peer's lineage selected AT `position`, and the reference a
-/// later `P` names that position by (DSM Amendment A19; SoFi Amendment S15):
-/// the segment from this receiver's frontier, each step validated in full,
-/// with `position` itself resolved through `conditional` when its claim is
-/// conditional, exactly as an interior one.
+/// The root a peer selected AT `position`, and the reference a later `P`
+/// names that position by (SoFi Amendment S35). Its economic ancestry is
+/// established from activation; a conditional claim is resolved through
+/// `conditional` after its predecessor is established.
 ///
-/// Not a debit source: it yields no [`ValidatedPeerTransition`]. Position 0
-/// is the activation root, where no claim was accepted for a `P` to name, and
-/// is `Invalid`. The coordinate at `position` is a frontier like any other the
-/// walk reached.
+/// Position 0 is the activation root, where no claim was accepted for a `P`
+/// to name, and is `Invalid`.
 pub fn peer_root_at(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     position: u64,
-    frontiers: &dyn PeerFrontiers,
+    records: &dyn OfflineRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<(ValidatedEconomicRoot, ParentClaimRef)>, PeerLineageFailure> {
     if position == 0 {
@@ -543,38 +409,28 @@ pub fn peer_root_at(
              its parent",
         ));
     }
-    let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
-    let below = position.checked_add(1).ok_or_else(|| {
-        invalid(format!(
-            "position {position} has no successor to stand below"
-        ))
-    })?;
-    let frontier = verifier.frontier_below(peer_genesis, peer_devid, below)?;
-    let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position)?;
-    let accepted = point.accepted.ok_or_else(|| {
-        invalid(format!(
-            "position {position} is the activation root: no claim was accepted there for a P \
-             to name as its parent"
-        ))
-    })?;
-    let own = PeerFrontier::at_point(*peer_genesis, *peer_devid, &point);
-    Ok(verifier.checked((point.root, accepted), own))
+    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
+    let (point, _, _) = verifier.validated_to(peer_genesis, peer_devid, position, Target::Root)?;
+    let answer = (
+        point.root,
+        point
+            .accepted
+            .ok_or_else(|| invalid("the selected root has no accepted claim"))?,
+    );
+    Ok(verifier.checked(answer))
 }
 
-/// The claim a peer's lineage accepted AT `position` (SoFi Amendment S15,
-/// MR-SOFI-0347): what a setup naming that position is checked against. The
-/// segment from this receiver's frontier is validated in full as a payer's
-/// is, and `position` itself as its last step, or, when its claim is
-/// conditional, resolved through `conditional` exactly as an interior
-/// position is. The coordinate at `position` is a frontier like any other the
-/// walk reached.
+/// The claim a peer accepted AT `position` (SoFi Amendment S35,
+/// MR-SOFI-0432): what a setup naming that position is checked against.
+/// Its economic ancestry is established from activation, and a conditional
+/// position is resolved from public SoFi evidence before its claim is used.
 pub fn peer_claim_at(
     fetcher: &dyn PeerEvidenceFetcher,
     expected_network_id: &[u8],
     peer_genesis: &[u8; 32],
     peer_devid: &[u8; 32],
     position: u64,
-    frontiers: &dyn PeerFrontiers,
+    records: &dyn OfflineRecords,
     conditional: &dyn ConditionalPositionResolver,
 ) -> Result<Checked<AcceptedClaim>, PeerLineageFailure> {
     if position == 0 {
@@ -582,44 +438,66 @@ pub fn peer_claim_at(
             "position 0 is the activation root: no claim was accepted there",
         ));
     }
-    let verifier = Verifier::new(fetcher, expected_network_id, frontiers, conditional)?;
-    let frontier = verifier.frontier_below(peer_genesis, peer_devid, position)?;
-    let point = verifier.chain_through(peer_genesis, peer_devid, &frontier, position - 1)?;
-    verifier.spend_step()?;
-    let (accepted, own) =
-        match verifier.final_claim(peer_genesis, peer_devid, position, &point.root)? {
-            RegisteredEconomicClaim::SingleRoot(claim) => {
-                let step = verifier.full_step(
-                    peer_genesis,
-                    peer_devid,
-                    position,
-                    &point,
-                    &claim,
-                    StepRole::Segment,
-                )?;
-                (*step.accepted_claim(), PeerFrontier::reached_by(&step))
-            }
-            RegisteredEconomicClaim::ConditionalSofi(held) => {
-                let (root, accepted) = verifier.resolve_conditional(
-                    peer_genesis,
-                    peer_devid,
-                    position,
-                    &point,
-                    &held,
-                )?;
-                let at = ChainPoint {
-                    root,
-                    accepted: Some(ParentClaimRef::Conditional {
-                        fulfillment_id: held.fulfillment_id,
-                    }),
-                };
-                (
-                    accepted,
-                    PeerFrontier::at_point(*peer_genesis, *peer_devid, &at),
-                )
-            }
-        };
-    Ok(verifier.checked(accepted, own))
+    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
+    let (_, answer, _) = verifier.validated_to(peer_genesis, peer_devid, position, Target::Root)?;
+    Ok(verifier.checked(answer))
+}
+
+/// The maximum positions one offline boundary scan requests. Validation
+/// also establishes ancestry before the start of the requested range.
+pub const OFFLINE_SCAN_POSITIONS: u64 = 512;
+
+/// How far a scan of a peer's offline boundaries read.
+#[derive(Debug)]
+pub struct OfflineScan {
+    reached: u64,
+    stop: ScanStop,
+}
+
+/// Why a scan of a peer's offline boundaries stopped.
+#[derive(Debug)]
+pub enum ScanStop {
+    /// No member holds a claim of the peer at the next position.
+    Head,
+    /// The scan read the positions it was asked to.
+    Bound,
+    /// A read did not decide a position yet. What the scan validated before it
+    /// stands.
+    Short(String),
+}
+
+impl OfflineScan {
+    /// The last position the scan read past; the position before its start
+    /// when it read none.
+    pub fn reached(&self) -> u64 {
+        self.reached
+    }
+
+    /// Why the scan stopped.
+    pub fn stop(&self) -> &ScanStop {
+        &self.stop
+    }
+}
+
+/// Read `positions` of a peer in order and validate every predecessor from
+/// activation. Record only offline boundaries from fully validated steps.
+pub fn scan_offline_boundaries(
+    fetcher: &dyn PeerEvidenceFetcher,
+    expected_network_id: &[u8],
+    peer_genesis: &[u8; 32],
+    peer_devid: &[u8; 32],
+    positions: std::ops::Range<u64>,
+    records: &dyn OfflineRecords,
+    conditional: &dyn ConditionalPositionResolver,
+) -> Result<Checked<OfflineScan>, PeerLineageFailure> {
+    if positions.start == 0 {
+        return Err(invalid(
+            "position 0 is the activation root; it holds no offline boundary",
+        ));
+    }
+    let verifier = Verifier::new(fetcher, expected_network_id, records, conditional)?;
+    let answer = verifier.offline_boundaries(peer_genesis, peer_devid, positions)?;
+    Ok(verifier.checked(answer))
 }
 
 /// A failure met inside a step, kept in its own class and located at the
@@ -653,14 +531,12 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
     match e {
         EconomicValidationError::Provenance(p) => match p {
             P::GenesisReleasePolicy(failure)
-            | P::TransferPolicy(failure)
             | P::PeerTransitionNotValidated { failure, .. }
             | P::AcceptanceEvidence(failure)
             | P::OwnerLineage(failure)
             | P::RegisterNotEstablished(failure)
             | P::ReleaseNotEstablished { failure, .. } => at_position(position, failure),
             P::GenesisReleaseInvalid(..)
-            | P::AssetNotTransferable
             | P::PeerDebitIsNotAnOnlineTransfer
             | P::NotAnOfflineUnload
             | P::PeerDebitNotAddressedToConsumer
@@ -678,9 +554,11 @@ fn step_failure(position: u64, e: EconomicValidationError) -> PeerLineageFailure
             | P::NotTheCanonicalReserve { .. }
             | P::GenerationIsGenesis
             | P::ReleaseInvalid(..)
+            | P::ReleaseParentNotOnTheReserve(..)
+            | P::ReleaseNotTheSuccessor(..)
+            | P::ReleaseIsNotTheEstablishedStep { .. }
             | P::ReleaseRecipientMismatch
             | P::ReleaseBindingMismatch
-            | P::ReleaseForeignSet
             | P::ReleaseEvidenceAddrMismatch
             | P::RegisterNotResolvable(..) => invalid_at(&p),
         },
@@ -737,8 +615,9 @@ impl Register {
     }
 }
 
-/// Where a chain stands: the root this verifier validated at a position, and
-/// the claim it accepted there (`None` only at the activation root).
+/// The parent a step is validated from: the root at the position before, and
+/// the claim accepted there when it was read for a conditional claim to name
+/// (`None` otherwise, and always at the activation root).
 struct ChainPoint {
     root: ValidatedEconomicRoot,
     accepted: Option<ParentClaimRef>,
@@ -755,82 +634,109 @@ struct Authenticated {
 /// questions go.
 #[derive(Clone, Copy)]
 enum StepRole {
-    /// A step of a segment from a frontier: its credits' sources are held to
-    /// account through their own segments.
-    Segment,
+    /// The step asked about: each credit source has validated ancestry.
+    Offered,
     /// A credit's source step: it must be an online transfer, a debit that
     /// names no source of its own.
     Source,
 }
 
-/// What a root cell routed from one parent reads (storage spec §9).
-enum AtRoute {
-    /// This claim is final there, and no other ever will be.
-    Final(Box<RegisteredEconomicClaim>),
-    /// A claim holds the leader link, short of Final: any party may carry
-    /// its chain on (§9 route chains, rule 8), so it can become final.
-    Held,
-    /// No claim holds the cell.
-    Open,
-    /// The reads in hand do not decide the cell.
-    Undecided(String),
+#[derive(Clone, Copy)]
+enum Target {
+    Transition(StepRole),
+    Root,
 }
 
 struct Verifier<'a> {
     fetcher: &'a dyn PeerEvidenceFetcher,
     expected_network_id: &'a [u8],
     register: Register,
-    frontiers: &'a dyn PeerFrontiers,
+    records: &'a dyn OfflineRecords,
     conditional: &'a dyn ConditionalPositionResolver,
-    /// What this verification has cost so far, counted as it reads.
+    /// What this check has cost so far, counted as it reads.
     cost: std::cell::Cell<StepCost>,
-    /// Every frontier this walk established besides the walked identity's own
-    /// last coordinate: the position before a target, and each credit source's
-    /// segment end, each standing at a step whose whole segment passed.
-    established: std::cell::RefCell<Vec<PeerFrontier>>,
-    /// Every offline account a step this walk validated left: each boundary
+    active: std::cell::RefCell<std::collections::BTreeSet<([u8; 32], [u8; 32], u64)>>,
+    /// Every offline account a step this check validated left: each boundary
     /// in a step that passed.
     offline_accounts: std::cell::RefCell<Vec<PeerOfflineAccount>>,
+    /// Every payment those boundaries exposed.
+    offline_exposures: std::cell::RefCell<Vec<PeerOfflineExposure>>,
+    /// Every EK step a step this check validated fetched and verified; a later
+    /// step of the same check holds them.
+    ek_steps: std::cell::RefCell<Vec<crate::economic::peer_acceptance::VerifiedEkStep>>,
+}
+
+/// A claim's identity at its cell: the entry digest the register recognizes
+/// it by (a single-root claim by its exact bytes, a conditional one by its
+/// derived body `C_q`).
+fn claim_identity(claim: &RegisteredEconomicClaim) -> [u8; 32] {
+    match claim {
+        RegisteredEconomicClaim::SingleRoot(c) => {
+            crate::storage_cell::entry_digest(c.envelope_bytes())
+        }
+        RegisteredEconomicClaim::ConditionalSofi(c) => {
+            crate::storage_cell::entry_digest(&c.encode())
+        }
+    }
 }
 
 impl<'a> Verifier<'a> {
     fn new(
         fetcher: &'a dyn PeerEvidenceFetcher,
         expected_network_id: &'a [u8],
-        frontiers: &'a dyn PeerFrontiers,
+        records: &'a dyn OfflineRecords,
         conditional: &'a dyn ConditionalPositionResolver,
     ) -> Result<Self, PeerLineageFailure> {
         Ok(Self {
             fetcher,
             expected_network_id,
             register: Register::resolve(fetcher, expected_network_id)?,
-            frontiers,
+            records,
             conditional,
             cost: std::cell::Cell::new(StepCost {
-                steps_validated: 0,
+                register_probes: 0,
                 routed_reads: 0,
                 source_steps: 0,
+                conditional_hops: 0,
+                steps_validated: 0,
             }),
-            established: std::cell::RefCell::new(Vec::new()),
+            active: std::cell::RefCell::new(std::collections::BTreeSet::new()),
             offline_accounts: std::cell::RefCell::new(Vec::new()),
+            offline_exposures: std::cell::RefCell::new(Vec::new()),
+            ek_steps: std::cell::RefCell::new(Vec::new()),
         })
     }
 }
 
 impl Verifier<'_> {
-    /// `answer`, with what this walk cost and every frontier it established:
-    /// `own`, the walked identity's last coordinate, and each source's.
-    fn checked<T>(self, answer: T, own: Option<PeerFrontier>) -> Checked<T> {
-        let cost = self.cost.get();
-        let reached = own
-            .into_iter()
-            .chain(self.established.into_inner())
-            .collect();
+    /// `answer`, with what this check cost and what it left to record.
+    fn checked<T>(self, answer: T) -> Checked<T> {
         Checked {
             answer,
-            cost,
-            reached,
+            cost: self.cost.get(),
             offline_accounts: self.offline_accounts.into_inner(),
+            offline_exposures: self.offline_exposures.into_inner(),
+            ek_steps: self.ek_steps.into_inner(),
+        }
+    }
+
+    /// The key of the EK step at `addr` in `signer`'s chain, when this verifier
+    /// holds it: one an earlier step of this check verified, or one the
+    /// fetcher holds (its own relationships', and those it recorded).
+    fn held_ek_step(
+        &self,
+        signer: &[u8; 32],
+        addr: &[u8; 32],
+    ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+        let verified = self
+            .ek_steps
+            .borrow()
+            .iter()
+            .find(|step| step.signer == *signer && step.addr == *addr)
+            .map(|step| step.ek_pk.clone());
+        match verified {
+            Some(key) => Ok(Some(key)),
+            None => self.fetcher.held_ek_step(signer, addr),
         }
     }
 
@@ -839,19 +745,157 @@ impl Verifier<'_> {
         add(&mut cost);
         self.cost.set(cost);
     }
-    /// What the root cell at `position` routed from `previous` reads: the
-    /// cell routed from the root authenticated at the position before. Only
-    /// a claim naming `K_root(position)` is recognized there, and the key is
-    /// a hash of `(G, DevID, position)`, so the claim that holds the cell is
-    /// this peer's at this position; any other bytes count as nothing,
-    /// however early they arrived.
-    fn at_route(
+
+    fn validated_to(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        target_position: u64,
+        target: Target,
+    ) -> Result<(ChainPoint, AcceptedClaim, Option<ValidatedPeerTransition>), PeerLineageFailure>
+    {
+        if target_position == 0 {
+            return Err(invalid("the activation root has no accepted claim"));
+        }
+        let coordinate = (*genesis, *device_id, target_position);
+        if self.active.borrow().len() >= VALIDATION_STEP_BUDGET as usize {
+            return Err(incomplete(
+                "economic ancestry exceeds the validation budget",
+            ));
+        }
+        if !self.active.borrow_mut().insert(coordinate) {
+            return Err(invalid(format!(
+                "cyclic economic ancestry at position {target_position} of {}/{}",
+                encode_base32_crockford(genesis),
+                encode_base32_crockford(device_id),
+            )));
+        }
+        let result = self.validated_to_inner(genesis, device_id, target_position, target);
+        self.active.borrow_mut().remove(&coordinate);
+        result
+    }
+
+    fn validated_to_inner(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        target_position: u64,
+        target: Target,
+    ) -> Result<(ChainPoint, AcceptedClaim, Option<ValidatedPeerTransition>), PeerLineageFailure>
+    {
+        let mut point = ChainPoint {
+            root: activate(EconomicActivationSnapshot::fresh())
+                .map_err(|e| invalid(format!("activation shape: {e}")))?,
+            accepted: None,
+        };
+        let mut answer = None;
+        for position in 1..=target_position {
+            let at = if position == target_position {
+                target
+            } else {
+                Target::Root
+            };
+            let (next, accepted, transition) =
+                self.validated_position(genesis, device_id, position, point, at)?;
+            point = next;
+            answer = Some((accepted, transition));
+        }
+        let (accepted, transition) =
+            answer.ok_or_else(|| invalid("the target accepted no claim"))?;
+        Ok((point, accepted, transition))
+    }
+
+    /// Route the next cell from the root validated at the prior position.
+    /// A signed claim final only along the route its own witness names cannot
+    /// make that witness-named root into an established predecessor.
+    fn validated_position(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        position: u64,
+        point: ChainPoint,
+        target: Target,
+    ) -> Result<(ChainPoint, AcceptedClaim, Option<ValidatedPeerTransition>), PeerLineageFailure>
+    {
+        if self.cost.get().steps_validated >= VALIDATION_STEP_BUDGET {
+            return Err(incomplete(format!(
+                "validation reached its budget of {VALIDATION_STEP_BUDGET} steps before \
+                 establishing position {position}"
+            )));
+        }
+        self.count(|c| c.routed_reads += 1);
+        let claim = self
+            .final_claim(genesis, device_id, position, &point.root)
+            .map_err(|e| at_position(position, e))?;
+        let result = match claim {
+            RegisteredEconomicClaim::SingleRoot(claim) => {
+                let role = match target {
+                    Target::Transition(role) => role,
+                    Target::Root => StepRole::Offered,
+                };
+                let step = self.full_step(genesis, device_id, position, &point, &claim, role)?;
+                let accepted = *step.accepted_claim();
+                (
+                    ChainPoint {
+                        root: *step.validated_root(),
+                        accepted: Some(ParentClaimRef::SingleRoot {
+                            claim_ref: accepted.claim_ref(),
+                        }),
+                    },
+                    accepted,
+                    Some(step),
+                )
+            }
+            RegisteredEconomicClaim::ConditionalSofi(held) => {
+                match target {
+                    Target::Transition(StepRole::Source) => {
+                        return Err(invalid(format!(
+                            "position {position}: a conditional SoFi position is not an online debit"
+                        )));
+                    }
+                    Target::Transition(StepRole::Offered) => {
+                        return Err(PeerLineageFailure::Unresolved(format!(
+                            "position {position}: a conditional position has no transition until its route resolves"
+                        )));
+                    }
+                    Target::Root => {}
+                }
+                if held.void_root != point.root.economic_root() {
+                    return Err(invalid(format!(
+                        "position {position}: the conditional claim names a different predecessor"
+                    )));
+                }
+                let (root, accepted) =
+                    self.resolve_conditional(genesis, device_id, position, &point, &held)?;
+                self.count(|c| c.conditional_hops += 1);
+                (
+                    ChainPoint {
+                        root,
+                        accepted: Some(ParentClaimRef::Conditional {
+                            fulfillment_id: held.fulfillment_id,
+                        }),
+                    },
+                    accepted,
+                    None,
+                )
+            }
+        };
+        self.count(|c| c.steps_validated += 1);
+        Ok(result)
+    }
+    /// The claim final at `position`'s root cell, routed from the root
+    /// authenticated at the position before. Only a claim naming
+    /// `K_root(position)` is recognized there, and the key is a hash of
+    /// `(G, DevID, position)`, so the claim that holds the cell is this
+    /// peer's at this position; any other bytes count as nothing, however
+    /// early they arrived.
+    fn final_claim(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
         previous: &ValidatedEconomicRoot,
-    ) -> Result<AtRoute, PeerLineageFailure> {
+    ) -> Result<RegisteredEconomicClaim, PeerLineageFailure> {
         let cell = RootCell::new(
             genesis,
             device_id,
@@ -862,19 +906,25 @@ impl Verifier<'_> {
         )
         .map_err(|e| incomplete(format!("root cell at {position}: {e:?}")))?;
         let evidence = self.fetcher.register_cell(&cell)?;
-        Ok(match read_root_cell(&cell, &evidence) {
+        match read_root_cell(&cell, &evidence) {
             Ok(CellReading::Held {
                 object,
                 state: ChainState::Final,
                 ..
-            }) => AtRoute::Final(Box::new(object)),
+            }) => Ok(object),
             Ok(CellReading::Held {
                 state: ChainState::LeaderHeld | ChainState::Preserved,
                 ..
-            }) => AtRoute::Held,
-            Ok(CellReading::Open) => AtRoute::Open,
-            Err(missing) => AtRoute::Undecided(format!("{missing:?}")),
-        })
+            }) => Err(incomplete(format!(
+                "position {position}: the claim holding the root cell is not final yet"
+            ))),
+            Ok(CellReading::Open) => Err(incomplete(format!(
+                "position {position}: no claim holds the root cell"
+            ))),
+            Err(missing) => Err(incomplete(format!(
+                "position {position}: the root cell is not decided yet: {missing:?}"
+            ))),
+        }
     }
 
     /// Authenticate a single-root claim: its manifest by content address,
@@ -1003,6 +1053,9 @@ impl Verifier<'_> {
         )?;
         let witness = crate::economic::decode::decode_transition_witness(&witness_bytes)
             .map_err(|e| invalid(format!("witness at {position}: {e}")))?;
+        // The payments an offline boundary at this step exposes, recorded once
+        // the step passes whole.
+        let mut exposed: Vec<crate::types::offline_chain::ChainPayment> = Vec::new();
         let (accepted, substrate) = match &manifest.substrate {
             AdmissionSubstrate::DsmSuccessor {
                 evidence_addr: successor_addr,
@@ -1018,12 +1071,11 @@ impl Verifier<'_> {
                 )
                 .map_err(|e| invalid(format!("successor evidence at {position}: {e}")))?;
                 if let StepRole::Source = role {
-                    // A credit's source is a peer's online transfer, and only
-                    // its own step is validated here. Its write set is a
-                    // debit and names no credit source, so nothing behind it
-                    // is asked for.
+                    // A credit's source is a peer's online transfer. Its
+                    // economic predecessors have already been established;
+                    // its own debit has no credit source to resolve.
                     if !matches!(
-                        verified.operation,
+                        verified.operation(),
                         crate::types::operations::Operation::Transfer {
                             authority_policy: None,
                             ..
@@ -1034,18 +1086,14 @@ impl Verifier<'_> {
                         )));
                     }
                 }
+                let peer = PeerSubstrate::Dsm {
+                    c_dsm_plus: verified.c_dsm_plus(),
+                    embedded_parent: verified.embedded_parent(),
+                    verified_operation: verified.operation().clone(),
+                };
                 (
-                    AcceptedSubstrate::from_verified_dsm_successor(
-                        verified.operation.clone(),
-                        verified.c_dsm_plus,
-                        verified.embedded_parent,
-                        *successor_addr,
-                    ),
-                    PeerSubstrate::Dsm {
-                        c_dsm_plus: verified.c_dsm_plus,
-                        embedded_parent: verified.embedded_parent,
-                        verified_operation: verified.operation,
-                    },
+                    AcceptedSubstrate::from_verified_dsm_successor(verified),
+                    peer,
                 )
             }
             AdmissionSubstrate::OfflineBoundary { evidence_addr } => {
@@ -1058,12 +1106,59 @@ impl Verifier<'_> {
                 let body_bytes = self
                     .fetcher
                     .immutable(TAG_DSM_ECONOMIC_OFFLINE_BOUNDARY_EVIDENCE, evidence_addr)?;
-                let verified = crate::economic::offline_boundary::OfflineBoundaryBody::verify(
-                    &body_bytes,
-                    genesis,
-                    device_id,
-                )
-                .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                use crate::economic::offline_boundary::{offline_body_kind, OfflineBodyKind};
+                let verified = match offline_body_kind(&body_bytes)
+                    .map_err(|e| invalid(format!("offline body at {position}: {e}")))?
+                {
+                    // A settlement of value received offline: funded by the
+                    // payer's spend the payer's online history exposed.
+                    OfflineBodyKind::Settlement => self
+                        .settlement(genesis, device_id, &body_bytes)
+                        .map_err(|e| at_position(position, e))?,
+                    OfflineBodyKind::Boundary => {
+                        let (verified, payments) =
+                            crate::economic::offline_boundary::OfflineBoundaryBody::verify(
+                                &body_bytes,
+                                genesis,
+                                device_id,
+                                &facts.proven_ak,
+                            )
+                            .map_err(|e| invalid(format!("offline boundary at {position}: {e}")))?;
+                        // The account the latest boundary strictly below this one
+                        // left, as this check validated it, else as this receiver
+                        // recorded it.
+                        let previous = match self
+                            .offline_accounts
+                            .borrow()
+                            .iter()
+                            .filter(|a| {
+                                a.genesis == *genesis
+                                    && a.device_id == *device_id
+                                    && a.bundle == verified.bundle()
+                                    && a.economic_position < position
+                            })
+                            .max_by_key(|a| a.economic_position)
+                            .cloned()
+                        {
+                            Some(earlier) => Some(earlier),
+                            None => self.records.offline_account_below(
+                                genesis,
+                                device_id,
+                                &verified.bundle(),
+                                position,
+                            )?,
+                        };
+                        let since = verified.since().ok_or_else(|| {
+                            invalid(format!(
+                                "offline boundary at {position}: it moves no account"
+                            ))
+                        })?;
+                        continues_the_account(since, previous.as_ref())
+                            .map_err(|e| at_position(position, e))?;
+                        exposed = payments;
+                        verified
+                    }
+                };
                 (
                     AcceptedSubstrate::from_verified_offline_boundary(verified, *evidence_addr),
                     PeerSubstrate::OfflineBoundary(verified),
@@ -1074,7 +1169,7 @@ impl Verifier<'_> {
         let ancestry = SourceAncestry { verifier: self };
         let no_sources = DebitHasNoSources { verifier: self };
         let provenance: &dyn ProvenanceResolver = match role {
-            StepRole::Segment => &ancestry,
+            StepRole::Offered => &ancestry,
             StepRole::Source => &no_sources,
         };
         let advanced = advance_validated(
@@ -1090,14 +1185,28 @@ impl Verifier<'_> {
             &facts.proven_ak,
         )
         .map_err(|e| step_failure(position, e))?;
+        // The step passed whole: the EK steps its credits' acceptances verified
+        // are this verifier's from here on.
+        self.ek_steps
+            .borrow_mut()
+            .extend(advanced.ek_steps.iter().cloned());
         // The step passed whole: the offline account its boundary left is one
         // this receiver validated.
         if let PeerSubstrate::OfflineBoundary(boundary) = &substrate {
             self.offline_accounts
                 .borrow_mut()
-                .push(PeerOfflineAccount::validated(
+                .extend(PeerOfflineAccount::validated(
                     *genesis, *device_id, position, boundary,
                 ));
+            self.offline_exposures
+                .borrow_mut()
+                .extend(exposed.iter().map(|payment| PeerOfflineExposure {
+                    genesis: *genesis,
+                    device_id: *device_id,
+                    economic_position: position,
+                    bundle: boundary.bundle(),
+                    payment: *payment,
+                }));
         }
         Ok(ValidatedPeerTransition::single_root_from_walk(
             *genesis,
@@ -1111,275 +1220,134 @@ impl Verifier<'_> {
         ))
     }
 
-    /// Spend one position of the walk's budget.
-    fn spend_step(&self) -> Result<(), PeerLineageFailure> {
-        if self.cost.get().steps_validated >= WALK_STEP_BUDGET {
-            return Err(incomplete(format!(
-                "the verification walked its budget of {WALK_STEP_BUDGET} positions before a \
-                 frontier it holds; retry once the frontier has advanced"
-            )));
+    /// A settlement of value received offline, verified: the payer's step that
+    /// exposed the spend after its ancestry was established, which records what its boundary
+    /// exposed, and the settlement held to exactly that exposed payment, to this
+    /// device.
+    fn settlement(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        body_bytes: &[u8],
+    ) -> Result<crate::economic::offline_boundary::VerifiedOfflineBoundary, PeerLineageFailure>
+    {
+        use crate::economic::offline_boundary::OfflineSettlementBody;
+        let body = OfflineSettlementBody::decode(body_bytes)
+            .map_err(|e| invalid(format!("an offline settlement body: {e}")))?;
+        if body.exposed_at == 0 {
+            return Err(invalid(
+                "a settlement names the payer's activation root, where nothing is exposed",
+            ));
         }
-        self.count(|c| c.steps_validated += 1);
-        Ok(())
+        self.validated_to(
+            &body.payer_genesis,
+            &body.payer_device,
+            body.exposed_at,
+            Target::Transition(StepRole::Offered),
+        )?;
+        let exposure = self
+            .offline_exposures
+            .borrow()
+            .iter()
+            .find(|e| {
+                e.genesis == body.payer_genesis
+                    && e.device_id == body.payer_device
+                    && e.economic_position == body.exposed_at
+                    && e.payment.release_message == body.release_message
+            })
+            .copied()
+            .ok_or_else(|| {
+                invalid("the payer's step at the settlement's position exposes no such payment")
+            })?;
+        OfflineSettlementBody::verify(body_bytes, genesis, device_id, &exposure)
+            .map_err(|e| invalid(format!("an offline settlement: {e}")))
     }
 
-    /// This receiver's latest frontier for `(genesis, device_id)` below
-    /// `position`: the one it recorded, or one a source's segment reached
-    /// earlier in this walk, whichever is later; the activation root where
-    /// it holds neither.
-    fn frontier_below(
+    /// Every claim of `(genesis, device_id)` any member holds under
+    /// `K_root(position)`, each once. A member holds each value as a route
+    /// entry, the copy written at one position of some route: the value
+    /// inside is the candidate, whatever route it was written along.
+    fn held_claims(
         &self,
         genesis: &[u8; 32],
         device_id: &[u8; 32],
         position: u64,
-    ) -> Result<PeerFrontier, PeerLineageFailure> {
-        let recorded = self.recorded_frontier_below(genesis, device_id, position)?;
-        let reached = self
-            .established
-            .borrow()
+    ) -> Result<Vec<RegisteredEconomicClaim>, PeerLineageFailure> {
+        let key = economic_root_register_key(genesis, device_id, position);
+        self.count(|c| c.register_probes += 1);
+        let held = self
+            .fetcher
+            .register_key_values(genesis, device_id, position)?;
+        let namespace = crate::economic::register::economic_root_namespace();
+        let mut seen = std::collections::BTreeSet::new();
+        Ok(held
             .iter()
-            .filter(|f| {
-                f.genesis() == genesis
-                    && f.device_id() == device_id
-                    && f.economic_position() < position
-            })
-            .max_by_key(|f| f.economic_position())
-            .cloned();
-        Ok(match (recorded, reached) {
-            (Some(recorded), Some(reached))
-                if reached.economic_position() > recorded.economic_position() =>
-            {
-                reached
+            .filter_map(|bytes| crate::route_chain::RouteEntry::decode(bytes))
+            .filter(|entry| entry.namespace == namespace && entry.key == key)
+            .filter_map(|entry| root_claim_naming(&entry.value, &key))
+            .filter(|claim| seen.insert(claim_identity(claim)))
+            .collect())
+    }
+
+    /// Scan the requested positions while establishing the peer's history
+    /// from activation. Every boundary the scan records comes from a step
+    /// validated against the root established at the preceding position.
+    fn offline_boundaries(
+        &self,
+        genesis: &[u8; 32],
+        device_id: &[u8; 32],
+        positions: std::ops::Range<u64>,
+    ) -> Result<OfflineScan, PeerLineageFailure> {
+        let mut reached = positions.start.saturating_sub(1);
+        let mut point = ChainPoint {
+            root: activate(EconomicActivationSnapshot::fresh())
+                .map_err(|e| invalid(format!("activation shape: {e}")))?,
+            accepted: None,
+        };
+        for position in 1..positions.end {
+            if position >= positions.start {
+                match self.held_claims(genesis, device_id, position) {
+                    Ok(candidates) if candidates.is_empty() => {
+                        return Ok(OfflineScan {
+                            reached,
+                            stop: ScanStop::Head,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(PeerLineageFailure::Incomplete(m) | PeerLineageFailure::Unresolved(m)) => {
+                        return Ok(OfflineScan {
+                            reached,
+                            stop: ScanStop::Short(m),
+                        });
+                    }
+                    Err(other) => return Err(other),
+                }
             }
-            (Some(recorded), _) => recorded,
-            (None, Some(reached)) => reached,
-            (None, None) => PeerFrontier::activation(*genesis, *device_id),
+            match self.validated_position(genesis, device_id, position, point, Target::Root) {
+                Ok((next, _, _)) => {
+                    point = next;
+                    if position >= positions.start {
+                        reached = position;
+                    }
+                }
+                Err(PeerLineageFailure::Incomplete(m) | PeerLineageFailure::Unresolved(m)) => {
+                    return Ok(OfflineScan {
+                        reached,
+                        stop: ScanStop::Short(m),
+                    });
+                }
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(OfflineScan {
+            reached,
+            stop: ScanStop::Bound,
         })
     }
 
-    /// The frontier this receiver recorded for `(genesis, device_id)` below
-    /// `position`, checked to be the one asked for. A store that answers with
-    /// another identity's coordinate, or one not below `position`, is this
-    /// verifier's own fault and decides nothing about the peer.
-    fn recorded_frontier_below(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-    ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
-        let Some(frontier) = self
-            .frontiers
-            .frontier_below(genesis, device_id, position)?
-        else {
-            return Ok(None);
-        };
-        if frontier.genesis() != genesis
-            || frontier.device_id() != device_id
-            || frontier.economic_position() >= position
-        {
-            return Err(incomplete(format!(
-                "the frontier store answered position {} of {}/{} for a frontier of {}/{} below \
-                 {position}",
-                frontier.economic_position(),
-                encode_base32_crockford(frontier.genesis()),
-                encode_base32_crockford(frontier.device_id()),
-                encode_base32_crockford(genesis),
-                encode_base32_crockford(device_id),
-            )));
-        }
-        Ok(Some(frontier))
-    }
-
-    /// The chain point a frontier stands at.
-    fn start(&self, frontier: &PeerFrontier) -> Result<ChainPoint, PeerLineageFailure> {
-        match frontier.recorded() {
-            None => Ok(ChainPoint {
-                root: activate(EconomicActivationSnapshot::fresh())
-                    .map_err(|e| invalid(format!("activation shape: {e}")))?,
-                accepted: None,
-            }),
-            Some((position, root, accepted)) => Ok(ChainPoint {
-                root: authenticated_root(position, root),
-                accepted: Some(*accepted),
-            }),
-        }
-    }
-
-    /// The claim final at `position`'s root cell, routed from the root
-    /// validated at the position before. Anything short of a final claim
-    /// there decides nothing yet: `Incomplete`.
-    fn final_claim(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-        previous: &ValidatedEconomicRoot,
-    ) -> Result<RegisteredEconomicClaim, PeerLineageFailure> {
-        self.count(|c| c.routed_reads += 1);
-        match self.at_route(genesis, device_id, position, previous)? {
-            AtRoute::Final(claim) => Ok(*claim),
-            AtRoute::Held => Err(incomplete(format!(
-                "position {position}: the claim holding the root cell is not final yet"
-            ))),
-            AtRoute::Open => Err(incomplete(format!(
-                "position {position}: no claim holds the root cell routed from the root \
-                 validated before it"
-            ))),
-            AtRoute::Undecided(why) => Err(incomplete(format!(
-                "position {position}: the root cell is not decided yet: {why}"
-            ))),
-        }
-    }
-
-    /// The chain point `position` stands at, from the one before: its
-    /// single-root step validated in full, or its conditional claim resolved
-    /// from SoFi's public objects (SoFi Amendment S15).
-    fn next_point(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        position: u64,
-        point: &ChainPoint,
-        claim: RegisteredEconomicClaim,
-    ) -> Result<ChainPoint, PeerLineageFailure> {
-        match claim {
-            RegisteredEconomicClaim::SingleRoot(claim) => {
-                let step = self.full_step(
-                    genesis,
-                    device_id,
-                    position,
-                    point,
-                    &claim,
-                    StepRole::Segment,
-                )?;
-                Ok(ChainPoint {
-                    root: *step.validated_root(),
-                    accepted: Some(ParentClaimRef::SingleRoot {
-                        claim_ref: step.accepted_claim().claim_ref(),
-                    }),
-                })
-            }
-            RegisteredEconomicClaim::ConditionalSofi(held) => {
-                let (root, _) =
-                    self.resolve_conditional(genesis, device_id, position, point, &held)?;
-                Ok(ChainPoint {
-                    root,
-                    accepted: Some(ParentClaimRef::Conditional {
-                        fulfillment_id: held.fulfillment_id,
-                    }),
-                })
-            }
-        }
-    }
-
-    /// The chain from `frontier` through `through`, every position validated
-    /// from the root validated before it.
-    fn chain_through(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        frontier: &PeerFrontier,
-        through: u64,
-    ) -> Result<ChainPoint, PeerLineageFailure> {
-        let mut point = self.start(frontier)?;
-        for position in frontier.economic_position() + 1..=through {
-            self.spend_step()?;
-            let claim = self.final_claim(genesis, device_id, position, &point.root)?;
-            point = self.next_point(genesis, device_id, position, &point, claim)?;
-        }
-        Ok(point)
-    }
-
-    /// The step at `target`, validated from the receiver's frontier: the
-    /// chain to the position before, then the target's own single-root step.
-    fn segment(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-        target: u64,
-    ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        let frontier = self.frontier_below(genesis, device_id, target)?;
-        let point = self.chain_through(genesis, device_id, &frontier, target - 1)?;
-        // The position before the target stands at the end of a segment that
-        // passed whole: it is a frontier whether or not the target passes, and
-        // the receiver's later walk to the target starts from it.
-        if let Some(before) = PeerFrontier::at_point(*genesis, *device_id, &point) {
-            self.established.borrow_mut().push(before);
-        }
-        self.spend_step()?;
-        let claim = self.final_claim(genesis, device_id, target, &point.root)?;
-        // The target is the step being presented, and a conditional position
-        // selects no root by its bytes: the peer is mid-route, not forging.
-        let claim = claim.single_root().map_err(|conditional| {
-            PeerLineageFailure::Unresolved(format!(
-                "peer {}/{} at position {target}: {conditional}",
-                encode_base32_crockford(genesis),
-                encode_base32_crockford(device_id)
-            ))
-        })?;
-        self.full_step(genesis, device_id, target, &point, claim, StepRole::Segment)
-    }
-
-    /// The chain from the receiver's frontier toward the head the register
-    /// holds: the coordinate validated last, and why the walk stopped. A
-    /// step that verifies as wrong is an error; stopping short is not.
-    fn toward_head(
-        &self,
-        genesis: &[u8; 32],
-        device_id: &[u8; 32],
-    ) -> Result<(Option<PeerFrontier>, PrefixStop), PeerLineageFailure> {
-        let frontier = self.frontier_below(genesis, device_id, u64::MAX)?;
-        let mut point = self.start(&frontier)?;
-        let mut reached = None;
-        let mut position = frontier.economic_position();
-        loop {
-            position = match position.checked_add(1) {
-                Some(next) => next,
-                None => return Ok((reached, PrefixStop::Head)),
-            };
-            if let Err(spent) = self.spend_step() {
-                return Ok((reached, PrefixStop::Short(spent.to_string())));
-            }
-            self.count(|c| c.routed_reads += 1);
-            let claim = match self.at_route(genesis, device_id, position, &point.root)? {
-                AtRoute::Final(claim) => *claim,
-                AtRoute::Open => return Ok((reached, PrefixStop::Head)),
-                AtRoute::Held => {
-                    return Ok((
-                        reached,
-                        PrefixStop::Short(format!(
-                            "position {position}: the claim holding the root cell is not final yet"
-                        )),
-                    ))
-                }
-                AtRoute::Undecided(why) => {
-                    return Ok((
-                        reached,
-                        PrefixStop::Short(format!(
-                            "position {position}: the root cell is not decided yet: {why}"
-                        )),
-                    ))
-                }
-            };
-            point = match self.next_point(genesis, device_id, position, &point, claim) {
-                Ok(next) => next,
-                Err(PeerLineageFailure::Invalid(why)) => {
-                    return Err(PeerLineageFailure::Invalid(why))
-                }
-                Err(PeerLineageFailure::Quarantined(why)) => {
-                    return Err(PeerLineageFailure::Quarantined(why))
-                }
-                Err(PeerLineageFailure::Incomplete(why) | PeerLineageFailure::Unresolved(why)) => {
-                    return Ok((reached, PrefixStop::Short(why)))
-                }
-            };
-            reached = PeerFrontier::at_point(*genesis, *device_id, &point);
-        }
-    }
-
-    /// A credit's source: the source's own step at `position`, validated
-    /// through its segment from this verifier's frontier for the source. It
-    /// is an online transfer, a debit that names no source of its own.
+    /// A credit's source: the source's own step at `position`, validated one
+    /// hop. It is an online transfer, a debit that names no source of its
+    /// own, so nothing behind it is read.
     fn source_step(
         &self,
         genesis: &[u8; 32],
@@ -1392,45 +1360,16 @@ impl Verifier<'_> {
             ));
         }
         self.count(|c| c.source_steps += 1);
-        let frontier = self.frontier_below(genesis, device_id, position)?;
-        let point = self.chain_through(genesis, device_id, &frontier, position - 1)?;
-        self.spend_step()?;
-        let source = match self.final_claim(genesis, device_id, position, &point.root)? {
-            RegisteredEconomicClaim::SingleRoot(claim) => self.full_step(
-                genesis,
-                device_id,
-                position,
-                &point,
-                &claim,
-                StepRole::Source,
-            )?,
-            RegisteredEconomicClaim::ConditionalSofi(_) => {
-                return Err(invalid(format!(
-                    "position {position}: the credit's source is a conditional SoFi position, \
-                     not an online transfer"
-                )))
-            }
-        };
-        // The whole segment to the source step has passed: its coordinate is
-        // a frontier for the rest of this walk, and for the receiver once it
-        // accepts the target.
-        if let Some(reached) = PeerFrontier::reached_by(&source) {
-            self.established.borrow_mut().push(reached);
-        }
-        Ok(source)
+        let (_, _, step) = self.validated_to(
+            genesis,
+            device_id,
+            position,
+            Target::Transition(StepRole::Source),
+        )?;
+        step.ok_or_else(|| invalid("the credit source has no online debit transition"))
     }
 }
 
-/// A root this verifier validated at `position`: a frontier the receiver
-/// recorded, or the end of a step this walk validated (DSM Amendment A19).
-/// Never a root a peer merely states.
-fn authenticated_root(position: u64, root: [u8; 32]) -> ValidatedEconomicRoot {
-    ValidatedEconomicRoot::from_verifier_memo(position, root)
-}
-
-/// The provenance of a segment step's credits: each source validated through
-/// its own segment from this verifier's frontier for it (DSM Amendment A8, as
-/// restored by A19).
 struct SourceAncestry<'v, 'a> {
     verifier: &'v Verifier<'a>,
 }
@@ -1485,7 +1424,7 @@ impl ProvenanceResolver for SourceAncestry<'_, '_> {
         signer: &[u8; 32],
         addr: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        self.verifier.fetcher.held_ek_step(signer, addr)
+        self.verifier.held_ek_step(signer, addr)
     }
 
     fn anchored_policy_bytes(
@@ -1545,7 +1484,7 @@ impl ProvenanceResolver for DebitHasNoSources<'_, '_> {
         signer: &[u8; 32],
         addr: &[u8; 32],
     ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-        self.verifier.fetcher.held_ek_step(signer, addr)
+        self.verifier.held_ek_step(signer, addr)
     }
 
     fn anchored_policy_bytes(
@@ -1557,876 +1496,164 @@ impl ProvenanceResolver for DebitHasNoSources<'_, '_> {
 }
 
 #[cfg(test)]
-#[allow(clippy::disallowed_methods)] // test asserts; a failure here is the signal
 mod tests {
     use super::*;
 
-    use crate::economic::claim_envelope::device_fixture::{device, signed_conditional, Device};
-
-    const PEER_G: [u8; 32] = [0x11; 32];
-
-    /// The peer device: its id is derived from its key and AttA, so the
-    /// claims it signs name its own cells (DSM Amendment A10).
-    fn peer() -> &'static Device {
-        static PEER: std::sync::OnceLock<Device> = std::sync::OnceLock::new();
-        PEER.get_or_init(|| device([0xA7; 32]).expect("the peer device"))
-    }
-
-    fn peer_d() -> [u8; 32] {
-        peer().devid
-    }
-
-    /// `claim` as the peer's root cell holds it: signed by the peer device
-    /// (SoFi Amendment S20).
-    fn peer_c_q(claim: SofiResolutionClaim) -> Vec<u8> {
-        signed_conditional(claim, peer()).expect("the peer signs its own C_q")
-    }
     const NETWORK: &[u8] = b"dsm-testnet";
 
-    /// A fetcher over the network's pinned register set that serves one root
-    /// cell, the one at `position`, holding `writes` written along the cell's
-    /// route in order, each through route position `last`. The leader of every other
-    /// root cell answers holding nothing. Every other capability refuses,
-    /// because none of them should be reached: the walk has to stop at the
-    /// claim.
-    struct ConditionalCellFetcher {
-        position: u64,
-        writes: Vec<Vec<u8>>,
-        last: usize,
-    }
-
-    impl PeerEvidenceFetcher for ConditionalCellFetcher {
-        fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
-            let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
-            if cell.economic_position() == self.position {
-                for value in &self.writes {
-                    seats.write(value, self.last, &[]);
-                }
-            }
-            Ok(seats.evidence())
-        }
-        fn native_reserve_release(
-            &self,
-            reserve_id: &[u8; 32],
-            generation: u64,
-        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no reserve release in this test: {} at {generation}",
-                encode_base32_crockford(reserve_id)
-            )))
-        }
-        fn root_register_candidate_set(
-            &self,
-            network_id: &[u8],
-        ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
-            let pinned = crate::economic::register::pinned_root_register_members(network_id)
-                .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
-            crate::ccb::StorageSetMembers::new(pinned)
-                .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))
-        }
-        fn immutable(
-            &self,
-            namespace: TaggedHashDomain<'static>,
-            addr: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no objects in this test: {} under {:?}",
-                encode_base32_crockford(addr),
-                namespace.source_bytes()
-            )))
-        }
-        fn held_ek_step(
-            &self,
-            signer: &[u8; 32],
-            addr: &[u8; 32],
-        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no relationship in this test: {} step {}",
-                encode_base32_crockford(signer),
-                encode_base32_crockford(addr)
-            )))
-        }
-        fn anchored_policy_bytes(
-            &self,
-            policy_commit: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no policies in this test: {}",
-                encode_base32_crockford(policy_commit)
-            )))
-        }
-    }
-
-    /// This test's frontier store: one recorded coordinate, the position
-    /// before the cell under test.
-    struct Recorded(PeerFrontier);
-
-    impl Recorded {
-        fn below(position: u64) -> Self {
-            Self(PeerFrontier::rehydrate_recorded(
-                PEER_G,
-                peer_d(),
-                position - 1,
-                [0x77; 32],
-                ParentClaimRef::SingleRoot {
-                    claim_ref: [0x78; 32],
-                },
-            ))
-        }
-    }
-
-    impl PeerFrontiers for Recorded {
-        fn frontier_below(
-            &self,
-            _genesis: &[u8; 32],
-            _device_id: &[u8; 32],
-            _position: u64,
-        ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
-    /// A receiver that has recorded nothing of this peer.
     struct NoneRecorded;
 
-    impl PeerFrontiers for NoneRecorded {
-        fn frontier_below(
+    impl OfflineRecords for NoneRecorded {
+        fn offline_account_below(
             &self,
             _genesis: &[u8; 32],
             _device_id: &[u8; 32],
+            _bundle: &[u8; 32],
             _position: u64,
-        ) -> Result<Option<PeerFrontier>, PeerLineageFailure> {
+        ) -> Result<Option<PeerOfflineAccount>, PeerLineageFailure> {
             Ok(None)
         }
     }
 
-    /// No conditional position is resolved in these tests: every one of them
-    /// stops before a resolver would be reached.
+    struct NoEvidence;
+
+    impl PeerEvidenceFetcher for NoEvidence {
+        fn register_key_values(
+            &self,
+            _genesis: &[u8; 32],
+            _device_id: &[u8; 32],
+            _position: u64,
+        ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+            Err(incomplete("no register values were supplied"))
+        }
+
+        fn register_cell(&self, _cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
+            Err(incomplete("no root cell was supplied"))
+        }
+
+        fn native_reserve_release(
+            &self,
+            _reserve_id: &[u8; 32],
+            _generation: u64,
+        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
+            Err(incomplete("no reserve release was supplied"))
+        }
+
+        fn root_register_candidate_set(
+            &self,
+            network_id: &[u8],
+        ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
+            let members = crate::economic::register::pinned_root_register_members(network_id)
+                .map_err(|e| incomplete(e.to_string()))?;
+            crate::ccb::StorageSetMembers::new(members).map_err(|e| incomplete(format!("{e:?}")))
+        }
+
+        fn immutable(
+            &self,
+            _namespace: TaggedHashDomain<'static>,
+            _addr: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(incomplete("no immutable object was supplied"))
+        }
+
+        fn held_ek_step(
+            &self,
+            _signer: &[u8; 32],
+            _addr: &[u8; 32],
+        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
+            Err(incomplete("no relationship step was supplied"))
+        }
+
+        fn anchored_policy_bytes(
+            &self,
+            _policy_commit: &[u8; 32],
+        ) -> Result<Vec<u8>, PeerLineageFailure> {
+            Err(incomplete("no token policy was supplied"))
+        }
+    }
+
     struct NoResolution;
 
     impl ConditionalPositionResolver for NoResolution {
         fn resolve(
             &self,
-            previous: &ValidatedEconomicRoot,
+            _previous: &ValidatedEconomicRoot,
             _parent: &ParentClaimRef,
-            held: &SofiResolutionClaim,
+            _held: &SofiResolutionClaim,
         ) -> Result<(ValidatedEconomicRoot, AcceptedClaim), PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no conditional resolution in this test: position {} after {}",
-                held.position,
-                previous.economic_position()
-            )))
+            Err(incomplete("no SoFi resolution was supplied"))
         }
     }
 
-    fn conditional_claim(position: u64) -> SofiResolutionClaim {
-        SofiResolutionClaim {
-            genesis: PEER_G,
-            device_id: peer_d(),
-            position,
-            fulfillment_id: [0xF1; 32],
-            realize_root: [0xA1; 32],
-            void_root: [0xB1; 32],
-        }
-    }
-
-    /// The fetcher a test hands the walk, counting every read of the peer it
-    /// is asked for: root cells, objects, reserve releases and policies. The
-    /// register's candidate set is the network's, not the peer's, and is not
-    /// counted.
-    struct CountingCells {
-        inner: ConditionalCellFetcher,
-        reads: std::cell::Cell<usize>,
-    }
-
-    impl CountingCells {
-        fn read(&self) {
-            self.reads.set(self.reads.get() + 1);
-        }
-    }
-
-    impl PeerEvidenceFetcher for CountingCells {
-        fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
-            self.read();
-            self.inner.register_cell(cell)
-        }
-        fn native_reserve_release(
-            &self,
-            reserve_id: &[u8; 32],
-            generation: u64,
-        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
-            self.read();
-            self.inner.native_reserve_release(reserve_id, generation)
-        }
-        fn root_register_candidate_set(
-            &self,
-            network_id: &[u8],
-        ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
-            self.inner.root_register_candidate_set(network_id)
-        }
-        fn immutable(
-            &self,
-            namespace: TaggedHashDomain<'static>,
-            addr: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            self.read();
-            self.inner.immutable(namespace, addr)
-        }
-        fn held_ek_step(
-            &self,
-            signer: &[u8; 32],
-            addr: &[u8; 32],
-        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-            self.read();
-            self.inner.held_ek_step(signer, addr)
-        }
-        fn anchored_policy_bytes(
-            &self,
-            policy_commit: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            self.read();
-            self.inner.anchored_policy_bytes(policy_commit)
-        }
-    }
-
-    /// Owner ruling 2026-10-01 (pre-audit item 3): a credit's source whose
-    /// ancestry exceeds the walk budget before reaching a frontier this
-    /// verifier holds is `Incomplete`, never accepted on weaker evidence, and
-    /// nothing past the spent budget is read.
     #[test]
-    fn a_source_walk_past_the_budget_is_incomplete_and_reads_nothing() {
-        let fetcher = CountingCells {
-            inner: ConditionalCellFetcher {
-                position: 3,
-                writes: Vec::new(),
-                last: crate::route_chain::ROUTE_LEN - 1,
+    fn an_offline_boundary_continues_only_an_established_account() {
+        use crate::economic::offline_boundary::BoundarySince;
+        let previous =
+            PeerOfflineAccount::rehydrate_recorded([1; 32], [2; 32], 3, [3; 32], [4; 32], [5; 32]);
+        continues_the_account(BoundarySince::Opened { frontier: [6; 32] }, None)
+            .expect("the first boundary opens its account");
+        continues_the_account(
+            BoundarySince::Previous {
+                account_root: [4; 32],
             },
-            reads: std::cell::Cell::new(0),
-        };
-        let verifier = Verifier::new(&fetcher, NETWORK, &NoneRecorded, &NoResolution)
-            .expect("the network's register");
-        verifier.cost.set(StepCost {
-            steps_validated: WALK_STEP_BUDGET,
-            routed_reads: 0,
-            source_steps: 0,
-        });
-        match verifier.source_step(&PEER_G, &peer_d(), 3) {
-            Err(PeerLineageFailure::Incomplete(why)) => {
-                assert!(why.contains("walked its budget"), "{why}")
-            }
-            Err(other) => panic!("a spent budget is Incomplete, got {other:?}"),
-            Ok(_) => panic!("a spent budget validated a source"),
-        }
-        assert_eq!(fetcher.reads.get(), 0, "nothing of the source was read");
-    }
-
-    /// DSM Amendment A19, `peer_root_at`: a frontier this receiver recorded AT
-    /// the position is the answer, and nothing of the peer is read: the walk
-    /// stands below `position + 1`, which the recorded frontier already is. A
-    /// frontier is recorded only as `reached_by` records one, single-root.
-    #[test]
-    fn a_frontier_recorded_at_the_position_is_its_root_and_nothing_is_read() {
-        let position = 6;
-        let accepted = ParentClaimRef::SingleRoot {
-            claim_ref: [0xF6; 32],
-        };
-        let recorded = Recorded(PeerFrontier::rehydrate_recorded(
-            PEER_G,
-            peer_d(),
-            position,
-            [0x66; 32],
-            accepted,
-        ));
-        let fetcher = CountingCells {
-            inner: ConditionalCellFetcher {
-                position,
-                writes: vec![peer_c_q(conditional_claim(position))],
-                last: crate::route_chain::ROUTE_LEN - 1,
-            },
-            reads: std::cell::Cell::new(0),
-        };
-        let (root, named) = peer_root_at(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position,
-            &recorded,
-            &NoResolution,
+            Some(&previous),
         )
-        .expect("the recorded point")
-        .into_answer();
-        assert_eq!(
-            (root.economic_position(), root.economic_root(), named),
-            (position, [0x66; 32], accepted)
-        );
-        assert_eq!(fetcher.reads.get(), 0, "nothing of the peer was read");
-    }
-
-    /// `peer_root_at` at position 0 is the activation root, where no claim was
-    /// accepted: no `P` can name it as a parent, so it is `Invalid`, and no
-    /// reference is made up for it.
-    #[test]
-    fn the_activation_root_names_no_parent() {
-        let fetcher = ConditionalCellFetcher {
-            position: 0,
-            writes: Vec::new(),
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        match peer_root_at(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            0,
-            &NoneRecorded,
-            &NoResolution,
-        ) {
-            Err(PeerLineageFailure::Invalid(why)) => {
-                assert!(why.contains("activation root"), "{why}")
-            }
-            other => panic!("position 0 is Invalid, not {other:?}"),
-        }
-    }
-
-    /// A CONDITIONAL PEER POSITION IS `Unresolved`, NOT `Invalid`.
-    ///
-    /// Before the union existed, the single-root decoder failed on these bytes
-    /// and the walk mapped that failure to `Invalid` — i.e. to *authenticated
-    /// forgery*, which is terminal and quarantining. Every honest counterparty
-    /// that ever exercised a route would have been permanently refused by
-    /// every peer, as a fraud, for being mid-route.
-    #[test]
-    fn a_conditional_peer_position_is_unresolved_and_never_invalid() {
-        let position = 4;
-        let fetcher = ConditionalCellFetcher {
-            position,
-            writes: vec![peer_c_q(conditional_claim(position))],
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        let err = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position,
-            &Recorded::below(position),
-            &NoResolution,
-        )
-        .expect_err("a conditional position cannot produce a validated transition");
-
-        match &err {
-            PeerLineageFailure::Unresolved(m) => {
-                assert!(
-                    m.contains("commits two roots and has selected neither"),
-                    "the refusal must say what it is waiting on, got: {m}"
-                );
-            }
-            other => panic!("a conditional position must be Unresolved, got {other:?}"),
-        }
-        // The distinction is the whole point: not a forgery, not a quarantine,
-        // and not a fetch that might succeed on retry.
-        assert!(!matches!(err, PeerLineageFailure::Invalid(_)));
-        assert!(!matches!(err, PeerLineageFailure::Quarantined(_)));
-        assert!(!matches!(err, PeerLineageFailure::Incomplete(_)));
-    }
-
-    /// SoFi Amendment S15, MR-SOFI-0347: a setup made right after a SoFi
-    /// position names the claim that position's resolution accepted, so the
-    /// claim at a conditional position is asked of the resolver, never
-    /// refused as a payer's conditional target is. With no resolution in
-    /// hand the answer is the resolver's own, in its class.
-    #[test]
-    fn the_claim_at_a_conditional_position_is_asked_of_its_resolution() {
-        let position = 4;
-        let fetcher = ConditionalCellFetcher {
-            position,
-            writes: vec![peer_c_q(conditional_claim(position))],
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        match peer_claim_at(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position,
-            &Recorded::below(position),
-            &NoResolution,
-        ) {
-            Err(PeerLineageFailure::Incomplete(why)) => {
-                assert!(why.contains("no conditional resolution"), "{why}")
-            }
-            other => panic!("the resolver answers for a conditional position, not {other:?}"),
-        }
-    }
-
-    /// A claim naming other coordinates never holds the root cell (storage
-    /// spec §9 rule 3): only a claim whose own coordinates derive `K_root(q)`
-    /// is recognized there, so a foreign claim written first blocks nothing,
-    /// and a cell holding only foreign claims is open.
-    #[test]
-    fn a_claim_naming_other_coordinates_never_holds_the_root_cell() {
-        let position = 3;
-        let other = device([0x5A; 32]).expect("another device");
-        let foreign = SofiResolutionClaim {
-            genesis: [0x99; 32],
-            device_id: other.devid,
-            position,
-            fulfillment_id: [0xF1; 32],
-            realize_root: [0xA1; 32],
-            void_root: [0xB1; 32],
-        };
-        let ours = SofiResolutionClaim {
-            genesis: PEER_G,
-            device_id: peer_d(),
-            ..foreign
-        };
-        let walk = |writes: Vec<Vec<u8>>| {
-            validate_peer_lineage(
-                &ConditionalCellFetcher {
-                    position,
-                    writes,
-                    last: crate::route_chain::ROUTE_LEN - 1,
+        .expect("a later boundary continues the established account");
+        assert!(matches!(
+            continues_the_account(
+                BoundarySince::Previous {
+                    account_root: [4; 32]
                 },
-                NETWORK,
-                &PEER_G,
-                &peer_d(),
-                position,
-                &Recorded::below(position),
-                &NoResolution,
-            )
-        };
-        assert!(
-            matches!(
-                walk(vec![signed_conditional(foreign, &other).expect("its own C_q")]),
-                Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("no claim holds")
+                None
             ),
-            "a cell holding only a foreign claim is open"
-        );
-        assert!(
-            matches!(
-                walk(vec![
-                    signed_conditional(foreign, &other).expect("its own C_q"),
-                    peer_c_q(ours),
-                ]),
-                Err(PeerLineageFailure::Unresolved(_))
+            Err(PeerLineageFailure::Invalid(_))
+        ));
+        assert!(matches!(
+            continues_the_account(
+                BoundarySince::Previous {
+                    account_root: [7; 32]
+                },
+                Some(&previous)
             ),
-            "the foreign claim first at the leader does not stop this trader's claim"
-        );
+            Err(PeerLineageFailure::Invalid(_))
+        ));
+        assert!(matches!(
+            continues_the_account(BoundarySince::Opened { frontier: [6; 32] }, Some(&previous)),
+            Err(PeerLineageFailure::Invalid(_))
+        ));
     }
 
-    /// Only a FINAL claim is read (storage spec §9 finality 3): a claim that
-    /// holds the leader link, with fewer than two further links, decides
-    /// nothing yet.
     #[test]
-    fn a_claim_that_is_not_final_decides_nothing_yet() {
-        let position = 2;
-        for last in [0, 1] {
-            let fetcher = ConditionalCellFetcher {
-                position,
-                writes: vec![peer_c_q(conditional_claim(position))],
-                last,
-            };
-            let outcome = validate_peer_lineage(
-                &fetcher,
-                NETWORK,
-                &PEER_G,
-                &peer_d(),
-                position,
-                &Recorded::below(position),
-                &NoResolution,
-            );
-            assert!(
-                matches!(outcome, Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("not final yet")),
-                "written through position {last}: {outcome:?}"
-            );
-        }
-    }
-
-    /// A failure met below a step keeps its class: evidence that could not
-    /// be established is retried, and only evidence that verified as wrong is
-    /// `Invalid` (storage spec §4).
-    #[test]
-    fn a_step_failure_keeps_the_class_it_was_established_in() {
-        use crate::economic::provenance::ProvenanceError as P;
-        let unavailable = |m: &str| PeerLineageFailure::Incomplete(m.to_string());
-        let provenance = |p: P| EconomicValidationError::Provenance(p);
-        assert!(matches!(
-            step_failure(
-                3,
-                provenance(P::ReleaseNotEstablished {
-                    generation: 1,
-                    failure: unavailable("the reserve lineage has not reached generation 1"),
-                })
-            ),
-            PeerLineageFailure::Incomplete(_)
-        ));
-        assert!(matches!(
-            step_failure(
-                3,
-                provenance(P::PeerTransitionNotValidated {
-                    peer_economic_position: 2,
-                    failure: PeerLineageFailure::Unresolved("mid-route".into()),
-                })
-            ),
-            PeerLineageFailure::Unresolved(_)
-        ));
-        assert!(matches!(
-            step_failure(
-                3,
-                provenance(P::OwnerLineage(unavailable("no member answered")))
-            ),
-            PeerLineageFailure::Incomplete(_)
-        ));
-        assert!(matches!(
-            step_failure(
-                3,
-                provenance(P::RegisterNotEstablished(unavailable(
-                    "the catalog could not be read"
-                )))
-            ),
-            PeerLineageFailure::Incomplete(_)
-        ));
-        assert!(matches!(
-            step_failure(
-                3,
-                provenance(P::AmountMismatch {
-                    source: 1,
-                    credit: 2
-                })
-            ),
-            PeerLineageFailure::Invalid(_)
-        ));
-        assert!(matches!(
-            step_failure(
-                3,
-                EconomicValidationError::RegisteredClaimNamesAnotherTrader
-            ),
-            PeerLineageFailure::Invalid(_)
-        ));
-    }
-
-    /// NO PATH from a conditional cell to a validated root. The walk is the
-    /// only way a foreign position becomes a `ValidatedEconomicRoot`, and it
-    /// refuses — so neither branch of an unresolved `C_q` can be minted, and
-    /// no `ValidatedPeerTransition` exists to carry one downstream.
-    #[test]
-    fn no_validated_root_is_minted_from_either_branch_of_an_unresolved_claim() {
-        let position = 2;
-        let claim = conditional_claim(position);
-        let fetcher = ConditionalCellFetcher {
-            position,
-            writes: vec![peer_c_q(claim)],
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        let outcome = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position,
-            &Recorded::below(position),
-            &NoResolution,
-        );
-        let err = outcome.expect_err("no validated transition");
-        // Neither of the two committed roots appears in the refusal, because
-        // nothing selected one. A message quoting `realize_root` would mean
-        // some code path had already read it as "the" root.
-        let rendered = err.to_string();
-        for (name, root) in [
-            ("realize_root", claim.realize_root),
-            ("void_root", claim.void_root),
-        ] {
-            let b32 = crate::utils::text_id::encode_base32_crockford(&root);
-            assert!(
-                !rendered.contains(&b32),
-                "{name} leaked into the refusal: {rendered}"
-            );
-        }
-    }
-
-    /// No claim is accepted at the activation root, so nothing can name it
-    /// as a parent: a conditional position right after it is `Invalid`, and
-    /// the resolver is never asked (DSM Amendment A8; SoFi S9, every leg
-    /// follows a setup the trader registered).
-    #[test]
-    fn a_conditional_position_right_after_the_activation_root_is_invalid() {
-        let fetcher = ConditionalCellFetcher {
-            position: 1,
-            writes: vec![peer_c_q(conditional_claim(1))],
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        let outcome = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            2,
-            &NoneRecorded,
-            &NoResolution,
-        );
-        assert!(
-            matches!(outcome, Err(PeerLineageFailure::Invalid(ref m)) if m.contains("cannot follow the activation root")),
-            "{outcome:?}"
-        );
-    }
-
-    /// A frontier store that answers at or past the target has decided
-    /// nothing about the peer: the verification reads no cell and says the
-    /// fault is its own.
-    #[test]
-    fn a_frontier_at_the_target_is_this_verifiers_fault_not_the_peers() {
-        let position = 3;
-        let fetcher = ConditionalCellFetcher {
-            position,
-            writes: vec![peer_c_q(conditional_claim(position))],
-            last: crate::route_chain::ROUTE_LEN - 1,
-        };
-        let outcome = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position - 1,
-            &Recorded::below(position),
-            &NoResolution,
-        );
-        assert!(
-            matches!(outcome, Err(PeerLineageFailure::Incomplete(ref m)) if m.contains("the frontier store answered")),
-            "{outcome:?}"
-        );
-    }
-
-    /// Cells answered by the parent root they are routed from: `routed`
-    /// holds each `(position, parent root, value)` written along the cell
-    /// routed from that parent, final. Every routed read is recorded as the
-    /// `(position, parent root)` of the cell asked for.
-    struct ByParent {
-        routed: Vec<(u64, [u8; 32], Vec<u8>)>,
-        asked: std::cell::RefCell<Vec<(u64, [u8; 32])>>,
-    }
-
-    impl ByParent {
-        fn routed_from(
-            &self,
-            cell: &RootCell,
-            position: u64,
-            parent: &[u8; 32],
-        ) -> Result<bool, PeerLineageFailure> {
-            let register = Register::resolve(self, NETWORK)?;
-            RootCell::new(
-                &PEER_G,
-                &peer_d(),
-                position,
-                parent,
-                &register.set,
-                &register.profile.storage_set_id,
-            )
-            .map(|from| from.routed().seed() == cell.routed().seed())
-            .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))
-        }
-    }
-
-    impl PeerEvidenceFetcher for ByParent {
-        fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
-            let mut seats = crate::route_chain::fixtures::Cell::at(cell.routed());
-            for (position, parent, value) in &self.routed {
-                if self.routed_from(cell, *position, parent)? {
-                    seats.write(value, crate::route_chain::ROUTE_LEN - 1, &[]);
-                }
+    fn a_reached_validation_budget_never_reads_or_accepts_a_step() {
+        let fetcher = NoEvidence;
+        let resolver = NoResolution;
+        let verifier =
+            Verifier::new(&fetcher, NETWORK, &NoneRecorded, &resolver).expect("pinned register");
+        let mut cost = verifier.cost.get();
+        cost.steps_validated = VALIDATION_STEP_BUDGET;
+        verifier.cost.set(cost);
+        match verifier.validated_to(&[1; 32], &[2; 32], 1, Target::Root) {
+            Err(PeerLineageFailure::Incomplete(why)) => {
+                assert!(why.contains("budget"), "{why}");
             }
-            for parent in [[0x41; 32], [0x99; 32]] {
-                if self.routed_from(cell, cell.economic_position(), &parent)? {
-                    self.asked
-                        .borrow_mut()
-                        .push((cell.economic_position(), parent));
-                }
+            Err(other) => panic!("the budget must be incomplete: {other:?}"),
+            Ok(_) => panic!("a reached budget cannot establish a root"),
+        }
+    }
+
+    #[test]
+    fn a_cyclic_credit_dependency_never_becomes_a_valid_root() {
+        let fetcher = NoEvidence;
+        let resolver = NoResolution;
+        let verifier =
+            Verifier::new(&fetcher, NETWORK, &NoneRecorded, &resolver).expect("pinned register");
+        verifier.active.borrow_mut().insert(([1; 32], [2; 32], 1));
+        match verifier.validated_to(&[1; 32], &[2; 32], 1, Target::Root) {
+            Err(PeerLineageFailure::Invalid(why)) => {
+                assert!(why.contains("cyclic economic ancestry"), "{why}");
             }
-            Ok(seats.evidence())
+            Err(other) => panic!("a cycle must be invalid: {other:?}"),
+            Ok(_) => panic!("a cyclic dependency cannot establish a root"),
         }
-        fn native_reserve_release(
-            &self,
-            reserve_id: &[u8; 32],
-            generation: u64,
-        ) -> Result<ReserveReleaseWin, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no reserve release in this test: {} at {generation}",
-                encode_base32_crockford(reserve_id)
-            )))
-        }
-        fn root_register_candidate_set(
-            &self,
-            network_id: &[u8],
-        ) -> Result<crate::ccb::StorageSetMembers, PeerLineageFailure> {
-            let pinned = crate::economic::register::pinned_root_register_members(network_id)
-                .map_err(|e| PeerLineageFailure::Incomplete(e.to_string()))?;
-            crate::ccb::StorageSetMembers::new(pinned)
-                .map_err(|e| PeerLineageFailure::Incomplete(format!("{e:?}")))
-        }
-        fn immutable(
-            &self,
-            namespace: TaggedHashDomain<'static>,
-            addr: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no objects in this test: {} under {:?}",
-                encode_base32_crockford(addr),
-                namespace.source_bytes()
-            )))
-        }
-        fn held_ek_step(
-            &self,
-            signer: &[u8; 32],
-            addr: &[u8; 32],
-        ) -> Result<Option<Vec<u8>>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no relationship in this test: {} step {}",
-                encode_base32_crockford(signer),
-                encode_base32_crockford(addr)
-            )))
-        }
-        fn anchored_policy_bytes(
-            &self,
-            policy_commit: &[u8; 32],
-        ) -> Result<Vec<u8>, PeerLineageFailure> {
-            Err(PeerLineageFailure::Incomplete(format!(
-                "no policies in this test: {}",
-                encode_base32_crockford(policy_commit)
-            )))
-        }
-    }
-
-    /// DSM Amendment A19 (audit finding SA-02): the claim at a position is
-    /// read only at the cell routed from the root the receiver validated
-    /// before it, never at the cell routed from a root the claim's own
-    /// witness names. The receiver's frontier stands at position 4 with root
-    /// `0x41…`; the peer's claim at 5 is final only along the cell routed from
-    /// `0x99…`, a root the receiver never validated. The receiver asks for
-    /// the cell routed from `0x41…` alone, finds no claim there, and accepts
-    /// nothing.
-    /// MUTATION CONTROL: routing the read from any root but the validated
-    /// one turns this red.
-    #[test]
-    fn a_claim_on_a_root_the_receiver_never_validated_is_not_on_its_chain() {
-        let position = 5;
-        let claim = peer_c_q(conditional_claim(position));
-        let fetcher = ByParent {
-            routed: vec![(position, [0x99; 32], claim)],
-            asked: std::cell::RefCell::new(Vec::new()),
-        };
-        let frontier = Recorded(PeerFrontier::rehydrate_recorded(
-            PEER_G,
-            peer_d(),
-            position - 1,
-            [0x41; 32],
-            ParentClaimRef::SingleRoot {
-                claim_ref: [0x78; 32],
-            },
-        ));
-        let outcome = validate_peer_lineage(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            position,
-            &frontier,
-            &NoResolution,
-        );
-        assert!(
-            matches!(
-                outcome,
-                Err(PeerLineageFailure::Incomplete(ref m))
-                    if m.contains("routed from the root validated before it")
-            ),
-            "{outcome:?}"
-        );
-        assert_eq!(
-            *fetcher.asked.borrow(),
-            vec![(position, [0x41; 32])],
-            "only the cell routed from the validated root was read"
-        );
-    }
-
-    /// DSM Amendment A19, contact add: a walk toward a peer's head stops at
-    /// the first position whose root cell, routed from the root validated
-    /// before it, holds no claim. With nothing validated past the frontier it
-    /// started at, it reaches nothing new and reads one cell.
-    #[test]
-    fn a_walk_toward_the_head_stops_where_the_register_holds_nothing() {
-        let fetcher = CountingCells {
-            inner: ConditionalCellFetcher {
-                position: 9,
-                writes: Vec::new(),
-                last: crate::route_chain::ROUTE_LEN - 1,
-            },
-            reads: std::cell::Cell::new(0),
-        };
-        let walked = validate_peer_prefix(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            &Recorded::below(4),
-            &NoResolution,
-        )
-        .expect("an empty cell is the head, not a failure");
-        assert!(matches!(walked.answer().stop(), PrefixStop::Head));
-        assert!(walked.answer().reached().is_none());
-        assert_eq!(walked.cost().routed_reads, 1);
-        assert_eq!(fetcher.reads.get(), 1, "one root cell was read");
-    }
-
-    /// DSM Amendment A19, contact add: a walk that meets a position it
-    /// cannot decide yet stops short and keeps what it validated, which is
-    /// nothing here; it is not a failure of the contact.
-    #[test]
-    fn a_walk_toward_the_head_stops_short_on_a_cell_not_decided_yet() {
-        let position = 4;
-        let fetcher = ConditionalCellFetcher {
-            position,
-            writes: vec![peer_c_q(conditional_claim(position))],
-            last: 0,
-        };
-        let walked = validate_peer_prefix(
-            &fetcher,
-            NETWORK,
-            &PEER_G,
-            &peer_d(),
-            &Recorded::below(position),
-            &NoResolution,
-        )
-        .expect("a cell not decided yet is no failure");
-        match walked.answer().stop() {
-            PrefixStop::Short(why) => assert!(why.contains("not final yet"), "{why}"),
-            PrefixStop::Head => panic!("the cell holds a claim short of final"),
-        }
-        assert!(walked.answer().reached().is_none());
-    }
-
-    /// A walk toward the head spends from the same budget: with none left it
-    /// stops short at once and reads nothing.
-    #[test]
-    fn a_walk_toward_the_head_past_its_budget_stops_short_and_reads_nothing() {
-        let fetcher = CountingCells {
-            inner: ConditionalCellFetcher {
-                position: 1,
-                writes: Vec::new(),
-                last: crate::route_chain::ROUTE_LEN - 1,
-            },
-            reads: std::cell::Cell::new(0),
-        };
-        let verifier = Verifier::new(&fetcher, NETWORK, &NoneRecorded, &NoResolution)
-            .expect("the network's register");
-        verifier.cost.set(StepCost {
-            steps_validated: WALK_STEP_BUDGET,
-            routed_reads: 0,
-            source_steps: 0,
-        });
-        let (reached, stop) = verifier
-            .toward_head(&PEER_G, &peer_d())
-            .expect("a spent budget is no failure");
-        assert!(reached.is_none());
-        assert!(matches!(stop, PrefixStop::Short(ref why) if why.contains("walked its budget")));
-        assert_eq!(fetcher.reads.get(), 0, "nothing was read");
     }
 }

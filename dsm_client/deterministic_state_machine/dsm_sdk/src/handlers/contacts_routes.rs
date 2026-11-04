@@ -17,29 +17,6 @@ use super::relationship_status::derive_local_send_status_for_contact;
 use super::response_helpers::{err, pack_envelope_ok};
 use crate::sdk::contact_profile;
 
-/// Start validating a contact's lineage toward its head (DSM Amendment A19).
-/// It runs beside the add, which does not wait for it. The two-device test
-/// harness holds background work off, as it does the poller, so there it
-/// runs before the add returns, on the device that added the contact.
-async fn prevalidate_contact_lineage(genesis: [u8; 32], device_id: [u8; 32]) {
-    let validate = async move {
-        if let Err(e) =
-            crate::sdk::economic_registers::prevalidate_contact(genesis, device_id).await
-        {
-            log::warn!(
-                "[contacts.add] the contact's lineage was not validated yet: {e}; acceptance \
-                 validates it when a payment arrives"
-            );
-        }
-    };
-    #[cfg(test)]
-    if crate::sdk::inbox_poller::background_held() {
-        validate.await;
-        return;
-    }
-    crate::runtime::get_runtime().spawn(validate);
-}
-
 impl AppRouterImpl {
     /// Add the counterparty a directory read proved, and establish the
     /// relationship before any step on it (§26). The one path a contact is
@@ -92,12 +69,8 @@ impl AppRouterImpl {
         if let Err(e) = self.core_sdk.establish_relationship(device_id) {
             return Err(format!("contacts.add: establishing the relationship: {e}"));
         }
-        // The contact's lineage is validated while this device is online for
-        // the add, so its first payment is one step (DSM Amendment A19). The
-        // add does not wait for it.
-        prevalidate_contact_lineage(resolved.entry.body.genesis, device_id).await;
 
-        #[cfg(all(target_os = "android", feature = "bluetooth"))]
+        #[cfg(feature = "bluetooth")]
         {
             let Some(stored) = cm.get_verified_contact(device_id).await else {
                 return Err("contact added, but it is not held in memory".into());
@@ -152,7 +125,7 @@ impl AppRouterImpl {
                         .get_session_status(&contact.device_id)
                         .await;
                     item.pairing = crate::bluetooth::pairing_orchestrator::contact_pairing_phase(
-                        record.ble_address.as_deref().is_some_and(|a| !a.is_empty()),
+                        record.ble_address.as_deref().filter(|a| !a.is_empty()),
                         session.as_ref(),
                     ) as i32;
                     items.push(item);

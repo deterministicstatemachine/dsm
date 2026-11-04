@@ -395,66 +395,9 @@ impl ReassemblyBuffer {
     }
 }
 
-/// Fixed-size LRU dedup table for fully reassembled frames.
-///
-/// After a frame is reassembled, its link and commitment are inserted here.
-/// If the same frame appears again on the same link within `TTL_SECS` (e.g.
-/// peer retransmitted the entire chunk set), the duplicate is dropped before
-/// it reaches the bilateral handler. The same bytes on another link are that
-/// link's frame, answered on that link.
-///
-/// Capacity is bounded at `DEDUP_TABLE_SIZE` entries — oldest entry is evicted
-/// when full, so memory usage is O(1).
-struct DeduplicationTable {
-    entries: Vec<(FrameKey, Instant)>,
-    capacity: usize,
-}
-
-impl DeduplicationTable {
-    const TTL_SECS: u64 = 60;
-
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: Vec::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    /// Whether the frame was already seen within the TTL window. A first
-    /// sighting is recorded.
-    fn sight(&mut self, key: &FrameKey) -> Sighting {
-        let now = Instant::now();
-
-        // Evict expired entries
-        self.entries
-            .retain(|(_, ts)| now.duration_since(*ts).as_secs() < Self::TTL_SECS);
-
-        // Check for existing entry
-        if self.entries.iter().any(|(seen, _)| seen == key) {
-            return Sighting::Repeat;
-        }
-
-        // Evict oldest if at capacity
-        if self.entries.len() >= self.capacity {
-            self.entries.remove(0);
-        }
-
-        self.entries.push((key.clone(), now));
-        Sighting::First
-    }
-}
-
-/// Whether a reassembled frame was seen before on its link.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Sighting {
-    First,
-    Repeat,
-}
-
 /// BLE frame coordinator: handles chunking, reassembly, and bilateral flow dispatch.
 pub struct BleFrameCoordinator {
     pending_reassembly: Arc<Mutex<HashMap<FrameKey, ReassemblyBuffer>>>,
-    dedup_table: Arc<Mutex<DeduplicationTable>>,
     device_id: [u8; 32],
 }
 
@@ -625,7 +568,6 @@ impl BleFrameCoordinator {
     pub fn new(device_id: [u8; 32]) -> Self {
         Self {
             pending_reassembly: Arc::new(Mutex::new(HashMap::new())),
-            dedup_table: Arc::new(Mutex::new(DeduplicationTable::new(32))),
             device_id,
         }
     }
@@ -930,17 +872,8 @@ impl BleFrameCoordinator {
             .map_err(|e| storage("the completed frame's chunks", e))?;
         let payload = buffer.reassemble()?;
 
-        // Transport-level dedup: if the same frame was already dispatched from
-        // this link (e.g. peer retransmitted the entire chunk set), drop it
-        // before it reaches the bilateral handler.
-        if self.dedup_table.lock().await.sight(&key) == Sighting::Repeat {
-            warn!(
-                "Transport dedup: dropping reassembled duplicate frame {}",
-                short_id(&key.commitment[..8])
-            );
-            return Ok(FrameIngressResult::NeedMoreChunks);
-        }
-
+        // A frame delivered again goes up like the first: the bilateral handler
+        // answers a redelivery, and an owed frame is one.
         Ok(FrameIngressResult::MessageComplete {
             message: BleTransportMessage {
                 frame_type,
@@ -1054,6 +987,32 @@ mod tests {
             last = coord.ingest_chunk(link, chunk).await?;
         }
         Ok(last)
+    }
+
+    /// A complete frame delivered again on its link goes up again. The
+    /// bilateral handler answers a redelivery
+    /// (`offline_step_tests::a_lost_ack_is_answered_again_*`), and an owed frame
+    /// is one.
+    #[test]
+    #[serial_test::serial]
+    fn a_complete_frame_delivered_again_goes_up_again() {
+        let rt = Runtime::new().expect("runtime");
+        rt.block_on(async {
+            init_test_db();
+            let coord = test_coordinator();
+            let frame = payload(0x51, 900);
+            let chunks = coord
+                .encode_message(BleFrameType::BilateralPrepare, &frame)
+                .expect("chunks");
+            for delivery in ["the first", "the second"] {
+                match feed(&coord, LINK_A, &chunks).await.expect(delivery) {
+                    FrameIngressResult::MessageComplete { message } => {
+                        assert_eq!(message.payload, frame, "{delivery} delivery");
+                    }
+                    other => panic!("{delivery} delivery did not complete: {other:?}"),
+                }
+            }
+        });
     }
 
     /// SA-13. A peer in range writes a chunk naming an honest peer's frame

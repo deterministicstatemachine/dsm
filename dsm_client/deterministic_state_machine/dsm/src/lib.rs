@@ -46,7 +46,7 @@
 //! - [`bilateral`] — Bilateral transaction types and protocol definitions
 //! - [`commitments`] — Deterministic, smart, and external commitments
 //! - [`envelope`] — Envelope v3 protobuf wire format (0x03 framing)
-//! - [`recovery`] — Recovery capsules, tombstones, and rollup proofs
+//! - [`recovery`] — Recovery tombstones, succession and rollup proofs
 //! - [`serialization`] — Protobuf serialization utilities
 //! - [`verification`] — Chain verification and integrity checking
 //!
@@ -66,10 +66,13 @@
 //! - All secrets use `Zeroize` + `ZeroizeOnDrop` for memory safety
 //! - Feature-gated optional modules (bluetooth)
 
+pub mod authored_object; // authored objects (storage spec §5, §7)
 pub mod bilateral;
 pub mod ccb; // canonical commit bytes — docs/papers/ccb-object-registry.md
 pub mod commitments;
 pub mod common;
+// DSM Connect's signed objects (DSM Amendment A11)
+pub mod connect;
 // keyed-cell arrival records and running hashes (storage spec §14)
 pub mod route_chain;
 pub mod storage_cell;

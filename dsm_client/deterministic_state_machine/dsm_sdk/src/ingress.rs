@@ -35,37 +35,17 @@ fn ingress_error(code: u32, message: impl Into<String>) -> pb::Error {
     }
 }
 
-#[cfg(all(target_os = "android", feature = "jni"))]
-fn encode_framed_envelope(payload: pb::envelope::Payload) -> Result<Vec<u8>, pb::Error> {
-    let envelope = crate::envelope::local_answer(payload);
-    let mut buf = Vec::with_capacity(1 + envelope.encoded_len());
-    buf.push(0x03);
-    envelope.encode(&mut buf).map_err(|e| {
-        ingress_error(
-            ERROR_CODE_PROCESSING_FAILED,
-            format!("ingress: envelope encode failed: {e}"),
-        )
-    })?;
-    Ok(buf)
-}
-
+/// Hand the page a canonical envelope event through the host.
 fn push_canonical_envelope_event(payload: pb::envelope::Payload) -> Result<(), pb::Error> {
-    #[cfg(all(target_os = "android", feature = "jni"))]
-    {
-        let framed = encode_framed_envelope(payload)?;
-        crate::jni::event_dispatch::post_event_to_webview("canonical.envelope.bin", &framed)
-            .map_err(|e| {
-                ingress_error(
-                    ERROR_CODE_PROCESSING_FAILED,
-                    format!("ingress: canonical envelope dispatch failed: {e}"),
-                )
-            })?;
-    }
-    #[cfg(not(all(target_os = "android", feature = "jni")))]
-    {
-        let _ = payload;
-    }
-    Ok(())
+    let framed = crate::host::framed_local_answer(payload);
+    crate::host::host()
+        .and_then(|host| host.post_event("canonical.envelope.bin", &framed))
+        .map_err(|e| {
+            ingress_error(
+                ERROR_CODE_PROCESSING_FAILED,
+                format!("ingress: canonical envelope dispatch failed: {e}"),
+            )
+        })
 }
 
 /// Push a genesis lifecycle event to the WebView (EventBridge maps kinds to the
@@ -918,6 +898,33 @@ mod tests {
             // Finer than ERA counts, and nothing at all.
             (Unit::Decimals(2), Amount::Entered("1.234".to_string())),
             (Unit::Decimals(2), Amount::Entered("0".to_string())),
+            // The routes the tour walks through (practiceRoutes.test.ts): the
+            // practice market's reserves, a 10 PLAY swap and its 4.45 ERA, a
+            // vault of 20 PLAY against 10 ERA and its close, a 5 PLAY escrow
+            // stake, the practice app's 5 PLAY grant and its 8 PLAY request,
+            // and a token of 1000 created for a 10 ERA fee.
+            (Unit::Decimals(0), Amount::Entered("1000".to_string())),
+            (Unit::Decimals(2), Amount::Entered("500".to_string())),
+            (Unit::Decimals(0), Amount::Entered("10".to_string())),
+            (Unit::Decimals(2), Amount::BaseUnits(445)),
+            (Unit::Decimals(2), Amount::Entered("4.45".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(40)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_445)),
+            (Unit::Decimals(2), Amount::Entered("5".to_string())),
+            (Unit::Decimals(0), Amount::Entered("20".to_string())),
+            (Unit::Decimals(2), Amount::Entered("10".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(30)),
+            (Unit::Decimals(2), Amount::BaseUnits(99_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(20)),
+            (Unit::Decimals(2), Amount::BaseUnits(1_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(50)),
+            (Unit::Decimals(2), Amount::BaseUnits(100_000)),
+            (Unit::Decimals(0), Amount::BaseUnits(0)),
+            (Unit::Decimals(2), Amount::BaseUnits(0)),
+            (Unit::Decimals(0), Amount::BaseUnits(15)),
+            (Unit::Decimals(0), Amount::Entered("8".to_string())),
+            (Unit::Decimals(0), Amount::BaseUnits(42)),
+            (Unit::Decimals(0), Amount::BaseUnits(8)),
         ];
         let mut record = Vec::new();
         let mut answers = Vec::new();
@@ -1090,185 +1097,6 @@ mod tests {
                 invoked.message
             );
         }
-    }
-
-    /// `recovery.enable` reports a first capsule it could not make, never
-    /// success (SA-52): here the capsule table is gone, so its write fails.
-    #[test]
-    #[serial]
-    fn enabling_backup_reports_a_first_capsule_it_could_not_make() {
-        device_with_router(0x4D);
-        crate::storage::client_db::recovery::ensure_recovery_tables().expect("the tables");
-        crate::storage::client_db::get_connection()
-            .expect("the database")
-            .lock()
-            .expect("the connection")
-            .execute_batch("DROP TABLE recovery_capsules")
-            .expect("lose the capsule table");
-        let enabled = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterInvoke(
-                pb::RouterInvokeOp {
-                    method: "recovery.enable".to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: "recovery.enable".to_string(),
-                            operation: String::new(),
-                            value: economic_fixtures::test_mnemonic(0x4D),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                },
-            )),
-        });
-        crate::storage::client_db::recovery::ensure_recovery_tables().expect("the tables back");
-        let refused = expect_error(enabled);
-        assert!(
-            refused.message.contains("first capsule was not made"),
-            "{}",
-            refused.message
-        );
-    }
-
-    /// A recovery route invoked as the NFC backup screen invokes it, with one
-    /// phrase as its argument.
-    fn invoke_recovery_route(method: &str, phrase: &str) -> IngressResponse {
-        dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterInvoke(
-                pb::RouterInvokeOp {
-                    method: method.to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: pb::AppStateRequest {
-                            key: method.to_string(),
-                            operation: String::new(),
-                            value: phrase.to_string(),
-                        }
-                        .encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                },
-            )),
-        })
-    }
-
-    /// The wallet seed this session holds, and the one sealed at rest, read
-    /// back as a restart reads it.
-    fn held_and_sealed_seed() -> (Vec<u8>, Vec<u8>) {
-        use crate::sdk::recovery_sdk::RecoverySDK;
-        let held = RecoverySDK::get_cached_wallet_seed()
-            .expect("the session's seed")
-            .to_vec();
-        RecoverySDK::clear_wallet_seed_cache();
-        assert!(
-            RecoverySDK::load_and_cache_wallet_seed().expect("the seed vault"),
-            "no sealed seed"
-        );
-        let sealed = RecoverySDK::get_cached_wallet_seed()
-            .expect("the unsealed seed")
-            .to_vec();
-        (held, sealed)
-    }
-
-    /// NFC backup is armed with this wallet's own phrase or not at all, and no
-    /// recovery route writes the wallet seed (SA-64). Another wallet's phrase
-    /// is refused by `recovery.enable` and `recovery.createCapsule`, and
-    /// `recovery.cacheMnemonic`, which reads a ring with whatever phrase made
-    /// it, leaves the seed in memory and the sealed one as they were. The
-    /// wallet's own phrase arms the backup.
-    #[test]
-    #[serial]
-    fn no_recovery_route_replaces_the_wallet_seed() {
-        device_with_router(0x4E);
-        let (own, own_sealed) = held_and_sealed_seed();
-        assert_eq!(own, own_sealed);
-        let other = economic_fixtures::test_mnemonic(0x4F);
-        for method in ["recovery.enable", "recovery.createCapsule"] {
-            let refused = expect_error(invoke_recovery_route(method, &other));
-            assert!(
-                refused
-                    .message
-                    .contains("not this wallet's recovery phrase"),
-                "{method}: {}",
-                refused.message
-            );
-        }
-        let cached = expect_ok_bytes(invoke_recovery_route("recovery.cacheMnemonic", &other));
-        assert!(!cached.is_empty());
-        assert_eq!(held_and_sealed_seed(), (own.clone(), own.clone()));
-
-        let armed = expect_ok_bytes(invoke_recovery_route(
-            "recovery.enable",
-            &economic_fixtures::test_mnemonic(0x4E),
-        ));
-        assert!(!armed.is_empty());
-        assert_eq!(held_and_sealed_seed(), (own.clone(), own));
-    }
-
-    /// A ring capsule read back through `recovery.decryptCapsule` stages the
-    /// device and genesis it was sealed by, which the tombstone names: only
-    /// the Core bridge's decrypt, now gone (SA-119), staged them.
-    #[test]
-    #[serial]
-    fn decrypting_a_ring_capsule_stages_the_device_it_was_sealed_by() {
-        device_with_router(0x52);
-        let phrase = economic_fixtures::test_mnemonic(0x52);
-        let sealed = expect_ok_bytes(invoke_recovery_route("recovery.createCapsule", &phrase));
-        let capsule = match crate::envelope::local_answer_from_canonical_bytes(&sealed[1..])
-            .map(|e| e.payload)
-        {
-            Ok(Some(pb::envelope::Payload::NfcRecoveryCapsule(c))) => c,
-            other => panic!("recovery.createCapsule answered {other:?}"),
-        };
-        let cached = expect_ok_bytes(invoke_recovery_route("recovery.cacheMnemonic", &phrase));
-        assert!(!cached.is_empty());
-        let decrypted = dispatch_ingress(IngressRequest {
-            operation: Some(ingress_request::Operation::RouterInvoke(
-                pb::RouterInvokeOp {
-                    method: "recovery.decryptCapsule".to_string(),
-                    args: pb::ArgPack {
-                        codec: pb::Codec::Proto as i32,
-                        body: capsule.encode_to_vec(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                },
-            )),
-        });
-        assert!(!expect_ok_bytes(decrypted).is_empty());
-        let staged =
-            crate::storage::client_db::recovery::get_recovery_pref("capsule_source_device_id")
-                .expect("read the staged device")
-                .expect("the staged device");
-        assert_eq!(
-            staged,
-            crate::sdk::app_state::AppState::get_device_id().expect("this device")
-        );
-    }
-
-    /// Turning NFC backup off drops the recovery keys and nothing else: the
-    /// wallet seed stays in memory and sealed at rest, so the wallet still
-    /// signs, and opens after a restart (SA-65).
-    #[test]
-    #[serial]
-    fn disabling_backup_keeps_the_wallet_seed() {
-        use crate::sdk::recovery_sdk::RecoverySDK;
-        device_with_router(0x50);
-        let (own, _) = held_and_sealed_seed();
-        let armed = expect_ok_bytes(invoke_recovery_route(
-            "recovery.enable",
-            &economic_fixtures::test_mnemonic(0x50),
-        ));
-        assert!(!armed.is_empty());
-        assert!(RecoverySDK::has_cached_key());
-
-        let disabled = expect_ok_bytes(invoke_recovery_route("recovery.disable", ""));
-        assert!(!disabled.is_empty());
-        assert!(!RecoverySDK::has_cached_key());
-        assert_eq!(held_and_sealed_seed(), (own.clone(), own));
     }
 
     /// While the session is locked the ingress runs nothing the app asks but

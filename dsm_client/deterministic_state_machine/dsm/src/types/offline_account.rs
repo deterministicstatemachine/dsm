@@ -572,6 +572,58 @@ impl SpendWitness {
     }
 }
 
+impl SpendWitness {
+    /// The witness's wire form.
+    pub fn to_proto(&self) -> crate::types::proto::StepWriteOfflineAccount {
+        crate::types::proto::StepWriteOfflineAccount {
+            pre_account_root: self.pre_account_root.to_vec(),
+            pre_allocation: self.pre_allocation,
+            pre_counter: self.pre_counter,
+            pre_frontier: self.pre_frontier.to_vec(),
+            next_frontier: self.next_frontier.to_vec(),
+            account_paths: self
+                .account_paths
+                .iter()
+                .map(|p| SmtPathProto {
+                    heights: p.explicit_heights.to_vec(),
+                    siblings: p.siblings.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// The witness a wire form states, its paths each in the one canonical
+    /// encoding of a path.
+    pub fn from_proto(a: crate::types::proto::StepWriteOfflineAccount) -> Result<Self, DsmError> {
+        let fixed = |bytes: &[u8], what: &str| -> Result<[u8; 32], DsmError> {
+            bytes.try_into().map_err(|e| {
+                DsmError::invalid_operation(format!("an offline account witness's {what}: {e}"))
+            })
+        };
+        let account_paths = a
+            .account_paths
+            .into_iter()
+            .map(|p| {
+                smt_path::decode::<DeviceSmtHashes>(&p.heights, &p.siblings).map_err(|e| {
+                    DsmError::invalid_operation(format!("an offline account witness's path: {e}"))
+                })?;
+                Ok(EncodedPath {
+                    explicit_heights: fixed(&p.heights, "path height set")?,
+                    siblings: p.siblings,
+                })
+            })
+            .collect::<Result<Vec<_>, DsmError>>()?;
+        Ok(Self {
+            pre_account_root: fixed(&a.pre_account_root, "pre-root")?,
+            pre_allocation: a.pre_allocation,
+            pre_counter: a.pre_counter,
+            pre_frontier: fixed(&a.pre_frontier, "pre-frontier")?,
+            next_frontier: fixed(&a.next_frontier, "next frontier")?,
+            account_paths,
+        })
+    }
+}
+
 fn decode_path(path: &SmtPathProto) -> Result<Box<[[u8; 32]; FOLD_HEIGHT]>, DsmError> {
     smt_path::decode::<DeviceSmtHashes>(&path.heights, &path.siblings)
         .map_err(|e| DsmError::invalid_operation(format!("an offline state proof's path: {e}")))
@@ -630,6 +682,19 @@ pub fn verify_offline_state(
     counter: u64,
     proof: &[u8],
 ) -> Result<(), DsmError> {
+    verify_offline_state_at(device_root, bundle, frontier, counter, proof).map(|_| ())
+}
+
+/// [`verify_offline_state`], answering with the account root the proof proved:
+/// the account `device_root` commits under `bundle`, which holds `counter` and
+/// `frontier`.
+pub fn verify_offline_state_at(
+    device_root: &[u8; 32],
+    bundle: &[u8; 32],
+    frontier: &[u8; 32],
+    counter: u64,
+    proof: &[u8],
+) -> Result<[u8; 32], DsmError> {
     use prost::Message;
     let proof = crate::types::proto::OfflineStateProof::decode(proof)
         .map_err(|e| DsmError::invalid_operation(format!("an offline state proof: {e}")))?;
@@ -663,7 +728,7 @@ pub fn verify_offline_state(
             "the device root does not commit this offline account",
         ));
     }
-    Ok(())
+    Ok(account_root)
 }
 
 #[cfg(test)]

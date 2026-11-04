@@ -258,11 +258,6 @@ impl AndroidBleBridge {
                 // Frontend will handle the modal and user action
                 // Just log and pass through
             }
-            Some(Ev::PairingAccept(acc)) => {
-                info!("BLE pairing accept received from {}", acc.address);
-                // Frontend will handle contact creation
-                // Just log and pass through
-            }
             Some(Ev::PairingStatus(ps)) => {
                 info!(
                     "BLE pairing status update: status={} message={}",
@@ -271,95 +266,10 @@ impl AndroidBleBridge {
                 // Status updates are dispatched to the frontend via JNI; no bridge action needed.
             }
             Some(Ev::IdentityObserved(obs)) => {
-                info!(
-                    "BLE identity observed (implicit) from {} device_id_zero={} genesis_zero={}",
-                    obs.address,
-                    obs.device_id.iter().all(|&b| b == 0),
-                    obs.genesis_hash.iter().all(|&b| b == 0)
-                );
-                // Update connection record with observed device_id if present (first time only)
-                let mut should_reconcile = false;
-                if obs.device_id.iter().any(|&b| b != 0) {
-                    let mut devices = self.connected_devices.write().await;
-                    if let Some(conn) = devices.get_mut(&obs.address) {
-                        if conn.device_id.is_none() {
-                            let mut id = [0u8; 32];
-                            id.copy_from_slice(&obs.device_id);
-                            conn.device_id = Some(id);
-                            should_reconcile = true;
-                        }
-                        conn.last_activity_tick = next_ble_tick();
-                    } else {
-                        // Connection record missing; still allow a one-time reconcile attempt.
-                        should_reconcile = true;
-                    }
-                }
-
-                // Notify pairing orchestrator about identity observation
-                let orchestrator = crate::bluetooth::get_pairing_orchestrator();
-                let mut device_id = [0u8; 32];
-                device_id.copy_from_slice(&obs.device_id);
-                let mut genesis_hash = [0u8; 32];
-                genesis_hash.copy_from_slice(&obs.genesis_hash);
-
-                info!(
-                    "[AndroidBleBridge] Calling orchestrator.handle_identity_observed for {} (device_id={:02x}{:02x}...)",
-                    obs.address,
-                    device_id[0], device_id[1]
-                );
-
-                let mut skip_reconcile = false;
-                match orchestrator
-                    .handle_identity_observed(obs.address.clone(), genesis_hash, device_id)
-                    .await
-                {
-                    Ok(_) => info!(
-                        "Pairing orchestrator handled identity observation for {} (device_id={:02x}{:02x}...)",
-                        obs.address, device_id[0], device_id[1]
-                    ),
-                    Err(e) => {
-                        // Orchestrator error is non-fatal - might not have active pairing session
-                        debug!(
-                            "Pairing orchestrator couldn't handle identity observation: {} (device_id={:02x}{:02x}...)",
-                            e, device_id[0], device_id[1]
-                        );
-                        // Only fall back for non-validation errors. If genesis mismatch (or other validation failure),
-                        // do NOT promote contact to BleCapable to preserve integrity.
-                        if e.contains("Genesis hash mismatch") {
-                            warn!(
-                                "Skipping direct BLE status update due to genesis mismatch for {} (device_id={:02x}{:02x}...)",
-                                obs.address, device_id[0], device_id[1]
-                            );
-                            skip_reconcile = true;
-                        } else {
-                            // Fall back to direct contact status update (original behavior)
-                            match crate::storage::client_db::update_contact_ble_status(
-                                &obs.device_id,
-                                None,
-                                Some(&obs.address),
-                            ) {
-                                Ok(_) => info!("Contact status updated via BLE identity observation: {} (device_id={:02x}{:02x}...)", obs.address, device_id[0], device_id[1]),
-                                Err(e) => warn!("Failed to update contact status via BLE identity observation: {}: {} (device_id={:02x}{:02x}...)", obs.address, e, device_id[0], device_id[1]),
-                            }
-                        }
-                    }
-                }
-
-                // Reconciliation deleted: forks are Tripwire violations, not reconcilable.
-                // Connection established — proceed directly to bilateral protocol.
-                let _ = (should_reconcile, skip_reconcile);
-
-                // Pairing confirmation is handled at the GATT layer via protobuf envelopes:
-                // the advertiser sends a BlePairingAccept indication on PAIRING_ACK after
-                // processing the scanner's identity write. No raw byte-packed PAIR1/PAIR2.
-            }
-            Some(Ev::PairingConfirm(confirm)) => {
-                info!(
-                    "BLE pairing confirm received from {} (Phase 3 atomic commit)",
-                    confirm.address
-                );
-                // Handled at the GATT/JNI layer (processBleIdentityEnvelope).
-                // Bridge pass-through only.
+                // Rust raises this for the frontend once a link handshake
+                // paired the contact (DSM Amendment A27); the platform never
+                // pairs anything with it.
+                debug!("BLE identity event for the frontend: {}", obs.address);
             }
             Some(Ev::BlePermission(_)) => {
                 debug!("BlePermissionEvent received in bridge — outbound-only, no action");
@@ -655,9 +565,6 @@ mod tests {
     use crate::bluetooth::BilateralTransportAdapter;
     use crate::bluetooth::bilateral_ble_handler::BilateralBleHandler;
     use crate::bluetooth::ble_frame_coordinator::BleFrameCoordinator;
-    use crate::bluetooth::{get_pairing_orchestrator};
-    use crate::storage::client_db;
-    use crate::storage::client_db::ContactRecord;
     use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -826,309 +733,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
-    async fn pairing_smoke_event_ordering() {
-        // Initialize environment for AppState (Global singleton)
-        crate::economic_fixtures::use_test_storage_dir();
-
-        // Ensure device ID is available using idempotent bootstrap
-        crate::sdk::app_state::AppState::set_identity_info_if_empty(
-            vec![0xAA; 32],
-            vec![0xBB; 32],
-            vec![0xCC; 32],
-            vec![0x00; 32],
-        )
-        .expect("AppState identity");
-
-        // Fresh DB + orchestrator for deterministic behavior
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-        crate::bluetooth::reset_pairing_orchestrator_for_tests();
-
-        // Build minimal bridge
-        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([1u8; 32], [2u8; 32]);
-
-        // Prepare contact so status update succeeds
-        let device_id = [9u8; 32];
-        let genesis = [3u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-smoke".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer-smoke".to_string(),
-            genesis_hash: genesis.to_vec(),
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0x41; 64],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
-
-        // Start a pairing session explicitly
-        let orchestrator = get_pairing_orchestrator();
-        orchestrator
-            .initiate_pairing(device_id)
-            .await
-            .expect("init pairing");
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::WaitingForConnection)
-        );
-
-        // 1) DeviceConnected event
-        let dev_connected = crate::generated::BleEvent {
-            ev: Some(crate::generated::ble_event::Ev::DeviceConnected(
-                crate::generated::BleDeviceInfo {
-                    address: "AA:BB:CC".to_string(),
-                    name: String::new(),
-                    rssi: 0,
-                },
-            )),
-        };
-        let mut buf1 = Vec::new();
-        dev_connected.encode(&mut buf1).expect("encode");
-        let _ = bridge
-            .handle_ble_event_bytes(&buf1)
-            .await
-            .expect("handle connected");
-        // Session should still be WaitingForConnection at orchestrator level
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::WaitingForConnection)
-        );
-
-        // 2) IdentityObserved event
-        let identity_evt = crate::generated::BleEvent {
-            ev: Some(crate::generated::ble_event::Ev::IdentityObserved(
-                crate::generated::BleIdentityObserved {
-                    address: "AA:BB:CC".to_string(),
-                    device_id: device_id.to_vec(),
-                    genesis_hash: genesis.to_vec(),
-                },
-            )),
-        };
-        let mut buf2 = Vec::new();
-        identity_evt.encode(&mut buf2).expect("encode");
-        let _ = bridge
-            .handle_ble_event_bytes(&buf2)
-            .await
-            .expect("handle identity");
-
-        // After identity observation we are not yet complete; mutual handshake is required.
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::ExchangingChainTips)
-        );
-        let contact = client_db::get_contact_by_device_id(&device_id)
-            .expect("get contact")
-            .expect("exists");
-        assert_eq!(contact.status, "BleCapable");
-        // ble_address is NOT set during identity observation — it's committed only
-        // after the bilateral handshake (handle_pairing_ack / handle_pairing_propose)
-        // to prevent the early-disconnect race condition.
-        assert_eq!(contact.ble_address, None);
-
-        // Simulate bilateral confirmation: advertiser sends BlePairingAccept back,
-        // scanner receives it and calls handle_pairing_ack on the orchestrator.
-        // (In production this flows via PAIRING_ACK GATT indication → Rust JNI.)
-        orchestrator
-            .handle_pairing_propose(device_id, "AA:BB:CC".to_string(), None)
-            .await
-            .expect("handle propose");
-        orchestrator
-            .handle_pairing_ack(device_id, None, "")
-            .await
-            .expect("handle ack");
-
-        // After handle_pairing_ack the scanner is in ConfirmSent — ble_address is NOT
-        // persisted yet. Finalization is deferred until BlePairingConfirm is delivered
-        // (simulated here by calling finalize_scanner_pairing_by_address directly).
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::ConfirmSent)
-        );
-        orchestrator
-            .finalize_scanner_pairing_by_address("AA:BB:CC")
-            .await
-            .expect("finalize scanner pairing");
-
-        // Now final state: Complete, and ble_address is committed.
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::Complete)
-        );
-        let contact_after_ack = client_db::get_contact_by_device_id(&device_id)
-            .expect("get contact")
-            .expect("exists");
-        assert_eq!(contact_after_ack.ble_address.as_deref(), Some("AA:BB:CC"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn pairing_smoke_identity_before_connection() {
-        crate::economic_fixtures::use_test_storage_dir();
-        // Fresh DB + orchestrator
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-        crate::bluetooth::reset_pairing_orchestrator_for_tests();
-
-        // Build bridge
-        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([2u8; 32], [3u8; 32]);
-
-        // Contact
-        let device_id = [5u8; 32];
-        let genesis = [4u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-pre".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer-pre".to_string(),
-            genesis_hash: genesis.to_vec(),
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0x41; 64],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
-
-        let orchestrator = get_pairing_orchestrator();
-
-        // IdentityObserved BEFORE connection
-        let identity_evt = crate::generated::BleEvent {
-            ev: Some(crate::generated::ble_event::Ev::IdentityObserved(
-                crate::generated::BleIdentityObserved {
-                    address: "DD:EE:FF".to_string(),
-                    device_id: device_id.to_vec(),
-                    genesis_hash: genesis.to_vec(),
-                },
-            )),
-        };
-        let mut buf = Vec::new();
-        identity_evt.encode(&mut buf).expect("encode");
-        let _ = bridge
-            .handle_ble_event_bytes(&buf)
-            .await
-            .expect("handle identity");
-
-        // Identity is observed, but finalization requires mutual handshake.
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::ExchangingChainTips)
-        );
-        let contact = client_db::get_contact_by_device_id(&device_id)
-            .expect("get contact")
-            .expect("exists");
-        assert_eq!(contact.status, "BleCapable");
-        // ble_address not yet committed — only written after bilateral handshake.
-        assert_eq!(contact.ble_address, None);
-
-        // Simulate bilateral confirmation via orchestrator (replaces raw PAIR2 bytes).
-        orchestrator
-            .handle_pairing_ack(device_id, None, "")
-            .await
-            .expect("handle ack");
-
-        // After handle_pairing_ack the scanner is ConfirmSent — ble_address not yet persisted.
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::ConfirmSent)
-        );
-        // Simulate the BlePairingConfirm GATT write-with-response ACK from the BLE stack.
-        orchestrator
-            .finalize_scanner_pairing_by_address("DD:EE:FF")
-            .await
-            .expect("finalize scanner pairing");
-        assert_eq!(
-            orchestrator.get_session_status(&device_id).await,
-            Some(crate::bluetooth::pairing_orchestrator::PairingState::Complete)
-        );
-        let contact_after_ack = client_db::get_contact_by_device_id(&device_id)
-            .expect("get contact")
-            .expect("exists");
-        assert_eq!(contact_after_ack.ble_address.as_deref(), Some("DD:EE:FF"));
-    }
-
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn pairing_smoke_identity_mismatch_no_promotion() {
-        crate::economic_fixtures::use_test_storage_dir();
-        // Fresh DB + orchestrator
-        client_db::reset_database_for_tests();
-        client_db::init_database().expect("init db");
-        crate::bluetooth::reset_pairing_orchestrator_for_tests();
-
-        // Build bridge
-        let (_mgr, _adapter, _coord, bridge) = make_test_bridge([10u8; 32], [11u8; 32]);
-        // Contact with stored genesis
-        let device_id = [12u8; 32];
-        let genesis_stored = [8u8; 32];
-        let genesis_observed = [9u8; 32];
-        let rec = ContactRecord {
-            contact_id: "ct-mis".to_string(),
-            device_id: device_id.to_vec(),
-            alias: "peer-mis".to_string(),
-            genesis_hash: genesis_stored.to_vec(),
-            current_chain_tip: Some(vec![0x70; 32]),
-            verified: true,
-            verification_proof: None,
-            metadata: HashMap::new(),
-            ble_address: None,
-            status: "Created".to_string(),
-            needs_online_reconcile: false,
-            public_key: vec![0x41; 64],
-            kyber_public_key: vec![0x4B; 1184],
-            previous_chain_tip: None,
-        };
-        client_db::store_contact(&rec).expect("store contact");
-
-        // IdentityObserved with mismatched genesis
-        let identity_evt = crate::generated::BleEvent {
-            ev: Some(crate::generated::ble_event::Ev::IdentityObserved(
-                crate::generated::BleIdentityObserved {
-                    address: "AA:BB:CC".to_string(),
-                    device_id: device_id.to_vec(),
-                    genesis_hash: genesis_observed.to_vec(),
-                },
-            )),
-        };
-        let mut buf = Vec::new();
-        identity_evt.encode(&mut buf).expect("encode");
-        let _ = bridge
-            .handle_ble_event_bytes(&buf)
-            .await
-            .expect("handle identity");
-
-        // Orchestrator should place session in Failed (mismatch)
-        let state = get_pairing_orchestrator()
-            .get_session_status(&device_id)
-            .await
-            .expect("session exists");
-        match state {
-            crate::bluetooth::pairing_orchestrator::PairingState::Failed(msg) => {
-                assert!(msg.contains("Genesis hash mismatch"))
-            }
-            other => panic!("expected Failed state, got {:?}", other),
-        }
-
-        // DB should not be promoted nor address set due to guarded secondary path
-        let contact = client_db::get_contact_by_device_id(&device_id)
-            .expect("get contact")
-            .expect("exists");
-        assert_eq!(contact.status, "Created");
-        assert_eq!(contact.ble_address, None);
-    }
-
-    #[tokio::test]
     async fn device_connect_disconnect_clears_state() {
         // Build bridge (no DB needed)
         let (_mgr, _adapter, _coord, bridge) = make_test_bridge([20u8; 32], [21u8; 32]);
@@ -1175,6 +779,31 @@ mod tests {
             assert!(!devices.contains_key("11:22"));
         }
     }
+
+    /// An offline-bearer transfer of 7 base units of ERA to `to`, with its
+    /// terms: the one operation the offline door carries (MR-DSM-0219).
+    fn bearer_transfer_to(
+        to: [u8; 32],
+    ) -> (
+        dsm::types::operations::Operation,
+        dsm::types::operations::TransferTerms,
+    ) {
+        let (bytes, terms) =
+            crate::handlers::wallet_routes::encode_offline_transfer_operation_canonical(
+                &to,
+                &[0x6E; 32],
+                7,
+                "ERA",
+                "",
+                &dsm::core::token::token_state_manager::era_policy_commit(),
+                dsm::core::token::era_policy::era_policy_bytes().to_vec(),
+            );
+        (
+            dsm::types::operations::Operation::from_bytes(&bytes).expect("a bearer transfer"),
+            terms,
+        )
+    }
+
     #[tokio::test]
     async fn test_defer_response_until_identity() {
         // Build minimal environment similar to other tests
@@ -1204,9 +833,9 @@ mod tests {
         }
 
         // Create a prepare message chunks directly via coordinator (simulate receiving from counterparty)
-        let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope = transport_adapter
-            .create_prepare_message(counterparty, op)
+        let (op, terms) = bearer_transfer_to(counterparty);
+        let (prepare_envelope, _commitment) = transport_adapter
+            .create_transfer_prepare_with_commitment(counterparty, op, terms)
             .await
             .expect("prepare envelope");
         let chunks = coord
@@ -1286,10 +915,15 @@ mod tests {
         });
 
         // Test that we can create prepare message chunks directly from coordinator
-        let op = dsm::types::operations::Operation::Noop;
-        let prepare_envelope = match rt.block_on(transport_adapter.create_prepare_message(cp, op)) {
-            Ok(payload) => payload,
-            Err(e) => panic!("create_prepare_message failed in test: {}", e),
+        let (op, terms) = bearer_transfer_to(cp);
+        let prepare_envelope = match rt
+            .block_on(transport_adapter.create_transfer_prepare_with_commitment(cp, op, terms))
+        {
+            Ok((payload, _commitment)) => payload,
+            Err(e) => panic!(
+                "create_transfer_prepare_with_commitment failed in test: {}",
+                e
+            ),
         };
         let chunks = match coord.encode_message(BleFrameType::BilateralPrepare, &prepare_envelope) {
             Ok(c) => c,

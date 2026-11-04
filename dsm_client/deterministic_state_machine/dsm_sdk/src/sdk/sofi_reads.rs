@@ -13,8 +13,8 @@ use std::future::Future;
 
 use dsm::ccb::StorageSetMembers;
 use dsm::common::domain_tags::{
-    TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR, TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR,
-    TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
+    TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR, TAG_DSM_SOFI_VAULT_GENESIS_LOCATOR,
+    TAG_DSM_SOFI_VAULT_HISTORY_LOCATOR, TAG_DSM_SOFI_VAULT_TOKEN_LOCATOR,
 };
 use dsm::economic::lineage::{AcceptedClaim, AdmittedEconomicPosition, ValidatedEconomicRoot};
 use dsm::crypto::domain::TaggedHashDomain;
@@ -27,7 +27,7 @@ use dsm::sofi::facts::ResolvedParent;
 use dsm::sofi::publication::Signed;
 use dsm::sofi::resolve::{
     AcceptedGeneses, JudgedKey, KeptCompletion, KeptJudgement, LocalLeaves, PeerPositionResolver,
-    ReadFailure, RecordedGenerationRow, SofiReads, Verifier, VerifierFailure,
+    ReadFailure, SofiReads, Verifier, VerifierFailure,
 };
 use dsm::sofi::storage::{Discovered, Resolved};
 use dsm::sofi::validation::VaultPostState;
@@ -228,6 +228,17 @@ struct OnceFetcher<'r, 'a> {
 }
 
 impl PeerEvidenceFetcher for OnceFetcher<'_, '_> {
+    fn register_key_values(
+        &self,
+        genesis: &D32,
+        device_id: &D32,
+        position: u64,
+    ) -> Result<Vec<Vec<u8>>, PeerLineageFailure> {
+        // Discovery: read fresh, never kept. A claim that arrives later is a
+        // candidate too.
+        self.live.register_key_values(genesis, device_id, position)
+    }
+
     fn register_cell(&self, cell: &RootCell) -> Result<CellEvidence, PeerLineageFailure> {
         // Kept once Core reads a final claim at the cell from them.
         read_once(
@@ -315,7 +326,7 @@ impl<'a> LiveSofiReads<'a> {
         })
     }
 
-    /// The peer walks' fetcher: the live one, through this context's
+    /// The peer step checks' fetcher: the live one, through this context's
     /// readings.
     fn peer_resolver(&self) -> OnceFetcher<'_, '_> {
         OnceFetcher {
@@ -328,11 +339,10 @@ impl<'a> LiveSofiReads<'a> {
         }
     }
 
-    /// Another trader's lineage to `position`, verified from this device's
-    /// frontier for it (DSM Amendment A8); a conditional position on the way
-    /// is resolved by Core over SoFi's public objects for that position alone
-    /// (SoFi Amendment S15).
-    fn peer_walk(
+    /// Another trader's step at `position`, validated from its own parent (DSM
+    /// Amendment A14); a conditional position is resolved by Core over SoFi's
+    /// public objects for that position alone (SoFi Amendment S15).
+    fn peer_step(
         &self,
         genesis: &D32,
         device_id: &D32,
@@ -513,6 +523,28 @@ impl SofiReads for LiveSofiReads<'_> {
         )
     }
 
+    fn baseline_contradiction_candidates(
+        &self,
+        vault_id: &D32,
+    ) -> Result<Discovered<Vec<u8>>, ReadFailure> {
+        self.read(
+            "baseline contradiction candidates",
+            resolve_locator_all(
+                self.set,
+                TAG_DSM_SOFI_VAULT_CONTRADICTION_LOCATOR.source_bytes(),
+                &dsm::sofi::derive::vault_contradiction_locator(vault_id),
+                LOCATOR_BUDGET,
+                |bytes| match dsm::sofi::wire::VaultBaselineContradictionV1::decode(bytes) {
+                    Ok(claim) => Some((
+                        dsm::sofi::derive::vault_contradiction_locator(&claim.vault_id),
+                        bytes.to_vec(),
+                    )),
+                    Err(..) => None,
+                },
+            ),
+        )
+    }
+
     fn token_policy_bytes(&self, policy_commit: &D32) -> Result<Vec<u8>, ReadFailure> {
         anchored_policy_bytes(self.set, policy_commit, &self.runtime)
             .map_err(|failure| ReadFailure(format!("token policy: {failure}")))
@@ -592,7 +624,7 @@ impl SofiReads for LiveSofiReads<'_> {
         device_id: &D32,
         position: u64,
     ) -> Result<ValidatedPeerTransition, PeerLineageFailure> {
-        self.peer_walk(genesis, device_id, position)
+        self.peer_step(genesis, device_id, position)
     }
 
     fn vault_state_at(
@@ -704,15 +736,10 @@ impl SofiReads for LiveSofiReads<'_> {
             .map_err(|unresolved| PeerLineageFailure::Unresolved(unresolved.to_string()))
     }
 
-    fn recorded_generations(
+    fn record_generation(
         &self,
-        vault_id: &D32,
-    ) -> Result<Vec<RecordedGenerationRow>, ReadFailure> {
-        sofi_vault_head::recorded_generations(vault_id)
-            .map_err(|e| ReadFailure(format!("recorded generations: {e}")))
-    }
-
-    fn record_generation(&self, post: &VaultPostState) -> Result<(), ReadFailure> {
+        post: &VaultPostState,
+    ) -> Result<Option<dsm::sofi::resolve::ReplacedRecord>, ReadFailure> {
         sofi_vault_head::record_walked(post)
             .map_err(|e| ReadFailure(format!("record generation: {e}")))
     }
@@ -890,8 +917,8 @@ impl<'a> VerifierContext<'a> {
     }
 
     /// Core's resolver of another trader's conditional position (SoFi
-    /// Amendment S15), over this context's reads, for a frontier-relative walk
-    /// of that trader's lineage (DSM Amendment A8).
+    /// Amendment S15), over this context's reads, for a one-hop check of that
+    /// trader's step (DSM Amendment A14).
     pub fn peer_position_resolver(&self) -> PeerPositionResolver<'_, LiveSofiReads<'a>> {
         PeerPositionResolver {
             reads: &self.reads,

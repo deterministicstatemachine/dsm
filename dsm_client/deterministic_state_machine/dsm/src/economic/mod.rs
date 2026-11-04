@@ -57,6 +57,7 @@ pub mod claim_envelope;
 pub mod classifier;
 pub mod credit;
 pub mod decode;
+pub mod holdings;
 pub mod issuance;
 pub mod keys;
 pub mod lineage;

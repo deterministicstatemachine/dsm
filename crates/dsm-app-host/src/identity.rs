@@ -86,8 +86,8 @@ fn invoke(method: &str, args: Vec<u8>) -> Result<Vec<u8>, String> {
 
 /// An account created before: unlocked from the operator's mnemonic, as a
 /// phone's mnemonic unlock derives its wallet seed, then its identity
-/// context restored. The SDK's at-rest seal is not what unlocks it: off
-/// Android that seal is not held by the platform.
+/// context restored. No platform key holds a seed here, so the SDK writes
+/// none at rest and the mnemonic unlocks the account on every start.
 fn restore(args: &Args, device_id: &[u8]) -> Result<(), String> {
     let path = args.data_dir.join("RECOVERY_MNEMONIC");
     let mnemonic =

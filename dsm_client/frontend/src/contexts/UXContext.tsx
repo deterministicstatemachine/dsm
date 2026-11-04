@@ -1,10 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // path: src/contexts/UXContext.tsx
 // SPDX-License-Identifier: Apache-2.0
-import React, { createContext, useContext, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useMemo, useState } from 'react';
 import { useBridgeEvent } from '@/hooks/useBridgeEvents';
 import { playCoinSound } from '@/utils/coinSound';
-import { getNfcBackupStatus, writeToNfcRing, stopNfcRead } from '@/services/recovery/nfcRecoveryService';
 
 export interface UXContextValue {
   hideComplexity: boolean;
@@ -37,7 +36,6 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
 }) => {
   const [hideComplexity, setHideComplexity] = useState<boolean>(defaultHideComplexity);
   const [globalToast, setGlobalToast] = useState<{ type: string; message?: string; persistent?: boolean } | null>(null);
-  const nfcWriteActiveRef = useRef(false);
 
   // Toasts are auto-dismissed by GlobalToast (setTimeout, UI-only — not used in protocol logic).
 
@@ -47,10 +45,6 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
 
   const clearToast = React.useCallback(() => {
     setGlobalToast(null);
-    if (nfcWriteActiveRef.current) {
-      nfcWriteActiveRef.current = false;
-      void stopNfcRead().catch(() => { /* best-effort */ });
-    }
   }, [setGlobalToast]);
 
   // BLE permission event listeners (standardized)
@@ -75,58 +69,18 @@ export const UXProvider: React.FC<{ defaultHideComplexity?: boolean; children?: 
     playCoinSound();
   }, []);
 
-  // Auto-backup helper: check if auto-write is enabled, then either show
-  // persistent ring-prompt toast + activate NFC writer, or fall back to normal toast.
-  const triggerAutoBackupOrToast = React.useCallback(async (fallbackType: string, fallbackMessage?: string) => {
-    try {
-      const status = await getNfcBackupStatus();
-      if (status.autoWriteEnabled && status.enabled && status.pendingCapsule) {
-        notifyToast('ring_backup_prompt', undefined, { persistent: true });
-        nfcWriteActiveRef.current = true;
-        writeToNfcRing()
-          .then(() => {
-            // NFC writer activated — actual write happens when ring touches phone.
-            // The nfc.backupWritten event handler will dismiss the persistent toast.
-            // Safety: if the event never fires (e.g., user walks away), auto-dismiss
-            // after 30s so the toast doesn't stay stuck forever.
-            setTimeout(() => {
-              if (nfcWriteActiveRef.current) {
-                nfcWriteActiveRef.current = false;
-                notifyToast('warning', 'Ring write timed out. Try again from NFC settings.');
-              }
-            }, 30_000);
-          })
-          .catch((e) => {
-            console.warn('[UXContext] NFC auto-write activation failed:', e);
-            nfcWriteActiveRef.current = false;
-            notifyToast('error', 'NFC write failed. Try again from NFC settings.');
-          });
-        return;
-      }
-    } catch {
-      // If status check fails, fall through to normal toast.
-    }
-    notifyToast(fallbackType, fallbackMessage);
-  }, [notifyToast]);
-
   // Global notification when new inbox items arrive from storage sync.
   useBridgeEvent('inbox.updated', (detail?: { newItems?: number }) => {
     const newItems = typeof detail?.newItems === 'number' ? detail.newItems : 0;
     if (newItems <= 0) return;
     playCoinSound();
     const label = newItems === 1 ? 'New inbox item received' : `${newItems} new inbox items received`;
-    void triggerAutoBackupOrToast('inbox_received', label);
+    notifyToast('inbox_received', label);
   }, [notifyToast]);
 
-  // Auto-backup: BLE bilateral transfer completed — prompt ring write if enabled.
+  // A BLE bilateral transfer completed.
   useBridgeEvent('bilateral.transferComplete', () => {
-    void triggerAutoBackupOrToast('transfer_accepted');
-  }, [notifyToast]);
-
-  // Auto-backup: NFC write succeeded — dismiss persistent toast, show brief success.
-  useBridgeEvent('nfc.backupWritten', () => {
-    nfcWriteActiveRef.current = false;
-    notifyToast('success', 'RING UPDATED');
+    notifyToast('transfer_accepted');
   }, [notifyToast]);
 
   const value = useMemo<UXContextValue>(() => ({

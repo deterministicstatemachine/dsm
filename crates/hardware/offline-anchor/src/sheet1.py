@@ -257,8 +257,8 @@ def build():
             ("Mode / clock", "MODE 0 (CPOL 0, CPHA 0) · 1 MHz"),
             ("Chip select", "GP17 as push-pull GPIO, driven by firmware"),
             ("Logic / supply", "3.3 V only · Pico 3V3(OUT) pin 36"),
-            ("Source of truth", "crates/dsm-anchor-pico/src/main.rs"),
-            ("", "crates/dsm-anchor-secure-monitor/src/tropic.rs")]
+            ("Source of truth", "crates/dsm-anchor-secure-monitor/src/anchor_glue.rs"),
+            ("", "crates/dsm-anchor-secure-monitor/src/anchor_glue.rs")]
     for i, (k, v) in enumerate(rows):
         s.text(tx + 10, by + 22 + i * 19, k, size=10, fill=INK_DIM)
         s.text(tx + 150, by + 22 + i * 19, v, size=11)

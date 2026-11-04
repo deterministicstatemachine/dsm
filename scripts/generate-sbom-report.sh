@@ -99,6 +99,8 @@ ANDROID_COMPONENTS="$(jq -r '.summary.android_manifest_components' "${METADATA_P
 CONSOLIDATED_SBOM="$(jq -r '.artifacts.consolidated_sbom' "${METADATA_PATH}")"
 VALIDATION_EVIDENCE="$(jq -r '.artifacts.validation_evidence' "${METADATA_PATH}")"
 VALIDATION_LOG="$(jq -r '.artifacts.validation_log' "${METADATA_PATH}")"
+ASSURANCE_DOCUMENT="$(jq -r '.artifacts.assurance_document // empty' "${METADATA_PATH}")"
+ASSURANCE_REPORT="$(jq -r '.artifacts.assurance_report // empty' "${METADATA_PATH}")"
 VALIDATION_STATUS="$(jq -r '.status' "${VALIDATION_EVIDENCE_PATH}")"
 VALIDATION_COMMAND="$(jq -r '.command' "${VALIDATION_EVIDENCE_PATH}")"
 
@@ -113,7 +115,11 @@ VALIDATION_COMMAND="$(jq -r '.command' "${VALIDATION_EVIDENCE_PATH}")"
     printf -- '## What This Bundle Contains\n\n'
     printf -- '- A consolidated CycloneDX SBOM at `%s`\n' "${CONSOLIDATED_SBOM}"
     printf -- '- Per-ecosystem inventories under `%s`\n' "$(relative_path "${RUN_DIR}")"
-    printf -- '- Validation evidence from the integrated TLA check at `%s`\n\n' "${VALIDATION_EVIDENCE}"
+    printf -- '- Validation evidence from the integrated TLA check at `%s`\n' "${VALIDATION_EVIDENCE}"
+    if [[ -n "${ASSURANCE_DOCUMENT}" ]]; then
+        printf -- '- Security assurance and verification: `%s` (CycloneDX 1.7) and `%s`\n' "${ASSURANCE_DOCUMENT}" "${ASSURANCE_REPORT}"
+    fi
+    printf -- '\n'
 
     printf -- '## Inventory Summary\n\n'
     printf -- '| Inventory | Resolution | Components |\n'
@@ -135,6 +141,12 @@ VALIDATION_COMMAND="$(jq -r '.command' "${VALIDATION_EVIDENCE_PATH}")"
             [[ -n "${summary_line}" ]] || continue
             printf -- '- `%s`\n' "${summary_line}"
         done < <(jq -r '.summary_lines[]?' "${VALIDATION_EVIDENCE_PATH}")
+        printf -- '\n'
+    fi
+
+    if [[ -n "${ASSURANCE_REPORT}" && -f "${PROJECT_ROOT}/${ASSURANCE_REPORT}" ]]; then
+        # The assurance report, one heading level down, so this report carries it whole.
+        sed -E -e 's/^## (Checks|Software|Internal|Hardware)/### \1/' -e 's/^# /## /' "${PROJECT_ROOT}/${ASSURANCE_REPORT}"
         printf -- '\n'
     fi
 

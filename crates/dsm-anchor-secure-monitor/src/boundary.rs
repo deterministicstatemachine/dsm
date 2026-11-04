@@ -63,27 +63,27 @@ pub fn disarm_watchdog() {
 
 /// TrustZone domain map (must match dsm-secure-sram.x / memory.x). SAU limit addresses are the
 /// INCLUSIVE last byte (low 5 bits = 1), per the cortex-m SAU API.
-const NSC_BASE: u32 = 0x2004_0000;
-const NSC_LIMIT: u32 = 0x2004_0FFF; // NSC veneer region [0x20040000, 0x20041000)
-const NS_BASE: u32 = 0x2004_1000;
-const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20041000, 0x20080000)
-// Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
-// This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
-// per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
-// every Secure peripheral (OTP 0x…60a8, SPI0 0x…6090, DMA, …) keeps its reset default NSP=0, so an
-// NS access to it still bus-errors. Covers APB (0x40000000+) and the USB block (0x50100000+); SIO
-// (0xd0000000) is deliberately NOT covered (the NS app uses no GPIO).
+const NSC_BASE: u32 = 0x2006_0000;
+const NSC_LIMIT: u32 = 0x2006_0FFF; // NSC veneer region [0x20060000, 0x20061000)
+const NS_BASE: u32 = 0x2006_1000;
+const NS_LIMIT: u32 = 0x2007_FFFF; // Non-secure SRAM [0x20061000, 0x20080000)
+                                   // Peripheral space made Non-secure-ADDRESSABLE so the NS app can reach the clocks + USB it needs.
+                                   // This is defense-in-depth, NOT a blanket grant: SAU only lifts the address-level Secure attribution;
+                                   // per-peripheral ACCESSCTRL (grant_ns_peripherals) still gates WHICH peripherals NS may touch, and
+                                   // every Secure peripheral (OTP 0x…60a8, SPI0 0x…6090, DMA, …) keeps its reset default NSP=0, so an
+                                   // NS access to it still bus-errors. Covers APB (0x40000000+) and the USB block (0x50100000+); SIO
+                                   // (0xd0000000) is deliberately NOT covered (the NS app uses no GPIO).
 const PERIPH_BASE: u32 = 0x4000_0000;
 const PERIPH_LIMIT: u32 = 0x501F_FFFF;
 
 /// Configure SAU address attribution and enable it.
 ///
 /// Regions defined:
-/// - region 0: NSC — the single legal NS→S gateway surface (the `sg` veneer at 0x20040000).
+/// - region 0: NSC — the single legal NS→S gateway surface (the `sg` veneer at 0x20060000).
 /// - region 1: NS  — the Non-secure app's SRAM (code/data/stack + the mailbox data plane).
 ///
 /// Everything NOT covered by an enabled NS/NSC region is Secure by default (SAU_CTRL.ALLNS=0): the
-/// Secure monitor image at [0x20000000,0x20040000), the flash boot block, OTP, and all peripherals.
+/// Secure monitor image at [0x20000000,0x20060000), the flash boot block, OTP, and all peripherals.
 /// This function runs from Secure SRAM and must leave the Secure monitor executing (no Secure region
 /// is marked NS), so a post-config self-reboot / continued execution is the silicon check that the
 /// attribution did not fault the Secure world.
@@ -175,12 +175,32 @@ pub fn lock_accessctrl() {
         cortex_m::asm::dsb();
     }
 }
-/// Core-1 containment. RP2350 core 1 does not execute until core 0 launches it via the SIO FIFO
-/// vector handshake; the monitor never performs that handshake, so core 1 stays powered-down with
-/// no bus master activity. v1 is deliberately single-core (no reviewed Secure multicore design), so
-/// "disabled" is the absence of the launch, asserted here as an explicit invariant. A hard PSM
-/// reset-hold is added when the peripheral set that could be reached by a rogue core-1 is wired.
-#[inline(always)]
-pub fn assert_core1_contained() {
-    // No-op by construction: core 1 is never launched. Kept as a named invariant + integration seam.
+/// Core 1 is not held off: the power-on state machine did not report its power domain off after
+/// the force-off was written.
+#[derive(Debug)]
+pub struct Core1NotContained;
+
+/// How many reads of `PSM.DONE` the force-off may take to show core 1's domain off. A bounded
+/// count, not a time: the domain drops within a few `clk_ref` cycles of the write.
+const CORE1_OFF_READS: u32 = 1_000_000;
+
+/// Core-1 containment. RP2350 core 1 runs only once core 0 launches it through the SIO FIFO
+/// handshake, which the monitor never performs; v1 is single-core (no reviewed Secure multicore
+/// design). On top of that, the power-on state machine is told to hold core 1's power domain off
+/// (`PSM.FRCE_OFF.PROC1`), and the force-off is read back and the domain seen off (`PSM.DONE.PROC1`
+/// clear) before the boundary is configured. A board that does not confirm both is refused here,
+/// before anything Non-secure runs. Built for the RP2350; not yet run on silicon.
+pub fn contain_core1() -> Result<(), Core1NotContained> {
+    let psm = unsafe { &*hal::pac::PSM::ptr() };
+    psm.frce_off().modify(|_, w| w.proc1().set_bit());
+    cortex_m::asm::dsb();
+    if psm.frce_off().read().proc1().bit_is_clear() {
+        return Err(Core1NotContained);
+    }
+    for _ in 0..CORE1_OFF_READS {
+        if psm.done().read().proc1().bit_is_clear() {
+            return Ok(());
+        }
+    }
+    Err(Core1NotContained)
 }

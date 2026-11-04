@@ -29,7 +29,7 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
     let row = conn
         .query_row(
             "SELECT policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
-                    pk_chip, uncompromised
+                    pk_chip
              FROM anchor_enrollments WHERE device_id = ?1",
             params![device_id.as_slice()],
             |row| {
@@ -40,14 +40,11 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
                     row.get::<_, i64>(3)?,
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, Vec<u8>>(5)?,
-                    row.get::<_, i64>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((policy_hash, bundle, anchor_id, enrolled, partition_pk, pk_chip, uncompromised)) =
-        row
-    else {
+    let Some((policy_hash, bundle, anchor_id, enrolled, partition_pk, pk_chip)) = row else {
         return Ok(None);
     };
     Ok(Some(AnchorEnrollment {
@@ -59,7 +56,6 @@ pub fn get_anchor_enrollment_raw(device_id: &[u8; 32]) -> Result<Option<AnchorEn
             enrolled_counter: enrolled as u64,
             partition_pk,
             pk_chip,
-            uncompromised: uncompromised != 0,
         },
     }))
 }
@@ -121,11 +117,20 @@ pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
     let conn = binding
         .lock()
         .map_err(|_| anyhow!("anchor_enrollments: db lock poisoned"))?;
+    admit_anchor_enrollment_with_conn(&conn, e)
+}
+
+/// [`admit_anchor_enrollment`] inside the caller's transaction: the step that accepts an anchor's
+/// first release pins it in the same commit, or nothing is pinned.
+pub fn admit_anchor_enrollment_with_conn(
+    conn: &rusqlite::Connection,
+    e: &AnchorEnrollment,
+) -> Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO anchor_enrollments
             (device_id, policy_hash, bundle, anchor_id, enrolled_counter, partition_pk,
-             pk_chip, uncompromised)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             pk_chip)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             e.device_id.as_slice(),
             e.policy_hash.as_slice(),
@@ -134,7 +139,6 @@ pub fn admit_anchor_enrollment(e: &AnchorEnrollment) -> Result<()> {
             e.pin.enrolled_counter as i64,
             e.pin.partition_pk.as_slice(),
             e.pin.pk_chip.as_slice(),
-            e.pin.uncompromised as i64,
         ],
     )?;
     Ok(())

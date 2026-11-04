@@ -57,11 +57,13 @@ MUST and MUST NOT state requirements an implementation cannot relax. SHOULD stat
 
 **Rule (Imported: DSM §11; SoFi §2, Part II, §12)**
 
-1. A node MUST hold no key and MUST sign nothing.
+1. A node MUST hold no protocol key and MUST sign no protocol object. A transport key that authenticates the node's endpoint (its TLS server key) certifies nothing a verifier relies on as a protocol fact, and is permitted (Owner decision, 2026-10-28).
 2. A node MUST NOT validate a protocol rule, evaluate a guard, compute a balance, compute a leader, compare one value with another, or decide whether a transition is valid.
 3. Economic and protocol payloads MUST be opaque to the node apart from content addressing. The node MUST NOT vary what it stores by what a payload would parse as.
 4. No protocol-relevant path in the node MAY read a clock. Ordering inside the node uses logical ticks. Transport liveness is not a protocol path: the node MAY use timers to bound how long a connection may sit with no request in flight, how slowly a request body may arrive, and how long a response may wait to be written, and to close the connection or answer the request that passes such a bound (Owner decision, 2026-10-16). No such timer decides validity, ordering, finality, retention or what is stored, and a connection or request it ends changes nothing, as an unreachable node changes nothing.
 5. Inter-node gossip is state synchronisation only. There is no leader election, no Raft, no Paxos, and no vote between nodes.
+
+> **Owner decision, 2026-10-28 — transport keys, not protocol keys.** On 2026-10-28 the owner adopted one set of rulings on the storage decisions recorded in CONFORMANCE §6.101, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Transport keys permitted, protocol-signing keys prohibited. Build the CI gate. TLS authenticates endpoints; nodes never sign DSM protocol objects." A node serves TLS with a key that authenticates its endpoint to set-mates and devices, which pin the set's CA and the member's name; that authentication is what keeps a network attacker's bytes out of a mirror (§22 obligation 8). The node holds no protocol signing key and has no protocol signing path, and the build refuses one (the gate is `dsm_storage_node`'s `no_protocol_signing` test).
 
 **Rule — the layer test (Imported: SoFi §2.2)**
 
@@ -144,7 +146,7 @@ Anyone MAY append the content address of an object the member already holds unde
 **Rule (Imported: DSM §11)**
 
 1. **Tip mirror.** A public head and encrypted per-relationship leaves, keyed by device and relationship.
-2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, and never opened by the node. The spool is append-only and read from a position: nothing is marked, hidden, expired or removed after a write, and which messages a device has consumed is the device's own state. Every payload is ciphertext, sealed end to end under a per-step key derived from the relationship's Kyber exchange (Owner decision, 2026-09-23; DSM Amendment A7).
+2. **Inbox spool.** Unilateral delivery to an offline counterparty. Envelopes are strictly versioned, ordered by insertion, and never opened by the node. The spool is append-only and read from a position: nothing is marked, hidden, expired or removed after a write, and which messages a device has consumed is the device's own state. Every payload is ciphertext, sealed end to end under a key from that payload's own Kyber encapsulation to the recipient device (Owner decision, 2026-09-23; DSM Amendment A7, refined by the owner's ruling of 2026-10-27). The seal authenticates no sender: the recipient takes a payload's content only on the signature that content carries.
 3. **Identity and recovery.** Genesis anchoring, device-tree indexing, and recovery capsules, stored as bytes under derived keys. Recovery is out of scope for this round; this document imports it as substrate only.
 
 **Rule — routing exists only through a pre-established contact (Owner decision; Imported: DSM §9, §13)**
@@ -269,12 +271,16 @@ The leader's cadence is driven by all of its customers' traffic, and a node does
 
 *Why the incarnation is committed.* A member that loses its register and is rebuilt under the same member id gets a new incarnation. Committing the pair makes the rebuilt member a different member of the set, so it cannot answer for cells its lost register held, for example by reporting a cell empty. Once members run enrolled appliances whose hardware identity carries this continuity, the incarnation may be revisited; until then it stays in the set identity.
 
+> **Owner decision, 2026-10-28 — the incarnation names a register history.** On 2026-10-28 the owner adopted one set of rulings on the storage decisions recorded in CONFORMANCE §6.101, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Keep incarnation in `storage_set_id`. Live handover carries the register history and preserves the set. Complete register loss ends that incarnation and requires a new set. Never treat a rebuilt empty register as the old leader's history." A live handover (§12.5) carries the register and its incarnation, so `S` is unchanged. A complete loss (§12.6) ends the incarnation, and with it `S`: in beta a lost register means a new set and a reprovision. MR-STOR-0066 holds for handover only until §12.6 is built.
+
 **Rule — party sets (Owner decision)**
 
 1. Every party has its own storage set for its own objects and cells. Traders' objects and cells go to the trader's set; an owner's objects and cells go to the owner's set.
 2. A party's set is assigned from the active registry by Fisher–Yates. The party never chooses a member.
 3. A party MAY opt out of a member. The replacement is drawn by Fisher–Yates (§12.4). The party may draw another poor performer; that is accepted.
 4. A party pays for storage with credits (§17).
+
+> **Owner decision, 2026-10-28 — party sets equal the pinned set during beta.** On 2026-10-28 the owner adopted one set of rulings on the storage decisions recorded in CONFORMANCE §6.101, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: "Pinned-set equivalence during beta. Five available operators means each party uses the same five members. No opt-out without a replacement. Future per-party set commitments belong in authenticated canonical device state, not an SQL projection." While the registry holds five operators, a Fisher–Yates draw of five returns those five, so every party's set is the pinned set, and no opt-out is possible because there is no replacement to draw. When per-party sets begin, a party's set is committed in its authenticated canonical device state.
 
 **Open — device register set.** DSM §9 and §80.12 require the economic-root register's set to be "owner-committed". Where that set is committed in device state is not specified.
 
@@ -435,6 +441,8 @@ If `Final(K, x)` held before the loss, `x`'s chain was held by the leader and tw
 7. **Owner decision:** an operator that does not meet the performance bar is never admitted, and one that falls below it is cut. Cadence regularity, meaning the size and spacing of an operator's ByteCommit cycles compared with its own history and its peers, is part of the performance score.
 
 **Open — the performance criterion.** The October 2025 spec prunes by lowest utilisation. The owner's intent is to prune under-performers. Which performance measures are expressible over committed evidence is not decided here.
+
+> **Owner decision, 2026-10-28 — no registry, pruning or growth in beta.** On 2026-10-28 the owner adopted one set of rulings on the storage decisions recorded in CONFORMANCE §6.101, relayed into the session and confirmed in the owner's words "No more beating around the … bush." (DSM Amendment A21.) Its words: on the registry, "Outside beta. Keep the pinned five-operator set. Do not build a registry that has no functional inputs merely to mark a requirement complete"; on pruning, "No pruning during beta. Future pruning must be justified by objectively verifiable evidence. Don't use subjective uptime or locally measured latency as protocol authority"; on growth, "No dynamic growth during beta. Future admission must not require storage-node hardware binding. Nodes remain ordinary, signature-free infrastructure"; and "the future performance and growth models remain explicitly unspecified. No clock-based acceptance, hardware attestation, or protocol signing by storage nodes should be introduced to fill that gap." Beta runs on the five operators pinned in Core and configuration. Rules 1–7 and the Open items here and in §14 stay unbuilt, and when they are specified, admission binds no storage-node hardware.
 
 <!-- spec-section: STOR-014 -->
 ### 14 ByteCommit
@@ -634,4 +642,4 @@ No safety property, and no party's liveness other than the owner's own, may depe
 | 12 | The minimum network size: a set needs five distinct operators, and replacements need more to draw from (§12). |
 | 13 | Whether opting out of a member should carry a cost (§12.4). |
 | 14 | The registry growth ranking, its genesis commit-reveal anchor, and the Up and Down capacity-signal computations, now referenced from the October 2025 spec outside this corpus (§13, §14). |
-| 15 | An ancestry accumulator over each member's ByteCommits, so a reader holding a member's current ByteCommit can check an earlier one with a proof whose size does not grow with the cycles between them. DSM Amendment A15's phase C (a validity proof of a shared lineage's history) needs it to rely on historical finality facts. Whether it holds against a member showing different histories to different readers is undecided (§14). |
+| 15 | An ancestry accumulator over each member's ByteCommits, so a reader holding a member's current ByteCommit can check an earlier one with a proof whose size does not grow with the cycles between them. DSM Amendment A15's phase C (a validity proof of a shared lineage's history) needs it to rely on historical finality facts. Whether it holds against a member showing different histories to different readers is undecided (§14). **Deferred with phase C (owner, 2026-10-28):** "Defer phase C. The native reserve remains at phase A, expressly without claiming phase-C guarantees. Evaluate a hash-based, logarithmic Merkle accumulator when phase C is designed." |

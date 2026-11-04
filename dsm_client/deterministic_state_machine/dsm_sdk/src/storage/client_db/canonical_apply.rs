@@ -114,6 +114,18 @@ pub fn compute_canonical_apply_id(
     out
 }
 
+/// The operation digest of a transfer: its canonical operation bytes, hashed
+/// under their own domain. The sender records it on its proposal and the
+/// recipient on its canonical apply; each keeps it locally and neither sends
+/// it.
+pub fn canonical_apply_operation_digest(canonical_operation_bytes: &[u8]) -> [u8; 32] {
+    let mut h = dsm::crypto::blake3::dsm_domain_hasher(dsm::tagged_domain!(
+        b"DSM/canonical-apply-op-digest/v1"
+    ));
+    h.update(canonical_operation_bytes);
+    *h.finalize().as_bytes()
+}
+
 /// Outcome of the in-transaction insert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalApplyInsertOutcome {
@@ -447,6 +459,19 @@ mod tests {
         crate::economic_fixtures::use_test_storage_dir();
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
+    }
+
+    /// The sender's proposal and the recipient's canonical apply each built
+    /// this digest, in two places, before it became one function (owner,
+    /// 2026-10-28). Pinned on a fixed input at the bytes both copies derived.
+    #[test]
+    fn the_operation_digest_keeps_the_bytes_both_copies_had() {
+        assert_eq!(
+            crate::util::text_id::encode_base32_crockford(&canonical_apply_operation_digest(
+                &[0x6F; 96]
+            )),
+            "RRCNJAXW580FV5W468ZB26F11HFQFSCNGWJCYBW34RMRBYBHFKY0"
+        );
     }
 
     fn rec(rel: u8, parent: u8, nonce: u8) -> CanonicalApplyRecord {

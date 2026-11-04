@@ -21,6 +21,11 @@ pub enum TropicError {
     Comm,
     /// `MCounter_Update` on an exhausted counter (`H == 0`) — online only.
     CounterExhausted,
+    /// The chip took the command and refused it: a key or slot in the wrong state, an access the
+    /// session's pairing slot is denied, a command or parameter it does not accept.
+    Refused,
+    /// After closing its birth the chip still accepts a command the closed birth denies.
+    CageOpen,
 }
 
 /// TROPIC01 primitives used over an authenticated L3 session, mediated by the RP2350
@@ -40,6 +45,12 @@ pub trait Tropic {
     /// The public half `pk_chip` is read once at enrollment (bound into the anchor bundle `B`)
     /// via the chip's own key-read primitive, not through this trait.
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError>;
+
+    /// Close the chip to a second birth: the pairing slot the appliance runs on may no longer
+    /// re-initialize the counter, write or invalidate pairing keys, or write the chip's access
+    /// configuration, and the closed configuration is in force when this returns. A chip already
+    /// closed is closed. Irreversible on silicon.
+    fn close_birth(&mut self) -> Result<(), TropicError>;
 }
 
 /// Forward `Tropic` through a `Box`, so a firmware holding the appliance in a `'static` slot can
@@ -57,6 +68,9 @@ impl<T: Tropic + ?Sized> Tropic for alloc::boxed::Box<T> {
     fn chip_sign(&mut self, message: &[u8; 32]) -> Result<Vec<u8>, TropicError> {
         (**self).chip_sign(message)
     }
+    fn close_birth(&mut self) -> Result<(), TropicError> {
+        (**self).close_birth()
+    }
 }
 
 /// Host-side verification of the resident TROPIC01 Ed25519 witness (`σ^chip`). The
@@ -67,15 +81,41 @@ pub trait ChipSig {
     fn verify(pk_chip: &[u8], message: &[u8; 32], sig: &[u8]) -> bool;
 }
 
+/// Why the partition could not generate its keypair or sign. No `σ^host` exists then, and none
+/// is put in its place.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PartitionError {
+    /// The scheme refused the secret key it was given.
+    SecretKey,
+    /// The scheme refused the message it was given.
+    Message,
+    /// The signer's own verification of the signature it made failed.
+    SelfCheck,
+}
+
 /// The RP2350 secure-partition signature scheme (the `σ^host` factor). The partition
 /// keypair is generated at appliance birth under the birth seal; `pk_host` is bound into
 /// the anchor bundle `B` and pinned by the receiver. PartSign signs the per-transfer
 /// root-advance message `M_{i+1}`; the receiver verifies with the pinned `pk_host`.
 pub trait PartitionSig {
     /// Deterministic `(sk, pk)` from a 32-byte seed (partition birth seal).
-    fn part_keygen(seed: &[u8; 32]) -> (Vec<u8>, Vec<u8>);
+    fn part_keygen(seed: &[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), PartitionError>;
     /// Signature over a 32-byte digest under the partition secret key.
-    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Vec<u8>;
+    fn part_sign(sk: &[u8], digest: &[u8; 32]) -> Result<Vec<u8>, PartitionError>;
     /// Verify a partition signature over a 32-byte digest under the pinned `pk`.
     fn part_verify(pk: &[u8], digest: &[u8; 32], sig: &[u8]) -> bool;
+}
+
+/// Verification of the partition witness `σ^host` alone: what a receiver or a walker of an
+/// offline account needs, which never generates a partition key or signs. Every
+/// [`PartitionSig`] verifies.
+pub trait HostSig {
+    /// Verify a partition signature over a 32-byte digest under the pinned `pk_host`.
+    fn verify(pk_host: &[u8], message: &[u8; 32], sig: &[u8]) -> bool;
+}
+
+impl<P: PartitionSig> HostSig for P {
+    fn verify(pk_host: &[u8], message: &[u8; 32], sig: &[u8]) -> bool {
+        P::part_verify(pk_host, message, sig)
+    }
 }

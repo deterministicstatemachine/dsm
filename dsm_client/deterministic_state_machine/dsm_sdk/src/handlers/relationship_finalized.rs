@@ -14,15 +14,13 @@
 //! is checked under the journal's `new_counterparty_a_head` (the sender's
 //! per-step EK for that transition, which the sender signed the certificate
 //! with), NOT the live Counterparty EK head, which moves on the next inbound
-//! apply, on this device's own finalize, or on a cert resync.
+//! apply, on this device's own finalize, or on a cert resync. The check of the
+//! certificate against what the journal holds is Core's,
+//! [`verify_relationship_finalized`](dsm::types::receipt_types::verify_relationship_finalized);
+//! this module finds the journal and records the release.
 
-use crate::storage::client_db::{
-    self as cdb, RecipientAcceptanceJournal, STATUS_COMPLETE, STATUS_REJECTED,
-};
-use dsm::types::proto::RelationshipFinalizedV1;
-use dsm::types::receipt_types::{
-    decode_relationship_finalized_wire, relationship_finalized_signing_target,
-};
+use crate::storage::client_db::{self as cdb, STATUS_COMPLETE, STATUS_REJECTED};
+use dsm::types::receipt_types::decode_relationship_finalized_wire;
 
 /// What one polled certificate did here. Only `Applied` consumes the message
 /// id it was read under. `AlreadyFinalized` and `NoJournal` need no signature
@@ -51,44 +49,6 @@ pub enum RelationshipFinalizedOutcome {
 
 fn arr32(v: &[u8], what: &str) -> Result<[u8; 32], String> {
     <[u8; 32]>::try_from(v).map_err(|_| format!("{what} is not 32 bytes"))
-}
-
-/// Pure check of a decoded certificate against the journal it names. Returns
-/// the rejection reason, if any.
-fn check_against_journal(
-    cert: &RelationshipFinalizedV1,
-    journal: &RecipientAcceptanceJournal,
-    local_device: &[u8; 32],
-) -> Result<(), String> {
-    if cert.sender_device_id.as_slice() != journal.counterparty_device_id.as_slice() {
-        return Err("certificate sender is not the journal's counterparty".into());
-    }
-    if cert.recipient_device_id.as_slice() != local_device.as_slice() {
-        return Err("certificate recipient is not this device".into());
-    }
-    if cert.sender_child_tip_a.as_slice() != journal.child_tip.as_slice() {
-        return Err("certificate sender_child_tip_a != journaled signed child".into());
-    }
-    if cert.recipient_parent_tip_b.as_slice() != journal.applied_parent_tip_b.as_slice()
-        || cert.recipient_child_tip_b.as_slice() != journal.applied_child_tip_b.as_slice()
-    {
-        return Err("certificate recipient pair != the pair this device journaled".into());
-    }
-    if journal.new_counterparty_a_head.is_empty() {
-        return Err("journal carries no sender per-step EK head to verify under".into());
-    }
-    let target = relationship_finalized_signing_target(cert);
-    match dsm::crypto::sphincs::sphincs_verify(
-        &journal.new_counterparty_a_head,
-        &target,
-        &cert.signature_a,
-    ) {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            Err("certificate signature_a does not verify under the journal's sender EK head".into())
-        }
-        Err(e) => Err(format!("certificate signature verify error: {e}")),
-    }
 }
 
 /// Consume one polled certificate. Runs under the relationship lock (the
@@ -131,8 +91,15 @@ pub async fn apply_relationship_finalized(body: &[u8]) -> RelationshipFinalizedO
     if journal.status != STATUS_COMPLETE {
         return RelationshipFinalizedOutcome::NotYetComplete;
     }
-    if let Err(reason) = check_against_journal(&cert, &journal, &local_device) {
-        return RelationshipFinalizedOutcome::Rejected(reason);
+    if let Err(e) = dsm::types::receipt_types::verify_relationship_finalized(
+        &cert,
+        &journal.counterparty_device_id,
+        &local_device,
+        &journal.child_tip,
+        (&journal.applied_parent_tip_b, &journal.applied_child_tip_b),
+        &journal.new_counterparty_a_head,
+    ) {
+        return RelationshipFinalizedOutcome::Rejected(e.to_string());
     }
 
     let flipped = (|| -> anyhow::Result<bool> {
@@ -155,6 +122,8 @@ mod tests {
     use super::*;
     use crate::test_support::arrivals::arrivals_for;
     use crate::test_support::two_device::{Pair, TestDevice};
+    use dsm::types::proto::RelationshipFinalizedV1;
+    use dsm::types::receipt_types::relationship_finalized_signing_target;
     use prost::Message;
     use serial_test::serial;
 

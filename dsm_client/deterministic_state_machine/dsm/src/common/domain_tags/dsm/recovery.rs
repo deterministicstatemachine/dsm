@@ -8,11 +8,7 @@ pub const TAG_DSM_RECOVERY_ROLL: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-roll");
 pub const TAG_DSM_RECOVERY_ROLL_PROOF: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-roll-proof");
-pub const TAG_DSM_RECOVERY_NONCE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/recovery-nonce");
-pub const TAG_DSM_RECOVERY_CHALLENGE: TaggedHashDomain<'static> =
-    crate::tagged_domain!(b"DSM/recovery-challenge");
-/// Domain tag for the capsule contact-set commitment (gate-set anchor, R4).
+/// Domain tag for the contact-set commitment (gate-set anchor, R4).
 pub const TAG_DSM_RECOVERY_CONTACT_SET: TaggedHashDomain<'static> =
     crate::tagged_domain!(b"DSM/recovery-contact-set");
 /// Domain tag for a Contact Tombstone Acknowledgement's signing bytes (P4).
@@ -69,8 +65,6 @@ pub const TAG_DSM_TOMBSTONE_SUCCESSION: TaggedHashDomain<'static> =
 pub(super) const TAGS: &[TaggedHashDomain<'static>] = &[
     TAG_DSM_RECOVERY_ROLL,
     TAG_DSM_RECOVERY_ROLL_PROOF,
-    TAG_DSM_RECOVERY_NONCE,
-    TAG_DSM_RECOVERY_CHALLENGE,
     TAG_DSM_RECOVERY_CONTACT_SET,
     TAG_DSM_RECOVERY_ACK,
     TAG_DSM_RECOVERY_ACK_ROOT,

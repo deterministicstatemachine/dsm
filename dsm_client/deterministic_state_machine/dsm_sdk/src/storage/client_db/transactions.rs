@@ -183,10 +183,7 @@ pub(crate) fn settle_step_in_tx(conn: &Connection, step: &SettledStep<'_>) -> Re
 }
 
 pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
-    info!(
-        "Storing transaction: {} ({} -> {})",
-        tx.tx_id, tx.from_device, tx.to_device
-    );
+    info!("Storing transaction: {}", tx.tx_id);
     let binding = get_connection()?;
     let conn = binding.lock().unwrap_or_else(|poisoned| {
         log::warn!("DB lock poisoned, recovering");
@@ -197,24 +194,10 @@ pub fn store_transaction(tx: &TransactionRecord) -> Result<()> {
     // Important: never downgrade proof_data from non-empty to empty.
     let affected = upsert_transaction_row(&conn, tx)?;
     if affected > 0 {
-        info!("Transaction upserted successfully, amount={}", tx.amount);
+        info!("Transaction upserted: {}", tx.tx_id);
     } else {
         info!("Transaction unchanged after upsert: {}", tx.tx_id);
     }
-
-    // Debug: verify the transaction was stored
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM transactions WHERE from_device = ?1 OR to_device = ?1",
-            params![tx.from_device],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-    info!(
-        "Total transactions for device {}: {}",
-        &tx.from_device[..tx.from_device.len().min(20)],
-        count
-    );
 
     Ok(())
 }

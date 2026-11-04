@@ -19,6 +19,21 @@ pub struct TipSyncRequest {
     pub counterparty_device_id: [u8; 32],
     pub expected_parent_tip: [u8; 32],
     pub target_tip: [u8; 32],
+    /// What another accepted step from the same parent is to this one.
+    pub crossing: CrossingSteps,
+}
+
+/// What another accepted step from the expected parent is to the step a sync
+/// carries (owner ruling, 2026-10-29: "both settle").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossingSteps {
+    /// An online transfer: each sender's step consumes its own parent, so a
+    /// counterparty's transfer from the same relationship tip is concurrent,
+    /// and the two join.
+    Join,
+    /// The offline protocol takes one step at a time on one shared tip:
+    /// another step from the same parent is a fork, never joined.
+    Refuse,
 }
 
 /// Outcome of an atomic tip sync operation.
@@ -30,6 +45,14 @@ pub enum TipSyncOutcome {
     RepairedAtTarget { tip: [u8; 32] },
     /// Both tips already equal target. No mutation needed.
     AlreadyAtTarget { tip: [u8; 32] },
+    /// The relationship had already advanced from expected_parent to another
+    /// accepted step's successor — a transfer that crossed this one. Both
+    /// tips moved to the two steps' join (owner ruling, 2026-10-29: "both
+    /// settle").
+    Joined { new_tip: [u8; 32] },
+    /// Both tips already equal this step's join with the step that crossed
+    /// it. No mutation needed.
+    AlreadyJoined { tip: [u8; 32] },
     /// Canonical is not at expected_parent (still behind or at a different value).
     ParentMismatch { current_tip: [u8; 32] },
     /// Canonical already moved, but not to the requested target.
@@ -86,7 +109,9 @@ fn sync_projection_with_optional_acceptance(
     match outcome {
         TipSyncOutcome::Advanced { .. }
         | TipSyncOutcome::RepairedAtTarget { .. }
-        | TipSyncOutcome::AlreadyAtTarget { .. } => {
+        | TipSyncOutcome::AlreadyAtTarget { .. }
+        | TipSyncOutcome::Joined { .. }
+        | TipSyncOutcome::AlreadyJoined { .. } => {
             tx.commit()?;
         }
         _ => {
@@ -109,14 +134,16 @@ pub(crate) fn sync_tip_projections_in_tx(
     acceptance: Option<&super::recipient_receipt_fold::AcceptedTransition>,
 ) -> Result<TipSyncOutcome> {
     // Step 1: Load current bilateral row
-    let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source): (
+    let (chain_tip, local_tip, observed_remote_tip, observed_remote_tip_source, previous_tip): (
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
         Option<i64>,
+        Option<Vec<u8>>,
     ) = {
         let mut stmt = tx.prepare(
-            "SELECT chain_tip, local_bilateral_chain_tip, observed_remote_chain_tip, observed_remote_tip_source
+            "SELECT chain_tip, local_bilateral_chain_tip, observed_remote_chain_tip, observed_remote_tip_source,
+                    previous_chain_tip
                FROM contacts WHERE device_id = ?1",
         )?;
         match stmt.query_row(params![&request.counterparty_device_id[..]], |row| {
@@ -125,6 +152,7 @@ pub(crate) fn sync_tip_projections_in_tx(
                 row.get::<_, Option<Vec<u8>>>(1)?,
                 row.get::<_, Option<Vec<u8>>>(2)?,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
             ))
         }) {
             Ok(v) => v,
@@ -178,9 +206,34 @@ pub(crate) fn sync_tip_projections_in_tx(
         None => None,
     };
 
+    let previous_tip_arr: Option<[u8; 32]> = match previous_tip {
+        Some(tip) => match tip_of("previous_chain_tip", Some(tip)) {
+            Ok(tip) => Some(tip),
+            Err(violation) => return Ok(violation),
+        },
+        None => None,
+    };
     // Step 3: Branch on canonical/local state
     let target = &request.target_tip;
     let parent = &request.expected_parent_tip;
+    // The join of this step with the step that crossed it: the relationship
+    // left `parent` for another accepted step's successor, the tip it now
+    // holds (Case D), or holds that join already, the crossing step's
+    // successor kept as its previous tip.
+    let crossing = |sibling: &[u8; 32]| {
+        dsm::core::bilateral_transaction_manager::join_concurrent_tips(parent, sibling, target)
+            .map_err(|e| anyhow::anyhow!("the join of two concurrent steps: {e}"))
+    };
+    let joined_already = match previous_tip_arr {
+        Some(sibling)
+            if request.crossing == CrossingSteps::Join
+                && sibling != *parent
+                && sibling != *target =>
+        {
+            Some(crossing(&sibling)?)
+        }
+        _ => None,
+    };
     let clear_observed_tip_on_success =
         should_clear_observed_tip_after_success(observed_remote_tip_record.as_ref(), target);
 
@@ -229,6 +282,40 @@ pub(crate) fn sync_tip_projections_in_tx(
             clear_observed_tip_on_success,
         )?;
         TipSyncOutcome::Advanced { new_tip: *target }
+    } else if request.crossing == CrossingSteps::Join
+        && previous_tip_arr == Some(*parent)
+        && local_tip_arr == chain_tip_arr
+    {
+        // Case D: the relationship already advanced from the expected parent
+        // to another accepted step's successor — a transfer that crossed this
+        // one (owner ruling, 2026-10-29: "both settle"). Neither step is
+        // rewritten onto the other's successor: both keep their own parent and
+        // successor, and the relationship continues from their join, which
+        // either device derives, taking the two in either order.
+        let joined = crossing(&chain_tip_arr)?;
+        tx.execute(
+            "UPDATE contacts SET \
+                previous_chain_tip = chain_tip, \
+                chain_tip = ?1, \
+                local_bilateral_chain_tip = ?1, \
+                chain_tip_commitment = NULL, \
+                needs_online_reconcile = 0 \
+             WHERE device_id = ?2",
+            params![&joined[..], &request.counterparty_device_id[..]],
+        )?;
+        super::transactions::record_passed_tip_in_tx(
+            tx,
+            &request.counterparty_device_id,
+            &chain_tip_arr,
+        )?;
+        clear_observed_remote_tip_in_tx(
+            tx,
+            &request.counterparty_device_id,
+            clear_observed_tip_on_success,
+        )?;
+        TipSyncOutcome::Joined { new_tip: joined }
+    } else if joined_already == Some(chain_tip_arr) && local_tip_arr == chain_tip_arr {
+        TipSyncOutcome::AlreadyJoined { tip: chain_tip_arr }
     } else {
         // Case C: canonical is somewhere else — fail closed, no writes
         // (wrapper rolls back). Distinguish ParentMismatch from

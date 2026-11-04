@@ -15,7 +15,9 @@ import java.util.UUID
  */
 class GattOperationQueueTest {
 
-    private val pairing: UUID = BleConstants.PAIRING_UUID
+    // A characteristic other than TX_REQUEST: the queue keys each write by its
+    // characteristic. (Named for the pairing characteristic it once was.)
+    private val pairing: UUID = BleConstants.TX_RESPONSE_UUID
     private val txRequest: UUID = BleConstants.TX_REQUEST_UUID
 
     /** Android's rule: one outstanding operation; a second start is refused. */

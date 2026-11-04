@@ -1,0 +1,9 @@
+# Built by `make ios-libs`: the Rust SDK for iOS and its generated header.
+Native/DsmSdk.xcframework/
+Native/headers/
+# Built by the frontend's `build:ios`: the React bundle Xcode packages.
+DsmWallet/www/
+# Xcode's own state.
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+DerivedData/

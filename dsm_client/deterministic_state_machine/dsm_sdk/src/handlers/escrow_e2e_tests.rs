@@ -18,8 +18,9 @@ use generated::envelope::Payload;
 use serial_test::serial;
 
 use super::node_e2e_tests::{
-    adopt, args, balance, create_token, entered, era, head_agrees_with_admitted_root, history_rows,
-    invoke, payload, pending_position, position_of, realized_through,
+    admitted_position, adopt, args, balance, create_non_transferable_token, create_token, entered,
+    era, head_agrees_with_admitted_root, history_rows, invoke, payload, pending_position,
+    position_of, realized_through, rows_on_the_nodes,
 };
 use crate::bridge::AppResult;
 use crate::economic_fixtures::{whole_era, NETWORK};
@@ -324,10 +325,14 @@ async fn write_to_cell(d: &TestDevice, m: &Match, value: &EscrowVerdict) {
         &set.id(),
     )
     .expect("the verdict cell");
-    let wrote = write_recorded(&set, cell.routed(), &value.encode())
+    let wrote = write_recorded(&set, cell.routed(), &cell.recognizes(), &value.encode())
         .await
         .expect("the write");
-    assert!(wrote.reached_leader(), "the cell's leader took the value");
+    assert_eq!(
+        wrote.leader(),
+        crate::sdk::route_seats::AtLeader::Link,
+        "the cell's leader took the value"
+    );
 }
 
 /// The match settles A's way: A takes both stakes, once, and B takes nothing.
@@ -605,6 +610,80 @@ async fn a_joint_cancel_and_a_referee_result_cannot_both_settle() {
     realized_through(&p.b, "escrow.release", release_request(&m.b_vault)).await;
     assert_eq!(balance(&p.a, &m.era), whole_era(100));
     assert_eq!(balance(&p.b, &m.era), whole_era(100));
+}
+
+/// DSM §60, MR-DSM-0185: three parties, two chains, one commitment. Alice
+/// (A) and Bob (B) each fund a vault for Carol (R) bound to the same
+/// delivery `Y`, each released to Carol by its own funder's acknowledgement
+/// and refunded by its funder alone. Bob refuses to acknowledge. Alice's
+/// vault still releases to Carol: the two vaults name one `Y` and share no
+/// parent, so they bind two verdict cells, and Bob's refusal is a liveness
+/// failure on his chain only. Bob's vault holds no verdict and releases
+/// nothing, until Bob's own branch refunds it.
+///
+/// MUTATION CONTROL: deriving the verdict cell from `Y` alone, so the two
+/// vaults share one, turns this red.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn a_refusal_on_one_chain_cannot_touch_another_bound_to_the_same_commitment() {
+    let p = Pair::boot(100, 100).await;
+    // Carol is a wallet of her own: a release is an operation on her own
+    // lineage, so she has one.
+    let carol = referee(&p).await;
+    carol.fund_admitted(100).await;
+    let (pa, pb, pc) = (party(&p.a).await, party(&p.b).await, party(&carol).await);
+    let stake = whole_era(10);
+    let delivery = b"delivery 9: Carol delivers to Alice and Bob";
+    let funded = |funder: &generated::EscrowPartyResponse| {
+        vec![
+            branch(b"delivered", vec![signer_of(funder)], &pc),
+            branch(b"refund", vec![signer_of(funder)], funder),
+        ]
+    };
+    let alice = created(&lock(&p.a, delivery, stake, funded(&pa), None).await);
+    let bob = created(&lock(&p.b, delivery, stake, funded(&pb), None).await);
+    assert_eq!(
+        alice.external_commitment, bob.external_commitment,
+        "both vaults name the one delivery"
+    );
+    assert_ne!(
+        alice.verdict_cell, bob.verdict_cell,
+        "two chains, two verdict cells: no shared parent"
+    );
+    let (alice_vault, bob_vault) = (d32(&alice.vault_id), d32(&bob.vault_id));
+
+    // Alice acknowledges the delivery; Bob refuses and signs nothing.
+    let acknowledged = verdict_of(
+        &adjudicate(&p.a, &alice_vault, b"delivered").await,
+        "escrow.adjudicate",
+    );
+    assert_eq!(
+        (acknowledged.state, acknowledged.outcome.as_slice()),
+        (
+            generated::EscrowVerdictState::Final as i32,
+            b"delivered".as_slice()
+        )
+    );
+    assert_eq!(
+        verdict(&carol, &bob_vault).await.state,
+        generated::EscrowVerdictState::None as i32,
+        "Bob's refusal leaves his cell empty"
+    );
+
+    // Carol is paid from Alice's vault; Bob's releases nothing.
+    realized_through(&carol, "escrow.release", release_request(&alice_vault)).await;
+    assert_eq!(balance(&carol, &era()), whole_era(100) + stake);
+    refused_release(&carol, &bob_vault, "no verdict holds the cell yet").await;
+    assert_eq!(balance(&p.b, &era()), whole_era(100) - stake);
+
+    // Bob's own branch still settles his vault.
+    verdict_of(
+        &adjudicate(&p.b, &bob_vault, b"refund").await,
+        "escrow.adjudicate",
+    );
+    realized_through(&p.b, "escrow.release", release_request(&bob_vault)).await;
+    assert_eq!(balance(&p.b, &era()), whole_era(100));
+    assert_eq!(balance(&p.a, &era()), whole_era(100) - stake);
 }
 
 /// An escrow vault is not a market: it is not traded through, its owner
@@ -896,4 +975,112 @@ async fn escrow_lock_refuses_a_party_it_does_not_hold_and_a_repeated_name() {
     )
     .await;
     assert!(own.vaults.is_empty(), "no vault was created");
+}
+
+/// MR-SOFI-0311 for escrow: a stake of a token whose committed policy forbids
+/// transfer could never be released to any branch, so `escrow.create` over
+/// it is refused before anything moves or is published.
+///
+/// MUTATION CONTROL: drop the check in `sofi_flow::vault_funding_policies`
+/// and the terms and genesis are published before Core refuses the creation:
+/// the nodes' rows change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_escrow_over_a_token_whose_policy_forbids_transfer_is_refused_before_anything_moves() {
+    let p = Pair::boot(100, 100).await;
+    let r = referee(&p).await;
+    let notx = create_non_transferable_token(&p.a, "NOTX").await;
+    let (pa, pb, pr) = (party(&p.a).await, party(&p.b).await, party(&r).await);
+    let before = (balance(&p.a, &notx), admitted_position(&p.a));
+    let rows = rows_on_the_nodes(&p).await;
+    let made = invoke(
+        &p.a,
+        "escrow.create",
+        args(&generated::EscrowCreateRequest {
+            external: b"a match over NOTX".to_vec(),
+            token_policy_commit: notx.to_vec(),
+            amount_entered: entered(&p.a, &notx, 100),
+            branches: branches(&pa, &pb, &pr, &pa),
+            counterpart_vault_id: Vec::new(),
+        }),
+    )
+    .await;
+    assert!(
+        !made.success,
+        "an escrow over a non-transferable token is refused"
+    );
+    let why = made.error_message.expect("a refusal says why");
+    assert!(why.contains("cannot be locked in a vault"), "{why}");
+    assert_eq!(
+        (balance(&p.a, &notx), admitted_position(&p.a)),
+        before,
+        "nothing moved"
+    );
+    assert_eq!(rows_on_the_nodes(&p).await, rows, "nothing was published");
+}
+
+/// MR-SOFI-0311 for escrow: the enforcement is Core's. The creation past the
+/// SDK's early check (`escrow_flow::create_carrying`) is refused in Core's
+/// write set before the admission, carrying the staked token's own policy or
+/// none, and nothing moves.
+///
+/// MUTATION CONTROL: drop the market-leg check in Core's
+/// `write_set::funded_tokens_permitted` and A's device admits the escrow
+/// carrying NOTX's policy: the stake leaves A's balance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn an_escrow_past_the_sdk_check_is_refused_by_core_and_moves_nothing() {
+    let p = Pair::boot(100, 100).await;
+    let r = referee(&p).await;
+    let notx = create_non_transferable_token(&p.a, "NOTX").await;
+    let (pa, pr) = (party(&p.a).await, party(&r).await);
+    let referee_key = signer_of(&pr);
+    let referee_signer = EscrowSigner::new(
+        u16::try_from(referee_key.signature_alg).expect("a declared algorithm"),
+        &referee_key.public_key,
+    )
+    .expect("the referee's key");
+    let intent = crate::sdk::escrow_flow::CreateEscrowIntent {
+        external: b"a match over NOTX".to_vec(),
+        token: notx,
+        amount: 100,
+        branches: vec![dsm::sofi::wire::EscrowBranch::new(
+            dsm::sofi::wire::EscrowOutcome::new(b"void", vec![referee_signer]).expect("an outcome"),
+            d32(&pa.genesis),
+            d32(&pa.device_id),
+        )],
+        counterpart: None,
+    };
+    p.a.enter();
+    let policy = crate::storage::client_db::token_registry::load_policy_verified(&notx)
+        .expect("the policy store reads")
+        .expect("A holds its own token's policy");
+    let set = canonical_set(NETWORK).expect("the pinned set");
+    let before = (balance(&p.a, &notx), admitted_position(&p.a));
+    for (carried, refusal) in [
+        (vec![policy], "cannot be locked in a vault"),
+        (
+            Vec::new(),
+            "carries exactly the committed policy of each funded token",
+        ),
+    ] {
+        p.a.enter();
+        let created = crate::sdk::escrow_flow::create_carrying(
+            &p.a.router().core_sdk,
+            &set,
+            &intent,
+            carried,
+        )
+        .await;
+        let why = match created {
+            Err(e) => e.to_string(),
+            Ok(done) => panic!("Core admitted an escrow over NOTX: {done:?}"),
+        };
+        assert!(why.contains(refusal), "{why}");
+        assert_eq!(
+            (balance(&p.a, &notx), admitted_position(&p.a)),
+            before,
+            "nothing moved"
+        );
+    }
 }

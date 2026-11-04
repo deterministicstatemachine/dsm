@@ -26,11 +26,17 @@ EXTENDS Naturals, FiniteSets, Sequences, TLC
 \*
 \*   raw bytes at a member  --recognition-->  protocol object  --> cell facts
 \*
-\* LEADER FIRST (Sections 7 and 8), over the recognized view:
+\* LEADER FIRST, ON THE ROUTE CHAIN (Sections 7 and 8; DSM_RouteChain;
+\* storage spec §9), over the recognized view:
 \*   LeaderHeld(K, x) == x is the first recognized object naming K at the leader
-\*   Final(K, x)      == LeaderHeld(K, x) /\ two other members hold x
-\* No member votes and nothing is counted against a quorum. No key is ever
-\* dead: a key is open until an object naming it reaches its leader.
+\*   Final(K, x)      == LeaderHeld(K, x) /\ two further links
+\* where a further link is a copy at another member that carries x's leader
+\* record, so it is written once x holds the leader. A copy written before that
+\* (EarlyCopy) carries no leader record and counts for nothing, however many
+\* members hold one: visibility grants no priority. Counting it is the copy
+\* rule G15 replaced, the CopyRule FAULT. No member votes and nothing is
+\* counted against a quorum. No key is ever dead: a key is open until an
+\* object naming it reaches its leader.
 \*
 \* THE MODEL
 \*   members     the leader of a key is a fixed position of S, never a node's
@@ -70,6 +76,7 @@ CONSTANTS
     RecognizeAnyBytes,        \* [FALSE] recognition promotes bytes it cannot rebuild into an object
     ExerciseCountsAnywhere,   \* [FALSE] recognition reads an exercise as naming a key it does not name
     CountWithoutLeader,       \* [FALSE] finality counted over any three holders
+    CopyRule,                 \* [FALSE] copies written before the leader record count
     AvailabilityLeader,       \* [FALSE] the leader is whoever is reachable
     UnreadCountedAsCopy,      \* [FALSE] an unread member counts as a holder
     SplitPositionPair,        \* [FALSE] K_ful(q) and K_root(q) written in two steps
@@ -120,14 +127,15 @@ VARIABLES
     raw,        \* [AttemptKeys -> [Slots -> Seq(bytes)]]: what the leader and the alternate hold, in arrival order
     given,      \* [AttemptKeys -> [Slots -> Seq(bytes)]]: everything ever sent to that member, in arrival order (R2)
     first,      \* [{KF, KR} -> [Slots -> value]]: the first object naming the position key at that member
-    copies,     \* [Keys -> [AllValues -> 0..3]]: the three copy members holding the value
+    copies,     \* [Keys -> [AllValues -> 0..3]]: the three copy members holding a copy that carries the value's leader record
+    early,      \* 0..2: copy members holding a copy of XT at K0 written before XT held the leader
     leaderUp,   \* the seeded leader is reachable (changes only under AvailabilityLeader)
     signedF,    \* T has signed F (nobody else can produce F, C or XT)
     evid,       \* T's validation evidence is available
     everFinal,  \* [Keys -> values ever Final there]
     consHist    \* E values ever observed consuming the parent
 
-vars == <<raw, given, first, copies, leaderUp, signedF, evid, everFinal, consHist>>
+vars == <<raw, given, first, copies, early, leaderUp, signedF, evid, everFinal, consHist>>
 
 \* ---- the recognition boundary ------------------------------------------
 \* THE FACT: b is a canonical object whose own fields name attempt key k
@@ -172,8 +180,13 @@ Holders(k, v) ==
 
 OthersHolding(k, v) == Holders(k, v) - 1
 
+\* Copies that carry no leader record: XT's at K0, written before it held the
+\* leader. Only the copy rule counts them.
+EarlyCopies(k, v) == IF k = K0 /\ v = XT THEN early ELSE 0
+
 Final(k, v) ==
     IF CountWithoutLeader THEN Holders(k, v) >= FINALITY
+    ELSE IF CopyRule THEN LeaderHeld(k, v) /\ OthersHolding(k, v) + EarlyCopies(k, v) >= FINALITY - 1
     ELSE LeaderHeld(k, v) /\ OthersHolding(k, v) >= FINALITY - 1
 
 FinalValues(k) == {v \in RawAt(k) : Final(k, v)}
@@ -254,12 +267,13 @@ PutRaw(k, b) ==
                    [] MemberReplacesValue -> <<b>>
                    [] OTHER -> Append(@, b)]
     /\ Hist
-    /\ UNCHANGED <<first, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<first, copies, early, leaderUp, signedF, evid>>
 
-\* A copy: any member other than the one that decides; any party carries any
-\* bytes. Copies of the leader's occupant are what finality counts; a loser's
-\* (or garbage's) copies are held too and count for nothing -- modelled where
-\* counting them is the mutation.
+\* A copy carrying the chain: any member other than the one that decides; any
+\* party carries any bytes. A copy of the leader's occupant carries its leader
+\* record, and those are what finality counts; a loser's (or garbage's)
+\* copies are held too and count for nothing -- modelled where counting them
+\* is the mutation.
 PutCopy(k, b) ==
     /\ b \in RawAt(k)
     /\ b # S
@@ -268,7 +282,18 @@ PutCopy(k, b) ==
     /\ copies[k][b] < CopyCap
     /\ copies' = [copies EXCEPT ![k][b] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, early, leaderUp, signedF, evid>>
+
+\* A copy of T's exercise written to copy members at K0 before it holds the
+\* leader: it carries no leader record (there is none to carry yet), so it is
+\* no link. Members keep it all the same.
+EarlyCopy ==
+    /\ signedF
+    /\ Occupant(K0, Lead) # XT
+    /\ early < 2
+    /\ early' = early + 1
+    /\ Hist
+    /\ UNCHANGED <<raw, given, first, copies, leaderUp, signedF, evid>>
 
 \* Garbage copies land anywhere, any time: a hostile caller spraying members.
 PutGarbageCopy(k) ==
@@ -276,14 +301,14 @@ PutGarbageCopy(k) ==
     /\ copies[k][G] < CopyCap
     /\ copies' = [copies EXCEPT ![k][G] = @ + 1]
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, early, leaderUp, signedF, evid>>
 
 \* The ordinary claim S races C at K_root(q)'s leader.
 PutOrdinaryClaim ==
     /\ first[KR][Lead] = NONE
     /\ first' = [first EXCEPT ![KR][Lead] = S]
     /\ Hist
-    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, early, leaderUp, signedF, evid>>
 
 \* The trader's position pair is written together at its one leader (Section 9).
 PutPair ==
@@ -293,7 +318,7 @@ PutPair ==
     /\ first' = [first EXCEPT ![KF][Lead] = F,
                               ![KR][Lead] = IF first[KR][Lead] = NONE THEN C ELSE @]
     /\ Hist
-    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, early, leaderUp, signedF, evid>>
 
 PutHalf(k) ==
     /\ SplitPositionPair
@@ -302,33 +327,33 @@ PutHalf(k) ==
     /\ first[k][Lead] = NONE
     /\ first' = [first EXCEPT ![k][Lead] = IF k = KF THEN F ELSE C]
     /\ Hist
-    /\ UNCHANGED <<raw, given, copies, leaderUp, signedF, evid>>
+    /\ UNCHANGED <<raw, given, copies, early, leaderUp, signedF, evid>>
 
 SignF ==
     /\ ~signedF
     /\ signedF' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, copies, leaderUp, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, early, leaderUp, evid>>
 
 PublishEvidence ==
     /\ ~evid
     /\ evid' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, copies, leaderUp, signedF>>
+    /\ UNCHANGED <<raw, given, first, copies, early, leaderUp, signedF>>
 
 Crash ==
     /\ AvailabilityLeader
     /\ leaderUp
     /\ leaderUp' = FALSE
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, copies, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, early, signedF, evid>>
 
 Recover ==
     /\ AvailabilityLeader
     /\ ~leaderUp
     /\ leaderUp' = TRUE
     /\ Hist
-    /\ UNCHANGED <<raw, given, first, copies, signedF, evid>>
+    /\ UNCHANGED <<raw, given, first, copies, early, signedF, evid>>
 
 Idle == UNCHANGED vars
 
@@ -336,6 +361,7 @@ Next ==
     \/ \E k \in AttemptKeys, b \in AllValues : PutRaw(k, b)
     \/ \E k \in Keys, b \in AllValues : PutCopy(k, b)
     \/ \E k \in AttemptKeys : PutGarbageCopy(k)
+    \/ EarlyCopy
     \/ PutOrdinaryClaim
     \/ PutPair
     \/ \E k \in {KF, KR} : PutHalf(k)
@@ -350,6 +376,7 @@ Init ==
     /\ given = [k \in AttemptKeys |-> [s \in Slots |-> <<>>]]
     /\ first = [k \in {KF, KR} |-> [s \in Slots |-> NONE]]
     /\ copies = [k \in Keys |-> [v \in AllValues |-> 0]]
+    /\ early = 0
     /\ leaderUp = TRUE
     /\ signedF = FALSE
     /\ evid = FALSE
@@ -366,6 +393,7 @@ TypeOK ==
     /\ \A k \in AttemptKeys, s \in Slots : Len(raw[k][s]) <= 3 /\ Len(given[k][s]) <= 3
     /\ first \in [{KF, KR} -> [Slots -> AllValues \cup {NONE}]]
     /\ copies \in [Keys -> [AllValues -> 0..3]]
+    /\ early \in 0..2
     /\ evid \in BOOLEAN
 
 \* ---- R2: storage keeps what it is given (Part II §12) ---------------------
@@ -393,6 +421,12 @@ RecognizedImpliesConstructible ==
 
 \* ---- leader-first finality -------------------------------------------------
 FinalRequiresLeader == \A k \in Keys : \A v \in RawAt(k) : Final(k, v) => LeaderHeld(k, v)
+\* Finality is the chain's: a final value has two further links carrying its
+\* leader record; copies written before it held the leader never make it
+\* final (visibility grants no priority).
+FinalRequiresChainLinks ==
+    \A k \in Keys : \A v \in RawAt(k) :
+        Final(k, v) => LeaderHeld(k, v) /\ OthersHolding(k, v) >= FINALITY - 1
 AtMostOneFinalPerCoordinate ==
     \A k \in Keys : Cardinality(everFinal[k] \cup FinalValues(k)) <= 1
 LeaderFromCommittedSet == Lead = L

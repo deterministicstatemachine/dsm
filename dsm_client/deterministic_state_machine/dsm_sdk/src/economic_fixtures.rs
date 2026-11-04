@@ -339,9 +339,6 @@ pub async fn funded_router(fleet: &FleetGuard, seed: u8) -> AppRouterImpl {
 /// re-seeding it would destroy the property under test. The head is whatever
 /// was persisted.
 pub fn restart_router(fleet: &FleetGuard) -> AppRouterImpl {
-    // A new PROCESS: the startup-admission record belongs to the process that
-    // is being modeled as gone.
-    crate::sdk::core_sdk::CoreSDK::forget_process_startup_admissions_for_testing();
     device_router(fleet, "econ-fixture-restart", false)
 }
 

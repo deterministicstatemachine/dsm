@@ -141,6 +141,9 @@ pub fn describe_call(method: &str, args: &[u8]) -> String {
                     "ask the wallet to prove holdings of {} tokens",
                     k.policy_commits.len()
                 ),
+                Some(pb::connect_app_request_intent_v1::Kind::Sign(k)) => {
+                    format!("ask the wallet to sign: {}", k.statement)
+                }
                 Some(pb::connect_app_request_intent_v1::Kind::Contacts(..)) => {
                     "ask the wallet which of its contacts are here".to_string()
                 }
@@ -292,6 +295,7 @@ pub fn describe_answer(response: &pb::IngressResponse) -> Result<String, String>
                     match pb::ConnectFact::try_from(s.fact) {
                         Ok(pb::ConnectFact::Paid) => "PAID",
                         Ok(pb::ConnectFact::Holdings) => "HOLDINGS PROVEN",
+                        Ok(pb::ConnectFact::Signed) => "SIGNED",
                         Ok(pb::ConnectFact::EscrowLocked) => "STAKE LOCKED",
                         Ok(pb::ConnectFact::EscrowReleased) => "RESULT COLLECTED",
                         _ => "nothing established",

@@ -11,8 +11,9 @@
 //! its anchor, and holdings are a proof the application verifies itself.
 //!
 //! - [`code`]: the connect code.
-//! - [`signed`]: the signed objects, their digests and the identities they
-//!   name.
+//! - [`signed`]: signing under this device's AK, and the card it names
+//!   itself by. The signed objects, their digests and the identities they
+//!   name are Core's (`dsm::connect`).
 //! - [`grant`]: what a grant lets the application ask for without the player.
 //! - [`pinned_tls`]: the HTTPS client bound to the code's certificate pin.
 //! - [`holdings`]: the holdings proof, produced by the wallet and verified by

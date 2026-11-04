@@ -16,7 +16,8 @@ def go_home():
     raise DriverError(f"[{name}] not at home: {d.screen_text()[:200]!r}")
 if d.sees('PROTECT YOUR WALLET'): d.tap('LATER', exact=True); time.sleep(1)
 go_home(); d.tap('WALLET', exact=True); time.sleep(4)
-r = d.eval_js("""(() => { const b=[...document.querySelectorAll('button.tab-button')].find(b=>b.textContent.trim()==='Send'); if(!b) return 'NOTAB'; ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))); return 'OK'; })()""")
+# The wallet's sections are ScreenTabs: buttons (role tab) labelled by section.
+r = d.eval_js("""(() => { const b=[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Send' && !b.classList.contains('sb-btn')); if(!b) return 'NOTAB'; ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))); return 'OK'; })()""")
 log(f"send tab: {r}"); time.sleep(2.5)
 r = d.eval_js(f"""(() => {{
   const sel=document.querySelector('select#recipient'); if(!sel) return 'NOSELECT';
@@ -29,7 +30,7 @@ log(f"form: {r}")
 if not str(r).startswith('OK'): raise DriverError(r)
 time.sleep(1.5)
 log(f"confirm-line: {d.eval_js("(document.querySelector('.send-recipient-confirm')||{}).textContent")}")
-r = d.eval_js("""(() => { const b=document.querySelector('button.send-button'); if(!b) return 'NOBTN'; if(b.disabled) return 'DISABLED'; ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))); return 'CLICKED'; })()""")
+r = d.eval_js("""(() => { const b=document.querySelector('.send-tab button[type=submit].sb-btn--primary'); if(!b) return 'NOBTN'; if(b.disabled) return 'DISABLED'; ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>b.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true}))); return 'CLICKED'; })()""")
 log(f"send-button: {r}"); time.sleep(2)
 dl=time.time()+15
 while time.time()<dl and not d.eval_js("!!document.querySelector('button.bilateral-btn-accept')"): time.sleep(0.5)

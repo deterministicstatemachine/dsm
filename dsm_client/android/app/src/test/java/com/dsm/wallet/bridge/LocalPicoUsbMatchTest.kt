@@ -7,7 +7,7 @@ import org.junit.Test
 
 /**
  * Audit 2026-10-15 item 10: the phone opens only the DSM Anchor on USB, by the anchor firmware's
- * own descriptor (crates/dsm-anchor-pico: `UsbVidPid(0x1209, 0xd5a1)`), never any CDC device.
+ * own descriptor (crates/dsm-anchor-nonsecure-app: `UsbVidPid(0x1209, 0xd5a1)`), never any CDC device.
  */
 class LocalPicoUsbMatchTest {
     @Test

@@ -8,7 +8,7 @@ import '@testing-library/jest-dom';
 import ModernBoot from '../ModernBoot';
 import { skinInUse } from '../../../hooks/useSkin';
 import { recoveryPhraseStore } from '../../../runtime/recoveryPhraseStore';
-import type { AppState, ScreenType } from '../../../types/app';
+import type { AppState } from '../../../types/app';
 
 const WORDS = [
   'abandon', 'ability', 'able', 'about', 'above', 'absent',
@@ -17,17 +17,15 @@ const WORDS = [
   'across', 'act', 'action', 'actor', 'actress', 'actual',
 ];
 
-type Harness = { created: number; went: ScreenType[]; picked: string[]; cancelled: number };
+type Harness = { created: number; picked: string[]; cancelled: number };
 
-function boot(appState: AppState, currentScreen: ScreenType = 'home'): Harness {
-  const h: Harness = { created: 0, went: [], picked: [], cancelled: 0 };
+function boot(appState: AppState): Harness {
+  const h: Harness = { created: 0, picked: [], cancelled: 0 };
   render(
     <ModernBoot
       appState={appState}
       error={null}
       securingProgress={40}
-      currentScreen={currentScreen}
-      navigate={(to) => { h.went.push(to); }}
       handleGenerateGenesis={() => { h.created += 1; }}
       cancelPhraseBackup={() => {
         h.cancelled += 1;
@@ -59,14 +57,12 @@ describe('the skin each phase is drawn in', () => {
 });
 
 describe('a phone with no wallet, in the Modern skin', () => {
-  it('welcomes the user and creates the wallet or opens the restore', () => {
+  it('welcomes the user and creates the wallet', () => {
     const h = boot('needs_genesis');
     expect(screen.getByRole('heading', { name: 'Welcome to DSM' })).toBeInTheDocument();
     expect(screen.queryByText(/INITIALIZE|GENESIS/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Create my wallet' }));
     expect(h.created).toBe(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Restore from my recovery ring' }));
-    expect(h.went).toEqual(['recovery']);
   });
 
   it('shows securing as progress, in plain words', () => {

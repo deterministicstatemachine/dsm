@@ -1117,12 +1117,31 @@ message AuthorityEvidenceV1 {
 // chain, so the acceptance bundle references each side's predecessor by
 // signer identity through these objects. `prior_step_addr` absent means
 // relationship genesis: the expected certifying key is the signer's
-// P0-P6-proven AK.
+// P0-P6-proven AK. A step's authority is either the previous key's
+// certificate or, for a restart (DSM Amendment A20), both devices' AK
+// signatures over one restart statement; a restart's `h_n` is the agreed
+// accepted tip and its `prior_step_addr` is the step it continues.
 message EkCertStepV1 {
   bytes  ek_pk           = 1 [(dsm_max_len)=65535];
-  bytes  ek_cert         = 2 [(dsm_max_len)=65535]; // Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+  oneof authority {
+    bytes         ek_cert = 2 [(dsm_max_len)=65535]; // Sign(prev, H(TAG_DSM_EK_CERT, ek_pk ‖ h_n))
+    CertRestartV1 restart = 5;
+  }
   bytes  h_n             = 3 [(dsm_fixed_len)=32];
   optional bytes prior_step_addr = 4 [(dsm_fixed_len)=32];
+}
+
+// The authority of a restart step (DSM Amendment A20): the epoch, the
+// preserved acceptance commitment of the agreed accepted step, and both
+// devices' AK signatures over
+// H(DSM/cert-restart/v1 ‖ relationship ‖ predecessor ‖ agreed tip ‖ epoch ‖
+// commitment ‖ new key). The relationship is the two devices' own; the
+// predecessor, agreed tip and new key are the step's own fields.
+message CertRestartV1 {
+  uint64 epoch                           = 1;
+  bytes  preserved_acceptance_commitment = 2 [(dsm_fixed_len)=32];
+  bytes  restarting_sig                  = 3 [(dsm_max_len)=65535];
+  bytes  counterparty_sig                = 4 [(dsm_max_len)=65535];
 }
 
 // Portable bilateral-acceptance evidence for a peer-funded economic credit —
@@ -1292,8 +1311,12 @@ message EconomicRootClaimV1 {
 // canonical_body_bytes)). Strict: decode -> re-encode equality; the client
 // signs ONCE per parent root and replays the exact bytes on every retry.
 message FaucetClaimantRecipientV1 {
-  bytes claimant_public_key = 1 [(dsm_max_len)=65535];
-  bytes claimant_att_a      = 2 [(dsm_fixed_len)=32];
+  bytes claimant_public_key      = 1 [(dsm_max_len)=65535];
+  bytes claimant_att_a           = 2 [(dsm_fixed_len)=32];
+  // The claimant's own signed directory entry (DeviceDirectoryEntryV1 bytes):
+  // its bytes prove the AK, under the recipient genesis, by P0-P6, and so
+  // decide the claimant's entitlement at the cell (SA-63).
+  bytes claimant_directory_entry = 3 [(dsm_max_len)=262144];
 }
 
 message NativeReserveReleaseBodyV1 {
@@ -1721,6 +1744,9 @@ message AnchorDisclosure {
   bytes  policy_hash           = 5 [(dsm_fixed_len)=32];   // policy the anchor is admitted under
   reserved 6, 7, 8; // removed v1 counter-era fields: verifier_slot(+present), chip_static_pubkey
   bytes  pk_chip               = 9 [(dsm_fixed_len)=32];   // resident chip Ed25519 key (σ^chip)
+  // The public birth commitment S_birth B commits: with the keys above, the sender's pinned
+  // online key and its device id, the receiver recomputes B from what is disclosed.
+  bytes  birth_commitment      = 10 [(dsm_fixed_len)=32];
 }
 
 message BilateralPrepareResponse {
@@ -1869,7 +1895,7 @@ message BilateralCommitResponse {
   Hash32 commitment_hash  = 5;
   // §11.1 receiver counter-sign: receiver's locally-built copy of the
   // stitched receipt with B-side per-step EK signing artifacts
-  // (ek_pk_b / ek_cert_b / kyber_ct_b / sig_b) stamped on top of the
+  // (ek_pk_b / ek_cert_b / sig_b) stamped on top of the
   // sender's A-side fields. Sender verifies this on receipt and persists
   // a fully co-signed copy to its own archive. This field is required for
   // offline receipt authorization.
@@ -1902,6 +1928,10 @@ message BilateralConfirmRequest {
   // release. B pins it TOFU on the first transfer (already-verified contact, bound to this
   // transfer) and verifies same-anchor on every subsequent one. Absent for ordinary transfers.
   AnchorDisclosure anchor_disclosure = 15;
+  // The sender's offline spends since the boundary of its online history that left the account
+  // its receivers recorded, in order, ending where this spend starts (SA-116). Empty when this
+  // spend starts at that account.
+  OfflineSpendChain offline_spend_chain = 16;
 }
 
 // Canonical receipt commit form for hashing/signing (whitepaper Sec. 4.2.1)
@@ -1950,19 +1980,12 @@ message ReceiptCommit {
   // is the Boot Fenced Fused Anchor (a seed copy holds Smaster).
   bytes ek_pk_a = 16 [(dsm_max_len)=65535];
   bytes ek_pk_b = 17 [(dsm_max_len)=65535];
-  // Per-step Kyber/ML-KEM ciphertexts (whitepaper §11/§12). The sender derives
-  // deterministic Kyber coins from
-  //   coins = keyed-BLAKE3(Smaster, "DSM/kyber-coins/v1\0" || kyber_alg_id
-  //                         || H(recipient_kem_pub) || h_n || C_pre || DevID_sender)
-  // encapsulates against the recipient's Kyber public key, and the
-  // resulting ciphertext travels here. The recipient decapsulates with
-  // their local Kyber secret key to recover the same shared secret `ss`,
-  // then derives k_step = BLAKE3("DSM/kyber-ss\0" || ss). Both parties
-  // arrive at identical k_step, which is then mixed into the per-step
-  // EK derivation alongside Smaster. Wire-only — not part of canonical
-  // commit form (§4.2.1).
-  bytes kyber_ct_a = 18 [(dsm_max_len)=2048];
-  bytes kyber_ct_b = 19 [(dsm_max_len)=2048];
+  // 18 and 19 were the two sides' per-step ML-KEM ciphertexts. No signature
+  // covered them and nothing read them: the step's shared secret feeds only
+  // its sender's own EK seed, and the EK is authenticated by its certificate
+  // chain, never by the exchange (CONFORMANCE §6.121).
+  reserved 18, 19;
+  reserved "kyber_ct_a", "kyber_ct_b";
   // 20 was a fork-aware finalization witness: no producer made one, and the
   // receiver checked the sender's candidate set only against itself.
   reserved 20;
@@ -2041,6 +2064,22 @@ message OfflineStateProof {
   SmtPath account_leaf = 2;
   SmtPath counter = 3;
   SmtPath frontier = 4;
+}
+
+// One offline-bearer spend of an offline account as its anchor released it: the release
+// (dsm.anchor.OfflineRelease — Δ, Π_i, Π_{i+1} and the certificate carrying σ^chip and σ^host),
+// the spend's account witness, and what it moved. Π_i and Π_{i+1} prove the release's device
+// roots commit the account before and after; the witness folds the one into the other.
+message OfflineSpendHop {
+  bytes release = 1 [(dsm_max_len)=262144];
+  StepWriteOfflineAccount spend = 2;
+  bytes asset = 3 [(dsm_fixed_len)=32];
+  uint64 amount = 4;
+}
+
+// An offline account's spends, in order.
+message OfflineSpendChain {
+  repeated OfflineSpendHop hops = 1;
 }
 
 // Bilateral event notifications for frontend
@@ -2157,31 +2196,9 @@ message BilateralTransactionReceived {
 message BleDeviceInfo         { string address = 1; string name = 2; int32 rssi = 3; }
 message BleCharacteristicData { string address = 1; bytes  data = 2 [(dsm_max_len)=1024]; }
 message BlePairingRequest     { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; string alias = 4; }
-message BlePairingAccept      { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
-// Phase 3 confirmation: scanner → advertiser after receiving BlePairingAccept.
-// Neither side persists ble_address until this round-trip completes (atomic pairing).
-message BlePairingConfirm     { string address = 1; bytes device_id = 2 [(dsm_fixed_len)=32]; }
-// Identity observed implicitly via GATT identity characteristic read (not an explicit pairing handshake)
+// A contact the link handshake authenticated and paired at this BLE address
+// (DSM Amendment A27): a local event for the frontend, never radio bytes.
 message BleIdentityObserved   { string address = 1; bytes genesis_hash = 2 [(dsm_fixed_len)=32]; bytes device_id = 3 [(dsm_fixed_len)=32]; }
-
-// Protobuf-encoded identity value carried on the BLE GATT identity characteristic
-// (UUID 8e7f00ff-7c07-4f3f-9b32-7bf3ba6c2a01). Replaces raw 64-byte concatenation.
-// Kotlin MUST NOT parse or split identity bytes — all encoding/decoding is Rust-side.
-message BleIdentityCharValue {
-  bytes genesis_hash = 1 [(dsm_fixed_len)=32];
-  bytes device_id    = 2 [(dsm_fixed_len)=32];
-}
-
-// Response from processGattIdentityRead JNI call.
-// Rust decodes the BleIdentityCharValue from GATT, dispatches identity events, and
-// returns the write-back envelope for the peer's PAIRING characteristic.
-message BleGattIdentityReadResult {
-  bool   success             = 1;
-  bytes  write_back_envelope = 2 [(dsm_max_len)=4096]; // Framed Envelope to write to PAIRING char
-  string error_message       = 3;
-  bytes  peer_device_id      = 4 [(dsm_fixed_len)=32]; // Peer's deviceId (for Kotlin identity anchoring)
-  bytes  peer_genesis_hash   = 5 [(dsm_fixed_len)=32]; // Peer's genesisHash
-}
 
 // Response from processIncomingBleData JNI call.
 // Rust decides internally whether to route as chunk or Envelope v3, runs any
@@ -2269,12 +2286,10 @@ message BlePermissionEvent {
   string operation = 1; // "scan" | "advertise"
 }
 
-// NFC recovery capsule payload — raw NdefRecord bytes wrapped in Envelope v3.
-message NfcRecoveryCapsule {
-  bytes payload = 1 [(dsm_max_len)=65535];
-}
-
 message BleEvent {
+  // 12 BlePairingAccept and 15 BlePairingConfirm: the three-phase plaintext
+  // pairing, replaced by the link handshake (DSM Amendment A27).
+  reserved 12, 15;
   oneof ev {
     BleDeviceInfo device_found            = 1;
     BleDeviceInfo device_connected        = 2;
@@ -2287,10 +2302,8 @@ message BleEvent {
     bool   advertising_stopped = 9;
     BleConnectionFailed connection_failed = 10; // human text (transport only)
     BlePairingRequest pairing_request = 11;
-    BlePairingAccept  pairing_accept  = 12;
     BleIdentityObserved identity_observed = 13;
     PairingStatusUpdate pairing_status    = 14;
-    BlePairingConfirm   pairing_confirm  = 15;
     BlePermissionEvent    ble_permission     = 17;
   }
 }
@@ -2527,6 +2540,9 @@ message UniversalOp {
   reserved 3;
   reserved "genesis_hash";
   reserved 18, 19, 27, 28; // Bilateral ops removed
+  // 22 carried an encrypted ring-backup capsule to decrypt (removed 2026-11-01).
+  reserved 22;
+  reserved "recovery_capsule_decrypt";
   oneof kind {
     Invoke                  invoke                 = 10;
     PrecommitOneOf          precommit_oneof        = 11;
@@ -2536,7 +2552,6 @@ message UniversalOp {
     AttestedAction          attested_action        = 15;
     VaultOp                 vault                  = 16;
     QueryOp                 query                  = 17;
-    RecoveryCapsuleDecryptRequest recovery_capsule_decrypt = 22;
     RecoveryTombstoneRequest     recovery_tombstone       = 23;
     RecoverySuccessionRequest    recovery_succession      = 24;
     RecoveryResumeRequest        recovery_resume          = 25;
@@ -2623,12 +2638,15 @@ message Envelope {
   uint32  version   = 1; // MUST be 3 (strict-fail if != 3)
   Headers headers   = 2;
   bytes   message_id= 3 [(dsm_fixed_len)=16]; // 16-byte opaque transport id (MUST NOT be derived from wall-clock)
+  // 15 answered a ring-backup capsule decrypt and 96 carried a capsule read
+  // from a ring (removed 2026-11-01).
+  reserved 15, 96;
+  reserved "recovery_capsule_decrypt_response", "nfc_recovery_capsule";
   oneof payload {
     UniversalTx  universal_tx    = 10;
     UniversalRx  universal_rx    = 11;
     BatchEnvelope batch_envelope = 12;
 
-    RecoveryCapsuleDecryptResponse   recovery_capsule_decrypt_response = 15;
     RecoveryTombstoneResponse        recovery_tombstone_response       = 16;
     RecoverySuccessionResponse       recovery_succession_response      = 17;
     RecoveryResumeResponse           recovery_resume_response          = 18;
@@ -2731,7 +2749,6 @@ message Envelope {
 
     // Session state snapshot (session.status query response)
     AppSessionStateProto              session_state_response           = 95;
-    NfcRecoveryCapsule                nfc_recovery_capsule             = 96;
     TokenPolicyListResponse           token_policy_list_response       = 97;
 
     Error                             error                            = 99;
@@ -2785,6 +2802,8 @@ message Envelope {
     ReceiptEmailResultV1              receipt_email_result             = 138;
     // Reply to `inbox.moneyWaiting` and `inbox.moneySeen`.
     MoneyWaitingResponse              money_waiting_response           = 139;
+    // Reply to `wallet.pendingOffline`.
+    PendingOfflineValueResponse       pending_offline_value_response   = 140;
 
 
     // Reply to `token.adoptionQr`.
@@ -3188,14 +3207,6 @@ message ArchitectureInfoProto {
   string supported_abis = 3;
   string message = 4;
   string recommendation = 5;
-}
-message RecoveryCapsuleDecryptRequest { bytes encrypted_capsule = 1 [(dsm_max_len)=4096]; bytes mnemonic_key = 2 [(dsm_fixed_len)=32]; }
-message RecoveryCapsuleDecryptResponse{
-  bool   success          = 1;
-  Hash32 global_root      = 2;
-  repeated ChainTip chain_tips = 3;
-  Hash32 receipt_rollup   = 4;
-  bytes  meta_data        = 5 [(dsm_max_len)=256]; // version/flags/counters only
 }
 message SmtLeaf     { uint64 index = 1; Hash32 value = 2; }
 message SmtSnapshot { uint32 height = 1; uint64 leaf_count = 2; repeated SmtLeaf leaves = 3; }
@@ -3673,7 +3684,9 @@ message ReceiptCountersignB {
   bytes sig_b                     = 3 [(dsm_max_len)=65535];
   bytes ek_cert_b                 = 4 [(dsm_max_len)=65535];
   bytes ek_pk_b                   = 5 [(dsm_max_len)=65535];
-  bytes kyber_ct_b                = 6 [(dsm_max_len)=2048];
+  // 6 was the B side's per-step ML-KEM ciphertext, covered by no signature.
+  reserved 6;
+  reserved "kyber_ct_b";
   // The recipient's own canonical relationship pair for the applied step: its
   // local lineage head before this apply (parent) and after it (child) — the
   // exact parent the recipient will sign under when IT next originates.
@@ -3845,6 +3858,30 @@ message OfflineAllocationView {
   // Display form of `base_units`, rendered by Rust.
   string display_amount = 2;
 }
+// One payment this device received offline and holds pending: its value
+// settles online only once the payer's return online exposes its signed spend
+// chain (CONFORMANCE §6.103). It is not part of `available` and not part of
+// the offline allocation, and nothing spends it until it settles.
+message PendingOfflineReceiptView {
+  // The token's policy commit, and its ticker and decimals as Rust read them.
+  bytes  asset          = 1;
+  string ticker         = 2;
+  uint32 decimals       = 3;
+  uint64 base_units     = 4;
+  // Display form of `base_units`, rendered by Rust.
+  string display_amount = 5;
+  // The paying contact's alias, or its device id in Base32 when it has none.
+  string payer          = 6;
+  // `M`, the release message the payer's anchor signed: the receipt's id.
+  bytes  release_message = 7;
+}
+
+// wallet.pendingOffline: every payment received offline and not yet settled,
+// oldest first.
+message PendingOfflineValueResponse {
+  repeated PendingOfflineReceiptView receipts = 1;
+}
+
 // The permission flags of a committed token policy, as Core's one parser read
 // them (SoFi §47).
 message TokenPolicyPermissions {
@@ -4362,8 +4399,9 @@ enum SdkEventKind {
   SDK_EVENT_KIND_BLUETOOTH_PERMISSIONS = 10;
   SDK_EVENT_KIND_DETERMINISTIC_SAFETY = 11;
   SDK_EVENT_KIND_CONTACT_BLE_UPDATED = 12;
-  SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE = 13;
-  SDK_EVENT_KIND_NFC_BACKUP_WRITTEN = 14;
+  // 13 and 14 announced a ring-backup capsule read and written (removed 2026-11-01).
+  reserved 13, 14;
+  reserved "SDK_EVENT_KIND_NFC_RECOVERY_CAPSULE", "SDK_EVENT_KIND_NFC_BACKUP_WRITTEN";
   SDK_EVENT_KIND_BRIDGE_READY = 15;
   SDK_EVENT_KIND_CANONICAL_ENVELOPE = 16;
 }
@@ -4467,16 +4505,19 @@ enum NativeHostRequestKind {
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_SCAN_STOP",
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_START",
            "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_BLE_ADVERTISE_STOP";
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START = 8;
-  NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP = 9;
+  // 8 and 9 started and stopped the ring reader (removed 2026-11-01).
+  reserved 8, 9;
+  reserved "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_START",
+           "NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_NFC_READER_STOP";
   NATIVE_HOST_REQUEST_KIND_HOST_CONTROL_PERMISSIONS_REQUEST = 10;
 
   // platform_primitive.*
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD = 105;
-  NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD = 106;
-  // Declared host primitives no host implemented and no caller issued.
-  reserved 103, 104, 107 to 109;
-  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY",
+  // 105 and 106 read and wrote a ring tag (removed 2026-11-01). The rest are
+  // declared host primitives no host implemented and no caller issued.
+  reserved 103 to 109;
+  reserved "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_READ_PAYLOAD",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_NFC_TAG_WRITE_PAYLOAD",
+           "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_GENERATE_KEY",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_SECURE_HARDWARE_SIGN",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_OPEN",
            "NATIVE_HOST_REQUEST_KIND_PLATFORM_PRIMITIVE_BLE_TRANSPORT_SEND_CHUNKS",
@@ -4507,8 +4548,9 @@ enum NativeHostEventKind {
   // the policy wants); the frontend had nothing listening for it.
   reserved 2;
   reserved "NATIVE_HOST_EVENT_KIND_BLUETOOTH_PERMISSIONS";
-  NATIVE_HOST_EVENT_KIND_NFC_TAG_READ = 4;
-  NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE = 5;
+  // 4 and 5 reported a ring tag read and written (removed 2026-11-01).
+  reserved 4, 5;
+  reserved "NATIVE_HOST_EVENT_KIND_NFC_TAG_READ", "NATIVE_HOST_EVENT_KIND_NFC_TAG_WRITE";
   NATIVE_HOST_EVENT_KIND_SESSION_STATE_HINT = 6;
   // The phone contact the user picked (DSM Amendment A17): a ContactProfileV1,
   // or no bytes when the user picked none or did not allow the read.
@@ -4531,23 +4573,6 @@ message HostPermissionsRequestPayload {
 message HostPermissionsResult {
   repeated string granted_permissions = 1;
   bool all_granted = 2;
-}
-
-message NfcTagReadPayload {
-  string mime_type = 1 [(dsm_max_len)=128];
-}
-
-message NfcTagReadResult {
-  bool reader_started = 1;
-}
-
-message NfcTagWritePayload {
-  string mime_type = 1 [(dsm_max_len)=128];
-  bytes payload = 2 [(dsm_max_len)=65535];
-}
-
-message NfcTagWriteResult {
-  bool launched = 1;
 }
 
 message QrScanResultPayload {
@@ -4721,6 +4746,54 @@ message CellCommitProofV1 {
   bytes  smt_proof    = 3 [(dsm_max_len)=8300];
 }
 
+// The reads of one cell a client kept with a final value it memoised, so
+// Core proves the value final again, offline, from what was read (storage
+// spec §9 rule 11). Client store only; never sent.
+message KeptCellReadsV1 {
+  repeated KeptSeatReadsV1 seats = 1; // one per route position, in route order
+}
+
+// What the client held about one seat: its folded arrival log at the cell,
+// its committed state there, and its mirror of the leader's ByteCommits.
+message KeptSeatReadsV1 {
+  KeptHeldLogV1   values      = 1; // absent when the seat was not read
+  KeptCommittedV1 committed   = 2;
+  KeptCommittedV1 leader_seen = 3;
+}
+
+// A seat's arrival log at one cell as the client folded it: the running hash
+// through every entry, and the copies of the cell it kept, each with where it
+// arrived. Each distinct value is held once.
+message KeptHeldLogV1 {
+  uint64 count = 1;                              // entries folded
+  bytes  head  = 2 [(dsm_fixed_len)=32];         // running hash after the last
+  repeated KeptRunningHashV1 marks = 3;          // running hashes a ByteCommit's proof asked for
+  repeated bytes values = 4 [(dsm_max_len)=327680];
+  repeated KeptHeldCopyV1 copies = 5;            // in arrival order
+}
+
+message KeptRunningHashV1 {
+  uint64 index        = 1;
+  bytes  running_hash = 2 [(dsm_fixed_len)=32];
+}
+
+message KeptHeldCopyV1 {
+  uint64 index        = 1;
+  bytes  running_hash = 2 [(dsm_fixed_len)=32];
+  bytes  seat         = 3 [(dsm_max_len)=128];
+  uint32 position     = 4;
+  repeated ChainSlotV1 chain = 5;
+  uint32 value        = 6; // index into the log's values
+}
+
+// A member's committed state at a cell: its ByteCommit, the one before it,
+// and the proof the ByteCommit commits the cell's latest entry.
+message KeptCommittedV1 {
+  ByteCommitV4      commit = 1;
+  ByteCommitV4      parent = 2; // absent at cycle 1
+  CellCommitProofV1 proof  = 3;
+}
+
 // One value for one key, as a batch put carries it. The member keeps it
 // after anything already at the key, exactly as a single put would.
 message CellPutV1 {
@@ -4803,6 +4876,9 @@ message AppConnectOfferBodyV1 {
   repeated ConnectScopeV1 scopes        = 5;
   repeated bytes          token_anchors = 6 [(dsm_fixed_len)=32]; // rooted at pairing
   bytes                   nonce         = 7 [(dsm_fixed_len)=32];
+  // How many requests that spend nothing the application asks to make over the
+  // session's whole life (SA-78). The player's grant names at most this many.
+  uint32                  free_requests = 8;
 }
 message AppConnectOfferV1 {
   bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectOfferBodyV1
@@ -4814,6 +4890,12 @@ message AppConnectAcceptBodyV1 {
   ContactQrV3             wallet_card  = 2;
   bytes                   wallet_att_a = 3 [(dsm_fixed_len)=32];
   repeated ConnectScopeV1 granted      = 4; // never wider than the offer asked
+  // Requests that spend nothing the grant takes over the session's life, at most
+  // the offer's free_requests; past it each is refused (SA-78).
+  uint32                  free_requests   = 5;
+  // H(DSM/connect/read ‖ session_id ‖ secret): the wallet's secret, which it
+  // alone presents to read the session's requests (SA-128).
+  bytes                   read_commitment = 6 [(dsm_fixed_len)=32];
 }
 message AppConnectAcceptV1 {
   bytes body      = 1 [(dsm_max_len)=65535]; // AppConnectAcceptBodyV1
@@ -4866,6 +4948,16 @@ message ConnectContactV1 {
 // connected to (DSM Amendment A16). The wallet's word: no other evidence.
 message ConnectContactsResultV1 {
   repeated ConnectContactV1 contacts = 1;
+}
+// Sign a statement (DSM Amendment A29). The wallet shows these words whole, and
+// only after its holder approves them does it answer with them, under the
+// answer's own signature, which already names the session and the request. It
+// is never in a grant: every one waits on the device.
+message ConnectSignV1 {
+  string statement = 1 [(dsm_max_len)=512];
+}
+message ConnectSignResultV1 {
+  string statement = 1 [(dsm_max_len)=512];
 }
 // Lock a stake for a match the application referees (DSM Amendment A12). The
 // wallet builds the escrow terms itself from one fixed outcome table: a-wins
@@ -4921,8 +5013,11 @@ message ConnectDuelLockV1 {
 // its ready. With the other side's ready signature, it readies second and
 // writes the Start.
 message ConnectDuelReadyV1 {
-  bytes match_cell     = 1 [(dsm_fixed_len)=32];
-  bytes opponent_ready = 2 [(dsm_max_len)=65535]; // empty when this wallet readies first
+  bytes match_cell      = 1 [(dsm_fixed_len)=32];
+  bytes opponent_ready  = 2 [(dsm_max_len)=65535]; // empty when this wallet readies first
+  // The other side's start entropy, handed out with its ready (SoFi Amendment
+  // S33); empty exactly when opponent_ready is.
+  bytes opponent_reveal = 3 [(dsm_max_len)=32];
 }
 // Withdraw from the match while no Start holds its start cell: void, both refunded.
 message ConnectDuelWithdrawV1 {
@@ -5019,6 +5114,7 @@ message AppRequestBodyV1 {
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
+    ConnectSignV1           sign             = 25;
   }
 }
 message AppRequestV1 {
@@ -5089,6 +5185,9 @@ message ConnectEscrowReleaseResultV1 {
 message ConnectDuelSessionKeyResultV1 {
   bytes  session_public_key = 1 [(dsm_max_len)=64];
   uint32 signature_alg      = 2;
+  // H(DSM/escrow/start-commit/v1 ‖ r): the wallet's commitment to its start
+  // entropy for the match, which the setup carries (SoFi Amendment S33).
+  bytes  start_commitment   = 3 [(dsm_fixed_len)=32];
 }
 // A stake the wallet locked in a computed match: a notification, never evidence.
 message ConnectDuelLockResultV1 {
@@ -5119,6 +5218,8 @@ message ConnectDuelCellsV1 {
 message ConnectDuelReadyResultV1 {
   bytes              ready_signature = 1 [(dsm_max_len)=65535];
   ConnectDuelCellsV1 cells           = 2;
+  // This wallet's start entropy, opened with its ready (SoFi Amendment S33).
+  bytes              reveal          = 3 [(dsm_fixed_len)=32];
 }
 message ConnectDuelSignResultV1 {
   uint32 index     = 1;
@@ -5143,6 +5244,7 @@ message AppResponseBodyV1 {
     ConnectDuelCellsV1            duel_cells       = 18; // a withdraw's or a settle's
     ConnectDuelSignResultV1       duel_sign        = 19;
     ConnectContactsResultV1       contacts         = 20;
+    ConnectSignResultV1           sign             = 21;
   }
 }
 message AppResponseV1 {
@@ -5245,6 +5347,7 @@ message ConnectAppOfferRequestV1 {
   bytes                   cert_pin      = 3 [(dsm_fixed_len)=32];
   repeated ConnectScopeV1 scopes        = 4;
   repeated bytes          token_anchors = 5 [(dsm_fixed_len)=32];
+  uint32                  free_requests = 6; // asked for in the offer (SA-78)
 }
 message ConnectAppOfferV1 {
   string code         = 1; // the `dsm:connect/v1:` text the application shows
@@ -5270,11 +5373,15 @@ message ConnectAppRequestIntentV1 {
     ConnectDuelSettleV1     duel_settle      = 22;
     ConnectDuelCollectV1    duel_collect     = 23;
     ConnectContactsV1       contacts         = 24;
+    ConnectSignV1           sign             = 25;
   }
 }
 message ConnectAppRequestsQueryV1 {
-  bytes  session_id = 1 [(dsm_fixed_len)=32];
-  uint64 after      = 2;
+  bytes  session_id  = 1 [(dsm_fixed_len)=32];
+  uint64 after       = 2;
+  // The secret the session's accept commits (read_commitment): only its
+  // wallet reads the session's requests (SA-128).
+  bytes  read_secret = 3 [(dsm_fixed_len)=32];
 }
 message ConnectRequestRefV1 {
   bytes  session_id = 1 [(dsm_fixed_len)=32];
@@ -5291,6 +5398,7 @@ enum ConnectFact {
   CONNECT_FACT_DUEL_LOCKED     = 6; // the wallet's Active computed vault holds the stake under exactly the setup's terms, on its match cell
   CONNECT_FACT_DUEL_STARTED    = 7; // a Start holds the match's start cell: both sides readied
   CONNECT_FACT_DUEL_WITHDRAWN  = 8; // a Withdraw holds the match's start cell: void
+  CONNECT_FACT_SIGNED          = 10; // the session's wallet signed exactly the statement asked, after approval on its device
   CONNECT_FACT_DUEL_SETTLED    = 9; // an occupant the registered program recognizes holds the match cell on `fact_detail`'s outcome
 }
 message VerifiedHoldingV1 {
@@ -5320,6 +5428,10 @@ message ConnectAppStatusV1 {
   // a duel's session key, ready or entry signature: never a fact; each is
   // checked where it is used. Empty while unanswered.
   bytes                      answer_body         = 17 [(dsm_max_len)=1048576];
+  // FACT_SIGNED: the statement, and the wallet's signature over answer_body,
+  // which anyone holding the wallet's AK can check again.
+  string                     signed_statement    = 18 [(dsm_max_len)=512];
+  bytes                      answer_signature    = 19 [(dsm_max_len)=65535];
 }
 
 // One envelope payload for every DSM Connect reply.
@@ -5335,6 +5447,8 @@ message ConnectReplyV1 {
     ConnectAppStatusV1   status   = 8;
     ConnectRequestRefV1  request  = 9;
     ConnectDecidedV1     decided  = 10;
+    ConnectDuelCellsV1   duel     = 11; // connect.duelWithdraw / connect.duelSettle: the match's cells after
+    ConnectEscrowReleaseResultV1 released = 12; // connect.duelCollect: each stake released to this wallet
   }
 }
 

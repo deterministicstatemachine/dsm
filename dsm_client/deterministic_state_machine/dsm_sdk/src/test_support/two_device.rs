@@ -123,12 +123,20 @@ impl TestDevice {
         }
     }
 
-    /// Bring the device up on `fleet`: build its `AppRouterImpl` (which loads
-    /// its head, and installs its wallet's Kyber key), install the durable
-    /// policy resolver and the pinned-anchor store production bring-up
-    /// installs beside it, and publish its directory entry. The store reads the
-    /// entered device's database, as each device's process reads its own.
+    /// Bring the device up on `fleet` for the first time: [`start`](Self::start)
+    /// it, and publish its directory entry.
     pub async fn boot(&mut self, fleet: &FleetGuard) {
+        self.start(fleet);
+        economic_fixtures::publish_identity(&self.device_id, &self.genesis).await;
+    }
+
+    /// Start the device's process on `fleet`, as a restart does: build its
+    /// `AppRouterImpl` (which loads its head, and installs its wallet's Kyber
+    /// key) and install the durable policy resolver and the pinned-anchor
+    /// store production bring-up installs beside it. The store reads the
+    /// entered device's database, as each device's process reads its own. A
+    /// device already published needs no member to start.
+    pub fn start(&mut self, fleet: &FleetGuard) {
         self.enter();
         let router = AppRouterImpl::new(crate::init::SdkConfig {
             node_id: self.slot.to_string(),
@@ -145,7 +153,19 @@ impl TestDevice {
             .get_kyber_public_key()
             .expect("wallet Kyber key");
         self.router = Some(Arc::new(router));
-        economic_fixtures::publish_identity(&self.device_id, &self.genesis).await;
+    }
+
+    /// A backup of this device taken now, to be restored later: its database
+    /// as it stands, copied into `slot`. The returned device is this one —
+    /// the same identity and wallet — over that copy, not yet booted.
+    pub fn backed_up_into(&self, slot: &'static str) -> TestDevice {
+        self.enter();
+        client_db::copy_test_database_to_slot(slot).expect("back up the device's database");
+        TestDevice {
+            slot,
+            router: None,
+            ..self.clone()
+        }
     }
 
     /// The device's router. Only meaningful while [`enter`](Self::enter)ed.
@@ -250,7 +270,7 @@ impl TestDevice {
     /// The device's spendable ERA as the canonical state machine holds it.
     pub fn era_balance(&self) -> u64 {
         self.enter();
-        let pc = crate::policy::builtin_policy_commit("ERA").expect("ERA policy");
+        let pc = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA policy");
         self.router()
             .core_sdk
             .device_head()
@@ -344,6 +364,24 @@ pub fn assert_incomplete(sync: &generated::StorageSyncResponse) {
         "{:?}",
         sync.errors
     );
+}
+
+/// The message of a committed send's answer, an `OnlineTransferResponse`,
+/// delivered or not. Panics on any other answer, a refusal included: a send
+/// whose debit is committed is never answered as one.
+pub fn committed_send_message(answer: &crate::bridge::AppResult) -> String {
+    assert!(
+        answer.success,
+        "a committed send answers success: {:?}",
+        answer.error_message
+    );
+    match crate::handlers::response_helpers::decode_local_envelope(&answer.data)
+        .expect("the send answers an envelope")
+        .payload
+    {
+        Some(generated::envelope::Payload::OnlineTransferResponse(response)) => response.message,
+        other => panic!("a committed send answers an OnlineTransferResponse, not {other:?}"),
+    }
 }
 
 /// A booted A/B pair on the network's pinned set of storage nodes, each device

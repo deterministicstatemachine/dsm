@@ -93,6 +93,12 @@ async fn an_unaffordable_creation_moves_nothing_and_registers_nothing() {
     assert!(token_registry::get_token_by_ticker("POOR")
         .expect("registry")
         .is_none());
+    let unresolved = crate::policy::resolve_policy_commit_strict(b"POOR")
+        .expect_err("a token whose creation was refused names no policy here");
+    assert!(
+        matches!(unresolved, dsm::types::error::DsmError::NotFound { .. }),
+        "a refused creation leaves its ticker not installed: {unresolved}"
+    );
 }
 
 async fn fee_schedule(router: &AppRouterImpl) -> generated::TokenFeeScheduleResponse {
@@ -394,7 +400,7 @@ async fn a_created_tokens_amounts_render_at_its_own_decimals() {
         "250.00"
     );
 
-    let era = crate::policy::builtin_policy_commit("ERA").expect("ERA's policy");
+    let era = dsm::core::token::builtin_policy_commit_for_token("ERA").expect("ERA's policy");
     let (_, era_decimals) = token_of_commit(&era).expect("ERA's decimals are known");
     assert_eq!(
         format_directed_base_units_for_display(100, Debit, era_decimals),

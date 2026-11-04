@@ -17,7 +17,8 @@
 
 use core::fmt;
 
-/// Every duel object ships at schema 1.
+/// Every duel object ships at schema 1, except the setup and the conformance
+/// vector (schema 2, SoFi Amendment S33), whose schema 1 is retired.
 pub const SCHEMA_V1: u16 = 1;
 
 /// Why bytes are not the canonical encoding of the object asked for.
@@ -80,9 +81,13 @@ pub struct Writer {
 impl Writer {
     /// A writer that starts with the object's envelope.
     pub fn object(class: u16) -> Self {
+        Self::object_at(class, SCHEMA_V1)
+    }
+    /// A writer that starts with the envelope of `class` at `schema`.
+    pub fn object_at(class: u16, schema: u16) -> Self {
         let mut w = Self { out: Vec::new() };
         w.u16(class);
-        w.u16(SCHEMA_V1);
+        w.u16(schema);
         w
     }
     pub fn u8(&mut self, v: u8) {
@@ -126,12 +131,17 @@ pub struct Reader<'a> {
 impl<'a> Reader<'a> {
     /// Opens an object and checks its envelope.
     pub fn object(b: &'a [u8], class: u16) -> Result<Self, DecodeError> {
+        Self::object_at(b, class, SCHEMA_V1)
+    }
+
+    /// Opens an object of `class` at `schema`; any other schema is refused.
+    pub fn object_at(b: &'a [u8], class: u16, schema: u16) -> Result<Self, DecodeError> {
         let mut r = Self { b, i: 0 };
-        r.envelope(class)?;
+        r.envelope(class, schema)?;
         Ok(r)
     }
 
-    fn envelope(&mut self, class: u16) -> Result<(), DecodeError> {
+    fn envelope(&mut self, class: u16, expected: u16) -> Result<(), DecodeError> {
         let got = self.u16("class")?;
         if got != class {
             return Err(DecodeError::WrongClass {
@@ -140,7 +150,7 @@ impl<'a> Reader<'a> {
             });
         }
         let schema = self.u16("schema")?;
-        if schema != SCHEMA_V1 {
+        if schema != expected {
             return Err(DecodeError::UnknownSchema { class, schema });
         }
         Ok(())
@@ -206,7 +216,16 @@ impl<'a> Reader<'a> {
         decode: impl FnOnce(&mut Reader<'a>) -> Result<T, DecodeError>,
         class: u16,
     ) -> Result<T, DecodeError> {
-        self.envelope(class)?;
+        self.nested_at(decode, class, SCHEMA_V1)
+    }
+    /// [`Self::nested`] of an object of `class` at `schema`.
+    pub fn nested_at<T>(
+        &mut self,
+        decode: impl FnOnce(&mut Reader<'a>) -> Result<T, DecodeError>,
+        class: u16,
+        schema: u16,
+    ) -> Result<T, DecodeError> {
+        self.envelope(class, schema)?;
         decode(self)
     }
     /// Refuses trailing bytes.

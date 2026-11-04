@@ -30,7 +30,7 @@ import androidx.annotation.Keep
 //   Protocol:  processEnvelopeV3
 //   Shared boundary: dispatchStartup, dispatchIngress
 //   Bilateral: acceptBilateralByCommitment, ...
-//   BLE:       initBleCoordinator, chunkEnvelopeForBle, ...
+//   BLE:       initBleCoordinator, bleLinkOpened, processIncomingBleData, ...
 //   Contacts:  hasContactForDeviceId
 //
 // Full method list: UnifiedNativeApi.kt holds every external declaration.
@@ -75,31 +75,6 @@ object Unified {
     @Keep @JvmStatic fun picoUsbTransceive(frame: ByteArray): ByteArray =
         LocalPicoUsb.transceive(frame)
 
-    // READ-ONLY self-test (default .so; never writes): ONE authenticated TROPIC01 counter read
-    // over the phone's own USB link to its own Pico. Returns the live counter H (>= 0) or -1.
-    // Callers must catch UnsatisfiedLinkError (absent in non-glue builds).
-    @Keep @JvmStatic external fun anchorCounterSelfTest(): Long
-
-    // READ-ONLY chip diagnostic (default .so; never writes): logs the local chip's mcounter[0]
-    // vs the intended device budget to logcat under "se-slot", so an operator can inspect the chip
-    // THROUGH the phone (via adb) without moving it to a bench.
-    @Keep @JvmStatic external fun anchorChipStatus(): Int
-
-    // GATED device-setup WRITE (only in on_device_installs-feature .so builds; absent otherwise):
-    // counter birth — initialize mcounter[0] to the max device budget on the local chip, via slot
-    // 0. Returns the read-back counter (>= 0) or -1. Run BEFORE birthCageSlot0. Invoked
-    // deliberately by the operator over ADB; never from app boot or a transfer. Callers must catch
-    // UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun counterInitMax(): Long
-
-    // GATED IRREVERSIBLE birth burn (only in on_device_installs-feature .so; absent otherwise):
-    // permanently seal slot-0 (revoke counter-reset / re-key / un-cage) so the down-counter's
-    // one-way monotonicity is a hardware birth invariant. Run LAST in device setup, AFTER
-    // counterInitMax. Returns the now-immutable H0 (>= 0) or -1. Invoked deliberately by the
-    // operator over ADB with explicit confirmation; never from boot or a transfer. Callers must
-    // catch UnsatisfiedLinkError.
-    @Keep @JvmStatic external fun birthCageSlot0(): Long
-
     // GATED sender-transport install (only in on_device_installs-feature .so; absent otherwise):
     // installs the USB anchor appliance factory so offline-bearer sends drive the phone's own
     // physical RP2350/TROPIC01 (v2: the receiver needs NO hardware — this is the entire device
@@ -117,7 +92,7 @@ object Unified {
     /**
      * The local envelope entry: an Envelope v3 this device's own app layer built.
      * Never a peer's bytes — those go to processIncomingBleData (TX writes and
-     * notifications) or processBleIdentityEnvelope (pairing writes).
+     * notifications), through the link session.
      */
     @Keep @JvmStatic fun processEnvelopeV3(envelope: ByteArray): ByteArray =
         UnifiedNativeApi.processEnvelopeV3(envelope)
@@ -178,8 +153,21 @@ object Unified {
     }
 
     // ---------- Event notifications ----------
-    @Keep @JvmStatic fun bleNotifyLink(deviceId: ByteArray, address: String, up: Boolean) {
-        UnifiedNativeApi.bleNotifyLink(deviceId, address, up)
+    /**
+     * A GATT link came up at [address], this device on it as [role]
+     * (BleConstants.LINK_ROLE_CLIENT / LINK_ROLE_SERVER). The client names the
+     * contact it reached for in [target] (empty when it connected to any DSM
+     * device). Returns the radio bytes to write on the link: the client's
+     * first Hello (DSM Amendment A27); nothing for the server. Throws when
+     * Rust does not open the link: close it.
+     */
+    @Keep @JvmStatic fun bleLinkOpened(address: String, role: Int, target: ByteArray): Array<ByteArray> =
+        UnifiedNativeApi.bleLinkOpened(address, role, target)
+            ?: throw IllegalStateException("BLE link: Rust panicked opening $address")
+
+    /** The GATT link at [address], this device on it as [role], closed. */
+    @Keep @JvmStatic fun bleLinkClosed(address: String, role: Int) {
+        UnifiedNativeApi.bleLinkClosed(address, role)
     }
 
     /**
@@ -202,17 +190,6 @@ object Unified {
      */
     @Keep @JvmStatic fun isCommitEnvelope(envelope: ByteArray): Boolean =
         UnifiedNativeApi.isCommitEnvelope(envelope)
-
-    /**
-     * Notify the pairing orchestrator that a BLE identity was observed.
-     * This should be called after successfully reading a peer's identity characteristic.
-     * address: BLE MAC address
-     * genesisHash: 32-byte genesis hash from identity
-     * deviceId: 32-byte device ID from identity
-     */
-    @Keep @JvmStatic fun notifyBleIdentityObserved(address: String, genesisHash: ByteArray, deviceId: ByteArray) {
-        UnifiedNativeApi.notifyBleIdentityObserved(address, genesisHash, deviceId)
-    }
 
     @Keep @JvmStatic fun onDeviceConnected(address: String) {
         UnifiedBleEvents.onDeviceConnected(address)
@@ -253,40 +230,6 @@ object Unified {
     }
 
     // ---------- Envelope helpers for BLE events ----------
-    @Keep @JvmStatic fun processBleIdentityEnvelope(envelopeBytes: ByteArray, senderBleAddress: String): ByteArray =
-        UnifiedNativeApi.processBleIdentityEnvelope(envelopeBytes, senderBleAddress)
-
-    /**
-     * Atomic pairing Phase 3b (scanner side).
-     * Finalizes the scanner session after the BlePairingConfirm GATT write is acknowledged
-     * by the BLE stack (onCharacteristicWrite → PairingConfirmWritten event).
-     * Persists ble_address to SQLite and marks the session Complete.
-     * Returns true on success; false if no ConfirmSent session found (benign on retry).
-     */
-    @Keep @JvmStatic fun finalizeScannerPairing(bleAddress: String): Boolean =
-        UnifiedNativeApi.finalizeScannerPairing(bleAddress)
-
-    /**
-     * Encode genesis_hash + device_id as protobuf BleIdentityCharValue.
-     * Returns proto bytes to set on the GATT identity characteristic.
-     * Kotlin MUST NOT concatenate raw bytes — this is the canonical encoder.
-     */
-    @Keep @JvmStatic fun encodeIdentityCharValue(genesisHash: ByteArray, deviceId: ByteArray): ByteArray =
-        UnifiedNativeApi.encodeIdentityCharValue(genesisHash, deviceId)
-
-    /**
-     * Process raw protobuf bytes read from the GATT identity characteristic.
-     * Rust decodes BleIdentityCharValue, decides by the contact's device id whether
-     * the link re-anchors a paired contact or starts pairing, and returns
-     * BleGattIdentityReadResult (with the write-back envelope when pairing starts).
-     * expectedDeviceId names the appliance a reach is connecting for (empty when the
-     * link is not a reach); any other peer is reported not established and nothing
-     * about it is recorded.
-     * Kotlin MUST NOT split or interpret identity bytes.
-     */
-    @Keep @JvmStatic fun processGattIdentityRead(bleAddress: String, rawProtoBytes: ByteArray, expectedDeviceId: ByteArray): ByteArray =
-        UnifiedNativeApi.processGattIdentityRead(bleAddress, rawProtoBytes, expectedDeviceId)
-
     @Keep @JvmStatic fun createTransactionErrorEnvelope(address: String, code: Int, message: String): ByteArray? =
         UnifiedNativeApi.createTransactionErrorEnvelope(address, code, message)
         
@@ -318,13 +261,15 @@ object Unified {
 
     /**
      * The radio's entry: bytes a peer wrote over BLE (a TX_REQUEST write or a
-     * TX_RESPONSE notification). Rust takes a bilateral frame and refuses anything
-     * else. Returns a serialized BleIncomingDataResponse (not Envelope v3 framed)
-     * containing pre-chunked response bytes to write back.
-     * Kotlin MUST NOT inspect data[0] or branch on frame type — call this instead.
+     * TX_RESPONSE notification) on the link at [deviceAddress], this device on
+     * it as [role]. Rust takes a link handshake fragment or a sealed record and
+     * refuses anything else. Returns a serialized BleIncomingDataResponse (not
+     * Envelope v3 framed) whose chunks are written back verbatim on the same
+     * link, or an error envelope: close the link.
+     * Kotlin MUST NOT inspect the bytes — call this instead.
      */
-    @Keep @JvmStatic fun processIncomingBleData(deviceAddress: String, data: ByteArray): ByteArray =
-        UnifiedNativeApi.processIncomingBleData(deviceAddress, data)
+    @Keep @JvmStatic fun processIncomingBleData(deviceAddress: String, role: Int, data: ByteArray): ByteArray =
+        UnifiedNativeApi.processIncomingBleData(deviceAddress, role, data)
 
     /** Extract response_chunks from a BleIncomingDataResponse proto (returned by processIncomingBleData). */
     @Keep @JvmStatic fun bleDataResponseExtractChunks(responseProto: ByteArray): Array<ByteArray> =
@@ -334,39 +279,23 @@ object Unified {
     @Keep @JvmStatic fun bleDataResponseUsesReliableWrite(responseProto: ByteArray): Boolean =
         UnifiedNativeApi.bleDataResponseUsesReliableWrite(responseProto)
 
-    /** Extract success flag from a BleGattIdentityReadResult proto (returned by processGattIdentityRead). */
-    @Keep @JvmStatic fun identityReadResultGetSuccess(responseProto: ByteArray): Boolean =
-        UnifiedNativeApi.identityReadResultGetSuccess(responseProto)
-
-    /** Extract write_back_envelope bytes from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractWriteBack(responseProto: ByteArray): ByteArray? =
-        UnifiedNativeApi.identityReadResultExtractWriteBack(responseProto)
-
-    /** Extract peer_device_id (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractPeerDeviceId(responseProto: ByteArray): ByteArray? =
-        UnifiedNativeApi.identityReadResultExtractPeerDeviceId(responseProto)
-
-    /** Extract peer_genesis_hash (32 bytes) from a BleGattIdentityReadResult proto. */
-    @Keep @JvmStatic fun identityReadResultExtractPeerGenesisHash(responseProto: ByteArray): ByteArray? =
-        UnifiedNativeApi.identityReadResultExtractPeerGenesisHash(responseProto)
-
     /**
-     * Send one message's chunks to the appliance deviceId (invoked by Rust). The
-     * device id routes: only a link whose identity is anchored to it carries the
-     * message; with none, the transport reaches for it, trying addressHint (where
-     * it was last seen, possibly empty) first. False is "not delivered now" — the
-     * SDK's frame stays owed.
+     * Ask the transport for a link to the contact [deviceId] (invoked by Rust,
+     * DSM Amendment A27): connect, [addressHint] first, and name [deviceId] as
+     * the link's handshake target. Rust delivers what it owes once the link
+     * pairs.
      */
-    @Keep @JvmStatic fun requestGattWriteChunks(deviceId: ByteArray, addressHint: String, chunks: Array<ByteArray>): Boolean {
-        return UnifiedBleBridge.requestGattWriteChunks(deviceId, addressHint, chunks)
+    @Keep @JvmStatic fun requestGattConnect(deviceId: ByteArray, addressHint: String) {
+        UnifiedBleBridge.requestGattConnect(deviceId, addressHint)
     }
 
     /**
-     * Send a reply on the link, at deviceAddress, that the frame it answers
-     * arrived on. Nothing reconnects for it.
+     * Write [chunks], sealed by Rust, on exactly the link at [deviceAddress]
+     * where this device is [role] (invoked by Rust: Rust chooses the link).
+     * False when that link is gone or refused them: nothing switches links.
      */
-    @Keep @JvmStatic fun dispatchRustBleFollowUp(deviceAddress: String, chunks: Array<ByteArray>, useReliableWrite: Boolean): Boolean {
-        return UnifiedBleBridge.dispatchRustFollowUp(deviceAddress, chunks, useReliableWrite)
+    @Keep @JvmStatic fun dispatchRustBleFollowUp(deviceAddress: String, role: Int, chunks: Array<ByteArray>): Boolean {
+        return UnifiedBleBridge.dispatchRustFollowUp(deviceAddress, role, chunks)
     }
 
     /**
@@ -408,32 +337,6 @@ object Unified {
     @Keep @JvmStatic fun isErrorEnvelope(envelopeBytes: ByteArray): Int =
         UnifiedNativeApi.isErrorEnvelope(envelopeBytes)
 
-    /**
-     * Chunk a response envelope into BLE chunks for transmission.
-     * Returns array of BleChunk protobuf messages ready to send.
-     */
-    @Keep @JvmStatic fun chunkEnvelopeForBle(envelopeBytes: ByteArray, frameType: Int): Array<ByteArray> =
-        UnifiedNativeApi.chunkEnvelopeForBle(envelopeBytes, frameType)
-    
-    /**
-     * Chunk a response envelope into BLE chunks for transmission with explicit counterparty.
-     * Use this for response envelopes (like BilateralPrepareResponse) where the counterparty
-     * cannot be extracted from the payload.
-     * @param envelopeBytes The protobuf-encoded envelope to chunk
-     * @param frameType BLE frame type (1=prepare, 2=prepare_response, 3=commit, etc.)
-     * @param counterpartyDeviceId 32-byte device ID of the counterparty
-     * Returns array of BleChunk protobuf messages ready to send.
-     */
-    @Keep @JvmStatic fun chunkEnvelopeForBleWithCounterparty(
-        envelopeBytes: ByteArray, 
-        frameType: Int, 
-        counterpartyDeviceId: ByteArray
-    ): Array<ByteArray> = UnifiedNativeApi.chunkEnvelopeForBleWithCounterparty(
-        envelopeBytes,
-        frameType,
-        counterpartyDeviceId
-    )
-
     // ---------- BLE diagnostics helpers (non-external; pure-Kotlin wrappers) ----------
     @Keep @JvmStatic fun getBleStats(deviceAddress: String): ByteArray {
         return UnifiedBleBridge.getBleStats(deviceAddress)
@@ -468,15 +371,6 @@ object Unified {
 
     @Keep @JvmStatic fun onConnectionFailed(address: String, reason: String) {
         UnifiedBleEvents.onConnectionFailed(address, reason)
-    }
-
-    /**
-     * Receive a deferred BlePairingAccept from Rust's async identity retry.
-     * Called from a tokio background thread via JNI when the contact was not in
-     * SQLite at identity-write time but appeared during the polling window.
-     */
-    @Keep @JvmStatic fun deliverDeferredPairingAck(deviceAddress: String, ackBytes: ByteArray) {
-        UnifiedBleBridge.deliverDeferredPairingAck(deviceAddress, ackBytes)
     }
 
     /**

@@ -167,7 +167,7 @@ class BleAdvertiser(private val context: Context) {
             .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH)
             .build()
 
-        val serviceUuid = ParcelUuid(BleConstants.DSM_SERVICE_UUID_V2)
+        val serviceUuid = ParcelUuid(BleConstants.DSM_SERVICE_UUID)
         val advertiseData = AdvertiseData.Builder()
             .addServiceUuid(serviceUuid)
             .setIncludeDeviceName(false)
