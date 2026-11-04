@@ -277,19 +277,21 @@ impl RecoverySDK {
     ///                 (pk, sk) = SPHINCS+.generate_from_seed(K_A)
     ///
     /// The authority keypair is cached in memory, and the
-    /// wallet seed is cached and sealed at rest: this is the wallet's unlock, used where
-    /// the phrase is the wallet's own (genesis, restore, the session unlock). Every
-    /// intermediate secret is zeroized when it goes out of scope.
+    /// wallet seed is cached, and on a device sealed at rest: this is the wallet's unlock,
+    /// used where the phrase is the wallet's own (genesis, restore, the session unlock).
+    /// Every intermediate secret is zeroized when it goes out of scope.
     pub fn derive_and_cache_key(mnemonic: &str) -> Result<(), DsmError> {
         let wallet_seed = Zeroizing::new(wallet_seed_from_mnemonic(mnemonic)?);
         Self::install_recovery_authority(wallet_seed.as_slice())?;
 
         // Cache the BIP39 wallet seed — the canonical Genesis v2 root-secret input
         // (mnemonic -> wallet_seed -> s0 -> Smaster). Lives for the unlocked session so
-        // device-key + per-step EK/ML-KEM derivations can re-derive it, and is ALSO sealed
-        // at rest (hardware Keystore on Android) so the signer rebuilds on cold start
-        // without the mnemonic. The seed is a one-way BIP39 derivation — NOT the mnemonic,
-        // never reversible to it; the mnemonic itself is never persisted.
+        // device-key + per-step EK/ML-KEM derivations can re-derive it. On a device it is
+        // ALSO sealed at rest under the platform's key so the signer rebuilds on cold start
+        // without the mnemonic; anywhere else no platform key holds it, so nothing is
+        // written and the next start unlocks from the mnemonic. The seed is a one-way BIP39
+        // derivation — NOT the mnemonic, never reversible to it; the mnemonic itself is
+        // never persisted.
         {
             let mut guard = WALLET_SEED_CACHE
                 .lock()
@@ -298,6 +300,7 @@ impl RecoverySDK {
         }
         // Seal the seed at rest (non-fatal: the session is already usable; failure only
         // means the next cold start will require the mnemonic again).
+        #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
         if let Err(e) = Self::persist_wallet_seed(wallet_seed.as_slice()) {
             log::warn!("[RECOVERY_SDK] Failed to seal wallet seed (non-fatal): {e}");
         }
@@ -1101,6 +1104,7 @@ impl RecoverySDK {
     /// Seal the BIP39 wallet seed at rest via the hardware-backed seed vault so the
     /// signer can be rebuilt on cold start without the mnemonic. The seed is a one-way
     /// derivation from the paper mnemonic (never the mnemonic, never reversible to it).
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     pub fn persist_wallet_seed(seed: &[u8]) -> Result<(), DsmError> {
         let blob = crate::sdk::seed_vault::seal(seed)?;
         crate::storage::client_db::recovery::store_encrypted_wallet_seed(&blob)
@@ -1116,6 +1120,7 @@ impl RecoverySDK {
     /// bundle and re-cache it (rebuilding the signer without the mnemonic). Returns
     /// `Ok(true)` if the seed is now cached, `Ok(false)` if no sealed bundle exists.
     /// A vault that cannot be opened surfaces as `Err`.
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     pub fn load_and_cache_wallet_seed() -> Result<bool, DsmError> {
         if Self::get_cached_wallet_seed().is_some() {
             return Ok(true);
@@ -1900,6 +1905,35 @@ mod tests {
             Ok(m) => panic!("a {}-word phrase was accepted", m.word_count()),
             Err(e) => assert!(e.to_string().contains("24 words"), "{e}"),
         }
+    }
+
+    /// Owner, 2026-10-04: "No seal off Android". A build with no platform key holds the
+    /// wallet seed in memory for the session and writes nothing at rest: a seal under a
+    /// key every build carries is readable by anyone holding the store.
+    ///
+    /// MUTATION CONTROL: writing the seed at rest off a device, as the constant-key seal
+    /// did, fills the row: red.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
+    #[test]
+    #[serial_test::serial]
+    fn off_a_device_an_unlock_leaves_no_secret_at_rest() {
+        use crate::storage::client_db::recovery::{get_recovery_pref, SEALED_WALLET_SEED};
+        crate::economic_fixtures::use_test_storage_dir();
+        crate::storage::client_db::reset_database_for_tests();
+        crate::storage::client_db::init_database().expect("init db");
+        let phrase = crate::economic_fixtures::test_mnemonic(0x5e);
+        let seed = wallet_seed_from_mnemonic(&phrase).expect("the wallet seed");
+        RecoverySDK::clear_wallet_seed_cache();
+
+        RecoverySDK::derive_and_cache_key(&phrase).expect("unlock from the mnemonic");
+
+        let held = RecoverySDK::get_cached_wallet_seed().expect("the session holds the seed");
+        assert_eq!(held.as_slice(), seed.as_slice());
+        assert_eq!(
+            get_recovery_pref(SEALED_WALLET_SEED).expect("read the store"),
+            None,
+            "no wallet seed is written at rest off a device"
+        );
     }
 
     #[test]

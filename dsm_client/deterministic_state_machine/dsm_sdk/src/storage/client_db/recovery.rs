@@ -61,12 +61,24 @@ pub fn ensure_recovery_tables() -> Result<()> {
         params![STALE_PUBLICLY_WRAPPED_RECOVERY_KEY],
     )?;
 
+    // A build with no platform key seals nothing. Earlier builds sealed the wallet seed
+    // here under a key derived from a constant, which anyone holding the store could
+    // open. Nothing reads the row off a device; it is removed whenever the tables open.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
+    conn.execute(
+        "DELETE FROM recovery_prefs WHERE key = ?1",
+        params![SEALED_WALLET_SEED],
+    )?;
+
     Ok(())
 }
 
 /// The `recovery_prefs` key under which builds before SA-17's fix kept a recovery key
 /// wrapped under public values.
 const STALE_PUBLICLY_WRAPPED_RECOVERY_KEY: &str = "encrypted_recovery_key";
+
+/// The `recovery_prefs` key of the wallet seed sealed at rest.
+pub(crate) const SEALED_WALLET_SEED: &str = "encrypted_wallet_seed";
 
 /// Set a recovery preference (binary value).
 pub fn set_recovery_pref(key: &str, value: &[u8]) -> Result<()> {
@@ -296,15 +308,17 @@ pub fn resume_tip_diverges_from_floor(
 
 /// Store the hardware-sealed wallet-seed bundle (the Genesis v2 root-secret input,
 /// one-way BIP39-derived from the paper mnemonic — never the mnemonic itself). The
-/// sealing key is the Android Keystore (hardware-backed) on device; the blob here is
+/// sealing key is the platform's own (hardware-backed on device); the blob here is
 /// already ciphertext.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub fn store_encrypted_wallet_seed(blob: &[u8]) -> Result<()> {
-    set_recovery_pref("encrypted_wallet_seed", blob)
+    set_recovery_pref(SEALED_WALLET_SEED, blob)
 }
 
 /// Load the hardware-sealed wallet-seed bundle.
+#[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
 pub fn load_encrypted_wallet_seed() -> Result<Option<Vec<u8>>> {
-    get_recovery_pref("encrypted_wallet_seed")
+    get_recovery_pref(SEALED_WALLET_SEED)
 }
 
 use rusqlite::OptionalExtension;
@@ -924,6 +938,25 @@ mod tests {
         crate::storage::client_db::reset_database_for_tests();
         crate::storage::client_db::init_database().expect("init db");
         ensure_recovery_tables().expect("ensure recovery tables");
+    }
+
+    /// Owner, 2026-10-04: "No seal off Android". A seed an earlier build sealed under a
+    /// key every build carries does not outlive the next start.
+    ///
+    /// MUTATION CONTROL: removing the delete from `ensure_recovery_tables` leaves the
+    /// row: red.
+    #[cfg(not(any(all(target_os = "android", feature = "jni"), feature = "ffi")))]
+    #[test]
+    #[serial]
+    fn off_a_device_a_seed_an_earlier_build_sealed_is_removed_when_the_tables_open() {
+        setup_test_db();
+        set_recovery_pref(SEALED_WALLET_SEED, b"an earlier build's blob").expect("the row");
+        ensure_recovery_tables().expect("the tables open");
+        assert_eq!(
+            get_recovery_pref(SEALED_WALLET_SEED).expect("read the store"),
+            None,
+            "the earlier build's blob is gone"
+        );
     }
 
     #[test]

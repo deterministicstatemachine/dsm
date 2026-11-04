@@ -478,7 +478,6 @@ bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfT
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfTestActivity.kt	7e4fe8351c22e218
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/debug/PicoSelfTestActivity.kt	b307dd5603e01bd1
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/diagnostics/ArchitectureChecker.kt	af93d36e997009ad
-bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/security/KeystoreVault.kt	2ed48dfb60407cdd
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/security/KeystoreVault.kt	47e349283029a40a
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/service/BleBackgroundService.kt	11a0073e4dd2caf6
 bool-literal	dsm_client/android/app/src/main/java/com/dsm/wallet/service/BleBackgroundService.kt	2dcdabc1c35e81f5
@@ -5834,8 +5833,6 @@ rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/runt
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sdk_context.rs	bf98ee362ba027c8
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	1a906b07c78760e1
-rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/seed_vault.rs	cd254efaeb6b7908
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/session_manager.rs	1fc4e2a74515e873
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_reads.rs	0bf42ef1cf8d619b
 rust-error-discarded	dsm_client/deterministic_state_machine/dsm_sdk/src/sdk/sofi_sdk.rs	c45b9af992c369a8

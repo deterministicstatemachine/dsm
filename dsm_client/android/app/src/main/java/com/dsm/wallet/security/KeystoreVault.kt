@@ -4,12 +4,64 @@ package com.dsm.wallet.security
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.util.Log
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+
+/**
+ * One AES-256/GCM key in the `AndroidKeyStore`, named by `alias`. A blob opens only under
+ * that same key: the key is generated inside the Keystore (hardware-backed on devices with a
+ * TEE/StrongBox) and cannot be exported, so another device — or this one after the key is
+ * gone — holds a different key and the GCM tag refuses the blob.
+ */
+class KeystoreSealer(private val alias: String) {
+    private fun getOrCreateKey(): SecretKey {
+        val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+        (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
+
+        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
+        val spec = KeyGenParameterSpec.Builder(
+            alias,
+            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+        )
+            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(false)
+            .build()
+        generator.init(spec)
+        return generator.generateKey()
+    }
+
+    /** Seal `plaintext` under this alias's Keystore key. Returns `iv(12) || ciphertext+tag`. */
+    fun seal(plaintext: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        val iv = cipher.iv
+        require(iv.size == IV_LEN) { "unexpected GCM IV length ${iv.size}" }
+        val ct = cipher.doFinal(plaintext)
+        return iv + ct
+    }
+
+    /** Open a blob produced by [seal] under this alias's key. Throws on tamper or a different key. */
+    fun open(blob: ByteArray): ByteArray {
+        require(blob.size > IV_LEN) { "sealed blob too short: ${blob.size}" }
+        val iv = blob.copyOfRange(0, IV_LEN)
+        val ct = blob.copyOfRange(IV_LEN, blob.size)
+        val cipher = Cipher.getInstance(TRANSFORMATION)
+        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(TAG_BITS, iv))
+        return cipher.doFinal(ct)
+    }
+
+    private companion object {
+        const val KEYSTORE = "AndroidKeyStore"
+        const val TRANSFORMATION = "AES/GCM/NoPadding"
+        const val IV_LEN = 12
+        const val TAG_BITS = 128
+    }
+}
 
 /**
  * Hardware-backed sealing for the DSM wallet-seed vault.
@@ -24,60 +76,13 @@ import javax.crypto.spec.GCMParameterSpec
  * Keystore.
  */
 object KeystoreVault {
-    private const val TAG = "KeystoreVault"
-    private const val KEYSTORE = "AndroidKeyStore"
-    private const val KEY_ALIAS = "dsm_seed_vault_key_v1"
-    private const val TRANSFORMATION = "AES/GCM/NoPadding"
-    private const val IV_LEN = 12
-    private const val TAG_BITS = 128
+    private val vault = KeystoreSealer("dsm_seed_vault_key_v1")
 
-    private fun getOrCreateKey(): SecretKey {
-        val ks = KeyStore.getInstance(KEYSTORE).apply { load(null) }
-        (ks.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE)
-        val spec = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setUserAuthenticationRequired(false)
-            .build()
-        generator.init(spec)
-        return generator.generateKey()
-    }
-
-    /** Seal `plaintext` under the Keystore key. Returns `iv(12) || ciphertext+tag`. */
+    /** Seal `plaintext` under this device's vault key. Returns `iv(12) || ciphertext+tag`. */
     @JvmStatic
-    fun seal(plaintext: ByteArray): ByteArray {
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        val iv = cipher.iv
-        require(iv.size == IV_LEN) { "unexpected GCM IV length ${iv.size}" }
-        val ct = cipher.doFinal(plaintext)
-        return iv + ct
-    }
+    fun seal(plaintext: ByteArray): ByteArray = vault.seal(plaintext)
 
     /** Open a blob produced by [seal] on this device. Throws on tamper/auth failure. */
     @JvmStatic
-    fun open(blob: ByteArray): ByteArray {
-        require(blob.size > IV_LEN) { "sealed blob too short: ${blob.size}" }
-        val iv = blob.copyOfRange(0, IV_LEN)
-        val ct = blob.copyOfRange(IV_LEN, blob.size)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), GCMParameterSpec(TAG_BITS, iv))
-        return cipher.doFinal(ct)
-    }
-
-    /** Drop the sealing key (full wallet wipe / mnemonic change). Sealed blobs become unrecoverable. */
-    @JvmStatic
-    fun wipeKey() {
-        try {
-            KeyStore.getInstance(KEYSTORE).apply { load(null) }.deleteEntry(KEY_ALIAS)
-        } catch (e: Exception) {
-            Log.w(TAG, "wipeKey failed: ${e.message}")
-        }
-    }
+    fun open(blob: ByteArray): ByteArray = vault.open(blob)
 }

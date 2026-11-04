@@ -578,11 +578,12 @@ pub(crate) fn build_ble_stack_for_identity() -> Result<(), String> {
     // from the BIP39 wallet seed (mnemonic.to_seed) — byte-identical to what
     // create_genesis_v2 registered. There is no device secret. The wallet seed is the
     // unlocked-session secret; it is cached at unlock (RecoverySDK::derive_and_cache_key)
-    // and sealed at rest, so on a cold start we first try the hardware seed vault before
-    // demanding the mnemonic again. Either way init fails without it, and the failure is
-    // the session's fatal error. A vault that cannot be read is that failure in its own
-    // words: reporting it as "not unlocked" sent a device whose store refused its schema
-    // looking for its mnemonic.
+    // and on a device sealed at rest, so on a cold start there we first try the hardware
+    // seed vault before demanding the mnemonic again. Either way init fails without it, and
+    // the failure is the session's fatal error. A vault that cannot be read is that failure
+    // in its own words: reporting it as "not unlocked" sent a device whose store refused its
+    // schema looking for its mnemonic.
+    #[cfg(any(all(target_os = "android", feature = "jni"), feature = "ffi"))]
     if crate::sdk::recovery_sdk::RecoverySDK::get_cached_wallet_seed().is_none() {
         match crate::sdk::recovery_sdk::RecoverySDK::load_and_cache_wallet_seed() {
             Ok(true) => log::info!("[SDK Init] Wallet seed unsealed from vault (cold start)"),
