@@ -7270,6 +7270,18 @@ So the premise fails: the chip signs the device roots its host gives it (`anchor
 - *Code quality.* `ci/sofi_reachability.py` no longer leaves its files open: the six open threads, and one more of the same.
 - *CodeQL.* 79 alerts open on the merge ref, not a required check: 68 `hard-coded-cryptographic-value` and 11 `cleartext-logging`, the kinds §6.141 read line by line. Nothing is dismissed here.
 
+### 6.147 What main's first CI run found after the ancestry commit (`fix/main-ci-after-ancestry`, 2026-11-04)
+
+CI on `5382ab162`, the merge of #1158, is the first full reading of `622aec2fa` (DSM Amendment A31).
+
+- **Clippy.** `Verifier::active` was a type too complex for `-D warnings`, which stopped `Rust gates` at the lint step. It now names `StepCoordinate`. The gates after that lint had not run on this commit when this was written.
+- **Six evidence rows named tests that were gone.** A31's rewrite of `peer_lineage.rs` deleted the module's tests, and `Pin evidence` refused the rows that named them. The behaviours still exist, so the tests are ported to the verifier rather than dropped from the rows:
+  - `a_conditional_peer_position_is_unresolved_and_never_invalid`, `no_validated_root_is_minted_from_either_branch_of_an_unresolved_claim`, `a_claim_naming_other_coordinates_is_never_a_candidate` and `the_activation_root_names_no_parent` keep their names. They now run at position 1, because A31 walks from activation and a claim at a later position is not reached without its predecessors.
+  - `a_source_at_a_conditional_position_is_invalid` and `a_conditional_position_right_after_the_activation_root_is_invalid` are ported as well, and join MR-SOFI-0196 and MR-SOFI-0356.
+  - `a_conditional_claim_on_a_conditional_parent_reads_one_position_back_and_never_two` is not ported. It tested the one-hop read A31 removed. MR-SOFI-0356 cites `a_trader_who_has_traded_can_pay` in its place, as its §8 row already does.
+  - `a_claim_whose_witness_names_another_parent_is_never_accepted` moved to `validated_ancestry_tests`, and its five rows follow it.
+- **Not ported.** The other tests A31 deleted from this module are named by no row and were not reviewed one by one.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
