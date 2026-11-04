@@ -163,20 +163,6 @@ impl ValidatedEconomicRoot {
         }
     }
 
-    /// The root a peer's step is validated from (DSM Amendment A14): the root
-    /// that step's own witness was built on, taken as its parent only because
-    /// the claim is final at the cell routed from it, and `advance_validated`
-    /// then refuses a witness built on any other root. Never a root a peer
-    /// merely states.
-    /// **Only the peer step verifier may call this**, from one place
-    /// (`peer_lineage::authenticated_root`).
-    pub(crate) fn from_verifier_memo(economic_position: u64, economic_root: [u8; 32]) -> Self {
-        Self {
-            economic_position,
-            economic_root,
-        }
-    }
-
     pub fn economic_position(&self) -> u64 {
         self.economic_position
     }
@@ -403,17 +389,6 @@ impl AcceptedClaim {
                 fulfillment_id,
             }),
         }
-    }
-
-    /// A claim at any coordinate, for a test's resolver to answer with.
-    #[cfg(test)]
-    pub(crate) fn at_coordinate_for_test(
-        genesis: [u8; 32],
-        device_id: [u8; 32],
-        economic_position: u64,
-        claim_ref: [u8; 32],
-    ) -> Self {
-        Self::from_resolved_sofi_position(genesis, device_id, economic_position, claim_ref)
     }
 
     /// The SoFi counterpart, for a position whose claim is `C_q`. **Only
