@@ -86,7 +86,7 @@ impl AppRouterImpl {
         // move the allocation that payment was checked against, between its proposal and its
         // acknowledgment. Decided from the durable rows under the step door, held through the
         // boundary, so no payment is proposed between the check and the boundary's commit.
-        let _door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
+        let door = crate::security::modal_sync_lock::STEP_DOOR.lock().await;
         match crate::storage::client_db::offline_spend_in_flight(&self.device_id_bytes) {
             Ok(None) => {}
             Ok(Some((_, phase))) => {
@@ -117,6 +117,24 @@ impl AppRouterImpl {
             Ok((outcome, _admitted)) => outcome,
             Err(e) => return err(format!("wallet.{verb}: {e}")),
         };
+        // The door was held through the boundary's commit; a contact's notice waits on nothing.
+        drop(door);
+        // The boundary is admitted whatever becomes of its notices. What is not delivered here
+        // stays owed, the next sync delivers it, and the holder is told: a contact not told cannot
+        // be paid offline from this boundary, so it matters before they leave coverage.
+        let untold = match crate::sdk::storage_set::pinned_endpoints() {
+            Ok(endpoints) => self.tell_contacts_of_offline_boundaries(&endpoints).await,
+            Err(e) => vec![format!("the pinned storage set: {e}")],
+        };
+        let untold = if untold.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ". Not every contact is told of it yet, so those cannot be paid from it offline; \
+                 this device tells them at its next sync online: {}",
+                untold.join("; ")
+            )
+        };
         let allocation = outcome
             .new_device_state
             .offline_allocation(&bundle, &asset)
@@ -140,12 +158,13 @@ impl AppRouterImpl {
             allocation_balance: allocation,
             device_root: outcome.post_device_root.to_vec(),
             message: format!(
-                "{} {} {} — offline allocation now {}, online {}",
+                "{} {} {} — offline allocation now {}, online {}{}",
                 if is_load { "loaded" } else { "unloaded" },
                 render(amount),
                 req.token_id,
                 allocation_display,
                 online_display,
+                untold,
             ),
             online_display,
             allocation_display,

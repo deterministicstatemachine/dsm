@@ -84,9 +84,10 @@ pub fn reply_message_id(
     )
 }
 
-/// The spool message id of a certificate resync message: its method, the
-/// recipient's tip it is routed by, and its body.
-pub fn certresync_message_id(
+/// The spool message id of a control message (a certificate resync leg, an
+/// offline boundary notice): its method, the recipient's tip it is routed by,
+/// and its body.
+pub fn control_message_id(
     method: &str,
     recipient_tip: &[u8; 32],
     body: &[u8],
@@ -194,11 +195,7 @@ mod tests {
             "XGTW4SKJT363VQ0Z6HC5QKG0M4"
         );
         assert_eq!(
-            encode_base32_crockford(&certresync_message_id(
-                "cert.resync",
-                &[0xC3; 32],
-                &[0xD4; 48]
-            )),
+            encode_base32_crockford(&control_message_id("cert.resync", &[0xC3; 32], &[0xD4; 48])),
             "S18PJ2235HSQWAWGW2X4JM214M"
         );
         assert_eq!(
@@ -309,7 +306,7 @@ mod tests {
         let method = "cert.resync";
         let rtip = [0xC3u8; 32];
         let body = [0xD4u8; 48];
-        let b6 = certresync_message_id(method, &rtip, &body).to_vec();
+        let b6 = control_message_id(method, &rtip, &body).to_vec();
         assert_ne!(
             b6,
             old_id(

@@ -811,9 +811,10 @@ async fn bearer_pair() -> (
 
 /// A loaded pair: A funded and its offline allocation of 20 ERA loaded under
 /// its anchor — the real anchor-core appliance on a software chip, whose
-/// seed is the appliance's only typed-in value — B having validated A's online
-/// history through the load, so it holds the account the load opened, and the
-/// transfer of 7 base units of ERA from it to B.
+/// seed is the appliance's only typed-in value — B having run its sync since,
+/// which took A's notice of the load and validated it, so it holds the account
+/// the load opened (DSM Amendment A30), and the transfer of 7 base units of ERA
+/// from it to B.
 async fn loaded_pair(
     a_funding: u64,
     b_funding: u64,
@@ -841,13 +842,7 @@ async fn loaded_pair(
         )
         .await;
     assert!(loaded.success, "the load: {:?}", loaded.error_message);
-    let (genesis, devid) = {
-        let head = a.device.router().core_sdk.device_head().expect("A's head");
-        (head.genesis_digest(), head.devid())
-    };
-    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
-    b.device.enter();
-    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    pair.b.sync().await;
     let operation = bearer_transfer(&b, 7);
     (pair, a, b, appliance, operation)
 }
@@ -2067,18 +2062,13 @@ async fn an_offline_payment_in_flight_holds_the_account_until_it_is_acknowledged
     use crate::economic_fixtures::whole_era;
 
     let (pair, a, b, appliance, _) = bearer_pair().await;
-    a.device.enter();
-    let (genesis, devid) = {
-        let head = a.device.router().core_sdk.device_head().expect("A's head");
-        (head.genesis_digest(), head.devid())
-    };
-    let loaded_at = crate::economic_fixtures::admitted_position().expect("A is activated");
     let mut c_device = TestDevice::create("C", 0x0C);
     c_device.boot(&pair.fleet).await;
     c_device.add_contact(&pair.a).await;
     pair.a.add_contact(&c_device).await;
-    c_device.enter();
-    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+    // A's next sync tells the contact it added since the load, and C's takes it.
+    pair.a.sync().await;
+    c_device.sync().await;
     let c = OfflineDevice::new(&c_device);
 
     a.device.enter();
@@ -3807,7 +3797,7 @@ fn spend_receipt(
 async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded() {
     use dsm::bilateral::offline::spend_starts_at_the_record;
 
-    let (_pair, a, b, appliance, operation) = bearer_pair().await;
+    let (pair, a, b, appliance, operation) = bearer_pair().await;
     a.device.enter();
     let (genesis, devid) = {
         let head = a.device.router().core_sdk.device_head().expect("A's head");
@@ -3823,7 +3813,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         )
         .expect("B's store reads")
         .filter(|account| account.economic_position() == position)
-        .expect("B recorded the boundary it walked")
+        .expect("B recorded the boundary its sync validated")
     };
     // B's origin for A's spends: its record, A's anchor as B pins it, and no
     // spends of A's since the record.
@@ -3842,8 +3832,6 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         }
     };
 
-    b.device.enter();
-    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
     let after_load = origin(recorded(loaded_at));
     let from_load = stage_release(&a, &b, &operation);
     let (load_receipt, load_leaves) = spend_receipt(&a, &b, &operation, &from_load);
@@ -3874,8 +3862,7 @@ async fn an_offline_spend_is_taken_only_from_the_account_its_receiver_recorded()
         "{refused}"
     );
 
-    b.device.enter();
-    crate::economic_fixtures::foreign_walk(genesis, devid, loaded_at + 1).await;
+    pair.b.sync().await;
     let after_unload = origin(recorded(loaded_at + 1));
     spend_starts_at_the_record(&unload_receipt, &unload_leaves, &genesis, &after_unload)
         .expect("taken once B recorded the unload");
@@ -4842,6 +4829,9 @@ async fn a_receipt_whose_offline_account_its_release_did_not_advance_is_refused_
     );
     assert_eq!(b.tip_with(&a), b_tip, "the forgery moved B's tip");
 }
+
+/// How a payer's offline boundaries reach its contacts (DSM Amendment A30).
+mod boundary_notices;
 
 /// The bilateral models, refined by this protocol run between real devices.
 mod model_correspondence;

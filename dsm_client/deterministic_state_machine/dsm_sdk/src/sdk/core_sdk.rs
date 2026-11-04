@@ -763,6 +763,18 @@ impl CoreSDK {
                         None::<std::io::Error>,
                     )
                 })?;
+            // What this device's contacts are told of once the boundary is admitted: durable
+            // with the boundary, so a process that stops here owes the notices still.
+            crate::storage::client_db::offline_boundary_notices::record_own_boundary_in_tx(
+                &tx,
+                pending.economic_position,
+            )
+            .map_err(|e| {
+                DsmError::storage(
+                    format!("offline boundary: record it for its contacts: {e}"),
+                    None::<std::io::Error>,
+                )
+            })?;
             tx.commit().map_err(|e| {
                 DsmError::storage(
                     format!("offline boundary: commit: {e}"),

@@ -75,16 +75,6 @@ impl World {
                 )
                 .await;
             assert!(load.success, "the load: {:?}", load.error_message);
-            let (genesis, devid) = {
-                let head = offline[i]
-                    .device
-                    .router()
-                    .core_sdk
-                    .device_head()
-                    .expect("the device's head");
-                (head.genesis_digest(), head.devid())
-            };
-            let loaded_at = economic_fixtures::admitted_position().expect("activated");
             for (a, b) in relationships {
                 let counterparty = if *b == i {
                     *a
@@ -93,8 +83,7 @@ impl World {
                 } else {
                     continue;
                 };
-                offline[counterparty].device.enter();
-                economic_fixtures::foreign_walk(genesis, devid, loaded_at).await;
+                offline[counterparty].device.sync().await;
             }
         }
         Self {

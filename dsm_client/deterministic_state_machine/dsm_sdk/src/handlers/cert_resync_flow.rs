@@ -522,7 +522,7 @@ impl super::app_router_impl::AppRouterImpl {
             request_sig,
         };
         self.b0x(storage_endpoints)?
-            .submit_cert_resync_message(
+            .submit_control_message(
                 CERT_RESYNC_REQUEST_METHOD,
                 req.to_body(),
                 &peer_genesis,
@@ -609,7 +609,7 @@ impl super::app_router_impl::AppRouterImpl {
             counterparty_sig: sphincs_sign(&ak_sk, &statement)?,
         };
         self.b0x(storage_endpoints)?
-            .submit_cert_resync_message(
+            .submit_control_message(
                 CERT_RESYNC_OFFER_METHOD,
                 offer.to_body(),
                 &initiator_genesis,
@@ -718,7 +718,7 @@ impl super::app_router_impl::AppRouterImpl {
             restart_step: restart_addr,
         };
         self.b0x(storage_endpoints)?
-            .submit_cert_resync_message(
+            .submit_control_message(
                 CERT_RESYNC_CONFIRM_METHOD,
                 confirm.to_body(),
                 &peer_genesis,
@@ -882,7 +882,7 @@ impl super::app_router_impl::AppRouterImpl {
             done_sig: sphincs_sign(&ak_sk, &restart_done_statement(&addr, &own_step))?,
         };
         self.b0x(storage_endpoints)?
-            .submit_cert_resync_message(
+            .submit_control_message(
                 CERT_RESYNC_DONE_METHOD,
                 done.to_body(),
                 &initiator_genesis,

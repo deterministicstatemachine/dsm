@@ -465,6 +465,8 @@ pub struct B0xSDK {
     pending_evidence_artifacts: Vec<EvidenceArtifact>,
     /// Cert-resync control messages decoded on retrieve.
     pending_cert_resync: Vec<CertResyncMessage>,
+    /// Offline boundary notices decoded on retrieve.
+    pending_offline_boundary_notices: Vec<OfflineBoundaryNotice>,
 }
 
 /// One cert-resync control message as a retrieve read it: its method, its
@@ -476,6 +478,22 @@ pub struct CertResyncMessage {
     pub body: Vec<u8>,
     pub copy_key: String,
 }
+
+/// One offline boundary notice as a retrieve read it (DSM Amendment A30): the
+/// device its envelope header names, its body, and the content key of the copy
+/// it came in, by which a notice that never will be anything is passed over.
+/// None of it is authority: the header and body say only whose step to check,
+/// and the check reads the step from the registers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineBoundaryNotice {
+    pub sender: Vec<u8>,
+    pub body: Vec<u8>,
+    pub copy_key: String,
+}
+
+/// Explicit invoke method that marks an offline boundary notice: a payer telling
+/// a contact the economic position of a load or unload (DSM Amendment A30).
+pub(crate) const OFFLINE_BOUNDARY_NOTICE_METHOD: &str = "wallet.offlineBoundaryNotice";
 
 /// Explicit invoke method that marks an ADR 0003 A-side evidence artifact. The
 /// evidence half is structurally distinct from both forward transfers and
@@ -844,6 +862,7 @@ impl B0xSDK {
             pending_relationship_finalized: Vec::new(),
             pending_evidence_artifacts: Vec::new(),
             pending_cert_resync: Vec::new(),
+            pending_offline_boundary_notices: Vec::new(),
         };
 
         Ok(sdk)
@@ -1063,6 +1082,36 @@ impl B0xSDK {
     /// Drain cert-resync control messages decoded by the most recent retrieve.
     pub fn take_cert_resync_messages(&mut self) -> Vec<CertResyncMessage> {
         std::mem::take(&mut self.pending_cert_resync)
+    }
+
+    /// Decode an offline boundary notice from a spooled envelope, discriminated
+    /// on the EXPLICIT invoke method, never trial-decoded: the device its header
+    /// names and its body.
+    fn decode_offline_boundary_notice(
+        env: &dsm::types::proto::Envelope,
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        let Some(dsm::types::proto::envelope::Payload::UniversalTx(tx)) = &env.payload else {
+            return None;
+        };
+        tx.ops.iter().find_map(|op| {
+            let Some(dsm::types::proto::universal_op::Kind::Invoke(invoke)) = &op.kind else {
+                return None;
+            };
+            if invoke.method != OFFLINE_BOUNDARY_NOTICE_METHOD {
+                return None;
+            }
+            let body = invoke.args.as_ref()?.body.clone();
+            let sender = env
+                .headers
+                .as_ref()
+                .map_or_else(Vec::new, |headers| headers.device_id.clone());
+            Some((sender, body))
+        })
+    }
+
+    /// Drain offline boundary notices decoded by the most recent retrieve.
+    pub fn take_offline_boundary_notices(&mut self) -> Vec<OfflineBoundaryNotice> {
+        std::mem::take(&mut self.pending_offline_boundary_notices)
     }
 
     /// Deliver the recipient's countersigned acceptance receipt BACK to the
@@ -1430,15 +1479,36 @@ impl B0xSDK {
         ))
     }
 
-    /// Submit a cert-resync control message (an explicit `invoke.method` with the
-    /// framed body in `ArgPack.body`) addressed to the recipient's b0x route. Rides
-    /// the SAME allowlisted UniversalTx tag as everything else — no new payload tag,
-    /// no fleet redeploy. Mirrors `submit_acceptance_reply`'s carrier choice.
+    /// Tell a contact the economic position of an offline boundary of this
+    /// device's (DSM Amendment A30), on the relationship's route. The body is the
+    /// position alone, big-endian. Delivered again it is the same message.
+    pub async fn submit_offline_boundary_notice(
+        &mut self,
+        position: u64,
+        recipient_genesis: &[u8; 32],
+        recipient_device: &[u8; 32],
+        recipient_tip: &[u8; 32],
+    ) -> Result<String, DsmError> {
+        self.submit_control_message(
+            OFFLINE_BOUNDARY_NOTICE_METHOD,
+            position.to_be_bytes().to_vec(),
+            recipient_genesis,
+            recipient_device,
+            recipient_tip,
+        )
+        .await
+    }
+
+    /// Submit a control message (a cert-resync leg, an offline boundary notice: an
+    /// explicit `invoke.method` with the framed body in `ArgPack.body`) addressed
+    /// to the recipient's b0x route. Rides the SAME allowlisted UniversalTx tag as
+    /// everything else — no new payload tag, no fleet redeploy. Mirrors
+    /// `submit_acceptance_reply`'s carrier choice.
     ///
     /// NOTE ON PAIDK: the deployed fleet does not currently enforce the PaidK gate
     /// on submit; the structural exemption (a recovery message must never depend on
     /// the spend authority it restores) is tracked as node-side follow-up.
-    pub async fn submit_cert_resync_message(
+    pub async fn submit_control_message(
         &mut self,
         method: &str,
         body: Vec<u8>,
@@ -1455,8 +1525,7 @@ impl B0xSDK {
 
         // Deterministic transport id from method + route + a digest of the body.
         let message_id_bytes =
-            dsm::crypto::spool_address::certresync_message_id(method, recipient_tip, &body)
-                .to_vec();
+            dsm::crypto::spool_address::control_message_id(method, recipient_tip, &body).to_vec();
         let message_id_b32 = crate::util::text_id::encode_base32_crockford(&message_id_bytes);
 
         let local_device_bytes =
@@ -1464,7 +1533,7 @@ impl B0xSDK {
                 .filter(|b| b.len() == 32)
                 .ok_or_else(|| {
                     DsmError::invalid_parameter(
-                        "submit_cert_resync: local device_id not base32(32)",
+                        "submit_control_message: local device_id not base32(32)",
                     )
                 })?;
         let local_genesis = self.resolve_local_genesis().await?.to_vec();
@@ -1505,7 +1574,7 @@ impl B0xSDK {
         let mut buf = Vec::with_capacity(envelope.encoded_len());
         envelope.encode(&mut buf).map_err(|e| {
             DsmError::internal(
-                format!("cert-resync envelope encode failed: {e}"),
+                format!("control message envelope encode failed: {e}"),
                 None::<std::io::Error>,
             )
         })?;
@@ -1518,10 +1587,7 @@ impl B0xSDK {
         )
         .await
         .map_err(|e| {
-            DsmError::network(
-                format!("cert-resync {method} delivery: {e}"),
-                None::<std::io::Error>,
-            )
+            DsmError::network(format!("{method} delivery: {e}"), None::<std::io::Error>)
         })?;
         Ok(message_id_b32)
     }
@@ -2571,6 +2637,16 @@ impl B0xSDK {
             // has no B0xEntry shape. It is discriminated by the EXPLICIT invoke method
             // (never a trial-decode) and buffered for the sender-finalization path;
             // dropping it here is what would strand a countersigned receipt.
+            if let Some((sender, body)) = Self::decode_offline_boundary_notice(&env) {
+                info!("📬 offline boundary notice body={}B", body.len());
+                self.pending_offline_boundary_notices
+                    .push(OfflineBoundaryNotice {
+                        sender,
+                        body,
+                        copy_key,
+                    });
+                continue;
+            }
             if let Some((method, body)) = Self::decode_cert_resync_message(&env) {
                 info!(
                     "📬 cert-resync message method={} body={}B",

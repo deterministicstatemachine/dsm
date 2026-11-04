@@ -55,6 +55,7 @@ pub mod mempool_api;
 mod money_waiting_tests;
 #[cfg(test)]
 mod node_e2e_tests;
+pub mod offline_boundary_notices;
 #[cfg(test)]
 mod offline_boundary_tests;
 pub mod offline_cash_routes;

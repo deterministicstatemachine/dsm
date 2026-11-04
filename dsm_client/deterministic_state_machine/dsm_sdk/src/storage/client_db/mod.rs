@@ -41,6 +41,7 @@ mod manifold_seeds;
 pub mod money_received;
 pub mod native_reserve;
 mod nonces;
+pub mod offline_boundary_notices;
 pub mod offline_receipts;
 pub mod offline_spends;
 mod online_outbox;
@@ -1008,6 +1009,20 @@ fn create_schema(conn: &Connection) -> Result<()> {
             account_root        BLOB NOT NULL,      -- 32B
             funding_chain       BLOB NOT NULL,      -- 32B
             PRIMARY KEY(peer_genesis, peer_devid, bundle, economic_position)
+        );
+
+        -- This device's own offline boundaries, by the economic position each
+        -- is admitted at, written in the transaction that commits the boundary.
+        -- What a contact is told of (`offline_boundary_notices`).
+        CREATE TABLE IF NOT EXISTS own_offline_boundary(
+            economic_position   INTEGER PRIMARY KEY
+        );
+
+        -- How far each contact has been told of this device's own offline
+        -- boundaries. A contact with no row has been told of none.
+        CREATE TABLE IF NOT EXISTS offline_boundary_told(
+            contact_device      BLOB PRIMARY KEY,   -- 32B
+            economic_position   INTEGER NOT NULL
         );
 
         -- A payment a peer's offline boundary exposed online, as this

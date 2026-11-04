@@ -2300,6 +2300,38 @@ fn take_in_cert_resync(
     }
 }
 
+/// Check what this sync read of its contacts' offline boundary notices (DSM
+/// Amendment A30). In position order for each sender: a boundary continues the
+/// account the one before it left, so one not established leaves that sender's
+/// later ones for the next sync, unread. A notice checked, or one that never will
+/// be anything, is passed over by its content.
+async fn take_in_offline_boundary_notices(
+    mut notices: Vec<(String, crate::sdk::b0x_sdk::OfflineBoundaryNotice)>,
+    taken: &mut CopiesTaken,
+    errors: &mut Vec<String>,
+) {
+    use super::offline_boundary_notices::{check_offline_boundary_notice, NoticeChecked};
+    // A position's body is big-endian, so its bytes sort as the number does.
+    notices.sort_by(|(_, x), (_, y)| (&x.sender, &x.body).cmp(&(&y.sender, &y.body)));
+    let mut waiting = std::collections::BTreeSet::<Vec<u8>>::new();
+    for (address, notice) in notices {
+        if waiting.contains(&notice.sender) {
+            continue;
+        }
+        match check_offline_boundary_notice(&notice).await {
+            NoticeChecked::Done => taken.pass_over(&address, &notice.copy_key),
+            NoticeChecked::NotEstablished(why) => {
+                errors.push(format!("offline boundary notice: {why}"));
+                waiting.insert(notice.sender);
+            }
+            NoticeChecked::Refused(why) => {
+                errors.push(format!("offline boundary notice: {why}; passed over"));
+                taken.pass_over(&address, &notice.copy_key);
+            }
+        }
+    }
+}
+
 /// Whether a durable row was found, for a message: present, absent, or why it
 /// could not be read.
 fn presence<T, E: std::fmt::Display>(read: &Result<Option<T>, E>) -> String {
@@ -2410,6 +2442,7 @@ impl AppRouterImpl {
         // content: passed over.
         let mut taken = CopiesTaken::default();
         let mut resyncs_answered = std::collections::BTreeSet::<[u8; 32]>::new();
+        let mut boundary_notices = Vec::new();
         let mut pulled = 0usize;
         // Routes read to full coverage, routes read partially, and routes no
         // member answered for. Only the first kind says "nothing more there".
@@ -2527,6 +2560,12 @@ impl AppRouterImpl {
                         &mut report.errors,
                     );
                 }
+                boundary_notices.extend(
+                    route_sdk
+                        .take_offline_boundary_notices()
+                        .into_iter()
+                        .map(|notice| (tagged.address.clone(), notice)),
+                );
 
                 let (polled, read_on) = match retrieved {
                     Ok(outcome) => {
@@ -2609,6 +2648,11 @@ impl AppRouterImpl {
         // the epoch it answers, not one this sync raised while reading.
         self.initiate_required_cert_resyncs(storage_endpoints, &resyncs_answered, &mut report)
             .await;
+
+        // What the contacts told this device of their offline boundaries, in
+        // order, whichever route each came on: recorded before anything below
+        // settles against those records.
+        take_in_offline_boundary_notices(boundary_notices, &mut taken, &mut report.errors).await;
 
         // At most `limit` per route, which the request bounds by
         // STORAGE_SYNC_MAX_LIMIT, over the few routes this device's contacts
@@ -2843,6 +2887,12 @@ impl AppRouterImpl {
             Ok(n) => report.pushed += n,
             Err(e) => report.errors.push(format!("checkpoint sweep failed: {e}")),
         }
+        // DSM Amendment A30: what this device's contacts are owed of its offline
+        // boundaries, a failed delivery and a contact added since alike.
+        report.errors.extend(
+            self.tell_contacts_of_offline_boundaries(storage_endpoints)
+                .await,
+        );
         match crate::handlers::artifact_republish::republish_unpublished_artifacts().await {
             Ok(n) => report.pushed += n,
             Err(e) => report

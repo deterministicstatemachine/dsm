@@ -21,7 +21,7 @@
 use dsm::economic::claim_envelope::RegisteredEconomicClaim;
 use dsm::economic::lineage::{AcceptedClaim, ValidatedEconomicRoot};
 use dsm::economic::peer_lineage::{
-    peer_claim_at, peer_root_at, scan_offline_boundaries, validate_peer_step, Checked,
+    peer_claim_at, peer_root_at, scan_offline_boundaries, validate_peer_step, Checked, OfflineScan,
     ConditionalPositionResolver, OfflineRecords, PeerEvidenceFetcher, StepCost,
     OFFLINE_SCAN_POSITIONS,
 };
@@ -555,44 +555,59 @@ pub(crate) fn resolve_peer_claim<F: PeerEvidenceFetcher>(
     record_established("claim", device_id, position, checked)
 }
 
-/// Scan a payer's positions from `from` for the offline boundaries that expose
-/// what it paid this device offline (SA-91), within
-/// [`OFFLINE_SCAN_POSITIONS`], recording the accounts they left and the
-/// payments they exposed. A scan that stops short records what it validated.
-/// One that meets a boundary that verifies as wrong records nothing.
-pub(crate) async fn scan_payer_offline_boundaries(
+/// Validate one hop the offline boundaries among `positions` of a payer,
+/// recording the accounts they left and the payments they exposed. A read that
+/// stops short records what it validated. One that meets a boundary that
+/// verifies as wrong records nothing.
+async fn read_payer_offline_boundaries(
     genesis: [u8; 32],
     device_id: [u8; 32],
-    from: u64,
-) -> Result<(), String> {
+    positions: std::ops::Range<u64>,
+) -> Result<OfflineScan, PeerLineageFailure> {
     let network_id = crate::sdk::economic_admission_flow::committed_network_id()
-        .map_err(|e| format!("the committed network: {e}"))?;
+        .map_err(|e| PeerLineageFailure::Incomplete(format!("the committed network: {e}")))?;
     let set = crate::sdk::storage_set::canonical_set(&network_id)
-        .map_err(|e| format!("the register set: {e}"))?;
+        .map_err(|e| PeerLineageFailure::Incomplete(format!("the register set: {e}")))?;
     let runtime = tokio::runtime::Handle::current();
-    let scan = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let live = LiveRegisterResolver {
             set: &set,
             runtime,
             expected_network_id: network_id.clone(),
         };
         let sofi = crate::sdk::sofi_reads::VerifierContext::new(&set, None, None)
-            .map_err(|e| format!("SoFi reads: {e}"))?;
+            .map_err(|e| PeerLineageFailure::Incomplete(format!("SoFi reads: {e}")))?;
         let checked = scan_offline_boundaries(
             &live,
             &network_id,
             &genesis,
             &device_id,
-            from..from.saturating_add(OFFLINE_SCAN_POSITIONS),
+            positions,
             &StoredOfflineRecords,
             &sofi.peer_position_resolver(),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let reached = checked.answer().reached();
-        record_established("offline scan", &device_id, reached, checked).map_err(|e| e.to_string())
+        record_established("offline scan", &device_id, reached, checked)
     })
     .await
-    .map_err(|e| format!("the payer's scan did not finish: {e}"))??;
+    .map_err(|e| PeerLineageFailure::Incomplete(format!("the payer's read did not finish: {e}")))?
+}
+
+/// Scan a payer's positions from `from` for the offline boundaries that expose
+/// what it paid this device offline (SA-91), within
+/// [`OFFLINE_SCAN_POSITIONS`].
+pub(crate) async fn scan_payer_offline_boundaries(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    from: u64,
+) -> Result<(), String> {
+    let scan = read_payer_offline_boundaries(
+        genesis,
+        device_id,
+        from..from.saturating_add(OFFLINE_SCAN_POSITIONS),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     log::info!(
         "[A14] payer {} scanned from position {from} to {}: {:?}",
         text_id::encode_base32_crockford(&device_id),
@@ -600,6 +615,22 @@ pub(crate) async fn scan_payer_offline_boundaries(
         scan.stop()
     );
     Ok(())
+}
+
+/// The one position a payer's notice names (DSM Amendment A30), validated one
+/// hop when it is an offline boundary. A constant cost, whatever the position
+/// and however long the payer's history. The notice is believed in nothing:
+/// a step that is no boundary is read and records nothing. The scan has reached
+/// `position` only when the position was read to its end.
+pub(crate) async fn record_peer_offline_boundary(
+    genesis: [u8; 32],
+    device_id: [u8; 32],
+    position: u64,
+) -> Result<OfflineScan, PeerLineageFailure> {
+    let next = position.checked_add(1).ok_or_else(|| {
+        PeerLineageFailure::Invalid(format!("position {position} is past every position"))
+    })?;
+    read_payer_offline_boundaries(genesis, device_id, position..next).await
 }
 
 /// The RECORDING fetch boundary for recipient prevalidation. It IS the
