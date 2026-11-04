@@ -7,7 +7,8 @@
 # without the owner's own words naming the change. See specs/README.md.
 #
 # This refuses what brought a walk back before: the identifiers of the A19
-# frontier and the A31 walk, a position loop from the start of a history, the
+# frontier, the A31 walk and A28's first-spend exception, a position loop from
+# the start of a history, a second step validated beside the one asked for, the
 # amendments themselves, and the loss of the tests that fail when a check reads
 # behind the step it was asked about. A31 deleted those tests to pass. The tests
 # are the behavioural lock, since a renamed walk still reads what they count.
@@ -48,12 +49,21 @@ FORBIDDEN_IDENTIFIERS = (
     "validated_position",
     "steps_validated",
     "VALIDATION_STEP_BUDGET",
+    # A28's exception: a step at position 2 held to the step before it.
+    "FIRST_SPEND_POSITION",
 )
 
 # A verifier loop over positions from the first one is a walk of the history.
 WALK_LOOP = re.compile(r"\bfor\s+\w+\s+in\s+\(?\s*1\s*\.\.")
 
 FORBIDDEN_AMENDMENTS = re.compile(r"Amendment (A31|S35)\b")
+
+# A28's exception, in the words the explainer held it in.
+FORBIDDEN_RULE = "An offered step at position 2 is held to the step before it"
+
+# A one-hop test that expects position 1 read beside the position it asked for.
+LOOKBACK_EXPECTED = re.compile(r"vec!\[\s*1\s*,\s*\w+\s*\]")
+ONE_HOP_TESTS = f"{CORE}/dsm_sdk/src/handlers/one_hop_verification_tests.rs"
 
 REQUIRED_TESTS = {
     f"{CORE}/dsm_sdk/src/handlers/one_hop_verification_tests.rs": (
@@ -95,6 +105,11 @@ def check_verifier(root, problems):
     for number, line in enumerate(text.splitlines(), 1):
         if WALK_LOOP.search(line):
             problems.append(f"{VERIFIER}:{number}: a loop over positions from the first")
+    body = re.search(r"^pub fn validate_peer_step\(.*?^\}$", text, re.S | re.M)
+    if body is None:
+        problems.append(f"{VERIFIER}: validate_peer_step is gone")
+    elif body.group(0).count(".step_at(") != 1:
+        problems.append(f"{VERIFIER}: validate_peer_step must validate the requested step alone")
 
 
 def check_specifications(root, problems):
@@ -102,6 +117,8 @@ def check_specifications(root, problems):
     for needed in ("Amendment A14", "one-hop acceptance restored"):
         if needed not in explainer:
             problems.append(f"{EXPLAINER}: no longer states {needed!r}")
+    if FORBIDDEN_RULE in explainer:
+        problems.append(f"{EXPLAINER}: states A28's first-spend exception")
     for path in (EXPLAINER, SOFI, REQUIREMENTS):
         for number, line in enumerate(read(root, path, problems).splitlines(), 1):
             found = FORBIDDEN_AMENDMENTS.search(line)
@@ -115,6 +132,9 @@ def check_tests(root, problems):
         for name in names:
             if not re.search(rf"\basync fn {name}\(", text):
                 problems.append(f"{path}: the test {name} is gone")
+    for number, line in enumerate(read(root, ONE_HOP_TESTS, problems).splitlines(), 1):
+        if LOOKBACK_EXPECTED.search(line):
+            problems.append(f"{ONE_HOP_TESTS}:{number}: expects position 1 beside the step asked for")
     if "mod one_hop_verification_tests;" not in read(root, HANDLERS, problems):
         problems.append(f"{HANDLERS}: one_hop_verification_tests is not compiled")
 

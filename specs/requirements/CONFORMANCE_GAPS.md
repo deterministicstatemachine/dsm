@@ -7168,6 +7168,8 @@ Dismissing these alerts is the owner's call. The check stays red on the PR until
 
 ### 6.143 A first spend is held to the step before it (`fix/restore-a14-one-hop-acceptance`, DSM Amendment A28, 2026-11-03)
 
+**Removed 2026-11-04, §6.148.** This section is the record of a check that no longer exists.
+
 **The direction (pasted into the session, 2026-11-03).** B and C had a contact and no prior transfer. B's step 1 claimed a token credit from A's step 2, where no debit was registered, and B's signed step 2 consumed step 1's root. C accepted under the original check. "For an offered step 2, independently validate step 1 from B's authenticated activation root". The isolated run let the honest funded transfer pass and made C reject the forged payment with a zero balance. "This result establishes the fix for the tested step-1-credit → step-2-spend case; it does not establish a rule for other positions."
 
 **What changed.** `validate_peer_step`, at position 2, runs `step_at` on position 1 and requires the target's `pre_economic_root` to equal the root position 1 installed. Every caller of `validate_peer_step` gets it: recipient admission, the provenance resolver and SoFi's peer reads. `peer_root_at`, `peer_claim_at` and a credit's `source_step` do not. No contact state is kept.
@@ -7286,16 +7288,27 @@ A run on this tree, 2026-11-04, in release on real nodes, with A31's test `a_thi
 
 **The lock.** `ci/acceptance_lock.py`, CI job `Acceptance lock`, refuses the A19 and A31 identifiers, a verifier loop over positions from the first, the two amendments in the specifications, and the loss of the tests that fail when a check reads behind its step. `specs/README.md` states the rule.
 
+### 6.148 A28's first-spend exception removed: A14 as written (2026-11-04)
+
+The direction, pasted into the session 2026-11-04: "the A28-specific exception does not stay. A14 is the authority." `validate_peer_step` now validates the requested step alone at every position; position 2 no longer reads position 1. MR-DSM-0348 is removed.
+
+- **Tests changed to A14.** `every_acceptance_reads_only_the_senders_paying_position`, `a_credits_source_is_one_step`, `a_contact_with_a_history_pays_in_one_step_after_the_add`, `a_read_checks_only_the_step_it_asks_about` and `the_same_payment_costs_every_receiver_the_same` expected position 1 to be read beside a first spend. They now expect the requested position alone.
+- **Tests removed.** Three tests could pass only under the exception, as §6.143's mutation table records, and A14 has no check that refuses their state: `a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer`, `a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited` and `a_second_step_built_on_a_forged_predecessor_is_never_accepted`, the last of which the owner asked for on 2026-11-03. They remain at `ab7f70158` for the audit to run.
+- **Open, for the independent audit.** The forged-credit concern in §6.147 stays open and is not resolved here. No other mechanism replaces the exception.
+- **The lock.** `ci/acceptance_lock.py` now also refuses `FIRST_SPEND_POSITION`, a second `step_at` in `validate_peer_step`, A28's first-spend sentence in the explainer, and a one-hop test that expects position 1 beside the requested position.
+
+Run in release on real nodes, 2026-11-04, on this commit's code: `dsm` `economic::peer_lineage` 19/0; `dsm_sdk` 31/0 across `one_hop_verification_tests`, `counterfeit_acceptance_tests` and `boundary_notices`, with `a_trader_who_has_traded_can_pay`, `resolving_another_traders_position_reads_only_that_position`, `one_resolution_asks_each_node_for_a_final_cell_or_an_object_once` and `many_devices_conserve_value_and_settle_under_outages_crashes_and_restarts`. The lock refuses `ab7f70158` with 10 violations. The full board is GitHub's run on this commit.
+
 ## 7 Totals
 
 | Spec | Rows | Met | Partial | Missing | Violated | Not code | Deferred |
 |---|---|---|---|---|---|---|---|
-| DSM high-level (MR-DSM) | 351 | 224 | 47 | 16 | 0 | 37 | 27 |
+| DSM high-level (MR-DSM) | 351 | 223 | 47 | 16 | 0 | 38 | 27 |
 | SoFi (MR-SOFI) | 431 | 387 | 13 | 10 | 1 | 17 | 3 |
 | dBTC (MR-DBTC) | 135 | 0 | 0 | 0 | 0 | 0 | 135 |
 | Storage node (MR-STOR) | 158 | 77 | 13 | 40 | 0 | 18 | 10 |
 | Storage §14 lines added after the pin (STOR-014) | 11 | 11 | 0 | 0 | 0 | 0 | 0 |
-| **All** | **1086** | **699** | **73** | **66** | **1** | **72** | **175** |
+| **All** | **1086** | **698** | **73** | **66** | **1** | **73** | **175** |
 
 ## 8 Per-requirement results
 
@@ -7650,7 +7663,7 @@ A run on this tree, 2026-11-04, in release on real nodes, with A31's test `a_thi
 | MR-DSM-0345 | Met | `dsm_sdk::sdk::connect::grant::request_from_wire` | `dsm_sdk::sdk::connect::grant::tests::a_statement_is_one_line_with_nothing_hidden`; `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
 | MR-DSM-0346 | Met | `dsm_sdk::handlers::connect_routes::connect_app_status` | `dsm_sdk::handlers::connect_e2e_tests::a_signature_waits_for_its_holder_and_covers_the_words_shown` |
 | MR-DSM-0347 | Met | `dsm::economic::peer_lineage::scan_offline_boundaries`; `dsm_sdk::sdk::economic_registers::scan_payer_offline_boundaries`; `dsm_sdk::sdk::economic_admission_flow::settle_received_offline` | `dsm::economic::peer_lineage::tests::a_scan_stops_where_the_register_holds_nothing`; `dsm::economic::peer_lineage::tests::a_scan_stops_at_its_bound_and_reads_nothing_past_it`; `dsm::economic::peer_lineage::tests::a_scan_stops_short_on_a_position_not_decided_yet` | DSM Amendment A28 (§6.142). A default the owner was told of and did not object to, not a ruling. A payer's next boundary past the bound is not found. |
-| MR-DSM-0348 | Met | `dsm::economic::peer_lineage::validate_peer_step` | `dsm_sdk::handlers::counterfeit_acceptance_tests::a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_new_receivers_acceptance_refuses_a_payment_of_value_no_one_debited`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_second_step_built_on_a_forged_predecessor_is_never_accepted`; `dsm_sdk::handlers::one_hop_verification_tests::every_acceptance_reads_only_the_senders_paying_position` | DSM Amendment A28 (§6.143). Position 2 alone. The tests build the payer's state by hand. |
+| MR-DSM-0348 | Not code | — | — | Removed 2026-11-04: A14 as written reads nothing behind the offered step, position 2 included (§6.148). |
 | MR-DSM-0349 | Met | `dsm_sdk::handlers::offline_boundary_notices::tell_contacts_of_offline_boundaries`; `dsm_sdk::storage::client_db::offline_boundary_notices::record_own_boundary_in_tx`; `dsm_sdk::sdk::core_sdk::CoreSDK::admitted_boundary` | `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::a_load_reaches_a_contact_by_its_sync_and_the_first_offline_payment_is_taken`; `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::a_load_followed_by_an_online_payment_still_reaches_the_contact` | DSM Amendment A30 (§6.145). Passed in CI at `6601cc48c` (§6.146). |
 | MR-DSM-0350 | Met | `dsm_sdk::storage::client_db::offline_boundary_notices::owed_to`; `dsm_sdk::storage::client_db::offline_boundary_notices::record_told` | `dsm_sdk::storage::client_db::offline_boundary_notices::tests::a_contact_is_owed_what_it_has_not_been_told_of_what_is_admitted`; `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::each_contact_is_told_what_it_is_owed_of_a_payers_boundaries` | DSM Amendment A30 (§6.145). Passed in CI at `6601cc48c` (§6.146). |
 | MR-DSM-0351 | Met | `dsm_sdk::handlers::offline_boundary_notices::check_offline_boundary_notice`; `dsm_sdk::sdk::economic_registers::record_peer_offline_boundary`; `dsm::economic::peer_lineage::scan_offline_boundaries` | `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::a_notice_is_believed_in_nothing_and_no_notice_creates_a_record`; `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::a_receiver_that_has_not_synced_since_the_load_refuses_the_first_payment`; `dsm_sdk::bluetooth::offline_step_tests::boundary_notices::a_balance_the_payers_host_invented_is_refused_under_its_real_chip` | DSM Amendment A30 (§6.145). Passed in CI at `6601cc48c` (§6.146). |
@@ -7659,7 +7672,7 @@ A run on this tree, 2026-11-04, in release on real nodes, with A31's test `a_thi
 
 | MR-ID | Status | Code (crate · file · function) | Test | Gap / note |
 |---|---|---|---|---|
-| MR-SOFI-0001 | Met | `dsm::economic::write_set::build_write_set`; `dsm::sofi::validation::route_validation`; `dsm::types::device_state::RealizedHead` | `dsm_sdk::one_door_for_device_heads::a_device_head_is_installed_only_as_a_head_core_realized`; `dsm_sdk::source_rules::no_state_core_makes_has_a_field_another_layer_can_set`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_payment_of_value_no_one_debited_is_never_accepted_by_a_receiver_new_to_the_payer` | Rechecked 2026-10-27 on `fix/beta-requirements-completion` (was Partial). The only door is shown, not assumed: heads exist only as Core realized them, no state Core makes has a field another layer can set, and value built around the gates is refused by a receiver's walk. |
+| MR-SOFI-0001 | Met | `dsm::economic::write_set::build_write_set`; `dsm::sofi::validation::route_validation`; `dsm::types::device_state::RealizedHead` | `dsm_sdk::one_door_for_device_heads::a_device_head_is_installed_only_as_a_head_core_realized`; `dsm_sdk::source_rules::no_state_core_makes_has_a_field_another_layer_can_set`; `dsm_sdk::handlers::counterfeit_acceptance_tests::a_debit_that_takes_less_than_it_sends_is_never_accepted` | Rechecked 2026-10-27 on `fix/beta-requirements-completion` (was Partial). The only door is shown, not assumed: heads exist only as Core realized them, no state Core makes has a field another layer can set, and a step built around the write-set gates is refused by a receiver's check. The test named here changed 2026-11-04 (§6.148). |
 | MR-SOFI-0002 | Met | `dsm_storage_node::api::cells`; `dsm_storage_node::api::objects::immutable` (no signing code) | `dsm_storage_node::immutable_store_round_trip::a_put_with_no_authorization_is_taken_on_the_served_assembly` | — |
 | MR-SOFI-0003 | Met | `dsm::route_chain::evaluate` | `dsm_sdk::handlers::node_e2e_tests::a_trade_that_loses_its_key_to_another_resolves_void_and_the_next_realizes`; `dsm::route_chain::tests::the_first_recognized_value_at_the_leader_holds_the_cell`; `dsm_storage_node::cells_keep_everything::a_second_value_at_a_key_is_kept_after_the_first_never_refused` | Rechecked 2026-10-26 on main ad831f53 (was Partial). Storage node source has no signing key or signature code (searched); Core decides a cell's winner from bytes by the route chain; a losing attempt resolves Void and moves nothing (e2e). [STALE-NOTE] sofi/arith.rs no longer exists. |
 | MR-SOFI-0004 | Met | `dsm_storage_node::api::cells` (generic KV, no role concept) | `dsm_storage_node::cells_keep_everything::only_malformed_requests_are_refused` | Test added |

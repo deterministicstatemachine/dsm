@@ -424,7 +424,7 @@ dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/cert_resync_flow.rs	1891	new_key: dsm::crypto::sphincs::generate_sphincs_keypair()
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	829	dsm::crypto::sphincs::generate_keypair(dsm::crypto::sphincs::SphincsVariant::SPX256f)
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/connect_e2e_tests.rs	833	signature: dsm::crypto::sphincs::sphincs_sign(
-dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/counterfeit_acceptance_tests.rs	451	let signature = dsm::crypto::sphincs::sphincs_sign(
+dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/counterfeit_acceptance_tests.rs	438	let signature = dsm::crypto::sphincs::sphincs_sign(
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2155	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2404	dsm::crypto::sphincs::sphincs_sign(&secret_key, &digest).expect("B signs")
 dsm_client/deterministic_state_machine/dsm_sdk/src/handlers/node_e2e_tests.rs	2787	let signature = dsm::crypto::sphincs::sphincs_sign(
