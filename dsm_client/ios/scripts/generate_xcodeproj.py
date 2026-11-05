@@ -72,7 +72,14 @@ def main():
     www_ref = file_ref(f"{APP}/www", "folder")
     bootstrap_ref = file_ref(f"{APP}/Web/bridge_bootstrap.js", "sourcecode.javascript")
     plist_ref = file_ref(f"{APP}/Info.plist", "text.plist.xml")
-    resource_builds = [build_file(f"{APP}/www", www_ref), build_file(f"{APP}/Web/bridge_bootstrap.js", bootstrap_ref)]
+    assets_ref = file_ref(f"{APP}/Assets.xcassets", "folder.assetcatalog")
+    privacy_ref = file_ref(f"{APP}/PrivacyInfo.xcprivacy", "text.xml")
+    resource_builds = [
+        build_file(f"{APP}/www", www_ref),
+        build_file(f"{APP}/Web/bridge_bootstrap.js", bootstrap_ref),
+        build_file(f"{APP}/Assets.xcassets", assets_ref),
+        build_file(f"{APP}/PrivacyInfo.xcprivacy", privacy_ref),
+    ]
 
     xcframework_ref = file_ref("Native/DsmSdk.xcframework", "wrapper.xcframework")
     framework_builds = [build_file("Native/DsmSdk.xcframework", xcframework_ref)]
@@ -89,7 +96,7 @@ def main():
         add(gid, f"{{isa = PBXGroup; children = ({', '.join(children)}); name = {quoted(name)};{path_part} sourceTree = {quoted('<group>')}; }}")
         return gid
 
-    app_group = group(APP, [r for _, r in app_source_refs] + [www_ref, bootstrap_ref, plist_ref])
+    app_group = group(APP, [r for _, r in app_source_refs] + [www_ref, bootstrap_ref, plist_ref, assets_ref, privacy_ref])
     test_group = group(TESTS, [r for _, r in test_source_refs])
     native_group = group("Native", [xcframework_ref])
     products_group = group("Products", [app_product, test_product])

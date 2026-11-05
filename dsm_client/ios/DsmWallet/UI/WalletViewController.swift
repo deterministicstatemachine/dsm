@@ -4,6 +4,16 @@ import AVFoundation
 import UIKit
 import WebKit
 
+/// A share sheet is a popover on an iPad, and the page's button is not a view
+/// to anchor it to: it opens centred, not out of the top-left corner over what
+/// the player is sharing (2026-11-05, on the iPad).
+func centerPopover(of sheet: UIViewController, over controller: UIViewController) {
+    guard let popover = sheet.popoverPresentationController else { return }
+    popover.sourceView = controller.view
+    popover.sourceRect = CGRect(x: controller.view.bounds.midX, y: controller.view.bounds.midY, width: 0, height: 0)
+    popover.permittedArrowDirections = []
+}
+
 /// The wallet's one screen: the web view container and the host actions the
 /// page asks for, as `MainActivity.kt` holds them. It initializes the SDK on
 /// its own thread when it appears, signals the page when the bridge is up,
@@ -19,6 +29,7 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
     /// A black cover over the page while a guarded screen must not be seen:
     /// in the app switcher's snapshot, or while the screen is being recorded.
     private let guardCover = UIView()
+    private let guardCoverNote = UILabel()
     private var guards = ScreenGuards.none
     /// How the page meets the phone's bars: `edge` (the Game Boy, under the
     /// bars) or `fit` (the Modern skin, between them).
@@ -79,6 +90,15 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
         guardCover.backgroundColor = .black
         guardCover.isHidden = !coverRequired()
         view.addSubview(guardCover)
+        // The cover takes the screen and its taps, so it says why: a black page
+        // with no words reads as a hang to someone recording or sharing their
+        // screen (2026-11-05, on the iPad).
+        guardCoverNote.text = "Your recovery phrase is hidden. If your screen is being recorded or shared, stop that to see it."
+        guardCoverNote.textColor = .white
+        guardCoverNote.textAlignment = .center
+        guardCoverNote.numberOfLines = 0
+        guardCoverNote.font = .preferredFont(forTextStyle: .body)
+        guardCover.addSubview(guardCoverNote)
 
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
@@ -94,6 +114,7 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
         let frame = barFit == .fit ? view.bounds.inset(by: view.safeAreaInsets) : view.bounds
         webView?.frame = frame
         guardCover.frame = view.bounds
+        guardCoverNote.frame = view.bounds.insetBy(dx: 32, dy: 0)
         view.bringSubviewToFront(guardCover)
     }
 
@@ -338,7 +359,7 @@ final class WalletViewController: UIViewController, WKNavigationDelegate, WKUIDe
 
     func shareText(_ text: String) {
         let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
-        sheet.popoverPresentationController?.sourceView = view
+        centerPopover(of: sheet, over: self)
         present(sheet, animated: isViewLoaded)
     }
 

@@ -38,7 +38,7 @@ enum DiagnosticsReport {
     /// Opens the share sheet with the report; the user picks where it goes.
     static func share(_ report: URL, from controller: UIViewController) {
         let sheet = UIActivityViewController(activityItems: [report], applicationActivities: nil)
-        sheet.popoverPresentationController?.sourceView = controller.view
+        centerPopover(of: sheet, over: controller)
         controller.present(sheet, animated: controller.isViewLoaded)
     }
 

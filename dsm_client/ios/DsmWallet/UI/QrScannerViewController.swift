@@ -34,9 +34,21 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
         cancel.sizeToFit()
         view.addSubview(cancel)
         cancelButton = cancel
+    }
+
+    /// The camera is asked for once the scanner is on screen: a scan that ends
+    /// here can dismiss it. From `viewDidLoad` the presentation is still under
+    /// way, so the dismissal is dropped and the result already spent: a black
+    /// screen whose Cancel does nothing (2026-11-04, the simulator).
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard cameraStep == .notAsked else { return }
+        cameraStep = .asked
         configureCamera()
     }
 
+    private enum CameraStep { case notAsked, asked }
+    private var cameraStep = CameraStep.notAsked
     private var cancelButton: UIButton?
 
     private func configureCamera() {
@@ -55,9 +67,27 @@ final class QrScannerViewController: UIViewController, AVCaptureMetadataOutputOb
                 }
             }
         default:
-            DsmLog.warn("QrScanner", "the camera is not allowed; the scan is cancelled")
-            finish(nil)
+            DsmLog.warn("QrScanner", "the camera is not allowed; offering Settings")
+            offerCameraSettings()
         }
+    }
+
+    /// The camera was refused earlier, and iOS will not ask again: only
+    /// Settings can allow it now, so say so and go there on request.
+    private func offerCameraSettings() {
+        let alert = UIAlertController(title: "Camera access is off",
+                                      message: "To scan a code, allow the camera for DSM in Settings. You can also enter the code by hand.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Not now", style: .cancel) { [weak self] _ in
+            self?.finish(nil)
+        })
+        alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { [weak self] _ in
+            if let settings = URL(string: UIApplication.openSettingsURLString) {
+                UIApplication.shared.open(settings)
+            }
+            self?.finish(nil)
+        })
+        present(alert, animated: isViewLoaded)
     }
 
     private func start(_ camera: AVCaptureDevice) {
